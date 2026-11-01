@@ -48,9 +48,12 @@ pub enum Update {
     Forged(model::Forged),
     /// An agent said something, reported, or was woken: news for its session.
     News(model::News),
-    /// An item of the project changed (`item.*`), or what it declares (`project.changed`): its
-    /// pull requests and tickets are read again.
-    Items(String),
+    /// An item of the project changed (`item.*`, which names it), or what it declares
+    /// (`project.changed`): its pull requests and tickets are read again.
+    Items {
+        project: String,
+        item: Option<crate::items::ItemKey>,
+    },
     /// What the open session page's link read or saw, with the link's token.
     Session {
         token: u64,
@@ -166,8 +169,8 @@ fn follow(
         if let Some(news) = model::News::of(event) {
             let _ = updates.unbounded_send(Update::News(news));
         }
-        if let Some(project) = items_of(event) {
-            let _ = updates.unbounded_send(Update::Items(project));
+        if let Some((project, item)) = items_of(event) {
+            let _ = updates.unbounded_send(Update::Items { project, item });
         }
     };
     loop {
@@ -195,15 +198,23 @@ fn follow(
     }
 }
 
-/// The project whose pull requests and tickets an event says changed: an `item.*`, or a change
-/// of what it declares.
-fn items_of(event: &Event) -> Option<String> {
-    let field = match event.name.as_str() {
-        "project.changed" => "name",
-        name if name.starts_with("item.") => "project",
-        _ => return None,
-    };
-    event.data[field].as_str().map(str::to_owned)
+/// The project whose pull requests and tickets an event says changed, and the item when it names
+/// one: an `item.*`, or a change of what the project declares.
+fn items_of(event: &Event) -> Option<(String, Option<crate::items::ItemKey>)> {
+    let data = &event.data;
+    let text = |field: &str| data[field].as_str().map(str::to_owned);
+    match event.name.as_str() {
+        "project.changed" => Some((text("name")?, None)),
+        name if name.starts_with("item.") => {
+            let item = crate::items::ItemKey {
+                kind: text("kind")?,
+                repository: text("repository").unwrap_or_default(),
+                key: text("key")?,
+            };
+            Some((text("project")?, Some(item)))
+        }
+        _ => None,
+    }
 }
 
 /// Whether an event may change what `provider.list` says: a provider enabled or disabled, or a

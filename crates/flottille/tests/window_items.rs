@@ -14,7 +14,7 @@ use common::User;
 use flottille_ui::AgentState;
 use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
-use flottille_window::items::{ItemRow, Kind, ProjectItems};
+use flottille_window::items::{ItemRow, Kind, ProjectItems, Read};
 use flottille_window::shell::Selection;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
@@ -135,6 +135,8 @@ fn until(
     let deadline = Instant::now() + Duration::from_secs(25);
     loop {
         shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        // The reads an event asks wait for a short quiet.
+        cx.executor().advance_clock(Duration::from_millis(50));
         cx.run_until_parked();
         cx.update(|window, cx| window.simulate_next_frame(cx));
         cx.run_until_parked();
@@ -262,7 +264,7 @@ fn the_pull_requests_tab_lists_the_projects_pulls_from_items_list_with_their_ci_
     let row = listed.iter().find(|r| r.key == "3").unwrap().id();
     assert_eq!(label(cx, &row).unwrap(), "Speed up the build");
     let facts = label(cx, &format!("{row}-facts")).unwrap();
-    for fact in ["#3", "open", "someone", "dana", "Updated"] {
+    for fact in ["#3", "someone", "dana", "Updated"] {
         assert!(facts.contains(fact), "{fact}: {facts}");
     }
     // The tabs count what they list.
@@ -299,7 +301,7 @@ fn the_tickets_tab_lists_the_tickets_with_their_status(cx: &mut TestAppContext) 
         .id();
     assert_eq!(label(cx, &row).unwrap(), "Users cannot sign in");
     let facts = label(cx, &format!("{row}-facts")).unwrap();
-    for fact in ["#5", "open", "other", "someone"] {
+    for fact in ["#5", "other", "someone"] {
         assert!(facts.contains(fact), "{fact}: {facts}");
     }
     // Nothing moves once the tab is shown: nothing is drawn again at rest.
@@ -448,14 +450,19 @@ fn a_click_opens_the_detail_modal_with_the_description_the_checks_and_the_commen
             .contains("Adds the **login** form."),
         "the description"
     );
-    assert_eq!(
-        label(cx, "item-detail-check-build").unwrap(),
-        "build: passing"
-    );
-    assert_eq!(
-        label(cx, "item-detail-check-test").unwrap(),
-        "test: failing"
-    );
+    assert_eq!(label(cx, "item-detail-check-build").unwrap(), "build");
+    assert_eq!(label(cx, "item-detail-check-test").unwrap(), "test");
+    // A check says its state with the mark the rows use.
+    let marks = items.read_with(cx, |items, cx| {
+        let Some(Ok(full)) = &items.detail().unwrap().full else {
+            panic!("read")
+        };
+        full.checks
+            .iter()
+            .map(|check| check.status.read(cx).state())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(marks, [AgentState::Completed, AgentState::Failed]);
     assert!(
         label(cx, "item-detail-said-0").unwrap().contains("dana"),
         "a comment says who wrote it"
@@ -540,4 +547,330 @@ fn an_open_window_has_the_items_read_every_minute(cx: &mut TestAppContext) {
 
     user.call("test.advance", json!({"ms": 61_000})).unwrap();
     until(&shell, cx, "a round a minute on", |_| lists(&user) > before);
+}
+
+/// The detail of the row `key`, once `items.show` answered and what it brought has unfolded.
+fn open_detail(
+    shell: &Entity<Shell>,
+    items: &Entity<ProjectItems>,
+    cx: &mut VisualTestContext,
+    key: &str,
+) {
+    let row = rows(items, cx)
+        .into_iter()
+        .find(|r| r.key == key)
+        .unwrap()
+        .id();
+    click(cx, &row);
+    until(shell, cx, "the detail is read", |cx| {
+        items.read_with(cx, |items, _| {
+            items.detail().is_some_and(|detail| detail.read())
+        })
+    });
+    settle(cx);
+}
+
+#[gpui_kit::test]
+fn a_burst_of_item_events_asks_one_read_once_it_goes_quiet(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, &["api"]);
+    declare(&user, &["api"], false);
+    let (_shell, items, cx) = open_page(&user, cx);
+    let before = items.read_with(cx, |items, _| items.lists_asked());
+
+    items.update(cx, |items, cx| {
+        for _ in 0..40 {
+            items.changed(None, cx);
+        }
+    });
+    cx.executor().advance_clock(Duration::from_millis(100));
+    cx.run_until_parked();
+    assert_eq!(
+        items.read_with(cx, |items, _| items.lists_asked()),
+        before,
+        "nothing while the events still come"
+    );
+    cx.executor().advance_clock(Duration::from_millis(400));
+    cx.run_until_parked();
+    assert_eq!(
+        items.read_with(cx, |items, _| items.lists_asked()),
+        before + 1
+    );
+}
+
+#[gpui_kit::test]
+fn an_answer_older_than_the_one_applied_changes_nothing(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, &["api"]);
+    declare(&user, &["api"], false);
+    let (_shell, items, cx) = open_page(&user, cx);
+    let read = |title: &str| Read {
+        items: vec![ItemRow::of(&json!({"kind": "pull", "repository": "api",
+            "key": "1", "title": title, "state": "open"}))],
+        forges: vec!["api".into()],
+        repositories: vec!["api".into()],
+        ..Read::default()
+    };
+
+    items.update(cx, |items, cx| {
+        items.listed(1_000_001, Ok(read("Newer")), cx);
+        items.listed(1_000_000, Ok(read("Older")), cx);
+    });
+
+    let titles: Vec<String> = rows(&items, cx).into_iter().map(|r| r.title).collect();
+    assert_eq!(titles, ["Newer"]);
+}
+
+#[gpui_kit::test]
+fn a_description_never_read_says_so_and_an_empty_one_says_there_is_none(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, &["api"]);
+    // A first round reads in full the open pull requests alone.
+    user.gh_script(json!({"pulls": {"acme/api": {
+        "feature-1": pull("api", 1, "Add the login", "OPEN", OLD),
+        "feature-2": pull("api", 2, "Old work", "MERGED", OLD)
+    }}}));
+    declare(&user, &["api"], false);
+    refresh(&user);
+    let (shell, items, cx) = open_page(&user, cx);
+    click(cx, "project-items-state-all");
+    settle(cx);
+
+    open_detail(&shell, &items, cx, "2");
+    assert_eq!(
+        label(cx, "item-detail-description").unwrap(),
+        "Not read in full yet."
+    );
+    cx.simulate_keystrokes("escape");
+    settle(cx);
+    open_detail(&shell, &items, cx, "1");
+    assert_eq!(
+        label(cx, "item-detail-description").unwrap(),
+        "No description."
+    );
+}
+
+#[gpui_kit::test]
+fn a_rows_state_is_said_only_where_it_tells_the_rows_apart(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, &["api"]);
+    let mut draft = pull("api", 2, "Draft work", "OPEN", OLD);
+    draft["isDraft"] = json!(true);
+    user.gh_script(json!({"pulls": {"acme/api": {
+        "feature-1": pull("api", 1, "Open work", "OPEN", OLD),
+        "feature-2": draft,
+        "feature-3": pull("api", 3, "Merged work", "MERGED", OLD),
+        "feature-4": pull("api", 4, "Closed work", "CLOSED", OLD)
+    }}}));
+    declare(&user, &["api"], false);
+    refresh(&user);
+    let (_shell, items, cx) = open_page(&user, cx);
+    let facts = |cx: &mut VisualTestContext, key: &str| {
+        let row = rows(&items, cx)
+            .into_iter()
+            .find(|r| r.key == key)
+            .unwrap()
+            .id();
+        label(cx, &format!("{row}-facts")).unwrap()
+    };
+
+    // Open: a draft says so, an open one says nothing of its state.
+    assert!(!facts(cx, "1").contains("State"), "{}", facts(cx, "1"));
+    assert!(facts(cx, "2").contains("State draft"), "{}", facts(cx, "2"));
+    // Closed: merged and closed tell them apart.
+    click(cx, "project-items-state-closed");
+    settle(cx);
+    assert!(
+        facts(cx, "3").contains("State merged"),
+        "{}",
+        facts(cx, "3")
+    );
+    assert!(
+        facts(cx, "4").contains("State closed"),
+        "{}",
+        facts(cx, "4")
+    );
+    // All: every row says it.
+    click(cx, "project-items-state-all");
+    settle(cx);
+    assert!(facts(cx, "1").contains("State open"), "{}", facts(cx, "1"));
+    assert!(
+        facts(cx, "3").contains("State merged"),
+        "{}",
+        facts(cx, "3")
+    );
+}
+
+#[gpui_kit::test]
+fn the_branches_of_the_detail_unfold_when_items_show_answers(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, &["api"]);
+    user.gh_script(json!({"pulls": {"acme/api": {
+        "feature-1": pull("api", 1, "Add the login", "OPEN", OLD)
+    }}}));
+    declare(&user, &["api"], false);
+    refresh(&user);
+    let (shell, items, cx) = open_page(&user, cx);
+    let row = rows(&items, cx)[0].id();
+
+    click(cx, &row);
+    until(&shell, cx, "the detail is read", |cx| {
+        items.read_with(cx, |items, _| {
+            items.detail().is_some_and(|detail| detail.read())
+        })
+    });
+    a_frame(cx);
+    let unfolding = height(cx, "item-detail-branches-block");
+    settle(cx);
+    let unfolded = height(cx, "item-detail-branches-block");
+    assert!(
+        unfolding < unfolded,
+        "the branches unfold: {unfolding} then {unfolded}"
+    );
+}
+
+#[gpui_kit::test]
+fn a_ci_mark_whose_checks_go_fades_into_the_plain_icon(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, &["api"]);
+    let mut green = pull("api", 1, "Add the login", "OPEN", OLD);
+    green["statusCheckRollup"] = json!([check("build", "COMPLETED", "SUCCESS")]);
+    user.gh_script(json!({"pulls": {"acme/api": {"feature-1": green}}}));
+    declare(&user, &["api"], false);
+    refresh(&user);
+    let (shell, items, cx) = open_page(&user, cx);
+    let row = rows(&items, cx)[0].id();
+    let mark = format!("{row}-ci");
+    assert!(present(cx, &mark));
+
+    // Its title changed too: the round says `item.changed`.
+    user.gh_script(json!({"pulls": {"acme/api": {
+        "feature-1": pull("api", 1, "Add the login form", "OPEN", NEW)
+    }}}));
+    refresh(&user);
+    until(&shell, cx, "the checks are gone", |cx| {
+        items.read_with(cx, |items, cx| items.ci_state(&row, cx).is_none())
+    });
+    a_frame(cx);
+    assert!(present(cx, &mark), "the mark fades out, not at once");
+    settle(cx);
+    assert!(!present(cx, &mark));
+}
+
+#[gpui_kit::test]
+fn an_open_detail_is_read_again_when_its_item_changes_and_says_when_it_leaves(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, &["api"]);
+    let mut open = pull("api", 1, "Add the login", "OPEN", OLD);
+    open["body"] = json!("First words.");
+    user.gh_script(json!({"pulls": {"acme/api": {"feature-1": open}}}));
+    declare(&user, &["api"], false);
+    refresh(&user);
+    let (shell, items, cx) = open_page(&user, cx);
+    open_detail(&shell, &items, cx, "1");
+    assert_eq!(
+        label(cx, "item-detail-description").unwrap(),
+        "First words."
+    );
+
+    // Its title changed too: the round says `item.changed`.
+    let mut changed = pull("api", 1, "Add the login form", "OPEN", NEW);
+    changed["body"] = json!("Second words.");
+    user.gh_script(json!({"pulls": {"acme/api": {"feature-1": changed}}}));
+    refresh(&user);
+    until(&shell, cx, "the detail is read again", |cx| {
+        label(cx, "item-detail-description").as_deref() == Some("Second words.")
+    });
+    assert!(!present(cx, "item-detail-gone"));
+
+    // A read that no longer lists it (its repository's forge unset, say): the open detail says
+    // so. The daemon forgets such items without an event, so the read is given here.
+    items.update(cx, |items, cx| {
+        let read = Read {
+            forges: vec!["api".into()],
+            repositories: vec!["api".into()],
+            ..Read::default()
+        };
+        items.listed(1_000_000, Ok(read), cx);
+    });
+    a_frame(cx);
+    assert!(present(cx, "item-detail-gone"));
+    let unfolding = height(cx, "item-detail-gone-block");
+    settle(cx);
+    assert!(
+        unfolding < height(cx, "item-detail-gone-block"),
+        "it unfolds"
+    );
+    assert!(label(cx, "item-detail-gone").unwrap().contains("no longer"));
+}
+
+#[gpui_kit::test]
+fn the_answer_for_another_repositorys_item_of_the_same_number_is_not_shown(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, &["api", "web"]);
+    declare(&user, &["api", "web"], false);
+    let (_shell, items, cx) = open_page(&user, cx);
+    let web = ItemRow::of(&json!({"kind": "pull", "repository": "web", "key": "12",
+        "title": "Restyle", "state": "open"}));
+
+    let read = items.update(cx, |items, cx| {
+        items.open_detail(web, cx);
+        let api = json!({"kind": "pull", "repository": "api", "key": "12", "title": "Other",
+            "details": {"description": "Not this one."}});
+        items.shown("pull", "12", Some("api".into()), u64::MAX, Ok(api), cx);
+        items.detail().unwrap().read()
+    });
+
+    assert!(!read, "api's #12 is not web's");
+}
+
+#[gpui_kit::test]
+fn the_repository_filter_has_a_visible_label(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, &["api", "web"]);
+    declare(&user, &["api", "web"], false);
+    let (_shell, _items, cx) = open_page(&user, cx);
+
+    assert_eq!(
+        label(cx, "project-items-repository-label").unwrap(),
+        "Repository"
+    );
+}
+
+#[gpui_kit::test]
+fn a_tab_shown_again_does_not_fold_away_rows_that_left_while_it_was_hidden(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, &["api"]);
+    let mut theirs = issue(6, "Typo on the page", "OPEN", OLD);
+    theirs["assignees"] = json!([]);
+    user.gh_script(json!({
+        "user": {"login": "someone"},
+        "issues": {"acme/api": {"5": issue(5, "Users cannot sign in", "OPEN", OLD), "6": theirs}}
+    }));
+    declare(&user, &["api"], true);
+    refresh(&user);
+    let (_shell, items, cx) = open_page(&user, cx);
+    click(cx, "project-items-tabs-tickets");
+    settle(cx);
+    let gone = rows(&items, cx)
+        .into_iter()
+        .find(|r| r.key == "6")
+        .unwrap()
+        .id();
+    assert!(present(cx, &gone));
+    click(cx, "project-items-tabs-pulls");
+    settle(cx);
+
+    click(cx, "project-items-mine");
+    settle(cx);
+    click(cx, "project-items-tabs-tickets");
+    a_frame(cx);
+
+    assert!(!present(cx, &gone), "it left while the tab was hidden");
 }

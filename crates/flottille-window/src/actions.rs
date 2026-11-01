@@ -191,8 +191,10 @@ pub enum Command {
     },
     /// The project's pull requests and tickets (`items.list`), and what it declares
     /// (`project.settings`).
+    /// `asked` numbers the reads, so that an answer older than one applied is dropped.
     Items {
         project: String,
+        asked: u64,
     },
     /// One pull request or ticket in full (`items.show`).
     Item {
@@ -200,6 +202,7 @@ pub enum Command {
         kind: String,
         key: String,
         repository: Option<String>,
+        asked: u64,
     },
     /// A change to the tasks: `task.add`, `task.edit` or `task.remove`, with its parameters.
     TaskWrite {
@@ -634,12 +637,15 @@ pub enum Outcome {
     },
     Items {
         project: String,
+        asked: u64,
         read: Result<crate::items::Read, String>,
     },
     Item {
         project: String,
         kind: String,
         key: String,
+        repository: Option<String>,
+        asked: u64,
         shown: Result<Value, String>,
     },
     /// A change to the tasks was made, or refused with why.
@@ -1261,7 +1267,7 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 project,
             }
         }
-        Command::Items { project } => {
+        Command::Items { project, asked } => {
             let params = json!({"project": project});
             let read = ask_alone(connect, "items.list", params, bounds.quick)
                 .and_then(|listed| listed)
@@ -1271,13 +1277,18 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                         .and_then(|settings| settings)
                         .map(|settings| crate::items::Read::of(&listed, &settings))
                 });
-            Outcome::Items { project, read }
+            Outcome::Items {
+                project,
+                asked,
+                read,
+            }
         }
         Command::Item {
             project,
             kind,
             key,
             repository,
+            asked,
         } => {
             let params = json!({"project": project, "kind": kind, "id": key,
                 "repository": repository});
@@ -1287,6 +1298,8 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 project,
                 kind,
                 key,
+                repository,
+                asked,
                 shown,
             }
         }

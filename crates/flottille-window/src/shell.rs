@@ -594,9 +594,9 @@ impl Shell {
             Update::DeveloperChanged => self.actions.send(Command::DeveloperRead),
             Update::Forged(forged) => self.forged(forged, cx),
             Update::News(news) => self.news(news, cx),
-            Update::Items(project) => {
-                if self.project_items_of(&project, cx).is_some() {
-                    self.actions.send(Command::Items { project });
+            Update::Items { project, item } => {
+                if let Some(items) = self.project_items_of(&project, cx) {
+                    items.update(cx, |items, cx| items.changed(item, cx));
                 }
             }
             Update::TextChanged { project, .. } => {
@@ -1014,19 +1014,27 @@ impl Shell {
                     tasks.update(cx, |tasks, cx| tasks.listed(listed, cx));
                 }
             }
-            Outcome::Items { project, read } => {
+            Outcome::Items {
+                project,
+                asked,
+                read,
+            } => {
                 if let Some(items) = self.project_items_of(&project, cx) {
-                    items.update(cx, |items, cx| items.listed(read, cx));
+                    items.update(cx, |items, cx| items.listed(asked, read, cx));
                 }
             }
             Outcome::Item {
                 project,
                 kind,
                 key,
+                repository,
+                asked,
                 shown,
             } => {
                 if let Some(items) = self.project_items_of(&project, cx) {
-                    items.update(cx, |items, cx| items.shown(&kind, &key, shown, cx));
+                    items.update(cx, |items, cx| {
+                        items.shown(&kind, &key, repository, asked, shown, cx)
+                    });
                 }
             }
             Outcome::TaskWritten { project, refused } => {
@@ -1082,7 +1090,6 @@ impl Shell {
         }
     }
 
-    /// The tasks of the open project page, when it is `project`'s.
     /// The pull requests and tickets of the open project page, when it is `project`'s.
     fn project_items_of(
         &self,
@@ -1093,6 +1100,7 @@ impl Shell {
         (page.name() == project).then(|| page.items().clone())
     }
 
+    /// The tasks of the open project page, when it is `project`'s.
     fn project_tasks_of(
         &self,
         project: &str,

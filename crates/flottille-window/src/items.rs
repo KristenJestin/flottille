@@ -1,22 +1,24 @@
 //! A project's pull requests and tickets (`docs/items.md`), as the daemon keeps them: the project
 //! page's "Pull requests and tickets", two tabs, each a list with its filters (open, closed or
 //! all, the user's own, a repository), and the detail of one in a dialog. Everything comes from
-//! `items.list` and `items.show`, read again when an `item.*` event says the project's changed:
-//! the window never asks a forge or a tracker itself. A row unfolds when it comes, folds away when
-//! it goes (a filter, a round), and moves to its place.
+//! `items.list` and `items.show`, read again once the `item.*` events that say the project's
+//! changed go quiet: the window never asks a forge or a tracker itself. A row unfolds when it
+//! comes, folds away when it goes (a filter, a round), and moves to its place.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
+use flottille_ui::motion::PANEL;
 use flottille_ui::{
-    AgentState, Button, EmptyLine, Icon, LabelledLine, ListCard, ListRow, Listing, Modal, Section,
-    Segmented, Select, SelectOption, StateIcon, Status, Switch, Tabs, Type, enter, hoverable, icon,
-    palette, presence, presence_of, space,
+    AgentState, Block, Button, Card, EmptyLine, FlatRow, Icon, LINE_GAP, LabelledLine, ListCard,
+    ListRow, Listing, Modal, Section, Segmented, Select, SelectOption, StateIcon, Status, Switch,
+    Tabs, Type, enter, fade, icon, palette, presence, presence_of, space,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, TestSupportExt as _,
-    WeakEntity, Window, div, px,
+    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Task,
+    TestSupportExt as _, WeakEntity, Window, div, px,
 };
 use serde_json::Value;
 
@@ -61,6 +63,19 @@ pub enum Shown {
 }
 
 const SHOWN: [(&str, &str); 3] = [("open", "Open"), ("closed", "Closed"), ("all", "All")];
+
+/// How long the `item.*` events must stop before the items are read again: a round says many at
+/// once, and one read answers them all.
+const QUIET: Duration = Duration::from_millis(300);
+
+/// An item an event names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ItemKey {
+    pub kind: String,
+    /// Empty for a Jira work item.
+    pub repository: String,
+    pub key: String,
+}
 
 /// A pull request or a ticket, as `items.list` gives it.
 #[derive(Clone, Debug, PartialEq)]
@@ -138,10 +153,35 @@ impl ItemRow {
         self.status.clone().unwrap_or_else(|| self.state.clone())
     }
 
-    /// The labelled values of its row: its number, its state, who opened it, who it is assigned
-    /// to, its repository when the project has several, and when it last changed.
-    fn facts(&self, project: &str, repositories: usize, now: u64) -> Vec<(&'static str, String)> {
-        let mut facts = vec![("", self.label()), ("State", self.state_said())];
+    fn is(&self, item: &ItemKey) -> bool {
+        self.kind == item.kind && self.repository == item.repository && self.key == item.key
+    }
+
+    /// Whether its state tells it apart from the other rows `shown` lists: a draft among open
+    /// pull requests, merged or closed among closed ones, any among all; a Jira status always.
+    fn says_state(&self, shown: Shown) -> bool {
+        self.status.is_some()
+            || match shown {
+                Shown::Open => self.state == "draft",
+                Shown::Closed => self.kind == "pull",
+                Shown::All => true,
+            }
+    }
+
+    /// The labelled values of its row: its number, its state where it tells the rows apart, who
+    /// opened it, who it is assigned to, its repository when the project has several, and when
+    /// it last changed.
+    fn facts(
+        &self,
+        project: &str,
+        repositories: usize,
+        shown: Shown,
+        now: u64,
+    ) -> Vec<(&'static str, String)> {
+        let mut facts = vec![("", self.label())];
+        if self.says_state(shown) {
+            facts.push(("State", self.state_said()));
+        }
         if let Some(author) = &self.author {
             facts.push(("Author", author.clone()));
         }
@@ -173,6 +213,14 @@ fn ci_of(checks: &Value) -> Option<String> {
         _ if any("failing") => Some("failing".into()),
         _ if any("pending") => Some("pending".into()),
         _ => Some("passing".into()),
+    }
+}
+
+/// The state that draws one check: a skipped one is stopped.
+fn check_state(state: &str) -> AgentState {
+    match state {
+        "skipped" => AgentState::Stopped,
+        state => ci_state(state),
     }
 }
 
@@ -287,12 +335,23 @@ pub struct Said {
     text: MarkdownText,
 }
 
-/// A check of an item's detail.
-#[derive(Clone, Debug, PartialEq)]
+/// A check of an item's detail, its state drawn with the mark of the rows.
 pub struct CheckLine {
     pub name: String,
     pub state: String,
     pub link: Option<String>,
+    pub status: Entity<Status>,
+    mark: Entity<StateIcon>,
+}
+
+/// What an item's detail says of its description.
+pub enum Description {
+    /// The item was never read in full (closed at a first round, stored before descriptions
+    /// were kept, a Jira work item): what its author wrote is not known.
+    NotRead,
+    /// Read, and its author wrote nothing.
+    Empty,
+    Text(String, MarkdownText),
 }
 
 /// What `items.show` gave of one item, and its texts drawn.
@@ -300,9 +359,11 @@ pub struct Full {
     pub head: Option<String>,
     pub base: Option<String>,
     pub labels: Vec<String>,
-    pub description: Option<(String, MarkdownText)>,
+    pub description: Description,
     pub checks: Vec<CheckLine>,
     pub said: Vec<Said>,
+    /// The comments and reviews older than those kept.
+    pub older: u64,
 }
 
 impl Full {
@@ -348,21 +409,33 @@ impl Full {
                 .flatten()
                 .filter_map(|label| label.as_str().map(str::to_owned))
                 .collect(),
-            description: text(&details["description"]).map(|description| {
-                let drawn = MarkdownText::new(&description, cx);
-                (description, drawn)
-            }),
+            description: match (details.get("description"), text(&details["description"])) {
+                (None, _) => Description::NotRead,
+                (Some(_), None) => Description::Empty,
+                (Some(_), Some(description)) => {
+                    let drawn = MarkdownText::new(&description, cx);
+                    Description::Text(description, drawn)
+                }
+            },
             checks: item["checks"]
                 .as_array()
                 .into_iter()
                 .flatten()
-                .map(|check| CheckLine {
-                    name: check["name"].as_str().unwrap_or_default().to_owned(),
-                    state: check["state"].as_str().unwrap_or_default().to_owned(),
-                    link: check["link"].as_str().map(str::to_owned),
+                .map(|check| {
+                    let state = check["state"].as_str().unwrap_or_default().to_owned();
+                    let status = cx.new(|_| Status::new(check_state(&state)));
+                    let mark = cx.new(|cx| StateIcon::new(status.clone(), cx));
+                    CheckLine {
+                        name: check["name"].as_str().unwrap_or_default().to_owned(),
+                        state,
+                        link: check["link"].as_str().map(str::to_owned),
+                        status,
+                        mark,
+                    }
                 })
                 .collect(),
             said,
+            older: details["discussion_older"].as_u64().unwrap_or(0),
         }
     }
 }
@@ -371,6 +444,10 @@ impl Full {
 pub struct Detail {
     pub row: ItemRow,
     pub full: Option<Result<Full, String>>,
+    /// The last `items.show` asked of it: an older answer is dropped.
+    asked: u64,
+    /// It is no longer in what `items.list` answers.
+    pub gone: bool,
 }
 
 impl Detail {
@@ -392,11 +469,27 @@ pub struct ProjectItems {
     repository: Option<String>,
     /// The rows as drawn, one list per tab: a row that leaves folds away before it is gone.
     lists: [Listing<ItemRow>; 2],
-    /// The CI mark of each pull request that has checks, by its row's id: its own view, so a
-    /// spinner turning redraws it alone.
-    marks: HashMap<String, (Entity<Status>, Entity<StateIcon>)>,
+    /// The CI mark of each pull request that has or had checks, by its row's id: its own view,
+    /// so a spinner turning redraws it alone; kept while the row is, so it fades out when its
+    /// checks go.
+    marks: HashMap<String, CiMark>,
     detail: Option<Detail>,
     detail_open: bool,
+    /// The last read asked (`items.list` or `items.show`), and the `items.list` last applied.
+    asked: u64,
+    listed_at: u64,
+    lists_asked: usize,
+    /// An event came: what it changed is read again once they go quiet.
+    stale_list: bool,
+    stale_detail: bool,
+    quiet: Option<Task<()>>,
+}
+
+struct CiMark {
+    status: Entity<Status>,
+    icon: Entity<StateIcon>,
+    /// The pull request has checks now.
+    on: bool,
 }
 
 impl ProjectItems {
@@ -413,6 +506,12 @@ impl ProjectItems {
             marks: HashMap::new(),
             detail: None,
             detail_open: false,
+            asked: 0,
+            listed_at: 0,
+            lists_asked: 0,
+            stale_list: false,
+            stale_detail: false,
+            quiet: None,
         }
     }
 
@@ -421,9 +520,60 @@ impl ProjectItems {
     }
 
     /// Asks the daemon for the items.
-    pub fn read(&self, cx: &mut App) {
-        let project = self.project.clone();
-        perform_later(&self.shell, Command::Items { project }, cx);
+    pub fn read(&mut self, cx: &mut App) {
+        self.asked += 1;
+        self.lists_asked += 1;
+        let (project, asked) = (self.project.clone(), self.asked);
+        perform_later(&self.shell, Command::Items { project, asked }, cx);
+    }
+
+    /// How many times the items were asked of the daemon.
+    pub fn lists_asked(&self) -> usize {
+        self.lists_asked
+    }
+
+    /// An event says the project's items changed, and which when it names one: the items, and
+    /// the detail shown when it is that one, are read again once the events go quiet.
+    pub fn changed(&mut self, item: Option<ItemKey>, cx: &mut Context<Self>) {
+        self.stale_list = true;
+        if let (Some(item), Some(detail)) = (&item, &self.detail)
+            && self.detail_open
+            && detail.row.is(item)
+        {
+            self.stale_detail = true;
+        }
+        self.quiet = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(QUIET).await;
+            this.update(cx, |this, cx| this.quieted(cx)).ok();
+        }));
+    }
+
+    fn quieted(&mut self, cx: &mut Context<Self>) {
+        self.quiet = None;
+        if std::mem::take(&mut self.stale_list) {
+            self.read(cx);
+        }
+        if std::mem::take(&mut self.stale_detail) && self.detail_open {
+            self.ask_detail(cx);
+        }
+    }
+
+    /// Asks the daemon for the detail shown.
+    fn ask_detail(&mut self, cx: &mut App) {
+        let Some(detail) = &mut self.detail else {
+            return;
+        };
+        self.asked += 1;
+        detail.asked = self.asked;
+        let row = &detail.row;
+        let command = Command::Item {
+            project: self.project.clone(),
+            kind: row.kind.clone(),
+            key: row.key.clone(),
+            repository: Some(row.repository.clone()).filter(|path| !path.is_empty()),
+            asked: self.asked,
+        };
+        perform_later(&self.shell, command, cx);
     }
 
     /// Whether the daemon answered a read.
@@ -431,27 +581,49 @@ impl ProjectItems {
         self.read.is_some()
     }
 
-    /// What the daemon answered; nothing is drawn again when it is what was drawn.
-    pub fn listed(&mut self, read: Result<Read, String>, cx: &mut Context<Self>) {
+    /// What the daemon answered to the read `asked`: dropped when a later one was applied, and
+    /// nothing is drawn again when it is what was drawn.
+    pub fn listed(&mut self, asked: u64, read: Result<Read, String>, cx: &mut Context<Self>) {
+        if asked < self.listed_at {
+            return;
+        }
+        self.listed_at = asked;
         if self.read.as_ref() == Some(&read) {
             return;
         }
         if let Ok(read) = &read {
             for row in &read.items {
-                let Some(ci) = &row.ci else { continue };
+                let id = row.id();
+                let Some(ci) = &row.ci else {
+                    if let Some(mark) = self.marks.get_mut(&id) {
+                        mark.on = false;
+                    }
+                    continue;
+                };
                 let state = ci_state(ci);
-                let (status, _) = self.marks.entry(row.id()).or_insert_with(|| {
+                let mark = self.marks.entry(id).or_insert_with(|| {
                     let status = cx.new(|_| Status::new(state));
-                    let mark = cx.new(|cx| StateIcon::new(status.clone(), cx));
-                    (status, mark)
+                    let icon = cx.new(|cx| StateIcon::new(status.clone(), cx));
+                    CiMark {
+                        status,
+                        icon,
+                        on: true,
+                    }
                 });
-                status.update(cx, |status, cx| status.set(state, cx));
+                mark.on = true;
+                mark.status.update(cx, |status, cx| status.set(state, cx));
             }
-            self.marks.retain(|id, _| {
-                read.items
-                    .iter()
-                    .any(|row| &row.id() == id && row.ci.is_some())
-            });
+            self.marks
+                .retain(|id, _| read.items.iter().any(|row| &row.id() == id));
+            if let Some(detail) = &mut self.detail {
+                match read.items.iter().find(|row| row.id() == detail.row.id()) {
+                    Some(row) => {
+                        detail.row = row.clone();
+                        detail.gone = false;
+                    }
+                    None => detail.gone = true,
+                }
+            }
             if self
                 .repository
                 .as_ref()
@@ -518,11 +690,12 @@ impl ProjectItems {
         self.kept(self.tab)
     }
 
-    /// The state the CI mark of the row `id` draws.
+    /// The state the CI mark of the row `id` draws; none while its pull request has no checks.
     pub fn ci_state(&self, id: &str, cx: &App) -> Option<AgentState> {
         self.marks
             .get(id)
-            .map(|(status, _)| status.read(cx).state())
+            .filter(|mark| mark.on)
+            .map(|mark| mark.status.read(cx).state())
     }
 
     pub fn detail(&self) -> Option<&Detail> {
@@ -535,32 +708,36 @@ impl ProjectItems {
 
     /// Opens the detail of `row`, and asks the daemon for the rest of it.
     pub fn open_detail(&mut self, row: ItemRow, cx: &mut Context<Self>) {
-        perform_later(
-            &self.shell,
-            Command::Item {
-                project: self.project.clone(),
-                kind: row.kind.clone(),
-                key: row.key.clone(),
-                repository: Some(row.repository.clone()).filter(|path| !path.is_empty()),
-            },
-            cx,
-        );
-        self.detail = Some(Detail { row, full: None });
+        self.detail = Some(Detail {
+            row,
+            full: None,
+            asked: 0,
+            gone: false,
+        });
         self.detail_open = true;
+        self.stale_detail = false;
+        self.ask_detail(cx);
         cx.notify();
     }
 
-    /// What `items.show` answered of the item `key` of `kind`, when its detail is still the one
-    /// shown.
+    /// What the read `asked` of `items.show` answered of the item `key` of `kind` of
+    /// `repository`, when its detail is still the one shown and no later read was asked of it.
     pub fn shown(
         &mut self,
         kind: &str,
         key: &str,
+        repository: Option<String>,
+        asked: u64,
         shown: Result<Value, String>,
         cx: &mut Context<Self>,
     ) {
         let Some(detail) = &self.detail else { return };
-        if detail.row.kind != kind || detail.row.key != key {
+        let item = ItemKey {
+            kind: kind.to_owned(),
+            repository: repository.unwrap_or_default(),
+            key: key.to_owned(),
+        };
+        if !detail.row.is(&item) || asked < detail.asked {
             return;
         }
         let full = shown.map(|item| Full::of(&item, cx));
@@ -581,21 +758,61 @@ impl ProjectItems {
         }
     }
 
-    /// One row: its CI mark (or what it is), its title, its labelled values.
-    fn row(&self, row: &ItemRow, repositories: usize, now: u64, cx: &mut Context<Self>) -> ListRow {
+    /// One row: what it is, or its CI mark over it while its pull request has checks (one fades
+    /// into the other), its title, its labelled values.
+    fn row(
+        &self,
+        row: &ItemRow,
+        repositories: usize,
+        now: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ListRow {
         let p = palette(cx);
         let id = row.id();
-        let leading: AnyElement = match self.marks.get(&id) {
-            Some((_, mark)) => mark.clone().into_any_element(),
-            None => icon(match row.kind.as_str() {
-                "pull" => Icon::PullRequest,
-                _ => Icon::Ticket,
-            })
-            .size(px(14.))
-            .text_color(p.faint)
-            .into_any_element(),
+        let plain = icon(match row.kind.as_str() {
+            "pull" => Icon::PullRequest,
+            _ => Icon::Ticket,
+        })
+        .size(px(14.))
+        .text_color(p.faint);
+        let leading: AnyElement = match row.kind.as_str() {
+            "pull" => {
+                let mark = self.marks.get(&id);
+                let on = mark.is_some_and(|mark| mark.on);
+                let t = fade(
+                    SharedString::from(format!("{id}-ci-fade")),
+                    on,
+                    PANEL,
+                    window,
+                    cx,
+                );
+                let layer = || {
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                };
+                div()
+                    .relative()
+                    .size(px(14.))
+                    .child(layer().opacity(1.0 - t).child(plain))
+                    .when_some(mark.filter(|_| t > 0.0), |d, mark| {
+                        d.child(
+                            layer()
+                                .id(SharedString::from(format!("{id}-ci")))
+                                .opacity(t)
+                                .child(mark.icon.clone())
+                                .test_support(),
+                        )
+                    })
+                    .into_any_element()
+            }
+            _ => plain.into_any_element(),
         };
-        let facts = row.facts(&self.project, repositories, now);
+        let facts = row.facts(&self.project, repositories, self.shown, now);
         let said = facts
             .iter()
             .map(|(label, value)| match label {
@@ -640,6 +857,7 @@ impl ProjectItems {
     /// The filters of the chosen tab: the states, the user's own, and a repository for the pull
     /// requests of a project of several.
     fn filters(&self, forges: &[String], cx: &mut Context<Self>) -> AnyElement {
+        let p = palette(cx);
         let this = cx.weak_entity();
         let chosen = SHOWN
             .iter()
@@ -676,13 +894,27 @@ impl ProjectItems {
                 .and_then(|path| forges.iter().position(|p| p == path))
                 .map_or(0, |at| at + 1);
             let forges = forges.to_vec();
-            Select::new("project-items-repository", options, chosen)
+            let select = Select::new("project-items-repository", options, chosen)
                 .fit()
                 .on_choose(move |at, _, cx| {
                     let repository = at.checked_sub(1).map(|at| forges[at].clone());
                     this.update(cx, |this, cx| this.filter_repository(repository, cx))
                         .ok();
-                })
+                });
+            div()
+                .flex()
+                .items_center()
+                .gap(space::SM)
+                .child(
+                    div()
+                        .id("project-items-repository-label")
+                        .aria_label("Repository")
+                        .text_size(px(13.))
+                        .text_color(p.mute)
+                        .child("Repository")
+                        .test_support(),
+                )
+                .child(select)
         });
         div()
             .flex()
@@ -695,7 +927,8 @@ impl ProjectItems {
             .into_any_element()
     }
 
-    /// The detail of the item clicked, in a dialog; drawn while it closes too.
+    /// The detail of the item clicked, in a dialog; drawn while it closes too. What `items.show`
+    /// brings unfolds into it, the dialog growing along, and folds away when the item leaves.
     fn detail_modal(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let detail = self.detail.as_ref()?;
         let p = palette(cx);
@@ -735,150 +968,163 @@ impl ProjectItems {
             );
         }
         let full = detail.full.as_ref().and_then(|full| full.as_ref().ok());
-        let mut facts: Vec<AnyElement> = Vec::new();
-        let mut fact = |id: &str, glyph: Icon, label: &str, value: String| {
-            facts.push(
-                LabelledLine::new(
-                    SharedString::from(id.to_owned()),
-                    glyph,
-                    SharedString::from(label.to_owned()),
-                    SharedString::from(value.clone()),
-                )
-                .child(SharedString::from(value))
-                .into_any_element(),
-            );
+        // What `items.show` brought shows while the item is still listed; it folds away with
+        // what it says when the item leaves.
+        let listed = !detail.gone;
+        let fact = |id: &str, glyph: Icon, label: &str, value: String| {
+            LabelledLine::new(
+                SharedString::from(id.to_owned()),
+                glyph,
+                SharedString::from(label.to_owned()),
+                SharedString::from(value.clone()),
+            )
+            .child(SharedString::from(value))
+            .into_any_element()
         };
+        let mut facts: Vec<AnyElement> = Vec::new();
         if let Some(author) = &row.author {
-            fact("item-detail-author", Icon::Agents, "Author", author.clone());
+            facts.push(fact(
+                "item-detail-author",
+                Icon::Agents,
+                "Author",
+                author.clone(),
+            ));
         }
         if !row.assignees.is_empty() {
-            fact(
+            facts.push(fact(
                 "item-detail-assignees",
                 Icon::Agents,
                 "Assignees",
                 row.assignees.join(", "),
-            );
+            ));
         }
-        if let Some(full) = full {
-            if let (Some(head), Some(base)) = (&full.head, &full.base) {
+        let branches = full.and_then(|full| {
+            Some(format!(
+                "{} into {}",
+                full.head.as_ref()?,
+                full.base.as_ref()?
+            ))
+        });
+        facts.push(
+            presence(
+                "item-detail-branches-block",
+                branches.is_some() && listed,
                 fact(
                     "item-detail-branches",
                     Icon::Branch,
                     "Branches",
-                    format!("{head} into {base}"),
-                );
-            }
-            if !full.labels.is_empty() {
+                    branches.unwrap_or_default(),
+                ),
+            )
+            .gap(LINE_GAP)
+            .into_any_element(),
+        );
+        let labels = full
+            .map(|full| full.labels.join(", "))
+            .filter(|labels| !labels.is_empty());
+        facts.push(
+            presence(
+                "item-detail-labels-block",
+                labels.is_some() && listed,
                 fact(
                     "item-detail-labels",
                     Icon::Text,
                     "Labels",
-                    full.labels.join(", "),
-                );
-            }
-        }
-        let facts = div().flex().flex_col().children(facts);
-        let heading = |text: &'static str| {
+                    labels.unwrap_or_default(),
+                ),
+            )
+            .gap(LINE_GAP)
+            .into_any_element(),
+        );
+        let facts = div().flex().flex_col().gap(LINE_GAP).children(facts);
+        let quiet = |said: &'static str| {
             div()
-                .text_size(px(12.))
-                .semibold()
-                .text_color(p.mute)
-                .child(text)
+                .id("item-detail-description")
+                .aria_label(said)
+                .text_size(px(13.))
+                .text_color(p.faint)
+                .child(said)
+                .test_support()
+                .into_any_element()
         };
-        let description = full.map(|full| match &full.description {
-            Some((text, drawn)) => div()
+        let description = match full.map(|full| &full.description) {
+            Some(Description::Text(text, drawn)) => div()
                 .id("item-detail-description")
                 .aria_label(SharedString::from(text.clone()))
                 .text_size(px(13.))
                 .child(drawn.view("item-detail-description-text"))
                 .test_support()
                 .into_any_element(),
-            None => div()
-                .id("item-detail-description")
-                .aria_label("No description.")
-                .text_size(px(13.))
-                .text_color(p.faint)
-                .child("No description.")
-                .test_support()
-                .into_any_element(),
-        });
-        let checks = full.filter(|full| !full.checks.is_empty()).map(|full| {
-            div()
-                .flex()
-                .flex_col()
-                .gap(space::XS)
-                .child(heading("Checks"))
-                .children(full.checks.iter().map(|check| {
-                    let (glyph, color) = match check.state.as_str() {
-                        "passing" => ("✓", p.ok),
-                        "failing" => ("✗", p.fail),
-                        "pending" => ("●", p.run),
-                        _ => ("–", p.faint),
-                    };
-                    let line = div()
-                        .id(SharedString::from(format!(
-                            "item-detail-check-{}",
-                            check.name
-                        )))
-                        .aria_label(SharedString::from(format!(
-                            "{}: {}",
-                            check.name, check.state
-                        )))
-                        .flex()
-                        .items_center()
-                        .gap(space::SM)
-                        .text_size(px(13.))
-                        .child(div().mono(12.).text_color(color).child(glyph))
-                        .child(SharedString::from(check.name.clone()))
-                        .child(
-                            div()
-                                .text_color(p.faint)
-                                .child(SharedString::from(check.state.clone())),
-                        );
-                    match check.link.clone() {
-                        Some(link) => {
-                            let this = this.clone();
-                            hoverable(
-                                line.cursor_pointer().on_click(move |_, _, cx| {
-                                    this.update(cx, |this, cx| this.open_link(&link, cx)).ok();
-                                }),
-                                move |d, t| d.bg(p.hover.opacity(t)),
-                            )
-                            .into_any_element()
-                        }
-                        None => line.test_support().into_any_element(),
-                    }
-                }))
-        });
-        let discussion = full.filter(|full| !full.said.is_empty()).map(|full| {
-            div()
-                .flex()
-                .flex_col()
-                .gap(space::MD)
-                .child(heading("Reviews and comments"))
-                .children(full.said.iter().enumerate().map(|(at, said)| {
-                    let mut who = vec![
-                        div()
-                            .medium()
-                            .child(SharedString::from(said.author.clone()))
-                            .into_any_element(),
-                    ];
-                    if said.by_agent {
-                        who.push(
-                            div()
-                                .text_color(p.faint)
-                                .child("posted by an agent")
-                                .into_any_element(),
-                        );
-                    }
-                    if let Some(verdict) = &said.verdict {
-                        who.push(
-                            div()
-                                .text_color(p.mute)
-                                .child(SharedString::from(verdict.clone()))
-                                .into_any_element(),
-                        );
-                    }
+            Some(Description::Empty) => quiet("No description."),
+            Some(Description::NotRead) => quiet("Not read in full yet."),
+            None => div().into_any_element(),
+        };
+        let checks = full.map(|full| full.checks.as_slice()).unwrap_or_default();
+        let checks_card = Card::new()
+            .id("item-detail-checks")
+            .title("Checks")
+            .meta(checks.len().to_string())
+            .child(div().flex().flex_col().children(checks.iter().map(|check| {
+                let mut line = FlatRow::new(
+                    SharedString::from(format!("item-detail-check-{}", check.name)),
+                    check.name.clone(),
+                )
+                .leading(check.mark.clone())
+                .meta(SharedString::from(check.state.clone()));
+                if let Some(link) = check.link.clone() {
+                    let this = this.clone();
+                    line = line.on_click(move |_, _, cx| {
+                        this.update(cx, |this, cx| this.open_link(&link, cx)).ok();
+                    });
+                }
+                line
+            })));
+        let said = full.map(|full| full.said.as_slice()).unwrap_or_default();
+        let older = full.map_or(0, |full| full.older);
+        let count = match older {
+            0 => said.len().to_string(),
+            older => format!("{} of {}", said.len(), said.len() as u64 + older),
+        };
+        let mut discussion = Card::new()
+            .id("item-detail-discussion")
+            .title("Reviews and comments")
+            .meta(count);
+        if older > 0 {
+            discussion = discussion.block(
+                Block::new().child(
+                    div()
+                        .p(space::MD)
+                        .text_size(px(12.5))
+                        .text_color(p.faint)
+                        .child(format!("{older} older are not kept.")),
+                ),
+            );
+        }
+        for (at, said) in said.iter().enumerate() {
+            let mut who = vec![
+                div()
+                    .medium()
+                    .child(SharedString::from(said.author.clone()))
+                    .into_any_element(),
+            ];
+            if said.by_agent {
+                who.push(
+                    div()
+                        .text_color(p.faint)
+                        .child("posted by an agent")
+                        .into_any_element(),
+                );
+            }
+            if let Some(verdict) = &said.verdict {
+                who.push(
+                    div()
+                        .text_color(p.mute)
+                        .child(SharedString::from(verdict.clone()))
+                        .into_any_element(),
+                );
+            }
+            discussion = discussion.block(
+                Block::new().child(
                     div()
                         .id(SharedString::from(format!("item-detail-said-{at}")))
                         .aria_label(SharedString::from(said.said.clone()))
@@ -886,14 +1132,28 @@ impl ProjectItems {
                         .flex_col()
                         .gap(space::XS)
                         .p(space::MD)
-                        .rounded(px(10.))
-                        .bg(p.card2)
                         .text_size(px(13.))
                         .child(div().flex().gap(space::SM).text_size(px(12.)).children(who))
                         .child(said.text.view(format!("item-detail-said-{at}-text")))
-                        .test_support()
-                }))
-        });
+                        .test_support(),
+                ),
+            );
+        }
+        let left = match kind {
+            "Pull request" => "This pull request is no longer among the project's.",
+            _ => "This ticket is no longer among the project's.",
+        };
+        let gone = div()
+            .id("item-detail-gone")
+            .aria_label(left)
+            .flex()
+            .items_center()
+            .gap(space::SM)
+            .text_size(px(12.5))
+            .text_color(p.mute)
+            .child(icon(Icon::Warning).size(px(14.)).text_color(p.faint))
+            .child(left)
+            .test_support();
         let failed = detail
             .full
             .as_ref()
@@ -914,29 +1174,56 @@ impl ProjectItems {
             .flex_col()
             .gap(space::LG)
             .child(facts)
-            .children(description.map(|d| enter("item-detail-enter-description", 0, d)))
-            .children(checks.map(|c| enter("item-detail-enter-checks", 1, c)))
-            .children(discussion.map(|d| enter("item-detail-enter-discussion", 2, d)));
+            .child(presence("item-detail-gone-block", detail.gone, gone).gap(space::LG))
+            .child(
+                presence(
+                    "item-detail-description-block",
+                    full.is_some() && listed,
+                    description,
+                )
+                .gap(space::LG),
+            )
+            .child(
+                presence(
+                    "item-detail-checks-block",
+                    !checks.is_empty() && listed,
+                    checks_card,
+                )
+                .gap(space::LG),
+            )
+            .child(
+                presence(
+                    "item-detail-discussion-block",
+                    !said.is_empty() && listed,
+                    discussion,
+                )
+                .gap(space::LG),
+            );
         Some(modal.child(body).kept(refused).into_any_element())
     }
 }
 
 impl Render for ProjectItems {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let now = now_ms();
         let at = cx.background_executor().now();
         let reduce = cx.reduce_motion();
         let tab = self.tab;
-        let kept = self.kept(tab);
-        let counts = [self.kept(Kind::Pulls).len(), self.kept(Kind::Tickets).len()];
-        self.lists[tab.index()].sync(
-            kept.iter()
-                .map(|row| (row.id(), row.clone()))
-                .collect::<Vec<_>>(),
-            at,
-            reduce,
-        );
+        let mut counts = [0; 2];
+        // The hidden tab's list too: shown again, it holds what it lists now, not rows that left
+        // while it was hidden folding away then.
+        for kind in [Kind::Pulls, Kind::Tickets] {
+            let kept = self.kept(kind);
+            counts[kind.index()] = kept.len();
+            self.lists[kind.index()].sync(
+                kept.into_iter()
+                    .map(|row| (row.id(), row))
+                    .collect::<Vec<_>>(),
+                at,
+                reduce,
+            );
+        }
         let (read, failed) = match &self.read {
             Some(Ok(read)) => (Some(read.clone()), None),
             Some(Err(why)) => (None, Some(why.clone())),
@@ -986,7 +1273,7 @@ impl Render for ProjectItems {
         let card = listed.into_iter().fold(
             ListCard::new("project-items-list"),
             |card, (key, row, placement)| {
-                let drawn = self.row(&row, forges.len(), now, cx);
+                let drawn = self.row(&row, forges.len(), now, window, cx);
                 card.item(
                     ElementId::Name(format!("{key}-item").into()),
                     placement,
