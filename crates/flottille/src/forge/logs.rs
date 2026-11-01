@@ -3,6 +3,7 @@
 //! lines of the job's log can often fix it. Bounded in lines and in bytes, per job and in total,
 //! cleaned of what makes a log unreadable, and masked before it is kept.
 
+use super::bitbucket::{self, Contexts};
 use super::{Forge, Job, Log, Pull, gh_text};
 
 /// The lines of a log that are given, counted from its end.
@@ -20,9 +21,40 @@ const JOBS: usize = 5;
 pub(super) async fn attach(forge: &Forge, pull: &mut Pull) {
     let mut left = TOTAL_BYTES;
     let mut asked = 0;
+    // Only Bitbucket Cloud has logs to read, and a context to name for them.
+    let context = match forge {
+        Forge::Bitbucket { .. } if bitbucket::cloud(forge) && !pull.jobs.is_empty() => {
+            Contexts::default().of(forge).await
+        }
+        _ => Err(String::new()),
+    };
     for job in &mut pull.jobs {
         job.log = Some(match forge {
-            Forge::Bitbucket { .. } => Err("bkt gives no job logs, read it on Bitbucket".into()),
+            Forge::Bitbucket { .. } if !bitbucket::cloud(forge) => {
+                Err("bkt gives no job logs, read it on Bitbucket".into())
+            }
+            Forge::Bitbucket { .. } => match bitbucket::build_of(forge, job.details.as_deref()) {
+                None => Err(match &job.details {
+                    Some(link) => format!("it is not a Bitbucket Pipelines build, see {link}"),
+                    None => "it is not a Bitbucket Pipelines build".into(),
+                }),
+                Some(_) if asked == JOBS || left == 0 => Err(format!(
+                    "at most {JOBS} logs and {TOTAL_BYTES} bytes are given"
+                )),
+                Some(build) => match &context {
+                    Err(why) => Err(why.clone()),
+                    Ok(context) => {
+                        asked += 1;
+                        let log = bitbucket::failed_step_log(forge, context, build)
+                            .await
+                            .and_then(|raw| tail_with(&raw, JOB_BYTES.min(left), plain));
+                        if let Ok(log) = &log {
+                            left -= log.text.len().min(left);
+                        }
+                        log
+                    }
+                },
+            },
             Forge::GitHub { .. } => match actions_job(job.details.as_deref()) {
                 None => Err(match &job.details {
                     Some(link) => format!("it is not a GitHub Actions job, see {link}"),
@@ -66,7 +98,13 @@ fn actions_job(link: Option<&str>) -> Option<u64> {
 /// The end of `raw`, cleaned: at most `LINES` lines and `bytes` bytes of text, the oldest lines
 /// going first and whole; a single line longer than `bytes` keeps its end.
 fn tail(raw: &str, bytes: usize) -> Result<Log, String> {
-    let mut lines: Vec<String> = raw.lines().map(clean).collect();
+    tail_with(raw, bytes, clean)
+}
+
+/// `tail`, each line made plain by `line_of`: GitHub's lines start with names and a timestamp,
+/// Bitbucket's do not.
+fn tail_with(raw: &str, bytes: usize, line_of: fn(&str) -> String) -> Result<Log, String> {
+    let mut lines: Vec<String> = raw.lines().map(line_of).collect();
     while lines.last().is_some_and(String::is_empty) {
         lines.pop();
     }
@@ -112,6 +150,11 @@ fn clean(line: &str) -> String {
         Some((stamp, rest)) if is_timestamp(stamp) => rest,
         _ => text,
     };
+    plain(text)
+}
+
+/// A line of a log without the colours and the carriage returns of a terminal.
+fn plain(text: &str) -> String {
     let text = text
         .rsplit('\r')
         .find(|part| !part.is_empty())
