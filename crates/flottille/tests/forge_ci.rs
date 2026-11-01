@@ -414,7 +414,7 @@ fn forge_subscribe_with_minutes_keeps_the_agent_s_choice_and_still_says_the_runs
 }
 
 #[test]
-fn the_runs_are_read_by_forge_show_and_forge_subscribe_only_never_by_the_watch() {
+fn the_runs_are_read_by_forge_show_and_forge_subscribe_only_never_by_the_rounds() {
     let user = User::with_fake_agent()
         .with_fake_gh()
         .with_env("FLOTTILLE_TEST_CLOCK", "1");
@@ -430,15 +430,13 @@ fn the_runs_are_read_by_forge_show_and_forge_subscribe_only_never_by_the_watch()
 
     subscribe(&mcp, json!({}));
     let after_subscribing = reads(&user);
-    // The subscription's watch reads the pull request again each minute, and not the runs.
+    // The rounds of the items, which the subscription hears, read the pull requests and not the
+    // runs.
     for _ in 0..3 {
         let before = gh_calls(&user).len();
-        user.call("test.advance", json!({"ms": 61_000})).unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while gh_calls(&user).len() == before {
-            assert!(std::time::Instant::now() < deadline, "no read of the watch");
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+        user.call("items.refresh", json!({"project": "app"}))
+            .unwrap();
+        assert!(gh_calls(&user).len() > before, "no read of the round");
     }
 
     assert_eq!(after_subscribing, 1);

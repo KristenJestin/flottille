@@ -378,8 +378,8 @@ Recent CI runs of acme/app took 4 min on average (3 to 6 min, last 5).
 - **Bitbucket Data Center** has no CI API in common: nothing is said and nothing is asked.
 - The **last 5** finished runs of the repository, any branch, newest first; the average, the
   shortest and the longest are rounded to the minute (1 at least). A run of no time is left out.
-- **One read**, made only when `forge` `show` or `forge` `subscribe` runs, never by the watch of
-  a subscription nor of a client. **A read that fails** (`gh` or `bkt` failing, an answer in a
+- **One read**, made only when `forge` `show` or `forge` `subscribe` runs, never by the rounds
+  of the items (which a subscription hears) nor the watch of a client. **A read that fails** (`gh` or `bkt` failing, an answer in a
   shape not expected) is not an error: `show` and `subscribe` answer without the line.
 
 **`forge` `subscribe` without `minutes`** is sized by those runs: twice their average, rounded up
