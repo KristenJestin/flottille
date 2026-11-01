@@ -198,7 +198,7 @@ const SERVED: [Definition; 28] = [
     Definition {
         name: "tasks",
         title: "The project's tasks",
-        description: "The project's tasks: named lines that run runs by \
+        description: "The project's tasks: named lines (tests, lint, servers…) that run runs by \
             name; prefer them to a line of your own, they are what the project means. list and \
             show read them; a root's add, edit and remove change them once the session's judge \
             or the user allows it, judged as a run of the line (check and read_only are the \
@@ -249,9 +249,10 @@ const SERVED: [Definition; 28] = [
         title: "Follow or stop a run",
         description: "A run this agent started, by the run id run gave. action output (the \
             default): its state and lines of its output, the last tail lines (40 by default, \
-            1000 at most) or those from start; only the last 64 KiB of an output are kept. action stop: ends it with \
+            1000 at most) or those from start; the answer says how to read the lines before or \
+            after; only the last 64 KiB of an output are kept. action stop: ends it with \
             everything it started, asked to end, then killed 5 seconds later, and answers once \
-            it ended. {\"run\": \"a1b2c3\", \
+            it ended; a run that already ended is left as it is. {\"run\": \"a1b2c3\", \
             \"action\": \"stop\"}",
         read_only: false,
         idempotent: true,
@@ -269,7 +270,8 @@ const SERVED: [Definition; 28] = [
         name: "skill_read",
         title: "Read a skill",
         description: "Reads one of the project's skills, the texts listed in your instructions \
-            when your task needs them. A file or a text skill is read by its name, a page at a time (32 KiB at \
+            (framework guides, test library, design system, the project's ways), when your task \
+            needs them. A file or a text skill is read by its name, a page at a time (32 KiB at \
             most) like fs_read; a folder skill lists its files, then path names the one to read. \
             Only the skill's own files are served, never outside it. Refused for a name that is \
             not the project's.",
@@ -291,14 +293,16 @@ const SERVED: [Definition; 28] = [
         name: "forge",
         title: "Pull requests",
         description: "The pull requests of the project's repositories on their forge, through \
-            the user's own gh or bkt (never run them). list: by state \
+            the user's own gh or bkt (no forge sign-in here: never run them). list: by state \
             (open by default) and branch. show: a workspace's branch's (yours; in main, name \
-            it), or number's, with checks (failed jobs' log ends), review and comment \
-            counts; detail full adds texts. Writes (judged; result maybe later): create, merge \
-            (method, default squash; refused with no check, failing checks or requested \
-            changes unless waive gives the user's words) and checks (re-run failed) act on a workspace's branch; comment, \
-            edit, close (comment first), reopen on number. subscribe: the next events of a workspace's pull request \
-            wakes you once, by a delivery (from people: no bot nor agent; minutes: sized by CI, else 60); unsubscribe. {\"action\": \"create\", \"repository\": \"api\", \"title\": \
+            it), or number's, with checks (the log's end of each failed job), review and comment \
+            counts; detail full adds texts. Writes, judged, answered at once, the result maybe \
+            later: create, merge (method, squash by default; refused with no check, while checks \
+            fail or a review asks for changes unless waive gives the user's words) and checks \
+            (re-run failed) act on a workspace's branch; comment, edit, close (comment first), \
+            reopen on number. subscribe: the next events of a workspace's pull request wakes you \
+            once, by a delivery (from people: no bot nor agent; minutes: sized by CI, else 60); \
+            unsubscribe. {\"action\": \"create\", \"repository\": \"api\", \"title\": \
             \"fix: ...\", \"body\": \"...\"}",
         read_only: false,
         idempotent: false,
@@ -307,17 +311,17 @@ const SERVED: [Definition; 28] = [
             json!({"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["list", "show", "subscribe", "unsubscribe", "create", "comment", "edit", "merge", "checks", "close", "reopen"]},
                 "workspace": {"type": "string", "description": "Yours when left out; in main, name it."},
-                "repository": {"type": "string", "description": "By path; all when left out (list, show)."},
+                "repository": {"type": "string", "description": "By path; all of the place's when left out (list, show)."},
                 "number": {"type": "integer", "minimum": 1, "description": "show, comment, edit: a pull request."},
                 "state": {"type": "string", "enum": ["open", "closed", "merged", "all"]},
                 "branch": {"type": "string", "description": "list: its source branch."},
                 "detail": {"type": "string", "enum": ["short", "full"]},
                 "title": {"type": "string"},
-                "body": {"type": "string", "description": "create, edit: description; comment: text."},
+                "body": {"type": "string", "description": "create, edit: description; comment: the comment."},
                 "draft": {"type": "boolean"},
-                "comment": {"type": "string"},
-                "delete_branch": {"type": "boolean"},
-                "waive": {"type": "string", "description": "merge: the user's words allowing a blocked merge."},
+                "comment": {"type": "string", "description": "close, reopen: posted on the pull request first."},
+                "delete_branch": {"type": "boolean", "description": "close: also delete the pull request's branch, unless a workspace is on it or it comes from a fork."},
+                "waive": {"type": "string", "description": "merge: the user's words letting a blocked pull request be merged; held for them."},
                 "method": {"type": "string", "enum": ["squash", "merge", "rebase"], "description": "merge: squash when left out."},
                 "events": {"type": "array", "items": {"enum": crate::forge::EVENTS}},
                 "from": {"enum": crate::subscriptions::FROM},
@@ -333,7 +337,8 @@ const SERVED: [Definition; 28] = [
             ticket of a state (open by default), by label and assignee, in one call; search: \
             the same, with words; show: a workspace's linked ticket (yours; in main, name \
             workspace) or ticket, detail full adds the comments. Writes, judged, answered at \
-            once, the result maybe later: create, comment, edit, close, reopen, status. \
+            once, the result maybe later: create, comment, edit, close, reopen, status (Jira \
+            moves a work item, GitHub its board column). \
             {\"action\": \"comment\", \"ticket\": \"#12\", \"body\": \"...\"}",
         read_only: false,
         idempotent: false,
@@ -341,7 +346,7 @@ const SERVED: [Definition; 28] = [
         schema: || {
             json!({"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["list", "search", "show", "create", "comment", "edit", "close", "reopen", "status"]},
-                "ticket": {"type": "string", "description": "#123 or ABC-123; default: the workspace's."},
+                "ticket": {"type": "string", "description": "#123 or ABC-123; the workspace's when left out."},
                 "workspace": {"type": "string"},
                 "query": {"type": "string", "description": "search: words."},
                 "state": {"type": "string", "enum": ["open", "closed", "all"]},
@@ -350,11 +355,11 @@ const SERVED: [Definition; 28] = [
                 "detail": {"type": "string", "enum": ["short", "full"]},
                 "title": {"type": "string"},
                 "body": {"type": "string", "description": "create, edit: description; comment: the comment."},
-                "labels": {"type": "array", "items": {"type": "string"}},
-                "reason": {"enum": ["completed", "not planned"]},
-                "remove_labels": {"type": "array", "items": {"type": "string"}},
-                "assignees": {"type": "array", "items": {"type": "string"}},
-                "remove_assignees": {"type": "array", "items": {"type": "string"}},
+                "labels": {"type": "array", "items": {"type": "string"}, "description": "create, edit: labels to add (GitHub)."},
+                "reason": {"enum": ["completed", "not planned"], "description": "close: completed or not planned (GitHub)."},
+                "remove_labels": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to remove (GitHub)."},
+                "assignees": {"type": "array", "items": {"type": "string"}, "description": "edit: logins to add (GitHub)."},
+                "remove_assignees": {"type": "array", "items": {"type": "string"}, "description": "edit: logins to remove (GitHub)."},
                 "status": {"type": "string", "description": "status: its name."},
                 "project": {"type": "string", "description": "create on Jira: the tracker's project; status: the board."},
                 "type": {"type": "string", "description": "create on Jira: work item type."}
@@ -505,13 +510,15 @@ const SERVED: [Definition; 28] = [
             the task, what to read, the checks, the deliverable. provider: yours when left out; \
             a refusal names the ready ones. Only a root has this tool, never a child; a \
             child launch is refused above the children cap. {\"title\": \"Fix login\", \"brief\": \"...\", \"root\": true, \
-            \"workspace\": \"login\"}; {\"title\": \"Write the tests\", \"brief\": \"...\"}",
+            \"workspace\": \"login\"}; {\"title\": \"Add API\", \"brief\": \"...\", \"root\": \
+            true, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}; {\"title\": \
+            \"Write the tests\", \"brief\": \"...\"}",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "title": {"type": "string", "description": "The task in a few words."},
+                "title": {"type": "string", "description": "The task in a few words: how you and the user will name this session or child."},
                 "brief": {"type": "string", "description": "Everything the session or the child needs to know."},
                 "provider": {"type": "string", "description": "The provider it runs on: yours when left out."},
                 "model": {"type": "string", "description": "The model; the provider's default when left out."},
@@ -544,11 +551,12 @@ const SERVED: [Definition; 28] = [
         name: "agent_status",
         title: "See how children are doing",
         description: "How your children are doing. Without agent_id: one line per child, what it \
-            does now, the time since its last sign of activity and its context \
+            does now (thinking, which command runs and for how long, waiting for approval #n, \
+            waiting on the provider), the time since its last sign of activity and its context \
             use; detail full adds their last messages. With agent_id: that child, in full. \
             action conversation: a page of that child's conversation, oldest first (what it was \
             sent, its messages and its tool calls), ending with the after to pass for the next \
-            one. \
+            one; read the lines that matter rather than whole transcripts. \
             {\"agent_id\": \"a1b2\", \"action\": \"conversation\"}.",
         read_only: true,
         idempotent: true,
@@ -669,7 +677,7 @@ const SERVED: [Definition; 28] = [
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "session": {"type": "string", "description": "The session's agent id."},
+                "session": {"type": "string", "description": "The session's agent id: as agent_launch gave it, or as a [flottille:session] message names it."},
                 "text": {"type": "string", "description": "The message, at most 8000 characters."}
             }, "required": ["session", "text"], "additionalProperties": false})
         },
@@ -2159,33 +2167,167 @@ mod tests {
         assert!(shown.chars().count() <= ERROR_LIMIT);
     }
 
+    /// A tool's description, then the description of one of its parameters.
+    fn text_of(tool: &str, parameter: Option<&str>) -> String {
+        let definition = definition(tool).unwrap();
+        match parameter {
+            None => definition.description.to_owned(),
+            Some(name) => (definition.schema)()["properties"][name]["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{tool} has no described parameter {name}"))
+                .to_owned(),
+        }
+    }
+
     #[test]
-    fn the_biggest_list_stays_far_under_the_threshold_of_tool_search() {
+    fn the_texts_cut_to_fit_the_old_cap_are_whole_again() {
+        // What #224, #225, #233, #255 and #259 took out of other tools to stay under a number
+        // nobody chose (#264): what is still true is said again.
+        let whole: [(&str, Option<&str>, &str); 25] = [
+            ("tasks", None, "(tests, lint, servers…)"),
+            (
+                "run_status",
+                None,
+                "the answer says how to read the lines before or after",
+            ),
+            (
+                "run_status",
+                None,
+                "a run that already ended is left as it is",
+            ),
+            (
+                "skill_read",
+                None,
+                "(framework guides, test library, design system, the project's ways)",
+            ),
+            ("forge", None, "no forge sign-in here: never run them"),
+            ("forge", None, "the log's end of each failed job"),
+            (
+                "forge",
+                None,
+                "squash by default; refused with no check, while checks fail or a review asks for changes unless waive gives the user's words",
+            ),
+            (
+                "forge",
+                None,
+                "Writes, judged, answered at once, the result maybe later",
+            ),
+            (
+                "forge",
+                Some("repository"),
+                "all of the place's when left out",
+            ),
+            ("forge", Some("body"), "comment: the comment."),
+            (
+                "forge",
+                Some("waive"),
+                "letting a blocked pull request be merged; held for them",
+            ),
+            (
+                "forge",
+                Some("comment"),
+                "close, reopen: posted on the pull request first",
+            ),
+            (
+                "forge",
+                Some("delete_branch"),
+                "close: also delete the pull request's branch",
+            ),
+            (
+                "tickets",
+                None,
+                "Writes, judged, answered at once, the result maybe later",
+            ),
+            ("tickets", Some("ticket"), "the workspace's when left out"),
+            ("tickets", Some("labels"), "create, edit: labels to add"),
+            ("tickets", Some("reason"), "close: completed or not planned"),
+            ("tickets", Some("remove_labels"), "edit: labels to remove"),
+            ("tickets", Some("assignees"), "edit: logins to add"),
+            (
+                "tickets",
+                Some("remove_assignees"),
+                "edit: logins to remove",
+            ),
+            (
+                "agent_launch",
+                None,
+                "{\"title\": \"Add API\", \"brief\": \"...\", \"root\": true, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}",
+            ),
+            (
+                "agent_launch",
+                Some("title"),
+                "how you and the user will name this session or child",
+            ),
+            (
+                "agent_status",
+                None,
+                "thinking, which command runs and for how long, waiting for approval #n, waiting on the provider",
+            ),
+            (
+                "agent_status",
+                None,
+                "read the lines that matter rather than whole transcripts",
+            ),
+            (
+                "session_send",
+                Some("session"),
+                "as agent_launch gave it, or as a [flottille:session] message names it",
+            ),
+        ];
+        for (tool, parameter, said) in whole {
+            // The descriptions break their lines with a backslash; the text is read whole.
+            let text = text_of(tool, parameter)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                text.contains(said),
+                "{tool} {parameter:?} lost: {said}\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_biggest_list_stays_under_the_guards_on_tools_and_tokens() {
         // Anthropic suggests tool search past 10 tools or 10k tokens of definitions
-        // (`docs/reference/mcp.md` §3); every tool loads upfront here, so the list stays under
-        // the tokens. JSON schemas tokenize densely, about 3 characters a token at worst: 29,000
-        // characters is under 9,700 tokens then, and about 7,250 at the usual 4.
-        let biggest = claude::PROVIDER.tools(true, false, true, true);
-        let chars: usize = served(&claude::PROVIDER, &biggest)
-            .into_iter()
-            .map(|name| {
-                let tool = serde_json::to_string(&tool_of(definition(name).unwrap(), true));
-                tool.unwrap().len()
-            })
-            .sum();
-        // 26,889 characters in 25 tools before the families were completed (#141); 25,236 in
-        // 23 after, the forge, ticket and removal tools merged into families and the
-        // descriptions shortened. 28,224 once `project` took the base branches and dependencies
-        // (#198): the cap is 29,000, still under 9,700 tokens at 3 characters a token. 28,600
-        // once `forge` subscribed to a pull request's events (#206). 28,801 once `tickets` wrote
-        // Jira (#224). 28,990 once it set a GitHub issue's board status, closed for a reason and
-        // edited labels and assignees (#225), the `tickets` texts shortened to stay under the cap.
-        // `forge` closed and reopened pull requests (#233), its own text shortened: 28,981.
-        // Unchanged by #222: the ten characters `forge` gained (sized by CI) are paid by ten
-        // taken from its own text. `wake` (#254) costs 527, paid by shortening the texts of
-        // tasks, run_status, skill_read, agent_launch, agent_status and session_send: 28,909. The
-        // 100 hours' maximum of `forge` and `wake` (6000 minutes, not 240): 28,911.
-        // Raised for `web` (#259) without shortening other tools; a new budget follows: 29,660.
-        assert!(chars < 30_000, "{chars} characters of definitions");
+        // (`docs/reference/mcp.md` §3). Flottille loads every tool upfront, so these two guards
+        // say when the list grows too big to be read well; they are not a limit to trim to.
+        // JSON schemas tokenize densely: 3 characters a token at worst, 4 usually.
+        const TOOLS: usize = 40;
+        const TOKENS: usize = 20_000;
+        const CHARS_A_TOKEN: usize = 3;
+        let advice = "Never trim another tool to fit: a tool keeps the description and the example \
+            it needs. Open a discussion with the maintainer; the ways out are a new concept as \
+            one family tool with actions (as forge and tickets), guidance read on demand (as \
+            skill_read), or tool search for rarely used families. A tool cannot be withheld by \
+            context.";
+        let mut biggest = 0;
+        for (role, root, at_depth_limit) in [
+            ("a root", true, false),
+            ("a child", false, false),
+            ("a child at the depth limit", false, true),
+        ] {
+            let list = claude::PROVIDER.tools(root, at_depth_limit, true, true);
+            let names = served(&claude::PROVIDER, &list);
+            assert!(
+                names.len() <= TOOLS,
+                "{} tools for {role}, at most {TOOLS}. {advice}",
+                names.len()
+            );
+            let chars: usize = names
+                .into_iter()
+                .map(|name| {
+                    let tool = serde_json::to_string(&tool_of(definition(name).unwrap(), true));
+                    tool.unwrap().len()
+                })
+                .sum();
+            biggest = biggest.max(chars);
+        }
+        assert!(
+            biggest <= TOKENS * CHARS_A_TOKEN,
+            "{biggest} characters of definitions for the biggest list, at most {} \
+             ({TOKENS} tokens at {CHARS_A_TOKEN} characters a token). {advice}",
+            TOKENS * CHARS_A_TOKEN
+        );
     }
 }
