@@ -1109,7 +1109,10 @@ pub async fn forge(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Value
 
 /// What `forge show` ends with: the agent's subscriptions, when it has some.
 fn subscriptions_text(daemon: &Daemon, agent: &str) -> String {
-    let mine = crate::subscriptions::of(daemon, agent);
+    let mine: Vec<_> = crate::subscriptions::of(daemon, agent)
+        .into_iter()
+        .filter(|s| s.source == "forge")
+        .collect();
     if mine.is_empty() {
         return String::new();
     }
@@ -1278,6 +1281,7 @@ fn forge_unsubscribe(daemon: &Daemon, agent: &str, asked: ForgeCall) -> Outcome 
         };
     let cancelled: Vec<_> = crate::subscriptions::of(daemon, agent)
         .into_iter()
+        .filter(|s| s.source == "forge")
         .filter(|s| named(s, "workspace", &asked.workspace))
         .filter(|s| named(s, "repository", &asked.repository))
         .collect();

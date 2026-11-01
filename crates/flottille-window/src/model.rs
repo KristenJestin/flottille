@@ -555,8 +555,17 @@ impl Snapshot {
                 .filter_map(Value::as_str)
                 .collect();
             let number = subscription["target"]["number"].as_u64();
+            let wake = (subscription["source"] == "timer")
+                .then(|| subscription["expires_at"].as_u64())
+                .flatten();
             waiting_for.entry(root_of(&parents, agent)).or_insert(
                 match (events.is_empty(), number) {
+                    _ if wake.is_some() => {
+                        format!(
+                            "Waiting: wake at {}",
+                            crate::session::clock(wake.unwrap_or(0))
+                        )
+                    }
                     (false, Some(n)) => format!("Waiting: {} of #{n}", events.join(", ")),
                     (true, Some(n)) => format!("Waiting: #{n}"),
                     _ => "Waiting".to_owned(),
@@ -1131,11 +1140,13 @@ mod tests {
                 "waiting_on_answer": true, "created_at": 10, "active_at": 20}),
             agent("r3", None, "working", None),
             agent("r4", None, "idle", None), agent("c4", Some("r4"), "idle", None),
-            agent("r5", None, "idle", None)]});
+            agent("r5", None, "idle", None), agent("r6", None, "idle", None)]});
         let approvals = json!({"requests": [{"number": 3, "agent": "r1", "tool": "fs_read",
             "call": {"path": ".env"}, "created_at": 30}]});
         let subscriptions = json!({"subscriptions": [{"agent": "c4", "events": ["checks"],
-            "target": {"project": "app", "repository": ".", "number": 1}}]});
+            "target": {"project": "app", "repository": ".", "number": 1}},
+            {"agent": "r6", "source": "timer", "events": ["wake"], "target": {"why": "later"},
+            "expires_at": 600_000}]});
         let asking = HashSet::from(["r1".to_owned(), "r2".to_owned()]);
         let snapshot = Snapshot::build(Answers {
             projects: &json!({"projects": [{"name": "app", "folder": "/work/app"}]}),
@@ -1153,6 +1164,10 @@ mod tests {
         assert_eq!(said("r2"), "Needs you: a question");
         assert_eq!(said("r3"), "Running");
         assert_eq!(said("r4"), "Waiting: checks of #1");
+        assert_eq!(
+            said("r6"),
+            format!("Waiting: wake at {}", crate::session::clock(600_000))
+        );
         assert_eq!(said("r5"), "", "no mark, no words");
     }
 

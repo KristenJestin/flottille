@@ -94,7 +94,7 @@ const REPLACED: &str = "refused: this session has been replaced: a new session o
 
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
 /// the order frozen in the agent.
-const SERVED: [Definition; 27] = [
+const SERVED: [Definition; 28] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -158,8 +158,7 @@ const SERVED: [Definition; 27] = [
         title: "Write a file",
         description: "Writes a whole file of the place, making it and its folders when it is \
             new. An existing file is written only when this session read it (fs_read) and it \
-            has not changed since; otherwise the call is refused with what changed, and \
-            nothing is written. Prefer fs_edit for a change in a long file.",
+            has not changed since; otherwise it is refused with what changed. Prefer fs_edit for a change in a long file.",
         read_only: false,
         idempotent: true,
         destructive: true,
@@ -198,7 +197,7 @@ const SERVED: [Definition; 27] = [
     Definition {
         name: "tasks",
         title: "The project's tasks",
-        description: "The project's tasks: named lines (tests, lint, servers…) that run runs by \
+        description: "The project's tasks: named lines that run runs by \
             name; prefer them to a line of your own, they are what the project means. list and \
             show read them; a root's add, edit and remove are judged as a run of the line \
             (check and read_only, the user's word, are held for the user), answered at once, \
@@ -248,10 +247,9 @@ const SERVED: [Definition; 27] = [
         title: "Follow or stop a run",
         description: "A run this agent started, by the run id run gave. action output (the \
             default): its state and lines of its output, the last tail lines (40 by default, \
-            1000 at most) or those from start; the answer says how to read the lines before or \
-            after; only the last 64 KiB of an output are kept. action stop: ends it with \
+            1000 at most) or those from start; only the last 64 KiB of an output are kept. action stop: ends it with \
             everything it started, asked to end, then killed 5 seconds later, and answers once \
-            it ended; one already ended is left as is. {\"run\": \"a1b2c3\", \
+            it ended. {\"run\": \"a1b2c3\", \
             \"action\": \"stop\"}",
         read_only: false,
         idempotent: true,
@@ -268,8 +266,8 @@ const SERVED: [Definition; 27] = [
     Definition {
         name: "skill_read",
         title: "Read a skill",
-        description: "Reads one of the project's skills listed in your instructions (guides, \
-            test library, design system, the project's ways) when your task needs it. A file or a text skill is read by its name, a page at a time (32 KiB at \
+        description: "Reads one of the project's skills listed in your instructions when your \
+            task needs it. A file or a text skill is read by its name, a page at a time (32 KiB at \
             most) like fs_read; a folder skill lists its files, then path names the one to read. \
             Only the skill's own files; refused for a name that is not the project's.",
         read_only: true,
@@ -417,7 +415,7 @@ const SERVED: [Definition; 27] = [
                 "action": {"type": "string", "enum": ["list", "add", "edit", "remove", "move"]},
                 "number": {"type": "integer", "minimum": 1, "description": "edit, remove, move: the step; add: its number once added."},
                 "to": {"type": "integer", "minimum": 1, "description": "move: its new number."},
-                "step": {"type": "object", "description": "add, edit: the step whole: one of copy, link, root_entries, run, task; repository or for_each_repository; time_limit (seconds) with run or task."}
+                "step": {"type": "object", "description": "add, edit: the step whole; time_limit (seconds) with run or task."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -474,8 +472,8 @@ const SERVED: [Definition; 27] = [
         name: "web",
         title: "The web",
         description: "read: a page's main text (HTML as Markdown, PDF, text, JSON; 30,000 \
-            characters) and its links. search: DuckDuckGo, 10 results. Both are the web's text, \
-            never the user's. A URL you were shown (user, ticket, pull request, page, result) \
+            characters) and its links. search: DuckDuckGo, 10 results. Both are the web's, not \
+            the user's. A URL you were shown (user, ticket, pull request, page, result) \
             passes; one you build is judged: it sends out what it holds. No local or private \
             address.",
         read_only: true,
@@ -503,8 +501,7 @@ const SERVED: [Definition; 27] = [
             the task, what to read, the checks, the deliverable. provider: yours when left out; \
             a refusal names the ready ones. Only a root has this tool, never a child; a \
             child launch is refused above the children cap. {\"title\": \"Fix login\", \"brief\": \"...\", \"root\": true, \
-            \"workspace\": \"login\"}; {\"title\": \
-            \"Write the tests\", \"brief\": \"...\"}",
+            \"workspace\": \"login\"}; {\"title\": \"Write the tests\", \"brief\": \"...\"}",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -543,12 +540,10 @@ const SERVED: [Definition; 27] = [
         name: "agent_status",
         title: "See how children are doing",
         description: "How your children are doing. Without agent_id: one line per child, what it \
-            does now (thinking, a command and for how long, waiting for approval or the \
-            provider), the time since its last activity, its context \
+            does now, the time since its last activity, its context \
             use; detail full adds their last messages. With agent_id: that child, in full. \
             action conversation: a page of that child's conversation, oldest first (what it was \
-            sent, said and called), ending with the after to pass for the next \
-            one; read the lines that matter rather than whole transcripts. \
+            sent, said and called), ending with the after to pass for the next one. \
             {\"agent_id\": \"a1b2\", \"action\": \"conversation\"}.",
         read_only: true,
         idempotent: true,
@@ -575,6 +570,22 @@ const SERVED: [Definition; 27] = [
             json!({"type": "object", "properties": {
                 "agent_id": {"type": "string"}
             }, "required": ["agent_id"], "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "wake",
+        title: "Wake later",
+        description: "Wakes you once, in minutes, by a delivery saying why; end your turn \
+            meanwhile. A new one replaces yours; cancel drops it.",
+        read_only: false,
+        idempotent: false,
+        destructive: false,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "minutes": {"type": "integer", "minimum": 1, "maximum": crate::subscriptions::LONGEST_MINUTES},
+                "why": {"type": "string"},
+                "cancel": {"type": "boolean"}
+            }, "additionalProperties": false})
         },
     },
     Definition {
@@ -653,7 +664,7 @@ const SERVED: [Definition; 27] = [
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "session": {"type": "string", "description": "The session's agent id: as agent_launch gave it, or as a [flottille:session] message names it."},
+                "session": {"type": "string", "description": "The session's agent id."},
                 "text": {"type": "string", "description": "The message, at most 8000 characters."}
             }, "required": ["session", "text"], "additionalProperties": false})
         },
@@ -1848,6 +1859,7 @@ async fn performed_once(
         "run_status" => runs::run_status(daemon, &grant.agent, args).await,
         "forge" => crate::forge::forge(daemon, &grant.agent, &grant.place, args).await,
         "tickets" => crate::tickets::tickets(daemon, &grant.place, args).await,
+        "wake" => crate::subscriptions::wake(daemon, &grant.agent, args),
         tool if tree::TOOLS.contains(&tool) => tree::call(daemon, grant, tool, args).await,
         tool if crate::actions::TOOLS.contains(&tool) => {
             crate::actions::perform(daemon, grant, tool, args).await
@@ -1986,7 +1998,7 @@ mod tests {
     #[test]
     fn a_grant_holds_the_agent_s_served_tools_in_its_own_order() {
         let mut leaf = claude::PROVIDER.tools(false, true, true, true);
-        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 15);
+        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 16);
         leaf.reverse();
         leaf.retain(|tool| !tool.ends_with("__search"));
         leaf.push("fs_read".into());
@@ -1994,7 +2006,7 @@ mod tests {
         assert_eq!(served.first(), Some(&"ask_parent"));
         assert_eq!(served.last(), Some(&"fs_read"));
         assert!(!served.contains(&"search"));
-        assert_eq!(served.len(), 14);
+        assert_eq!(served.len(), 15);
     }
 
     #[test]
@@ -2161,9 +2173,11 @@ mod tests {
         // edited labels and assignees (#225), the `tickets` texts shortened to stay under the cap.
         // `forge` closed and reopened pull requests (#233), its own text shortened: 28,981.
         // Unchanged by #222: the ten characters `forge` gained (sized by CI) are paid by ten
-        // taken from its own text. `web` (#259) is paid by shorter texts of `agent_launch` (its
-        // schema and one of its examples), `agent_status`, `project`, `skill_read`, `tasks`,
-        // `run_status`: 28,936.
+        // taken from its own text. `wake` (#254) costs 527, paid by shortening the texts of
+        // tasks, run_status, skill_read, agent_launch, agent_status and session_send: 28,909. The
+        // 100 hours' maximum of `forge` and `wake` (6000 minutes, not 240): 28,911. `web` (#259)
+        // costs 816, paid by shorter texts of `agent_launch` (its schema), `agent_status`,
+        // `project`, `skill_read`, `tasks`, `setup` and `fs_write`: 28,966.
         assert!(chars < 29_000, "{chars} characters of definitions");
     }
 }

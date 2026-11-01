@@ -167,6 +167,7 @@ fn the_exact_claude_code_options_are_sent() {
         "commands",
         "setup",
         "project",
+        "wake",
         "report",
         "ask_user",
         "session_send",

@@ -154,7 +154,7 @@ and the 2026 practice around it:
      `workspace_remove` had until #141; the old names are still served under the new ones for
      one release.
 
-   A root lead has 24 tools, a leaf worker 13; one more each when the project's repositories
+   A root lead has 25 tools, a leaf worker 14; one more each when the project's repositories
    declare a forge (`forge`), one more when it declares a tracker (`tickets`).
 
    **The budget.** Every tool loads upfront (rule 7), so the definitions must stay under
@@ -169,7 +169,7 @@ and the 2026 practice around it:
    |---|---|---|
    | Before #141 (forge, ticket and removal tools apart, a 27,000 limit) | 25 | 26,889 |
    | After #141 (`forge`, `tickets`, `workspace` complete families) | 23 | 25,236 |
-   | After #259 (`web`, paid by shorter texts of `agent_launch`, `agent_status`, `project`, `skill_read`, `tasks`, `run_status`; a 29,000 limit since #198) | 26 | 28,936 |
+   | After #259 (`web`, paid by shorter texts of `agent_launch`, `agent_status`, `project`, `skill_read`, `tasks`, `setup`, `fs_write`; a 29,000 limit since #198) | 27 | 28,966 |
 
    A family grows by an action and a line of description, not by a tool; a new tool or a long
    description that passes the limit is answered by merging or shortening, and the limit moves

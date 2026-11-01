@@ -922,8 +922,11 @@ impl Conversation {
 }
 
 /// The line that says what woke the agent, from the text of a `subscription` delivery
-/// (`subscriptions.rs` of the daemon): `checks of #12 ended, 1 failed`.
+/// (`subscriptions.rs` of the daemon): `checks of #12 ended, 1 failed`, `the timer: <why>`.
 pub fn woken_by(body: &str) -> String {
+    if let Some(rest) = body.strip_prefix("Woken by the timer: ") {
+        return format!("the timer: {}", rest.lines().next().unwrap_or_default());
+    }
     let number = |text: &str| {
         let rest = &text[text.find("pull request #")? + "pull request #".len()..];
         let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
@@ -1392,6 +1395,12 @@ mod tests {
                 "Your subscription to checks of pull request #3 of app, workspace w ended after 60 min with nothing of what you waited for: subscribe again."
             ),
             "nothing came for the checks of #3 after 60 min"
+        );
+        assert_eq!(
+            woken_by(
+                "Woken by the timer: the deploy of api\nYou asked for it at 2026-11-01T10:22:00Z, 20 min later."
+            ),
+            "the timer: the deploy of api"
         );
     }
 
