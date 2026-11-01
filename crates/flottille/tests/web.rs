@@ -746,3 +746,41 @@ fn a_pdf_is_read_as_its_text() {
 
     assert!(text.contains("The release notes of version two"), "{text}");
 }
+
+#[test]
+fn the_reader_can_write_no_file_connect_nowhere_and_run_no_program() {
+    let dir = tempfile::tempdir().unwrap();
+    let written = dir.path().join("written");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let page = json!({
+        "write": written,
+        "connect": listener.local_addr().unwrap().to_string(),
+        "run": "/bin/true",
+    });
+    // The reader as the daemon runs it, in its debug build's mode that tries each of them.
+    let mut reader = std::process::Command::new(env!("CARGO_BIN_EXE_flottille"))
+        .args(["read-page", "probe", "https://docs.example/"])
+        .env_clear()
+        .current_dir("/")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    reader
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(page.to_string().as_bytes())
+        .unwrap();
+    let said = reader.wait_with_output().unwrap();
+    let answer: Value = serde_json::from_slice(&said.stdout).unwrap();
+    let text = answer["read"]["text"].as_str().unwrap_or_default();
+
+    for attempt in ["write", "connect", "run"] {
+        assert!(
+            text.contains(&format!("{attempt}: refused")),
+            "{attempt}: {answer}"
+        );
+    }
+    assert!(!written.exists());
+}

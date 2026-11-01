@@ -765,6 +765,12 @@ async fn in_reader(net: &Net, kind: Body, page: &Page) -> Result<Extracted, Stri
 /// what it holds on its standard output, as JSON.
 pub fn read_page(kind: &str, url: &str) -> std::process::ExitCode {
     use std::io::{Read as _, Write as _};
+    if let Err(why) = shut_in() {
+        let answer =
+            serde_json::json!({"error": format!("its reader could not shut itself in: {why}")});
+        let _ = writeln!(std::io::stdout().lock(), "{answer}");
+        return std::process::ExitCode::SUCCESS;
+    }
     let mut bytes = Vec::new();
     let read = std::io::stdin()
         .take(DOWNLOAD_BYTES as u64)
@@ -781,6 +787,58 @@ pub fn read_page(kind: &str, url: &str) -> std::process::ExitCode {
     let mut out = std::io::stdout().lock();
     let _ = writeln!(out, "{answer}");
     std::process::ExitCode::SUCCESS
+}
+
+/// The system calls the reader makes once it has started, measured on HTML and PDF pages:
+/// reading its page, its memory, writing its answer, ending, and aborting on itself
+/// (`tgkill`, allowed to its own process alone, below). Opening a file is not among them: what
+/// the parsers open (the cgroup files `available_parallelism` reads for `regex`) fails, and they
+/// do without.
+const READER_CALLS: &[i64] = &[
+    libc::SYS_read,
+    libc::SYS_write,
+    libc::SYS_mmap,
+    libc::SYS_munmap,
+    libc::SYS_mremap,
+    libc::SYS_brk,
+    libc::SYS_getrandom,
+    libc::SYS_rt_sigprocmask,
+    libc::SYS_getpid,
+    libc::SYS_gettid,
+    libc::SYS_exit_group,
+];
+
+/// Shuts the reader in before it reads a byte of its page: any other system call fails, so code
+/// a parser bug let run opens no file, no socket, runs no program and reaches no other process.
+fn shut_in() -> Result<(), String> {
+    use seccompiler::{
+        BackendError, BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition,
+        SeccompFilter, SeccompRule,
+    };
+    let built = || -> Result<BpfProgram, BackendError> {
+        let mut calls: std::collections::BTreeMap<i64, Vec<SeccompRule>> = READER_CALLS
+            .iter()
+            .map(|&call| (call, Vec::new()))
+            .collect();
+        // An abort (memory or stack exhausted) signals the reader itself; refused, it would
+        // spin until its processor time is up.
+        let itself = SeccompCondition::new(
+            0,
+            SeccompCmpArgLen::Dword,
+            SeccompCmpOp::Eq,
+            u64::from(std::process::id()),
+        )?;
+        calls.insert(libc::SYS_tgkill, vec![SeccompRule::new(vec![itself])?]);
+        SeccompFilter::new(
+            calls,
+            SeccompAction::Errno(libc::EPERM as u32),
+            SeccompAction::Allow,
+            std::env::consts::ARCH.try_into()?,
+        )?
+        .try_into()
+    };
+    let program = built().map_err(|e| e.to_string())?;
+    seccompiler::apply_filter(&program).map_err(|e| e.to_string())
 }
 
 /// What an HTML page or a PDF holds: done in the reader alone.
@@ -814,8 +872,30 @@ fn extracted(kind: &str, bytes: Vec<u8>, url: &str) -> Result<Extracted, String>
                 links: links_of(&source, &base),
             })
         }
+        #[cfg(debug_assertions)]
+        "probe" => Ok(Extracted {
+            title: None,
+            text: probe(&bytes),
+            links: Vec::new(),
+        }),
         other => Err(format!("no reader for {other}")),
     }
+}
+
+/// What code a parser bug let run in the reader would try, for a test of a debug build: write
+/// a file, connect to an address, run a program, each named in the page; how each attempt ended.
+#[cfg(debug_assertions)]
+fn probe(bytes: &[u8]) -> String {
+    let asked: Value = serde_json::from_slice(bytes).unwrap_or_default();
+    let named = |key: &str| asked[key].as_str().unwrap_or_default().to_owned();
+    let ended = |done: std::io::Result<()>| match done {
+        Ok(()) => "done".to_owned(),
+        Err(error) => format!("refused ({error})"),
+    };
+    let write = ended(std::fs::write(named("write"), "written"));
+    let connect = ended(std::net::TcpStream::connect(named("connect")).map(drop));
+    let run = ended(std::process::Command::new(named("run")).status().map(drop));
+    format!("write: {write}\nconnect: {connect}\nrun: {run}")
 }
 
 fn looks_like_html(bytes: &[u8]) -> bool {
