@@ -17,8 +17,9 @@ pub struct Subscription {
     pub events: Vec<String>,
     /// Whose events count: `anyone`, or `people` (no bot, not the agent's own).
     pub from: String,
-    /// What its source last saw of the target, so that a read is compared with it, after a
-    /// restart too; its meaning is the source's.
+    /// What its source last saw of the target. No source writes it since the subscriptions
+    /// filter the items' events (#257), which compare with the store: it is `{}`, its column
+    /// kept, a migration being worth nothing here.
     pub seen: Value,
     pub created_at: u64,
     pub expires_at: u64,

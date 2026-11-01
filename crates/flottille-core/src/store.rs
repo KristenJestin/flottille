@@ -1808,15 +1808,6 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// What the subscription's source saw last.
-    pub fn subscription_saw(&self, id: &str, seen: &Value) -> Result<()> {
-        self.connection.execute(
-            "UPDATE subscriptions SET seen = ?2 WHERE id = ?1",
-            params![id, serde_json::to_string(seen)?],
-        )?;
-        Ok(())
-    }
-
     /// Removes a subscription; whether it was there.
     pub fn unsubscribe(&self, id: &str) -> Result<bool> {
         Ok(self
@@ -3827,16 +3818,11 @@ mod tests {
         store
             .subscribe(&subscription("s2", &["checks", "review"]))
             .unwrap();
-        store
-            .subscription_saw("s2", &json!({"state": "merged"}))
-            .unwrap();
         drop(store);
 
         let store = Store::open(&path).unwrap();
         let kept = store.subscriptions().unwrap();
-        let mut expected = subscription("s2", &["checks", "review"]);
-        expected.seen = json!({"state": "merged"});
-        assert_eq!(kept, [expected]);
+        assert_eq!(kept, [subscription("s2", &["checks", "review"])]);
         assert!(store.unsubscribe("s2").unwrap());
         assert!(!store.unsubscribe("s2").unwrap());
         assert!(store.subscriptions().unwrap().is_empty());
