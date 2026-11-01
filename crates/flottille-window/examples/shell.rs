@@ -323,7 +323,6 @@ fn main() {
                     })
                     .ok();
             }
-            // A task run from the project's page, then its output opened once it is listed.
             // The project page's Tickets tab, or an item's detail, once the items are read.
             if items_tab || item.is_some() {
                 cx.background_executor()
@@ -348,6 +347,7 @@ fn main() {
                     })
                     .ok();
             }
+            // A task run from the project's page, then its output opened once it is listed.
             if let Some(name) = run_task {
                 cx.background_executor()
                     .timer(Duration::from_millis(1000))
