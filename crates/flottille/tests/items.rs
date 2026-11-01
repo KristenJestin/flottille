@@ -563,5 +563,7 @@ fn the_items_of_a_repository_whose_forge_is_unset_go_with_it() {
     assert_eq!(list(&user, json!({})).len(), 1);
     declare(&user, Value::Null, Value::Null);
     advance(&user, 0);
-    eventually("the items are forgotten", || list(&user, json!({})).is_empty());
+    eventually("the items are forgotten", || {
+        list(&user, json!({})).is_empty()
+    });
 }
