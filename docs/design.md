@@ -755,7 +755,8 @@ the window without its animations is incomplete.
 
 Colours: Flottille's own palette, or, on an Omarchy desktop, the current Omarchy theme's colours
 followed live. Only the keys of a theme file that name a colour are read: another string (`mode = "light"`, a name) is ignored, a colour key with a value that is not a colour refuses the theme. A light theme
-gets a light palette: the body and the bars are shaded toward the foreground, the cards away from it.
+gets a light palette: the body and the bars are shaded toward the foreground (below the background in lightness), and
+the cards toward it too, never to white.
 Shapes, type and motion do not change with the theme. A state is drawn the same
 everywhere, by shape as well as colour.
 

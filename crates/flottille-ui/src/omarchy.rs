@@ -100,13 +100,15 @@ pub fn palette_from_toml(text: &str) -> Result<Palette, String> {
     let fg = colors["foreground"];
     let accent = colors["accent"];
     let toward_fg = |t: f32| mix(bg, fg, t);
-    // `darker` and `dark` sit below the background in lightness, `lighter` above it: away from
-    // the foreground on a dark theme, toward it on a light one.
+    // `darker` and `dark` sit below the background in lightness: away from the foreground on a
+    // dark theme, toward it on a light one. `lighter` stays toward the foreground on both: on a
+    // light theme away from it would clamp to white, the background of a white theme and the
+    // kit's own surface.
     let sign = if fg.l > bg.l { -1.0 } else { 1.0 };
 
     let darker = get(&["darker_background"]).unwrap_or_else(|| toward_fg(sign * 0.05));
     let dark = get(&["dark_background"]).unwrap_or_else(|| toward_fg(sign * 0.02));
-    let lighter = get(&["lighter_background"]).unwrap_or_else(|| toward_fg(-sign * 0.04));
+    let lighter = get(&["lighter_background"]).unwrap_or_else(|| toward_fg(0.04));
     let bright_fg = get(&["bright_foreground"]).unwrap_or_else(|| mix(fg, bg, -0.15));
     let dark_fg = get(&["dark_foreground"]).unwrap_or_else(|| mix(fg, bg, 0.4));
     let selection =
@@ -342,19 +344,30 @@ mod tests {
 
     #[test]
     fn a_light_theme_keeps_the_order_of_its_shades() {
-        let p = palette_from_toml(
-            "accent = \"#1e66f5\"\nbackground = \"#eff1f5\"\nforeground = \"#4c4f69\"\n",
-        )
-        .unwrap();
-        assert!(
-            p.body.l < p.rail.l && p.rail.l < p.bg.l && p.bg.l < p.card.l,
-            "body {} rail {} bg {} card {}",
-            p.body.l,
-            p.rail.l,
-            p.bg.l,
-            p.card.l
-        );
-        assert!(contrast(p.text, p.card) >= TEXT_CONTRAST);
-        assert!(contrast(p.faint, p.card2) >= TEXT_CONTRAST);
+        for (bg, fg) in [
+            (0xeff1f5, 0x4c4f69),
+            (0xfafafa, 0x1c1c1c),
+            (0xffffff, 0x1c1c1c),
+        ] {
+            let p = palette_from_toml(&format!(
+                "accent = \"#1e66f5\"\nbackground = \"#{bg:06x}\"\nforeground = \"#{fg:06x}\"\n"
+            ))
+            .unwrap();
+            assert!(
+                p.body.l < p.rail.l && p.rail.l < p.bg.l,
+                "{bg:06x}: body {} rail {} bg {}",
+                p.body.l,
+                p.rail.l,
+                p.bg.l
+            );
+            // A card is told from the background by being a little toward the foreground, never
+            // by clamping to white, which on a white theme is the background itself.
+            assert!(
+                p.card.l < p.bg.l && p.card != gpui_kit::white(),
+                "{bg:06x}: the card is set apart"
+            );
+            assert!(contrast(p.text, p.card) >= TEXT_CONTRAST);
+            assert!(contrast(p.faint, p.card2) >= TEXT_CONTRAST);
+        }
     }
 }
