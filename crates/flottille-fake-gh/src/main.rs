@@ -47,6 +47,9 @@
 //! drafts included; `closed`, `merged`, `all`) and of `--head` when given, newest first, at most
 //! `--limit`; each with the fields `--json` asks that it has, `headRefName` being its branch.
 //!
+//! `view_fail` (`{"acme/app": {"12": "HTTP 502: Bad Gateway"}}`) makes `pr view` and `issue view`
+//! of that number alone fail that way; `list_delay_ms` makes `pr list` wait that long first.
+//!
 //! A `--search` of `pr list` and `issue list` keeps, for each `updated:>=<time>` it holds, the
 //! objects whose `updatedAt` is that time or later (compared as the RFC 3339 texts they are, as
 //! GitHub's search reads the qualifier), with `--state all` too; `pr list` reads no other word
@@ -227,7 +230,10 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 eprintln!("fake gh: no -R");
                 return 2;
             };
-            if let Some(failure) = script["fail"][repository].as_str() {
+            if let Some(failure) = script["fail"][repository]
+                .as_str()
+                .or(script["view_fail"][repository][*number].as_str())
+            {
                 eprintln!("{failure}");
                 return 1;
             }
@@ -443,8 +449,19 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 eprintln!("{failure}");
                 return 1;
             }
+            if *sub == "view"
+                && let Some(failure) = script["view_fail"][repository]
+                    [rest.first().copied().unwrap_or_default()]
+                .as_str()
+            {
+                eprintln!("{failure}");
+                return 1;
+            }
             let pulls = &script["pulls"][repository];
             if *sub == "list" {
+                if let Some(ms) = script["list_delay_ms"].as_u64() {
+                    std::thread::sleep(std::time::Duration::from_millis(ms));
+                }
                 let state = option("--state").unwrap_or("open");
                 let limit: usize = option("--limit").and_then(|n| n.parse().ok()).unwrap_or(30);
                 let mut found: Vec<(&String, &Value)> = pulls
