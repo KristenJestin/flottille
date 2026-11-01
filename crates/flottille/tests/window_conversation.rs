@@ -753,3 +753,185 @@ fn a_ticket_created_in_auto_says_allowed_by_the_judge(cx: &mut TestAppContext) {
         Some("allowed by the judge")
     );
 }
+
+/// The width of an element, or `None` while it is not drawn.
+fn width_of(id: impl Into<gpui_kit::ElementId>, cx: &mut VisualTestContext) -> Option<f32> {
+    let id = id.into();
+    cx.update(|window, _| {
+        window
+            .try_find(id)
+            .map(|found| f32::from(found.bounds().size.width))
+    })
+}
+
+/// The widths of `id` on each frame, until every animation ended.
+fn widths_while_it_moves(id: &str, cx: &mut VisualTestContext) -> Vec<f32> {
+    let mut seen = Vec::new();
+    for _ in 0..40 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        seen.extend(width_of(id.to_owned(), cx));
+    }
+    seen
+}
+
+/// The page of `agent` is the one the window shows.
+fn shows(shell: &Entity<Shell>, agent: &str, cx: &mut VisualTestContext) -> bool {
+    shell
+        .read_with(cx, |s, cx| s.main().read(cx).session_page().cloned())
+        .is_some_and(|page| page.read_with(cx, |p, _| p.id() == agent))
+}
+
+#[gpui_kit::test]
+fn a_relayed_card_keeps_one_width_while_it_unfolds_and_folds(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    let docs = docs_session(&user, &lead);
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": format!("write to the session {docs}")}),
+    )
+    .unwrap();
+    allow_the_request(&user);
+    let (shell, page, cx) = open_session(&user, &docs, cx);
+    until(&shell, cx, "the message reached the session", |cx| {
+        row_of(&page, cx, |b| {
+            matches!(b, Block::Relayed { sent: false, .. })
+        })
+        .is_some()
+    });
+    settle(cx);
+    let at = row_of(&page, cx, |b| {
+        matches!(b, Block::Relayed { sent: false, .. })
+    })
+    .unwrap();
+    let card = format!("row-{at}-relayed-card");
+    let folded = width_of(card.clone(), cx).expect("the card is drawn");
+
+    cx.update(|window, cx| window.click(format!("row-{at}-relayed-toggle"), cx));
+    let unfolding = widths_while_it_moves(&card, cx);
+    assert!(unfolding.len() > 2, "{unfolding:?}");
+    assert!(
+        unfolding.iter().all(|w| (*w - folded).abs() < 0.5),
+        "the card is {folded} px folded and moved through {unfolding:?} while it unfolded"
+    );
+
+    cx.update(|window, cx| window.click(format!("row-{at}-relayed-toggle"), cx));
+    let folding = widths_while_it_moves(&card, cx);
+    assert!(
+        folding.iter().all(|w| (*w - folded).abs() < 0.5),
+        "the card is {folded} px open and moved through {folding:?} while it folded"
+    );
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn the_name_on_a_from_card_opens_that_session(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    let docs = docs_session(&user, &lead);
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": format!("write to the session {docs}")}),
+    )
+    .unwrap();
+    allow_the_request(&user);
+    let (shell, page, cx) = open_session(&user, &docs, cx);
+    until(&shell, cx, "the message reached the session", |cx| {
+        row_of(&page, cx, |b| {
+            matches!(b, Block::Relayed { sent: false, .. })
+        })
+        .is_some()
+    });
+    settle(cx);
+    let at = row_of(&page, cx, |b| {
+        matches!(b, Block::Relayed { sent: false, .. })
+    })
+    .unwrap();
+    assert_eq!(
+        label(format!("row-{at}-relayed-peer"), cx).as_deref(),
+        Some("lead the work")
+    );
+
+    cx.update(|window, cx| window.click(format!("row-{at}-relayed-peer"), cx));
+    until(&shell, cx, "the sender's session opens", |cx| {
+        shows(&shell, &lead, cx)
+    });
+}
+
+#[gpui_kit::test]
+fn the_name_on_a_to_card_opens_that_session(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    let docs = docs_session(&user, &lead);
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": format!("write to the session {docs}")}),
+    )
+    .unwrap();
+    allow_the_request(&user);
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    until(&shell, cx, "the lead shows what it sent", |cx| {
+        row_of(&page, cx, |b| {
+            matches!(b, Block::Relayed { sent: true, .. })
+        })
+        .is_some()
+    });
+    settle(cx);
+    let at = row_of(&page, cx, |b| {
+        matches!(b, Block::Relayed { sent: true, .. })
+    })
+    .unwrap();
+    assert_eq!(
+        label(format!("row-{at}-relayed-peer"), cx).as_deref(),
+        Some("Docs")
+    );
+
+    cx.update(|window, cx| window.click(format!("row-{at}-relayed-peer"), cx));
+    until(&shell, cx, "the target's session opens", |cx| {
+        shows(&shell, &docs, cx)
+    });
+}
+
+#[gpui_kit::test]
+fn a_relayed_card_whose_session_no_longer_exists_has_its_name_and_no_link(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    let event = |seq: u64, name: &str, data: Value| flottille_core::protocol::Event {
+        seq,
+        at: seq,
+        name: name.into(),
+        data,
+    };
+    page.update(cx, |p, cx| {
+        let token = p.token().unwrap();
+        p.apply(
+            token,
+            flottille_window::session_link::SessionUpdate::History {
+                events: vec![event(
+                    1,
+                    "agent.prompted",
+                    json!({"text": "[flottille:session]\n\"Gone\" (agent ffffffffffff) wrote to this session:\n\nBye."}),
+                )],
+                earlier: false,
+            },
+            cx,
+        )
+    });
+    settle(cx);
+    let at = row_of(&page, cx, |b| {
+        matches!(b, Block::Relayed { sent: false, .. })
+    })
+    .expect("the card is drawn");
+    assert_eq!(
+        label(format!("row-{at}-relayed-from"), cx).as_deref(),
+        Some("from Gone")
+    );
+    assert!(
+        !has(format!("row-{at}-relayed-peer"), cx),
+        "no link to a session that is gone"
+    );
+    let _ = shell;
+}
