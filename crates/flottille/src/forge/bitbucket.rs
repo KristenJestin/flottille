@@ -281,8 +281,23 @@ async fn cloud_values(
     path: &str,
     total: usize,
 ) -> Result<(Vec<Value>, bool), String> {
+    cloud_values_with(context, path, total, &[]).await
+}
+
+/// `cloud_values` with more query parameters on the first page, each given as `--param`: the path
+/// never holds a `?`, `bkt api` is not known to merge a param into one.
+async fn cloud_values_with(
+    context: &str,
+    path: &str,
+    total: usize,
+    params: &[&str],
+) -> Result<(Vec<Value>, bool), String> {
     let size = format!("pagelen={PAGE}");
-    let mut page = json(&["api", path, "--context", context, "--param", &size]).await?;
+    let mut args = vec!["api", path, "--context", context, "--param", &size];
+    for param in params {
+        args.extend(["--param", param]);
+    }
+    let mut page = json(&args).await?;
     let mut values = Vec::new();
     loop {
         values.extend(page["values"].as_array().into_iter().flatten().cloned());
@@ -932,11 +947,12 @@ pub(super) async fn write(
                      on a Data Center host: its builds are another tool's"
                 ));
             }
-            let path = format!("{}/pipelines/?sort=-created_on", cloud_repository(forge));
-            let pipelines = match cloud_values(context, &path, PAGE).await {
-                Ok((pipelines, _)) => pipelines,
-                Err(why) => return Outcome::Failed(why),
-            };
+            let path = format!("{}/pipelines/", cloud_repository(forge));
+            let pipelines =
+                match cloud_values_with(context, &path, PAGE, &["sort=-created_on"]).await {
+                    Ok((pipelines, _)) => pipelines,
+                    Err(why) => return Outcome::Failed(why),
+                };
             // The newest pipeline of the branch, whether it ran for a push or for a pull request:
             // `bkt pipeline list` leaves the branch out (`target.ref.name` is always empty), the
             // API's own targets name it.

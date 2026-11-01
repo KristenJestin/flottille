@@ -1460,8 +1460,8 @@ fn bitbucket_rerun_starts_the_branch_again_when_its_pipeline_failed() {
     let calls = bkt_calls(&user);
     assert!(
         calls.contains(
-            &"api /repositories/acme/app/pipelines/?sort=-created_on --context cloud --param \
-              pagelen=50"
+            &"api /repositories/acme/app/pipelines/ --context cloud --param pagelen=50 --param \
+              sort=-created_on"
                 .to_owned()
         ),
         "{calls:?}"

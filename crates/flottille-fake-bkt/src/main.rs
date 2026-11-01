@@ -339,6 +339,16 @@ fn api(script: &Value, path: &str, params: &[(&str, &str)]) -> i32 {
         eprintln!("Error: 404 Not Found: {path}");
         return 1;
     };
+    // Whether `bkt api` merges a `--param` into a path that already holds a `?` is not proven: the
+    // newest-first order of the pipelines is asked as a param, never inside the path.
+    if path.ends_with("/pipelines/")
+        && !params
+            .iter()
+            .any(|(key, value)| *key == "sort" && *value == "-created_on")
+    {
+        eprintln!("400 Bad Request: the pipelines are asked newest first with --param sort");
+        return 1;
+    }
     let values = body["values"].as_array().cloned();
     if path.starts_with("/rest/api/") {
         // Data Center clamps a `limit` it does not take, and says where the next page starts.
