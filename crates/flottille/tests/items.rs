@@ -1095,3 +1095,54 @@ fn a_github_issue_or_pull_that_stops_being_listed_is_read_alone_once_an_hour() {
     refresh(&user);
     assert_eq!(open_lists(&user), 2);
 }
+
+#[test]
+fn a_merged_pull_whose_checks_cannot_be_found_stays_merged() {
+    let user = user();
+    project(&user, "git@bitbucket.org:acme/api.git");
+    let script = |updated: &str| {
+        json!({
+            "contexts": [{"name": "cloud", "host": "bitbucket.org", "active": true}],
+            "api": {
+                "/repositories/acme/api/pullrequests": {"values": [{
+                    "id": 2, "title": "Old work", "state": "MERGED",
+                    "author": {"display_name": "Alice"},
+                    "source": {"branch": {"name": "old"}, "commit": {"hash": "abcdef2"},
+                        "repository": {"full_name": "acme/api"}},
+                    "destination": {"branch": {"name": "main"},
+                        "repository": {"full_name": "acme/api"}},
+                    "links": {"html": {"href": "https://bitbucket.org/acme/api/pull-requests/2"}},
+                    "comment_count": 0, "updated_on": updated,
+                    "created_on": "2020-01-01T00:00:00+00:00"
+                }]},
+                "/repositories/acme/api/pullrequests/2": {"participants": []},
+                "/repositories/acme/api/pullrequests/2/comments": {"values": []},
+                "/repositories/acme/api/pullrequests/2/diffstat": {"values": []}
+            },
+            "checks_fail": {"acme/api": {"2": "Error: 404 Not Found: the commit's statuses"}}
+        })
+    };
+    user.bkt_script(script("2020-01-01T00:00:00+00:00"));
+    declare(
+        &user,
+        json!({"kind": "bitbucket-cloud", "repository": "acme/api"}),
+        Value::Null,
+    );
+    refresh(&user);
+    // It changed: its details are read, and its checks are not found.
+    user.bkt_script(script("2999-01-01T00:00:00+00:00"));
+    refresh(&user);
+    let item = user
+        .call(
+            "items.show",
+            json!({"project": "app", "kind": "pull", "id": "2"}),
+        )
+        .unwrap();
+    assert_eq!(item["state"], "merged", "{item}");
+    assert_eq!(item["details"].get("removed"), None, "{item}");
+    let events = item_events(&user);
+    assert!(
+        events.iter().all(|e| e["name"] != "item.closed"),
+        "{events:?}"
+    );
+}

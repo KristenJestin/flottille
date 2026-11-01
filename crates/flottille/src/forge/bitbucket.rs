@@ -703,7 +703,9 @@ fn listed_of(item: &flottille_core::item::Item) -> Option<Listed> {
 }
 
 /// Reads the checks, reviewers and comments of a listed pull request, as `forge show` reads
-/// them; false when Bitbucket no longer has it.
+/// them; false when Bitbucket no longer has it. A part of it not found (its checks, its
+/// comments) while the pull request itself is found leaves it not `detailed`: what is stored of
+/// it is kept, and it is said.
 pub(super) async fn detail(
     forge: &Forge,
     context: &str,
@@ -712,9 +714,32 @@ pub(super) async fn detail(
     let Some(found) = listed_of(&fetched.item) else {
         return Ok(true);
     };
+    let id = found.id;
     let (pull, statuses) = match detailed_with(forge, context, found).await {
         Ok(read) => read,
-        Err(error) if super::not_found(&error) => return Ok(false),
+        Err(error) if super::not_found(&error) => {
+            let page = match cloud(forge) {
+                true => cloud_page(forge, &id.to_string()),
+                false => {
+                    let Forge::Bitbucket { owner, name, .. } = forge else {
+                        unreachable!()
+                    };
+                    format!("/rest/api/1.0/projects/{owner}/repos/{name}/pull-requests/{id}")
+                }
+            };
+            return match json(&["api", &page, "--context", context]).await {
+                Ok(_) => {
+                    eprintln!(
+                        "flottille daemon: items: a part of the pull request #{id} of {} was not \
+                         found ({error}); what is kept of it stays",
+                        forge.slug()
+                    );
+                    Ok(true)
+                }
+                Err(gone) if super::not_found(&gone) => Ok(false),
+                Err(other) => Err(other),
+            };
+        }
         Err(error) => return Err(error),
     };
     let version = fetched.item.details["version"].take();
