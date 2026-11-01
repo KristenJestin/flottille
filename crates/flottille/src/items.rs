@@ -168,6 +168,8 @@ pub struct Items {
     sources: Mutex<Option<Declared>>,
     /// `daemon.toml`'s rhythm, with the time its file was changed: read again when it changes.
     rhythm: Mutex<Option<Rhythm>>,
+    /// The pull requests whose checks could not be read again, said once each.
+    unread_checks: Mutex<std::collections::HashSet<String>>,
 }
 
 /// A window connected to the daemon (`events.watch {client: "window"}`): while one is, the rounds
@@ -455,6 +457,37 @@ async fn me_of(daemon: &Daemon, found: &forge::Forge) -> Option<String> {
     me
 }
 
+/// The checks of an open pull request whose CI still runs, read again: they move without it.
+/// None when there is nothing to read, or when the read failed, which is said once for the pull
+/// request and tried again at the next round.
+async fn checks_now(daemon: &Daemon, reader: &Reader, item: &Item) -> Option<Vec<Check>> {
+    let Reader::Pulls(pulls) = reader else {
+        return None;
+    };
+    let running = item.checks.iter().any(|c| c.state == "pending");
+    if !running || !matches!(item.state.as_str(), "open" | "draft") {
+        return None;
+    }
+    let number = item.key.parse::<u64>().ok()?;
+    let which = format!("{}\t{}\t{}", item.project, item.repository, item.key);
+    match pulls.checks(number).await {
+        Ok(checks) => {
+            daemon.items.unread_checks.lock().unwrap().remove(&which);
+            Some(checks)
+        }
+        Err(error) => {
+            if daemon.items.unread_checks.lock().unwrap().insert(which) {
+                eprintln!(
+                    "flottille daemon: items of {}: the checks of the pull request #{number} of \
+                     {} could not be read: {error}",
+                    item.project, item.repository
+                );
+            }
+            None
+        }
+    }
+}
+
 /// Whether an item needs its details read: one open, or one changed in a round after the first
 /// (a first round reads the history's details for the open ones alone), unless what is stored of
 /// it was read in full at the same update.
@@ -618,6 +651,9 @@ async fn read_round(
             && !fetched.detailed
         {
             keep_details(old, &mut fetched.item);
+            if let Some(checks) = checks_now(daemon, &reader, &fetched.item).await {
+                fetched.item.checks = checks;
+            }
         }
         if !first {
             let made_before = fetched
@@ -635,33 +671,27 @@ async fn read_round(
             return Ok(None);
         }
     }
-    // The checks of the open pull requests whose CI still runs move without them.
-    if let Reader::Pulls(pulls) = &reader {
-        for old in stored {
-            let running = old.checks.iter().any(|c| c.state == "pending");
-            let open = matches!(old.state.as_str(), "open" | "draft");
-            if !running || !open || listed_keys.contains(&(old.repository.clone(), old.key.clone()))
-            {
-                continue;
-            }
-            let Ok(number) = old.key.parse::<u64>() else {
-                continue;
-            };
-            if let Ok(checks) = pulls.checks(number).await {
-                let mut item = old.clone();
-                item.checks = checks;
-                item.seen_at = started;
-                let fetched = Fetched {
-                    item,
-                    comments: Vec::new(),
-                    reviews: Vec::new(),
-                    created_at: None,
-                    detailed: true,
-                };
-                events.extend(events_of(Some(old), &fetched));
-                items.push(fetched.item);
-            }
+    // The checks of the open pull requests not listed whose CI still runs: they move without
+    // them.
+    for old in stored {
+        if listed_keys.contains(&(old.repository.clone(), old.key.clone())) {
+            continue;
         }
+        let Some(checks) = checks_now(daemon, &reader, old).await else {
+            continue;
+        };
+        let mut item = old.clone();
+        item.checks = checks;
+        item.seen_at = started;
+        let fetched = Fetched {
+            item,
+            comments: Vec::new(),
+            reviews: Vec::new(),
+            created_at: None,
+            detailed: true,
+        };
+        events.extend(events_of(Some(old), &fetched));
+        items.push(fetched.item);
     }
     if !flush(daemon, &project.name, &mut items, &mut events)? {
         return Ok(None);

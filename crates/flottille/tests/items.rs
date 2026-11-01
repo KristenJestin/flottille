@@ -934,3 +934,46 @@ fn a_transferred_issue_or_a_pull_the_forge_no_longer_has_is_closed() {
         .count();
     assert_eq!(closed, 2);
 }
+
+/// A Data Center pull request of `APP/web` as its list says it, open, at `version`.
+fn dc_open_pull(id: u64, version: u64) -> Value {
+    let repository = json!({"slug": "web", "project": {"key": "APP"}});
+    json!({"id": id, "title": format!("Pull {id}"), "state": "OPEN", "version": version,
+        "createdDate": 1_600_000_000_000u64, "updatedDate": 1_600_000_000_000u64 + version,
+        "author": {"user": {"name": "alice", "displayName": "Alice"}},
+        "fromRef": {"displayId": format!("b{id}"), "latestCommit": "abcdef1",
+            "repository": repository},
+        "toRef": {"displayId": "main", "latestCommit": "abcdef2", "repository": repository},
+        "participants": [],
+        "links": {"self": [{"href": format!("https://bitbucket.example.com/projects/APP/repos/web/pull-requests/{id}")}]}})
+}
+
+#[test]
+fn a_data_center_pull_whose_checks_end_without_it_moving_emits_item_checks() {
+    let user = user();
+    project(&user, "ssh://git@bitbucket.example.com:7999/APP/web.git");
+    let script = |state: &str| {
+        json!({"contexts": [{"name": "work", "host": "bitbucket.example.com:7990", "active": true}],
+            "api": {
+                "/rest/api/1.0/projects/APP/repos/web/pull-requests": {"values": [dc_open_pull(1, 1)]},
+                "/rest/api/1.0/projects/APP/repos/web/pull-requests/1/activities": {"values": []},
+                "/rest/api/1.0/projects/APP/repos/web/pull-requests/1/merge": {"conflicted": false}
+            },
+            "checks": {"APP/web": {"1": [{"state": state, "name": "build"}]}}})
+    };
+    user.bkt_script(script("INPROGRESS"));
+    declare(
+        &user,
+        json!({"kind": "bitbucket-data-center", "host": "bitbucket.example.com",
+            "repository": "APP/web"}),
+        Value::Null,
+    );
+    refresh(&user);
+    // Data Center lists it again, unchanged: only its checks moved.
+    user.bkt_script(script("SUCCESSFUL"));
+    refresh(&user);
+    let events = item_events(&user);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["name"], "item.checks");
+    assert_eq!(events[0]["data"]["checks"], "passing");
+}
