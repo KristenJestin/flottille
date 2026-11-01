@@ -309,15 +309,17 @@ review) subscribes to it instead of reading again and again. Four parts, each it
   what was seen before; a state already there when it was seen is no event. The only source now
   is the forge watch of a workspace's pull request (`docs/forges.md`, "Subscriptions"): its events
   are `checks` (all ended), `review`, `comment`, `merged` and `closed`. A source reads only while
-  a subscription or a client needs it.
+  a subscription or a client needs it. The **timer** of a wake is a source too: its target is the
+  agent's reason, its one event the time it asked for (`wake`, `docs/tools.md`, "Waking later").
 - **A subscription** is (agent, source, target, the events chosen, whose events count, an
   expiry), stored with what its source last saw of the target, so that it survives a restart of
   the daemon and nothing that happened meanwhile is lost (`crates/flottille/src/subscriptions.rs`).
-  The agent subscribes itself (`forge` `subscribe`, `docs/tools.md`); nothing subscribes it.
+  The agent subscribes itself (`forge` `subscribe`, `wake`, `docs/tools.md`); nothing subscribes
+  it.
 - **One shot.** The first read that holds an event the subscription waits for is delivered, every
   such event of that read in one delivery, and the subscription is over. It also ends when the
   target ends (a pull request merged or closed, said when that was not what it waited for), when
-  its time is up (an hour by default, said), when the agent ends, or when the agent unsubscribes.
+  its time is up (an hour by default, 100 hours at most, said), when the agent ends, or when the agent unsubscribes.
   Nothing is delivered of what does not change: each delivery costs the agent a turn.
 - **Delivering** is the existing path (§5.2): a `subscription` delivery, masked, its forge texts
   framed as data and not instructions, wakes the agent as a child's report does.
@@ -328,9 +330,10 @@ subscriptions and a ticket source on that stream (#257); relaunching an agent th
 an event comes.
 
 The window shows them: the session page's rail lists the session's open subscriptions (the pull
-request, the events, since when and until when), each with a Cancel that ends it through the daemon
+request, the events, since when and until when; a wake, `Wake: <why>` and when it is due), each with a Cancel that ends it through the daemon
 (`subscription.cancel`), an agent between turns that waits on one is drawn waiting, not idle, in the
-left tree and in the rail, and the delivery that wakes the agent is a folded step saying what woke it.
+left tree and in the rail (`Waiting: wake at 10:42` for a wake), and the delivery that wakes the
+agent is a folded step saying what woke it (`woken by the timer: <why>`).
 Opening and ending are events (`subscription.opened`, `subscription.ended`, `docs/events.md`).
 
 ## 6. Projects and workspaces

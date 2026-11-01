@@ -1,6 +1,6 @@
 //! The rail's Subscriptions section: what the session's agents wait for outside Flottille (the
 //! next event of a pull request, `docs/design.md` §5.6): the pull request, the events, since when
-//! and until when, each with a Cancel that the daemon carries out (`subscription.cancel`). Nothing
+//! and until when, or a wake the agent asked for and when it is due, each with a Cancel that the daemon carries out (`subscription.cancel`). Nothing
 //! is drawn while the session waits for nothing; a row unfolds when a subscription opens and folds
 //! away when it ends, whatever ended it.
 
@@ -9,6 +9,7 @@ use std::time::Duration;
 use flottille_ui::{
     Button, Icon, Item, Listing, Palette, Type, icon, palette, presence, presence_of, space,
 };
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Render,
     SharedString, StatefulInteractiveElement, Styled, Task, TestSupportExt as _, WeakEntity,
@@ -18,15 +19,20 @@ use serde_json::Value;
 
 use crate::project::repository_label;
 use crate::runs::rail_label;
-use crate::session::{SessionPage, said_at};
+use crate::session::{SessionPage, clock, said_at};
 use crate::shell::now_ms;
 
 /// A subscription of the session, as `subscription.list` gives it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SubscriptionRow {
     pub id: String,
-    /// The pull request in a few words: `#12 of api` (the project's own name for its folder).
+    /// The agent it wakes.
+    pub agent: String,
+    /// The pull request in a few words: `#12 of api` (the project's own name for its folder);
+    /// `Wake: <why>` for a wake.
     pub pull: String,
+    /// A wake the agent asked for (the source `timer`), not a pull request's events.
+    pub wake: bool,
     pub events: Vec<String>,
     pub created_at: u64,
     pub expires_at: u64,
@@ -36,16 +42,22 @@ impl SubscriptionRow {
     pub fn of(value: &Value) -> SubscriptionRow {
         let target = &value["target"];
         let text = |value: &Value| value.as_str().unwrap_or_default().to_owned();
+        let wake = value["source"] == "timer";
         SubscriptionRow {
             id: text(&value["id"]),
-            pull: format!(
-                "#{} of {}",
-                target["number"].as_u64().unwrap_or_default(),
-                repository_label(
-                    target["project"].as_str().unwrap_or_default(),
-                    target["repository"].as_str().unwrap_or_default()
-                )
-            ),
+            agent: text(&value["agent"]),
+            pull: match wake {
+                true => format!("Wake: {}", text(&target["why"])),
+                false => format!(
+                    "#{} of {}",
+                    target["number"].as_u64().unwrap_or_default(),
+                    repository_label(
+                        target["project"].as_str().unwrap_or_default(),
+                        target["repository"].as_str().unwrap_or_default()
+                    )
+                ),
+            },
+            wake,
             events: value["events"]
                 .as_array()
                 .into_iter()
@@ -57,8 +69,11 @@ impl SubscriptionRow {
         }
     }
 
-    /// `since 14:05 · expires in 30 min`.
+    /// `since 14:05 · expires in 30 min`; `at 10:42` for a wake.
     pub fn times(&self, now: u64) -> String {
+        if self.wake {
+            return format!("at {}", clock(self.expires_at));
+        }
         let since = said_at(self.created_at);
         let since = since.rsplit(", ").next().unwrap_or(&since);
         let left = self.expires_at.saturating_sub(now).div_ceil(60_000);
@@ -184,7 +199,9 @@ impl SubscriptionList {
                             .child(SharedString::from(row.pull.clone()))
                             .test_support(),
                     )
-                    .child(line(id("events"), row.events.join(", ")))
+                    .when(!row.wake, |d| {
+                        d.child(line(id("events"), row.events.join(", ")))
+                    })
                     .child(line(id("times"), row.times(now))),
             )
             .child(cancel)
@@ -282,6 +299,19 @@ mod tests {
     #[test]
     fn a_repository_that_is_the_project_folder_is_named_by_the_project() {
         assert_eq!(row(0).pull, "#12 of app");
+    }
+
+    #[test]
+    fn a_wake_is_named_by_its_why_and_says_when_it_is_due() {
+        let wake = SubscriptionRow::of(&json!({
+            "id": "sub-2", "agent": "a1", "source": "timer",
+            "target": {"why": "the deploy of api"}, "events": ["wake"],
+            "created_at": 0, "expires_at": 20 * 60_000,
+        }));
+        assert!(wake.wake);
+        assert_eq!(wake.pull, "Wake: the deploy of api");
+        assert_eq!(wake.times(0), format!("at {}", clock(20 * 60_000)));
+        assert!(!row(0).wake);
     }
 
     #[test]

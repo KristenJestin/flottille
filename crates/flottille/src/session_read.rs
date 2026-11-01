@@ -713,7 +713,7 @@ pub(crate) fn form(text: &str) -> Option<u64> {
 }
 
 /// A time as a page shows it, in UTC: `2026-10-31T14:05:09Z`.
-pub(crate) fn shown_date(ms: u64) -> String {
+pub fn shown_date(ms: u64) -> String {
     let seconds = (ms / 1000) as i64;
     let (days, time) = (seconds.div_euclid(86_400), seconds.rem_euclid(86_400));
     let (year, month, day) = civil_from_days(days);

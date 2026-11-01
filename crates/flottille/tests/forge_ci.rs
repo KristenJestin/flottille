@@ -364,8 +364,8 @@ fn forge_subscribe_with_no_minutes_waits_at_least_15_minutes_when_the_runs_are_s
 fn forge_subscribe_with_no_minutes_waits_at_most_the_longest_when_the_runs_are_long() {
     let user = User::with_fake_agent().with_fake_gh();
     github(&user);
-    // 20 hours each: twice that is past any longest.
-    runs(&user, each(5, 20 * 3600));
+    // 60 hours each: twice that is past any longest.
+    runs(&user, each(5, 60 * 3600));
     let mcp = agent(&user);
     let longest = longest(&mcp);
 
@@ -376,7 +376,7 @@ fn forge_subscribe_with_no_minutes_waits_at_most_the_longest_when_the_runs_are_l
         said.contains(&format!(
             "Duration: {longest} min, the longest: twice the average of the recent CI runs is {} \
              min.",
-            2 * 20 * 60
+            2 * 60 * 60
         )),
         "{said}"
     );
