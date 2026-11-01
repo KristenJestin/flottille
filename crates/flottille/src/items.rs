@@ -576,9 +576,10 @@ pub fn held_now(daemon: &Daemon, project: &str) -> Option<tokio::sync::OwnedMute
 
 /// Stores what a live read found of one item (`forge show`, `tickets show`, a subscription's
 /// first read) with the events a round would emit of it, so that the next round compares with
-/// it; called with the project's round lock held. Only an item a round stored already: what a
-/// live read does not say (its author, labels and assignees, when it changed, an empty state)
-/// is kept, as are the links of its checks.
+/// it; called with the project's round lock held. What a live read does
+/// not say (its author, labels and assignees, when it changed, an empty state) is kept, as are
+/// the links of its checks. One no round stored yet (made since the last) is stored as it was
+/// read, once its source had a first round: the next round's events are from what it was then.
 pub fn put_live(daemon: &Arc<Daemon>, mut fetched: Fetched) {
     let item = &mut fetched.item;
     let stored = daemon
@@ -593,7 +594,26 @@ pub fn put_live(daemon: &Arc<Daemon>, mut fetched: Fetched) {
             )
         })
         .unwrap_or_default();
+    item.seen_at = now_ms();
     let Some(old) = stored.into_iter().find(|old| old.key == item.key) else {
+        let target = match item.kind.as_str() {
+            "ticket" => "tracker".to_owned(),
+            _ => item.repository.clone(),
+        };
+        let first_done = daemon
+            .read(|store| store.cursors(&item.project))
+            .unwrap_or_default()
+            .iter()
+            .any(|c| c.kind == item.kind && c.target == target && c.first_at.is_some());
+        // A Jira work item's state is not said by its live read.
+        if !first_done || item.state.is_empty() {
+            return;
+        }
+        let mut events = events_of(None, &fetched);
+        let project = fetched.item.project.clone();
+        if let Err(error) = flush(daemon, &project, &mut vec![fetched.item], &mut events) {
+            eprintln!("flottille daemon: items of {project}: {error}");
+        }
         return;
     };
     item.source = old.source.clone();
@@ -602,7 +622,6 @@ pub fn put_live(daemon: &Arc<Daemon>, mut fetched: Fetched) {
     item.labels = old.labels.clone();
     item.updated_at = old.updated_at.clone();
     item.mine = old.mine;
-    item.seen_at = now_ms();
     if item.state.is_empty() {
         item.state = old.state.clone();
     }
@@ -876,8 +895,11 @@ fn events_of(old: Option<&Item>, new: &Fetched) -> Vec<(&'static str, Value)> {
         change("status", from.clone(), to.clone());
     }
     change("title", json!(old.title), json!(item.title));
-    change("assignees", json!(old.assignees), json!(item.assignees));
-    change("labels", json!(old.labels), json!(item.labels));
+    // One stored from a live read alone, which says neither, is no change of them.
+    if old.updated_at.is_some() {
+        change("assignees", json!(old.assignees), json!(item.assignees));
+        change("labels", json!(old.labels), json!(item.labels));
+    }
     if !changes.is_empty() {
         events.insert(
             0,

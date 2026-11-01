@@ -183,9 +183,12 @@ again on its own (#257):
 - **`forge show` and `tickets show` read live** (one item) and store what they read over what the
   store holds of it, with the events a round would emit of it, so that the next round compares
   with that; so does `forge subscribe` and `tickets subscribe` before the subscription opens, so
-  that what is so then is no event. Only an item a round stored already is: what a live read
-  does not say (its author, labels and assignees, when it changed, a Jira state) is kept, as are
-  the links of its checks. A live read is stored while no round of the project runs (the round
+  that what is so then is no event. What a live read does not say (its author, labels and
+  assignees, when it changed, a Jira state) is kept, as are the links of its checks. **One no round stored yet** (made since the last
+  round, by `forge create` or `tickets create`) is stored as the live read found it, with
+  `item.opened`, once its source had a first round, so that what happens to it before the next
+  round is an event of that round; its assignees and labels, which a live read does not say, are
+  no change then. A Jira work item no round stored is not, its live read saying no state. A live read is stored while no round of the project runs (the round
   stores a read of its own); `subscribe` waits for the round to end, so that no older read is
   written over it.
 - A subscription made before this, stored with what its own watch saw, is carried over as it is:

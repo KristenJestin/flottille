@@ -81,7 +81,10 @@ fn fetched_of(project: &Project, key: &Key, ticket: &Ticket) -> Option<crate::it
         item: Item {
             project: project.name.clone(),
             kind: "ticket".into(),
-            source: String::new(),
+            source: match jira {
+                true => "jira".into(),
+                false => "github".into(),
+            },
             repository,
             key,
             title: ticket.title.clone(),

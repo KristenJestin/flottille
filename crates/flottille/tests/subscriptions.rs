@@ -983,3 +983,71 @@ fn a_ticket_subscription_s_expiry_and_cancel_are_those_of_a_forge_subscription()
     a_round(&user);
     assert_eq!(delivered(&user).len(), 1, "{:?}", delivered(&user));
 }
+
+/// The fake `gh` answers no pull request and no issue: what a round reads before the agent opens
+/// one.
+fn nothing_opened(user: &User) {
+    user.gh_script(json!({"pulls": {"acme/api": {}}, "issues": {"acme/api": {}}}));
+}
+
+#[test]
+fn checks_of_a_pull_request_no_round_stored_yet_are_delivered_to_its_subscription() {
+    let user = user();
+    fixture(&user);
+    nothing_opened(&user);
+    let (_, mcp) = agent(&user);
+    // Opened since the last round, as `forge create` does.
+    script(&user, pull());
+
+    subscribe(&mcp, json!({"events": ["checks"]}));
+    script(&user, ended(pull()));
+    a_round(&user);
+    let delivery = the_delivery(&user);
+    assert!(
+        delivery.contains("checks ended: 1 passed, 1 failed"),
+        "{delivery}"
+    );
+}
+
+#[test]
+fn a_comment_on_a_pull_request_no_round_stored_yet_is_delivered_to_its_subscription() {
+    let user = user();
+    fixture(&user);
+    nothing_opened(&user);
+    let (_, mcp) = agent(&user);
+    script(&user, pull());
+
+    subscribe(&mcp, json!({"events": ["comment"]}));
+    let mut commented = pull();
+    commented["comments"] = json!([{"author": {"login": "alice"}, "body": "Why a new form?"}]);
+    script(&user, commented);
+    a_round(&user);
+    let delivery = the_delivery(&user);
+    assert!(
+        delivery.contains("comment by alice: Why a new form?"),
+        "{delivery}"
+    );
+}
+
+#[test]
+fn a_comment_on_a_ticket_no_round_stored_yet_is_delivered_to_its_subscription() {
+    let user = user();
+    fixture(&user);
+    track(&user, json!({"kind": "github", "repository": "api"}));
+    nothing_opened(&user);
+    let (_, mcp) = agent(&user);
+    // Created since the last round, as `tickets create` does.
+    script_issue(&user, issue(json!([])));
+
+    subscribe_ticket(&mcp, json!({"ticket": "#5", "events": ["commented"]}));
+    script_issue(
+        &user,
+        issue(json!([{"author": {"login": "alice"}, "body": "I can reproduce"}])),
+    );
+    a_round(&user);
+    let delivery = the_delivery(&user);
+    assert!(
+        delivery.contains("comment by alice: I can reproduce"),
+        "{delivery}"
+    );
+}
