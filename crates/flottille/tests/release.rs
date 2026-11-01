@@ -1205,6 +1205,10 @@ fn flottille_update_refuses_while_an_agent_runs_and_says_how_to_stop_it() {
     );
     user.call("project.add", json!({"folder": folder, "name": "app"}))
         .unwrap();
+    // Summed before the agent starts: its turn lasts 30 s, and the sum of a debug binary can
+    // take that long on a slow runner.
+    let binary = installed();
+    let before = sha256(&binary);
     let agent = user
         .call(
             "agent.start",
@@ -1219,8 +1223,6 @@ fn flottille_update_refuses_while_an_agent_runs_and_says_how_to_stop_it() {
         assert!(std::time::Instant::now() < deadline, "the agent never ran");
         std::thread::sleep(Duration::from_millis(50));
     }
-    let binary = installed();
-    let before = sha256(&binary);
 
     let output = user
         .command_through(&binary, &["update", "--channel", "beta"])
