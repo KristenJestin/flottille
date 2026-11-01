@@ -21,7 +21,7 @@ use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
 
-const SCRIPTS: [(&str, &str); 6] = [
+const SCRIPTS: [(&str, &str); 7] = [
     // A server: prints a line a second.
     (
         "server.sh",
@@ -42,9 +42,16 @@ const SCRIPTS: [(&str, &str); 6] = [
         "many.sh",
         "#!/bin/sh\ni=0\nwhile [ $i -lt 60 ]; do printf '\\033[3%dmline %d\\033[0m \\033[1;3%dmbold\\033[0m\\n' $((i % 7 + 1)) $i $(((i + 1) % 7 + 1)); i=$((i + 1)); done\n",
     ),
+    // A server that prints its first line, then ticks only once the test has created `release`:
+    // what its last line is stays the test's to say, however slow the machine is.
+    (
+        "listener.sh",
+        "#!/bin/sh\necho listening on 8080\nwhile [ ! -e release ]; do sleep 0.1; done\ni=0\nwhile true; do sleep 1; i=$((i+1)); echo tick $i; done\n",
+    ),
 ];
 
 const CATALOGUE: &str = "\n[commands.server]\nline = \"./server.sh\"\nserve = true\n\
+    [commands.listener]\nline = \"./listener.sh\"\nserve = true\n\
     [commands.fails]\nline = \"./fails.sh\"\n\
     [commands.colours]\nline = \"./colours.sh\"\n\
     [commands.blip]\nline = \"./blip.sh\"\n\
@@ -237,13 +244,16 @@ fn the_rail_lists_a_running_command_with_its_line_who_started_it_and_its_last_li
     cx: &mut TestAppContext,
 ) {
     let user = user();
-    let (lead, mcp, _) = lead(&user);
-    let run = start(&mcp, "server");
+    let (lead, mcp, workspace) = lead(&user);
+    let run = start(&mcp, "listener");
     let (shell, cx) = open_session(&user, &lead, cx);
     let page = session_page(&shell, cx);
 
     until(&shell, cx, "the rail lists the command", |cx| {
         !commands(&page, cx).is_empty()
+    });
+    until(&shell, cx, "the rail shows its first line", |cx| {
+        label(cx, &format!("command-last-{run}")).is_some_and(|line| line == "listening on 8080")
     });
     settle(cx);
 
@@ -253,19 +263,20 @@ fn the_rail_lists_a_running_command_with_its_line_who_started_it_and_its_last_li
     assert!(rows[0].running());
     assert_eq!(
         label(cx, &format!("command-line-{run}")).unwrap(),
-        "./server.sh"
+        "./listener.sh"
     );
     assert_eq!(
         label(cx, &format!("command-last-{run}")).unwrap(),
         "listening on 8080"
     );
     let who = label(cx, &format!("command-who-{run}")).unwrap();
-    assert_eq!(who, "task server", "the root does not name itself");
+    assert_eq!(who, "task listener", "the root does not name itself");
     assert!(
         cx.update(|window, _| window.try_find(format!("command-stop-{run}")).is_some()),
         "a running command has its Stop"
     );
     // The last line moves on by itself: the program writes, nobody tells the window.
+    std::fs::write(workspace.join("release"), "").unwrap();
     until(&shell, cx, "the last line moves on", |cx| {
         label(cx, &format!("command-last-{run}")).is_some_and(|line| line.starts_with("tick"))
     });

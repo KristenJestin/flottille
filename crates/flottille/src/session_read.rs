@@ -646,7 +646,8 @@ fn parse_date(text: &str) -> Result<u64, Wrong> {
     form(text).ok_or(Wrong::Form)
 }
 
-fn form(text: &str) -> Option<u64> {
+/// A date, or a time with its offset, as milliseconds since 1970.
+pub(crate) fn form(text: &str) -> Option<u64> {
     let number = |s: &str| -> Option<i64> {
         (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse().ok())?
     };

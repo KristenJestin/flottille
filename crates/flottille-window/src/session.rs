@@ -24,10 +24,9 @@ use std::time::Duration;
 use flottille_ui::color::mix;
 use flottille_ui::motion::{HOVER, Motion, PANEL};
 use flottille_ui::{
-    AgentState, Badge, Button, Card, Drawer, Icon, LabelledLine, ListRow, Menu, Modal, Palette,
-    Pill, PulsingLabel, Side, StateIcon, Status, Toast, Type, enter, fade, fold_frame, hoverable,
-    icon, palette, presence, presence_of, section_label, selectable, space, text_region, toast,
-    turning,
+    AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Menu, Modal, Palette, Pill,
+    PulsingLabel, Side, StateIcon, Status, Toast, Type, enter, fade, fold_frame, hoverable, icon,
+    palette, presence, presence_of, section_label, selectable, space, text_region, toast, turning,
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{
@@ -4007,14 +4006,40 @@ impl Render for SessionRail {
                             .gap(space::SM)
                             .text_size(px(13.))
                             .medium()
-                            .child(icon(Icon::Repository).size(px(14.)).text_color(p.faint))
                             .child(
                                 div()
+                                    .id(ElementId::Name(
+                                        format!("rail-repository-{name}-icon").into(),
+                                    ))
+                                    .w(px(FACT_ICON))
+                                    .flex_none()
+                                    .child(
+                                        icon(Icon::Repository)
+                                            .size(px(FACT_ICON))
+                                            .text_color(p.faint),
+                                    )
+                                    .test_support(),
+                            )
+                            .child(
+                                div()
+                                    .id(ElementId::Name(
+                                        format!("rail-repository-{name}-label").into(),
+                                    ))
                                     .flex_1()
                                     .min_w_0()
-                                    .child(SharedString::from(name.clone())),
+                                    .child(SharedString::from(name.clone()))
+                                    .test_support(),
                             )
-                            .child(div().flex_none().mono(11.5).child(changes))
+                            .child(
+                                div()
+                                    .id(ElementId::Name(
+                                        format!("rail-repository-{name}-value").into(),
+                                    ))
+                                    .flex_none()
+                                    .mono(11.5)
+                                    .child(changes)
+                                    .test_support(),
+                            )
                             .test_support(),
                     )
                     // Its branch, commits ahead, files not committed and setup played; it
@@ -4062,13 +4087,14 @@ impl Render for SessionRail {
                     false => "Pull request".to_owned(),
                 };
                 lines.push(
-                    LabelledLine::new(
-                        ElementId::Name(format!("rail-line-pull-{name}").into()),
-                        Icon::PullRequest,
+                    fact_line(
+                        format!("rail-line-pull-{name}"),
+                        Some(Icon::PullRequest),
                         key,
                         pull.label(),
+                        pull_hover(row, cx),
+                        p,
                     )
-                    .child(pull_hover(row, cx))
                     .into_any_element(),
                 );
             }
@@ -4115,7 +4141,9 @@ impl Render for SessionRail {
             self.ticket_field = Some(field);
         }
         let ticket = self.place.as_ref().and_then(|p| p.ticket.clone());
-        if let Some(ticket) = ticket {
+        // The ticket is why the workspace exists: its line opens the section's lines, before any
+        // pull request.
+        let ticket_line = ticket.map(|ticket| {
             let page = self.page.clone();
             let said = match (&ticket.title, &ticket.problem) {
                 (_, Some(problem)) => problem.clone(),
@@ -4130,6 +4158,7 @@ impl Render for SessionRail {
                 .gap(space::XS)
                 .overflow_hidden()
                 .whitespace_nowrap()
+                .mono(FACT_SIZE)
                 .when(url.is_some(), |d| d.cursor_pointer())
                 .aria_label(SharedString::from(
                     format!(
@@ -4144,7 +4173,6 @@ impl Render for SessionRail {
                 .child(
                     div()
                         .flex_none()
-                        .mono(11.5)
                         .child(SharedString::from(ticket.reference.clone())),
                 )
                 .child(
@@ -4160,17 +4188,16 @@ impl Render for SessionRail {
                     }
                 });
             let row = hoverable(row, move |d, t| d.text_color(mix(p.mute, p.text, t)));
-            lines.push(
-                LabelledLine::new(
-                    "rail-line-ticket",
-                    Icon::Ticket,
-                    "Ticket",
-                    ticket.reference.clone(),
-                )
-                .child(row)
-                .into_any_element(),
-            );
-        }
+            fact_line(
+                "rail-line-ticket".to_owned(),
+                Some(Icon::Ticket),
+                "Ticket",
+                ticket.reference.clone(),
+                row,
+                p,
+            )
+            .into_any_element()
+        });
         let ticket_field = self
             .ticket_field
             .clone()
@@ -4204,6 +4231,7 @@ impl Render for SessionRail {
                 Some(self.menu.clone().into_any_element()),
                 cx,
             ))
+            .children(ticket_line)
             .children(lines)
             .child(presence(
                 "rail-no-forge-block",
@@ -4266,20 +4294,20 @@ impl Render for SessionRail {
                 div()
                     .id("rail-facts")
                     .pt(space::SM)
-                    .px(space::XS)
                     .flex()
                     .flex_col()
-                    .gap(space::XS)
-                    .text_size(px(12.5))
                     .children(facts.into_iter().map(|(key, value)| {
-                        div()
-                            .id(ElementId::Name(format!("rail-fact-{key}").into()))
-                            .flex()
-                            .gap(space::LG)
-                            .aria_label(SharedString::from(format!("{key} {value}")))
-                            .child(div().text_color(p.faint).child(key))
-                            .child(div().ml_auto().mono(12.).child(SharedString::from(value)))
-                            .test_support()
+                        let said = SharedString::from(value.clone());
+                        let value = div()
+                            .id(ElementId::Name(format!("rail-fact-{key}-value").into()))
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .mono(FACT_SIZE)
+                            .child(SharedString::from(value))
+                            .test_support();
+                        fact_line(format!("rail-fact-{key}"), None, key, said, value, p)
                     }))
                     .test_support(),
             )
@@ -4315,6 +4343,62 @@ impl Render for SessionRail {
             )
             .test_support()
     }
+}
+
+/// The size of every value in the Workspace section's facts (From, Place, Machine, Ticket,
+/// Pull request).
+const FACT_SIZE: f32 = 12.;
+
+/// The width of the icon column of the Workspace section's lines.
+const FACT_ICON: f32 = 14.;
+
+/// One fact of the Workspace section: the icon column, the label, then the value at the right
+/// edge. Every line of the section sits in the same columns: a fact with no icon keeps the
+/// column empty, so that its label starts where the others do. `said` is the value in words.
+fn fact_line(
+    id: String,
+    glyph: Option<Icon>,
+    label: impl Into<SharedString>,
+    said: impl Into<SharedString>,
+    value: impl IntoElement,
+    p: Palette,
+) -> impl IntoElement {
+    let label = label.into();
+    let slot = div()
+        .id(ElementId::Name(format!("{id}-icon").into()))
+        .w(px(FACT_ICON))
+        .flex_none()
+        .children(glyph.map(|glyph| icon(glyph).size(px(FACT_ICON)).text_color(p.faint)))
+        .test_support();
+    div()
+        .id(ElementId::Name(id.clone().into()))
+        .aria_label(SharedString::from(format!("{label} {}", said.into())))
+        .px(space::XS)
+        .min_h(px(24.))
+        .flex()
+        .items_center()
+        .gap(space::SM)
+        .text_size(px(12.5))
+        .child(slot)
+        .child(
+            div()
+                .id(ElementId::Name(format!("{id}-label").into()))
+                .flex_none()
+                .text_color(p.faint)
+                .child(label)
+                .test_support(),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .justify_end()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .child(value),
+        )
+        .test_support()
 }
 
 /// What a workspace's "⋯" offers, wherever it is drawn: the rail's Workspace and the workspace's
@@ -4388,11 +4472,8 @@ pub(crate) fn pull_row(id: ElementId, pull: &PullRequest, cx: &App) -> Stateful<
         .flex()
         .items_center()
         .gap(space::SM)
-        .px(space::SM)
-        .py(space::XS)
-        .rounded(px(6.))
         .cursor_pointer()
-        .mono(11.)
+        .mono(FACT_SIZE)
         .aria_label(SharedString::from(format!("{}, {said}", pull.label())))
         .child(SharedString::from(pull.label()))
         .child(div().text_color(color).child(glyph))
@@ -4401,9 +4482,7 @@ pub(crate) fn pull_row(id: ElementId, pull: &PullRequest, cx: &App) -> Stateful<
 /// A [`pull_row`] once its handlers and children are on: its hover fades in.
 pub(crate) fn pull_hover(row: Stateful<Div>, cx: &App) -> flottille_ui::Hoverable {
     let p = palette(cx);
-    hoverable(row, move |d, t| {
-        d.bg(p.hover.opacity(t)).text_color(mix(p.mute, p.text, t))
-    })
+    hoverable(row, move |d, t| d.text_color(mix(p.mute, p.text, t)))
 }
 
 /// The drawn link from a parent to its child in the rail: down, then right, with a round corner.

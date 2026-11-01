@@ -461,3 +461,28 @@ fn an_issue_closes_for_a_reason_gh_knows_only() {
     assert!(close("not planned"));
     assert!(!close("done"));
 }
+
+#[test]
+fn run_fail_makes_the_run_list_alone_fail() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        json!({"runs": {"acme/app": []}, "run_fail": {"acme/app": "HTTP 502: Bad Gateway"}})
+            .to_string(),
+    )
+    .unwrap();
+    let run = |args: &[&str]| {
+        fake(dir.path())
+            .args(args)
+            .args(["-R", "github.com/acme/app"])
+            .output()
+            .unwrap()
+    };
+
+    let runs = run(&["run", "list"]);
+    let pulls = run(&["pr", "list"]);
+
+    assert_eq!(runs.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&runs.stderr).contains("502"));
+    assert!(pulls.status.success());
+}

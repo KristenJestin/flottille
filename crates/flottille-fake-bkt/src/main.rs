@@ -41,6 +41,7 @@
 //! API says `ref_name`; seen with v0.37.0), `steps` the `steps` of `bkt pipeline view <build>
 //! --json` and `logs` what `bkt pipeline logs <build> [--step <uuid>]` prints (the last step's by
 //! default), and `fail` makes every call on that repository end with 1, saying its text.
+//! `pipeline_fail` makes `pipeline list` alone fail that way.
 //!
 //! The writes answer as `bkt` does when they work: `pr create` prints `✓ Created pull request #N`
 //! (N is `created`, 1 by default), `pr merge` prints `✓ Merged pull request #N` and `pipeline run`
@@ -199,6 +200,10 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             }
         }
         ["pipeline", "list"] => {
+            if let Some(failure) = script["pipeline_fail"][&key].as_str() {
+                eprintln!("{failure}");
+                return 1;
+            }
             // `bkt` decodes `target.ref.name`, which the API never sends: it is always empty.
             payload["pipelines"] = script["pipelines"][&key]
                 .as_array()
