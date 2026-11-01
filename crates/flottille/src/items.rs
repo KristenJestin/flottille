@@ -604,6 +604,46 @@ pub async fn held_after(
     Some(held)
 }
 
+/// Why the rounds do not see an item yet, said to an agent that subscribes to it.
+pub enum Unseen {
+    /// Its source had no complete round: the first one stores without an event.
+    Source,
+    /// It is not stored: the next round stores it without an event.
+    Item,
+}
+
+pub fn unseen(
+    daemon: &Daemon,
+    project: &str,
+    kind: &str,
+    repository: &str,
+    key: &str,
+) -> Option<Unseen> {
+    let target = match kind {
+        "ticket" => "tracker",
+        _ => repository,
+    };
+    let read = daemon
+        .read(|store| store.cursors(project))
+        .unwrap_or_default()
+        .iter()
+        .any(|c| c.kind == kind && c.target == target && c.first_at.is_some());
+    if !read {
+        return Some(Unseen::Source);
+    }
+    let filter = Filter {
+        kind: Some(kind.into()),
+        repository: Some(repository.into()),
+        ..Filter::default()
+    };
+    let stored = daemon
+        .read(|store| store.items(project, &filter))
+        .unwrap_or_default()
+        .iter()
+        .any(|item| item.key == key);
+    (!stored).then_some(Unseen::Item)
+}
+
 /// Stores what a live read found of one item (`forge show`, `tickets show`, a subscription's
 /// first read) with the events a round would emit of it, so that the next round compares with
 /// it; called with the project's round lock held since before the read. What a live read does

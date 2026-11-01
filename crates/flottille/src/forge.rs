@@ -1206,6 +1206,13 @@ async fn forge_subscribe(
     if let (Some(_), Some(forge)) = (&held, &repository.forge) {
         remember(daemon, &place.project, &path, forge, pull);
     }
+    let unseen = crate::items::unseen(
+        daemon,
+        &place.project,
+        "pull",
+        &path,
+        &pull.number.to_string(),
+    );
     for old in crate::subscriptions::of(daemon, agent) {
         if old.target == target {
             crate::subscriptions::end(daemon, &old, "cancelled");
@@ -1238,6 +1245,17 @@ async fn forge_subscribe(
         subscription.events.join(" or "),
         target_named(&subscription.target)
     );
+    match unseen {
+        Some(crate::items::Unseen::Source) => text.push_str(&format!(
+            "\nFlottille's rounds have not read the pull requests of {path} once yet: what \
+             happens before their first complete round is not seen."
+        )),
+        Some(crate::items::Unseen::Item) => text.push_str(
+            "\nFlottille's rounds have not stored this pull request yet: what happens to it \
+             before their next round is not seen.",
+        ),
+        None => {}
+    }
     for line in runs.map(|runs| runs.line()).into_iter().chain(duration) {
         text.push_str(&format!("\n{line}"));
     }

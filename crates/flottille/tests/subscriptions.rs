@@ -938,7 +938,8 @@ fn a_ticket_subscription_wakes_the_agent_on_a_status_change() {
     user.acli_script(json!({"items": {"ABC-1": work_item("To Do")}}));
     let (_, mcp) = agent(&user);
 
-    subscribe_ticket(&mcp, json!({"ticket": "ABC-1", "events": ["status"]}));
+    let said = subscribe_ticket(&mcp, json!({"ticket": "ABC-1", "events": ["status"]}));
+    assert!(!said.contains("Flottille's rounds have not"), "{said}");
     user.acli_script(json!({"items": {"ABC-1": work_item("In Progress")}}));
     a_round(&user);
     let delivery = the_delivery(&user);
@@ -1049,6 +1050,53 @@ fn a_comment_on_a_ticket_no_round_stored_yet_is_delivered_to_its_subscription() 
     assert!(
         delivery.contains("comment by alice: I can reproduce"),
         "{delivery}"
+    );
+}
+
+#[test]
+fn a_ticket_subscription_before_the_tracker_was_ever_read_says_what_is_not_seen() {
+    let user = user().with_fake_acli();
+    fixture(&user);
+    track(
+        &user,
+        json!({"kind": "jira", "site": "example.atlassian.net", "projects": ["ABC"]}),
+    );
+    script(&user, pull());
+    // Every round of the tracker fails: none ever read it through.
+    user.acli_script(json!({"items": {"ABC-1": work_item("To Do")},
+        "fail": {"search": "Error: the search could not be run"}}));
+    let (_, mcp) = agent(&user);
+
+    let said = subscribe_ticket(&mcp, json!({"ticket": "ABC-1", "events": ["status"]}));
+    assert!(
+        said.contains(
+            "Flottille's rounds have not read the tracker once yet: what happens before their \
+             first complete round is not seen."
+        ),
+        "{said}"
+    );
+}
+
+#[test]
+fn a_subscription_to_a_work_item_no_round_stored_says_what_is_not_seen() {
+    let user = user().with_fake_acli();
+    fixture(&user);
+    track(
+        &user,
+        json!({"kind": "jira", "site": "example.atlassian.net", "projects": ["ABC"]}),
+    );
+    script(&user, pull());
+    // The rounds read the tracker, and not ABC-1: created since, as `tickets create` does.
+    user.acli_script(json!({"items": {"ABC-1": work_item("To Do")}, "search": []}));
+    let (_, mcp) = agent(&user);
+
+    let said = subscribe_ticket(&mcp, json!({"ticket": "ABC-1", "events": ["status"]}));
+    assert!(
+        said.contains(
+            "Flottille's rounds have not stored this ticket yet: what happens to it before their \
+             next round is not seen."
+        ),
+        "{said}"
     );
 }
 

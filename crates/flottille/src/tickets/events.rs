@@ -293,6 +293,7 @@ pub(super) async fn subscribe(
     if held.is_some() {
         remember(daemon, project, &key, &ticket);
     }
+    let unseen = crate::items::unseen(daemon, &project.name, "ticket", &repository, &item);
     for old in subscriptions::of(daemon, agent) {
         if old.source == TICKETS && old.target == target {
             subscriptions::end(daemon, &old, "cancelled");
@@ -319,12 +320,24 @@ pub(super) async fn subscribe(
         "people" => ", from people",
         _ => "",
     };
-    Outcome::Done(format!(
+    let mut text = format!(
         "Subscribed: the next {}{from} of the {} wakes you once, as a delivery, within {minutes} \
          min. What is so now is no event: tickets show reads it.",
         subscription.events.join(" or "),
         target_named(&subscription.target)
-    ))
+    );
+    match unseen {
+        Some(crate::items::Unseen::Source) => text.push_str(
+            "\nFlottille's rounds have not read the tracker once yet: what happens before their \
+             first complete round is not seen.",
+        ),
+        Some(crate::items::Unseen::Item) => text.push_str(
+            "\nFlottille's rounds have not stored this ticket yet: what happens to it before \
+             their next round is not seen.",
+        ),
+        None => {}
+    }
+    Outcome::Done(text)
 }
 
 /// `tickets unsubscribe`: the agent's subscriptions to the ticket it names, every one when it
