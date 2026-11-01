@@ -169,7 +169,7 @@ and the 2026 practice around it:
    |---|---|---|
    | Before #141 (forge, ticket and removal tools apart, a 27,000 limit) | 25 | 26,889 |
    | After #141 (`forge`, `tickets`, `workspace` complete families) | 23 | 25,236 |
-   | After #259 (`web`, paid by shorter texts of `agent_launch`, `agent_status`, `project`, `skill_read`, `tasks`, `setup`, `fs_write`; a 29,000 limit since #198) | 27 | 28,966 |
+   | After #259 (`web`; no other tool shortened, by the maintainer's decision: the 29,000 limit of #198 raised to 30,000 until a new budget replaces it) | 27 | 29,660 |
 
    A family grows by an action and a line of description, not by a tool; a new tool or a long
    description that passes the limit is answered by merging or shortening, and the limit moves
