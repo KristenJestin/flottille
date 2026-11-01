@@ -327,7 +327,7 @@ pending requests.
   once; what is so already (checks that already ended) is no event, `show` reads it. `from` is
   `anyone` (the default) or `people`: no bot, nor a comment marked as posted by an agent
   ([`forges.md`](forges.md), "What Flottille posts is marked"). `minutes` is how
-  long it waits, 60 by default, 240 (4 hours) at most. Without `minutes` the wait is sized by the
+  long it waits, 60 by default, 6000 (100 hours) at most. Without `minutes` the wait is sized by the
   repository's CI instead, and the answer says the duration taken and why: twice the average of
   its recent runs, from 15 minutes to the longest, 60 when there is no run to measure by
   ([`forges.md`](forges.md), "How long CI takes"); the answer carries the line `show` gives about
@@ -378,7 +378,7 @@ action's, and the store renamed them in the agents' fixed lists and their pendin
 
 ## Waking later
 
-**`wake {minutes, why}`** asks Flottille to wake the agent once, `minutes` from now (1 to 240, the
+**`wake {minutes, why}`** asks Flottille to wake the agent once, `minutes` from now (1 to 6000, 100 hours, the
 subscriptions' longest), by a `subscription` delivery that starts `Woken by the timer: <why>` and
 says when it was asked (`You asked for it at 2026-11-01T10:22:00Z, 20 min later.`). It is a
 subscription whose source is a timer (`docs/design.md` §5.6), stored, listed and cancelled as the

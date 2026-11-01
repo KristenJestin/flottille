@@ -318,7 +318,7 @@ review) subscribes to it instead of reading again and again. Four parts, each it
 - **One shot.** The first read that holds an event the subscription waits for is delivered, every
   such event of that read in one delivery, and the subscription is over. It also ends when the
   target ends (a pull request merged or closed, said when that was not what it waited for), when
-  its time is up (an hour by default, said), when the agent ends, or when the agent unsubscribes.
+  its time is up (an hour by default, 100 hours at most, said), when the agent ends, or when the agent unsubscribes.
   Nothing is delivered of what does not change: each delivery costs the agent a turn.
 - **Delivering** is the existing path (§5.2): a `subscription` delivery, masked, its forge texts
   framed as data and not instructions, wakes the agent as a child's report does.

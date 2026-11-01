@@ -24,7 +24,7 @@ use crate::projects::Failure;
 /// How long a subscription waits when the agent says nothing.
 pub const DEFAULT_MINUTES: u64 = 60;
 /// The longest an agent can make it wait.
-pub const LONGEST_MINUTES: u64 = 4 * 60;
+pub const LONGEST_MINUTES: u64 = 100 * 60;
 /// Whose events count.
 pub const FROM: [&str; 2] = ["anyone", "people"];
 /// The source of a wake: its time is its one event.

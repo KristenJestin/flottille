@@ -159,13 +159,13 @@ fn cancel_removes_the_wake_and_nothing_wakes_the_agent() {
 }
 
 #[test]
-fn minutes_out_of_1_to_240_or_no_why_are_refused_before_anything() {
+fn minutes_out_of_1_to_6000_or_no_why_are_refused_before_anything() {
     let user = user();
     let (id, mcp) = agent(&user);
 
-    for minutes in [0, 241] {
+    for minutes in [0, 6001] {
         let text = refused(&mcp, json!({"minutes": minutes, "why": "later"}));
-        assert!(text.contains("from 1 to 240"), "{text}");
+        assert!(text.contains("from 1 to 6000"), "{text}");
     }
     for args in [
         json!({"minutes": 5}),
@@ -177,7 +177,7 @@ fn minutes_out_of_1_to_240_or_no_why_are_refused_before_anything() {
     let long = "x".repeat(300);
     refused(&mcp, json!({"minutes": 5, "why": long}));
     assert!(listed(&user, &id).is_empty());
-    assert!(wake(&mcp, json!({"minutes": 240, "why": "later"})).contains("in 240 min"));
+    assert!(wake(&mcp, json!({"minutes": 6000, "why": "later"})).contains("in 6000 min"));
 }
 
 /// Kills the daemon as a crash would; the next call starts another.

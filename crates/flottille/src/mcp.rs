@@ -2133,7 +2133,8 @@ mod tests {
         // `forge` closed and reopened pull requests (#233), its own text shortened: 28,981.
         // Unchanged by #222: the ten characters `forge` gained (sized by CI) are paid by ten
         // taken from its own text. `wake` (#254) costs 527, paid by shortening the texts of
-        // tasks, run_status, skill_read, agent_launch, agent_status and session_send: 28,909.
+        // tasks, run_status, skill_read, agent_launch, agent_status and session_send: 28,909. The
+        // 100 hours' maximum of `forge` and `wake` (6000 minutes, not 240): 28,911.
         assert!(chars < 29_000, "{chars} characters of definitions");
     }
 }
