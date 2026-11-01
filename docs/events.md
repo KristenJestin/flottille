@@ -195,7 +195,8 @@ An item not stored before.
 
 | Field | |
 |---|---|
-| `changes` | Each field that changed, `{"from", "to"}`: `state` (a reopening; a merge and a close have their own events), `title`, `assignees`, `labels`, `status` (Jira's). |
+| `fields` | The name of each field that changed: those of `changes`, and `description`, `discussion` (a comment edited or deleted: a new comment or review has its own event) and `checks` (one of them moved while others still run: their end has its own event), whose texts it does not carry. A description or a discussion never read before is no change. |
+| `changes` | Each short field that changed, `{"from", "to"}`: `state` (a reopening; a merge and a close have their own events), `title`, `assignees`, `labels`, `status` (Jira's). `{}` when none did. |
 
 #### `item.commented`, `item.reviewed`
 
@@ -221,6 +222,17 @@ A pull request's checks ended: none runs now, and one was running, or its head c
 
 The pull request was merged; the pull request, the issue or the work item (its status in the
 done category) was closed.
+
+#### `items.forgotten`
+
+The items of a source went from the store: the project no longer declares it (a repository's
+forge or the tracker unset, a repository removed), or the project was removed. One per project
+and source, at the sweep that forgets them.
+
+| Field | |
+|---|---|
+| `project`, `kind` (`pull`, `ticket`), `source` (`github`, `bitbucket`, `jira`), `repository` (empty for Jira) | The source. |
+| `items` | How many went. |
 
 ### The events of an agent
 

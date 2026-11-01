@@ -604,6 +604,80 @@ fn the_items_of_a_repository_whose_forge_is_unset_go_with_it() {
     });
 }
 
+/// The stored events named `items.forgotten`, the first first.
+fn forgotten(user: &User) -> Vec<Value> {
+    let watch = user.watch(&["--after", "0"]);
+    watch
+        .within(Duration::from_millis(1500))
+        .into_iter()
+        .filter(|e| e["name"] == "items.forgotten")
+        .collect()
+}
+
+#[test]
+fn a_source_removed_from_the_settings_emits_items_forgotten_once_and_its_items_leave_the_list() {
+    let user = user();
+    project(&user, "git@github.com:acme/api.git");
+    user.gh_script(
+        json!({"pulls": {"acme/api": {"feature-1": pull(1, "x", "OPEN", OLD),
+        "feature-2": pull(2, "y", "OPEN", OLD)}}}),
+    );
+    user.acli_script(json!({"search": [work_item("ABC-1", "Log in", "To Do")]}));
+    declare(&user, github(), jira());
+    refresh(&user);
+    assert_eq!(list(&user, json!({})).len(), 3);
+
+    // The forge unset, the tracker kept: its pull requests alone go.
+    declare(&user, Value::Null, jira());
+    advance(&user, 0);
+    eventually("the pull requests are forgotten", || {
+        list(&user, json!({})).len() == 1
+    });
+    advance(&user, 0);
+    let events = forgotten(&user);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(
+        events[0]["data"],
+        json!({"project": "app", "kind": "pull", "source": "github", "repository": "api",
+            "items": 2})
+    );
+    assert_eq!(list(&user, json!({}))[0]["key"], "ABC-1");
+
+    // The project removed: its tickets go, said too.
+    user.call("project.remove", json!({"name": "app"})).unwrap();
+    advance(&user, 0);
+    eventually("the tickets are forgotten", || forgotten(&user).len() == 2);
+    assert_eq!(forgotten(&user)[1]["data"]["kind"], "ticket");
+}
+
+#[test]
+fn an_item_whose_description_alone_changed_emits_item_changed_naming_it_and_one_unchanged_none() {
+    let user = user();
+    project(&user, "git@github.com:acme/api.git");
+    let script = |body: &str, updated: &str| {
+        let mut one = pull(1, "Add the login", "OPEN", updated);
+        one["body"] = json!(body);
+        let mut two = pull(2, "Untouched", "OPEN", OLD);
+        two["body"] = json!("Stays.");
+        json!({"pulls": {"acme/api": {"feature-1": one, "feature-2": two}}})
+    };
+    user.gh_script(script("First words.", OLD));
+    declare(&user, github(), Value::Null);
+    refresh(&user);
+    // GitHub moves `updatedAt` when a description is edited.
+    user.gh_script(script("Second words.", NEW));
+    refresh(&user);
+
+    let events = item_events(&user);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["name"], "item.changed");
+    let data = &events[0]["data"];
+    assert_eq!(data["key"], "1");
+    assert_eq!(data["fields"], json!(["description"]), "{data}");
+    assert_eq!(data["changes"], json!({}), "{data}");
+    assert!(!data.to_string().contains("words"), "no text: {data}");
+}
+
 /// Milliseconds since 1970 in RFC 3339, UTC (Howard Hinnant's `civil_from_days`).
 fn rfc3339(ms: u64) -> String {
     let seconds = (ms / 1000) as i64;

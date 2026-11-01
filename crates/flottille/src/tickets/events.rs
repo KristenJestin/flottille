@@ -409,4 +409,16 @@ mod tests {
         );
         assert_eq!(ends.map(|e| e.kind), Some("closed"));
     }
+
+    #[test]
+    fn a_description_or_a_discussion_changed_alone_is_no_event_of_a_ticket() {
+        let events = [(
+            "item.changed",
+            json!({"changes": {}, "fields": ["description", "discussion"]}),
+        )];
+        let events: Vec<&(&'static str, Value)> = events.iter().collect();
+        let (found, ends) = events_of("ticket #5", &events);
+        assert!(found.is_empty(), "{found:?}");
+        assert!(ends.is_none());
+    }
 }

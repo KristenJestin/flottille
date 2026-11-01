@@ -199,12 +199,13 @@ fn follow(
 }
 
 /// The project whose pull requests and tickets an event says changed, and the item when it names
-/// one: an `item.*`, or a change of what the project declares.
+/// one: an `item.*`, a change of what the project declares, or a source's items forgotten.
 fn items_of(event: &Event) -> Option<(String, Option<crate::items::ItemKey>)> {
     let data = &event.data;
     let text = |field: &str| data[field].as_str().map(str::to_owned);
     match event.name.as_str() {
         "project.changed" => Some((text("name")?, None)),
+        "items.forgotten" => Some((text("project")?, None)),
         name if name.starts_with("item.") => {
             let item = crate::items::ItemKey {
                 kind: text("kind")?,
