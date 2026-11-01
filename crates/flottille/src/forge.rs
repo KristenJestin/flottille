@@ -5,9 +5,10 @@
 //! never reads, keeps nor prints a token, and of `gh auth status` it reads the exit code alone.
 //!
 //! A workspace is read on demand (`workspace.forge`, the agents' `forge show`), and again about
-//! once a minute while a client watches it or an agent subscribes to its pull request
-//! (`events`), less often while `gh` or `bkt` fails. Nothing is read
-//! while nobody looks. Every text kept from them is masked before it is shown or stored.
+//! once a minute while a client watches it, less often while `gh` or `bkt` fails. Nothing is read
+//! while nobody looks. A subscription to a pull request reads nothing of its own: it filters the
+//! events of the items' rounds (`events`, `docs/items.md`). Every text kept from them is masked
+//! before it is shown or stored.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -36,6 +37,7 @@ mod ci;
 mod events;
 mod logs;
 
+pub(crate) use events::offer;
 pub use events::{EVENTS, target_named};
 
 /// How long a state read stays fresh, and how often a watched workspace is read again.
@@ -805,8 +807,6 @@ pub fn repositories_of(workspace: &Workspace, project: Option<&Project>) -> Vec<
 #[derive(Default)]
 pub struct Forges {
     entries: Mutex<HashMap<i64, Entry>>,
-    /// The watches the subscriptions hold, by subscription.
-    held: Mutex<HashMap<String, Watch>>,
 }
 
 #[derive(Default)]
@@ -855,8 +855,7 @@ pub async fn state(daemon: &Arc<Daemon>, workspace: &Workspace) -> Value {
     refresh(daemon, workspace).await
 }
 
-/// Reads the workspace's forges now and keeps what was read; an event says when it changed, and
-/// the subscriptions to its pull requests are offered what happened.
+/// Reads the workspace's forges now and keeps what was read; an event says when it changed.
 async fn refresh(daemon: &Arc<Daemon>, workspace: &Workspace) -> Value {
     refresh_read(daemon, workspace).await.0
 }
@@ -909,7 +908,6 @@ async fn refresh_read(daemon: &Arc<Daemon>, workspace: &Workspace) -> (Value, Re
             eprintln!("flottille daemon: workspace.forge: {error}");
         }
     }
-    events::offer(daemon, workspace, &read).await;
     (state, read)
 }
 
@@ -930,37 +928,6 @@ pub fn watch(daemon: &Arc<Daemon>, workspace: &Workspace) -> Watch {
         daemon: daemon.clone(),
         id: workspace.id,
     }
-}
-
-/// A subscription's watch of its workspace, held until `release`; false when the workspace is
-/// gone.
-pub fn hold(
-    daemon: &Arc<Daemon>,
-    subscription: &flottille_core::subscription::Subscription,
-) -> bool {
-    let target = &subscription.target;
-    let (Some(project), Some(name)) = (target["project"].as_str(), target["workspace"].as_str())
-    else {
-        return false;
-    };
-    let Ok(Some(workspace)) = daemon.read(|store| store.workspace(project, name)) else {
-        return false;
-    };
-    let watch = watch(daemon, &workspace);
-    let replaced = daemon
-        .forges
-        .held
-        .lock()
-        .unwrap()
-        .insert(subscription.id.clone(), watch);
-    drop(replaced);
-    true
-}
-
-/// Drops the watch a subscription held.
-pub fn release(daemon: &Daemon, subscription: &str) {
-    let held = daemon.forges.held.lock().unwrap().remove(subscription);
-    drop(held);
 }
 
 impl Drop for Watch {
@@ -1232,6 +1199,12 @@ async fn forge_subscribe(
         }
     };
     let target = events::target(&workspace, &path, pull.number);
+    // The read now is stored, while no round writes, before the subscription opens: what is so
+    // now is no event of the next rounds.
+    let held = crate::items::held(daemon, &place.project).await;
+    if let Some(forge) = &repository.forge {
+        remember(daemon, &place.project, &path, forge, pull);
+    }
     for old in crate::subscriptions::of(daemon, agent) {
         if old.target == target {
             crate::subscriptions::end(daemon, &old, "cancelled");
@@ -1245,16 +1218,14 @@ async fn forge_subscribe(
         target,
         events,
         from: from.to_owned(),
-        seen: events::seen_of(pull),
+        seen: json!({}),
         created_at: now,
         expires_at: now + minutes * 60_000,
     };
-    if let Err(error) = crate::subscriptions::subscribe(daemon, &subscription) {
+    let subscribed = crate::subscriptions::subscribe(daemon, &subscription);
+    drop(held);
+    if let Err(error) = subscribed {
         return Outcome::Failed(error);
-    }
-    if !hold(daemon, &subscription) {
-        crate::subscriptions::end(daemon, &subscription, "unavailable");
-        return Outcome::Failed(format!("the workspace {name} is gone"));
     }
     let from = match from {
         "people" => ", from people",
@@ -1270,6 +1241,13 @@ async fn forge_subscribe(
         text.push_str(&format!("\n{line}"));
     }
     Outcome::Done(text)
+}
+
+/// What a live read found of a pull request, stored over what the items keep of it.
+fn remember(daemon: &Arc<Daemon>, project: &str, path: &str, forge: &Forge, pull: &Pull) {
+    let mut fetched = fetched_pull(path, forge.kind(), pull, true);
+    fetched.item.project = project.to_owned();
+    crate::items::put_live(daemon, fetched);
 }
 
 /// `forge unsubscribe`: the agent's subscriptions to the workspace and repository it names, every
@@ -1362,7 +1340,9 @@ pub(crate) struct Listed {
     pub url: String,
 }
 
-/// `forge list`: the pull requests of the place's repositories, by state and source branch.
+/// `forge list`: the pull requests of the place's repositories, by state and source branch, as
+/// the items' rounds keep them, with their age; read from the forge only for a repository no
+/// round read yet.
 async fn forge_list(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
     let state = asked.state.as_deref().unwrap_or("open");
     if !["open", "closed", "merged", "all"].contains(&state) {
@@ -1383,7 +1363,18 @@ async fn forge_list(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
         None => format!("The {state} pull requests:\n"),
     };
     let mut contexts = bitbucket::Contexts::default();
+    let cursors = daemon
+        .read(|store| store.cursors(&place.project))
+        .unwrap_or_default();
     for checkout in &checkouts {
+        let cursor = cursors
+            .iter()
+            .find(|c| c.kind == "pull" && c.target == checkout.path)
+            .filter(|c| c.cursor.is_some() && checkout.declared.is_some());
+        if let Some(cursor) = cursor {
+            text.push_str(&stored_list(daemon, place, checkout, cursor, state, branch));
+            continue;
+        }
         let listed = match declared_forge(checkout).await {
             Err(None) => Err(NO_FORGE.to_owned()),
             Err(Some(why)) => Err(why),
@@ -1428,6 +1419,57 @@ async fn forge_list(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
     Outcome::Done(text)
 }
 
+/// What `forge list` says of a repository the items' rounds read: its pull requests in `state`
+/// (`open` holding the drafts), of `branch` when given, the newest 100, and how old the read is.
+fn stored_list(
+    daemon: &Daemon,
+    place: &Place,
+    checkout: &Checkout,
+    cursor: &flottille_core::item::Cursor,
+    state: &str,
+    branch: Option<&str>,
+) -> String {
+    let filter = flottille_core::item::Filter {
+        kind: Some("pull".into()),
+        repository: Some(checkout.path.clone()),
+        ..Default::default()
+    };
+    let pulls: Vec<_> = daemon
+        .read(|store| store.items(&place.project, &filter))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|pull| match state {
+            "all" => true,
+            "open" => matches!(pull.state.as_str(), "open" | "draft"),
+            state => pull.state == state,
+        })
+        .filter(|pull| branch.is_none_or(|b| pull.details["head"] == b))
+        .take(LISTED.parse().unwrap_or(100))
+        .collect();
+    let mut age = crate::items::as_of(cursor.cursor.unwrap_or_default());
+    if let Some(problem) = &cursor.problem {
+        age.push_str(&format!("; its last read failed: {problem}"));
+    }
+    if pulls.is_empty() {
+        return format!("\n{}: none ({age}).\n", checkout.path);
+    }
+    let mut text = format!("\n{} ({}, {age}):\n", checkout.path, pulls.len());
+    for pull in pulls {
+        let url = pull.url.unwrap_or_default();
+        crate::web::shown(&url, crate::web::Source::Link);
+        let detail = |key: &str| pull.details[key].as_str().unwrap_or_default().to_owned();
+        text.push_str(&format!(
+            "- #{} {}, {} into {}: {}  {url}\n",
+            pull.key,
+            pull.state,
+            detail("head"),
+            detail("base"),
+            pull.title
+        ));
+    }
+    text
+}
+
 /// How many pull requests one list asks `gh` for.
 const LISTED: &str = "100";
 
@@ -1465,7 +1507,7 @@ async fn gh_list(forge: &Forge, state: &str, branch: Option<&str>) -> Result<Vec
 
 /// `forge show` with a number: that pull request of one repository of the place, its checks,
 /// review and comments.
-async fn forge_show(daemon: &Daemon, place: &Place, asked: ForgeCall, number: u64) -> Outcome {
+async fn forge_show(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall, number: u64) -> Outcome {
     let full = match full_detail("forge", asked.detail.as_deref()) {
         Ok(full) => full,
         Err(refusal) => return refusal,
@@ -1504,6 +1546,10 @@ async fn forge_show(daemon: &Daemon, place: &Place, asked: ForgeCall, number: u6
             forge.slug()
         )),
         Ok(Some(mut pull)) => {
+            // A round of the project running stores a read of its own.
+            if let Some(_held) = crate::items::held_now(daemon, &place.project) {
+                remember(daemon, &place.project, &checkout.path, &forge, &pull);
+            }
             logs::attach(&forge, &mut pull).await;
             ci::attach(&forge, &mut pull).await;
             let again = format!(
@@ -1742,7 +1788,7 @@ async fn forge_close(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
 
 /// `forge show` without a number: the pull requests of a workspace's branch, their checks and
 /// their review comments. Never another repository.
-async fn forge_read(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
+async fn forge_read(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall) -> Outcome {
     let full = match full_detail("forge", asked.detail.as_deref()) {
         Ok(full) => full,
         Err(refusal) => return refusal,
@@ -1775,8 +1821,12 @@ async fn forge_read(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
         repositories.retain(|r| &r.path == asked);
     }
     let mut read = read(&repositories, &workspace.branch, obsolete).await;
+    let held = crate::items::held_now(daemon, &place.project);
     for repository in &mut read.repositories {
         if let (Some(forge), Some(pull)) = (&repository.forge, &mut repository.pull) {
+            if held.is_some() {
+                remember(daemon, &place.project, &repository.path, forge, pull);
+            }
             logs::attach(forge, pull).await;
             ci::attach(forge, pull).await;
         }

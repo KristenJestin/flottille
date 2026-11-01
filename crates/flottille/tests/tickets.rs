@@ -954,3 +954,69 @@ fn an_agent_s_acli_always_asks_the_user_and_never_runs_before() {
     }
     assert!(user.acli_received().is_empty(), "the fake was never run");
 }
+
+/// The issue `number` as `gh issue list` and `gh issue view` answer it, changed at `updated`.
+fn listed_issue(number: u64, title: &str, updated: &str) -> Value {
+    let mut issue = issue(number, title);
+    issue["updatedAt"] = updated.into();
+    issue["author"] = json!({"login": "other"});
+    issue["assignees"] = json!([{"login": "alice"}]);
+    issue["labels"] = json!([{"name": "auth"}]);
+    issue
+}
+
+#[test]
+fn tickets_list_and_search_answer_from_the_store_with_its_age_and_show_reads_live() {
+    let user = User::with_fake_agent()
+        .with_fake_gh()
+        .with_env("FLOTTILLE_TEST_CLOCK", "1");
+    fixture(&user);
+    track(&user, github_issues());
+    issues(
+        &user,
+        json!({"5": listed_issue(5, "Users cannot sign in", "2026-10-01T10:00:00Z"),
+            "6": listed_issue(6, "Dark mode", "2026-10-01T09:00:00Z")}),
+    );
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
+    user.call("test.advance", json!({"ms": 3 * 60_000}))
+        .unwrap();
+    issues(
+        &user,
+        json!({"5": listed_issue(5, "Renamed on GitHub", "2026-10-02T10:00:00Z"),
+            "6": listed_issue(6, "Dark mode", "2026-10-01T09:00:00Z")}),
+    );
+    let mcp = agent_in(&user, None);
+    let before = calls(user.gh_received()).len();
+
+    let listed = mcp.call("tickets", json!({"action": "list", "label": "auth"}));
+    assert!(!listed.error, "{}", listed.text);
+    for part in [
+        "- #5 open: Users cannot sign in [auth] (alice)",
+        "- #6 open: Dark mode",
+        "as of 3 min ago",
+    ] {
+        assert!(listed.text.contains(part), "{part} in {}", listed.text);
+    }
+    let found = mcp.call("tickets", json!({"action": "search", "query": "sign"}));
+    assert!(!found.error, "{}", found.text);
+    assert!(found.text.contains("#5 open"), "{}", found.text);
+    assert!(!found.text.contains("Dark mode"), "{}", found.text);
+    assert_eq!(
+        calls(user.gh_received()).len(),
+        before,
+        "{:?}",
+        calls(user.gh_received())
+    );
+
+    // Read live, one ticket updates the store.
+    let shown = mcp.call("tickets", json!({"action": "show", "ticket": "#5"}));
+    assert!(shown.text.contains("Renamed on GitHub"), "{}", shown.text);
+    let item = user
+        .call(
+            "items.show",
+            json!({"project": "app", "kind": "ticket", "id": "5"}),
+        )
+        .unwrap();
+    assert_eq!(item["title"], "Renamed on GitHub", "{item}");
+}

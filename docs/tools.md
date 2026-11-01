@@ -301,9 +301,11 @@ pending requests.
 - **`list {repository?, state?, branch?}`**: the pull requests of each repository, or of the one
   named, a line each (`- #12 open, app/login into main: Add the login page  <link>`): `state` is
   `open` (the default), `closed`, `merged` or `all`, `branch` keeps those of one source branch;
-  the newest 100 of each (on Bitbucket, the newest 50, and the answer says when a list may be
-  cut). Bitbucket lists by state and the branch is picked from them
-  ([`forges.md`](forges.md), "Bitbucket").
+  the newest 100 of each, as the daemon's rounds last read them ([`items.md`](items.md), "What
+  reads this stream"), each repository saying how old that read is (`api (2, as of 40 s ago):`)
+  and why its last round failed when it did. A repository no round read yet is listed from the
+  forge (on Bitbucket, the newest 50, and the answer says when a list may be cut; Bitbucket lists
+  by state and the branch is picked from them, [`forges.md`](forges.md), "Bitbucket").
 - **`show {workspace?, repository?, detail?}`**: the pull request of a workspace's branch in each
   of its repositories, or the one named (`workspace` names the workspace: the agent's own when
   left out, required in `main`, where `refused: this agent works in main, which has no workspace
@@ -319,6 +321,7 @@ pending requests.
   "show", "workspace": "login", "detail": "full"}`); `detail full` gives their texts, cut and
   under the result limit. **`show {number, repository?, detail?}`**: that pull request of a
   repository of the place, the same way; `repository` is needed when the place has several.
+  `show` reads the forge now, and stores what it read over what the rounds keep of it.
   `show` ends with the agent's subscriptions, when it has some (`Your subscriptions:` then `- pull
   request #12 of api, workspace login: checks, review, for 52 min more`).
 - **`subscribe {workspace?, repository?, events, from?, minutes?}`**: the next of `events`
@@ -333,7 +336,10 @@ pending requests.
   ([`forges.md`](forges.md), "How long CI takes"); the answer carries the line `show` gives about
   the runs, with `minutes` too. `checks` delivers how many passed and failed, with
   the end of each failed job's log as `show` gives it; `review` and `comment` their author, their
-  state and an excerpt (300 characters). A merged or closed pull request ends any subscription,
+  state and an excerpt (200 characters, on one line). The events are those of the daemon's rounds
+  of the items, which the subscription filters, reading nothing of its own: it hears as often as
+  the rounds come, every minute while a window is connected, every five otherwise. A merged or
+  closed pull request ends any subscription,
   said; so does its time, said. Subscribing again to the same pull request replaces the agent's
   subscription. A pull request merged or closed, a repository with no forge or no pull request,
   and `number` are refused. **`unsubscribe {workspace?, repository?}`** cancels the agent's
@@ -424,12 +430,14 @@ reasons.
 
 | Tool | |
 |---|---|
-| `tickets {action, ticket?, workspace?, query?, state?, label?, assignee?, detail?, title?, body?, labels?, reason?, remove_labels?, assignees?, remove_assignees?, status?, project?, type?}` | The tickets of the project's tracker, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
+| `tickets {action, ticket?, workspace?, query?, state?, label?, assignee?, detail?, title?, body?, labels?, reason?, remove_labels?, assignees?, remove_assignees?, status?, project?, type?, events?, from?, minutes?}` | The tickets of the project's tracker, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
 
 - **`list {state?, label?, assignee?}`**: every ticket of a state, in one call, a line each (`-
   #12 open: The login fails [bug] (ana)  <link>`): `state` is `open` (the default), `closed` or
   `all`; up to 200, the newest, and the answer says when there may be more. **`search {query,
-  …}`**: the same, with words. On GitHub, `gh issue list -R github.com/<owner/name> --state …
+  …}`**: the same, with words. Once a round of the daemon read the tracker, both answer from what
+  it stored, saying its age (`(as of 3 min ago)`), a search finding every word in the titles
+  ([`tickets.md`](tickets.md), "The agent's tool `tickets`"). Before, on GitHub, `gh issue list -R github.com/<owner/name> --state …
   --limit 200 [--label] [--assignee] [--search] --json number,title,state,labels,assignees,url`;
   on Jira, `acli jira workitem search --jql <JQL> --fields key,summary,status,assignee,labels
   --json --limit 200`, the JQL being the tracker's projects, the state as a status category
@@ -449,7 +457,15 @@ reasons.
   ABC-123 is a Jira ticket, and this workspace's tracker is GitHub issues (#123): …`), and nothing
   is asked of any tracker. A workspace with no ticket and no key is refused (`refused: workspace X
   is linked to no ticket: …`). An unreadable ticket (`gh` or `acli` missing or signed out, no such
-  ticket) is an error saying why and what to do.
+  ticket) is an error saying why and what to do. What it read is stored over what the daemon's
+  rounds keep of the ticket.
+- **`subscribe {ticket?, workspace?, events, from?, minutes?}`**: the next of `events`
+  (`commented`, `status`, `assigned`, `closed`) of the ticket wakes the agent once, as a
+  `subscription` delivery, the same shape as `forge` `subscribe` (60 minutes by default, 6000 at
+  most, `from: people` without bots nor what an agent posted); `commented` on a Jira work item is
+  refused, its comments not being read. **`unsubscribe {ticket?}`** cancels the agent's
+  subscriptions to the ticket, every one when it names none ([`tickets.md`](tickets.md),
+  "Subscribing to a ticket"). Both are allowed in every mode, never held.
 - **The writes**, on every tracker: `create {title, body?, labels?}`, `comment {ticket?, body}`,
   `edit {ticket?, title?, body?, labels?, remove_labels?, assignees?, remove_assignees?}` (at least
   one), `close {ticket?, reason?}`, `reopen {ticket?}` and `status {ticket?, status, project?}`, the

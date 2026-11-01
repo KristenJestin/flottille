@@ -595,7 +595,7 @@ pub const FORGE_ACTIONS: &str =
     "list, show, subscribe, unsubscribe, create, comment, edit, merge, checks, close and reopen";
 /// The actions of `tickets`, as a refusal names them.
 pub const TICKET_ACTIONS: &str =
-    "list, search, show, create, comment, edit, close, reopen and status";
+    "list, search, show, subscribe, unsubscribe, create, comment, edit, close, reopen and status";
 /// What `tickets close` closes for, as `gh issue close --reason` names it.
 pub const CLOSE_REASONS: [&str; 2] = ["completed", "not planned"];
 /// The arguments of `tickets` that belong to `edit` or `close` alone.
@@ -606,11 +606,12 @@ const TICKET_ONLY: [(&str, &str); 4] = [
     ("remove_assignees", "edit"),
 ];
 
-/// `tickets`: its reads are harmless, its writes to the tracker to judge.
+/// `tickets`: its reads are harmless, and so is waiting for what happens to a ticket; its writes
+/// to the tracker are to judge.
 fn tickets(call: &Call) -> Verdict {
     let action = call.args["action"].as_str().unwrap_or_default();
     let said = match action {
-        "list" | "search" | "show" => return Verdict::Allow,
+        "list" | "search" | "show" | "subscribe" | "unsubscribe" => return Verdict::Allow,
         "create" => "it opens a ticket on the tracker",
         "comment" => "it comments on a ticket on the tracker",
         "edit" => {

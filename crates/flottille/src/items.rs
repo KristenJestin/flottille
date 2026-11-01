@@ -539,9 +539,10 @@ fn failed(cursor: &mut Cursor, problem: String) {
 }
 
 /// Writes what a round read so far, with its events, unless the project is gone meanwhile:
-/// then nothing of it is kept, and false says to stop.
+/// then nothing of it is kept, and false says to stop. The subscriptions to those items are
+/// offered the events once they are stored.
 fn flush(
-    daemon: &Daemon,
+    daemon: &Arc<Daemon>,
     project: &str,
     items: &mut Vec<Item>,
     events: &mut Vec<(&'static str, Value)>,
@@ -556,9 +557,84 @@ fn flush(
     }
     let (items, events) = (std::mem::take(items), std::mem::take(events));
     daemon
-        .write_all(|store| Ok(((), store.put_items(&items, events)?)))
-        .map(|()| true)
-        .map_err(|error| format!("the items could not be stored: {error}"))
+        .write_all(|store| Ok(((), store.put_items(&items, events.clone())?)))
+        .map_err(|error| format!("the items could not be stored: {error}"))?;
+    crate::subscriptions::items(daemon, &items, &events);
+    Ok(true)
+}
+
+/// The project's round lock, waited for: what a live read stores is not written over by a round
+/// that read before it.
+pub async fn held(daemon: &Daemon, project: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    lock_of(daemon, project).lock_owned().await
+}
+
+/// The same lock, only when no round of the project runs: that round stores a read of its own.
+pub fn held_now(daemon: &Daemon, project: &str) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+    lock_of(daemon, project).try_lock_owned().ok()
+}
+
+/// Stores what a live read found of one item (`forge show`, `tickets show`, a subscription's
+/// first read) with the events a round would emit of it, so that the next round compares with
+/// it; called with the project's round lock held. Only an item a round stored already: what a
+/// live read does not say (its author, labels and assignees, when it changed, an empty state)
+/// is kept, as are the links of its checks.
+pub fn put_live(daemon: &Arc<Daemon>, mut fetched: Fetched) {
+    let item = &mut fetched.item;
+    let stored = daemon
+        .read(|store| {
+            store.items(
+                &item.project,
+                &Filter {
+                    kind: Some(item.kind.clone()),
+                    repository: Some(item.repository.clone()),
+                    ..Filter::default()
+                },
+            )
+        })
+        .unwrap_or_default();
+    let Some(old) = stored.into_iter().find(|old| old.key == item.key) else {
+        return;
+    };
+    item.source = old.source.clone();
+    item.author = old.author.clone();
+    item.assignees = old.assignees.clone();
+    item.labels = old.labels.clone();
+    item.updated_at = old.updated_at.clone();
+    item.mine = old.mine;
+    item.seen_at = now_ms();
+    if item.state.is_empty() {
+        item.state = old.state.clone();
+    }
+    let live = std::mem::take(&mut item.checks);
+    keep_details(&old, item);
+    if item.kind == "pull" {
+        item.checks = live
+            .into_iter()
+            .map(|mut check| {
+                if check.link.is_none() {
+                    let kept = old.checks.iter().find(|c| c.name == check.name);
+                    check.link = kept.and_then(|c| c.link.clone());
+                }
+                check
+            })
+            .collect();
+    }
+    let mut events = events_of(Some(&old), &fetched);
+    let project = fetched.item.project.clone();
+    if let Err(error) = flush(daemon, &project, &mut vec![fetched.item], &mut events) {
+        eprintln!("flottille daemon: items of {project}: {error}");
+    }
+}
+
+/// How old what a source read is, from when its last complete round started: `as of 40 s ago`.
+pub fn as_of(at: u64) -> String {
+    let seconds = now_ms().saturating_sub(at) / 1000;
+    match seconds {
+        0..60 => format!("as of {seconds} s ago"),
+        60..3600 => format!("as of {} min ago", seconds / 60),
+        _ => format!("as of {} h ago", seconds / 3600),
+    }
 }
 
 async fn source_round(daemon: &Arc<Daemon>, project: &Project, source: &Source) {
@@ -626,7 +702,7 @@ async fn source_round(daemon: &Arc<Daemon>, project: &Project, source: &Source) 
 /// whose CI still runs. The note of what could not be read; none when the project went
 /// meanwhile.
 async fn read_round(
-    daemon: &Daemon,
+    daemon: &Arc<Daemon>,
     project: &Project,
     source: &Source,
     cursor: &Cursor,
@@ -844,6 +920,24 @@ fn events_of(old: Option<&Item>, new: &Fetched) -> Vec<(&'static str, Value)> {
         }
         if let Some(reviewers) = item.details.get("reviewers") {
             data["reviewers"] = reviewers.clone();
+            // Bitbucket says a review as a reviewer's verdict: the new ones, by whom.
+            let was = |name: &Value| {
+                old.details["reviewers"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|r| r["name"] == *name)
+                    .map(|r| r["state"].clone())
+            };
+            data["verdicts"] = reviewers
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|r| {
+                    r["state"] != "pending" && was(&r["name"]).as_ref() != Some(&r["state"])
+                })
+                .cloned()
+                .collect();
         }
         events.push(("item.reviewed", data));
     }

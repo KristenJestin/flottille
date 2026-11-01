@@ -164,6 +164,9 @@ is as fresh as the call.
 **And continuously**: every ticket of a declared tracker is read by the daemon on its own,
 incrementally, its title, state, assignee, labels and status kept in the store and its changes
 said as `item.*` events ([`items.md`](items.md)); its description and comments are not kept.
+`tickets` `list` and `search` answer from that store once a round of the tracker worked, saying
+its age; `show` reads live and stores what it read; a subscription to a ticket hears those
+events.
 
 ## The protocol and the command line
 
@@ -204,6 +207,27 @@ a query holding `repo:`, `org:`, `user:`, `is:pr` or `type:pr` is refused, and o
 whose link is the tracker repository's are kept, the others counted. Every agent of a project that declares a tracker has
 the tool, in `main` as in a workspace, whether a ticket is linked or not (the tool list of a
 session is fixed when it starts). Until #141 `show` was `ticket_read`.
+
+`list` and `search` answer from what the daemon's rounds keep ([`items.md`](items.md), "What
+reads this stream"), with its age (`… : 2 (as of 3 min ago)`); a `search` finds the words in the
+titles, all of them, whatever their case, since no description is kept. Before the first round
+of the tracker worked, they ask the tracker as they did.
+
+### Subscribing to a ticket
+
+**`subscribe {ticket?, workspace?, events, from?, minutes?}`**: the next of `events` of the
+ticket (the one named, or the workspace's) wakes the agent once, as a `subscription` delivery
+(`docs/design.md` §5.6), with the same shape as `forge` `subscribe`: `commented` (a new comment,
+its author and an excerpt), `status` (Jira's status moved, or the ticket was reopened), `assigned`
+(its assignees changed) and `closed`, which ends any subscription to it. `from: people` leaves out
+a bot and a comment marked as posted by an agent; `minutes` is 60 by default, 6000 at most. The
+ticket is read once and stored first: what is so now is no event. Jira's comments are not read
+by the rounds: `commented` on a work item is refused, saying so. Subscribing again to the same
+ticket replaces the agent's subscription; **`unsubscribe {ticket?}`** cancels those to the ticket
+named, every one when it names none. The events are the rounds' (`item.commented`,
+`item.changed`, `item.closed`): a subscription hears as often as the rounds come. It is listed,
+cancelled and ends as a pull request's (`docs/protocol.md`, "The subscription methods"); the
+window's rail names it `Ticket #5 of api` or `Ticket ABC-1`.
 
 ### Jira's writes
 

@@ -294,7 +294,7 @@ const SERVED: [Definition; 28] = [
         title: "Pull requests",
         description: "The pull requests of the project's repositories on their forge, through \
             the user's own gh or bkt (no forge sign-in here: never run them). list: by state \
-            (open by default) and branch. show: a workspace's branch's (yours; in main, name \
+            (open by default) and branch, as the daemon last read them (it says when). show: a workspace's branch's (yours; in main, name \
             it), or number's, with checks (the log's end of each failed job), review and comment \
             counts; detail full adds texts. Writes, judged, answered at once, the result maybe \
             later: create, merge (method, squash by default; refused with no check, while checks \
@@ -334,18 +334,20 @@ const SERVED: [Definition; 28] = [
         title: "Tickets",
         description: "The tickets of the project's tracker (GitHub issues #123, Jira ABC-123), \
             through the user's own gh or acli (no sign-in here: never run them). list: every \
-            ticket of a state (open by default), by label and assignee, in one call; search: \
-            the same, with words; show: a workspace's linked ticket (yours; in main, name \
-            workspace) or ticket, detail full adds the comments. Writes, judged, answered at \
-            once, the result maybe later: create, comment, edit, close, reopen, status (Jira \
-            moves a work item, GitHub its board column). \
+            ticket of a state (open by default), by label and assignee, in one call, as the \
+            daemon last read them (it says when); search: the same, with words of the title; \
+            show: a workspace's linked ticket (yours; in main, name workspace) or ticket, read \
+            now, detail full adds the comments. Writes, judged, answered at once, the result \
+            maybe later: create, comment, edit, close, reopen, status (Jira moves a work item, \
+            GitHub its board column). subscribe: the next events of a ticket wake you once, by \
+            a delivery (from people: no bot nor agent; minutes: 60 by default); unsubscribe. \
             {\"action\": \"comment\", \"ticket\": \"#12\", \"body\": \"...\"}",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "search", "show", "create", "comment", "edit", "close", "reopen", "status"]},
+                "action": {"type": "string", "enum": ["list", "search", "show", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status"]},
                 "ticket": {"type": "string", "description": "#123 or ABC-123; the workspace's when left out."},
                 "workspace": {"type": "string"},
                 "query": {"type": "string", "description": "search: words."},
@@ -362,7 +364,10 @@ const SERVED: [Definition; 28] = [
                 "remove_assignees": {"type": "array", "items": {"type": "string"}, "description": "edit: logins to remove (GitHub)."},
                 "status": {"type": "string", "description": "status: its name."},
                 "project": {"type": "string", "description": "create on Jira: the tracker's project; status: the board."},
-                "type": {"type": "string", "description": "create on Jira: work item type."}
+                "type": {"type": "string", "description": "create on Jira: work item type."},
+                "events": {"type": "array", "items": {"enum": crate::tickets::EVENTS}},
+                "from": {"enum": crate::subscriptions::FROM},
+                "minutes": {"type": "integer", "minimum": 1, "maximum": crate::subscriptions::LONGEST_MINUTES}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -1875,7 +1880,7 @@ async fn performed_once(
         }
         "run_status" => runs::run_status(daemon, &grant.agent, args).await,
         "forge" => crate::forge::forge(daemon, &grant.agent, &grant.place, args).await,
-        "tickets" => crate::tickets::tickets(daemon, &grant.place, args).await,
+        "tickets" => crate::tickets::tickets(daemon, &grant.agent, &grant.place, args).await,
         "wake" => crate::subscriptions::wake(daemon, &grant.agent, args),
         tool if tree::TOOLS.contains(&tool) => tree::call(daemon, grant, tool, args).await,
         tool if crate::actions::TOOLS.contains(&tool) => {
