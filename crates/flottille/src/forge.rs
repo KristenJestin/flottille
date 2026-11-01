@@ -2460,8 +2460,11 @@ fn fetched_pull(path: &str, source: &str, pull: &Pull, detailed: bool) -> crate:
         "base": pull.base,
         "head_commit": pull.head_commit,
     });
-    if detailed {
+    // Bitbucket's list says the description, GitHub's does not.
+    if detailed || source == "bitbucket" {
         details["description"] = json!(pull.description);
+    }
+    if detailed {
         details["mergeable"] = json!(pull.mergeable);
         details["review"] = json!(pull.review);
         details["comments"] = json!(pull.comments.len());
