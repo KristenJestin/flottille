@@ -67,14 +67,22 @@ and the 2026 practice around it:
   tool listed costs context on every request (100 to 500 tokens each). Around 15 tools is a
   comfortable ceiling for one agent. Anthropic's own line for tool search
   ([Advanced tool use](https://www.anthropic.com/engineering/advanced-tool-use)) is more than 10
-  tools or 10k tokens of definitions: below both, loading everything upfront is the right call.
+  tools or 10k tokens of definitions: below both, loading everything upfront is the right call;
+  past them it is a choice, which Flottille makes on purpose (§4, "The budget": two guards of
+  its own, 40 tools and 20k tokens, and no tool shortened to fit them).
 - **Names are a namespace**: prefixes by family (`fs_`, `commands_`, `agent_`), parameters that
   cannot be misread (`agent_id`, not `agent`).
 - **Descriptions for a new colleague**:
   - say what the tool does and when to use it rather than another tool;
   - say its side effects and when it refuses;
   - put the important part first;
-  - a few hundred characters, rarely more than 1,000;
+  - a few hundred characters, rarely more than 1,000 (guidance, not a limit to trim to: a tool
+    keeps the text it needs, §4 "The budget"). The hard limit is Claude Code's: it cuts a tool
+    description that loads upfront at **4,096 characters** (2,048 before v2.1.296; 16,384 for a
+    tool found through tool search), and Claude sees only the text before the cut
+    ([MCP](https://code.claude.com/docs/en/mcp), "Scale with MCP tool search"). A test holds
+    every description under 2,048, the older figure, so no version cuts one, and the important
+    part goes first;
   - where an argument is easy to get wrong, one or two valid calls, written in the description
     (MCP has no field for the API's `input_examples`);
   - a parameter that asks why a call is made (`why`) asks for **one sentence**, never the
@@ -154,33 +162,54 @@ and the 2026 practice around it:
      `workspace_remove` had until #141; the old names are still served under the new ones for
      one release.
 
-   A root lead has 25 tools, a leaf worker 14; one more each when the project's repositories
-   declare a forge (`forge`), one more when it declares a tracker (`tickets`).
+   With the project's repositories declaring a forge (`forge`) and a tracker (`tickets`), a root
+   has 27 tools, a child that may have children (a lead) 21, a child at the depth limit (a leaf
+   worker) 16; without a forge, one fewer each, and one fewer again without a tracker (25, 19
+   and 14 with neither).
 
-   **The budget.** Every tool loads upfront (rule 7), so the definitions must stay under
-   Anthropic's line for tool search (§3: more than 10 tools or 10k tokens). Flottille's lists
-   pass 10 tools, which is why each family is one tool with an `action` rather than one tool per
-   verb; the tokens are the line kept. JSON schemas tokenize densely, about 3 characters a token
-   at worst and 4 usually: **28,000 characters** of definitions is under 9,400 tokens at worst,
-   and a test holds the biggest list, a root's with a forge and a tracker, under it. Measured
-   with that test (`the_biggest_list_stays_far_under_the_threshold_of_tool_search`):
+   **The budget.** Every tool loads upfront (rule 7), on purpose: Anthropic's line for tool search
+   (§3: more than 10 tools or 10k tokens of definitions) is where search starts to help, not a
+   limit, and Flottille's lists pass 10 tools, which is why each family is one tool with an
+   `action` rather than one tool per verb. Two guards, in the size test
+   (`the_biggest_list_stays_under_the_guards_on_tools_and_tokens`), say when the list grows too
+   big to be read well:
+
+   - at most **40 tools** in the biggest list of each role (a root, a child, a child at the depth
+     limit, each with a forge and a tracker);
+   - at most **20,000 tokens** of definitions in the biggest list, counted at 3 characters a
+     token, the worst case of JSON schemas (4 usually): **60,000 characters**.
+
+   They are not a number to trim to. Before #264 the test capped the characters (28,000, then
+   29,000 with #198, 30,000 with #262), a figure that came from the tokens at 3 characters a
+   token and that nobody had chosen as a size for the texts: from #198 on, every new tool
+   (#224, #225, #233, #254, #259) paid for its place by shortening the descriptions and schemas
+   of others, and agents lost examples and guidance. **A tool keeps the description and the
+   example it needs; a new tool is never paid for by shortening another, and a review refuses
+   such a trim.** A tool cannot be withheld by context (an agent may need to read or write a
+   spec from anywhere), so when a guard fails, nobody trims: open a discussion with the
+   maintainer. The ways out are a new concept as one family tool with actions (as `forge` and
+   `tickets`), detailed guidance read on demand (as `skill_read`), or tool search for rarely
+   used families.
+
+   Measured with that test, the biggest list is a root's with a forge and a tracker:
 
    | | Tools | Characters |
    |---|---|---|
    | Before #141 (forge, ticket and removal tools apart, a 27,000 limit) | 25 | 26,889 |
    | After #141 (`forge`, `tickets`, `workspace` complete families) | 23 | 25,236 |
-   | After #259 (`web`; no other tool shortened, by the maintainer's decision: the 29,000 limit of #198 raised to 30,000 until a new budget replaces it) | 27 | 29,660 |
+   | After #259 (`web`; no other tool shortened: the 29,000 limit of #198 raised to 30,000) | 27 | 29,660 |
+   | After #264 (the texts cut from #224 on restored; the two guards) | 27 | 30,866 |
 
-   A family grows by an action and a line of description, not by a tool; a new tool or a long
-   description that passes the limit is answered by merging or shortening, and the limit moves
-   only with the threshold it stands for.
+   By role after #264: a root 27 tools and 30,866 characters (about 10,300 tokens at 3 characters
+   a token), a child 21 and 23,784, a child at the depth limit 16 and 17,821. The guards leave
+   room for 13 more tools and about 29,000 more characters in the biggest list.
 
    **Every family is complete** (#141): what the window lets the user list, search, read,
    create or change, a family lets the agent do under the gate, or this table says why not.
 
    | Family | List | Search | Read | Create | Change | Left out, and why |
    |---|---|---|---|---|---|---|
-   | `forge` | `list` (state, branch) | `list` by branch | `show` (a workspace's branch, or a number) | `create` | `comment`, `edit`, `merge`, `checks` | Closing a pull request: the window has no such action, and closing someone's work is the user's; deleting a branch is `workspace` `remove`'s, for the workspace's own. |
+   | `forge` | `list` (state, branch) | `list` by branch | `show` (a workspace's branch, or a number) | `create` | `comment`, `edit`, `merge`, `checks`, `close` (a `comment` first, `delete_branch`), `reopen` (#243) | Deleting a branch on its own: `close` deletes the pull request's, `workspace` `remove` the workspace's own. |
    | `tickets` | `list` (state, label, assignee), every ticket in one call | `search` | `show` | `create` (GitHub) | `comment`, `edit`, `close`, `reopen` (GitHub) | Every write on Jira: Flottille reads Jira and writes nothing to it, by the user's decision; Bitbucket's issues: no tracker of that kind is declared today. |
    | `workspace` | `list` | `list` (few, a line each) | `show` | `create` | `prepare`, `link_ticket` (null unlinks), `remove` | Renaming: a workspace's name is its branch and its folder, fixed when it is made, in the window as here. |
    | `skills` | `list` | `list` (few) | `show`, and `skill_read` for the text | `add` | `edit`, `remove` | Nothing. |

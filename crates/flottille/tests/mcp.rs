@@ -291,8 +291,11 @@ fn tools_list_is_in_the_same_order_every_time_and_every_entry_carries_title_anno
             "{name}"
         );
         let description = tool["description"].as_str().unwrap();
+        // Claude Code cuts an upfront tool's description at 4,096 characters, 2,048 before
+        // v2.1.296 (https://code.claude.com/docs/en/mcp, "Scale with MCP tool search"): the
+        // older figure, so no version cuts a text.
         assert!(
-            (40..1_000).contains(&description.chars().count()),
+            (40..2_048).contains(&description.chars().count()),
             "{name}: {description}"
         );
         let annotations = &tool["annotations"];
