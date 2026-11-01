@@ -32,9 +32,11 @@ pub enum Block {
         images: Vec<String>,
     },
     /// A message between two sessions (`session_send`): one `peer` wrote to this agent, or one
-    /// this agent `sent` to `peer`. An agent's words, never the user's.
+    /// this agent `sent` to `peer`. An agent's words, never the user's. `agent` is the peer's id
+    /// when the daemon named it.
     Relayed {
         peer: String,
+        agent: Option<String>,
         sent: bool,
         text: String,
     },
@@ -711,9 +713,10 @@ impl Conversation {
         {
             let mut texts = Vec::new();
             strings(&data["raw_output"], &mut texts);
-            if let Some(peer) = texts.iter().find_map(|text| sent_to(text)) {
+            if let Some((peer, agent)) = texts.iter().find_map(|text| sent_to(text)) {
                 changes.extend(self.push(Block::Relayed {
                     peer,
+                    agent,
                     sent: true,
                     text: said,
                 }));
@@ -754,11 +757,12 @@ impl Conversation {
                 }
             }
             "approval" => {
-                if let Some((number, peer)) = sent_after_approval(&body)
+                if let Some((number, peer, agent)) = sent_after_approval(&body)
                     && let Some(said) = self.held_sends.remove(&number)
                 {
                     return self.push(Block::Relayed {
                         peer,
+                        agent,
                         sent: true,
                         text: said,
                     });
@@ -865,8 +869,10 @@ impl Conversation {
                     ))
                 });
                 let (who, text) = said.unwrap_or(("an agent", &body));
+                let (peer, agent) = peer_of(who);
                 Block::Relayed {
-                    peer: peer_name(who),
+                    peer,
+                    agent,
                     sent: false,
                     text: text.to_owned(),
                 }
@@ -970,20 +976,23 @@ pub fn woken_by(body: &str) -> String {
 const SESSION_WROTE: &str = " wrote to this session:";
 
 /// An agent as the daemon names it to another (`"Docs" (agent 0123…)`, or `agent 0123…`), as the
-/// conversation says it: its title, else its id.
-fn peer_name(named: &str) -> String {
-    named
+/// conversation says it: its title, else its id; and its id, which opens its session.
+fn peer_of(named: &str) -> (String, Option<String>) {
+    if let Some((title, id)) = named
         .strip_prefix('"')
         .and_then(|rest| rest.split_once("\" (agent "))
-        .map(|(title, _)| title.to_owned())
-        .unwrap_or_else(|| named.to_owned())
+    {
+        return (title.to_owned(), id.strip_suffix(')').map(str::to_owned));
+    }
+    let id = named.strip_prefix("agent ").map(str::to_owned);
+    (named.to_owned(), id)
 }
 
 /// The session a `session_send` result says the message went to (`Sent to <named>: …`).
-fn sent_to(text: &str) -> Option<String> {
+fn sent_to(text: &str) -> Option<(String, Option<String>)> {
     let rest = text.trim().strip_prefix("Sent to ")?;
     let (named, _) = rest.split_once(": it reaches")?;
-    Some(peer_name(named))
+    Some(peer_of(named))
 }
 
 /// What `agent_launch` answers when it started a session for the user (`tree.rs`).
@@ -1022,11 +1031,12 @@ fn held_request(text: &str) -> Option<u64> {
 }
 
 /// A `session_send` the user allowed and the daemon performed: its request and where it went.
-fn sent_after_approval(body: &str) -> Option<(u64, String)> {
+fn sent_after_approval(body: &str) -> Option<(u64, String, Option<String>)> {
     let rest = body.strip_prefix("Request #")?;
     let (number, rest) = rest.split_once(" (session_send) ")?;
     let (_, result) = rest.split_once("has now done it. Its result:\n\n")?;
-    Some((number.parse().ok()?, sent_to(result)?))
+    let (peer, agent) = sent_to(result)?;
+    Some((number.parse().ok()?, peer, agent))
 }
 
 /// The card of a command's answer (`runs.rs`: `run <id>: <line> <how it is> after <s> s`, then
@@ -1792,8 +1802,28 @@ mod tests {
             c.blocks(),
             [Block::Relayed {
                 peer: "Lead".into(),
+                agent: Some("0123456789ab".into()),
                 sent: false,
                 text: "The tests pass now.".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_session_message_from_an_untitled_agent_keeps_its_id_to_open_it() {
+        let mut c = root();
+        c.apply(&event(
+            1,
+            "agent.prompted",
+            json!({"text": "[flottille:session]\nagent 0123456789ab wrote to this session:\n\nHi."}),
+        ));
+        assert_eq!(
+            c.blocks(),
+            [Block::Relayed {
+                peer: "agent 0123456789ab".into(),
+                agent: Some("0123456789ab".into()),
+                sent: false,
+                text: "Hi.".into()
             }]
         );
     }
@@ -1821,6 +1851,7 @@ mod tests {
         ));
         assert!(c.blocks().contains(&Block::Relayed {
             peer: "Docs".into(),
+            agent: Some("0123456789ab".into()),
             sent: true,
             text: "Over to you.".into()
         }));
@@ -1849,6 +1880,7 @@ mod tests {
         ));
         assert!(c.blocks().contains(&Block::Relayed {
             peer: "Docs".into(),
+            agent: Some("0123456789ab".into()),
             sent: true,
             text: "Over to you.".into()
         }));
