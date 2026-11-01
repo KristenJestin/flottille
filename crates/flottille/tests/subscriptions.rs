@@ -1053,6 +1053,40 @@ fn a_comment_on_a_ticket_no_round_stored_yet_is_delivered_to_its_subscription() 
 }
 
 #[test]
+fn a_comment_by_a_bot_on_a_ticket_is_not_delivered_to_a_subscription_for_people_only() {
+    let user = user();
+    fixture(&user);
+    track(&user, json!({"kind": "github", "repository": "api"}));
+    script_issue(&user, issue(json!([])));
+    let (_, mcp) = agent(&user);
+
+    subscribe_ticket(
+        &mcp,
+        json!({"ticket": "#5", "events": ["commented"], "from": "people"}),
+    );
+    let mut comments = json!([
+        {"author": {"login": "github-actions[bot]"}, "body": "Stale for 30 days"},
+        {"author": {"login": "app/dependabot"}, "body": "Bump tokio"}
+    ]);
+    script_issue(&user, issue(comments.clone()));
+    a_round(&user);
+    assert!(delivered(&user).is_empty(), "{:?}", delivered(&user));
+
+    comments
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"author": {"login": "alice"}, "body": "I can reproduce"}));
+    script_issue(&user, issue(comments));
+    a_round(&user);
+    let delivery = the_delivery(&user);
+    assert!(
+        delivery.contains("comment by alice: I can reproduce"),
+        "{delivery}"
+    );
+    assert!(!delivery.contains("Bump tokio"), "{delivery}");
+}
+
+#[test]
 fn a_round_during_a_live_read_is_not_written_over_by_it() {
     let user = user();
     fixture(&user);

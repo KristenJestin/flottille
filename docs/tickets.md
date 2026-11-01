@@ -220,7 +220,8 @@ ticket (the one named, or the workspace's) wakes the agent once, as a `subscript
 (`docs/design.md` §5.6), with the same shape as `forge` `subscribe`: `commented` (a new comment,
 its author and an excerpt), `status` (Jira's status moved, or the ticket was reopened), `assigned`
 (its assignees changed) and `closed`, which ends any subscription to it. `from: people` leaves out
-a bot and a comment marked as posted by an agent; `minutes` is 60 by default, 6000 at most. The
+a bot (a GitHub login `app/<name>` or `<name>[bot]`, as for a pull request) and a comment marked
+as posted by an agent; `minutes` is 60 by default, 6000 at most. The
 ticket is read once and stored first: what is so now is no event. Jira's comments are not read
 by the rounds: `commented` on a work item is refused, saying so. Subscribing again to the same
 ticket replaces the agent's subscription; **`unsubscribe {ticket?}`** cancels those to the ticket

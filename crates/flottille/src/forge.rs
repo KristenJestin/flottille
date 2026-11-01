@@ -458,7 +458,7 @@ impl Pull {
 
 /// Whether a GitHub author is a bot: `gh` says an app's login as `app/<name>`, and GitHub names
 /// many `<name>[bot]`; `is_bot` when it says so.
-fn is_bot(author: &Value) -> bool {
+pub(crate) fn is_bot(author: &Value) -> bool {
     let login = author["login"].as_str().unwrap_or_default();
     author["is_bot"] == true || login.starts_with("app/") || login.ends_with("[bot]")
 }

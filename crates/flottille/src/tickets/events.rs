@@ -71,7 +71,7 @@ fn fetched_of(project: &Project, key: &Key, ticket: &Ticket) -> Option<crate::it
         .iter()
         .map(|comment| crate::items::Said {
             author: comment.author.clone(),
-            bot: false,
+            bot: crate::forge::is_bot(&json!({"login": comment.author})),
             by_agent: comment.agent,
             state: None,
             excerpt: crate::items::excerpt(&comment.body),

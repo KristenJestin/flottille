@@ -1969,7 +1969,7 @@ impl Tickets {
                     author: said(&comment["author"]["login"]),
                     state: None,
                     body: said(&comment["body"]),
-                    bot: false,
+                    bot: forge::is_bot(&comment["author"]),
                 })
             })
             .collect();
