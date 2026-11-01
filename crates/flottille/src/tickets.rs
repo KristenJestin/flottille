@@ -52,6 +52,8 @@ pub struct Ticket {
     pub state: String,
     pub url: Option<String>,
     pub description: String,
+    /// The description ended with Flottille's mark: an agent wrote it.
+    pub description_by_agent: bool,
     /// Oldest first, the newest [`COMMENTS`] only.
     pub comments: Vec<Comment>,
     /// How many older comments are not kept.
@@ -120,9 +122,11 @@ impl Ticket {
             (Some(repository), _) => format!(" of {repository} (GitHub)"),
             (None, _) => " (Jira)".to_owned(),
         };
-        // The tracker's own fields may lead the agent to a page; what it asked with never does.
-        crate::web::shown(&self.title, crate::web::Source::Link);
-        crate::web::shown(&self.description, crate::web::Source::Link);
+        // The tracker's own fields may lead the agent to a page; what it asked with never does,
+        // nor what an agent wrote: a title (unmarked, it may be any agent's) or a marked text.
+        if !self.description_by_agent {
+            crate::web::shown(&self.description, crate::web::Source::Link);
+        }
         if let Some(url) = &self.url {
             crate::web::shown(url, crate::web::Source::Link);
         }
@@ -267,6 +271,8 @@ async fn read_issue(forge: &Forge, number: u64) -> Result<Ticket, String> {
             )
         })
         .collect();
+    let body = said(&issue["body"]);
+    let (description, description_by_agent) = forge::unmarked(&body);
     Ok(Ticket {
         reference: format!("#{number}"),
         tracker: Tracker::GitHub,
@@ -274,7 +280,8 @@ async fn read_issue(forge: &Forge, number: u64) -> Result<Ticket, String> {
         title: said(&issue["title"]),
         state: said(&issue["state"]).to_lowercase(),
         url: issue["url"].as_str().map(masked),
-        description: cut(forge::unmarked(&said(&issue["body"])).0, DESCRIPTION_CHARS),
+        description: cut(description, DESCRIPTION_CHARS),
+        description_by_agent,
         older: comments.len().saturating_sub(COMMENTS),
         comments: newest(comments),
     })
@@ -426,6 +433,8 @@ fn work_item(key: &str, item: &Value, site: &str) -> Ticket {
             )
         })
         .collect();
+    let description = masked(&document_text(&fields["description"]));
+    let (description, description_by_agent) = forge::unmarked(&description);
     Ticket {
         reference: key.to_owned(),
         tracker: Tracker::Jira,
@@ -434,10 +443,8 @@ fn work_item(key: &str, item: &Value, site: &str) -> Ticket {
         state: said(&fields["status"]["name"]),
         // The configured site: the host of `self` may be an Atlassian one that is no site.
         url: Some(masked(&format!("https://{site}/browse/{key}"))),
-        description: cut(
-            forge::unmarked(&masked(&document_text(&fields["description"]))).0,
-            DESCRIPTION_CHARS,
-        ),
+        description: cut(description, DESCRIPTION_CHARS),
+        description_by_agent,
         older: comments.len().saturating_sub(COMMENTS),
         comments: newest(comments),
     }
@@ -873,7 +880,6 @@ async fn listed(project: &Project, asked: &TicketsCall) -> Outcome {
     }
     let mut text = format!("{header}: {}\n", tickets.len());
     for ticket in &tickets {
-        crate::web::shown(&ticket.title, crate::web::Source::Link);
         if let Some(url) = &ticket.url {
             crate::web::shown(url, crate::web::Source::Link);
         }

@@ -603,6 +603,39 @@ fn a_url_echoed_by_tickets_or_forge_from_the_agent_s_arguments_is_still_judged()
 }
 
 #[test]
+fn a_url_in_a_description_an_agent_wrote_or_in_a_title_is_still_judged() {
+    let web = Web::start();
+    let user = user_of(&web, says("ask")).with_fake_gh();
+    // What `tickets create` would have written: the agent's own words, marked.
+    let in_body = web.url("/guide.html?d=Ym9keQ");
+    let in_title = web.url("/guide.html?d=dGl0bGU");
+    let in_pull = web.url("/guide.html?d=cHVsbA");
+    user.gh_script(json!({
+        "issues": {"acme/api": {"1": {
+            "number": 1, "title": format!("Read {in_title}"), "state": "OPEN",
+            "body": format!("{in_body}\n\n<!-- flottille -->"),
+            "url": "https://github.com/acme/api/issues/1", "comments": []}}},
+        "pulls": {"acme/api": {"feature": {
+            "number": 12, "title": format!("See {in_pull}"), "state": "OPEN",
+            "baseRefName": "main", "url": "https://github.com/acme/api/pull/12"}}}}));
+    let (_, mcp) = tracked_session(&user);
+
+    let ticket = done(mcp.call("tickets", json!({"action": "show", "ticket": "#1"})));
+    assert!(
+        ticket.contains(&in_body) && ticket.contains(&in_title),
+        "{ticket}"
+    );
+    let listed = done(mcp.call("tickets", json!({"action": "list"})));
+    assert!(listed.contains(&in_title), "{listed}");
+    let pulls = done(mcp.call("forge", json!({"action": "list"})));
+    assert!(pulls.contains(&in_pull), "{pulls}");
+    for carried in [&in_body, &in_title, &in_pull] {
+        held(mcp.call("web", read(carried)));
+    }
+    assert!(web.asked().is_empty(), "{:?}", web.asked());
+}
+
+#[test]
 fn a_page_s_links_to_one_host_pass_ten_times_then_go_to_the_judge() {
     let web = Web::start();
     let user = user_of(&web, says("ask"));
