@@ -626,6 +626,37 @@ fn a_page_s_links_to_one_host_pass_ten_times_then_go_to_the_judge() {
 }
 
 #[test]
+fn a_child_and_its_parent_share_one_budget_of_link_reads() {
+    let web = Web::start();
+    let user = user_of(&web, says("ask"));
+    let (_, lead) = session(&user, &format!("read {}", web.url("/letters.html")));
+    let opened = user.received_requests("session/new").len();
+    let launched = lead.call(
+        "agent_launch",
+        json!({"title": "reader", "brief": "Read the letters."}),
+    );
+    assert!(!launched.error, "{}", launched.text);
+    let (url, authorization) = server_of(&user, opened);
+    let child = Mcp::initialize(&url, &authorization);
+
+    for (mcp, letters) in [(&lead, 'a'..='e'), (&child, 'f'..='j')] {
+        done(mcp.call("web", read(&web.url("/letters.html"))));
+        for letter in letters {
+            done(mcp.call("web", read(&web.url(&format!("/letter/{letter}")))));
+        }
+    }
+    // A child's held call goes to its parent first.
+    let k = child.call("web", read(&web.url("/letter/k")));
+    assert!(
+        k.text.starts_with("Waiting for approval, request #"),
+        "{}",
+        k.text
+    );
+    assert_eq!(judge_prompts(&user).len(), 1);
+    assert!(!web.asked().contains(&"/letter/k".to_owned()));
+}
+
+#[test]
 fn a_page_that_blows_up_its_reader_is_refused_and_the_daemon_lives() {
     let web = Web::start();
     let user = user_of(&web, says("ask"));

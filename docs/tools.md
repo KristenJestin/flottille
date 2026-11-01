@@ -737,8 +737,10 @@ it at once.
   result's, passes every time; one in what `tickets`, `forge` or `web` answered it in this
   session, taken from their data only (a page's text and links, a ticket's or a pull request's
   title, URL, body and comments not written by an agent; never the words the call itself was
-  given, which an answer may repeat), passes 10 times per host: past that, every read of that
-  host through such a link is to judge, since links chosen one at a time can spell data out. **A URL
+  given, which an answer may repeat), passes 10 times per site, counted for the whole tree (a
+  site is the host's last two labels, lowercased, without a final dot, so every subdomain of a
+  domain shares one count; an address is its own): past that, every read of that site through
+  such a link is to judge, since links chosen one at a time can spell data out. **A URL
   the agent built is to judge**: a card in Ask, the judge in Auto, told to look for data carried
   out (a long query string, encoded blobs, pieces of code, file contents, paths, names from the
   workspace) and given the URL whole; it passes in Full. What a session was shown is kept in the

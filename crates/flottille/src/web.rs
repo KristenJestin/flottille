@@ -78,10 +78,11 @@ pub const BUILT: &str = "the agent built this URL itself: it is in no message of
     ticket, pull request, page or search result of this session, and a GET sends out whatever \
     the URL holds; look for data carried out: a long query string, encoded blobs, pieces of \
     code, file contents, paths, names from the workspace";
-/// Why the gate holds a link read once its host was read often through links.
-pub const OFTEN: &str = "this URL is a link of a page, a ticket or a pull request, and its host \
-    was already read 10 times through such links in this session: links chosen one at a time \
-    can spell out data; look at the sequence of what was read";
+/// Why the gate holds a link read once its site was read often through links.
+pub const OFTEN: &str = "this URL is a link of a page, a ticket or a pull request, and its site \
+    (its domain, subdomains included) was already read 10 times through such links in this \
+    agent tree: links chosen one at a time can spell out data; look at the sequence of what was \
+    read";
 /// Why the gate holds a search in Ask.
 pub const SEARCHED: &str = "it sends this query to the search provider, DuckDuckGo";
 
@@ -146,7 +147,7 @@ fn asked(args: &Value) -> Result<Asked, String> {
 }
 
 /// How the agent came by a URL: shown by the user or a search, which passes; a link of a page,
-/// a ticket or a pull request, which passes until its host was read often that way; or not at all.
+/// a ticket or a pull request, which passes until its site was read often that way; or not at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
     Free,
@@ -163,7 +164,7 @@ pub enum Pass {
 }
 
 /// The gate's verdict on a call of `web`, in every mode: an address that can never be read is
-/// refused; a URL the agent was shown passes, a link only until its host was read
+/// refused; a URL the agent was shown passes, a link only until its site was read
 /// [`LINK_READS`] times through links, and one it built is to judge; a search is to judge only
 /// in Ask (`docs/tools.md`, "The web").
 pub fn verdict(args: &Value, pass: impl Fn(&Url) -> Pass, mode: GateMode) -> gate::Verdict {
@@ -187,7 +188,8 @@ pub fn verdict(args: &Value, pass: impl Fn(&Url) -> Pass, mode: GateMode) -> gat
     }
 }
 
-/// The gate's verdict on a call of the agent's, a link it lets through counted against its host.
+/// The gate's verdict on a call of the agent's, a link it lets through counted against its site
+/// for its whole tree.
 pub fn classify(daemon: &crate::daemon::Daemon, agent: &str, args: &Value) -> gate::Verdict {
     let root = crate::tree::root_of(daemon, agent);
     let said: HashSet<String> = daemon
@@ -196,17 +198,19 @@ pub fn classify(daemon: &crate::daemon::Daemon, agent: &str, args: &Value) -> ga
         .iter()
         .flat_map(|delivery| urls_in(&delivery.body))
         .collect();
-    let seen = &daemon.mcp.seen;
-    let pass = |url: &Url| match said.contains(url.as_str()) {
+    let mode = crate::judge::mode(daemon, agent);
+    // Judged and counted at once: two calls at the same time cannot both take the last read.
+    let mut seen = daemon.mcp.seen.0.lock().unwrap();
+    let pass = |seen: &Shown, url: &Url| match said.contains(url.as_str()) {
         true => Pass::Free,
-        false => seen.pass(agent, url),
+        false => seen.pass(agent, &root, url),
     };
-    let verdict = verdict(args, pass, crate::judge::mode(daemon, agent));
+    let verdict = verdict(args, |url| pass(&seen, url), mode);
     if verdict == gate::Verdict::Allow
         && let Ok(Asked::Read(url)) = asked(args)
-        && let Pass::Link(_) = pass(&url)
+        && let Pass::Link(_) = pass(&seen, &url)
     {
-        seen.read_through_link(agent, &url);
+        seen.read_through_link(&root, &url);
     }
     verdict
 }
@@ -370,44 +374,52 @@ impl Net {
     }
 }
 
-/// The URLs each agent was shown by data it did not write, and how often it read each host
+/// The URLs each agent was shown by data it did not write, and how often each tree read each site
 /// through links.
 #[derive(Default)]
-pub struct Seen(Mutex<HashMap<String, Shown>>);
+pub struct Seen(Mutex<Shown>);
 
 #[derive(Default)]
 struct Shown {
-    urls: HashMap<String, Source>,
-    link_reads: HashMap<String, usize>,
+    /// Per agent.
+    urls: HashMap<String, HashMap<String, Source>>,
+    /// Per root agent, then per [`site`]: the children of a tree share its budget, or each child
+    /// would bring ten more reads.
+    link_reads: HashMap<String, HashMap<String, usize>>,
 }
 
 impl Seen {
     /// Remembers URLs shown to the agent; one the user or a search gave stays free.
     pub fn saw(&self, agent: &str, urls: Vec<(String, Source)>) {
-        let mut seen = self.0.lock().unwrap();
-        let shown = seen.entry(agent.to_owned()).or_default();
+        self.0.lock().unwrap().saw(agent, urls);
+    }
+}
+
+impl Shown {
+    fn saw(&mut self, agent: &str, urls: Vec<(String, Source)>) {
+        let shown = self.urls.entry(agent.to_owned()).or_default();
         for (url, source) in urls {
-            if shown.urls.len() >= SEEN_KEPT && !shown.urls.contains_key(&url) {
+            if shown.len() >= SEEN_KEPT && !shown.contains_key(&url) {
                 continue;
             }
-            let kept = shown.urls.entry(url).or_insert(source);
+            let kept = shown.entry(url).or_insert(source);
             if source == Source::Free {
                 *kept = Source::Free;
             }
         }
     }
 
-    pub fn pass(&self, agent: &str, url: &Url) -> Pass {
-        let seen = self.0.lock().unwrap();
-        let Some(shown) = seen.get(agent) else {
-            return Pass::Unseen;
-        };
-        match shown.urls.get(url.as_str()) {
+    fn pass(&self, agent: &str, root: &str, url: &Url) -> Pass {
+        match self
+            .urls
+            .get(agent)
+            .and_then(|shown| shown.get(url.as_str()))
+        {
             Some(Source::Free) => Pass::Free,
             Some(Source::Link) => Pass::Link(
-                shown
-                    .link_reads
-                    .get(url.host_str().unwrap_or_default())
+                self.link_reads
+                    .get(root)
+                    .and_then(|reads| reads.get(&site(url)))
                     .copied()
                     .unwrap_or(0),
             ),
@@ -415,13 +427,29 @@ impl Seen {
         }
     }
 
-    fn read_through_link(&self, agent: &str, url: &Url) {
-        let mut seen = self.0.lock().unwrap();
-        let shown = seen.entry(agent.to_owned()).or_default();
-        *shown
+    fn read_through_link(&mut self, root: &str, url: &Url) {
+        *self
             .link_reads
-            .entry(url.host_str().unwrap_or_default().to_owned())
+            .entry(root.to_owned())
+            .or_default()
+            .entry(site(url))
             .or_default() += 1;
+    }
+}
+
+/// What a link read is counted against: the host's last two labels, lowercased, without a final
+/// dot, so that a page cannot give each link a subdomain of its own; an address whole. Without a
+/// list of public suffixes, `a.co.uk` and `b.co.uk` share one budget, the safer side.
+fn site(url: &Url) -> String {
+    match url.host() {
+        Some(Host::Domain(name)) => {
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            let mut labels: Vec<&str> = name.rsplit('.').take(2).collect();
+            labels.reverse();
+            labels.join(".")
+        }
+        Some(host) => host.to_string(),
+        None => String::new(),
     }
 }
 
@@ -1493,7 +1521,7 @@ mod tests {
                 gate::Verdict::Deny(_)
             ));
         }
-        // A link passes until its host was read often through links, then is judged.
+        // A link passes until its site was read often through links, then is judged.
         assert_eq!(
             verdict(&read("https://docs.rs/tokio/a"), seen, GateMode::Auto),
             gate::Verdict::Allow
@@ -1540,38 +1568,119 @@ mod tests {
                 "http://example.com/a?b=c",
             ]
         );
-        let seen = Seen::default();
         let url = |text: &str| Url::parse(text).unwrap();
         let shown = |source| urls_in(text).into_iter().map(|u| (u, source)).collect();
+        let mut seen = Shown::default();
         seen.saw("a1", shown(Source::Link));
         assert_eq!(
-            seen.pass("a1", &url("http://example.com/a?b=c")),
+            seen.pass("a1", "a1", &url("http://example.com/a?b=c")),
             Pass::Link(0)
         );
         seen.read_through_link("a1", &url("http://example.com/other"));
         assert_eq!(
-            seen.pass("a1", &url("http://example.com/a?b=c")),
+            seen.pass("a1", "a1", &url("http://example.com/a?b=c")),
             Pass::Link(1)
         );
         assert_eq!(
-            seen.pass("a1", &url("http://example.com/a?b=c&d=secret")),
+            seen.pass("a1", "a1", &url("http://example.com/a?b=c&d=secret")),
             Pass::Unseen
         );
         assert_eq!(
-            seen.pass("a2", &url("http://example.com/a?b=c")),
+            seen.pass("a2", "a2", &url("http://example.com/a?b=c")),
             Pass::Unseen
         );
         // Shown by a search too, it is free.
         seen.saw("a1", shown(Source::Free));
         assert_eq!(
-            seen.pass("a1", &url("http://example.com/a?b=c")),
+            seen.pass("a1", "a1", &url("http://example.com/a?b=c")),
             Pass::Free
         );
         seen.saw("a1", shown(Source::Link));
         assert_eq!(
-            seen.pass("a1", &url("http://example.com/a?b=c")),
+            seen.pass("a1", "a1", &url("http://example.com/a?b=c")),
             Pass::Free
         );
+    }
+
+    /// The reads through links counted so far for the links `urls` shown to agent `a1`, of tree
+    /// `root`, each read once.
+    fn read_through_links(urls: &[&str]) -> Vec<Pass> {
+        let mut seen = Shown::default();
+        let urls: Vec<Url> = urls.iter().map(|u| Url::parse(u).unwrap()).collect();
+        seen.saw(
+            "a1",
+            urls.iter()
+                .map(|u| (u.as_str().to_owned(), Source::Link))
+                .collect(),
+        );
+        urls.iter()
+            .map(|url| {
+                let pass = seen.pass("a1", "root", url);
+                seen.read_through_link("root", url);
+                pass
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_subdomains_of_one_domain_share_one_budget() {
+        assert_eq!(
+            read_through_links(&[
+                "https://0-a.attacker.example/",
+                "https://1-b.attacker.example/",
+                "https://deep.1-c.Attacker.Example/",
+                "https://attacker.example/",
+                "https://other.example/",
+            ]),
+            [
+                Pass::Link(0),
+                Pass::Link(1),
+                Pass::Link(2),
+                Pass::Link(3),
+                Pass::Link(0)
+            ]
+        );
+        // An address is its own site, whole.
+        assert_eq!(
+            read_through_links(&[
+                "http://10.0.0.1/",
+                "http://10.0.0.2/",
+                "http://[2001:db8::1]/"
+            ]),
+            [Pass::Link(0), Pass::Link(0), Pass::Link(0)]
+        );
+        assert_eq!(
+            site(&Url::parse("http://[2001:db8::1]:8080/").unwrap()),
+            "[2001:db8::1]"
+        );
+    }
+
+    #[test]
+    fn a_trailing_dot_shares_the_budget_of_its_domain() {
+        assert_eq!(
+            read_through_links(&[
+                "https://attacker.example/",
+                "https://attacker.example./",
+                "https://a.attacker.example./",
+            ]),
+            [Pass::Link(0), Pass::Link(1), Pass::Link(2)]
+        );
+    }
+
+    #[test]
+    fn a_child_and_its_parent_share_one_budget() {
+        let mut seen = Shown::default();
+        let link = Url::parse("https://docs.example/a").unwrap();
+        for agent in ["root", "child"] {
+            seen.saw(agent, vec![(link.as_str().to_owned(), Source::Link)]);
+        }
+        seen.read_through_link("root", &link);
+        assert_eq!(seen.pass("child", "root", &link), Pass::Link(1));
+        seen.read_through_link("root", &link);
+        assert_eq!(seen.pass("root", "root", &link), Pass::Link(2));
+        // Another tree has its own.
+        seen.saw("other", vec![(link.as_str().to_owned(), Source::Link)]);
+        assert_eq!(seen.pass("other", "other", &link), Pass::Link(0));
     }
 
     #[test]
