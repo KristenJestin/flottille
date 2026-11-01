@@ -10,7 +10,7 @@
 use serde_json::Value;
 
 use super::{
-    Comment, Forge, ForgeCall, Gh, MERGE_METHODS, Pull, blocks, commit_hash, masked,
+    Comment, Forge, ForgeCall, Gh, MERGE_METHODS, Pull, Seen, blocks, commit_hash, masked,
     method_refused, run,
 };
 use crate::mcp::Outcome;
@@ -163,7 +163,7 @@ fn place(forge: &Forge) -> [&str; 4] {
     }
 }
 
-fn cloud(forge: &Forge) -> bool {
+pub(super) fn cloud(forge: &Forge) -> bool {
     matches!(forge, Forge::Bitbucket { host, .. } if host == "bitbucket.org")
 }
 
@@ -898,4 +898,51 @@ pub(super) async fn write(
         }
         action => Outcome::Refused(format!("refused: forge {action} writes nothing here")),
     }
+}
+
+/// The state, source branch and origin of the pull request `number`, for `forge close`: none when
+/// the newest pull requests `bkt` lists do not hold it and it may be older (an error then).
+pub(super) async fn seen(forge: &Forge, number: u64) -> Result<Option<Seen>, String> {
+    let context = Contexts::default().of(forge).await?;
+    let all = pulls(forge, &context, "all").await?;
+    let cut = all.len() >= LISTED;
+    match all.into_iter().find(|pull| pull.id == number) {
+        Some(pull) => Ok(Some(Seen {
+            state: pull.state,
+            branch: pull.branch,
+            own: pull.own,
+        })),
+        None if cut => Err(format!(
+            "the pull request #{number} is not among the newest {LISTED} of {}, the most `bkt` \
+             lists: it may be older",
+            forge.slug()
+        )),
+        None => Ok(None),
+    }
+}
+
+/// `forge close` of a Bitbucket pull request: `bkt pr decline <id> [--comment T]
+/// [--delete-source]` (v0.37.0, `pkg/cmd/pr/pr.go`, `newDeclineCmd`).
+pub(super) async fn decline(
+    forge: &Forge,
+    number: &str,
+    comment: Option<&str>,
+    delete_source: bool,
+) -> Result<(), String> {
+    let context = Contexts::default().of(forge).await?;
+    let mut flags = Vec::new();
+    if let Some(comment) = comment {
+        flags.extend(["--comment", comment]);
+    }
+    if delete_source {
+        flags.push("--delete-source");
+    }
+    text(&command(
+        forge,
+        &context,
+        &["pr", "decline", number],
+        &flags,
+    ))
+    .await
+    .map(|_| ())
 }

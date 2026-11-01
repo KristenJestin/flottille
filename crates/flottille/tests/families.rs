@@ -347,6 +347,249 @@ fn forge_edit_is_judged_and_changes_the_pull_request_once_allowed() {
     ));
 }
 
+/// `pulls()` with an open pull request of a branch no workspace is on (#15), and a closed one (#9).
+fn pulls_to_close() -> Value {
+    let mut script = pulls();
+    let held = &mut script["pulls"]["acme/app"];
+    held["app/gone"] = json!({"number": 15, "title": "Gone work", "state": "OPEN",
+        "isDraft": false, "baseRefName": "main", "headRefName": "app/gone",
+        "isCrossRepository": false, "url": "https://github.com/acme/app/pull/15"});
+    held["app/closed"] = json!({"number": 9, "title": "Dropped work", "state": "CLOSED",
+        "isDraft": false, "baseRefName": "main", "headRefName": "app/closed",
+        "isCrossRepository": false, "url": "https://github.com/acme/app/pull/9"});
+    script
+}
+
+/// What the user is told once they allowed a call the forge then refused.
+fn allowed_then_refused(user: &User, answer: Answer) -> String {
+    let body = allow(user, held(&answer));
+    assert!(body.contains("refused:"), "{body}");
+    body
+}
+
+#[test]
+fn forge_close_closes_a_github_pull_request_with_a_comment_once_allowed() {
+    let user = user();
+    on_github(&user);
+    user.gh_script(pulls_to_close());
+    let (_, mcp) = root_in(&user, None);
+
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "close", "number": 12, "comment": "Superseded by #20"}),
+    );
+    let done = judged_then_done(&user, answer, || words(user.gh_received()), "pr close");
+
+    assert!(
+        done.contains("The pull request #12 of acme/app was closed."),
+        "{done}"
+    );
+    let calls = words(user.gh_received());
+    assert!(
+        calls
+            .contains(&"pr close 12 -R github.com/acme/app --comment Superseded by #20".to_owned())
+    );
+    // Its state was read first, and the branch is left to the workspace that holds it.
+    assert!(calls.iter().any(|call| call.starts_with("pr view 12 ")));
+    assert!(user.escalations().is_empty());
+}
+
+#[test]
+fn forge_close_declines_a_bitbucket_pull_request_with_a_comment() {
+    let user = user();
+    on_bitbucket(&user);
+    user.bkt_script(
+        json!({"pulls": {"acme/app": [{"id": 3, "title": "Work", "state": "OPEN",
+        "source": {"branch": {"name": "app/gone"}, "repository": {"full_name": "acme/app"}},
+        "destination": {"branch": {"name": "main"}, "repository": {"full_name": "acme/app"}},
+        "links": {"html": {"href": "https://bitbucket.org/acme/app/pull-requests/3"}}}]}}),
+    );
+    let (_, mcp) = root_in(&user, None);
+
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "close", "number": 3, "comment": "Superseded"}),
+    );
+    let done = judged_then_done(&user, answer, || words(user.bkt_received()), "pr decline");
+
+    assert!(
+        done.contains("The pull request #3 of acme/app was declined."),
+        "{done}"
+    );
+    assert!(words(user.bkt_received()).contains(
+        &"pr decline 3 --context cloud --workspace acme --repo app --comment Superseded".to_owned()
+    ));
+}
+
+#[test]
+fn forge_close_deletes_the_branch_of_a_pull_request_no_workspace_is_on() {
+    let user = user();
+    on_github(&user);
+    user.gh_script(pulls_to_close());
+    let (_, mcp) = root_in(&user, None);
+
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "close", "number": 15, "delete_branch": true}),
+    );
+    let done = judged_then_done(&user, answer, || words(user.gh_received()), "pr close");
+
+    assert!(
+        done.contains("and its branch app/gone was deleted"),
+        "{done}"
+    );
+    assert!(
+        words(user.gh_received())
+            .contains(&"pr close 15 -R github.com/acme/app --delete-branch".to_owned())
+    );
+}
+
+#[test]
+fn forge_close_leaves_the_branch_a_workspace_is_still_on() {
+    let user = user();
+    on_github(&user);
+    user.gh_script(pulls_to_close());
+    let (_, mcp) = root_in(&user, None);
+
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "close", "number": 12, "delete_branch": true}),
+    );
+    let done = judged_then_done(&user, answer, || words(user.gh_received()), "pr close");
+
+    assert!(
+        done.contains("its branch app/login was left: the workspace login is on it"),
+        "{done}"
+    );
+    assert!(words(user.gh_received()).contains(&"pr close 12 -R github.com/acme/app".to_owned()));
+}
+
+#[test]
+fn forge_close_of_a_merged_or_closed_pull_request_is_refused_with_its_state() {
+    let user = user();
+    on_github(&user);
+    user.gh_script(pulls_to_close());
+    let (_, mcp) = root_in(&user, None);
+
+    let merged = allowed_then_refused(
+        &user,
+        mcp.call("forge", json!({"action": "close", "number": 7})),
+    );
+    assert!(
+        merged.contains("the pull request #7 of acme/app is merged, not open"),
+        "{merged}"
+    );
+    let closed = allowed_then_refused(
+        &user,
+        mcp.call("forge", json!({"action": "close", "number": 9})),
+    );
+    assert!(
+        closed.contains("the pull request #9 of acme/app is closed, not open"),
+        "{closed}"
+    );
+    assert!(
+        !words(user.gh_received())
+            .iter()
+            .any(|call| call.starts_with("pr close"))
+    );
+}
+
+#[test]
+fn forge_reopen_reopens_a_closed_github_pull_request() {
+    let user = user();
+    on_github(&user);
+    user.gh_script(pulls_to_close());
+    let (_, mcp) = root_in(&user, None);
+
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "reopen", "number": 9, "comment": "Needed again"}),
+    );
+    let done = judged_then_done(&user, answer, || words(user.gh_received()), "pr reopen");
+
+    assert!(
+        done.contains("The pull request #9 of acme/app was reopened."),
+        "{done}"
+    );
+    assert!(
+        words(user.gh_received())
+            .contains(&"pr reopen 9 -R github.com/acme/app --comment Needed again".to_owned())
+    );
+    // Not one that is open, nor one that was merged.
+    let open = allowed_then_refused(
+        &user,
+        mcp.call("forge", json!({"action": "reopen", "number": 12})),
+    );
+    assert!(
+        open.contains("the pull request #12 of acme/app is open, not closed"),
+        "{open}"
+    );
+    let merged = allowed_then_refused(
+        &user,
+        mcp.call("forge", json!({"action": "reopen", "number": 7})),
+    );
+    assert!(
+        merged.contains("the pull request #7 of acme/app is merged, not closed"),
+        "{merged}"
+    );
+}
+
+#[test]
+fn forge_reopen_on_bitbucket_is_refused_saying_it_cannot() {
+    let user = user();
+    on_bitbucket(&user);
+    user.bkt_script(
+        json!({"pulls": {"acme/app": [{"id": 3, "title": "Work", "state": "DECLINED",
+        "source": {"branch": {"name": "app/gone"}, "repository": {"full_name": "acme/app"}},
+        "destination": {"branch": {"name": "main"}, "repository": {"full_name": "acme/app"}},
+        "links": {"html": {"href": "https://bitbucket.org/acme/app/pull-requests/3"}}}]}}),
+    );
+    let (_, mcp) = root_in(&user, None);
+
+    let refused = allowed_then_refused(
+        &user,
+        mcp.call("forge", json!({"action": "reopen", "number": 3})),
+    );
+
+    assert!(
+        refused.contains("Bitbucket cannot reopen a declined pull request"),
+        "{refused}"
+    );
+    assert!(
+        !words(user.bkt_received())
+            .iter()
+            .any(|call| call.starts_with("pr reopen") || call.starts_with("pr decline"))
+    );
+}
+
+#[test]
+fn forge_close_in_ask_mode_is_held_and_nothing_is_closed_before_the_user_allows_it() {
+    let user = user();
+    on_github(&user);
+    user.gh_script(pulls_to_close());
+    let (agent, mcp) = root_in(&user, None);
+    user.call("agent.mode", json!({"agent": agent, "mode": "ask"}))
+        .unwrap();
+
+    let answer = mcp.call("forge", json!({"action": "close", "number": 15}));
+    let number = held(&answer);
+
+    let request = user.call("approval.list", json!({})).unwrap()["requests"][0].clone();
+    assert!(
+        request["reasons"]
+            .to_string()
+            .contains("it closes a pull request on the forge"),
+        "{request}"
+    );
+    assert!(
+        !words(user.gh_received())
+            .iter()
+            .any(|call| call.starts_with("pr close"))
+    );
+    allow(&user, number);
+    assert!(words(user.gh_received()).contains(&"pr close 15 -R github.com/acme/app".to_owned()));
+}
+
 #[test]
 fn forge_list_comment_and_edit_go_through_bkt_on_bitbucket() {
     let user = user();

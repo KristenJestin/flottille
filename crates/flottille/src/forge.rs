@@ -974,6 +974,11 @@ pub(crate) struct ForgeCall {
     waive: Option<String>,
     /// merge: `squash` (the default), `merge` or `rebase`; the gate refused any other.
     method: Option<String>,
+    /// close, reopen: posted on the pull request first.
+    comment: Option<String>,
+    /// close: also delete the pull request's branch on the forge.
+    #[serde(default)]
+    delete_branch: bool,
     /// subscribe: the events it waits for (`EVENTS`).
     events: Option<Vec<String>>,
     /// subscribe: whose reviews and comments count (`subscriptions::FROM`).
@@ -1045,6 +1050,7 @@ pub async fn forge(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Value
         ("unsubscribe", _) => forge_unsubscribe(daemon, agent, asked),
         ("create" | "merge" | "checks", _) => forge_write(daemon, place, asked).await,
         ("comment" | "edit", _) => forge_note(daemon, agent, place, asked).await,
+        ("close" | "reopen", _) => forge_close(daemon, place, asked).await,
         (action, _) => Outcome::Refused(format!(
             "refused: forge has no action {action:?}: its actions are {}",
             crate::gate::FORGE_ACTIONS
@@ -1523,6 +1529,148 @@ async fn forge_note(daemon: &Daemon, agent: &str, place: &Place, asked: ForgeCal
         }
         (Ok(()), _) => Outcome::Done(format!("Pull request #{number} of {slug} was changed.")),
     }
+}
+
+/// What `forge close` and `reopen` read of a pull request before they act.
+pub(crate) struct Seen {
+    /// `open`, `merged` or `closed`.
+    pub state: &'static str,
+    pub branch: String,
+    /// From the repository itself, not from a fork of it.
+    pub own: bool,
+}
+
+/// `forge close` and `reopen` of a pull request of a repository of the place, by its number: only
+/// an open one is closed and only a closed one reopened, the refusal saying its state. The
+/// branch is deleted on request, unless a workspace is still on it.
+async fn forge_close(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
+    let action = asked.action.as_str();
+    let Some(number) = asked.number else {
+        return Outcome::Refused(format!(
+            "refused: forge {action} needs number, the pull request's: forge list lists them"
+        ));
+    };
+    let checkout = match place_checkouts(daemon, place)
+        .and_then(|all| chosen(all, asked.repository.as_deref(), action, true))
+    {
+        Ok(mut checkouts) => checkouts.remove(0),
+        Err(refusal) => return refusal,
+    };
+    let forge = match declared_forge(&checkout).await {
+        Ok(forge) => forge,
+        Err(None) => {
+            return Outcome::Refused(format!(
+                "refused: {}: {NO_FORGE}; nothing was written: ask the user to set it",
+                checkout.path
+            ));
+        }
+        Err(Some(why)) => return Outcome::Refused(why),
+    };
+    let slug = forge.slug();
+    let bitbucket = matches!(forge, Forge::Bitbucket { .. });
+    if bitbucket && action == "reopen" {
+        return Outcome::Refused(format!(
+            "refused: Bitbucket cannot reopen a declined pull request: nothing was reopened; \
+             open a new one for #{number} of {slug}"
+        ));
+    }
+    let comment = asked.comment.as_deref().filter(|c| !c.trim().is_empty());
+    let numbered = number.to_string();
+    let repo = forge.gh_repository();
+    if !bitbucket && let Err(problem) = signed_in().await {
+        return Outcome::Failed(problem);
+    }
+    let seen = if bitbucket {
+        match bitbucket::seen(&forge, number).await {
+            Ok(Some(seen)) => seen,
+            Ok(None) => {
+                return Outcome::Refused(format!(
+                    "refused: {slug} has no pull request #{number}: forge list lists them"
+                ));
+            }
+            Err(why) => return Outcome::Failed(why),
+        }
+    } else {
+        let fields = "state,headRefName,isCrossRepository";
+        match gh_json(&["pr", "view", &numbered, "-R", &repo, "--json", fields]).await {
+            Ok(viewed) => Seen {
+                state: match viewed["state"].as_str() {
+                    Some("MERGED") => "merged",
+                    Some("CLOSED") => "closed",
+                    _ => "open",
+                },
+                branch: viewed["headRefName"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+                own: viewed["isCrossRepository"] != true,
+            },
+            Err(why) => return Outcome::Failed(why),
+        }
+    };
+    let (wanted, other) = match action {
+        "close" => ("open", "closed"),
+        _ => ("closed", "reopened"),
+    };
+    if seen.state != wanted {
+        return Outcome::Refused(format!(
+            "refused: the pull request #{number} of {slug} is {}, not {wanted}; nothing was {other}",
+            seen.state
+        ));
+    }
+    // The branch of a pull request a workspace is still on is that workspace's.
+    let on_it = daemon
+        .read(|store| store.workspaces(Some(&place.project)))
+        .unwrap_or_default()
+        .into_iter()
+        .find(|w| {
+            w.branch == seen.branch && w.repositories.iter().any(|r| r.path == checkout.path)
+        });
+    let mut left = None;
+    if asked.delete_branch {
+        left = match (&on_it, seen.own) {
+            (Some(workspace), _) => Some(format!("the workspace {} is on it", workspace.name)),
+            (None, false) => Some("it comes from a fork".to_owned()),
+            (None, true) => None,
+        };
+        if left.is_none() && bitbucket::cloud(&forge) {
+            return Outcome::Refused(
+                "refused: bkt cannot delete the source branch of a Bitbucket Cloud pull \
+                 request it declines: decline it without delete_branch; nothing was declined"
+                    .into(),
+            );
+        }
+    }
+    let delete = asked.delete_branch && left.is_none();
+    let done = if bitbucket {
+        bitbucket::decline(&forge, &numbered, comment, delete).await
+    } else {
+        let mut args = vec!["pr", action, &numbered, "-R", &repo];
+        if let Some(comment) = comment {
+            args.extend(["--comment", comment]);
+        }
+        if delete {
+            args.push("--delete-branch");
+        }
+        gh_text(&args).await.map(|_| ())
+    };
+    if let Err(why) = done {
+        return Outcome::Failed(why);
+    }
+    let verb = match (action, bitbucket) {
+        ("close", true) => "declined",
+        ("close", false) => "closed",
+        _ => "reopened",
+    };
+    let branch = masked(&seen.branch);
+    let tail = match (delete, left) {
+        (true, _) => format!(" and its branch {branch} was deleted"),
+        (false, Some(why)) => format!("; its branch {branch} was left: {why}"),
+        (false, None) => String::new(),
+    };
+    Outcome::Done(format!(
+        "The pull request #{number} of {slug} was {verb}{tail}."
+    ))
 }
 
 /// `forge show` without a number: the pull requests of a workspace's branch, their checks and
