@@ -215,7 +215,49 @@ fn present(cx: &mut VisualTestContext, id: &str) -> bool {
     cx.update(|window, _| window.try_find(id.to_owned()).is_some())
 }
 
+/// What the project page scrolls under: the first of them in sight.
+const ANCHORS: [&str; 5] = [
+    "project-header-title",
+    "project-items-title",
+    "project-items-tabs",
+    "project-items-list",
+    "project-tasks-title",
+];
+
+fn visible(cx: &mut VisualTestContext, id: &str) -> bool {
+    cx.update(|window, _| {
+        window
+            .try_find(id.to_owned())
+            .is_some_and(|found| found.visible())
+    })
+}
+
+/// Scrolls the project page down until `id` is in sight, as a user would: where the fold of the
+/// test window falls depends on the fonts of the machine, so no test counts on it.
+fn reveal(cx: &mut VisualTestContext, id: &str) {
+    for _ in 0..80 {
+        if !present(cx, id) || visible(cx, id) {
+            return;
+        }
+        let Some(anchor) = ANCHORS.into_iter().find(|anchor| visible(cx, anchor)) else {
+            return;
+        };
+        cx.update(|window, cx| {
+            window.scroll(
+                anchor,
+                gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-120.))),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    }
+}
+
+/// Clicks `id`, scrolled into sight first.
 fn click(cx: &mut VisualTestContext, id: &str) {
+    reveal(cx, id);
     let id = id.to_owned();
     cx.update(|window, cx| window.click(id, cx));
 }
