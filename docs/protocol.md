@@ -588,7 +588,8 @@ request merged it: the message names every one, and the branch that holds the co
 Every pull request and ticket of a project, as the daemon last read them ([`items.md`](items.md)).
 An item is `{project, kind, source, repository, key, title, state, author, assignees, labels, url,
 updated_at, seen_at, mine, details, checks: [{name, state, started_at, ended_at, link}]}`; a
-source is `{kind, target, source, cursor, round_at, failures, problem}`. `not-found` when there is
+source is `{kind, target, source, cursor, round_at, failures, problem, note}`, `note` saying what
+its last round could not read (a list cut at its cap, `mine` unknown). `not-found` when there is
 no such project.
 
 #### `items.list`
