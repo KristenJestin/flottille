@@ -58,6 +58,24 @@ impl Environment {
 /// Keys a theme must give; everything else can be derived.
 const REQUIRED: [&str; 3] = ["background", "foreground", "accent"];
 
+/// Whether `key` names a colour of a theme file. Any other string in the file (`mode`, a name)
+/// says something else and is not read.
+fn is_colour_key(key: &str) -> bool {
+    const NAMES: [&str; 8] = [
+        "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+    ];
+    let ansi = key.strip_prefix("bright_").unwrap_or(key);
+    matches!(key, "background" | "foreground" | "accent" | "cursor")
+        || key.starts_with("selection")
+        || key.ends_with("_background")
+        || key.ends_with("_foreground")
+        || NAMES.contains(&ansi)
+        || key
+            .strip_prefix("color")
+            .and_then(|n| n.parse::<u8>().ok())
+            .is_some_and(|n| n < 16)
+}
+
 /// Maps a `colors.toml` to the window's tokens.
 pub fn palette_from_toml(text: &str) -> Result<Palette, String> {
     let table: toml::Table = text
@@ -65,7 +83,9 @@ pub fn palette_from_toml(text: &str) -> Result<Palette, String> {
         .map_err(|e| format!("colors.toml does not parse: {e}"))?;
     let mut colors = HashMap::new();
     for (key, value) in &table {
-        let Some(text) = value.as_str() else { continue };
+        let Some(text) = value.as_str().filter(|_| is_colour_key(key)) else {
+            continue;
+        };
         let color = parse_hex(text).ok_or_else(|| format!("`{key}` is not a colour: {text:?}"))?;
         colors.insert(key.as_str(), color);
     }
@@ -80,10 +100,13 @@ pub fn palette_from_toml(text: &str) -> Result<Palette, String> {
     let fg = colors["foreground"];
     let accent = colors["accent"];
     let toward_fg = |t: f32| mix(bg, fg, t);
+    // `darker` and `dark` sit below the background in lightness, `lighter` above it: away from
+    // the foreground on a dark theme, toward it on a light one.
+    let sign = if fg.l > bg.l { -1.0 } else { 1.0 };
 
-    let darker = get(&["darker_background"]).unwrap_or_else(|| toward_fg(-0.05));
-    let dark = get(&["dark_background"]).unwrap_or_else(|| toward_fg(-0.02));
-    let lighter = get(&["lighter_background"]).unwrap_or_else(|| toward_fg(0.04));
+    let darker = get(&["darker_background"]).unwrap_or_else(|| toward_fg(sign * 0.05));
+    let dark = get(&["dark_background"]).unwrap_or_else(|| toward_fg(sign * 0.02));
+    let lighter = get(&["lighter_background"]).unwrap_or_else(|| toward_fg(-sign * 0.04));
     let bright_fg = get(&["bright_foreground"]).unwrap_or_else(|| mix(fg, bg, -0.15));
     let dark_fg = get(&["dark_foreground"]).unwrap_or_else(|| mix(fg, bg, 0.4));
     let selection =
@@ -281,5 +304,57 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("foreground"), "{err}");
+    }
+
+    #[test]
+    fn a_theme_holding_a_mode_key_is_followed() {
+        let p = palette_from_toml(
+            "mode = \"light\"\naccent = \"#1e66f5\"\nbackground = \"#eff1f5\"\n\
+             foreground = \"#4c4f69\"\ncolor1 = \"#d20f39\"\n",
+        )
+        .unwrap();
+        assert_eq!(p.bg, hex(0xeff1f5));
+        assert_eq!(p.acc, hex(0x1e66f5));
+        assert!(contrast(p.text, p.card) >= TEXT_CONTRAST);
+    }
+
+    #[test]
+    fn an_unknown_string_key_is_ignored() {
+        let p = palette_from_toml(
+            "name = \"Latte\"\nnote = \"not #a colour\"\nbackground = \"#101010\"\n\
+             foreground = \"#d0d0d0\"\naccent = \"#88aaff\"\n",
+        )
+        .unwrap();
+        assert_eq!(p.bg, hex(0x101010));
+    }
+
+    #[test]
+    fn a_colour_key_with_a_bad_value_still_refuses_the_theme_and_is_named() {
+        for key in ["background", "color7", "bright_red", "selection_foreground"] {
+            let err = palette_from_toml(&format!(
+                "background = \"#101010\"\nforeground = \"#d0d0d0\"\naccent = \"#88aaff\"\n\
+                 {key} = \"not a colour\"\n"
+            ))
+            .unwrap_err();
+            assert!(err.contains(key), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_light_theme_keeps_the_order_of_its_shades() {
+        let p = palette_from_toml(
+            "accent = \"#1e66f5\"\nbackground = \"#eff1f5\"\nforeground = \"#4c4f69\"\n",
+        )
+        .unwrap();
+        assert!(
+            p.body.l < p.rail.l && p.rail.l < p.bg.l && p.bg.l < p.card.l,
+            "body {} rail {} bg {} card {}",
+            p.body.l,
+            p.rail.l,
+            p.bg.l,
+            p.card.l
+        );
+        assert!(contrast(p.text, p.card) >= TEXT_CONTRAST);
+        assert!(contrast(p.faint, p.card2) >= TEXT_CONTRAST);
     }
 }
