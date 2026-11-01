@@ -53,7 +53,10 @@
 //! A `--search` of `pr list` and `issue list` keeps, for each `updated:>=<time>` it holds, the
 //! objects whose `updatedAt` is that time or later (compared as the RFC 3339 texts they are, as
 //! GitHub's search reads the qualifier), with `--state all` too; `pr list` reads no other word
-//! of it. `api user` prints the script's `user` (`{"login": "someone"}` without).
+//! of it. `api user` prints the script's `user` (`{"login": "someone"}` without), or fails saying
+//! `user_fail` when the script has it. `unlisted` (`{"acme/app": [5]}`) keeps those numbers out
+//! of `pr list` and `issue list`, while `pr view` and `issue view` still answer them: an issue
+//! transferred elsewhere, which GitHub still answers by its old number with its new url.
 //!
 //! `run_fail` (`{"acme/app": "HTTP 502: Bad Gateway"}`) makes `run list` alone fail that way, the
 //! pull request calls still working.
@@ -129,6 +132,13 @@ fn fields_of(objects: &[&Value], fields: Option<&str>, branches: Option<&[&str]>
             Value::from(asked)
         })
         .collect()
+}
+
+/// Whether the script keeps `object` out of the lists of `repository`.
+fn unlisted(script: &Value, repository: &str, object: &Value) -> bool {
+    script["unlisted"][repository]
+        .as_array()
+        .is_some_and(|numbers| numbers.contains(&object["number"]))
 }
 
 /// Whether `object` was updated at or after every `updated:>=` of a search.
@@ -209,6 +219,10 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             0
         }
         ["api", "user", ..] => {
+            if let Some(failure) = script["user_fail"].as_str() {
+                eprintln!("{failure}");
+                return 1;
+            }
             match &script["user"] {
                 Value::Null => println!("{}", json!({"login": "someone"})),
                 user => println!("{user}"),
@@ -281,6 +295,7 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 .filter(|issue| {
                     option("--assignee").is_none_or(|a| named(&issue["assignees"], "login", a))
                 })
+                .filter(|issue| !unlisted(script, repository, issue))
                 .filter(|issue| updated_since(issue, option("--search")))
                 .filter(|issue| {
                     option("--search").is_none_or(|words| {
@@ -470,6 +485,7 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                     .flatten()
                     .filter(|(branch, _)| option("--head").is_none_or(|head| head == *branch))
                     .filter(|(_, pull)| pull["number"].is_u64())
+                    .filter(|(_, pull)| !unlisted(script, repository, pull))
                     .filter(|(_, pull)| updated_since(pull, option("--search")))
                     .filter(|(_, pull)| match (state, pull["state"].as_str()) {
                         ("all", _) => true,

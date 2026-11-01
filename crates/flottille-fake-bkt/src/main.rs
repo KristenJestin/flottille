@@ -41,7 +41,8 @@
 //! API says `ref_name`; seen with v0.37.0), `steps` the `steps` of `bkt pipeline view <build>
 //! --json` and `logs` what `bkt pipeline logs <build> [--step <uuid>]` prints (the last step's by
 //! default), and `fail` makes every call on that repository end with 1, saying its text.
-//! `pipeline_fail` makes `pipeline list` alone fail that way.
+//! `pipeline_fail` makes `pipeline list` alone fail that way, and `checks_fail`
+//! (`{"acme/api": {"12": "Error: 404 Not Found"}}`) `pr checks` of that pull request alone.
 //!
 //! The writes answer as `bkt` does when they work: `pr create` prints `✓ Created pull request #N`
 //! (N is `created`, 1 by default), `pr merge` prints `✓ Merged pull request #N` and `pipeline run`
@@ -194,6 +195,10 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             payload["pull_requests"] = Value::from(pulls);
         }
         ["pr", "checks", id] => {
+            if let Some(failure) = script["checks_fail"][&key][*id].as_str() {
+                eprintln!("{failure}");
+                return 1;
+            }
             payload["pull_request"] = json!(id.parse::<u64>().unwrap_or(0));
             payload["commit"] = json!("0123456789abcdef");
             match &script["checks"][&key][*id] {
