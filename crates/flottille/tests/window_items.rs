@@ -232,11 +232,23 @@ fn visible(cx: &mut VisualTestContext, id: &str) -> bool {
     })
 }
 
-/// Scrolls the project page down until `id` is in sight, as a user would: where the fold of the
-/// test window falls depends on the fonts of the machine, so no test counts on it.
+/// Whether `id` is whole in the window: `visible` holds from its first pixel in sight, while a
+/// click lands on its centre, which may still be below the fold.
+fn in_sight(cx: &mut VisualTestContext, id: &str) -> bool {
+    cx.update(|window, _| {
+        let height = window.viewport_size().height;
+        window.try_find(id.to_owned()).is_some_and(|found| {
+            let bounds = found.bounds();
+            found.visible() && bounds.top() >= px(0.) && bounds.bottom() <= height
+        })
+    })
+}
+
+/// Scrolls the project page down until `id` is whole in sight, as a user would: where the fold
+/// of the test window falls depends on the fonts of the machine, so no test counts on it.
 fn reveal(cx: &mut VisualTestContext, id: &str) {
     for _ in 0..80 {
-        if !present(cx, id) || visible(cx, id) {
+        if !present(cx, id) || in_sight(cx, id) {
             return;
         }
         let Some(anchor) = ANCHORS.into_iter().find(|anchor| visible(cx, anchor)) else {
