@@ -82,6 +82,8 @@ fn lead_in(user: &User, repository: &str) -> (String, Mcp) {
         ]}),
     )
     .unwrap();
+    // The daemon read the project's pull requests once.
+    a_round(user);
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     let opened = user.received_requests("session/new").len();
     let answer = user
@@ -124,7 +126,11 @@ fn ended() -> Value {
     pull
 }
 
-fn script(user: &User, pull: Value) {
+/// The fake `gh` answers `pull`, changed now (a newer `updatedAt`), and the failed job's log.
+fn script(user: &User, mut pull: Value) {
+    static CHANGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = CHANGES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    pull["updatedAt"] = format!("2999-01-01T{:02}:{:02}:00Z", n / 60 % 24, n % 60).into();
     let log = "test\tRun cargo test\t2026-01-01T00:00:00.1234567Z test login::form ... FAILED\n";
     user.gh_script(json!({
         "pulls": {"acme/api": {"app/login": pull}},
@@ -238,9 +244,11 @@ fn blocks(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Vec<Block> 
     })
 }
 
-/// Moves the clock a minute ahead: the daemon reads the pull request.
-fn a_minute_later(user: &User) {
-    user.call("test.advance", json!({"ms": 61_000})).unwrap();
+/// A round of the project's items, as the daemon makes every few minutes: what a subscription
+/// hears.
+fn a_round(user: &User) {
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
 }
 
 #[gpui_kit::test]
@@ -328,7 +336,7 @@ fn cancel_ends_the_subscription_through_the_daemon_and_the_row_folds_away(cx: &m
     assert!(!present(cx, "rail-subscriptions-title"));
     // Nothing is delivered of what the agent no longer waits for.
     script(&user, ended());
-    a_minute_later(&user);
+    a_round(&user);
     std::thread::sleep(Duration::from_millis(500));
     let prompts = user.received_requests("session/prompt");
     assert!(
@@ -354,7 +362,7 @@ fn a_subscription_that_delivers_leaves_the_rail_and_the_delivery_says_what_woke_
     });
 
     script(&user, ended());
-    a_minute_later(&user);
+    a_round(&user);
     until(&shell, cx, "the delivery is in the conversation", |cx| {
         blocks(&page, cx)
             .iter()
@@ -402,7 +410,7 @@ fn the_delivery_is_a_folded_step_that_says_what_woke_the_agent_and_a_click_unfol
     let (shell, cx) = open_session(&user, &lead, cx);
     let page = session_page(&shell, cx);
     script(&user, ended());
-    a_minute_later(&user);
+    a_round(&user);
     until(&shell, cx, "the step is in the conversation", |cx| {
         woken_row(&page, cx).is_some()
     });

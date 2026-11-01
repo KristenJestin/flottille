@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use flottille_core::declared::ProjectTracker;
 use flottille_core::item::{Check, Cursor, Filter, Item};
@@ -161,6 +162,9 @@ const BATCH: usize = 25;
 /// How often a source's open items are compared with its open list, at most: what the search of
 /// what changed never shows again (an issue deleted or transferred) is found this way.
 const SWEEP_MS: u64 = 60 * 60_000;
+/// How long a subscription waits for a round running to store its live read: a tool call answers
+/// promptly, and that round stores a read of its own.
+const LIVE_WAIT: Duration = Duration::from_secs(3);
 
 /// Each project's sources, as `Store::retain_items` takes them.
 type Declared = Vec<(String, Vec<[String; 4]>)>;
@@ -171,8 +175,9 @@ type Rhythm = (Option<std::time::SystemTime>, (u64, u64));
 /// whom each source is signed in as.
 #[derive(Default)]
 pub struct Items {
-    /// One round of a project at a time.
-    rounds: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// One round of a project at a time, each holding the count of what wrote under it (rounds,
+    /// live reads): a live read taken without it knows whether one wrote since.
+    rounds: Mutex<HashMap<String, Arc<tokio::sync::Mutex<u64>>>>,
     windows: AtomicUsize,
     /// Whom a forge says the user is, by host, once it said it.
     me: Mutex<HashMap<String, String>>,
@@ -384,9 +389,10 @@ pub fn poll(daemon: &Arc<Daemon>) {
             continue;
         }
         let lock = lock_of(daemon, &project.name);
-        let Ok(held) = lock.try_lock_owned() else {
+        let Ok(mut held) = lock.try_lock_owned() else {
             continue;
         };
+        *held += 1;
         let daemon = daemon.clone();
         tokio::spawn(async move {
             round(&daemon, &project, &due).await;
@@ -399,7 +405,7 @@ pub fn poll(daemon: &Arc<Daemon>) {
     }
 }
 
-fn lock_of(daemon: &Daemon, project: &str) -> Arc<tokio::sync::Mutex<()>> {
+fn lock_of(daemon: &Daemon, project: &str) -> Arc<tokio::sync::Mutex<u64>> {
     daemon
         .items
         .rounds
@@ -548,9 +554,10 @@ fn failed(cursor: &mut Cursor, problem: String) {
 }
 
 /// Writes what a round read so far, with its events, unless the project is gone meanwhile:
-/// then nothing of it is kept, and false says to stop.
+/// then nothing of it is kept, and false says to stop. The subscriptions to those items are
+/// offered the events once they are stored.
 fn flush(
-    daemon: &Daemon,
+    daemon: &Arc<Daemon>,
     project: &str,
     items: &mut Vec<Item>,
     events: &mut Vec<(&'static str, Value)>,
@@ -565,9 +572,180 @@ fn flush(
     }
     let (items, events) = (std::mem::take(items), std::mem::take(events));
     daemon
-        .write_all(|store| Ok(((), store.put_items(&items, events)?)))
-        .map(|()| true)
-        .map_err(|error| format!("the items could not be stored: {error}"))
+        .write_all(|store| Ok(((), store.put_items(&items, events.clone())?)))
+        .map_err(|error| format!("the items could not be stored: {error}"))?;
+    crate::subscriptions::items(daemon, &items, &events);
+    Ok(true)
+}
+
+/// The project's round lock, only when no round of the project runs: that round stores a read of
+/// its own. Taken before a live read, so that a round neither lands between the read and its
+/// write nor is written over by it.
+pub fn held_now(daemon: &Daemon, project: &str) -> Option<tokio::sync::OwnedMutexGuard<u64>> {
+    let mut held = lock_of(daemon, project).try_lock_owned().ok()?;
+    *held += 1;
+    Some(held)
+}
+
+/// Where the writes of a project stand when a live read starts without its round lock: none
+/// while a round runs.
+pub struct Before(Option<u64>);
+
+pub fn before_live(daemon: &Daemon, project: &str) -> Before {
+    Before(lock_of(daemon, project).try_lock().ok().map(|count| *count))
+}
+
+/// The round lock after a live read taken without it (a subscription's, which never waits behind
+/// a whole round), waited for `LIVE_WAIT` at most: given only when nothing wrote since `before`,
+/// so that the read is the newest and may be stored. Without it, a round running or just run
+/// stores what the next ones compare with.
+pub async fn held_after(
+    daemon: &Daemon,
+    project: &str,
+    before: Before,
+) -> Option<tokio::sync::OwnedMutexGuard<u64>> {
+    let lock = lock_of(daemon, project).lock_owned();
+    let mut held = tokio::time::timeout(LIVE_WAIT, lock).await.ok()?;
+    if before.0 != Some(*held) {
+        return None;
+    }
+    *held += 1;
+    Some(held)
+}
+
+/// Why the rounds do not see an item yet, said to an agent that subscribes to it.
+pub enum Unseen {
+    /// Its source had no complete round: the first one stores without an event.
+    Source,
+    /// It is not stored: the next round stores it without an event.
+    Item,
+}
+
+pub fn unseen(
+    daemon: &Daemon,
+    project: &str,
+    kind: &str,
+    repository: &str,
+    key: &str,
+) -> Option<Unseen> {
+    let target = match kind {
+        "ticket" => "tracker",
+        _ => repository,
+    };
+    let read = daemon
+        .read(|store| store.cursors(project))
+        .unwrap_or_default()
+        .iter()
+        .any(|c| c.kind == kind && c.target == target && c.first_at.is_some());
+    if !read {
+        return Some(Unseen::Source);
+    }
+    let filter = Filter {
+        kind: Some(kind.into()),
+        repository: Some(repository.into()),
+        ..Filter::default()
+    };
+    let stored = daemon
+        .read(|store| store.items(project, &filter))
+        .unwrap_or_default()
+        .iter()
+        .any(|item| item.key == key);
+    (!stored).then_some(Unseen::Item)
+}
+
+/// Stores what a live read found of one item (`forge show`, `tickets show`, a subscription's
+/// first read) with the events a round would emit of it, so that the next round compares with
+/// it; called with the project's round lock held since before the read, or given by `held_after`.
+/// What a live read does not say (its author, labels and assignees, when it changed, an empty
+/// state) is kept, as are the links of its checks. One no round stored yet (made since the last,
+/// or too old to be listed) is stored as it was read, once its source had a first round: the next
+/// round's events are from what it was then. As in a round, it is opened only when open and not
+/// made before that first round.
+pub fn put_live(daemon: &Arc<Daemon>, mut fetched: Fetched) {
+    let item = &mut fetched.item;
+    let stored = daemon
+        .read(|store| {
+            store.items(
+                &item.project,
+                &Filter {
+                    kind: Some(item.kind.clone()),
+                    repository: Some(item.repository.clone()),
+                    ..Filter::default()
+                },
+            )
+        })
+        .unwrap_or_default();
+    item.seen_at = now_ms();
+    let Some(old) = stored.into_iter().find(|old| old.key == item.key) else {
+        let target = match item.kind.as_str() {
+            "ticket" => "tracker".to_owned(),
+            _ => item.repository.clone(),
+        };
+        let first_at = daemon
+            .read(|store| store.cursors(&item.project))
+            .unwrap_or_default()
+            .iter()
+            .find(|c| c.kind == item.kind && c.target == target)
+            .and_then(|c| c.first_at);
+        // A Jira work item's state is not said by its live read.
+        let Some(first_at) = first_at.filter(|_| !item.state.is_empty()) else {
+            return;
+        };
+        let made_before = fetched
+            .created_at
+            .is_some_and(|made| made + OVERLAP_MS < first_at);
+        let mut events = match made_before || matches!(item.state.as_str(), "merged" | "closed") {
+            true => Vec::new(),
+            false => events_of(None, &fetched),
+        };
+        let project = fetched.item.project.clone();
+        if let Err(error) = flush(daemon, &project, &mut vec![fetched.item], &mut events) {
+            eprintln!("flottille daemon: items of {project}: {error}");
+        }
+        return;
+    };
+    item.source = old.source.clone();
+    item.author = old.author.clone();
+    item.assignees = old.assignees.clone();
+    item.labels = old.labels.clone();
+    item.updated_at = old.updated_at.clone();
+    item.mine = old.mine;
+    if item.state.is_empty() {
+        item.state = old.state.clone();
+    }
+    let live = std::mem::take(&mut item.checks);
+    keep_details(&old, item);
+    // Found, it is no longer removed.
+    if let Some(details) = item.details.as_object_mut() {
+        details.remove("removed");
+    }
+    if item.kind == "pull" {
+        item.checks = live
+            .into_iter()
+            .map(|mut check| {
+                if check.link.is_none() {
+                    let kept = old.checks.iter().find(|c| c.name == check.name);
+                    check.link = kept.and_then(|c| c.link.clone());
+                }
+                check
+            })
+            .collect();
+    }
+    let mut events = events_of(Some(&old), &fetched);
+    let project = fetched.item.project.clone();
+    if let Err(error) = flush(daemon, &project, &mut vec![fetched.item], &mut events) {
+        eprintln!("flottille daemon: items of {project}: {error}");
+    }
+}
+
+/// How old what a source read is, from when its last complete round started: `as of 40 s ago`.
+pub fn as_of(at: u64) -> String {
+    let seconds = now_ms().saturating_sub(at) / 1000;
+    match seconds {
+        0..60 => format!("as of {seconds} s ago"),
+        60..3600 => format!("as of {} min ago", seconds / 60),
+        _ => format!("as of {} h ago", seconds / 3600),
+    }
 }
 
 async fn source_round(daemon: &Arc<Daemon>, project: &Project, source: &Source) {
@@ -635,7 +813,7 @@ async fn source_round(daemon: &Arc<Daemon>, project: &Project, source: &Source) 
 /// whose CI still runs. The note of what could not be read; none when the project went
 /// meanwhile.
 async fn read_round(
-    daemon: &Daemon,
+    daemon: &Arc<Daemon>,
     project: &Project,
     source: &Source,
     cursor: &Cursor,
@@ -821,8 +999,11 @@ fn events_of(old: Option<&Item>, new: &Fetched) -> Vec<(&'static str, Value)> {
         change("status", from.clone(), to.clone());
     }
     change("title", json!(old.title), json!(item.title));
-    change("assignees", json!(old.assignees), json!(item.assignees));
-    change("labels", json!(old.labels), json!(item.labels));
+    // One stored from a live read alone, which says neither, is no change of them.
+    if old.updated_at.is_some() {
+        change("assignees", json!(old.assignees), json!(item.assignees));
+        change("labels", json!(old.labels), json!(item.labels));
+    }
     if !changes.is_empty() {
         events.insert(
             0,
@@ -865,6 +1046,24 @@ fn events_of(old: Option<&Item>, new: &Fetched) -> Vec<(&'static str, Value)> {
         }
         if let Some(reviewers) = item.details.get("reviewers") {
             data["reviewers"] = reviewers.clone();
+            // Bitbucket says a review as a reviewer's verdict: the new ones, by whom.
+            let was = |name: &Value| {
+                old.details["reviewers"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|r| r["name"] == *name)
+                    .map(|r| r["state"].clone())
+            };
+            data["verdicts"] = reviewers
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|r| {
+                    r["state"] != "pending" && was(&r["name"]).as_ref() != Some(&r["state"])
+                })
+                .cloned()
+                .collect();
         }
         events.push(("item.reviewed", data));
     }
@@ -1012,7 +1211,8 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
             let asked: Refreshed = serde_json::from_value(params)?;
             let project = projects::load_project(&daemon, &asked.project)?;
             let lock = lock_of(&daemon, &project.name);
-            let held = lock.lock().await;
+            let mut held = lock.lock().await;
+            *held += 1;
             round(&daemon, &project, &sources_of(&project)).await;
             drop(held);
             Ok(json!({"project": project.name,

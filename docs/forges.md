@@ -118,14 +118,13 @@ workspace with a GitHub repository and a Bitbucket one still shows the one that 
   long as that connection is open, the daemon reads the workspace again about once a minute.
   When a read fails (`gh` missing, not signed in, or a call failing), the next one waits twice as
   long, up to 16 minutes, and back to a minute after a read that works.
-- **While an agent subscribes to its pull request** (`forge` `subscribe`, "Subscriptions" below):
-  the subscription holds a watch of the workspace, the same reads, until it is over.
 - **And continuously, for the whole project**: every pull request of each repository whose forge
   is declared is read by the daemon on its own, incrementally (only what changed since the last
   round), within a budget (a round a minute while a window is connected, every 5 minutes
   otherwise, longer for a forge that fails), kept in the store and said as `item.*` events
   ([`items.md`](items.md)). The workspace's state above is still read on demand and while it is
-  watched.
+  watched. A subscription to a pull request reads nothing of its own: it hears the rounds'
+  events ("Subscriptions" below), and `forge list` answers from what they stored.
 
 The state is kept in the daemon's memory, not in the store. When a read finds it different from the
 last one (its time aside), the daemon emits `workspace.forge` with the whole state
@@ -379,8 +378,8 @@ Recent CI runs of acme/app took 4 min on average (3 to 6 min, last 5).
 - **Bitbucket Data Center** has no CI API in common: nothing is said and nothing is asked.
 - The **last 5** finished runs of the repository, any branch, newest first; the average, the
   shortest and the longest are rounded to the minute (1 at least). A run of no time is left out.
-- **One read**, made only when `forge` `show` or `forge` `subscribe` runs, never by the watch of
-  a subscription nor of a client. **A read that fails** (`gh` or `bkt` failing, an answer in a
+- **One read**, made only when `forge` `show` or `forge` `subscribe` runs, never by the rounds
+  of the items (which a subscription hears) nor the watch of a client. **A read that fails** (`gh` or `bkt` failing, an answer in a
   shape not expected) is not an error: `show` and `subscribe` answer without the line.
 
 **`forge` `subscribe` without `minutes`** is sized by those runs: twice their average, rounded up
@@ -398,21 +397,26 @@ With `minutes`, the agent's choice is kept and the answer carries the line about
 
 ## Subscriptions
 
-The forge watch is the first source of events of the subscriptions (`docs/design.md` §5.6). After
-each read of a workspace, every subscription to one of its pull requests compares it with what it
-saw last, stored with it (the state, whether a check was running, the head commit, a hash of each
-comment and review, Bitbucket's reviewers' verdicts):
+The pull requests the daemon keeps up to date are a source of events of the subscriptions
+(`docs/design.md` §5.6). Each round of the items compares what it read of a pull request with
+what the store holds of it and says what changed as `item.*` events ([`items.md`](items.md),
+"Events"); a subscription to that pull request is offered them once they are stored, as the
+events it names:
 
-- `checks`: none runs now, and one was running or the head commit changed; the delivery says how
-  many passed, failed and were skipped, and the end of each failed job's log, read then
-  ("Why a check failed");
-- `review`: a review that was not there (GitHub: its state, not `pending`; Bitbucket: a
-  reviewer's new verdict), with its author, state and an excerpt;
-- `comment`: a comment that was not there, with its author and an excerpt;
-- `merged`, `closed`: the pull request's state became that; either ends every subscription to it.
+- `checks` (`item.checks`): none runs now, and one was running or the head commit changed; the
+  delivery says how many passed, failed and were skipped, and the end of each failed job's log,
+  read then ("Why a check failed");
+- `review` (`item.reviewed`): a review that was not there (GitHub: its state, not `pending`;
+  Bitbucket: a reviewer's new verdict), with its author, state and an excerpt (200 characters, on
+  one line);
+- `comment` (`item.commented`): a comment that was not there, with its author and an excerpt, the
+  newest five of a round at most;
+- `merged`, `closed` (`item.merged`, `item.closed`): the pull request's state became that; either
+  ends every subscription to it.
 
-The first read after subscribing is the one the subscription saw: what is already so is no event.
-A read that fails changes nothing. **A bot**, for `from: people`, is a GitHub author whose
+`forge subscribe` reads the pull request once and stores it before the subscription opens: what
+is already so is no event. A round that fails changes nothing. A subscription hears as often as
+the rounds come: every minute while a window is connected, every five otherwise. **A bot**, for `from: people`, is a GitHub author whose
 login starts with `app/` (as `gh` says an app) or ends with `[bot]`, or that `gh` says `is_bot`;
 this is assumed from `gh`'s output, and the maintainer checks it on a real pull request. A
 Bitbucket author is always taken for a person: what says a bot there is not read. **What

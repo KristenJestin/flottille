@@ -1,175 +1,247 @@
-//! The forge as a source of events for the subscriptions (`crate::subscriptions`): a read of a
-//! watched workspace is compared with what each subscription to one of its pull requests saw
-//! last, and what changed becomes events. A state already there when it was seen is no event.
+//! The pull requests as a source of events for the subscriptions (`crate::subscriptions`): what
+//! the items' rounds and live reads emit of a pull request (`docs/items.md`, "Events") is offered
+//! to the subscriptions to it, as the events they name. A subscription reads nothing of its own:
+//! a state already stored when it subscribed is no event, since the rounds emit only changes.
 
-use std::collections::HashMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::Arc;
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
 
+use flottille_core::item::Item;
 use flottille_core::subscription::Subscription;
 use flottille_core::workspace::Workspace;
 use serde_json::{Value, json};
 
-use super::{BY_AGENT, Comment, Pull, Read, logs};
+use super::{BY_AGENT, Forge, Job, Pull, logs};
 use crate::daemon::Daemon;
 use crate::subscriptions::{self, By, Event};
 
 /// The events a pull request has, as a subscription names them.
 pub const EVENTS: [&str; 5] = ["checks", "review", "comment", "merged", "closed"];
-/// What a delivery shows of a comment or a review at most.
-const EXCERPT_CHARS: usize = 300;
 
-/// What a subscription keeps of a pull request to compare the next read with.
-pub(super) fn seen_of(pull: &Pull) -> Value {
-    let reviewers: HashMap<&str, &str> = pull
-        .reviewers
-        .iter()
-        .map(|(name, state)| (name.as_str(), *state))
-        .collect();
-    json!({
-        "state": pull.state,
-        "pending": pull.checks.iter().any(|(_, state)| *state == "pending"),
-        "head": pull.head_commit,
-        "comments": hashes(&pull.comments),
-        "reviews": hashes(&pull.reviews),
-        "reviewers": reviewers,
+/// Who wrote a comment or a review an `item.*` event says (`items::Said`).
+fn by(said: &Value) -> Option<By> {
+    Some(By {
+        name: said["author"].as_str().unwrap_or_default().to_owned(),
+        bot: said["bot"] == true,
+        marked: said["by_agent"] == true,
     })
 }
 
-/// Each comment as a short hash: what was seen is known without keeping its text.
-fn hashes(comments: &[Comment]) -> Vec<String> {
-    comments.iter().map(hash).collect()
+/// The newest comments or reviews an event says.
+fn said<'a>(data: &'a Value, key: &str) -> impl Iterator<Item = &'a Value> {
+    data[key].as_array().into_iter().flatten()
 }
 
-fn hash(comment: &Comment) -> String {
-    let mut hasher = DefaultHasher::new();
-    (&comment.author, &comment.state, &comment.body).hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
-}
-
-/// The comments of `now` that `seen` did not hold, as many times as they are new.
-fn new_ones<'a>(seen: &Value, now: &'a [Comment]) -> Vec<&'a Comment> {
-    let mut left: HashMap<&str, usize> = HashMap::new();
-    for hash in seen
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-    {
-        *left.entry(hash).or_default() += 1;
+/// The checks of `item`, all ended: how many passed, failed and were skipped.
+fn checks_ended(item: &Item) -> String {
+    let count = |state: &str| item.checks.iter().filter(|c| c.state == state).count();
+    let mut text = format!(
+        "The checks ended: {} passed, {} failed",
+        count("passing"),
+        count("failing")
+    );
+    if count("skipped") > 0 {
+        text.push_str(&format!(", {} skipped", count("skipped")));
     }
-    let hashes = hashes(now);
-    now.iter()
-        .zip(&hashes)
-        .filter(|(_, hash)| match left.get_mut(hash.as_str()) {
-            Some(count) if *count > 0 => {
-                *count -= 1;
-                false
+    text.push('.');
+    text
+}
+
+/// What the events of one pull request say, as its subscriptions name them, and the one that
+/// ends it (merged or closed).
+fn events_of(
+    named: &str,
+    item: Option<&Item>,
+    events: &[&(&'static str, Value)],
+) -> (Vec<Event>, Option<Event>) {
+    let mut found = Vec::new();
+    let mut ends = None;
+    for (name, data) in events {
+        match *name {
+            "item.checks" => found.extend(item.map(|item| Event {
+                kind: "checks",
+                by: None,
+                text: checks_ended(item),
+            })),
+            "item.reviewed" => {
+                for review in said(data, "reviews") {
+                    let state = review["state"].as_str().unwrap_or("commented");
+                    if state == "pending" {
+                        continue;
+                    }
+                    let author = review["author"].as_str().unwrap_or_default();
+                    found.push(Event {
+                        kind: "review",
+                        by: by(review),
+                        text: format!(
+                            "A review by {author}, {state}: {}",
+                            review["excerpt"].as_str().unwrap_or_default()
+                        ),
+                    });
+                }
+                // Bitbucket says a review as a reviewer's verdict.
+                for verdict in said(data, "verdicts") {
+                    let name = verdict["name"].as_str().unwrap_or_default();
+                    found.push(Event {
+                        kind: "review",
+                        by: Some(By {
+                            name: name.to_owned(),
+                            bot: false,
+                            marked: false,
+                        }),
+                        text: format!(
+                            "A review by {name}: {}",
+                            verdict["state"].as_str().unwrap_or_default()
+                        ),
+                    });
+                }
             }
-            _ => true,
+            "item.commented" => {
+                for comment in said(data, "comments") {
+                    let agent = match comment["by_agent"] == true {
+                        true => format!(" ({BY_AGENT})"),
+                        false => String::new(),
+                    };
+                    found.push(Event {
+                        kind: "comment",
+                        by: by(comment),
+                        text: format!(
+                            "A comment by {}{agent}: {}",
+                            comment["author"].as_str().unwrap_or_default(),
+                            comment["excerpt"].as_str().unwrap_or_default()
+                        ),
+                    });
+                }
+            }
+            "item.merged" | "item.closed" => {
+                let now = match *name {
+                    "item.merged" => "merged",
+                    _ => "closed",
+                };
+                let end = Event {
+                    kind: now,
+                    by: None,
+                    text: format!("The {named} was {now}"),
+                };
+                found.push(end.clone());
+                ends = Some(end);
+            }
+            _ => {}
+        }
+    }
+    (found, ends)
+}
+
+/// The failing checks of `item` as jobs whose log can be read.
+fn jobs_of(item: &Item) -> Vec<Job> {
+    item.checks
+        .iter()
+        .filter(|check| check.state == "failing")
+        .map(|check| Job {
+            name: check.name.clone(),
+            details: check.link.clone(),
+            log: None,
         })
-        .map(|(comment, _)| comment)
         .collect()
 }
 
-fn excerpt(text: &str) -> String {
-    let text = text.trim();
-    let mut cut: String = text.chars().take(EXCERPT_CHARS).collect();
-    if cut.len() < text.len() {
-        cut.push('…');
-    }
-    cut.replace('\n', "\n  ")
+/// The forge the project declares for the repository.
+fn forge_of(daemon: &Daemon, project: &str, repository: &str) -> Option<Forge> {
+    let project = crate::projects::load_project(daemon, project).ok()?;
+    let declared = project
+        .repositories
+        .iter()
+        .find(|r| r.path == repository)?
+        .forge
+        .as_ref()?;
+    Some(Forge::from(declared))
 }
 
-/// What happened to `pull` since `seen`, and the event that ends it (merged or closed); nothing
-/// when nothing was seen yet: this read is the first.
-fn events_between(seen: &Value, pull: &Pull, named: &str) -> (Vec<Event>, Option<Event>) {
-    if !seen.is_object() {
-        return (Vec::new(), None);
-    }
-    let mut events = Vec::new();
-    let pending = pull.checks.iter().any(|(_, state)| *state == "pending");
-    let new_head = seen["head"].is_string()
-        && pull.head_commit.is_some()
-        && seen["head"].as_str() != pull.head_commit.as_deref();
-    if !pull.checks.is_empty() && !pending && (seen["pending"] == true || new_head) {
-        let count = |state| pull.checks.iter().filter(|(_, s)| *s == state).count();
-        let mut text = format!(
-            "The checks ended: {} passed, {} failed",
-            count("passing"),
-            count("failing")
-        );
-        if count("skipped") > 0 {
-            text.push_str(&format!(", {} skipped", count("skipped")));
-        }
-        text.push_str(".\n");
-        text.push_str(&logs::text(&pull.jobs));
-        events.push(Event {
-            kind: "checks",
-            by: None,
-            text: text.trim_end().to_owned(),
-        });
-    }
-    for review in new_ones(&seen["reviews"], &pull.reviews) {
-        let state = review.state.as_deref().unwrap_or("commented");
-        if state == "pending" {
-            continue;
-        }
-        events.push(Event {
-            kind: "review",
-            by: Some(By {
-                name: review.author.clone(),
-                bot: review.bot,
-                marked: false,
-            }),
-            text: format!(
-                "A review by {}, {state}: {}",
-                review.author,
-                excerpt(&review.body)
-            ),
-        });
-    }
-    // Bitbucket says a review as a reviewer's verdict.
-    for (name, state) in &pull.reviewers {
-        if *state != "pending" && seen["reviewers"][name.as_str()].as_str() != Some(*state) {
-            events.push(Event {
-                kind: "review",
-                by: Some(By {
-                    name: name.clone(),
-                    bot: false,
-                    marked: false,
-                }),
-                text: format!("A review by {name}: {state}"),
-            });
-        }
-    }
-    for comment in new_ones(&seen["comments"], &pull.comments) {
-        let (body, marked) = comment.unmarked();
-        let agent = if marked {
-            format!(" ({BY_AGENT})")
-        } else {
-            String::new()
-        };
-        events.push(Event {
-            kind: "comment",
-            by: Some(By {
-                name: comment.author.clone(),
-                bot: comment.bot,
-                marked,
-            }),
-            text: format!("A comment by {}{agent}: {}", comment.author, excerpt(body)),
-        });
-    }
-    let ends = match (seen["state"].as_str(), pull.state) {
-        (Some(was), now @ ("merged" | "closed")) if was != now => Some(Event {
-            kind: now,
-            by: None,
-            text: format!("The {named} was {now}"),
-        }),
-        _ => None,
+/// The subscriptions told their checks ended, while the logs of the failed jobs are read: that
+/// delivery ends them, so what comes after for them is for nobody.
+static READING: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// Offers what the items stored to a subscription to a pull request, when some of the events are
+/// of its pull request. The logs of the failed jobs are read only when it is told the checks
+/// ended, after the round, which does not wait for them; the events after those are not offered
+/// to it meanwhile, so that it is delivered the first.
+pub(crate) fn offer(
+    daemon: &Arc<Daemon>,
+    subscription: &Subscription,
+    items: &[Item],
+    events: &[(&'static str, Value)],
+) {
+    let target = &subscription.target;
+    let project = target["project"].as_str().unwrap_or_default();
+    let repository = target["repository"].as_str().unwrap_or_default();
+    let key = target["number"].as_u64().unwrap_or_default().to_string();
+    let of = |p: &str, kind: &str, r: &str, k: &str| {
+        p == project && kind == "pull" && r == repository && k == key
     };
-    events.extend(ends.clone());
-    (events, ends)
+    let mine: Vec<&(&'static str, Value)> = events
+        .iter()
+        .filter(|(_, data)| {
+            let text = |key: &str| data[key].as_str().unwrap_or_default();
+            of(
+                text("project"),
+                text("kind"),
+                text("repository"),
+                text("key"),
+            )
+        })
+        .collect();
+    if mine.is_empty() || READING.lock().unwrap().contains(&subscription.id) {
+        return;
+    }
+    let item = items
+        .iter()
+        .find(|i| of(&i.project, &i.kind, &i.repository, &i.key));
+    let named = pull_named(project, repository, key.parse().unwrap_or_default());
+    let (found, ends) = events_of(&named, item, &mine);
+    let named = target_named(target);
+    let jobs = item.map(jobs_of).unwrap_or_default();
+    let told_checks = subscription.events.iter().any(|e| e == "checks")
+        && found.iter().any(|e| e.kind == "checks");
+    let forge = forge_of(daemon, project, repository);
+    let (Some(forge), true, false) = (forge, told_checks, jobs.is_empty()) else {
+        subscriptions::offer(daemon, subscription, &named, &found, ends.as_ref());
+        return;
+    };
+    let (daemon, subscription) = (daemon.clone(), subscription.clone());
+    READING.lock().unwrap().insert(subscription.id.clone());
+    tokio::spawn(async move {
+        let mut pull = Pull {
+            number: 0,
+            title: String::new(),
+            state: "open",
+            head: String::new(),
+            head_commit: None,
+            base: String::new(),
+            url: String::new(),
+            description: String::new(),
+            mergeable: None,
+            review: None,
+            checks: Vec::new(),
+            comments: Vec::new(),
+            reviews: Vec::new(),
+            reviewers: Vec::new(),
+            jobs,
+            ci: None,
+        };
+        logs::attach(&forge, &mut pull).await;
+        let logs = logs::text(&pull.jobs);
+        let found: Vec<Event> = found
+            .into_iter()
+            .map(|mut event| {
+                if event.kind == "checks" {
+                    event.text = format!("{}\n{logs}", event.text).trim_end().to_owned();
+                }
+                event
+            })
+            .collect();
+        subscriptions::offer(&daemon, &subscription, &named, &found, ends.as_ref());
+        READING.lock().unwrap().remove(&subscription.id);
+    });
 }
 
 /// A repository that is the project's folder is named by the project, as the window does.
@@ -201,127 +273,47 @@ pub fn target_named(target: &Value) -> String {
     )
 }
 
-/// The subscriptions to the pull requests of the workspace.
-fn on(daemon: &Daemon, workspace: &Workspace) -> Vec<Subscription> {
-    subscriptions::all(daemon)
-        .into_iter()
-        .filter(|s| {
-            s.source == "forge"
-                && s.target["project"] == workspace.project.as_str()
-                && s.target["workspace"] == workspace.name.as_str()
-        })
-        .collect()
-}
-
-/// Offers what a read of the workspace found to the subscriptions to its pull requests. The logs
-/// of the failed jobs are read only when a subscription is told the checks ended.
-pub(super) async fn offer(daemon: &Arc<Daemon>, workspace: &Workspace, read: &Read) {
-    let subscriptions = on(daemon, workspace);
-    if subscriptions.is_empty() {
-        return;
-    }
-    for repository in &read.repositories {
-        let (Some(forge), Some(pull)) = (&repository.forge, &repository.pull) else {
-            continue;
-        };
-        let mine: Vec<&Subscription> = subscriptions
-            .iter()
-            .filter(|s| {
-                s.target["repository"] == repository.path.as_str()
-                    && s.target["number"].as_u64() == Some(pull.number)
-            })
-            .collect();
-        if mine.is_empty() {
-            continue;
-        }
-        let named = pull_named(&workspace.project, &repository.path, pull.number);
-        let events = |pull: &Pull, seen: &Value| events_between(seen, pull, &named);
-        let mut pull = pull.clone();
-        let told_checks = mine.iter().any(|s| {
-            s.events.iter().any(|e| e == "checks")
-                && events(&pull, &s.seen).0.iter().any(|e| e.kind == "checks")
-        });
-        if told_checks {
-            logs::attach(forge, &mut pull).await;
-        }
-        let seen = seen_of(&pull);
-        for subscription in mine {
-            let (found, ends) = events(&pull, &subscription.seen);
-            subscriptions::offer(
-                daemon,
-                subscription,
-                &target_named(&subscription.target),
-                &found,
-                ends.as_ref(),
-                &seen,
-            );
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn pull(state: &'static str, checks: &[&'static str], comments: &[(&str, &str)]) -> Pull {
-        Pull {
-            number: 12,
-            title: String::new(),
-            state,
-            head: "app/login".into(),
-            head_commit: Some("aaaaaaa".into()),
-            base: "main".into(),
-            url: String::new(),
-            description: String::new(),
-            mergeable: None,
-            review: None,
-            checks: checks.iter().map(|s| ("ci".to_owned(), *s)).collect(),
-            comments: comments
-                .iter()
-                .map(|(author, body)| Comment {
-                    author: (*author).into(),
-                    state: None,
-                    body: (*body).into(),
-                    bot: false,
-                })
-                .collect(),
-            reviews: Vec::new(),
-            reviewers: Vec::new(),
-            jobs: Vec::new(),
-            ci: None,
-        }
-    }
-
-    fn kinds(seen: &Pull, now: &Pull) -> Vec<&'static str> {
-        let (events, _) = events_between(&seen_of(seen), now, "pull request #12 of api");
-        events.iter().map(|e| e.kind).collect()
+    fn event(name: &'static str, data: Value) -> (&'static str, Value) {
+        (name, data)
     }
 
     #[test]
-    fn a_change_is_an_event_and_a_state_already_seen_is_not() {
-        let running = pull("open", &["pending"], &[]);
-        let ended = pull("open", &["failing"], &[]);
-        assert_eq!(kinds(&running, &ended), ["checks"]);
-        assert!(kinds(&ended, &ended).is_empty());
-        assert!(
-            events_between(&Value::Null, &ended, "x").0.is_empty(),
-            "the first read is no event"
+    fn the_events_of_the_items_are_those_a_subscription_names() {
+        let events = [
+            event(
+                "item.commented",
+                json!({"comments": [
+                    {"author": "alice", "bot": false, "by_agent": false, "excerpt": "Why?"},
+                    {"author": "kris", "bot": false, "by_agent": true, "excerpt": "Rebased"}
+                ]}),
+            ),
+            event(
+                "item.reviewed",
+                json!({"reviews": [
+                    {"author": "bob", "bot": false, "state": "changes requested", "excerpt": "Rename"},
+                    {"author": "eve", "bot": false, "state": "pending", "excerpt": ""}
+                ], "verdicts": [{"name": "carol", "state": "approved"}]}),
+            ),
+            event("item.merged", json!({})),
+        ];
+        let events: Vec<&(&'static str, Value)> = events.iter().collect();
+        let (found, ends) = events_of("pull request #12 of api", None, &events);
+        let texts: Vec<&str> = found.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "A comment by alice: Why?",
+                "A comment by kris (posted by an agent): Rebased",
+                "A review by bob, changes requested: Rename",
+                "A review by carol: approved",
+                "The pull request #12 of api was merged",
+            ]
         );
-        let commented = pull("open", &["failing"], &[("alice", "a"), ("bob", "b")]);
-        let (events, _) = events_between(&seen_of(&ended), &commented, "x");
-        assert_eq!(events.len(), 2);
-        // A comment inserted among the others, as a Bitbucket reply is, is the only new one.
-        let replied = pull(
-            "open",
-            &["failing"],
-            &[("alice", "a"), ("carol", "c"), ("bob", "b")],
-        );
-        let (events, _) = events_between(&seen_of(&commented), &replied, "x");
-        assert_eq!(events.len(), 1);
-        assert!(events[0].text.contains("carol"), "{:?}", events);
-        let merged = pull("merged", &["failing"], &[]);
-        let (events, ends) = events_between(&seen_of(&ended), &merged, "x");
+        assert!(found[1].by.as_ref().is_some_and(|by| by.marked));
         assert_eq!(ends.map(|e| e.kind), Some("merged"));
-        assert_eq!(events.len(), 1);
     }
 }

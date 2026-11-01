@@ -2347,3 +2347,100 @@ fn a_cloud_conflict_on_a_later_page_of_the_diffstat_is_found_up_to_five_hundred_
         page_sizes(&user)
     );
 }
+
+/// The pull request #12 of `app/login`, as `gh pr list` and `gh pr view` answer it, changed at
+/// `updated`.
+fn stored_pull(title: &str, updated: &str) -> Value {
+    let mut pull = pull(12, title);
+    pull["updatedAt"] = updated.into();
+    pull["headRefOid"] = "0123456789abcdef0123456789abcdef01234567".into();
+    pull
+}
+
+#[test]
+fn forge_list_answers_from_the_store_with_its_age_without_calling_gh() {
+    let user = User::with_fake_agent()
+        .with_fake_gh()
+        .with_env("FLOTTILLE_TEST_CLOCK", "1");
+    fixture(&user);
+    declare_proposed(&user);
+    one_pull_request(
+        &user,
+        stored_pull("Add the login page", "2026-10-01T10:00:00Z"),
+    );
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
+    user.call("test.advance", json!({"ms": 10 * 60_000}))
+        .unwrap();
+    // The forge changed since: the list says what the store holds, and how old it is.
+    one_pull_request(
+        &user,
+        stored_pull("Renamed on GitHub", "2026-10-02T10:00:00Z"),
+    );
+    let (_, mcp) = agent_in(&user, None);
+    let lists = || {
+        gh_calls(&user)
+            .iter()
+            .filter(|c| c.starts_with("pr list"))
+            .count()
+    };
+    let before = lists();
+
+    let answer = mcp.call("forge", json!({"action": "list"}));
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("- #12 open, app/login into main: Add the login page"),
+        "{}",
+        answer.text
+    );
+    assert!(answer.text.contains("as of 10 min ago"), "{}", answer.text);
+    assert_eq!(lists(), before, "{:?}", gh_calls(&user));
+}
+
+#[test]
+fn forge_show_reads_live_and_the_store_is_updated() {
+    let user = User::with_fake_agent()
+        .with_fake_gh()
+        .with_env("FLOTTILLE_TEST_CLOCK", "1");
+    fixture(&user);
+    declare_proposed(&user);
+    one_pull_request(
+        &user,
+        stored_pull("Add the login page", "2026-10-01T10:00:00Z"),
+    );
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
+    let mut renamed = stored_pull("Renamed on GitHub", "2026-10-02T10:00:00Z");
+    renamed["comments"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"author": {"login": "carol"}, "body": "Ship it"}));
+    one_pull_request(&user, renamed);
+    let (_, mcp) = agent_in(&user, None);
+
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "show", "repository": "api", "number": 12}),
+    );
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(answer.text.contains("Renamed on GitHub"), "{}", answer.text);
+    let item = user
+        .call(
+            "items.show",
+            json!({"project": "app", "kind": "pull", "id": "12", "repository": "api"}),
+        )
+        .unwrap();
+    assert_eq!(item["title"], "Renamed on GitHub", "{item}");
+    assert_eq!(item["details"]["comments"], 2, "{item}");
+    let changed = stored(&user, "item.changed");
+    assert_eq!(changed.len(), 1, "{changed:?}");
+    assert_eq!(
+        changed[0]["data"]["changes"]["title"]["to"], "Renamed on GitHub",
+        "{changed:?}"
+    );
+    assert_eq!(stored(&user, "item.commented").len(), 1);
+}

@@ -1,5 +1,6 @@
 //! The rail's Subscriptions section: what the session's agents wait for outside Flottille (the
-//! next event of a pull request, `docs/design.md` §5.6): the pull request, the events, since when
+//! next event of a pull request or a ticket, `docs/design.md` §5.6): the pull request or the
+//! ticket, the events, since when
 //! and until when, or a wake the agent asked for and when it is due, each with a Cancel that the daemon carries out (`subscription.cancel`). Nothing
 //! is drawn while the session waits for nothing; a row unfolds when a subscription opens and folds
 //! away when it ends, whatever ended it.
@@ -29,7 +30,7 @@ pub struct SubscriptionRow {
     /// The agent it wakes.
     pub agent: String,
     /// The pull request in a few words: `#12 of api` (the project's own name for its folder);
-    /// `Wake: <why>` for a wake.
+    /// `Ticket #5 of api` or `Ticket ABC-1` for a ticket; `Wake: <why>` for a wake.
     pub pull: String,
     /// A wake the agent asked for (the source `timer`), not a pull request's events.
     pub wake: bool,
@@ -46,9 +47,20 @@ impl SubscriptionRow {
         SubscriptionRow {
             id: text(&value["id"]),
             agent: text(&value["agent"]),
-            pull: match wake {
-                true => format!("Wake: {}", text(&target["why"])),
-                false => format!(
+            pull: match (wake, value["source"] == "tickets") {
+                (true, _) => format!("Wake: {}", text(&target["why"])),
+                (false, true) => match text(&target["repository"]).as_str() {
+                    "" => format!("Ticket {}", text(&target["key"])),
+                    repository => format!(
+                        "Ticket #{} of {}",
+                        text(&target["key"]),
+                        repository_label(
+                            target["project"].as_str().unwrap_or_default(),
+                            repository
+                        )
+                    ),
+                },
+                (false, false) => format!(
                     "#{} of {}",
                     target["number"].as_u64().unwrap_or_default(),
                     repository_label(
@@ -312,6 +324,21 @@ mod tests {
         assert_eq!(wake.pull, "Wake: the deploy of api");
         assert_eq!(wake.times(0), format!("at {}", clock(20 * 60_000)));
         assert!(!row(0).wake);
+    }
+
+    #[test]
+    fn a_ticket_is_named_by_its_reference_and_its_repository_when_github() {
+        let ticket = |repository: &str, key: &str| {
+            SubscriptionRow::of(&json!({
+                "id": "sub-3", "agent": "a1", "source": "tickets",
+                "target": {"project": "app", "repository": repository, "key": key},
+                "events": ["commented"], "created_at": 0, "expires_at": 60_000,
+            }))
+            .pull
+        };
+        assert_eq!(ticket("api", "5"), "Ticket #5 of api");
+        assert_eq!(ticket(".", "5"), "Ticket #5 of app");
+        assert_eq!(ticket("", "ABC-1"), "Ticket ABC-1");
     }
 
     #[test]

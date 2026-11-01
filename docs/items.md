@@ -166,6 +166,55 @@ stores it (`docs/events.md`): `item.opened`, `item.changed` (with what changed: 
 `assignees`, `labels`, `status`), `item.commented`, `item.reviewed`, `item.checks`, `item.merged`,
 `item.closed`. **A source's first round stores without emitting.**
 
+## What reads this stream
+
+What waits on a forge or a tracker filters these events and reads this store instead of reading
+again on its own (#257):
+
+- **The subscriptions** (`docs/design.md` §5.6): a subscription to a pull request (`forge`
+  `subscribe`) or to a ticket (`tickets` `subscribe`) is a filter on the `item.*` events of its
+  item, offered once they are stored; it holds no read of its own. A pull request's `item.checks`
+  is its `checks`, `item.reviewed` its `review` (each new review, or, on Bitbucket, each new
+  verdict, `verdicts`), `item.commented` its `comment`, `item.merged` and `item.closed` its
+  `merged` and `closed`. A ticket's `item.commented` is its `commented`, an `item.changed` of its
+  `status` or of its `state` (a reopening) its `status`, one of its `assignees` its `assigned`,
+  `item.closed` its `closed`. The failed jobs' logs a `checks` delivery holds are read then, after
+  the round, which does not wait for them; that delivery ends the subscription, so an event that
+  comes while they are read (a comment) is not delivered before it, nor after.
+- **Their latency is the rhythm** above: a minute while a window is connected, five otherwise. A
+  subscription that needs to hear sooner has no faster rhythm of its own (a follow-up, if one
+  needs it).
+- **`forge list` and `tickets list` and `search`** answer from the store once a round of the
+  source worked, with its age (`as of 40 s ago`, from when that round started) and its problem
+  when the last round failed; a source no round read yet is read from the forge or the tracker
+  as before. A `search` finds the words in the titles: the store keeps no description, and its
+  answer says so (`matching "sign" in their titles (not their descriptions nor comments)`).
+- **`forge show` and `tickets show` read live** (one item) and store what they read over what the
+  store holds of it, with the events a round would emit of it, so that the next round compares
+  with that; so does `forge subscribe` and `tickets subscribe` before the subscription opens, so
+  that what is so then is no event. What a live read does not say (its author, labels and
+  assignees, when it changed, a Jira state) is kept, as are the links of its checks; a pull
+  request found again is no longer `removed`. **One no round stored yet** (made since the last
+  round, by `forge create` or `tickets create`, or too old to be listed) is stored as the live
+  read found it, once its source had a first round, so that what happens to it before the next
+  round is an event of that round; it is `item.opened` as in a round, only open and not made
+  before that first round (a live read says no creation time: an open one is opened). Its
+  assignees and labels, which a live read does not say, are no change then. A Jira work item no
+  round stored is not, its live read saying no state.
+- **A live read takes the project's round lock before it reads**, so that no round lands between
+  the read and its write and none is written over by an older read: `show` reads without storing
+  while a round runs (the round stores a read of its own), and holds the lock for its one read,
+  not for the logs and runs it reads after. `subscribe` never waits behind a whole round (a round
+  holds the lock for every source, minutes for a big project's first): it reads without the
+  lock, then waits for it three seconds at most (`items::LIVE_WAIT`), and stores its read only
+  when it got it and nothing wrote since its read started (the lock counts what wrote under it);
+  otherwise it stores nothing, and the round running or just run stored what the next ones
+  compare with. Its answer says when the rounds do not see the item yet: its source had no
+  complete round, or the item is not stored (a Jira work item made since the last round).
+- A subscription made before this, stored with what its own watch saw, is carried over as it is:
+  its target names the same pull request, the next rounds' events are offered to it, and what its
+  watch saw is no longer read.
+
 ## The protocol
 
 - `items.list {project, kind?, state?, repository?, mine?}`: the stored items, the most recently
@@ -176,7 +225,6 @@ stores it (`docs/events.md`): `item.opened`, `item.changed` (with what changed: 
 
 ## Not yet
 
-- The subscriptions and the agents' tools reading this stream (#257).
 - `mine` on Bitbucket Data Center; Jira's description and comments (`item.commented` is not
   emitted for a work item: no comment field is asked of the search); a Jira work item deleted or
   moved to another project stays as it was last read.

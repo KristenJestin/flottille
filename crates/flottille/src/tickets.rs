@@ -7,8 +7,9 @@
 //! to the tracker's site.
 //!
 //! A workspace's ticket is read on demand and kept nowhere; every ticket of the tracker is also
-//! read in the background by the items (`changed`, `docs/items.md`). Every text kept from a
-//! tracker is masked before it is shown or stored.
+//! read in the background by the items (`changed`, `docs/items.md`), which `tickets list` and
+//! `search` answer from and whose events a subscription to a ticket filters (`events`). Every
+//! text kept from a tracker is masked before it is shown or stored.
 
 use std::process::Stdio;
 use std::sync::Arc;
@@ -28,6 +29,10 @@ use crate::forge::{self, Checkout, Forge, Gh, masked};
 use crate::mcp::{Outcome, arguments, full_detail, workspace_named};
 use crate::place::Place;
 use crate::projects::{self, Failure};
+
+mod events;
+
+pub use events::{EVENTS, offer, reference_of, target_named};
 
 /// A call of `acli` is cut after this.
 const ACLI_TIME: Duration = Duration::from_secs(30);
@@ -688,6 +693,12 @@ struct TicketsCall {
     remove_labels: Option<Vec<String>>,
     assignees: Option<Vec<String>>,
     remove_assignees: Option<Vec<String>>,
+    /// subscribe: the events it waits for (`events::EVENTS`).
+    events: Option<Vec<String>>,
+    /// subscribe: whose comments count (`subscriptions::FROM`).
+    from: Option<String>,
+    /// subscribe: how long it waits at most.
+    minutes: Option<u64>,
 }
 
 /// The writes of `tickets`.
@@ -758,7 +769,7 @@ fn created_in<'a>(
 
 /// `tickets`, once the gate let it through: the tickets of the project's tracker, listed,
 /// searched, read and written through the user's own `gh` or `acli`. Never another tracker's.
-pub async fn tickets(daemon: &Daemon, place: &Place, args: Value) -> Outcome {
+pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Value) -> Outcome {
     let asked: TicketsCall = match arguments("tickets", args.clone()) {
         Ok(asked) => asked,
         Err(refusal) => return refusal,
@@ -771,8 +782,10 @@ pub async fn tickets(daemon: &Daemon, place: &Place, args: Value) -> Outcome {
         return Outcome::Refused(refusal);
     }
     match asked.action.as_str() {
-        "list" | "search" => listed(&project, &asked).await,
+        "list" | "search" => listed(daemon, &project, &asked).await,
         "show" => show(daemon, place, &project, &asked).await,
+        "subscribe" => events::subscribe(daemon, agent, place, &project, &asked).await,
+        "unsubscribe" => events::unsubscribe(daemon, agent, &project, &asked),
         "create" => create(&project, &asked).await,
         "comment" | "edit" | "close" | "reopen" | "status" => {
             let key = match key_of(daemon, place, &project, &asked) {
@@ -806,7 +819,7 @@ struct Listed {
 
 /// `tickets list` and `tickets search`: every ticket of a state, by label, assignee and, for a
 /// search, words, in one call.
-async fn listed(project: &Project, asked: &TicketsCall) -> Outcome {
+async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outcome {
     let state = asked.state.as_deref().unwrap_or("open");
     if !["open", "closed", "all"].contains(&state) {
         return Outcome::Refused(format!(
@@ -851,12 +864,22 @@ async fn listed(project: &Project, asked: &TicketsCall) -> Outcome {
         assignee: asked.assignee.as_deref(),
         query,
     };
-    let found = match tracker {
-        ProjectTracker::Github { repository } => match github_of(project, repository).await {
+    // What the items' rounds keep, once one read the tracker; the tracker itself before.
+    let cursor = daemon
+        .read(|store| store.cursors(&project.name))
+        .unwrap_or_default()
+        .into_iter()
+        .find(|c| c.kind == "ticket" && c.cursor.is_some());
+    let found = match (&cursor, tracker) {
+        (Some(_), _) => Ok((stored_tickets(daemon, project, &filters), 0)),
+        (None, ProjectTracker::Github { repository }) => match github_of(project, repository).await
+        {
             Ok(forge) => list_issues(&forge, &filters).await,
             Err(why) => Err(why),
         },
-        ProjectTracker::Jira { site, projects } => list_work_items(site, projects, &filters).await,
+        (None, ProjectTracker::Jira { site, projects }) => {
+            list_work_items(site, projects, &filters).await
+        }
     };
     let (tickets, left_out) = match found {
         Ok(found) => found,
@@ -878,8 +901,23 @@ async fn listed(project: &Project, asked: &TicketsCall) -> Outcome {
     }
     if let Some(query) = query {
         header.push_str(&format!(" matching {query:?}"));
+        // What the rounds keep of a ticket is its title: an agent must not read "none" as no
+        // ticket of it.
+        if cursor.is_some() {
+            header.push_str(" in their titles (not their descriptions nor comments)");
+        }
     }
-    let mut text = format!("{header}: {}\n", tickets.len());
+    let mut text = format!("{header}: {}", tickets.len());
+    if let Some(cursor) = &cursor {
+        text.push_str(&format!(
+            " ({})",
+            crate::items::as_of(cursor.cursor.unwrap_or_default())
+        ));
+        if let Some(problem) = &cursor.problem {
+            text.push_str(&format!("; its last read failed: {problem}"));
+        }
+    }
+    text.push('\n');
     for ticket in &tickets {
         if let Some(url) = &ticket.url {
             crate::web::shown(url, crate::web::Source::Link);
@@ -911,6 +949,50 @@ async fn listed(project: &Project, asked: &TicketsCall) -> Outcome {
     }
     text.push_str("tickets {\"action\": \"show\", \"ticket\": …} reads one.");
     Outcome::Done(text)
+}
+
+/// The tickets the items' rounds keep, as a list keeps them: by state, label, assignee and, for a
+/// search, the words of their title, the most recently changed first.
+fn stored_tickets(daemon: &Daemon, project: &Project, filters: &Filters<'_>) -> Vec<Listed> {
+    let kind = flottille_core::item::Filter {
+        kind: Some("ticket".into()),
+        ..Default::default()
+    };
+    let words: Vec<String> = filters
+        .query
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .collect();
+    let named = |names: &[String], asked: Option<&str>| {
+        asked.is_none_or(|asked| names.iter().any(|n| n.eq_ignore_ascii_case(asked)))
+    };
+    daemon
+        .read(|store| store.items(&project.name, &kind))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|item| filters.state == "all" || item.state == filters.state)
+        .filter(|item| named(&item.labels, filters.label))
+        .filter(|item| named(&item.assignees, filters.assignee))
+        .filter(|item| {
+            let title = item.title.to_lowercase();
+            words.iter().all(|word| title.contains(word))
+        })
+        .take(LISTED)
+        .map(|item| Listed {
+            reference: match item.repository.is_empty() {
+                true => item.key.clone(),
+                false => format!("#{}", item.key),
+            },
+            state: item.details["status"]
+                .as_str()
+                .map_or_else(|| item.state.clone(), str::to_owned),
+            title: item.title,
+            labels: item.labels,
+            assignees: item.assignees,
+            url: item.url,
+        })
+        .collect()
 }
 
 /// The qualifiers of GitHub's search that reach beyond the tracker's repository, or to pull
@@ -1140,7 +1222,12 @@ fn key_of(
 
 /// `tickets show`: the ticket of the agent's own workspace, or another ticket of the same
 /// tracker.
-async fn show(daemon: &Daemon, place: &Place, project: &Project, asked: &TicketsCall) -> Outcome {
+async fn show(
+    daemon: &Arc<Daemon>,
+    place: &Place,
+    project: &Project,
+    asked: &TicketsCall,
+) -> Outcome {
     let full = match full_detail("tickets", asked.detail.as_deref()) {
         Ok(full) => full,
         Err(refusal) => return refusal,
@@ -1149,8 +1236,15 @@ async fn show(daemon: &Daemon, place: &Place, project: &Project, asked: &Tickets
         Ok(key) => key,
         Err(refusal) => return refusal,
     };
+    // A round of the project running stores a read of its own; none starts during this one.
+    let held = crate::items::held_now(daemon, &project.name);
     match read(project, &key).await {
-        Ok(ticket) => Outcome::Done(ticket.text(full, asked.ticket.as_deref())),
+        Ok(ticket) => {
+            if held.is_some() {
+                events::remember(daemon, project, &key, &ticket);
+            }
+            Outcome::Done(ticket.text(full, asked.ticket.as_deref()))
+        }
         Err(problem) => Outcome::Failed(format!(
             "the ticket {} could not be read: {problem}",
             key.text()
@@ -1882,7 +1976,7 @@ impl Tickets {
                     author: said(&comment["author"]["login"]),
                     state: None,
                     body: said(&comment["body"]),
-                    bot: false,
+                    bot: forge::is_bot(&comment["author"]),
                 })
             })
             .collect();

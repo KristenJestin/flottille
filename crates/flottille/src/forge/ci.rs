@@ -1,8 +1,8 @@
 //! How long the CI of a repository usually takes, for `forge show` and `forge subscribe`
 //! (`docs/forges.md`, "How long CI takes"): an agent that subscribes to a pull request picks a
 //! duration blind, one that is told the last runs' length can wait for as long as they need. One
-//! read of the forge, made when one of those two runs and never by the watch; a repository whose
-//! runs cannot be read is simply not told.
+//! read of the forge, made when one of those two runs and never by the rounds of the items nor a
+//! watch; a repository whose runs cannot be read is simply not told.
 
 use serde_json::Value;
 
