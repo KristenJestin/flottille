@@ -69,14 +69,22 @@ pub fn subscribe(daemon: &Daemon, subscription: &Subscription) -> Result<(), Str
     Ok(())
 }
 
-/// What an agent between turns waits for, in a few words (`waiting for #12: checks, review`);
-/// none when it has no open subscription.
+/// What an agent between turns waits for, in a few words (`waiting for #12: checks, review`, `#12
+/// of api` when the project has several repositories); none when it has no open subscription.
 pub fn waiting_for(daemon: &Daemon, agent: &str) -> Option<String> {
     let waits: Vec<String> = of(daemon, agent)
         .iter()
         .map(|s| {
+            let project = s.target["project"].as_str().unwrap_or_default();
+            let several = crate::projects::load_project(daemon, project)
+                .is_ok_and(|project| project.repositories.len() > 1);
+            let of = match s.target["repository"].as_str() {
+                Some(".") if several => format!(" of {project}"),
+                Some(repository) if several => format!(" of {repository}"),
+                _ => String::new(),
+            };
             format!(
-                "#{}: {}",
+                "#{}{of}: {}",
                 s.target["number"].as_u64().unwrap_or_default(),
                 s.events.join(", ")
             )

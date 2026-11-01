@@ -883,7 +883,7 @@ form); `doing` a sentence of what it does
 (`working`, `idle`, `running \`cargo test\` for 12 min`, `waiting for approval #3`, `failed: …`);
 `waiting_on` `parent` for a child whose request or question waits for its parent, `user` for a
 root whose own does, `subscription` for an agent between turns that has an open subscription (`doing` then
-says `waiting for #12: checks`), else `null`; `needs_user`, for the root, whether a request of its tree or its
+says `waiting for #12: checks`, `#12 of api` when the project has several repositories), else `null`; `needs_user`, for the root, whether a request of its tree or its
 own question waits for the user; `context`, how much of its context the agent used at its last
 report (`agent.usage`), in percent, `null` before one; `queued`, for the root, the messages the
 user wrote to it that wait for it to read them between its turns, the oldest first, each
