@@ -109,6 +109,10 @@ is signed in to (`acli jira auth status`)`. A work item with no `self` is not sh
 A description or a comment longer than 20,000 and 4,000 characters is cut, saying so; only the
 newest 30 comments are kept, the number of older ones is said.
 
+What an agent writes is marked ([`forges.md`](forges.md), "What Flottille posts is marked"): a
+comment that ends with the marker (GitHub) or the visible footer (Jira) is shown as `<author>
+(posted by an agent)`, its text without the mark; a description loses the mark too.
+
 ### Jira's text
 
 Jira Cloud's descriptions and comments are Atlassian Document Format (ADF), a JSON tree. They are

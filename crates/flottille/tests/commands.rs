@@ -14,6 +14,9 @@ use common::mcp::{Answer, Mcp, server_of};
 use flottille_core::store::Store;
 use serde_json::{Value, json};
 
+/// What Flottille ends every comment and body it posts for an agent with (`docs/forges.md`).
+const MARKER: &str = "<!-- flottille -->";
+
 /// A project `app` that is one repository, pushed to a bare remote `origin`, with its ready
 /// workspace `login` on the branch `app/login`. Its folder and the remote's.
 fn fixture(user: &User) -> (PathBuf, PathBuf) {
@@ -438,8 +441,10 @@ fn forge_write_creates_a_pull_request_with_the_fake_gh_once_allowed() {
     let created = calls.iter().find(|c| c.starts_with("pr create")).unwrap();
     assert_eq!(
         created,
-        "pr create -R github.com/acme/app --head app/login --base main --title Add the login page --body \
-         What it does"
+        &format!(
+            "pr create -R github.com/acme/app --head app/login --base main --title Add the login \
+             page --body What it does\n\n{MARKER}"
+        )
     );
     assert_eq!(creates(&user), 1);
     // The daemon's own sign-in: the agent never had a token.
@@ -965,8 +970,11 @@ fn open_the_pull_requests_reports_first_opens_nothing_before_the_confirmation_th
     let created = calls.iter().find(|c| c.starts_with("pr create")).unwrap();
     assert_eq!(
         created,
-        "pr create -R github.com/acme/api --head app/login --base main --title feat(LOGIN-1): add the login \
-         --body Adds the login page. --reviewer alice --reviewer bob"
+        &format!(
+            "pr create -R github.com/acme/api --head app/login --base main --title \
+             feat(LOGIN-1): add the login --body Adds the login page.\n\n{MARKER} --reviewer alice \
+             --reviewer bob"
+        )
     );
     // The repositories with no commit of their own get nothing.
     for name in ["lib", "web"] {
@@ -1247,8 +1255,10 @@ fn forge_write_creates_a_bitbucket_pull_request_with_the_fake_bkt_once_allowed()
     let created = calls.iter().find(|c| c.starts_with("pr create")).unwrap();
     assert_eq!(
         created,
-        "pr create --context cloud --workspace acme --repo app --source app/login --target main \
-         --title Add the login page --description What it does"
+        &format!(
+            "pr create --context cloud --workspace acme --repo app --source app/login --target \
+             main --title Add the login page --description What it does\n\n{MARKER}"
+        )
     );
     assert_eq!(bkt_calls_starting(&user, "pr create"), 1);
     // The daemon's own sign-in: of it, the contexts are all that was read.
@@ -1296,11 +1306,10 @@ fn forge_write_names_a_data_center_repository_by_its_project() {
 
     assert!(!answer.error, "{}", answer.text);
     assert!(
-        bkt_calls(&user).contains(
-            &"pr create --context work --project APP --repo app --source app/login --target main \
-              --title Login --description "
-                .to_owned()
-        ),
+        bkt_calls(&user).contains(&format!(
+            "pr create --context work --project APP --repo app --source app/login --target main \
+             --title Login --description {MARKER}"
+        )),
         "{:?}",
         bkt_calls(&user)
     );
@@ -1599,8 +1608,10 @@ fn bitbucket_pr_create_asks_the_project_s_reviewers() {
     let created = calls.iter().find(|c| c.starts_with("pr create")).unwrap();
     assert_eq!(
         created,
-        "pr create --context cloud --workspace acme --repo app --source app/login --target main \
-         --title Login --description Adds it --reviewer alice --reviewer bob"
+        &format!(
+            "pr create --context cloud --workspace acme --repo app --source app/login --target \
+             main --title Login --description Adds it\n\n{MARKER} --reviewer alice --reviewer bob"
+        )
     );
 }
 

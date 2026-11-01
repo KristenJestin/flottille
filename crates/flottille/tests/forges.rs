@@ -11,6 +11,9 @@ use common::User;
 use common::mcp::{Mcp, server_of};
 use serde_json::{Value, json};
 
+/// What Flottille ends every comment and body it posts for an agent with (`docs/forges.md`).
+const MARKER: &str = "<!-- flottille -->";
+
 /// A project `app` of three repositories, `api` and `web` on GitHub (over SSH and over HTTPS) and
 /// `lib` on another host, and its ready workspace `login` on the branch `app/login`. Each
 /// repository is pushed to a bare remote of its own first, so that the workspace's fetch works;
@@ -1262,6 +1265,31 @@ fn a_bkt_call_that_fails_is_the_repository_s_error_and_never_hides_the_others() 
         "{api}"
     );
     assert_eq!(repository(&forge, "web")["pull_request"]["number"], 7);
+}
+
+#[test]
+fn a_marked_comment_of_a_pull_request_is_shown_as_posted_by_an_agent_without_its_marker() {
+    let user = User::with_fake_agent().with_fake_gh();
+    fixture(&user);
+    let mut marked = pull(12, "Add the login page");
+    marked["comments"] = json!([
+        {"author": {"login": "kris"}, "body": format!("Rebased on main\n\n{MARKER}")},
+        {"author": {"login": "kris"}, "body": "Thanks"}
+    ]);
+    one_pull_request(&user, marked);
+    let (_, mcp) = agent_in(&user, Some("login"));
+
+    let full = mcp.call("forge", json!({"action": "show", "detail": "full"}));
+
+    assert!(!full.error, "{}", full.text);
+    assert!(
+        full.text
+            .contains("- kris (posted by an agent): Rebased on main\n"),
+        "{}",
+        full.text
+    );
+    assert!(full.text.contains("- kris: Thanks"), "{}", full.text);
+    assert!(!full.text.contains("flottille -->"), "{}", full.text);
 }
 
 #[test]

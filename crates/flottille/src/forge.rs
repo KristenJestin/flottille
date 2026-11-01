@@ -329,6 +329,13 @@ pub struct Comment {
     pub bot: bool,
 }
 
+impl Comment {
+    /// The text, without the mark of Flottille, and whether an agent of Flottille posted it.
+    pub fn unmarked(&self) -> (&str, bool) {
+        unmarked(&self.body)
+    }
+}
+
 impl Pull {
     /// The checks as one mark: `failing` when one fails, else `pending` when one runs, else
     /// `passing`; none without checks.
@@ -703,6 +710,46 @@ pub(crate) async fn gh_json(args: &[&str]) -> Result<Value, String> {
     }
 }
 
+/// What ends every comment and body Flottille posts for an agent on GitHub and Bitbucket: an HTML
+/// comment, which both forges leave out of what they render. It goes out through the user's own
+/// `gh` or `bkt`, so it is the only way to tell an agent's words from the user's.
+pub(crate) const MARKER: &str = "<!-- flottille -->";
+/// The same on Jira, where nothing invisible survives `acli`: a short visible line.
+pub(crate) const FOOTER: &str = "— posted by a Flottille agent";
+/// How a text posted by an agent is said where it is shown to another.
+pub(crate) const BY_AGENT: &str = "posted by an agent";
+
+/// `body`, ended with `end` on a line of its own (`end` alone when there is no body).
+fn ended_with(body: &str, end: &str) -> String {
+    match body.trim_end() {
+        "" => end.to_owned(),
+        body => format!("{body}\n\n{end}"),
+    }
+}
+
+/// What an agent posts on GitHub or Bitbucket: `body`, marked.
+pub(crate) fn marked(body: &str) -> String {
+    ended_with(body, MARKER)
+}
+
+/// What an agent posts on Jira: `body`, with the footer.
+pub(crate) fn footed(body: &str) -> String {
+    ended_with(body, FOOTER)
+}
+
+/// A text read from a forge or a tracker, without the mark of Flottille, and whether it had one:
+/// an agent of Flottille posted it. A person's comment that ends with the mark is taken for an
+/// agent's, which is accepted.
+pub(crate) fn unmarked(text: &str) -> (&str, bool) {
+    let text = text.trim_end();
+    for end in [MARKER, FOOTER] {
+        if let Some(body) = text.strip_suffix(end) {
+            return (body.trim_end(), true);
+        }
+    }
+    (text, false)
+}
+
 /// Masked of the daemon's secrets, and of every token shaped like one.
 pub(crate) fn masked(text: &str) -> String {
     let env: std::collections::BTreeMap<OsString, OsString> = std::env::vars_os().collect();
@@ -760,8 +807,6 @@ pub struct Forges {
     entries: Mutex<HashMap<i64, Entry>>,
     /// The watches the subscriptions hold, by subscription.
     held: Mutex<HashMap<String, Watch>>,
-    /// The comments the agents posted lately (`events::posted`).
-    posted: Mutex<Vec<events::Posted>>,
 }
 
 #[derive(Default)]
@@ -1053,7 +1098,7 @@ pub async fn forge(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Value
         ("subscribe", _) => forge_subscribe(daemon, agent, place, asked).await,
         ("unsubscribe", _) => forge_unsubscribe(daemon, agent, asked),
         ("create" | "merge" | "checks", _) => forge_write(daemon, place, asked).await,
-        ("comment" | "edit", _) => forge_note(daemon, agent, place, asked).await,
+        ("comment" | "edit", _) => forge_note(daemon, place, asked).await,
         ("close" | "reopen", _) => forge_close(daemon, place, asked).await,
         (action, _) => Outcome::Refused(format!(
             "refused: forge has no action {action:?}: its actions are {}",
@@ -1476,7 +1521,7 @@ async fn forge_show(daemon: &Daemon, place: &Place, asked: ForgeCall, number: u6
 
 /// `forge comment` and `forge edit`: a comment on a pull request of one repository of the place,
 /// or a new title or description of it.
-async fn forge_note(daemon: &Daemon, agent: &str, place: &Place, asked: ForgeCall) -> Outcome {
+async fn forge_note(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
     let action = asked.action.as_str();
     let Some(number) = asked.number else {
         return Outcome::Refused(format!(
@@ -1513,8 +1558,9 @@ async fn forge_note(daemon: &Daemon, agent: &str, place: &Place, asked: ForgeCal
         Err(Some(why)) => return Outcome::Refused(why),
     };
     let slug = forge.slug();
-    let numbered = number;
     let number = number.to_string();
+    let marked_body = body.map(marked);
+    let body = marked_body.as_deref();
     let done = match &forge {
         Forge::Bitbucket { .. } => bitbucket::note(&forge, action, &number, title, body).await,
         Forge::GitHub { .. } => {
@@ -1535,18 +1581,9 @@ async fn forge_note(daemon: &Daemon, agent: &str, place: &Place, asked: ForgeCal
     };
     match (done, action) {
         (Err(why), _) => Outcome::Failed(why),
-        (Ok(()), "comment") => {
-            events::posted(
-                daemon,
-                agent,
-                (&place.project, &checkout.path),
-                numbered,
-                body.unwrap_or_default(),
-            );
-            Outcome::Done(format!(
-                "The comment was posted on pull request #{number} of {slug}."
-            ))
-        }
+        (Ok(()), "comment") => Outcome::Done(format!(
+            "The comment was posted on pull request #{number} of {slug}."
+        )),
         (Ok(()), _) => Outcome::Done(format!("Pull request #{number} of {slug} was changed.")),
     }
 }
@@ -1594,7 +1631,12 @@ async fn forge_close(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
              open a new one for #{number} of {slug}"
         ));
     }
-    let comment = asked.comment.as_deref().filter(|c| !c.trim().is_empty());
+    let comment = asked
+        .comment
+        .as_deref()
+        .filter(|c| !c.trim().is_empty())
+        .map(marked);
+    let comment = comment.as_deref();
     let numbered = number.to_string();
     let repo = forge.gh_repository();
     if !bitbucket && let Err(problem) = signed_in().await {
@@ -1844,7 +1886,7 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                 );
             };
             let base = &repository.base.branch;
-            let body = asked.body.unwrap_or_default();
+            let body = marked(&asked.body.unwrap_or_default());
             let mut args = vec![
                 "pr", "create", "-R", &repo, "--head", branch, "--base", base, "--title", &title,
                 "--body", &body,
@@ -2136,9 +2178,15 @@ fn pull_text(text: &mut String, named: &str, pull: &Pull, full: bool, again: &st
                 .state
                 .as_deref()
                 .map_or(String::new(), |s| format!(", {s}"));
-            let body: String = comment.body.chars().take(COMMENT_CHARS).collect();
+            let (body, agent) = comment.unmarked();
+            let body: String = body.chars().take(COMMENT_CHARS).collect();
+            let agent = if agent {
+                format!(" ({BY_AGENT})")
+            } else {
+                String::new()
+            };
             text.push_str(&format!(
-                "  - {}{state}: {}\n",
+                "  - {}{agent}{state}: {}\n",
                 comment.author,
                 body.replace('\n', "\n    ")
             ));
@@ -2235,5 +2283,27 @@ mod tests {
         );
         assert_eq!(state(json!({"number": 1, "state": "MERGED"})), "merged");
         assert_eq!(state(json!({"number": 1, "state": "CLOSED"})), "closed");
+    }
+    #[test]
+    fn a_posted_text_ends_with_the_mark_and_is_read_back_without_it() {
+        assert_eq!(marked("Rebased"), "Rebased\n\n<!-- flottille -->");
+        assert_eq!(marked("Rebased\n"), "Rebased\n\n<!-- flottille -->");
+        assert_eq!(marked(""), "<!-- flottille -->");
+        assert_eq!(
+            footed("Rebased"),
+            "Rebased\n\n— posted by a Flottille agent"
+        );
+        for posted in [
+            marked("Rebased"),
+            footed("Rebased"),
+            marked("Rebased") + "\n",
+        ] {
+            assert_eq!(unmarked(&posted), ("Rebased", true), "{posted:?}");
+        }
+        assert_eq!(unmarked(&marked("")), ("", true));
+        assert_eq!(unmarked("Thanks"), ("Thanks", false));
+        // Only the end counts: a mark quoted in the middle of a person's text is theirs.
+        let quoted = "Do not add <!-- flottille --> to it";
+        assert_eq!(unmarked(quoted), (quoted, false));
     }
 }

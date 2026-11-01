@@ -325,7 +325,8 @@ pending requests.
   (`checks`, `review`, `comment`, `merged`, `closed`) of the pull request of a workspace's branch
   wakes the agent once, as a `subscription` delivery (`docs/design.md` §5.6). The call answers at
   once; what is so already (checks that already ended) is no event, `show` reads it. `from` is
-  `anyone` (the default) or `people`: no bot, nor a comment the agent posted. `minutes` is how
+  `anyone` (the default) or `people`: no bot, nor a comment marked as posted by an agent
+  ([`forges.md`](forges.md), "What Flottille posts is marked"). `minutes` is how
   long it waits, 60 by default, 240 (4 hours) at most. Without `minutes` the wait is sized by the
   repository's CI instead, and the answer says the duration taken and why: twice the average of
   its recent runs, from 15 minutes to the longest, 60 when there is no run to measure by

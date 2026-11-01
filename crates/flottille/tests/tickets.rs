@@ -11,6 +11,11 @@ use common::User;
 use common::mcp::{Mcp, server_of};
 use serde_json::{Value, json};
 
+/// What Flottille ends every comment and body it posts for an agent with (`docs/forges.md`).
+const MARKER: &str = "<!-- flottille -->";
+/// The same on Jira, where nothing invisible survives: a short visible footer.
+const JIRA_FOOTER: &str = "— posted by a Flottille agent";
+
 /// A project `app` of two repositories, `lib` first on another host and `api` on GitHub, and its
 /// ready workspace `login`. Each repository is pushed to a bare remote of its own first, so that
 /// the workspace's fetch works; its `origin` then says where the forge is.
@@ -728,6 +733,59 @@ fn the_short_ticket_read_of_a_named_ticket_points_at_that_ticket() {
         json!({"action": "show", "ticket": "13", "detail": "full"}),
     );
     assert!(full.text.contains("The logout fails"), "{}", full.text);
+}
+
+#[test]
+fn a_marked_comment_of_an_issue_is_shown_as_posted_by_an_agent_without_its_marker() {
+    let user = User::with_fake_agent().with_fake_gh();
+    fixture(&user);
+    let mut marked = issue(12, "The login fails");
+    marked["comments"][1]["body"] = json!(format!("Fixed on a branch\n\n{MARKER}"));
+    issues(&user, json!({"12": marked}));
+    track(&user, github_issues());
+    link(&user, Some("#12")).unwrap();
+    let mcp = agent_in(&user, Some("login"));
+
+    let full = mcp.call("tickets", json!({"action": "show", "detail": "full"}));
+
+    assert!(!full.error, "{}", full.text);
+    assert!(
+        full.text
+            .contains("- bob (posted by an agent), 2026-10-02T09:30:00Z: Fixed on a branch\n"),
+        "{}",
+        full.text
+    );
+    assert!(
+        full.text
+            .contains("- alice, 2026-10-01T10:00:00Z: I can reproduce"),
+        "{}",
+        full.text
+    );
+    assert!(!full.text.contains("flottille -->"), "{}", full.text);
+}
+
+#[test]
+fn a_comment_ending_with_the_footer_of_a_jira_work_item_is_shown_as_posted_by_an_agent() {
+    let user = User::with_fake_agent().with_fake_acli();
+    fixture(&user);
+    let mut item = work_item("ABC-123", "Add the login page");
+    item["fields"]["comment"]["comments"][0]["body"] =
+        document(&format!("Started\n\n{JIRA_FOOTER}"));
+    jira(&user, json!({"ABC-123": item}));
+    track(&user, jira_abc());
+    link(&user, Some("ABC-123")).unwrap();
+    let mcp = agent_in(&user, Some("login"));
+
+    let full = mcp.call("tickets", json!({"action": "show", "detail": "full"}));
+
+    assert!(!full.error, "{}", full.text);
+    assert!(
+        full.text
+            .contains("- Alice (posted by an agent), 2026-10-01T10:00:00.000+0000: Started\n"),
+        "{}",
+        full.text
+    );
+    assert!(!full.text.contains("Flottille agent"), "{}", full.text);
 }
 
 #[test]

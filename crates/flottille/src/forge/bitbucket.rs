@@ -845,7 +845,7 @@ pub(super) async fn write(
                         .into(),
                 );
             }
-            let body = asked.body.unwrap_or_default();
+            let body = super::marked(&asked.body.unwrap_or_default());
             let mut flags = vec![
                 "--source",
                 branch,
