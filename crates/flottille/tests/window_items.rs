@@ -840,7 +840,7 @@ fn an_open_detail_is_read_again_when_its_item_changes_and_says_when_it_leaves(
     assert!(!present(cx, "item-detail-gone"));
 
     // A read that no longer lists it (its repository's forge unset, say): the open detail says
-    // so. The daemon forgets such items without an event, so the read is given here.
+    // so. The read is given here; how `items.forgotten` brings it is tested apart.
     items.update(cx, |items, cx| {
         let read = Read {
             forges: vec!["api".into()],
@@ -927,4 +927,49 @@ fn a_tab_shown_again_does_not_fold_away_rows_that_left_while_it_was_hidden(
     a_frame(cx);
 
     assert!(!present(cx, &gone), "it left while the tab was hidden");
+}
+
+#[gpui_kit::test]
+fn a_source_removed_from_the_settings_has_its_rows_fold_away_when_its_items_are_forgotten(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, &["api", "web"]);
+    user.gh_script(json!({"pulls": {
+        "acme/api": {"feature-1": pull("api", 1, "Add the login", "OPEN", OLD)},
+        "acme/web": {"feature-7": pull("web", 7, "Restyle the page", "OPEN", OLD)}
+    }}));
+    declare(&user, &["api", "web"], false);
+    refresh(&user);
+    let (shell, items, cx) = open_page(&user, cx);
+    let web = rows(&items, cx)
+        .into_iter()
+        .find(|r| r.key == "7")
+        .unwrap()
+        .id();
+
+    // `web`'s forge unset: the page reads the project again (`project.changed`), before the
+    // daemon's next sweep forgets its items, which only `items.forgotten` tells it.
+    let asked = items.read_with(cx, |items, _| items.lists_asked());
+    user.call(
+        "project.set_settings",
+        json!({"name": "app", "repositories": [{"path": "web", "forge": null}]}),
+    )
+    .unwrap();
+    until(&shell, cx, "the settings' change is read", |cx| {
+        items.read_with(cx, |items, _| items.lists_asked()) > asked
+    });
+    settle(cx);
+
+    // The sweep forgets them, and the row folds away.
+    user.call("test.advance", json!({"ms": 0})).unwrap();
+    until(&shell, cx, "the forgotten row leaves the list", |cx| {
+        keys(&items, cx) == ["1"]
+    });
+    a_frame(cx);
+    assert!(present(cx, &web), "it folds away, not at once");
+    settle(cx);
+    assert!(!present(cx, &web));
+    let pending = cx.update(|window, cx| window.simulate_next_frame(cx));
+    assert_eq!(pending, 0, "nothing moves at rest");
 }

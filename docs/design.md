@@ -665,11 +665,11 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   a session (place, agent, model, first message), its pull requests and tickets (`items.md`: two
   tabs, Pull requests and Tickets, each counting what it lists, filtered open, closed or all, the
   user's own, and a repository for the pull requests; each row its number, title, state, CI mark,
-  author, assignee and when it changed, coming, going and changing live with the `item.*` events;
-  a project with no forge or no tracker says so with a link to its Settings, a source that fails
-  says why; a click opens the item's detail in a dialog: its description in Markdown, its
-  branches, its checks with their links, its reviews and comments, an agent's marked "posted by
-  an agent", and Open in browser), and its tasks, each with Run, which runs it in
+  author, assignee and when it changed, coming, going and changing live with the `item.*` events
+  and going with `items.forgotten`; a project with no forge or no tracker says so with a link to
+  its Settings, a source that fails says why; a click opens the item's detail in a dialog: its
+  description in Markdown, its branches, its checks with their links, its reviews and comments,
+  an agent's marked "posted by an agent", and Open in browser), and its tasks, each with Run, which runs it in
   the project folder, listed below with the rail's rows and output panel; its Settings: each
   repository's forge, the tracker, its Skills (a path picked in the project folder, or a text;
   added, edited, removed), its Commands (added from a list of the templates and a blank one,

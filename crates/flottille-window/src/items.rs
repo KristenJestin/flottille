@@ -1,8 +1,8 @@
 //! A project's pull requests and tickets (`docs/items.md`), as the daemon keeps them: the project
 //! page's "Pull requests and tickets", two tabs, each a list with its filters (open, closed or
 //! all, the user's own, a repository), and the detail of one in a dialog. Everything comes from
-//! `items.list` and `items.show`, read again once the `item.*` events that say the project's
-//! changed go quiet: the window never asks a forge or a tracker itself. A row unfolds when it
+//! `items.list` and `items.show`, read again once the `item.*` and `items.forgotten` events that
+//! say the project's changed go quiet: the window never asks a forge or a tracker itself. A row unfolds when it
 //! comes, folds away when it goes (a filter, a round), and moves to its place.
 
 use std::collections::HashMap;
