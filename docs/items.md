@@ -25,7 +25,7 @@ tracker.
 |---|---|
 | `items` | One row per pull request or ticket: `project`, `kind` (`pull`, `ticket`), `source` (`github`, `bitbucket`, `jira`), `repository` (the project's path of it; empty for Jira), `key` (its number, or its Jira key), `title`, `state`, `author`, `assignees`, `labels`, `url`, `updated_at` (when the forge says it last changed, kept in RFC 3339 UTC, `2026-11-01T10:00:00Z`, whatever form the source writes it in, so that the newest sorts first), `seen_at` (when Flottille last read it, in ms), `mine`, and `details` (JSON) |
 | `item_checks` | The checks of a pull request, in order: `name`, `state` (`passing`, `failing`, `pending`, `skipped`), `started_at`, `ended_at`, `link`. The CI moves without the pull request's `updated_at`, so it is kept beside it |
-| `fetch_cursors` | Per project and source (`kind`, `target`: a repository's path, or `tracker`): `cursor` (when the last complete round started), `round_at` (when the last round started), `failures` (in a row), `problem` (why the last one failed), `first_at` (when its first round ended) and `note` (what the last round could not read: a list cut at its cap, `mine` unknown) |
+| `fetch_cursors` | Per project and source (`kind`, `target`: a repository's path, or `tracker`): `cursor` (when the last complete round started), `round_at` (when the last round started), `failures` (in a row), `problem` (why the last one failed), `first_at` (when its first round started) and `note` (what the last round could not read: a list cut at its cap, `mine` unknown) |
 
 - **`state`** is `open`, `draft`, `merged` or `closed` for a pull request, `open` or `closed` for
   an issue, and for a Jira work item `closed` once its status is in the done category
@@ -41,18 +41,25 @@ tracker.
   Cloud's `bkt api /user` (`display_name`, assumed from Atlassian's REST documentation). Jira's
   are those a second search of the same window finds with `AND (assignee = currentUser() OR
   reporter = currentUser())`, so that no user is ever read of `acli` (of `acli jira auth status`,
-  only the `Site:` line is read). Bitbucket Data Center says no user in what `bkt` gives: its
+  only the `Site:` line is read). While GitHub or Cloud does not say who the user is (`gh api
+  user` failing), an item keeps the `mine` it had, a new one is not `mine`, and the user is asked
+  again at the next round; once it is known, the stored items it was not said of are said again. Bitbucket Data Center says no user in what `bkt` gives: its
   pull requests are never `mine`, and its source's `note` says so.
 - Every text is masked before it is stored, as every output is (`flottille_core::secrets`).
 - A project's items and cursors go once its file is gone (`project.remove`, or by hand), and a
   source's once the project no longer declares it (a repository removed, its forge or the tracker
-  unset), at the next sweep.
+  unset), at the next sweep. A round that ends once its project is gone has the next sweep
+  compare again, so that what it wrote between its last check and the removal goes too.
 
 ## Fetched incrementally
 
 A **round** of a source asks only what changed since its cursor, less five minutes
 (`items::OVERLAP_MS`), so that what changed while the last round ran, or a forge whose clock is a
-little behind, is not missed; what it reads again unchanged emits nothing. A source's first round
+little behind, is not missed; what it reads again unchanged emits nothing. **The overlap is the
+only guard** against a search index late behind its forge and a clock skewed: what is changed
+more than five minutes before it shows in the search, or on a clock more than five minutes
+behind the daemon's, is missed until it changes again (or, for an open GitHub item, until the
+hourly comparison below). A source's first round
 (no cursor) reads everything. The cursor moves only when a round worked.
 
 **The list is cheap; the details are read one item at a time, and only where they are worth it.**
@@ -73,8 +80,23 @@ what was left, its cursor not having moved.
 | Jira | for each project of the tracker, `acli jira workitem search --jql 'project = "<KEY>" [AND updated >= "-<n>m"] ORDER BY updated DESC' --fields key,summary,status,assignee,reporter,labels,issuetype,priority,updated,created --json --limit 1000`, once `acli` is checked to be on the tracker's site (`tickets.md`, "The Jira site"), then the same search with `currentUser()` and `--fields key` for `mine` | none: the search holds them |
 
 - **The checks of an open pull request whose CI still runs** are read again at every round, even
-  when the pull request did not change (`gh pr view <n> --json statusCheckRollup`; on Bitbucket
-  `bkt pr checks <id> --json`); those of a merged or closed one never are again.
+  when the pull request did not change, whether its list showed it again or not (Data Center
+  lists every open one each round) (`gh pr view <n> --json statusCheckRollup`; on Bitbucket
+  `bkt pr checks <id> --json`); those of a merged or closed one never are again. A read of them
+  that fails is said once in the daemon's log for that pull request, and tried again at the next
+  round.
+- **Once an hour, a GitHub source compares its stored open items with its open list**
+  (`gh pr list` or `gh issue list -R … --state open --limit 1000 --json number`), since a deleted
+  or transferred item never shows again in a search of what changed: each stored open one missing
+  from it, and not listed by the round, is read alone (`gh pr view` or `gh issue view <n> --json
+  <the list's fields>`). Not found, or answering with another repository's url (transferred), it
+  is `closed` with `details.removed: true`; merged or closed, it takes its state. An open list cut
+  at its cap compares nothing. The hour is kept in the daemon's memory: a daemon started again
+  compares at its first round after a source's first. Bitbucket has none to compare: Data Center
+  reads every open one each round, and Cloud deletes no pull request. Jira's are not compared yet.
+- **Only the pull request itself not found makes it removed**: on Bitbucket, a part of it not
+  found (its checks, its comments) while its own page is found keeps what is stored of it, and is
+  said in the daemon's log.
 - **A list cut at its cap** (GitHub's search gives 1,000 results at most; Bitbucket's pages stop at
   1,000) says so in its source's `note`. An item first seen later, once the history moved, is
   stored without `item.opened` when it was made before its source's first round (`first_at`).
@@ -101,8 +123,8 @@ what was left, its cursor not having moved.
 
 | Source | A first round | A round after it |
 |---|---|---|
-| GitHub pull requests | `gh auth status`, 1 list, 1 `gh pr view` per open pull request, `gh api user` once per daemon | `gh auth status`, 1 list, 1 `gh pr view` per changed one, 1 checks read per open one whose CI still runs |
-| GitHub issues | `gh auth status`, 1 list, 1 `gh issue view` per open issue | `gh auth status`, 1 list, 1 `gh issue view` per changed one |
+| GitHub pull requests | `gh auth status`, 1 list, 1 `gh pr view` per open pull request, `gh api user` once per daemon | `gh auth status`, 1 list, 1 `gh pr view` per changed one, 1 checks read per open one whose CI still runs; once an hour, 1 open list and 1 `gh pr view` per stored open one missing from it |
+| GitHub issues | `gh auth status`, 1 list, 1 `gh issue view` per open issue | `gh auth status`, 1 list, 1 `gh issue view` per changed one; once an hour, 1 open list and 1 `gh issue view` per stored open one missing from it |
 | Bitbucket Cloud | the contexts, 1 page per 50 pull requests, about 4 calls per open one (its checks, the pull request, its comments, its diffstat), `/user` once per daemon | the contexts, 1 page per 50 changed, about 4 calls per changed one, 1 checks read per open one whose CI still runs |
 | Bitbucket Data Center | the contexts, 1 page per 50 open pull requests, about 3 calls per open one | the contexts, 1 page per 50 open, about 3 calls per changed one, 1 per stored open one that left the list, 1 checks read per open one whose CI still runs |
 | Jira | `acli jira auth status`, 2 searches per project of the tracker | the same |
@@ -151,12 +173,16 @@ stores it (`docs/events.md`): `item.opened`, `item.changed` (with what changed: 
   items (#258); the window says `client: "window"` from then on, so until then the rhythm is
   the one without a window.
 - `mine` on Bitbucket Data Center; Jira's comments (`item.commented` is not emitted for
-  a work item: no comment field is asked of the search).
+  a work item: no comment field is asked of the search); a Jira work item deleted or moved to
+  another project stays as it was last read.
 
 ## Tests
 
 On the fake `gh`, `bkt` and `acli` (`crates/flottille/tests/items.rs`), which keep, for a
 `--search` with `updated:>=` or a `q` with `updated_on>=`, only what changed at or after it. The
+fake `gh` assumes what the real one does with an item that is gone: a transferred issue is no
+longer listed and `gh issue view` of its old number answers with its new url; a deleted one is
+neither listed nor found ("Could not resolve to"). The
 daemon of every other test makes no round of its own (`FLOTTILLE_TEST_NO_FETCH`, which the tests'
 harness sets, and which the daemon's log says once), so that the calls their fakes record are their
 own.
