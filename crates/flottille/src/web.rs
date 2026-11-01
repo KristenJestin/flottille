@@ -570,8 +570,9 @@ async fn read(net: &Net, url: Url) -> Outcome {
     };
     match read {
         Ok(read) => {
-            // What the page holds is the web's: its links pass as links, never free.
-            shown(&read.text, Source::Link);
+            // What the page holds is the web's: its links pass as links, never free, and only
+            // those of the text the agent is given.
+            shown(&cut_at(&read.text, TEXT_CHARS), Source::Link);
             for link in &read.links {
                 shown(link, Source::Link);
             }

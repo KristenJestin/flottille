@@ -79,6 +79,14 @@ fn answer(addr: SocketAddr, path: &str) -> Vec<u8> {
     let (status, kind, body) = match path.split('?').next().unwrap() {
         "/guide.html" => html(GUIDE),
         "/join.html" => html(JOIN),
+        "/long.txt" => (
+            "200 OK",
+            "text/plain",
+            format!(
+                "{}\nhttp://{addr}/join.html?d=bG9uZw\n",
+                "word ".repeat(7_000)
+            ),
+        ),
         "/token.txt" => ("200 OK", "text/plain", format!("the key is {TOKEN}\n")),
         "/letters.html" => html(&format!(
             "<!doctype html><html><head><title>Letters</title></head><body><article><h1>The \
@@ -633,6 +641,18 @@ fn a_url_in_a_description_an_agent_wrote_or_in_a_title_is_still_judged() {
         held(mcp.call("web", read(carried)));
     }
     assert!(web.asked().is_empty(), "{:?}", web.asked());
+}
+
+#[test]
+fn a_url_past_the_text_the_agent_is_given_is_still_judged() {
+    let web = Web::start();
+    let user = user_of(&web, says("ask"));
+    let (_, mcp) = session(&user, &format!("read {}", web.url("/long.txt")));
+    let past = web.url("/join.html?d=bG9uZw");
+
+    let text = done(mcp.call("web", read(&web.url("/long.txt"))));
+    assert!(!text.contains(&past) && text.contains("(cut: "), "{text}");
+    held(mcp.call("web", read(&past)));
 }
 
 #[test]
