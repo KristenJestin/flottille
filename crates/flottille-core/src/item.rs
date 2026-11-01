@@ -67,6 +67,10 @@ pub struct Cursor {
     pub failures: u32,
     /// Why the last round failed.
     pub problem: Option<String>,
+    /// When its first round ended: an item seen later but made before it is not new.
+    pub first_at: Option<u64>,
+    /// What the last round could not read: a list cut at its cap, whose items are the user's.
+    pub note: Option<String>,
 }
 
 /// What `items.list` keeps.

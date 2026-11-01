@@ -522,6 +522,8 @@ const MIGRATIONS: &[&str] = &[
         round_at INTEGER,
         failures INTEGER NOT NULL,
         problem  TEXT,
+        first_at INTEGER,
+        note     TEXT,
         PRIMARY KEY (project, kind, target)
     ) STRICT;
 ",
@@ -1989,8 +1991,8 @@ impl Store {
     /// Where each source of the project stands.
     pub fn cursors(&self, project: &str) -> Result<Vec<Cursor>> {
         let mut statement = self.connection.prepare_cached(
-            "SELECT project, kind, target, source, cursor, round_at, failures, problem \
-             FROM fetch_cursors WHERE project = ?1 ORDER BY kind, target",
+            "SELECT project, kind, target, source, cursor, round_at, failures, problem, \
+             first_at, note FROM fetch_cursors WHERE project = ?1 ORDER BY kind, target",
         )?;
         let rows = statement.query_map(params![project], |row| {
             Ok(Cursor {
@@ -2002,6 +2004,8 @@ impl Store {
                 round_at: row.get(5)?,
                 failures: row.get(6)?,
                 problem: row.get(7)?,
+                first_at: row.get(8)?,
+                note: row.get(9)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -2010,7 +2014,8 @@ impl Store {
     pub fn set_cursor(&self, cursor: &Cursor) -> Result<()> {
         self.connection.execute(
             "INSERT OR REPLACE INTO fetch_cursors (project, kind, target, source, cursor, \
-             round_at, failures, problem) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             round_at, failures, problem, first_at, note) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 cursor.project,
                 cursor.kind,
@@ -2019,7 +2024,9 @@ impl Store {
                 cursor.cursor,
                 cursor.round_at,
                 cursor.failures,
-                cursor.problem
+                cursor.problem,
+                cursor.first_at,
+                cursor.note
             ],
         )?;
         Ok(())
@@ -4670,6 +4677,8 @@ mod tests {
             round_at: Some(6),
             failures: 1,
             problem: Some("gh is not signed in".into()),
+            first_at: Some(4),
+            note: Some("only the newest 1000 are read".into()),
         };
         store.set_cursor(&cursor).unwrap();
         assert_eq!(store.cursors("app").unwrap(), vec![cursor]);
