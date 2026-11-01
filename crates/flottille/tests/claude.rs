@@ -446,8 +446,40 @@ fn through_the_bridge_claude_s_models_are_listed_by_their_names_once_a_session_o
             ("haiku", "Haiku")
         ]
     );
-    assert_eq!(models[0]["default"], true);
     assert_eq!(claude["models_outdated"], false);
+}
+
+#[test]
+fn through_the_bridge_claude_s_default_alias_is_listed_as_the_model_it_stands_for() {
+    let user = User::with_fake_claude();
+    project(&user);
+    let (id, after) = run(&user, "hello");
+    events_until(&user, &id, after, "agent.turn_ended");
+
+    let listed = user.call("provider.list", Value::Null).unwrap();
+    let claude = listed["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "claude")
+        .unwrap()
+        .clone();
+    let models = claude["models"].as_array().unwrap();
+    // The alias stays listed, `--model default` is still offered, but it is not the default:
+    // the model it stands for is, with the alias's efforts.
+    assert_eq!(models[0]["id"], "default");
+    assert_eq!(models[0]["stands_for"], "fable");
+    assert_eq!(models[0].get("default"), None);
+    assert_eq!(models[1]["id"], "fable");
+    assert_eq!(models[1]["default"], true);
+    assert_eq!(models[1]["efforts"], models[0]["efforts"]);
+    // Claude does not say which effort it runs with when none is asked.
+    assert!(
+        models.iter().all(|m| m.get("default_effort").is_none()),
+        "{models:?}"
+    );
+    // The agent is said to run on the model, not on the alias.
+    assert_eq!(show(&user, &id)["agent"]["taken"]["model"], "fable");
 }
 
 #[test]

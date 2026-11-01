@@ -69,13 +69,16 @@ const MODEL: &str = "claude-fake-1";
 /// The models the answer to `initialize` lists, as Claude Code describes them.
 fn models() -> Value {
     json!([
-        {"value": "default", "displayName": "Default (recommended)",
+        {"value": "default", "resolvedModel": "claude-fable-5",
+            "displayName": "Default (recommended)",
             "description": "The model Claude Code picks", "supportsEffort": true,
             "supportedEffortLevels": ["low", "medium", "high", "xhigh"]},
-        {"value": "fable", "displayName": "Fable", "description": "The largest",
+        {"value": "fable", "resolvedModel": "claude-fable-5", "displayName": "Fable",
+            "description": "The largest",
             "supportsEffort": true,
             "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"]},
-        {"value": "haiku", "displayName": "Haiku", "description": "The fastest"}
+        {"value": "haiku", "resolvedModel": "claude-haiku-5", "displayName": "Haiku",
+            "description": "The fastest"}
     ])
 }
 

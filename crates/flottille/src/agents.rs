@@ -1361,8 +1361,8 @@ impl acp::Events for Recorder {
         deliveries::read_image(&self.daemon, &self.agent, name)
     }
 
-    fn offered(&self, options: &Value, fresh: bool) {
-        providers::learn(&self.daemon, self.provider, options, fresh);
+    fn offered(&self, options: &Value, fresh: bool, own_effort: bool) {
+        providers::learn(&self.daemon, self.provider, options, fresh, own_effort);
     }
 
     fn opened(

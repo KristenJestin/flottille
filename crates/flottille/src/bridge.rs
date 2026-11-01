@@ -1097,10 +1097,12 @@ fn config_options(claude: &Claude) -> Value {
     if !models.iter().any(|m| m["value"] == "default") {
         models.insert(0, json!({"value": "default", "name": "Default"}));
     }
-    let mut options = vec![
-        json!({"id": "model", "name": "Model", "category": "model", "type": "select",
-        "currentValue": claude.model, "options": models}),
-    ];
+    let mut model = json!({"id": "model", "name": "Model", "category": "model", "type": "select",
+        "currentValue": claude.model, "options": models});
+    if let Some(stands_for) = stands_for(&claude.models) {
+        model["_meta"] = json!({"jetbrains": {"air": {"recommendedValue": stands_for}}});
+    }
+    let mut options = vec![model];
     if let Some(levels) = effort_levels(&claude.models, &claude.model) {
         let levels: Vec<Value> = levels
             .iter()
@@ -1112,6 +1114,30 @@ fn config_options(claude: &Claude) -> Value {
         );
     }
     Value::Array(options)
+}
+
+/// The model `claude`'s `default` stands for: the one it resolves to as well, else the longest
+/// name its description gives (a version that does not say what it resolves to); `None` when
+/// neither says.
+fn stands_for(models: &[Value]) -> Option<&str> {
+    let alias = models.iter().find(|m| m["value"] == "default")?;
+    let others = || models.iter().filter(|m| m["value"] != "default");
+    let resolved = alias["resolvedModel"].as_str();
+    let by_resolution = others().find(|m| {
+        resolved.is_some()
+            && (m["resolvedModel"].as_str() == resolved || m["value"].as_str() == resolved)
+    });
+    let description = alias["description"].as_str().unwrap_or_default();
+    let by_description = || {
+        others()
+            .filter(|m| {
+                m["displayName"]
+                    .as_str()
+                    .is_some_and(|name| !name.is_empty() && description.contains(name))
+            })
+            .max_by_key(|m| m["displayName"].as_str().map_or(0, str::len))
+    };
+    by_resolution.or_else(by_description)?["value"].as_str()
 }
 
 /// The models offered, `default` first when `claude` did not list it.

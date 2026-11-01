@@ -790,6 +790,53 @@ fn the_models_offered_are_claude_s_own_and_an_unknown_one_is_refused_with_them()
     );
 }
 
+/// The value the model option says its `default` stands for, if any.
+fn recommended(answer: &Value) -> Value {
+    answer["configOptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["id"] == "model")
+        .map(|o| o["_meta"]["jetbrains"]["air"]["recommendedValue"].clone())
+        .unwrap_or_default()
+}
+
+#[test]
+fn claude_s_default_alias_is_resolved_to_the_model_it_stands_for() {
+    let opened = |models: Value| {
+        let user = User::with_fake_claude();
+        user.claude_script(json!({ "models": models }));
+        let mut bridge = Bridge::start(&user);
+        bridge
+            .request("session/new", new_session(&user, &[]))
+            .0
+            .unwrap()
+    };
+    // The model it resolves to, as Claude Code names it.
+    let resolved = opened(json!([
+        {"value": "default", "resolvedModel": "claude-fable-5", "displayName": "Default (recommended)",
+            "description": "The model Claude Code picks"},
+        {"value": "haiku", "resolvedModel": "claude-haiku-5", "displayName": "Haiku", "description": "h"},
+        {"value": "fable", "resolvedModel": "claude-fable-5", "displayName": "Fable", "description": "f"}
+    ]));
+    assert_eq!(current(&resolved, "model"), "default");
+    assert_eq!(recommended(&resolved), "fable");
+    // Without it, the longest model's name its description gives.
+    let described = opened(json!([
+        {"value": "default", "displayName": "Default (recommended)",
+            "description": "Fable Max 5 · the largest, for complex work"},
+        {"value": "fable", "displayName": "Fable", "description": "f"},
+        {"value": "fable-max", "displayName": "Fable Max", "description": "f"}
+    ]));
+    assert_eq!(recommended(&described), "fable-max");
+    // Claude does not say which: nothing is guessed.
+    let unsaid = opened(json!([
+        {"value": "default", "displayName": "Default (recommended)", "description": "d"},
+        {"value": "fable", "displayName": "Fable", "description": "f"}
+    ]));
+    assert_eq!(recommended(&unsaid), Value::Null);
+}
+
 #[test]
 fn the_effort_is_an_option_of_the_model_set_on_claude() {
     let user = User::with_fake_claude();

@@ -569,8 +569,9 @@ fn models_version(check: &Check) -> Option<String> {
 }
 
 /// The models a provider's agents last offered, each `{"id", "name", "efforts"}` (`efforts`
-/// `null` until the model was seen chosen) and `"default": true` on the one a new session takes,
-/// and whether they were read from the version of the provider there is now.
+/// `null` until the model was seen chosen), `"default": true` on the one a new session takes,
+/// `"default_effort"` on one whose own effort was seen and `"stands_for"` on an alias, and
+/// whether they were read from the version of the provider there is now.
 fn last_models(daemon: &Daemon, check: &Check) -> Option<(Vec<Value>, bool)> {
     let (version, models) = daemon
         .read(|store| store.provider_models(check.provider.name))
@@ -587,8 +588,16 @@ fn known_models(daemon: &Daemon, check: &Check) -> Option<Vec<Value>> {
 
 /// What a session of the provider's agent offers in its config options, kept: its models, the
 /// efforts of the model it has now, and, `fresh` (a new session none was set on), that this
-/// model is the default. What another version offered goes.
-pub fn learn(daemon: &Daemon, provider: &'static Provider, options: &Value, fresh: bool) {
+/// model is the default; `own_effort` (none was set), that its effort is the model's own. A
+/// `default` value that names the model it stands for is an alias: that model is the one the
+/// session has. What another version offered goes.
+pub fn learn(
+    daemon: &Daemon,
+    provider: &'static Provider,
+    options: &Value,
+    fresh: bool,
+    own_effort: bool,
+) {
     let find = |category: &str| {
         options
             .as_array()
@@ -598,27 +607,54 @@ pub fn learn(daemon: &Daemon, provider: &'static Provider, options: &Value, fres
     };
     let Some(model) = find("model") else { return };
     let current = model["currentValue"].as_str().unwrap_or_default();
-    let efforts = find("thought_level").map(values).unwrap_or_default();
+    let listed = named_values(model);
+    let alias = recommended(model).filter(|r| listed.iter().any(|(id, _)| id == r));
+    // The model the session has, the alias resolved.
+    let has = match alias {
+        Some(stands_for) if current == "default" => stands_for,
+        _ => current,
+    };
+    let effort = find("thought_level");
+    let efforts = effort.map(values).unwrap_or_default();
+    let own =
+        effort
+            .filter(|_| own_effort)
+            .and_then(|effort| match effort["currentValue"].as_str()? {
+                "default" => recommended(effort),
+                value => Some(value),
+            });
     let settings = Settings::load(&daemon.paths).unwrap_or_default();
     let check = Check::of(provider, &settings, Version::Skip);
     let before = known_models(daemon, &check).unwrap_or_default();
-    let models: Vec<Value> = named_values(model)
+    let models: Vec<Value> = listed
         .into_iter()
         .map(|(id, name)| {
             let known = before.iter().find(|m| m["id"] == id.as_str());
-            let efforts = if id == current {
+            let now = id == current || id == has;
+            let efforts = if now {
                 json!(efforts)
             } else {
                 known.map_or(Value::Null, |m| m["efforts"].clone())
             };
+            let stands_for = alias.filter(|_| id == "default");
             let default = if fresh {
-                id == current
+                id == has && stands_for.is_none()
             } else {
                 known.is_some_and(|m| m["default"] == true)
+            };
+            let default_effort = match own {
+                Some(own) if now => Some(Value::from(own)),
+                _ => known.and_then(|m| m.get("default_effort")).cloned(),
             };
             let mut model = json!({"id": id, "name": name, "efforts": efforts});
             if default {
                 model["default"] = true.into();
+            }
+            if let Some(effort) = default_effort {
+                model["default_effort"] = effort;
+            }
+            if let Some(stands_for) = stands_for {
+                model["stands_for"] = stands_for.into();
             }
             model
         })
@@ -627,6 +663,11 @@ pub fn learn(daemon: &Daemon, provider: &'static Provider, options: &Value, fres
     let _ = daemon.read(|store| {
         store.set_provider_models(provider.name, version.as_deref(), &Value::Array(models))
     });
+}
+
+/// The value an option's `default` stands for, when the agent names it.
+fn recommended(option: &Value) -> Option<&str> {
+    option["_meta"]["jetbrains"]["air"]["recommendedValue"].as_str()
 }
 
 /// The values a select option offers, in order, groups flattened.
