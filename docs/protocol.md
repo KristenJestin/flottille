@@ -119,6 +119,7 @@ Subscribes the connection to the event stream.
 | Parameter | |
 |---|---|
 | `after` | Optional event number. With it, the stored events numbered after it are sent first, oldest first, then the new ones. Without it, only the events emitted after the subscription. |
+| `client` | Optional: what the client is. `window` makes the daemon read the items at the window's rhythm for as long as this connection is open ([`items.md`](items.md), "Rhythm"). |
 
 The result is `{"after": <n>}`, the number the stream starts after. It is written before the
 first event. Then every event follows, in the order of its number, none missing and none twice,
@@ -581,6 +582,32 @@ cannot say whether it is merged: …"`); the remote branch is never deleted (`do
 "Removal"). `refused`, with nothing touched, while it is being prepared, or when a worktree holds a
 changed or untracked file or a commit on no remote, unless the forge says the branch's pull
 request merged it: the message names every one, and the branch that holds the commit.
+
+### The items methods
+
+Every pull request and ticket of a project, as the daemon last read them ([`items.md`](items.md)).
+An item is `{project, kind, source, repository, key, title, state, author, assignees, labels, url,
+updated_at, seen_at, mine, details, checks: [{name, state, started_at, ended_at, link}]}`; a
+source is `{kind, target, source, cursor, round_at, failures, problem}`. `not-found` when there is
+no such project.
+
+#### `items.list`
+
+`{"project", "kind"?, "state"?, "repository"?, "mine"?}`: `kind` is `pull` or `ticket`, `state`
+one of an item's states (`open`, `draft`, `merged`, `closed`), `repository` a path of the
+project's (a Jira work item has none), `mine` true for the user's own. Answers `{project, items,
+sources}`, the items most recently changed first, from the store: nothing is read.
+
+#### `items.show`
+
+`{"project", "kind", "id", "repository"?}`: the stored item whose key is `id` (`12`, `#12`,
+`ABC-1`); `not-found` when none is stored, `refused` when several repositories have one and
+`repository` does not say which.
+
+#### `items.refresh`
+
+`{"project"}`: a round of every source of the project now, whatever its rhythm, after the one
+running when there is one; answers `{project, sources}` once it ended.
 
 ### The command methods
 

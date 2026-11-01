@@ -156,10 +156,14 @@ JSON: the same, with the tracker's own first line, masked. The rest of Flottille
 
 ## When it is read
 
-**On demand only**: `workspace.ticket {project, name}` (and so `flottille workspace show` and the
+**On demand**: `workspace.ticket {project, name}` (and so `flottille workspace show` and the
 window's `WORKSPACE` section, when a page opens or the ticket is linked or unlinked) and
-`tickets` `show` read it now, one call. Nothing is read in the background, nothing is kept in
-memory or in the store but the reference: a ticket is as fresh as the call.
+`tickets` `show` read it now, one call; a workspace keeps only the reference, and what it shows
+is as fresh as the call.
+
+**And continuously**: every ticket of a declared tracker is read by the daemon on its own,
+incrementally, its title, state, assignee, labels and status kept in the store and its changes
+said as `item.*` events ([`items.md`](items.md)); its description and comments are not kept.
 
 ## The protocol and the command line
 

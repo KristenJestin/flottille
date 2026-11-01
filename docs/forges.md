@@ -120,7 +120,12 @@ workspace with a GitHub repository and a Bitbucket one still shows the one that 
   long, up to 16 minutes, and back to a minute after a read that works.
 - **While an agent subscribes to its pull request** (`forge` `subscribe`, "Subscriptions" below):
   the subscription holds a watch of the workspace, the same reads, until it is over.
-- **Never when nobody looks**: no timer runs for a workspace nobody watches.
+- **And continuously, for the whole project**: every pull request of each repository whose forge
+  is declared is read by the daemon on its own, incrementally (only what changed since the last
+  round), within a budget (a round a minute while a window is connected, every 5 minutes
+  otherwise, longer for a forge that fails), kept in the store and said as `item.*` events
+  ([`items.md`](items.md)). The workspace's state above is still read on demand and while it is
+  watched.
 
 The state is kept in the daemon's memory, not in the store. When a read finds it different from the
 last one (its time aside), the daemon emits `workspace.forge` with the whole state

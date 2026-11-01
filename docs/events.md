@@ -177,6 +177,50 @@ deleted after it, which the answer to `workspace.remove` says, not an event.
 |---|---|
 | `project`, `workspace` | |
 
+### The events of an item
+
+What a round of the items found changed on a pull request or a ticket ([`items.md`](items.md)).
+Every one has the item's identity and what it is now; a source's first round emits none.
+
+| Field | |
+|---|---|
+| `project`, `kind` (`pull`, `ticket`), `source` (`github`, `bitbucket`, `jira`), `repository` (empty for Jira), `key` | |
+| `title`, `state`, `url` | As read now. |
+
+#### `item.opened`
+
+An item not stored before.
+
+#### `item.changed`
+
+| Field | |
+|---|---|
+| `changes` | Each field that changed, `{"from", "to"}`: `state` (a reopening; a merge and a close have their own events), `title`, `assignees`, `labels`, `status` (Jira's). |
+
+#### `item.commented`, `item.reviewed`
+
+More comments, or more reviews or another review decision (Bitbucket: a reviewer's verdict),
+than stored.
+
+| Field | |
+|---|---|
+| `comments` (`item.commented`), `reviews` (`item.reviewed`) | The newest, five at most: `{author, bot, by_agent, state, excerpt}`, `by_agent` when an agent of Flottille posted it (`forges.md`, "What Flottille posts is marked"). |
+| `review`, `reviewers` (`item.reviewed`) | The decision now; Bitbucket's reviewers and their verdicts. |
+
+#### `item.checks`
+
+A pull request's checks ended: none runs now, and one was running, or its head commit moved.
+
+| Field | |
+|---|---|
+| `checks` | `passing` or `failing`, as one mark. |
+| `ended` | The checks that ended, `{name, state}`: those that were running, or all of them after a push. |
+
+#### `item.merged`, `item.closed`
+
+The pull request was merged; the pull request, the issue or the work item (its status in the
+done category) was closed.
+
 ### The events of an agent
 
 Every event of an agent has `agent`, its id (`docs/agents.md`), and is part of its conversation
