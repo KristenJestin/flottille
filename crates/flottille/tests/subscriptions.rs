@@ -546,6 +546,41 @@ fn the_user_cancels_a_subscription_through_the_daemon_and_the_agent_is_not_woken
 }
 
 #[test]
+fn a_subscription_cancelled_while_its_logs_are_read_wakes_nobody_and_ends_once() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull());
+    let (id, mcp) = agent(&user);
+    subscribe(&mcp, json!({"events": ["checks"]}));
+    let subscription = listed(&user, &id)[0]["id"].as_str().unwrap().to_owned();
+    let watch = user.watch(&["--after", "0"]);
+
+    // The checks ended and the daemon is reading the failed job's log, slowly.
+    user.gh_script(json!({
+        "pulls": {"acme/api": {"app/login": ended(pull())}},
+        "logs": {"acme/api": {"456": "test\tRun cargo test\t2026-01-01T00:00:00.0000000Z failed\n"}},
+        "log_delay_ms": 1500
+    }));
+    a_minute_later(&user);
+    eventually("the log being read", || {
+        user.gh_received()
+            .iter()
+            .any(|call| call["args"].to_string().contains("--log-failed"))
+    });
+    user.call("subscription.cancel", json!({"subscription": subscription}))
+        .unwrap();
+
+    let events = watch.within(Duration::from_secs(3));
+    let ended: Vec<&Value> = events
+        .iter()
+        .filter(|e| e["name"] == "subscription.ended")
+        .collect();
+    assert_eq!(ended.len(), 1, "{events:?}");
+    assert_eq!(ended[0]["data"]["why"], "cancelled", "{events:?}");
+    assert!(delivered(&user).is_empty(), "{:?}", delivered(&user));
+}
+
+#[test]
 fn a_delivery_ends_the_subscription_with_an_event_saying_it_was_delivered() {
     let user = user();
     fixture(&user);

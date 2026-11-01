@@ -111,8 +111,9 @@ pub fn all(daemon: &Daemon) -> Vec<Subscription> {
 }
 
 /// Ends a subscription without a word: its source stops watching for it, and `subscription.ended`
-/// says `why` once (`docs/events.md`).
-pub fn end(daemon: &Daemon, subscription: &Subscription, why: &str) {
+/// says `why` once (`docs/events.md`). False when it was no longer open: someone else ended it
+/// first, and there is nothing left to say or deliver.
+pub fn end(daemon: &Daemon, subscription: &Subscription, why: &str) -> bool {
     let was_open = daemon
         .read(|store| store.unsubscribe(&subscription.id))
         .unwrap_or(false);
@@ -125,6 +126,7 @@ pub fn end(daemon: &Daemon, subscription: &Subscription, why: &str) {
             json!({"agent": subscription.agent, "subscription": subscription.id, "why": why}),
         );
     }
+    was_open
 }
 
 /// What a source read of the subscription's target: the events since what it saw last, and what
@@ -161,7 +163,10 @@ pub fn offer(
 }
 
 fn deliver(daemon: &Arc<Daemon>, subscription: &Subscription, body: &str, why: &str) {
-    end(daemon, subscription, why);
+    // A subscription the user cancelled while the source was reading wakes nobody.
+    if !end(daemon, subscription, why) {
+        return;
+    }
     deliveries::deliver(
         daemon,
         &subscription.agent,
