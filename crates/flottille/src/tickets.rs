@@ -1787,49 +1787,21 @@ impl Tickets {
         args.extend(["--json", LIST_FIELDS]);
         let issues = forge::gh_json(&args).await?;
         let issues = issues.as_array().cloned().unwrap_or_default();
-        let ours = format!("https://{repo}/issues/").to_lowercase();
         let mut items = Vec::new();
         for issue in &issues {
             let Some(number) = issue["number"].as_u64() else {
                 continue;
             };
-            let key = number.to_string();
-            let is_ours = issue["url"]
-                .as_str()
-                .is_some_and(|url| url.to_lowercase().starts_with(&ours));
-            if !is_ours {
+            match listed_issue(&repo, repository, issue) {
+                Some(fetched) => items.push(fetched),
                 // Only the tracker's repository's issues are kept, whatever `gh` answered.
-                if let Some(gone) = stored.iter().find(|item| item.key == key) {
-                    items.push(crate::items::Fetched::removed(gone.clone()));
+                None => {
+                    let key = number.to_string();
+                    if let Some(gone) = stored.iter().find(|item| item.key == key) {
+                        items.push(crate::items::Fetched::removed(gone.clone()));
+                    }
                 }
-                continue;
             }
-            items.push(crate::items::Fetched {
-                item: flottille_core::item::Item {
-                    project: String::new(),
-                    kind: "ticket".into(),
-                    source: "github".into(),
-                    repository: repository.clone(),
-                    key,
-                    title: said(&issue["title"]),
-                    state: said(&issue["state"]).to_lowercase(),
-                    author: Some(said(&issue["author"]["login"])).filter(|name| !name.is_empty()),
-                    assignees: forge::names_of(&issue["assignees"], "login"),
-                    labels: forge::names_of(&issue["labels"], "name"),
-                    url: issue["url"].as_str().map(masked),
-                    updated_at: issue["updatedAt"].as_str().map(masked),
-                    seen_at: 0,
-                    mine: false,
-                    details: json!({}),
-                    checks: Vec::new(),
-                },
-                comments: Vec::new(),
-                reviews: Vec::new(),
-                created_at: issue["createdAt"]
-                    .as_str()
-                    .and_then(crate::session_read::form),
-                detailed: false,
-            });
         }
         Ok(crate::items::Listing {
             items,
@@ -1840,6 +1812,24 @@ impl Tickets {
             }),
             details: true,
         })
+    }
+
+    /// The stored open issues that GitHub no longer lists open, each read alone (`forge::swept`):
+    /// a deleted one is not found, a transferred one answers with another repository's url.
+    /// Jira has none to find this way.
+    pub async fn swept(
+        &self,
+        stored: &[flottille_core::item::Item],
+        listed: &[crate::items::Fetched],
+    ) -> Result<Vec<crate::items::Fetched>, String> {
+        let Tickets::GitHub { forge, repository } = self else {
+            return Ok(Vec::new());
+        };
+        let repo = forge.gh_repository();
+        forge::swept("issue", &repo, LIST_FIELDS, stored, listed, |issue| {
+            listed_issue(&repo, repository, issue)
+        })
+        .await
     }
 
     /// Reads the comments of a listed issue; false when GitHub no longer has it.
@@ -1879,6 +1869,45 @@ impl Tickets {
         fetched.detailed = true;
         Ok(true)
     }
+}
+
+/// An issue as `gh issue list --json LIST_FIELDS` says it, of the repository `repository` of the
+/// project (`repo` for `gh`); none when it is another repository's (transferred there).
+fn listed_issue(repo: &str, repository: &str, issue: &Value) -> Option<crate::items::Fetched> {
+    let number = issue["number"].as_u64()?;
+    let ours = format!("https://{repo}/issues/").to_lowercase();
+    if !issue["url"]
+        .as_str()
+        .is_some_and(|url| url.to_lowercase().starts_with(&ours))
+    {
+        return None;
+    }
+    Some(crate::items::Fetched {
+        item: flottille_core::item::Item {
+            project: String::new(),
+            kind: "ticket".into(),
+            source: "github".into(),
+            repository: repository.to_owned(),
+            key: number.to_string(),
+            title: said(&issue["title"]),
+            state: said(&issue["state"]).to_lowercase(),
+            author: Some(said(&issue["author"]["login"])).filter(|name| !name.is_empty()),
+            assignees: forge::names_of(&issue["assignees"], "login"),
+            labels: forge::names_of(&issue["labels"], "name"),
+            url: issue["url"].as_str().map(masked),
+            updated_at: issue["updatedAt"].as_str().map(masked),
+            seen_at: 0,
+            mine: false,
+            details: json!({}),
+            checks: Vec::new(),
+        },
+        comments: Vec::new(),
+        reviews: Vec::new(),
+        created_at: issue["createdAt"]
+            .as_str()
+            .and_then(crate::session_read::form),
+        detailed: false,
+    })
 }
 
 /// The work items of the Jira project `key` updated since `since`, and whether the list was cut

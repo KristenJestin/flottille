@@ -2290,19 +2290,7 @@ impl Pulls {
         });
         let items = values
             .iter()
-            .filter_map(|value| {
-                let pull = Pull::of(value)?;
-                let mut fetched = fetched_pull(&self.path, "github", &pull, false);
-                let item = &mut fetched.item;
-                item.author = value["author"]["login"].as_str().map(masked);
-                item.assignees = names_of(&value["assignees"], "login");
-                item.labels = names_of(&value["labels"], "name");
-                item.updated_at = value["updatedAt"].as_str().map(masked);
-                fetched.created_at = value["createdAt"]
-                    .as_str()
-                    .and_then(crate::session_read::form);
-                Some(fetched)
-            })
+            .filter_map(|value| listed_pull(&self.path, value))
             .collect();
         Ok(crate::items::Listing {
             items,
@@ -2311,8 +2299,27 @@ impl Pulls {
         })
     }
 
+    /// The stored open pull requests that GitHub no longer lists open, each read alone
+    /// (`swept`). Bitbucket has none to find: Data Center reads its own at every round, and
+    /// Cloud deletes no pull request.
+    pub(crate) async fn swept(
+        &self,
+        stored: &[flottille_core::item::Item],
+        listed: &[crate::items::Fetched],
+    ) -> Result<Vec<crate::items::Fetched>, String> {
+        if let Forge::Bitbucket { .. } = self.forge {
+            return Ok(Vec::new());
+        }
+        let repo = self.forge.gh_repository();
+        swept("pr", &repo, LIST_FIELDS, stored, listed, |value| {
+            listed_pull(&self.path, value)
+        })
+        .await
+    }
+
     /// Reads the checks, reviews and comments of a listed pull request, as `forge show` reads
-    /// them; false when the forge no longer has it.
+    /// them; false when the forge no longer has it. True without `detailed` when a part of it
+    /// could not be found: what is stored of it is kept.
     pub(crate) async fn detail(&self, fetched: &mut crate::items::Fetched) -> Result<bool, String> {
         let context = self.context.as_deref().unwrap_or_default();
         if let Forge::Bitbucket { .. } = self.forge {
@@ -2359,6 +2366,65 @@ impl Pulls {
         .await?;
         Ok(github_checks(&viewed))
     }
+}
+
+/// A pull request as `gh pr list --json LIST_FIELDS` says it, its cheap fields alone.
+fn listed_pull(path: &str, value: &Value) -> Option<crate::items::Fetched> {
+    let pull = Pull::of(value)?;
+    let mut fetched = fetched_pull(path, "github", &pull, false);
+    let item = &mut fetched.item;
+    item.author = value["author"]["login"].as_str().map(masked);
+    item.assignees = names_of(&value["assignees"], "login");
+    item.labels = names_of(&value["labels"], "name");
+    item.updated_at = value["updatedAt"].as_str().map(masked);
+    fetched.created_at = value["createdAt"]
+        .as_str()
+        .and_then(crate::session_read::form);
+    Some(fetched)
+}
+
+/// The stored open pull requests or issues (`kind`: `pr`, `issue`) of `repo` that its open list
+/// no longer holds and that this round did not list, each read alone with `gh <kind> view
+/// --json <fields>` and made an item by `read`: what a search of what changed never shows again
+/// (an issue deleted or transferred, an update its index missed). One not found, or that `read`
+/// refuses (moved to another repository), is closed and removed. Nothing is read alone when the
+/// open list is cut at its cap: those missing from it may still be open.
+pub(crate) async fn swept(
+    kind: &str,
+    repo: &str,
+    fields: &str,
+    stored: &[flottille_core::item::Item],
+    listed: &[crate::items::Fetched],
+    read: impl Fn(&Value) -> Option<crate::items::Fetched>,
+) -> Result<Vec<crate::items::Fetched>, String> {
+    let open = gh_json(&[
+        kind, "list", "-R", repo, "--state", "open", "--limit", ALL, "--json", "number",
+    ])
+    .await?;
+    let open: Vec<String> = open
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value["number"].as_u64())
+        .map(|number| number.to_string())
+        .collect();
+    if open.len() >= ALL_COUNT {
+        return Ok(Vec::new());
+    }
+    let mut found = Vec::new();
+    for old in stored.iter().filter(|old| {
+        matches!(old.state.as_str(), "open" | "draft")
+            && !open.contains(&old.key)
+            && !listed.iter().any(|l| l.item.key == old.key)
+    }) {
+        let alone = match gh_json(&[kind, "view", &old.key, "-R", repo, "--json", fields]).await {
+            Ok(value) => read(&value),
+            Err(error) if not_found(&error) => None,
+            Err(error) => return Err(error),
+        };
+        found.push(alone.unwrap_or_else(|| crate::items::Fetched::removed(old.clone())));
+    }
+    Ok(found)
 }
 
 /// Whom the forge says the user is signed in as: GitHub's login, Bitbucket Cloud's display name

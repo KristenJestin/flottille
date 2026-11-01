@@ -896,45 +896,6 @@ fn mine_holds_for_github_issues_and_jira_work_items() {
     );
 }
 
-#[test]
-fn a_transferred_issue_or_a_pull_the_forge_no_longer_has_is_closed() {
-    let user = user();
-    project(&user, "git@github.com:acme/api.git");
-    user.gh_script(json!({
-        "pulls": {"acme/api": {"feature-1": pull(1, "Gone", "OPEN", OLD)}},
-        "issues": {"acme/api": {"5": issue(5, "Moved", OLD)}}
-    }));
-    declare(
-        &user,
-        github(),
-        json!({"kind": "github", "repository": "api"}),
-    );
-    refresh(&user);
-    let mut moved = issue(5, "Moved", NEW);
-    moved["url"] = json!("https://github.com/acme/other/issues/9");
-    user.gh_script(json!({
-        "pulls": {"acme/api": {"feature-1": pull(1, "Gone", "OPEN", NEW)}},
-        "issues": {"acme/api": {"5": moved}},
-        "view_fail": {"acme/api": {"1": "no pull requests found for #1"}}
-    }));
-    refresh(&user);
-    for (kind, id) in [("ticket", "5"), ("pull", "1")] {
-        let item = user
-            .call(
-                "items.show",
-                json!({"project": "app", "kind": kind, "id": id}),
-            )
-            .unwrap();
-        assert_eq!(item["state"], "closed", "{item}");
-        assert_eq!(item["details"]["removed"], true, "{item}");
-    }
-    let closed = item_events(&user)
-        .into_iter()
-        .filter(|e| e["name"] == "item.closed")
-        .count();
-    assert_eq!(closed, 2);
-}
-
 /// A Data Center pull request of `APP/web` as its list says it, open, at `version`.
 fn dc_open_pull(id: u64, version: u64) -> Value {
     let repository = json!({"slug": "web", "project": {"key": "APP"}});
@@ -1066,4 +1027,71 @@ fn mine_is_kept_while_the_forge_does_not_say_who_the_user_is() {
     advance(&user, 10 * 60_000);
     refresh(&user);
     assert_eq!(mine(&user), ["5", "7"]);
+}
+
+#[test]
+fn a_github_issue_or_pull_that_stops_being_listed_is_read_alone_once_an_hour() {
+    let user = user();
+    project(&user, "git@github.com:acme/api.git");
+    let mut moved = issue(5, "Moved", OLD);
+    let mut closed = issue(8, "Closed", OLD);
+    user.gh_script(json!({
+        "pulls": {"acme/api": {"feature-1": pull(1, "Gone", "OPEN", OLD)}},
+        "issues": {"acme/api": {"5": moved, "6": issue(6, "Deleted", OLD), "8": closed}}
+    }));
+    declare(
+        &user,
+        github(),
+        json!({"kind": "github", "repository": "api"}),
+    );
+    refresh(&user);
+    // What gh really does: a transferred issue is no longer listed, and its old number answers
+    // with its new url; a deleted issue or pull request is no longer listed nor found. A closed
+    // issue whose update the search missed (an index late) is no longer open.
+    moved["url"] = json!("https://github.com/acme/other/issues/9");
+    closed["state"] = json!("CLOSED");
+    let script = json!({
+        "pulls": {"acme/api": {}},
+        "issues": {"acme/api": {"5": moved, "8": closed}},
+        "unlisted": {"acme/api": [5, 8]},
+        "view_fail": {"acme/api": {"1": "GraphQL: Could not resolve to a PullRequest with the number of 1. (repository.pullRequest)"}}
+    });
+    user.gh_script(script);
+    refresh(&user);
+    let open_lists = |user: &User| {
+        calls(user.gh_received())
+            .iter()
+            .filter(|c| c.contains("--state open") && c.ends_with("--json number"))
+            .count()
+    };
+    // Within the hour, nothing is read alone.
+    assert_eq!(open_lists(&user), 0);
+    let state = |user: &User, kind: &str, id: &str| {
+        user.call(
+            "items.show",
+            json!({"project": "app", "kind": kind, "id": id}),
+        )
+        .unwrap()
+    };
+    assert_eq!(state(&user, "ticket", "5")["state"], "open");
+    advance(&user, 61 * 60_000);
+    refresh(&user);
+    assert_eq!(open_lists(&user), 2, "{:?}", calls(user.gh_received()));
+    for (kind, id) in [("ticket", "5"), ("ticket", "6"), ("pull", "1")] {
+        let item = state(&user, kind, id);
+        assert_eq!(item["state"], "closed", "{item}");
+        assert_eq!(item["details"]["removed"], true, "{item}");
+    }
+    let item = state(&user, "ticket", "8");
+    assert_eq!(item["state"], "closed", "{item}");
+    assert_eq!(item["details"].get("removed"), None, "{item}");
+    let closed = item_events(&user)
+        .into_iter()
+        .filter(|e| e["name"] == "item.closed")
+        .count();
+    assert_eq!(closed, 4);
+    // The next round within the hour lists no open numbers again.
+    advance(&user, 10 * 60_000);
+    refresh(&user);
+    assert_eq!(open_lists(&user), 2);
 }

@@ -149,6 +149,9 @@ fn normalized(text: &str) -> String {
 
 /// How many items one write keeps: a round that fails keeps what it read before.
 const BATCH: usize = 25;
+/// How often a source's open items are compared with its open list, at most: what the search of
+/// what changed never shows again (an issue deleted or transferred) is found this way.
+const SWEEP_MS: u64 = 60 * 60_000;
 
 /// Each project's sources, as `Store::retain_items` takes them.
 type Declared = Vec<(String, Vec<[String; 4]>)>;
@@ -168,6 +171,8 @@ pub struct Items {
     sources: Mutex<Option<Declared>>,
     /// `daemon.toml`'s rhythm, with the time its file was changed: read again when it changes.
     rhythm: Mutex<Option<Rhythm>>,
+    /// When each source's open items were last compared with its open list (`SWEEP_MS`).
+    swept: Mutex<HashMap<String, u64>>,
     /// The pull requests whose checks could not be read again, said once each.
     unread_checks: Mutex<std::collections::HashSet<String>>,
 }
@@ -430,6 +435,14 @@ impl Reader {
         }
     }
 
+    /// The stored open items its open list no longer holds, each read alone.
+    async fn swept(&self, stored: &[Item], listed: &[Fetched]) -> Result<Vec<Fetched>, String> {
+        match self {
+            Reader::Pulls(pulls) => pulls.swept(stored, listed).await,
+            Reader::Tickets(tickets) => tickets.swept(stored, listed).await,
+        }
+    }
+
     /// The forge whose user `mine` is said of, when it can say it.
     fn forge(&self) -> Option<&forge::Forge> {
         match self {
@@ -618,14 +631,27 @@ async fn read_round(
 ) -> Result<Option<Option<String>>, String> {
     let reader = Reader::open(project, source).await?;
     let since = cursor.cursor.map(|at| at.saturating_sub(OVERLAP_MS));
-    let listing = reader.list(since, started, stored).await?;
+    let mut listing = reader.list(since, started, stored).await?;
+    let first = cursor.cursor.is_none();
+    let swept_key = format!("{}\t{}\t{}", project.name, source.kind(), source.target());
+    let sweep = !first
+        && daemon
+            .items
+            .swept
+            .lock()
+            .unwrap()
+            .get(&swept_key)
+            .is_none_or(|at| started >= at + SWEEP_MS);
+    if sweep {
+        let swept = reader.swept(stored, &listing.items).await?;
+        listing.items.extend(swept);
+    }
     // Unknown when the forge cannot say it, or did not this time: then what is stored is kept.
     let knows_me = reader.forge().is_some();
     let me = match reader.forge() {
         Some(found) => me_of(daemon, found).await,
         None => None,
     };
-    let first = cursor.cursor.is_none();
     let (mut items, mut events) = (Vec::new(), Vec::new());
     let mut listed_keys = Vec::new();
     for mut fetched in listing.items {
@@ -712,6 +738,14 @@ async fn read_round(
     }
     if !flush(daemon, &project.name, &mut items, &mut events)? {
         return Ok(None);
+    }
+    if sweep || first {
+        daemon
+            .items
+            .swept
+            .lock()
+            .unwrap()
+            .insert(swept_key, started);
     }
     Ok(Some(listing.note))
 }
