@@ -780,6 +780,23 @@ mod tests {
         assert_eq!(snapshot.root_of("c1"), "r1");
     }
 
+    #[test]
+    fn a_held_web_call_says_the_url_it_reads_or_the_words_it_searches() {
+        let asked = |call: Value| {
+            crate::session_link::Request::of(&json!({"number": 1, "agent": "r1", "tool": "web",
+                "call": call, "reasons": [], "created_at": 1}))
+            .asked()
+        };
+        assert_eq!(
+            asked(json!({"action": "read", "url": "https://docs.example/a?d=1"})),
+            "Read https://docs.example/a?d=1"
+        );
+        assert_eq!(
+            asked(json!({"action": "search", "query": "tokio select"})),
+            "Search the web for tokio select"
+        );
+    }
+
     fn served(tool: &str, arguments: Value, outcome: &str) -> flottille_core::protocol::Event {
         flottille_core::protocol::Event {
             seq: 9,
