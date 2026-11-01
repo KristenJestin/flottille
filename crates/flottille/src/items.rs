@@ -82,10 +82,78 @@ pub struct Fetched {
     pub item: Item,
     pub comments: Vec<Said>,
     pub reviews: Vec<Said>,
+    /// When it was made, when its source says it: one seen first after the first round but made
+    /// before it was not opened since (a list cut at its cap shows it late).
+    pub created_at: Option<u64>,
+    /// Its checks, reviews and comments were read; a listed one keeps those stored.
+    pub detailed: bool,
 }
+
+impl Fetched {
+    /// An item stored that its forge or tracker no longer has, or that left the repository: it
+    /// is closed, and says so.
+    pub fn removed(mut item: Item) -> Fetched {
+        item.state = "closed".into();
+        item.details["removed"] = json!(true);
+        Fetched {
+            item,
+            comments: Vec::new(),
+            reviews: Vec::new(),
+            created_at: None,
+            detailed: true,
+        }
+    }
+
+    fn open(&self) -> bool {
+        matches!(self.item.state.as_str(), "open" | "draft")
+    }
+}
+
+/// What one list of a source found: the items with their cheap fields, what it could not read
+/// (a cap), and whether its items have details to read one by one.
+pub struct Listing {
+    pub items: Vec<Fetched>,
+    pub note: Option<String>,
+    pub details: bool,
+}
+
+/// A time a source says, as milliseconds: RFC 3339 (with an offset written `+0000` too, as Jira
+/// writes it), or milliseconds already (Bitbucket Data Center).
+pub fn time_ms(text: &str) -> Option<u64> {
+    if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) {
+        return text.parse().ok();
+    }
+    crate::session_read::form(text).or_else(|| {
+        // `…+0000`: the offset without its colon.
+        let (head, offset) = text.split_at(text.len().checked_sub(5)?);
+        let (sign, digits) = offset.split_at(1);
+        (["+", "-"].contains(&sign) && digits.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| format!("{head}{sign}{}:{}", &digits[..2], &digits[2..]))
+            .and_then(|fixed| crate::session_read::form(&fixed))
+    })
+}
+
+/// An item's `updated_at` as it is stored: RFC 3339 in UTC, with its milliseconds when it has
+/// some (a change within the same second is a change), so that the store sorts by it; a time it
+/// cannot read is kept as it was said.
+fn normalized(text: &str) -> String {
+    let Some(ms) = time_ms(text) else {
+        return text.to_owned();
+    };
+    let shown = crate::session_read::shown_date(ms);
+    match ms % 1000 {
+        0 => shown,
+        millis => format!("{}.{millis:03}Z", shown.trim_end_matches('Z')),
+    }
+}
+
+/// How many items one write keeps: a round that fails keeps what it read before.
+const BATCH: usize = 25;
 
 /// Each project's sources, as `Store::retain_items` takes them.
 type Declared = Vec<(String, Vec<[String; 4]>)>;
+/// The rhythm read, with the time its file was changed then.
+type Rhythm = (Option<std::time::SystemTime>, (u64, u64));
 
 /// What the daemon keeps of the items in memory: the rounds running, the windows connected, and
 /// whom each source is signed in as.
@@ -98,6 +166,8 @@ pub struct Items {
     me: Mutex<HashMap<String, String>>,
     /// The sources of each project at the last poll: their items are forgotten once they go.
     sources: Mutex<Option<Declared>>,
+    /// `daemon.toml`'s rhythm, with the time its file was changed: read again when it changes.
+    rhythm: Mutex<Option<Rhythm>>,
 }
 
 /// A window connected to the daemon (`events.watch {client: "window"}`): while one is, the rounds
@@ -184,7 +254,20 @@ fn sources_of(project: &Project) -> Vec<Source> {
 /// connected, and otherwise.
 fn rhythm(daemon: &Daemon) -> (u64, u64) {
     let file = daemon.paths.config.join("daemon.toml");
-    let Ok(text) = std::fs::read_to_string(&file) else {
+    let changed = std::fs::metadata(&file).and_then(|m| m.modified()).ok();
+    let mut kept = daemon.items.rhythm.lock().unwrap();
+    if let Some((at, rhythm)) = *kept
+        && at == changed
+    {
+        return rhythm;
+    }
+    let rhythm = read_rhythm(&file);
+    *kept = Some((changed, rhythm));
+    rhythm
+}
+
+fn read_rhythm(file: &std::path::Path) -> (u64, u64) {
+    let Ok(text) = std::fs::read_to_string(file) else {
         return (WINDOW_MINUTES, MINUTES);
     };
     let read = |document: &toml_edit::DocumentMut, key: &str, default: u64| {
@@ -220,6 +303,10 @@ fn wait_ms(every_ms: u64, failures: u32) -> u64 {
 /// and projects that are gone.
 pub fn poll(daemon: &Arc<Daemon>) {
     if std::env::var_os("FLOTTILLE_TEST_NO_FETCH").is_some_and(|v| !v.is_empty()) {
+        static SAID: std::sync::Once = std::sync::Once::new();
+        SAID.call_once(|| {
+            eprintln!("flottille daemon: FLOTTILLE_TEST_NO_FETCH is set: no item is read");
+        });
         return;
     }
     let all = projects::all(daemon);
@@ -310,6 +397,115 @@ async fn round(daemon: &Arc<Daemon>, project: &Project, sources: &[Source]) {
     }
 }
 
+/// A source ready to read.
+enum Reader {
+    Pulls(forge::Pulls),
+    Tickets(tickets::Tickets),
+}
+
+impl Reader {
+    async fn open(project: &Project, source: &Source) -> Result<Reader, String> {
+        match source {
+            Source::Pulls(checkout) => forge::Pulls::open(checkout).await.map(Reader::Pulls),
+            Source::Tickets(_) => tickets::Tickets::open(project).await.map(Reader::Tickets),
+        }
+    }
+
+    async fn list(&self, since: Option<u64>, now: u64, stored: &[Item]) -> Result<Listing, String> {
+        match self {
+            Reader::Pulls(pulls) => {
+                let since = since.map(crate::session_read::shown_date);
+                pulls.list(since.as_deref(), stored).await
+            }
+            Reader::Tickets(tickets) => tickets.list(since, now, stored).await,
+        }
+    }
+
+    async fn detail(&self, fetched: &mut Fetched) -> Result<bool, String> {
+        match self {
+            Reader::Pulls(pulls) => pulls.detail(fetched).await,
+            Reader::Tickets(tickets) => tickets.detail(fetched).await,
+        }
+    }
+
+    /// The forge whose user `mine` is said of, when it can say it.
+    fn forge(&self) -> Option<&forge::Forge> {
+        match self {
+            Reader::Pulls(pulls) if pulls.knows_me() => Some(pulls.forge()),
+            Reader::Pulls(_) => None,
+            Reader::Tickets(tickets) => tickets.forge(),
+        }
+    }
+}
+
+/// Whom `found` says the user is, asked again while it has not said it.
+async fn me_of(daemon: &Daemon, found: &forge::Forge) -> Option<String> {
+    let host = match found {
+        forge::Forge::GitHub { .. } => flottille_core::declared::GITHUB.to_owned(),
+        forge::Forge::Bitbucket { host, .. } => host.clone(),
+    };
+    let known = daemon.items.me.lock().unwrap().get(&host).cloned();
+    if known.is_some() {
+        return known;
+    }
+    let me = forge::me(found).await;
+    if let Some(me) = &me {
+        daemon.items.me.lock().unwrap().insert(host, me.clone());
+    }
+    me
+}
+
+/// Whether an item needs its details read: one open, or one changed in a round after the first
+/// (a first round reads the history's details for the open ones alone), unless what is stored of
+/// it was read in full at the same update.
+fn wants_detail(old: Option<&Item>, new: &Fetched, first: bool) -> bool {
+    (new.open() || !first)
+        && old.is_none_or(|old| {
+            old.updated_at != new.item.updated_at || old.details.get("comments").is_none()
+        })
+}
+
+/// A listed item that was not read in full keeps what was read in full of it before: its checks
+/// and its details, the listed fields over them.
+fn keep_details(old: &Item, new: &mut Item) {
+    if let (Some(kept), Some(listed)) = (old.details.as_object(), new.details.as_object()) {
+        let mut details = kept.clone();
+        details.extend(listed.clone());
+        new.details = Value::Object(details);
+    }
+    new.checks = old.checks.clone();
+}
+
+/// The cursor after a round that failed, its reading or its writing: it waits twice as long,
+/// saying why.
+fn failed(cursor: &mut Cursor, problem: String) {
+    cursor.failures = cursor.failures.saturating_add(1);
+    cursor.problem = Some(problem);
+}
+
+/// Writes what a round read so far, with its events, unless the project is gone meanwhile:
+/// then nothing of it is kept, and false says to stop.
+fn flush(
+    daemon: &Daemon,
+    project: &str,
+    items: &mut Vec<Item>,
+    events: &mut Vec<(&'static str, Value)>,
+) -> Result<bool, String> {
+    if !projects::exists(daemon, project) {
+        items.clear();
+        events.clear();
+        return Ok(false);
+    }
+    if items.is_empty() && events.is_empty() {
+        return Ok(true);
+    }
+    let (items, events) = (std::mem::take(items), std::mem::take(events));
+    daemon
+        .write_all(|store| Ok(((), store.put_items(&items, events)?)))
+        .map(|()| true)
+        .map_err(|error| format!("the items could not be stored: {error}"))
+}
+
 async fn source_round(daemon: &Arc<Daemon>, project: &Project, source: &Source) {
     let (kind, target) = (source.kind(), source.target());
     let mut cursor = daemon
@@ -325,7 +521,7 @@ async fn source_round(daemon: &Arc<Daemon>, project: &Project, source: &Source) 
         });
     cursor.source = source.name().into();
     let started = now_ms();
-    let since = cursor.cursor.map(|at| at.saturating_sub(OVERLAP_MS));
+    let previous = cursor.problem.clone();
     let stored = daemon
         .read(|store| {
             store.items(
@@ -340,112 +536,137 @@ async fn source_round(daemon: &Arc<Daemon>, project: &Project, source: &Source) 
         .into_iter()
         .filter(|item| kind == "ticket" || item.repository == target)
         .collect::<Vec<_>>();
-    let read = match source {
-        Source::Pulls(checkout) => pulls(daemon, checkout, since, &stored).await,
-        Source::Tickets(_) => tickets::changed(project, since, started)
-            .await
-            .map(|fetched| (fetched, None)),
-    };
-    let previous = cursor.problem.clone();
-    match read {
-        Ok((fetched, me)) => {
-            let first = cursor.cursor.is_none();
-            let mut events = Vec::new();
-            let mut items = Vec::new();
-            for mut fetched in fetched {
-                fetched.item.project = project.name.clone();
-                fetched.item.seen_at = started;
-                if let Some(me) = &me {
-                    fetched.item.mine = fetched.item.author.as_ref() == Some(me)
-                        || fetched.item.assignees.contains(me);
-                }
-                let old = stored
-                    .iter()
-                    .find(|s| s.repository == fetched.item.repository && s.key == fetched.item.key);
-                if !first {
-                    events.extend(events_of(old, &fetched));
-                }
-                items.push(fetched.item);
-            }
-            if let Err(error) = daemon.write_all(|store| {
-                let written = store.put_items(&items, events)?;
-                Ok(((), written))
-            }) {
-                eprintln!("flottille daemon: items of {}: {error}", project.name);
-                return;
-            }
+    let outcome = read_round(daemon, project, source, &cursor, &stored, started).await;
+    match outcome {
+        // The project went meanwhile: nothing of it is written back.
+        Ok(None) => return,
+        Ok(Some(note)) => {
+            cursor.first_at = cursor.first_at.or(Some(now_ms()));
             cursor.cursor = Some(started);
             cursor.failures = 0;
             cursor.problem = None;
+            cursor.note = note;
         }
         Err(problem) => {
-            cursor.failures = cursor.failures.saturating_add(1);
             if previous.as_ref() != Some(&problem) {
                 eprintln!(
                     "flottille daemon: items of {} ({kind}s of {target}): {problem}",
                     project.name
                 );
             }
-            cursor.problem = Some(problem);
+            failed(&mut cursor, problem);
         }
     }
     cursor.round_at = Some(started);
+    if !projects::exists(daemon, &project.name) {
+        return;
+    }
     if let Err(error) = daemon.read(|store| store.set_cursor(&cursor)) {
         eprintln!("flottille daemon: items of {}: {error}", project.name);
     }
 }
 
-/// The pull requests of a repository that changed since `since`, and again the checks of those
-/// stored whose CI still runs, which move without the pull request's `updated_at`; with whom the
-/// forge says the user is.
-async fn pulls(
+/// Lists what changed since the cursor, reads in full what needs it, and stores it as it goes,
+/// so that a round that fails keeps what it read; then the checks of the open pull requests
+/// whose CI still runs. The note of what could not be read; none when the project went
+/// meanwhile.
+async fn read_round(
     daemon: &Daemon,
-    checkout: &Checkout,
-    since: Option<u64>,
+    project: &Project,
+    source: &Source,
+    cursor: &Cursor,
     stored: &[Item],
-) -> Result<(Vec<Fetched>, Option<String>), String> {
-    let found = match forge::declared_forge(checkout).await {
-        Ok(found) => found,
-        Err(None) => return Err(forge::NO_FORGE.into()),
-        Err(Some(why)) => return Err(why),
+    started: u64,
+) -> Result<Option<Option<String>>, String> {
+    let reader = Reader::open(project, source).await?;
+    let since = cursor.cursor.map(|at| at.saturating_sub(OVERLAP_MS));
+    let listing = reader.list(since, started, stored).await?;
+    let me = match reader.forge() {
+        Some(found) => me_of(daemon, found).await,
+        None => None,
     };
-    let since = since.map(crate::session_read::shown_date);
-    let mut fetched = forge::changed_pulls(&found, &checkout.path, since.as_deref()).await?;
-    for item in stored {
-        let running = item.checks.iter().any(|c| c.state == "pending");
-        if !running || fetched.iter().any(|f| f.item.key == item.key) {
-            continue;
+    let first = cursor.cursor.is_none();
+    let (mut items, mut events) = (Vec::new(), Vec::new());
+    let mut listed_keys = Vec::new();
+    for mut fetched in listing.items {
+        let item = &mut fetched.item;
+        item.project = project.name.clone();
+        item.seen_at = started;
+        item.updated_at = item.updated_at.as_deref().map(normalized);
+        if let Some(me) = &me {
+            item.mine = item.author.as_ref() == Some(me) || item.assignees.contains(me);
         }
-        let Ok(number) = item.key.parse::<u64>() else {
-            continue;
-        };
-        if let Ok(checks) = forge::checks_now(&found, number).await {
-            let mut item = item.clone();
-            item.checks = checks;
-            fetched.push(Fetched {
-                item,
-                comments: Vec::new(),
-                reviews: Vec::new(),
-            });
+        listed_keys.push((item.repository.clone(), item.key.clone()));
+        let old = stored
+            .iter()
+            .find(|s| s.repository == fetched.item.repository && s.key == fetched.item.key);
+        if listing.details && !fetched.detailed && wants_detail(old, &fetched, first) {
+            match reader.detail(&mut fetched).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    let mut gone = Fetched::removed(fetched.item.clone());
+                    gone.item.checks = old.map(|o| o.checks.clone()).unwrap_or_default();
+                    fetched = gone;
+                }
+                Err(error) => {
+                    flush(daemon, &project.name, &mut items, &mut events)?;
+                    return Err(error);
+                }
+            }
+        }
+        if let Some(old) = old
+            && !fetched.detailed
+        {
+            keep_details(old, &mut fetched.item);
+        }
+        if !first {
+            let made_before = fetched
+                .created_at
+                .zip(cursor.first_at)
+                .is_some_and(|(made, first_at)| made + OVERLAP_MS < first_at);
+            events.extend(
+                events_of(old, &fetched)
+                    .into_iter()
+                    .filter(|(name, _)| !(*name == "item.opened" && made_before)),
+            );
+        }
+        items.push(fetched.item);
+        if items.len() >= BATCH && !flush(daemon, &project.name, &mut items, &mut events)? {
+            return Ok(None);
         }
     }
-    let host = match &found {
-        forge::Forge::GitHub { .. } => flottille_core::declared::GITHUB.to_owned(),
-        forge::Forge::Bitbucket { host, .. } => host.clone(),
-    };
-    let known = daemon.items.me.lock().unwrap().get(&host).cloned();
-    // Asked again while the forge has not said it.
-    let me = match known {
-        Some(me) => Some(me),
-        None => {
-            let me = forge::me(&found).await;
-            if let Some(me) = &me {
-                daemon.items.me.lock().unwrap().insert(host, me.clone());
+    // The checks of the open pull requests whose CI still runs move without them.
+    if let Reader::Pulls(pulls) = &reader {
+        for old in stored {
+            let running = old.checks.iter().any(|c| c.state == "pending");
+            let open = matches!(old.state.as_str(), "open" | "draft");
+            if !running || !open || listed_keys.contains(&(old.repository.clone(), old.key.clone()))
+            {
+                continue;
             }
-            me
+            let Ok(number) = old.key.parse::<u64>() else {
+                continue;
+            };
+            if let Ok(checks) = pulls.checks(number).await {
+                let mut item = old.clone();
+                item.checks = checks;
+                item.seen_at = started;
+                let fetched = Fetched {
+                    item,
+                    comments: Vec::new(),
+                    reviews: Vec::new(),
+                    created_at: None,
+                    detailed: true,
+                };
+                events.extend(events_of(Some(old), &fetched));
+                items.push(fetched.item);
+            }
         }
-    };
-    Ok((fetched, me))
+    }
+    if !flush(daemon, &project.name, &mut items, &mut events)? {
+        return Ok(None);
+    }
+    Ok(Some(listing.note))
 }
 
 /// The checks as one mark: `failing` when one fails, else `pending` when one runs, else `passing`.
@@ -604,7 +825,8 @@ fn sources_json(daemon: &Daemon, project: &str) -> Result<Value, Failure> {
         .iter()
         .map(|c| {
             json!({"kind": c.kind, "target": c.target, "source": c.source, "cursor": c.cursor,
-                "round_at": c.round_at, "failures": c.failures, "problem": c.problem})
+                "round_at": c.round_at, "failures": c.failures, "problem": c.problem,
+                "note": c.note})
         })
         .collect())
 }
@@ -726,7 +948,61 @@ mod tests {
             item,
             comments: Vec::new(),
             reviews: Vec::new(),
+            created_at: None,
+            detailed: true,
         }
+    }
+
+    #[test]
+    fn a_round_that_fails_to_store_waits_as_one_that_fails_to_read() {
+        let mut cursor = Cursor {
+            failures: 1,
+            ..Cursor::default()
+        };
+        failed(
+            &mut cursor,
+            "the items could not be stored: disk full".into(),
+        );
+        assert_eq!(cursor.failures, 2);
+        assert_eq!(
+            cursor.problem.as_deref(),
+            Some("the items could not be stored: disk full")
+        );
+    }
+
+    #[test]
+    fn times_are_kept_in_rfc_3339_utc_whatever_the_source_writes() {
+        assert_eq!(
+            normalized("2026-10-01T12:00:00+02:00"),
+            "2026-10-01T10:00:00Z"
+        );
+        assert_eq!(
+            normalized("2026-10-01T10:00:00.000+0000"),
+            "2026-10-01T10:00:00Z"
+        );
+        assert_eq!(normalized("1600000000000"), "2020-09-13T12:26:40Z");
+        assert_eq!(normalized("1600000000002"), "2020-09-13T12:26:40.002Z");
+        assert_eq!(normalized("soon"), "soon");
+    }
+
+    #[test]
+    fn details_are_read_for_open_items_and_for_those_changed_after_the_first_round() {
+        let mut merged = stored("merged");
+        merged.details = json!({});
+        let listed = fetched(merged.clone());
+        assert!(!wants_detail(None, &listed, true));
+        assert!(wants_detail(None, &listed, false));
+        let open = fetched(stored("open"));
+        assert!(wants_detail(None, &open, true));
+        // Read in full at the same update: not again.
+        assert!(!wants_detail(Some(&stored("open")), &open, false));
+        let mut changed = stored("open");
+        changed.updated_at = Some("2026-10-02T00:00:00Z".into());
+        assert!(wants_detail(
+            Some(&stored("open")),
+            &fetched(changed),
+            false
+        ));
     }
 
     fn names(events: &[(&str, Value)]) -> Vec<String> {
@@ -777,6 +1053,8 @@ mod tests {
             item: new,
             comments: vec![said("old"), said("bob"), said("carol")],
             reviews: vec![said("dave")],
+            created_at: None,
+            detailed: true,
         };
         let events = events_of(Some(&old), &new);
         assert_eq!(names(&events), ["item.commented", "item.reviewed"]);

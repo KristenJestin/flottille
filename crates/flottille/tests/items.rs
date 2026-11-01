@@ -216,6 +216,23 @@ fn a_project_with_a_declared_github_forge_stores_its_pulls_and_issues_at_its_fir
         .collect();
     assert!(pulls[0].contains("--state all"), "{pulls:?}");
     assert!(!pulls[0].contains("--search"), "{pulls:?}");
+    // The history is listed cheaply: the checks, reviews and comments are read of the open ones
+    // alone, one by one.
+    for expensive in ["statusCheckRollup", "comments", "reviews"] {
+        assert!(!pulls[0].contains(expensive), "{pulls:?}");
+    }
+    let all = calls(user.gh_received());
+    let issues: Vec<&String> = all.iter().filter(|c| c.starts_with("issue list")).collect();
+    assert!(!issues[0].contains("comments"), "{issues:?}");
+    assert!(all.iter().any(|c| c.starts_with("pr view 1 ")), "{all:?}");
+    assert!(!all.iter().any(|c| c.starts_with("pr view 2 ")), "{all:?}");
+    assert!(
+        all.iter()
+            .any(|c| c.starts_with("issue view 5 ") && c.ends_with("--json comments")),
+        "{all:?}"
+    );
+    assert_eq!(first["details"]["comments"], 0);
+    assert_eq!(merged["details"].get("comments"), None);
     assert_eq!(item_events(&user), Vec::<Value>::new());
 }
 
@@ -300,7 +317,7 @@ fn checks_that_end_between_two_rounds_without_the_pull_moving_emit_item_checks()
     assert!(
         calls(user.gh_received())
             .iter()
-            .any(|c| c.starts_with("pr view 1") && c.contains("statusCheckRollup")),
+            .any(|c| c.starts_with("pr view 1 ") && c.ends_with("--json statusCheckRollup")),
         "{:?}",
         calls(user.gh_received())
     );
@@ -322,6 +339,16 @@ fn bitbucket_cloud_passes_q_and_sort_as_params_and_a_new_comment_emits_item_comm
             "contexts": [{"name": "cloud", "host": "bitbucket.org", "active": true}],
             "api": {
                 "/repositories/acme/api/pullrequests": {"values": [{
+                    "id": 2, "title": "Old work", "state": "MERGED",
+                    "author": {"display_name": "Alice"},
+                    "source": {"branch": {"name": "old"}, "commit": {"hash": "abcdef2"},
+                        "repository": {"full_name": "acme/api"}},
+                    "destination": {"branch": {"name": "main"},
+                        "repository": {"full_name": "acme/api"}},
+                    "links": {"html": {"href": "https://bitbucket.org/acme/api/pull-requests/2"}},
+                    "comment_count": 0, "updated_on": "2020-01-01T00:00:00+00:00",
+                    "created_on": "2020-01-01T00:00:00+00:00"
+                }, {
                     "id": 3, "title": "Add the login", "state": "OPEN",
                     "author": {"display_name": "Alice"},
                     "source": {"branch": {"name": "login"}, "commit": {"hash": "abcdef1"},
@@ -345,7 +372,15 @@ fn bitbucket_cloud_passes_q_and_sort_as_params_and_a_new_comment_emits_item_comm
         Value::Null,
     );
     refresh(&user);
-    assert_eq!(list(&user, json!({}))[0]["key"], "3");
+    assert_eq!(list(&user, json!({})).len(), 2);
+    // The merged one is listed, never read in full.
+    assert!(
+        !calls(user.bkt_received())
+            .iter()
+            .any(|c| c.contains("pullrequests/2")),
+        "{:?}",
+        calls(user.bkt_received())
+    );
     user.bkt_script(script(
         json!([{"content": {"raw": "Please rename it"}, "user": {"display_name": "Bob"},
             "deleted": false}]),
@@ -394,8 +429,9 @@ fn jira_asks_what_was_updated_and_a_status_change_emits_item_changed_with_the_st
 
     let searches: Vec<String> = calls(user.acli_received())
         .into_iter()
-        .filter(|c| c.starts_with("jira workitem search"))
+        .filter(|c| c.starts_with("jira workitem search") && !c.contains("currentUser()"))
         .collect();
+    assert_eq!(searches.len(), 2, "{searches:?}");
     assert!(!searches[0].contains("updated >="), "{searches:?}");
     assert!(
         searches[1].contains("project = \"ABC\" AND updated >= "),
@@ -566,4 +602,335 @@ fn the_items_of_a_repository_whose_forge_is_unset_go_with_it() {
     eventually("the items are forgotten", || {
         list(&user, json!({})).is_empty()
     });
+}
+
+/// Milliseconds since 1970 in RFC 3339, UTC (Howard Hinnant's `civil_from_days`).
+fn rfc3339(ms: u64) -> String {
+    let seconds = (ms / 1000) as i64;
+    let (days, time) = (seconds.div_euclid(86_400), seconds.rem_euclid(86_400));
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        time / 3600,
+        time % 3600 / 60,
+        time % 60
+    )
+}
+
+/// A pull request the fake `gh` lists, as many as asked, merged long ago.
+fn history(count: u64) -> Value {
+    let pulls: serde_json::Map<String, Value> = (1..=count)
+        .map(|n| (format!("feature-{n}"), pull(n, "Old", "MERGED", OLD)))
+        .collect();
+    Value::Object(pulls)
+}
+
+#[test]
+fn a_detail_that_fails_keeps_what_was_read_and_the_next_round_details_only_what_is_left() {
+    let user = user();
+    project(&user, "git@github.com:acme/api.git");
+    let pulls = json!({
+        "feature-1": pull(1, "One", "OPEN", OLD),
+        "feature-2": pull(2, "Two", "OPEN", OLD),
+        "feature-3": pull(3, "Three", "OPEN", OLD)
+    });
+    user.gh_script(json!({"pulls": {"acme/api": pulls},
+        "view_fail": {"acme/api": {"1": "HTTP 502: Bad Gateway"}}}));
+    declare(&user, github(), Value::Null);
+    let answer = refresh(&user);
+    assert!(
+        answer["sources"][0]["problem"]
+            .as_str()
+            .unwrap()
+            .contains("502"),
+        "{answer}"
+    );
+    // The newest first: 3 and 2 were read, and are kept.
+    let mut kept: Vec<String> = list(&user, json!({}))
+        .iter()
+        .map(|i| i["key"].as_str().unwrap().to_owned())
+        .collect();
+    kept.sort();
+    assert_eq!(kept, ["2", "3"]);
+    user.gh_script(json!({"pulls": {"acme/api": pulls}}));
+    let views = |user: &User| -> Vec<String> {
+        calls(user.gh_received())
+            .into_iter()
+            .filter(|c| c.starts_with("pr view"))
+            .collect()
+    };
+    let before = views(&user).len();
+    refresh(&user);
+    let after = views(&user);
+    assert_eq!(after.len(), before + 1, "{after:?}");
+    assert!(after.last().unwrap().starts_with("pr view 1 "), "{after:?}");
+    assert_eq!(list(&user, json!({})).len(), 3);
+}
+
+#[test]
+fn bitbucket_data_center_pages_every_open_pull_and_details_only_those_that_changed() {
+    let user = user();
+    project(&user, "ssh://git@bitbucket.example.com:7999/APP/web.git");
+    let dc_pull = |id: u64, version: u64, state: &str| {
+        let repository = json!({"slug": "web", "project": {"key": "APP"}});
+        json!({"id": id, "title": format!("Pull {id}"), "state": state, "version": version,
+            "createdDate": 1_600_000_000_000u64, "updatedDate": 1_600_000_000_000u64 + version,
+            "author": {"user": {"name": "alice", "displayName": "Alice"}},
+            "fromRef": {"displayId": format!("b{id}"), "latestCommit": "abcdef1",
+                "repository": repository},
+            "toRef": {"displayId": "main", "latestCommit": "abcdef2", "repository": repository},
+            "participants": [],
+            "links": {"self": [{"href": format!("https://bitbucket.example.com/projects/APP/repos/web/pull-requests/{id}")}]}})
+    };
+    let script = |open: Vec<Value>, single: Option<Value>| {
+        let mut api = serde_json::Map::new();
+        api.insert(
+            "/rest/api/1.0/projects/APP/repos/web/pull-requests".into(),
+            json!({"values": open}),
+        );
+        for id in 1..=60u64 {
+            api.insert(
+                format!("/rest/api/1.0/projects/APP/repos/web/pull-requests/{id}/activities"),
+                json!({"values": []}),
+            );
+            api.insert(
+                format!("/rest/api/1.0/projects/APP/repos/web/pull-requests/{id}/merge"),
+                json!({"conflicted": false}),
+            );
+        }
+        if let Some(single) = single {
+            api.insert(
+                "/rest/api/1.0/projects/APP/repos/web/pull-requests/60".into(),
+                single,
+            );
+        }
+        json!({"contexts": [{"name": "work", "host": "bitbucket.example.com:7990", "active": true}],
+            "api": api})
+    };
+    let open: Vec<Value> = (1..=60).map(|id| dc_pull(id, 1, "OPEN")).collect();
+    user.bkt_script(script(open.clone(), None));
+    declare(
+        &user,
+        json!({"kind": "bitbucket-data-center", "host": "bitbucket.example.com",
+            "repository": "APP/web"}),
+        Value::Null,
+    );
+    let answer = refresh(&user);
+    // Sixty open pull requests, past the first page of fifty.
+    assert_eq!(list(&user, json!({})).len(), 60, "{answer}");
+    let note = answer["sources"][0]["note"].as_str().unwrap_or_default();
+    assert!(note.contains("mine"), "{answer}");
+    let checks = |user: &User| {
+        calls(user.bkt_received())
+            .iter()
+            .filter(|c| c.starts_with("pr checks"))
+            .count()
+    };
+    let before = checks(&user);
+    // One changed, one merged: it leaves the open list and is read alone.
+    let mut next: Vec<Value> = open[..59].to_vec();
+    next[0] = dc_pull(1, 2, "OPEN");
+    user.bkt_script(script(next, Some(dc_pull(60, 2, "MERGED"))));
+    refresh(&user);
+    // The one changed, and the one merged, once each; none of the 58 others.
+    assert_eq!(checks(&user), before + 2);
+    let merged = user
+        .call(
+            "items.show",
+            json!({"project": "app", "kind": "pull", "id": "60"}),
+        )
+        .unwrap();
+    assert_eq!(merged["state"], "merged");
+}
+
+#[test]
+fn the_checks_of_a_pull_that_is_no_longer_open_are_not_read_again() {
+    let user = user();
+    project(&user, "git@github.com:acme/api.git");
+    let with_check = |state: &str, updated: &str| {
+        let mut pull = pull(1, "Add the login", state, updated);
+        pull["statusCheckRollup"] =
+            json!([{"__typename": "StatusContext", "context": "ci", "state": "PENDING"}]);
+        json!({"pulls": {"acme/api": {"feature-1": pull}}})
+    };
+    user.gh_script(with_check("OPEN", OLD));
+    declare(&user, github(), Value::Null);
+    refresh(&user);
+    // Merged now, by the daemon's clock: a round an hour on no longer lists it.
+    let now = user.call("test.advance", json!({"ms": 0})).unwrap()["now"]
+        .as_u64()
+        .unwrap();
+    user.gh_script(with_check("MERGED", &rfc3339(now)));
+    refresh(&user);
+    let checked = |user: &User| {
+        calls(user.gh_received())
+            .iter()
+            .filter(|c| c.ends_with("--json statusCheckRollup"))
+            .count()
+    };
+    let before = checked(&user);
+    advance(&user, 60 * 60_000);
+    refresh(&user);
+    assert!(
+        !calls(user.gh_received())
+            .last()
+            .is_some_and(|c| c.contains("updated:>=") && c.contains(&rfc3339(now)[..13])),
+        "the merged pull request is out of the last list's window"
+    );
+    assert_eq!(checked(&user), before);
+}
+
+#[test]
+fn a_list_cut_at_its_cap_says_so_and_an_old_item_seen_later_is_not_opened() {
+    let user = user();
+    project(&user, "git@github.com:acme/api.git");
+    user.gh_script(json!({"pulls": {"acme/api": history(1001)}}));
+    declare(&user, github(), Value::Null);
+    let answer = refresh(&user);
+    let note = answer["sources"][0]["note"].as_str().unwrap_or_default();
+    assert!(note.contains("1000"), "{answer}");
+    // Number 1 was past the cap: it shows up when it changes, created long ago.
+    let mut pulls = history(1001);
+    let mut old = pull(1, "Old, edited", "MERGED", NEW);
+    old["createdAt"] = json!(OLD);
+    pulls["feature-1"] = old;
+    let mut new = pull(1002, "Brand new", "OPEN", NEW);
+    new["createdAt"] = json!(NEW);
+    pulls["feature-1002"] = new;
+    user.gh_script(json!({"pulls": {"acme/api": pulls}}));
+    refresh(&user);
+    let opened: Vec<Value> = item_events(&user)
+        .into_iter()
+        .filter(|e| e["name"] == "item.opened")
+        .collect();
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    assert_eq!(opened[0]["data"]["key"], "1002");
+}
+
+#[test]
+fn a_project_removed_during_a_round_keeps_none_of_its_items() {
+    let user = user();
+    project(&user, "git@github.com:acme/api.git");
+    user.gh_script(
+        json!({"pulls": {"acme/api": {"feature-1": pull(1, "x", "MERGED", OLD)}},
+        "list_delay_ms": 1500}),
+    );
+    declare(&user, github(), Value::Null);
+    let removing = {
+        let socket = user.path("runtime/flottille/daemon.sock");
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            let mut stream = UnixStream::connect(socket).unwrap();
+            writeln!(
+                stream,
+                "{}",
+                json!({"id": "1", "method": "project.remove", "params": {"name": "app"}})
+            )
+            .unwrap();
+            let mut line = String::new();
+            BufReader::new(stream).read_line(&mut line).unwrap();
+        })
+    };
+    let _ = user.call("items.refresh", json!({"project": "app"}));
+    removing.join().unwrap();
+    user.call(
+        "project.add",
+        json!({"folder": user.path("work/app"), "name": "app"}),
+    )
+    .unwrap();
+    assert_eq!(list(&user, json!({})), Vec::<Value>::new());
+}
+
+#[test]
+fn mine_holds_for_github_issues_and_jira_work_items() {
+    let user = user();
+    project(&user, "git@github.com:acme/api.git");
+    let mut theirs = issue(6, "Not mine", OLD);
+    theirs["assignees"] = json!([]);
+    user.gh_script(json!({"user": {"login": "someone"},
+        "issues": {"acme/api": {"5": issue(5, "Mine", OLD), "6": theirs}}}));
+    declare(
+        &user,
+        github(),
+        json!({"kind": "github", "repository": "api"}),
+    );
+    refresh(&user);
+    let mine: Vec<Value> = list(&user, json!({"kind": "ticket", "mine": true}));
+    assert_eq!(mine.len(), 1, "{mine:?}");
+    assert_eq!(mine[0]["key"], "5");
+
+    user.acli_script(json!({
+        "search": [work_item("ABC-1", "Mine", "To Do"), work_item("ABC-2", "Theirs", "To Do")],
+        "mine_search": [work_item("ABC-1", "Mine", "To Do")]
+    }));
+    user.call(
+        "project.set_settings",
+        json!({"name": "app", "tracker": jira()}),
+    )
+    .unwrap();
+    refresh(&user);
+    // The issues of the tracker it had go at the next sweep.
+    advance(&user, 0);
+    eventually("the issues go", || {
+        list(&user, json!({"kind": "ticket"}))
+            .iter()
+            .all(|i| i["source"] == "jira")
+    });
+    let mine: Vec<Value> = list(&user, json!({"kind": "ticket", "mine": true}));
+    assert_eq!(mine.len(), 1, "{mine:?}");
+    assert_eq!(mine[0]["key"], "ABC-1");
+    assert!(
+        calls(user.acli_received())
+            .iter()
+            .any(|c| c.contains("assignee = currentUser() OR reporter = currentUser()")),
+        "{:?}",
+        calls(user.acli_received())
+    );
+}
+
+#[test]
+fn a_transferred_issue_or_a_pull_the_forge_no_longer_has_is_closed() {
+    let user = user();
+    project(&user, "git@github.com:acme/api.git");
+    user.gh_script(json!({
+        "pulls": {"acme/api": {"feature-1": pull(1, "Gone", "OPEN", OLD)}},
+        "issues": {"acme/api": {"5": issue(5, "Moved", OLD)}}
+    }));
+    declare(
+        &user,
+        github(),
+        json!({"kind": "github", "repository": "api"}),
+    );
+    refresh(&user);
+    let mut moved = issue(5, "Moved", NEW);
+    moved["url"] = json!("https://github.com/acme/other/issues/9");
+    user.gh_script(json!({
+        "pulls": {"acme/api": {"feature-1": pull(1, "Gone", "OPEN", NEW)}},
+        "issues": {"acme/api": {"5": moved}},
+        "view_fail": {"acme/api": {"1": "no pull requests found for #1"}}
+    }));
+    refresh(&user);
+    for (kind, id) in [("ticket", "5"), ("pull", "1")] {
+        let item = user
+            .call(
+                "items.show",
+                json!({"project": "app", "kind": kind, "id": id}),
+            )
+            .unwrap();
+        assert_eq!(item["state"], "closed", "{item}");
+        assert_eq!(item["details"]["removed"], true, "{item}");
+    }
+    let closed = item_events(&user)
+        .into_iter()
+        .filter(|e| e["name"] == "item.closed")
+        .count();
+    assert_eq!(closed, 2);
 }

@@ -1018,6 +1018,12 @@ pub fn all(daemon: &Daemon) -> Vec<Project> {
     }
 }
 
+/// Whether the project's file is still there.
+pub fn exists(daemon: &Daemon, name: &str) -> bool {
+    let projects = daemon.projects.lock().unwrap();
+    matches!(projects.registry.load(name), Ok(Some(_)))
+}
+
 /// The project as its file says now.
 pub fn load_project(daemon: &Daemon, name: &str) -> std::result::Result<Project, Failure> {
     load(&daemon.projects.lock().unwrap(), name)

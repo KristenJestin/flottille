@@ -1694,159 +1694,220 @@ async fn status(project: &Project, asked: &TicketsCall, key: &Key) -> Outcome {
     }
 }
 
-/// What `gh issue list` is asked of each issue a round of the items reads.
-const ITEM_FIELDS: &str = "number,title,state,author,assignees,labels,url,updatedAt,comments";
+/// What `gh issue list` is asked of each issue a round of the items lists: the cheap fields
+/// alone; the comments are read one issue at a time (`Tickets::detail`).
+const LIST_FIELDS: &str = "number,title,state,author,assignees,labels,url,updatedAt,createdAt";
 /// What a round of the items asks Jira of each work item.
 const ITEM_JIRA_FIELDS: &str =
-    "key,summary,status,assignee,reporter,labels,issuetype,priority,updated";
+    "key,summary,status,assignee,reporter,labels,issuetype,priority,updated,created";
+const ALL_COUNT: usize = 1000;
 
-/// The tickets of the project's tracker that changed since `since` (milliseconds), all of them
-/// without it, whatever their state and whoever opened them (`docs/items.md`).
-pub async fn changed(
-    project: &Project,
-    since: Option<u64>,
-    now: u64,
-) -> Result<Vec<crate::items::Fetched>, String> {
-    match project.tracker.as_ref().ok_or(NO_TRACKER)? {
-        ProjectTracker::Github { repository } => {
-            let forge = github_of(project, repository).await?;
-            forge::signed_in().await?;
-            let repo = forge.gh_repository();
-            let search =
-                since.map(|since| format!("updated:>={}", crate::session_read::shown_date(since)));
-            let mut args = vec![
-                "issue",
-                "list",
-                "-R",
-                &repo,
-                "--state",
-                "all",
-                "--limit",
-                forge::ALL,
-            ];
-            if let Some(search) = &search {
-                args.extend(["--search", search]);
+/// The tickets of a project's tracker as the items read them (`docs/items.md`): its sign-in
+/// checked once.
+pub enum Tickets {
+    GitHub { forge: Forge, repository: String },
+    Jira { site: String, projects: Vec<String> },
+}
+
+impl Tickets {
+    /// Ready to read: GitHub's repository declared and agreeing with its remote, `gh` signed in;
+    /// `acli` signed in to the tracker's site.
+    pub async fn open(project: &Project) -> Result<Tickets, String> {
+        match project.tracker.as_ref().ok_or(NO_TRACKER)? {
+            ProjectTracker::Github { repository } => {
+                let forge = github_of(project, repository).await?;
+                forge::signed_in().await?;
+                Ok(Tickets::GitHub {
+                    forge,
+                    repository: repository.clone(),
+                })
             }
-            args.extend(["--json", ITEM_FIELDS]);
-            let issues = forge::gh_json(&args).await?;
-            let names = |list: &Value, key: &str| -> Vec<String> {
-                list.as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|item| said(&item[key]))
-                    .filter(|name| !name.is_empty())
-                    .collect()
+            ProjectTracker::Jira { site, projects } => {
+                jira_site(site, "read").await?;
+                Ok(Tickets::Jira {
+                    site: site.clone(),
+                    projects: projects.clone(),
+                })
+            }
+        }
+    }
+
+    /// The forge whose user `mine` is said of: GitHub's; Jira says it in its own search.
+    pub fn forge(&self) -> Option<&Forge> {
+        match self {
+            Tickets::GitHub { forge, .. } => Some(forge),
+            Tickets::Jira { .. } => None,
+        }
+    }
+
+    /// The tickets that changed since `since` (milliseconds), all of them without it, whatever
+    /// their state and whoever opened them, with their cheap fields. An issue stored that GitHub
+    /// now lists in another repository (transferred) is no longer the tracker's: it is closed.
+    pub async fn list(
+        &self,
+        since: Option<u64>,
+        now: u64,
+        stored: &[flottille_core::item::Item],
+    ) -> Result<crate::items::Listing, String> {
+        let (forge, repository) = match self {
+            Tickets::Jira { site, projects } => {
+                let mut items = Vec::new();
+                let mut notes = Vec::new();
+                for key in projects {
+                    let (found, cut) = changed_work_items(site, key, since, now).await?;
+                    items.extend(found);
+                    if cut {
+                        notes.push(format!("only {ALL_COUNT} work items of {key} are listed"));
+                    }
+                }
+                return Ok(crate::items::Listing {
+                    items,
+                    note: (!notes.is_empty()).then(|| notes.join("; ")),
+                    details: false,
+                });
+            }
+            Tickets::GitHub { forge, repository } => (forge, repository),
+        };
+        let repo = forge.gh_repository();
+        let search =
+            since.map(|since| format!("updated:>={}", crate::session_read::shown_date(since)));
+        let mut args = vec![
+            "issue",
+            "list",
+            "-R",
+            &repo,
+            "--state",
+            "all",
+            "--limit",
+            forge::ALL,
+        ];
+        if let Some(search) = &search {
+            args.extend(["--search", search]);
+        }
+        args.extend(["--json", LIST_FIELDS]);
+        let issues = forge::gh_json(&args).await?;
+        let issues = issues.as_array().cloned().unwrap_or_default();
+        let ours = format!("https://{repo}/issues/").to_lowercase();
+        let mut items = Vec::new();
+        for issue in &issues {
+            let Some(number) = issue["number"].as_u64() else {
+                continue;
             };
-            // Only the tracker's repository's issues are kept, whatever `gh` answered.
-            let ours = format!("https://{repo}/issues/").to_lowercase();
-            Ok(issues
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|issue| {
-                    issue["url"]
-                        .as_str()
-                        .is_some_and(|url| url.to_lowercase().starts_with(&ours))
-                })
-                .filter_map(|issue| {
-                    let comments: Vec<crate::items::Said> = issue["comments"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .map(|comment| {
-                            crate::items::Said::of(&forge::Comment {
-                                author: said(&comment["author"]["login"]),
-                                state: None,
-                                body: said(&comment["body"]),
-                                bot: false,
-                            })
-                        })
-                        .collect();
-                    Some(crate::items::Fetched {
-                        item: flottille_core::item::Item {
-                            project: String::new(),
-                            kind: "ticket".into(),
-                            source: "github".into(),
-                            repository: repository.clone(),
-                            key: issue["number"].as_u64()?.to_string(),
-                            title: said(&issue["title"]),
-                            state: said(&issue["state"]).to_lowercase(),
-                            author: Some(said(&issue["author"]["login"]))
-                                .filter(|name| !name.is_empty()),
-                            assignees: names(&issue["assignees"], "login"),
-                            labels: names(&issue["labels"], "name"),
-                            url: issue["url"].as_str().map(masked),
-                            updated_at: issue["updatedAt"].as_str().map(masked),
-                            seen_at: 0,
-                            mine: false,
-                            details: json!({"comments": comments.len()}),
-                            checks: Vec::new(),
-                        },
-                        comments,
-                        reviews: Vec::new(),
-                    })
-                })
-                .collect())
-        }
-        ProjectTracker::Jira { site, projects } => {
-            jira_site(site, "read").await?;
-            let mut fetched = Vec::new();
-            for key in projects {
-                fetched.extend(changed_work_items(site, key, since, now).await?);
+            let key = number.to_string();
+            let is_ours = issue["url"]
+                .as_str()
+                .is_some_and(|url| url.to_lowercase().starts_with(&ours));
+            if !is_ours {
+                // Only the tracker's repository's issues are kept, whatever `gh` answered.
+                if let Some(gone) = stored.iter().find(|item| item.key == key) {
+                    items.push(crate::items::Fetched::removed(gone.clone()));
+                }
+                continue;
             }
-            Ok(fetched)
+            items.push(crate::items::Fetched {
+                item: flottille_core::item::Item {
+                    project: String::new(),
+                    kind: "ticket".into(),
+                    source: "github".into(),
+                    repository: repository.clone(),
+                    key,
+                    title: said(&issue["title"]),
+                    state: said(&issue["state"]).to_lowercase(),
+                    author: Some(said(&issue["author"]["login"])).filter(|name| !name.is_empty()),
+                    assignees: forge::names_of(&issue["assignees"], "login"),
+                    labels: forge::names_of(&issue["labels"], "name"),
+                    url: issue["url"].as_str().map(masked),
+                    updated_at: issue["updatedAt"].as_str().map(masked),
+                    seen_at: 0,
+                    mine: false,
+                    details: json!({}),
+                    checks: Vec::new(),
+                },
+                comments: Vec::new(),
+                reviews: Vec::new(),
+                created_at: issue["createdAt"]
+                    .as_str()
+                    .and_then(crate::session_read::form),
+                detailed: false,
+            });
         }
+        Ok(crate::items::Listing {
+            items,
+            note: (issues.len() >= ALL_COUNT).then(|| {
+                format!(
+                    "only the newest {ALL_COUNT} issues are listed; older ones, if any, are not"
+                )
+            }),
+            details: true,
+        })
+    }
+
+    /// Reads the comments of a listed issue; false when GitHub no longer has it.
+    pub async fn detail(&self, fetched: &mut crate::items::Fetched) -> Result<bool, String> {
+        let Tickets::GitHub { forge, .. } = self else {
+            return Ok(true);
+        };
+        let viewed = match forge::gh_json(&[
+            "issue",
+            "view",
+            &fetched.item.key,
+            "-R",
+            &forge.gh_repository(),
+            "--json",
+            "comments",
+        ])
+        .await
+        {
+            Ok(viewed) => viewed,
+            Err(error) if forge::not_found(&error) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        fetched.comments = viewed["comments"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|comment| {
+                crate::items::Said::of(&forge::Comment {
+                    author: said(&comment["author"]["login"]),
+                    state: None,
+                    body: said(&comment["body"]),
+                    bot: false,
+                })
+            })
+            .collect();
+        fetched.item.details["comments"] = json!(fetched.comments.len());
+        fetched.detailed = true;
+        Ok(true)
     }
 }
 
-/// The work items of the Jira project `key` updated since `since`. The time is given to JQL as
-/// minutes before now (`updated >= "-12m"`), which Jira reads the same whatever the time zone of
-/// the user's profile, where a date would be read in it.
+/// The work items of the Jira project `key` updated since `since`, and whether the list was cut
+/// at its cap. The time is given to JQL as minutes before now (`updated >= "-12m"`), which Jira
+/// reads the same whatever the time zone of the user's profile, where a date would be read in it.
+/// The user's own are those a second search with `currentUser()` finds, in the same window: Jira
+/// says who the user is without Flottille reading it.
 async fn changed_work_items(
     site: &str,
     key: &str,
     since: Option<u64>,
     now: u64,
-) -> Result<Vec<crate::items::Fetched>, String> {
+) -> Result<(Vec<crate::items::Fetched>, bool), String> {
     let mut query = format!("project = {}", jql_quoted(key));
     if let Some(since) = since {
         let minutes = now.saturating_sub(since).div_ceil(60_000).max(1);
         query.push_str(&format!(" AND updated >= \"-{minutes}m\""));
     }
-    query.push_str(" ORDER BY updated DESC");
-    let (ok, stdout, stderr) = match acli(&[
-        "jira",
-        "workitem",
-        "search",
-        "--jql",
-        &query,
-        "--fields",
-        ITEM_JIRA_FIELDS,
-        "--json",
-        "--limit",
-        forge::ALL,
-    ])
-    .await
-    {
-        Ok(output) => output,
-        Err(Gh::Missing) => return Err("acli is not on the daemon's PATH".into()),
-        Err(Gh::Failed(why)) => return Err(format!("acli jira workitem search: {why}")),
-    };
-    if !ok {
-        let said = stderr.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-        return Err(format!(
-            "acli jira workitem search failed: {}",
-            masked(&said.chars().take(300).collect::<String>())
-        ));
-    }
-    let found: Value = serde_json::from_str(&stdout)
-        .map_err(|error| format!("acli jira workitem search answered what is not JSON: {error}"))?;
-    let items = found
-        .as_array()
-        .or(found["issues"].as_array())
-        .cloned()
-        .unwrap_or_default();
-    Ok(items
+    let items = jira_search(&format!("{query} ORDER BY updated DESC"), ITEM_JIRA_FIELDS).await?;
+    let mine: Vec<String> = jira_search(
+        &format!("{query} AND (assignee = currentUser() OR reporter = currentUser())"),
+        "key",
+    )
+    .await?
+    .iter()
+    .filter_map(|item| item["key"].as_str().map(masked))
+    .collect();
+    let cut = items.len() >= ALL_COUNT;
+    let fetched = items
         .iter()
         // An item whose `self` names another site is not the tracker's (`list_work_items`).
         .filter(|item| {
@@ -1864,6 +1925,7 @@ async fn changed_work_items(
                     source: "jira".into(),
                     repository: String::new(),
                     url: Some(format!("https://{site}/browse/{key}")),
+                    mine: mine.contains(&key),
                     key,
                     title: said(&fields["summary"]),
                     // Done, by its status's category, is closed; its status is in its details.
@@ -1883,7 +1945,6 @@ async fn changed_work_items(
                         .collect(),
                     updated_at: fields["updated"].as_str().map(masked),
                     seen_at: 0,
-                    mine: false,
                     details: json!({
                         "status": name(&fields["status"]["name"]),
                         "type": name(&fields["issuetype"]["name"]),
@@ -1894,9 +1955,48 @@ async fn changed_work_items(
                 },
                 comments: Vec::new(),
                 reviews: Vec::new(),
+                created_at: fields["created"].as_str().and_then(crate::items::time_ms),
+                detailed: false,
             })
         })
-        .collect())
+        .collect();
+    Ok((fetched, cut))
+}
+
+/// `acli jira workitem search` of `query`, the items as an array.
+async fn jira_search(query: &str, fields: &str) -> Result<Vec<Value>, String> {
+    let (ok, stdout, stderr) = match acli(&[
+        "jira",
+        "workitem",
+        "search",
+        "--jql",
+        query,
+        "--fields",
+        fields,
+        "--json",
+        "--limit",
+        forge::ALL,
+    ])
+    .await
+    {
+        Ok(output) => output,
+        Err(Gh::Missing) => return Err("acli is not on the daemon's PATH".into()),
+        Err(Gh::Failed(why)) => return Err(format!("acli jira workitem search: {why}")),
+    };
+    if !ok {
+        let said = stderr.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+        return Err(format!(
+            "acli jira workitem search failed: {}",
+            masked(&said.chars().take(300).collect::<String>())
+        ));
+    }
+    let found: Value = serde_json::from_str(&stdout)
+        .map_err(|error| format!("acli jira workitem search answered what is not JSON: {error}"))?;
+    Ok(found
+        .as_array()
+        .or(found["issues"].as_array())
+        .cloned()
+        .unwrap_or_default())
 }
 
 #[cfg(test)]
