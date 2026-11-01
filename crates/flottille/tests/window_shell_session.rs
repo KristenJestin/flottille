@@ -897,7 +897,7 @@ fn a_session_send_message_is_marked_with_its_sender_in_both_conversations(cx: &m
         let page = session_page(&shell, cx);
         page.read_with(cx, |p, _| p.id() == lead)
             && blocks(&page, cx).iter().any(|b| {
-                matches!(b, Block::Relayed { sent: true, peer, text }
+                matches!(b, Block::Relayed { sent: true, peer, text, .. }
                     if peer == "Docs" && text == "The tests pass now.")
             })
     });
