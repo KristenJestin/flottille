@@ -146,6 +146,12 @@ pub fn said_at(ms: u64) -> String {
     said_at_offset(ms, local_offset(ms))
 }
 
+/// The time of day of `ms` on the machine's clock: `10:42`.
+pub fn clock(ms: u64) -> String {
+    let said = said_at(ms);
+    said.rsplit(", ").next().unwrap_or(&said).to_owned()
+}
+
 /// [`said_at`] at `offset` seconds east of UTC.
 pub fn said_at_offset(ms: u64, offset: i64) -> String {
     let seconds = (ms / 1000) as i64 + offset;
@@ -3711,6 +3717,15 @@ impl Render for SessionRail {
             })
             .collect();
         let agent_menu = self.agent_menu.clone();
+        // An agent waiting on its wake says when it is due, as its row in the sidebar does.
+        let wakes: HashMap<String, u64> = self
+            .subscriptions
+            .read(cx)
+            .rows()
+            .iter()
+            .filter(|row| row.wake)
+            .map(|row| (row.agent.clone(), row.expires_at))
+            .collect();
         let agent_row = |agent: &RailAgent| {
             let mark = self.marks[&agent.id].clone();
             let page = self.page.clone();
@@ -3736,9 +3751,12 @@ impl Render for SessionRail {
                     }),
                 ),
             };
-            let waiting_line = agent
-                .waits_on_subscription
-                .then(|| SharedString::from(agent.doing.clone()));
+            let waiting_line = agent.waits_on_subscription.then(|| {
+                SharedString::from(match wakes.get(&agent.id) {
+                    Some(at) => format!("waiting: wake at {}", clock(*at)),
+                    None => agent.doing.clone(),
+                })
+            });
             let gauge = agent.context.map(|used| {
                 let used = used.min(100);
                 // The share and its bar on one line, the share before it.

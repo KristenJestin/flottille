@@ -139,6 +139,7 @@ impl Provider {
         if root {
             names.extend(ACTION_TOOLS);
         }
+        names.push("wake");
         names.push("report");
         names.push(if root { "ask_user" } else { "ask_parent" });
         // Only a root starts a session or is one: the sessions it writes to are those.
@@ -1324,6 +1325,7 @@ mod tests {
                 "commands",
                 "setup",
                 "project",
+                "wake",
                 "report",
                 "ask_user",
                 "session_send",
@@ -1336,7 +1338,7 @@ mod tests {
     #[test]
     fn the_tools_follow_what_the_agent_can_do() {
         let leaf = short(claude::PROVIDER.tools(false, true, false, false));
-        assert_eq!(leaf.len(), 12);
+        assert_eq!(leaf.len(), 13);
         assert!(leaf.contains(&"ask_parent".to_owned()));
         assert!(
             !leaf
@@ -1374,12 +1376,12 @@ mod tests {
         assert_eq!(forge[10], "workspace", "after skill_read");
         assert!(!forge.contains(&"tickets".to_owned()));
         let both = short(claude::PROVIDER.tools(true, false, true, true));
-        assert_eq!(both.len(), 25);
+        assert_eq!(both.len(), 26);
         assert_eq!(both[10], "tickets", "after skill_read");
         assert_eq!(both[11], "workspace", "after tickets");
         assert_eq!(
             short(claude::PROVIDER.tools(false, true, true, true)).len(),
-            14
+            15
         );
     }
 

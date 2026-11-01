@@ -473,18 +473,18 @@ fn the_maximum_time_ends_it_and_says_so() {
 }
 
 #[test]
-fn a_subscription_asked_for_four_hours_is_accepted() {
+fn a_subscription_asked_for_100_hours_is_accepted() {
     let user = user();
     fixture(&user);
     script(&user, pull());
     let (_, mcp) = agent(&user);
 
-    let answer = subscribe(&mcp, json!({"events": ["checks"], "minutes": 240}));
-    assert!(answer.contains("within 240 min"), "{answer}");
+    let answer = subscribe(&mcp, json!({"events": ["checks"], "minutes": 6000}));
+    assert!(answer.contains("within 6000 min"), "{answer}");
 }
 
 #[test]
-fn a_subscription_asked_for_more_than_four_hours_is_refused_and_says_240_is_the_most() {
+fn a_subscription_asked_for_more_than_100_hours_is_refused_and_says_6000_is_the_most() {
     let user = user();
     fixture(&user);
     script(&user, pull());
@@ -492,10 +492,10 @@ fn a_subscription_asked_for_more_than_four_hours_is_refused_and_says_240_is_the_
 
     let answer = mcp.call(
         "forge",
-        json!({"action": "subscribe", "events": ["checks"], "minutes": 241}),
+        json!({"action": "subscribe", "events": ["checks"], "minutes": 6001}),
     );
     assert!(answer.error, "{}", answer.text);
-    assert!(answer.text.contains("from 1 to 240"), "{}", answer.text);
+    assert!(answer.text.contains("from 1 to 6000"), "{}", answer.text);
 }
 
 #[test]
@@ -821,4 +821,23 @@ fn a_repository_that_is_the_project_folder_is_named_by_the_project_never_by_a_do
         "{delivery}"
     );
     assert!(!delivery.contains("of ."), "{delivery}");
+}
+
+#[test]
+fn forge_unsubscribe_and_show_leave_the_agent_s_wake_alone() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull());
+    let (id, mcp) = agent(&user);
+    subscribe(&mcp, json!({"events": ["checks"]}));
+    let wake = mcp.call("wake", json!({"minutes": 20, "why": "look again"}));
+    assert!(!wake.error, "{}", wake.text);
+
+    let shown = mcp.call("forge", json!({"action": "show"}));
+    assert!(!shown.text.contains("look again"), "{}", shown.text);
+    let answer = mcp.call("forge", json!({"action": "unsubscribe"}));
+    assert!(!answer.error, "{}", answer.text);
+    let left = listed(&user, &id);
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert_eq!(left[0]["source"], "timer");
 }
