@@ -747,6 +747,8 @@ fn a_pdf_is_read_as_its_text() {
     assert!(text.contains("The release notes of version two"), "{text}");
 }
 
+/// The probe mode of the reader exists in a debug build alone.
+#[cfg(debug_assertions)]
 #[test]
 fn the_reader_can_write_no_file_connect_nowhere_and_run_no_program() {
     use std::os::fd::AsRawFd as _;
