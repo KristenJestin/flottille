@@ -817,12 +817,24 @@ async fn listed(project: &Project, asked: &TicketsCall) -> Outcome {
         Ok(found) => found,
         Err(why) => return Outcome::Failed(format!("the tickets could not be listed: {why}")),
     };
-    let mut text = format!(
-        "The {state} tickets of {}{}: {}\n",
-        tracker.said(),
-        query.map_or(String::new(), |q| format!(" matching {q:?}")),
-        tickets.len()
-    );
+    let head = match state {
+        "open" => "The open tickets",
+        "closed" => "The closed tickets",
+        _ => "All tickets",
+    };
+    // Every filter the list was asked with is said: a list filtered by a label must not read
+    // like the whole list.
+    let mut header = format!("{head} of {}", tracker.said());
+    if let Some(label) = filters.label {
+        header.push_str(&format!(" labelled {label}"));
+    }
+    if let Some(assignee) = filters.assignee {
+        header.push_str(&format!(", assigned to {assignee}"));
+    }
+    if let Some(query) = query {
+        header.push_str(&format!(" matching {query:?}"));
+    }
+    let mut text = format!("{header}: {}\n", tickets.len());
     for ticket in &tickets {
         let mut line = format!("- {} {}: {}", ticket.reference, ticket.state, ticket.title);
         if !ticket.labels.is_empty() {
