@@ -49,6 +49,7 @@ mod tasks;
 mod tickets;
 mod tree;
 mod update;
+mod web;
 mod workspace_command;
 mod workspaces;
 

@@ -94,7 +94,7 @@ const REPLACED: &str = "refused: this session has been replaced: a new session o
 
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
 /// the order frozen in the agent.
-const SERVED: [Definition; 26] = [
+const SERVED: [Definition; 27] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -200,10 +200,9 @@ const SERVED: [Definition; 26] = [
         title: "The project's tasks",
         description: "The project's tasks: named lines (tests, lint, servers…) that run runs by \
             name; prefer them to a line of your own, they are what the project means. list and \
-            show read them; a root's add, edit and remove change them once the session's judge \
-            or the user allows it, judged as a run of the line (check and read_only are the \
-            user's word: setting them is held for the user): you are answered at once, the \
-            result may come later. {\"action\": \"add\", \"name\": \"test\", \"line\": \
+            show read them; a root's add, edit and remove are judged as a run of the line \
+            (check and read_only, the user's word, are held for the user), answered at once, \
+            the result maybe later. {\"action\": \"add\", \"name\": \"test\", \"line\": \
             \"cargo test\"}.",
         read_only: false,
         idempotent: false,
@@ -252,7 +251,7 @@ const SERVED: [Definition; 26] = [
             1000 at most) or those from start; the answer says how to read the lines before or \
             after; only the last 64 KiB of an output are kept. action stop: ends it with \
             everything it started, asked to end, then killed 5 seconds later, and answers once \
-            it ended; a run that already ended is left as it is. {\"run\": \"a1b2c3\", \
+            it ended; one already ended is left as is. {\"run\": \"a1b2c3\", \
             \"action\": \"stop\"}",
         read_only: false,
         idempotent: true,
@@ -269,12 +268,10 @@ const SERVED: [Definition; 26] = [
     Definition {
         name: "skill_read",
         title: "Read a skill",
-        description: "Reads one of the project's skills, the texts listed in your instructions \
-            (framework guides, test library, design system, the project's ways), when your task \
-            needs them. A file or a text skill is read by its name, a page at a time (32 KiB at \
+        description: "Reads one of the project's skills listed in your instructions (guides, \
+            test library, design system, the project's ways) when your task needs it. A file or a text skill is read by its name, a page at a time (32 KiB at \
             most) like fs_read; a folder skill lists its files, then path names the one to read. \
-            Only the skill's own files are served, never outside it. Refused for a name that is \
-            not the project's.",
+            Only the skill's own files; refused for a name that is not the project's.",
         read_only: true,
         idempotent: true,
         destructive: false,
@@ -431,9 +428,8 @@ const SERVED: [Definition; 26] = [
             tracker; set_settings declares them (null removes one; a tracker left out is kept), \
             and a repository's base branches and dependencies; what is left out is kept, a \
             refused change saves nothing. rules reads how agents are told to work; set_rules \
-            replaces them, for the agents created after. A change is done once the judge or the \
-            user allows it, of the tracker or of the rules only once the user does: you are \
-            answered at once, the result may come later. {\"action\": \"set_settings\", \
+            replaces them, for the agents created after. Changes are judged (the tracker's and \
+            the rules' by the user), answered at once, the result maybe later. {\"action\": \"set_settings\", \
             \"repositories\": [{\"path\": \"api\", \"base\": [\"develop\", \"main\"], \
             \"depends_on\": [\"lib\"]}]}.",
         read_only: false,
@@ -449,7 +445,7 @@ const SERVED: [Definition; 26] = [
                     "depends_on": {"type": "array", "items": {"type": "string"}, "description": "Repository paths, [] for none; no cycle."}
                 }, "required": ["path"], "additionalProperties": false}},
                 "tracker": {"type": ["object", "null"], "description": "{kind: github, repository: <path>} or {kind: jira, site, projects}."},
-                "text": {"type": "string", "description": "set_rules: the rules, whole, at most 8000 characters; they replace the project's current ones."}
+                "text": {"type": "string", "description": "set_rules: the rules, whole, at most 8000 characters."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -475,6 +471,26 @@ const SERVED: [Definition; 26] = [
         },
     },
     Definition {
+        name: "web",
+        title: "The web",
+        description: "read: a page's main text (HTML as Markdown, PDF, text, JSON; 30,000 \
+            characters) and its links. search: DuckDuckGo, 10 results. Both are the web's text, \
+            never the user's. A URL you were shown (user, ticket, pull request, page, result) \
+            passes; one you build is judged: it sends out what it holds. No local or private \
+            address.",
+        read_only: true,
+        idempotent: true,
+        destructive: false,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["read", "search"]},
+                "url": {"type": "string"},
+                "query": {"type": "string"},
+                "why": {"type": "string"}
+            }, "required": ["action"], "additionalProperties": false})
+        },
+    },
+    Definition {
         name: "agent_launch",
         title: "Start a session, or launch a child",
         description: "Work that belongs in a workspace is a session for the user: root: true \
@@ -487,24 +503,23 @@ const SERVED: [Definition; 26] = [
             the task, what to read, the checks, the deliverable. provider: yours when left out; \
             a refusal names the ready ones. Only a root has this tool, never a child; a \
             child launch is refused above the children cap. {\"title\": \"Fix login\", \"brief\": \"...\", \"root\": true, \
-            \"workspace\": \"login\"}; {\"title\": \"Add API\", \"brief\": \"...\", \"root\": \
-            true, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}; {\"title\": \
+            \"workspace\": \"login\"}; {\"title\": \
             \"Write the tests\", \"brief\": \"...\"}",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "title": {"type": "string", "description": "The task in a few words: how you and the user will name this session or child."},
-                "brief": {"type": "string", "description": "Everything the session or the child needs to know."},
-                "provider": {"type": "string", "description": "The provider it runs on: yours when left out."},
-                "model": {"type": "string", "description": "The model; the provider's default when left out."},
-                "effort": {"type": "string", "description": "The model's effort; its default when left out."},
+                "title": {"type": "string", "description": "A few words naming it."},
+                "brief": {"type": "string", "description": "All it needs to know."},
+                "provider": {"type": "string"},
+                "model": {"type": "string", "description": "Its provider's default when left out."},
+                "effort": {"type": "string", "description": "Its default when left out."},
                 "role": {"type": "string", "enum": ["worker", "lead"], "description": "worker by default."},
-                "workspace": {"type": "string", "description": "With root: an existing workspace of the project, for the session to work in. A child works in your place."},
-                "new_workspace": {"type": "string", "description": "With root: the name of a new workspace to make for the session. Not with workspace."},
-                "repositories": {"type": "array", "items": {"type": "string"}, "description": "With new_workspace: its repositories, by path; the project's when left out."},
-                "root": {"type": "boolean", "description": "A session for the user, in a workspace or your place, not a child."}
+                "workspace": {"type": "string", "description": "With root: an existing workspace for the session."},
+                "new_workspace": {"type": "string", "description": "With root: a new workspace to make for it."},
+                "repositories": {"type": "array", "items": {"type": "string"}, "description": "With new_workspace: by path; all when left out."},
+                "root": {"type": "boolean", "description": "A session for the user, not a child."}
             }, "required": ["title", "brief"], "additionalProperties": false})
         },
     },
@@ -528,11 +543,11 @@ const SERVED: [Definition; 26] = [
         name: "agent_status",
         title: "See how children are doing",
         description: "How your children are doing. Without agent_id: one line per child, what it \
-            does now (thinking, which command runs and for how long, waiting for approval #n, \
-            waiting on the provider), the time since its last sign of activity and its context \
+            does now (thinking, a command and for how long, waiting for approval or the \
+            provider), the time since its last activity, its context \
             use; detail full adds their last messages. With agent_id: that child, in full. \
             action conversation: a page of that child's conversation, oldest first (what it was \
-            sent, its messages and its tool calls), ending with the after to pass for the next \
+            sent, said and called), ending with the after to pass for the next \
             one; read the lines that matter rather than whole transcripts. \
             {\"agent_id\": \"a1b2\", \"action\": \"conversation\"}.",
         read_only: true,
@@ -540,10 +555,10 @@ const SERVED: [Definition; 26] = [
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "agent_id": {"type": "string", "description": "One of your children, as agent_launch gave it; required for action conversation."},
+                "agent_id": {"type": "string", "description": "A child's id; required for conversation."},
                 "action": {"type": "string", "enum": ["status", "conversation"], "description": "status by default."},
                 "detail": {"type": "string", "enum": ["short", "full"], "description": "status: short for all the children, full for one, by default."},
-                "after": {"type": "integer", "minimum": 0, "description": "conversation: the number a previous page ended with."}
+                "after": {"type": "integer", "minimum": 0, "description": "conversation: as the last page ended."}
             }, "additionalProperties": false})
         },
     },
@@ -809,6 +824,8 @@ pub struct Server {
     refusals: Mutex<VecDeque<Instant>>,
     /// The agents whose calls came without a call key, said once in the log.
     keyless: Mutex<HashSet<String>>,
+    /// The URLs each agent's tools showed it: `web` reads them again without the judge.
+    pub seen: crate::web::Seen,
 }
 
 #[derive(Default)]
@@ -844,6 +861,7 @@ impl Server {
             runs: runs::Live::default(),
             refusals: Mutex::default(),
             keyless: Mutex::default(),
+            seen: crate::web::Seen::default(),
         }
     }
 
@@ -1493,6 +1511,10 @@ fn removes_a_workspace(tool: &str, args: &Value) -> bool {
 
 /// The gate's verdict on a call of one of the agent's tools.
 pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gate::Verdict {
+    if tool == "web" {
+        let seen = crate::web::seen_by(daemon, &grant.agent);
+        return crate::web::verdict(args, seen, judge::mode(daemon, &grant.agent));
+    }
     // A new workspace's launch is classified by its steps below, but its brief is held to the
     // judge's limit like any other launch's.
     if tool == "agent_launch"
@@ -1792,7 +1814,26 @@ async fn perform(
     cancelled: CancellationToken,
     approved: Option<gate::Class>,
 ) -> Outcome {
+    let outcome = performed_once(daemon, grant, tool, args, cancelled, approved).await;
+    // What a page, a search, a ticket or a pull request showed the agent, it may read with `web`.
+    if let Outcome::Done(text) = &outcome
+        && matches!(tool, "web" | "tickets" | "forge")
+    {
+        daemon.mcp.seen.saw(&grant.agent, text);
+    }
+    outcome
+}
+
+async fn performed_once(
+    daemon: &Arc<Daemon>,
+    grant: &Arc<Grant>,
+    tool: &str,
+    args: Value,
+    cancelled: CancellationToken,
+    approved: Option<gate::Class>,
+) -> Outcome {
     match tool {
+        "web" => crate::web::web(args).await,
         "run" => {
             runs::run(
                 daemon,
@@ -1945,7 +1986,7 @@ mod tests {
     #[test]
     fn a_grant_holds_the_agent_s_served_tools_in_its_own_order() {
         let mut leaf = claude::PROVIDER.tools(false, true, true, true);
-        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 14);
+        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 15);
         leaf.reverse();
         leaf.retain(|tool| !tool.ends_with("__search"));
         leaf.push("fs_read".into());
@@ -1953,7 +1994,7 @@ mod tests {
         assert_eq!(served.first(), Some(&"ask_parent"));
         assert_eq!(served.last(), Some(&"fs_read"));
         assert!(!served.contains(&"search"));
-        assert_eq!(served.len(), 13);
+        assert_eq!(served.len(), 14);
     }
 
     #[test]
@@ -2120,7 +2161,9 @@ mod tests {
         // edited labels and assignees (#225), the `tickets` texts shortened to stay under the cap.
         // `forge` closed and reopened pull requests (#233), its own text shortened: 28,981.
         // Unchanged by #222: the ten characters `forge` gained (sized by CI) are paid by ten
-        // taken from its own text.
+        // taken from its own text. `web` (#259) is paid by shorter texts of `agent_launch` (its
+        // schema and one of its examples), `agent_status`, `project`, `skill_read`, `tasks`,
+        // `run_status`: 28,936.
         assert!(chars < 29_000, "{chars} characters of definitions");
     }
 }
