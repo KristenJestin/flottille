@@ -746,6 +746,52 @@ fn tickets_list_filters_by_state_label_and_assignee() {
 }
 
 #[test]
+fn tickets_list_header_says_the_label_and_the_assignee_it_was_filtered_by() {
+    let user = user();
+    on_github(&user);
+    many_issues(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    let listed = read(
+        &user,
+        mcp.call(
+            "tickets",
+            json!({"action": "list", "label": "bug", "assignee": "ana"}),
+        ),
+    );
+
+    let header = listed.lines().next().unwrap();
+    assert!(
+        header.starts_with("The open tickets of GitHub issues"),
+        "{listed}"
+    );
+    assert!(
+        header.ends_with(" labelled bug, assigned to ana: 1"),
+        "{listed}"
+    );
+}
+
+#[test]
+fn tickets_list_with_the_state_all_reads_all_tickets_of() {
+    let user = user();
+    on_github(&user);
+    many_issues(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    let listed = read(
+        &user,
+        mcp.call("tickets", json!({"action": "list", "state": "all"})),
+    );
+
+    let header = listed.lines().next().unwrap();
+    assert!(
+        header.starts_with("All tickets of GitHub issues"),
+        "{listed}"
+    );
+    assert!(header.ends_with(": 45"), "{listed}");
+}
+
+#[test]
 fn tickets_search_finds_the_tickets_holding_its_words() {
     let user = user();
     on_github(&user);
