@@ -354,9 +354,8 @@ pending requests.
   `title`, a `body` or a `method` on `close` and `reopen` is refused before anything is asked.
 
 `list`, `show`, `subscribe` and `unsubscribe` go through the gate like every call, which allows
-them in every mode; `create`, `comment`,
-`edit`, `merge`, `checks`, `close` and `reopen` are to judge, and a merge that waives the checks base. A write is
-done only once the repository's remote is checked to lead where its forge is declared. **What a
+them in every mode; `create`, `comment`, `edit`, `merge`, `checks`, `close` and `reopen` are to
+judge, and a merge that waives the checks base. A write is done only once the repository's remote is checked to lead where its forge is declared. **What a
 write posts is shown whole**: its request says `Its title: …` and `Its body: …` in full (the
 arguments recorded are cut at 500 characters), and the judge is given them whole. A title or a
 body longer than the 8,000 characters the judge is given whole is refused (`refused: the body is
