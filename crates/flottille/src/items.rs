@@ -457,6 +457,11 @@ async fn me_of(daemon: &Daemon, found: &forge::Forge) -> Option<String> {
     me
 }
 
+/// Whether `item` was opened by, or is assigned to, `me`.
+fn mine_of(item: &Item, me: &str) -> bool {
+    item.author.as_deref() == Some(me) || item.assignees.iter().any(|a| a == me)
+}
+
 /// The checks of an open pull request whose CI still runs, read again: they move without it.
 /// None when there is nothing to read, or when the read failed, which is said once for the pull
 /// request and tried again at the next round.
@@ -614,6 +619,8 @@ async fn read_round(
     let reader = Reader::open(project, source).await?;
     let since = cursor.cursor.map(|at| at.saturating_sub(OVERLAP_MS));
     let listing = reader.list(since, started, stored).await?;
+    // Unknown when the forge cannot say it, or did not this time: then what is stored is kept.
+    let knows_me = reader.forge().is_some();
     let me = match reader.forge() {
         Some(found) => me_of(daemon, found).await,
         None => None,
@@ -626,13 +633,15 @@ async fn read_round(
         item.project = project.name.clone();
         item.seen_at = started;
         item.updated_at = item.updated_at.as_deref().map(normalized);
-        if let Some(me) = &me {
-            item.mine = item.author.as_ref() == Some(me) || item.assignees.contains(me);
-        }
         listed_keys.push((item.repository.clone(), item.key.clone()));
         let old = stored
             .iter()
-            .find(|s| s.repository == fetched.item.repository && s.key == fetched.item.key);
+            .find(|s| s.repository == item.repository && s.key == item.key);
+        match &me {
+            Some(me) => item.mine = mine_of(item, me),
+            None if knows_me => item.mine = old.is_some_and(|old| old.mine),
+            None => {}
+        }
         if listing.details && !fetched.detailed && wants_detail(old, &fetched, first) {
             match reader.detail(&mut fetched).await {
                 Ok(true) => {}
@@ -671,18 +680,26 @@ async fn read_round(
             return Ok(None);
         }
     }
-    // The checks of the open pull requests not listed whose CI still runs: they move without
-    // them.
+    // What was not listed: the checks of an open pull request whose CI still runs, which move
+    // without it, and whether it is the user's, once the forge says who the user is.
     for old in stored {
         if listed_keys.contains(&(old.repository.clone(), old.key.clone())) {
             continue;
         }
-        let Some(checks) = checks_now(daemon, &reader, old).await else {
-            continue;
-        };
         let mut item = old.clone();
-        item.checks = checks;
-        item.seen_at = started;
+        let mut changed = false;
+        if let Some(me) = &me {
+            item.mine = mine_of(old, me);
+            changed = item.mine != old.mine;
+        }
+        if let Some(checks) = checks_now(daemon, &reader, old).await {
+            item.checks = checks;
+            item.seen_at = started;
+            changed = true;
+        }
+        if !changed {
+            continue;
+        }
         let fetched = Fetched {
             item,
             comments: Vec::new(),

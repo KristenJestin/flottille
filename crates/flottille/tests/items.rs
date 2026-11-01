@@ -1021,3 +1021,49 @@ fn an_item_made_during_a_long_first_round_is_opened_at_the_next() {
     assert_eq!(opened.len(), 1, "{opened:?}");
     assert_eq!(opened[0]["data"]["key"], "2");
 }
+
+#[test]
+fn mine_is_kept_while_the_forge_does_not_say_who_the_user_is() {
+    let user = user();
+    project(&user, "git@github.com:acme/api.git");
+    let first = user.call("test.advance", json!({"ms": 0})).unwrap()["now"]
+        .as_u64()
+        .unwrap();
+    let issues = |updated: &str, with_seven: bool| {
+        let mut issues = json!({"5": issue(5, "Mine", updated)});
+        if with_seven {
+            issues["7"] = issue(7, "Mine too", &rfc3339(first));
+        }
+        issues
+    };
+    user.gh_script(json!({"user": {"login": "someone"},
+        "issues": {"acme/api": issues(OLD, false)}}));
+    declare(
+        &user,
+        github(),
+        json!({"kind": "github", "repository": "api"}),
+    );
+    refresh(&user);
+    let mine = |user: &User| -> Vec<String> {
+        let mut keys: Vec<String> = list(user, json!({"kind": "ticket", "mine": true}))
+            .iter()
+            .map(|i| i["key"].as_str().unwrap().to_owned())
+            .collect();
+        keys.sort();
+        keys
+    };
+    assert_eq!(mine(&user), ["5"]);
+    // A new daemon, which `gh api user` does not answer: 5 changes, 7 is new.
+    assert!(user.run(&["daemon", "stop"]).status.success());
+    user.gh_script(json!({"user_fail": "HTTP 502: Bad Gateway",
+        "issues": {"acme/api": issues(NEW, true)}}));
+    advance(&user, 20 * 60_000);
+    refresh(&user);
+    assert_eq!(mine(&user), ["5"]);
+    // It answers again: 7, which did not change and is no longer listed, is the user's too.
+    user.gh_script(json!({"user": {"login": "someone"},
+        "issues": {"acme/api": issues(NEW, true)}}));
+    advance(&user, 10 * 60_000);
+    refresh(&user);
+    assert_eq!(mine(&user), ["5", "7"]);
+}
