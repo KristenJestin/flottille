@@ -703,6 +703,19 @@ it at once.
   memory, 20 seconds of processor and 25 seconds in all, killed past them. A page that blows its reader up (a decompression bomb, nesting deep
   enough to overflow a stack, a loop) fails, `the page could not be read: …`, and the daemon
   goes on.
+- **The reader is shut in**: before it reads a byte of the page it installs a seccomp filter
+  (the `seccompiler` crate) that allows only what it was measured to need: `read` of its
+  standard input and `write` to its standard output and error alone (no other descriptor, one
+  the daemon left open included), its memory (`mmap` of none it could run, `munmap`,
+  `mremap`, `brk`), `getrandom`, `rt_sigprocmask`, `getpid`, `gettid`, `tgkill` to its own
+  process (an abort) and `exit_group`. Any other system call fails with `EPERM`: it opens no
+  file, for reading or writing, creates no socket, runs no program (`execve`, `fork`), traces
+  no process. A reader that cannot install it reads nothing (`its reader could not shut itself
+  in: …`); the filter is built for x86_64, aarch64 and riscv64 only, so on any other
+  architecture the reader refuses every HTML page and PDF. It also starts in new user and network namespaces, with no network at all, when the
+  kernel lets an unprivileged user have them; when it does not (AppArmor on Ubuntu may refuse
+  them), the daemon says so once in its log and the filter alone keeps the reader off the
+  network.
 - **`search {query}`**: DuckDuckGo's HTML page (`https://html.duckduckgo.com/html/?q=…`, no key,
   no account): at most 10 results, each its title, its URL (out of DuckDuckGo's redirect) and its
   excerpt, ads left out. A page that asks to prove a human is there, or any answer with no

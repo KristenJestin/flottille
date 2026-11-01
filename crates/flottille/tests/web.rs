@@ -746,3 +746,70 @@ fn a_pdf_is_read_as_its_text() {
 
     assert!(text.contains("The release notes of version two"), "{text}");
 }
+
+/// The probe mode of the reader exists in a debug build alone.
+#[cfg(debug_assertions)]
+#[test]
+fn the_reader_can_write_no_file_connect_nowhere_and_run_no_program() {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::process::CommandExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let written = dir.path().join("written");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    // A file of the daemon's, as a descriptor opened without close-on-exec would leave it.
+    let held = dir.path().join("held");
+    std::fs::write(&held, "secret").unwrap();
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&held)
+        .unwrap();
+    let fd = file.as_raw_fd();
+    let page = json!({
+        "write": written,
+        "connect": listener.local_addr().unwrap().to_string(),
+        "run": "/bin/true",
+        "inherited": 3,
+    });
+    // The reader as the daemon runs it, in its debug build's mode that tries each of them.
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_flottille"));
+    command
+        .args(["read-page", "probe", "https://docs.example/"])
+        .env_clear()
+        .current_dir("/")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
+    // SAFETY: dup2 is async-signal-safe; its copy is left open across the exec.
+    unsafe {
+        command.pre_exec(move || match libc::dup2(fd, 3) {
+            -1 => Err(std::io::Error::last_os_error()),
+            _ => Ok(()),
+        });
+    }
+    let mut reader = command.spawn().unwrap();
+    reader
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(page.to_string().as_bytes())
+        .unwrap();
+    let said = reader.wait_with_output().unwrap();
+    let answer: Value = serde_json::from_slice(&said.stdout).unwrap();
+    let text = answer["read"]["text"].as_str().unwrap_or_default();
+
+    for attempt in [
+        "write",
+        "connect",
+        "run",
+        "read inherited",
+        "write inherited",
+        "map executable",
+    ] {
+        assert!(
+            text.contains(&format!("{attempt}: refused")),
+            "{attempt}: {answer}"
+        );
+    }
+    assert!(!written.exists());
+    assert_eq!(std::fs::read_to_string(&held).unwrap(), "secret");
+}

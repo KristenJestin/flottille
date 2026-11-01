@@ -686,8 +686,8 @@ async fn in_reader(net: &Net, kind: Body, page: &Page) -> Result<Extracted, Stri
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
-    // SAFETY: setrlimit and prctl are async-signal-safe, and nothing else runs between fork and
-    // exec.
+    // SAFETY: setrlimit, prctl and unshare are async-signal-safe, and nothing else runs between
+    // fork and exec.
     unsafe {
         command.pre_exec(|| {
             // No setuid program it could run, nor a file capability, gives it more than it has.
@@ -708,6 +708,9 @@ async fn in_reader(net: &Net, kind: Body, page: &Page) -> Result<Extracted, Stri
                     return Err(std::io::Error::last_os_error());
                 }
             }
+            // A network of its own, with no interface but a loopback that is down, when the
+            // kernel lets a user have one; refused, its seccomp filter still keeps it off any.
+            let _ = libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNET);
             Ok(())
         });
     }
@@ -716,6 +719,17 @@ async fn in_reader(net: &Net, kind: Body, page: &Page) -> Result<Extracted, Stri
     let mut child = command
         .spawn()
         .map_err(|e| format!("its reader could not start: {e}"))?;
+    // Still alive: it waits for its page.
+    if let Some(pid) = child.id()
+        && own_network(pid) == Some(false)
+    {
+        SHARED_NETWORK.call_once(|| {
+            eprintln!(
+                "flottille daemon: the kernel gives page readers no user and network \
+                 namespaces of their own: their seccomp filter alone keeps them off the network"
+            )
+        });
+    }
     let mut input = child.stdin.take().expect("piped");
     let bytes = page.bytes.clone();
     tokio::spawn(async move {
@@ -761,10 +775,27 @@ async fn in_reader(net: &Net, kind: Body, page: &Page) -> Result<Extracted, Stri
     }
 }
 
+/// Said once in the daemon's log: the readers share its network namespace.
+static SHARED_NETWORK: std::sync::Once = std::sync::Once::new();
+
+/// Whether the process `pid` has a network namespace other than the daemon's; `None` when it
+/// cannot be told.
+fn own_network(pid: u32) -> Option<bool> {
+    let theirs = std::fs::read_link(format!("/proc/{pid}/ns/net")).ok()?;
+    let ours = std::fs::read_link("/proc/self/ns/net").ok()?;
+    Some(theirs != ours)
+}
+
 /// The reader, run as `flottille read-page <html|pdf> <url>`: the page on its standard input,
 /// what it holds on its standard output, as JSON.
 pub fn read_page(kind: &str, url: &str) -> std::process::ExitCode {
     use std::io::{Read as _, Write as _};
+    if let Err(why) = shut_in() {
+        let answer =
+            serde_json::json!({"error": format!("its reader could not shut itself in: {why}")});
+        let _ = writeln!(std::io::stdout().lock(), "{answer}");
+        return std::process::ExitCode::SUCCESS;
+    }
     let mut bytes = Vec::new();
     let read = std::io::stdin()
         .take(DOWNLOAD_BYTES as u64)
@@ -781,6 +812,73 @@ pub fn read_page(kind: &str, url: &str) -> std::process::ExitCode {
     let mut out = std::io::stdout().lock();
     let _ = writeln!(out, "{answer}");
     std::process::ExitCode::SUCCESS
+}
+
+/// The system calls the reader makes once it has started, measured on HTML and PDF pages,
+/// whatever their arguments: its memory, ending. Reading its page, writing its answer, mapping
+/// memory and aborting on itself are allowed with arguments of their own, below. Opening a file
+/// is not among them: what the parsers open (the cgroup files `available_parallelism` reads for
+/// `regex`) fails, and they do without.
+const READER_CALLS: &[i64] = &[
+    libc::SYS_munmap,
+    libc::SYS_mremap,
+    libc::SYS_brk,
+    libc::SYS_getrandom,
+    libc::SYS_rt_sigprocmask,
+    libc::SYS_getpid,
+    libc::SYS_gettid,
+    libc::SYS_exit_group,
+];
+
+/// Shuts the reader in before it reads a byte of its page: any other system call fails, so code
+/// a parser bug let run opens no file, no socket, runs no program and reaches no other process.
+fn shut_in() -> Result<(), String> {
+    use seccompiler::{
+        BackendError, BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition,
+        SeccompFilter, SeccompRule,
+    };
+    let built = || -> Result<BpfProgram, BackendError> {
+        let mut calls: std::collections::BTreeMap<i64, Vec<SeccompRule>> = READER_CALLS
+            .iter()
+            .map(|&call| (call, Vec::new()))
+            .collect();
+        let when = |arg: u8, op: SeccompCmpOp, value: u64| {
+            SeccompRule::new(vec![SeccompCondition::new(
+                arg,
+                SeccompCmpArgLen::Dword,
+                op,
+                value,
+            )?])
+        };
+        // Its standard input, output and error alone: a descriptor of the daemon's left open
+        // across the exec (a socket, the database) stays out of its reach.
+        calls.insert(libc::SYS_read, vec![when(0, SeccompCmpOp::Eq, 0)?]);
+        calls.insert(
+            libc::SYS_write,
+            vec![when(0, SeccompCmpOp::Eq, 1)?, when(0, SeccompCmpOp::Eq, 2)?],
+        );
+        // No memory it could run: code a parser bug let in stays data.
+        let exec = libc::PROT_EXEC as u64;
+        calls.insert(
+            libc::SYS_mmap,
+            vec![when(2, SeccompCmpOp::MaskedEq(exec), 0)?],
+        );
+        // An abort (memory or stack exhausted) signals the reader itself; refused, it would
+        // spin until its processor time is up.
+        calls.insert(
+            libc::SYS_tgkill,
+            vec![when(0, SeccompCmpOp::Eq, u64::from(std::process::id()))?],
+        );
+        SeccompFilter::new(
+            calls,
+            SeccompAction::Errno(libc::EPERM as u32),
+            SeccompAction::Allow,
+            std::env::consts::ARCH.try_into()?,
+        )?
+        .try_into()
+    };
+    let program = built().map_err(|e| e.to_string())?;
+    seccompiler::apply_filter(&program).map_err(|e| e.to_string())
 }
 
 /// What an HTML page or a PDF holds: done in the reader alone.
@@ -814,8 +912,56 @@ fn extracted(kind: &str, bytes: Vec<u8>, url: &str) -> Result<Extracted, String>
                 links: links_of(&source, &base),
             })
         }
+        #[cfg(debug_assertions)]
+        "probe" => Ok(Extracted {
+            title: None,
+            text: probe(&bytes),
+            links: Vec::new(),
+        }),
         other => Err(format!("no reader for {other}")),
     }
+}
+
+/// What code a parser bug let run in the reader would try, for a test of a debug build: write
+/// a file, connect to an address, run a program, each named in the page, read and write a
+/// descriptor it inherited, map memory it could run; how each attempt ended.
+#[cfg(debug_assertions)]
+fn probe(bytes: &[u8]) -> String {
+    let asked: Value = serde_json::from_slice(bytes).unwrap_or_default();
+    let named = |key: &str| asked[key].as_str().unwrap_or_default().to_owned();
+    let ended = |done: std::io::Result<()>| match done {
+        Ok(()) => "done".to_owned(),
+        Err(error) => format!("refused ({error})"),
+    };
+    let write = ended(std::fs::write(named("write"), "written"));
+    let connect = ended(std::net::TcpStream::connect(named("connect")).map(drop));
+    let run = ended(std::process::Command::new(named("run")).status().map(drop));
+    // A descriptor of the daemon's it was left, and memory it could run.
+    let fd = asked["inherited"].as_i64().unwrap_or(-1) as libc::c_int;
+    let called = |done: bool| ended(done.then_some(()).ok_or_else(std::io::Error::last_os_error));
+    let mut byte = [0u8];
+    // SAFETY: one byte read into and written from a buffer of one byte; an anonymous mapping
+    // nothing uses.
+    let (read_inherited, write_inherited, map_executable) = unsafe {
+        (
+            called(libc::read(fd, byte.as_mut_ptr().cast(), 1) == 1),
+            called(libc::write(fd, b"!".as_ptr().cast(), 1) == 1),
+            called(
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    4096,
+                    libc::PROT_READ | libc::PROT_EXEC,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                    -1,
+                    0,
+                ) != libc::MAP_FAILED,
+            ),
+        )
+    };
+    format!(
+        "write: {write}\nconnect: {connect}\nrun: {run}\nread inherited: {read_inherited}\n\
+         write inherited: {write_inherited}\nmap executable: {map_executable}"
+    )
 }
 
 fn looks_like_html(bytes: &[u8]) -> bool {
@@ -1943,6 +2089,43 @@ mod tests {
             .block_on(in_reader(&net, Body::Html, &page))
             .unwrap();
         assert_eq!(read.text, "NoNewPrivs: 1");
+    }
+
+    #[test]
+    fn the_reader_has_a_network_of_its_own_or_the_log_says_it_has_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let reader = dir.path().join("reader");
+        // A reader that takes its page, then answers with the network namespace it is in.
+        std::fs::write(
+            &reader,
+            "#!/bin/sh\n/usr/bin/cat > /dev/null\nprintf '{\"read\": {\"title\": null, \"text\": \"%s\", \
+             \"links\": []}}' \"$(/usr/bin/readlink /proc/self/ns/net)\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&reader, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let net = Net {
+            open: Vec::new(),
+            search: String::new(),
+            reader,
+            hosts: Vec::new(),
+        };
+        let page = Page {
+            url: Url::parse("https://docs.example/").unwrap(),
+            kind: "text/html".into(),
+            bytes: b"<html></html>".to_vec(),
+            cut: false,
+        };
+        let read = runtime()
+            .block_on(in_reader(&net, Body::Html, &page))
+            .unwrap();
+        let ours = std::fs::read_link("/proc/self/ns/net").unwrap();
+        // A kernel may refuse the namespaces (AppArmor on Ubuntu does): the daemon says so then.
+        assert!(
+            read.text != ours.to_string_lossy() || SHARED_NETWORK.is_completed(),
+            "{}",
+            read.text
+        );
     }
 
     #[test]
