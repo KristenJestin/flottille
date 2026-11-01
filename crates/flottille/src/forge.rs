@@ -1161,9 +1161,9 @@ async fn forge_subscribe(
         Ok(mut checkouts) => checkouts.remove(0).path,
         Err(refusal) => return refusal,
     };
-    // The read now is stored, while no round reads nor writes, before the subscription opens:
-    // what is so now is no event of the next rounds.
-    let held = crate::items::held(daemon, &place.project).await;
+    // The read now is stored before the subscription opens, unless a round wrote meanwhile: what
+    // is so now is no event of the next rounds.
+    let before = crate::items::before_live(daemon, &place.project);
     let (_, read) = refresh_read(daemon, &workspace).await;
     let Some(repository) = read.repositories.iter().find(|r| r.path == path) else {
         return Outcome::Failed(format!("{path} was not read"));
@@ -1202,7 +1202,8 @@ async fn forge_subscribe(
         }
     };
     let target = events::target(&workspace, &path, pull.number);
-    if let Some(forge) = &repository.forge {
+    let held = crate::items::held_after(daemon, &place.project, before).await;
+    if let (Some(_), Some(forge)) = (&held, &repository.forge) {
         remember(daemon, &place.project, &path, forge, pull);
     }
     for old in crate::subscriptions::of(daemon, agent) {

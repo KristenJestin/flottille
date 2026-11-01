@@ -49,6 +49,7 @@
 //!
 //! `view_fail` (`{"acme/app": {"12": "HTTP 502: Bad Gateway"}}`) makes `pr view` and `issue view`
 //! of that number alone fail that way; `list_delay_ms` makes `pr list` wait that long first,
+//! `listing_delay_ms` a `pr list` of every branch alone (a round's, not a branch's `--head`),
 //! `view_delay_ms` `pr view`.
 //!
 //! A `--search` of `pr list` and `issue list` keeps, for each `updated:>=<time>` it holds, the
@@ -476,6 +477,9 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             let pulls = &script["pulls"][repository];
             if *sub == "list" {
                 if let Some(ms) = script["list_delay_ms"].as_u64() {
+                    std::thread::sleep(std::time::Duration::from_millis(ms));
+                }
+                if let (Some(ms), None) = (script["listing_delay_ms"].as_u64(), option("--head")) {
                     std::thread::sleep(std::time::Duration::from_millis(ms));
                 }
                 let state = option("--state").unwrap_or("open");

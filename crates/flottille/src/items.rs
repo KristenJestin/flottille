@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use flottille_core::declared::ProjectTracker;
 use flottille_core::item::{Check, Cursor, Filter, Item};
@@ -152,6 +153,9 @@ const BATCH: usize = 25;
 /// How often a source's open items are compared with its open list, at most: what the search of
 /// what changed never shows again (an issue deleted or transferred) is found this way.
 const SWEEP_MS: u64 = 60 * 60_000;
+/// How long a subscription waits for a round running to store its live read: a tool call answers
+/// promptly, and that round stores a read of its own.
+const LIVE_WAIT: Duration = Duration::from_secs(3);
 
 /// Each project's sources, as `Store::retain_items` takes them.
 type Declared = Vec<(String, Vec<[String; 4]>)>;
@@ -162,8 +166,9 @@ type Rhythm = (Option<std::time::SystemTime>, (u64, u64));
 /// whom each source is signed in as.
 #[derive(Default)]
 pub struct Items {
-    /// One round of a project at a time.
-    rounds: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// One round of a project at a time, each holding the count of what wrote under it (rounds,
+    /// live reads): a live read taken without it knows whether one wrote since.
+    rounds: Mutex<HashMap<String, Arc<tokio::sync::Mutex<u64>>>>,
     windows: AtomicUsize,
     /// Whom a forge says the user is, by host, once it said it.
     me: Mutex<HashMap<String, String>>,
@@ -375,9 +380,10 @@ pub fn poll(daemon: &Arc<Daemon>) {
             continue;
         }
         let lock = lock_of(daemon, &project.name);
-        let Ok(held) = lock.try_lock_owned() else {
+        let Ok(mut held) = lock.try_lock_owned() else {
             continue;
         };
+        *held += 1;
         let daemon = daemon.clone();
         tokio::spawn(async move {
             round(&daemon, &project, &due).await;
@@ -390,7 +396,7 @@ pub fn poll(daemon: &Arc<Daemon>) {
     }
 }
 
-fn lock_of(daemon: &Daemon, project: &str) -> Arc<tokio::sync::Mutex<()>> {
+fn lock_of(daemon: &Daemon, project: &str) -> Arc<tokio::sync::Mutex<u64>> {
     daemon
         .items
         .rounds
@@ -563,15 +569,39 @@ fn flush(
     Ok(true)
 }
 
-/// The project's round lock, waited for: taken before a live read, so that a round neither
-/// lands between the read and its write nor is written over by it.
-pub async fn held(daemon: &Daemon, project: &str) -> tokio::sync::OwnedMutexGuard<()> {
-    lock_of(daemon, project).lock_owned().await
+/// The project's round lock, only when no round of the project runs: that round stores a read of
+/// its own. Taken before a live read, so that a round neither lands between the read and its
+/// write nor is written over by it.
+pub fn held_now(daemon: &Daemon, project: &str) -> Option<tokio::sync::OwnedMutexGuard<u64>> {
+    let mut held = lock_of(daemon, project).try_lock_owned().ok()?;
+    *held += 1;
+    Some(held)
 }
 
-/// The same lock, only when no round of the project runs: that round stores a read of its own.
-pub fn held_now(daemon: &Daemon, project: &str) -> Option<tokio::sync::OwnedMutexGuard<()>> {
-    lock_of(daemon, project).try_lock_owned().ok()
+/// Where the writes of a project stand when a live read starts without its round lock: none
+/// while a round runs.
+pub struct Before(Option<u64>);
+
+pub fn before_live(daemon: &Daemon, project: &str) -> Before {
+    Before(lock_of(daemon, project).try_lock().ok().map(|count| *count))
+}
+
+/// The round lock after a live read taken without it (a subscription's, which never waits behind
+/// a whole round), waited for `LIVE_WAIT` at most: given only when nothing wrote since `before`,
+/// so that the read is the newest and may be stored. Without it, a round running or just run
+/// stores what the next ones compare with.
+pub async fn held_after(
+    daemon: &Daemon,
+    project: &str,
+    before: Before,
+) -> Option<tokio::sync::OwnedMutexGuard<u64>> {
+    let lock = lock_of(daemon, project).lock_owned();
+    let mut held = tokio::time::timeout(LIVE_WAIT, lock).await.ok()?;
+    if before.0 != Some(*held) {
+        return None;
+    }
+    *held += 1;
+    Some(held)
 }
 
 /// Stores what a live read found of one item (`forge show`, `tickets show`, a subscription's
@@ -1103,7 +1133,8 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
             let asked: Refreshed = serde_json::from_value(params)?;
             let project = projects::load_project(&daemon, &asked.project)?;
             let lock = lock_of(&daemon, &project.name);
-            let held = lock.lock().await;
+            let mut held = lock.lock().await;
+            *held += 1;
             round(&daemon, &project, &sources_of(&project)).await;
             drop(held);
             Ok(json!({"project": project.name,

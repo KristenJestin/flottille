@@ -1053,6 +1053,48 @@ fn a_comment_on_a_ticket_no_round_stored_yet_is_delivered_to_its_subscription() 
 }
 
 #[test]
+fn a_subscription_during_a_slow_round_answers_at_once_and_is_delivered_the_round_s_event() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull());
+    let (_, mcp) = agent(&user);
+    let listings = |user: &User| {
+        user.gh_received()
+            .iter()
+            .filter(|call| {
+                let args = call["args"].to_string();
+                args.contains(r#""pr","list""#) && !args.contains("--head")
+            })
+            .count()
+    };
+    let before = listings(&user);
+    // A round reads the checks ended, its list slowly, as the first round of a big project does.
+    user.gh_script(json!({
+        "pulls": {"acme/api": {"app/login": changed(ended(pull()))}},
+        "logs": {"acme/api": {"456": "test\tRun cargo test\t2026-01-01T00:00:00.0000000Z failed\n"}},
+        "listing_delay_ms": 10_000
+    }));
+    std::thread::scope(|scope| {
+        let round = scope.spawn(|| a_round(&user));
+        eventually("the round's list", || listings(&user) > before);
+
+        let asked = Instant::now();
+        subscribe(&mcp, json!({"events": ["checks"]}));
+        assert!(
+            asked.elapsed() < Duration::from_secs(6),
+            "answered after {:?}",
+            asked.elapsed()
+        );
+        round.join().unwrap();
+    });
+    let delivery = the_delivery(&user);
+    assert!(
+        delivery.contains("checks ended: 1 passed, 1 failed"),
+        "{delivery}"
+    );
+}
+
+#[test]
 fn a_comment_by_a_bot_on_a_ticket_is_not_delivered_to_a_subscription_for_people_only() {
     let user = user();
     fixture(&user);
