@@ -32,9 +32,9 @@ use crate::projects::{self, Failure};
 /// A call of `acli` is cut after this.
 const ACLI_TIME: Duration = Duration::from_secs(30);
 /// What is kept of a description, of one comment, and how many comments (the newest).
-const DESCRIPTION_CHARS: usize = 20_000;
-const COMMENT_CHARS: usize = 4_000;
-const COMMENTS: usize = 30;
+pub(crate) const DESCRIPTION_CHARS: usize = 20_000;
+pub(crate) const COMMENT_CHARS: usize = 4_000;
+pub(crate) const COMMENTS: usize = 30;
 /// What `gh issue view` is asked for.
 const GH_FIELDS: &str = "number,title,state,body,comments,url";
 /// What `acli jira workitem view` is asked for.
@@ -180,7 +180,7 @@ impl Ticket {
     }
 }
 
-fn cut(text: &str, chars: usize) -> String {
+pub(crate) fn cut(text: &str, chars: usize) -> String {
     match text.char_indices().nth(chars) {
         Some((end, _)) => format!("{}… (cut)", &text[..end]),
         None => text.to_owned(),

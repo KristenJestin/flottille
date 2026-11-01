@@ -1211,3 +1211,78 @@ fn items_show_holds_the_description_and_the_discussion_of_a_pull_and_an_issue_re
     assert_eq!(details["discussion"][0]["body"], "Seen it too", "{shown}");
     assert_eq!(details["discussion"][0]["kind"], "comment", "{shown}");
 }
+
+#[test]
+fn items_list_leaves_out_the_texts_and_items_show_keeps_them_cut_with_the_newest_comments() {
+    let user = user();
+    project(&user, "git@github.com:acme/api.git");
+    let mut open = pull(1, "Add the login", "OPEN", OLD);
+    open["body"] = json!("d".repeat(30_000));
+    open["comments"] = (0..40)
+        .map(|at| json!({"author": {"login": "someone"}, "body": format!("{at} {}", "c".repeat(5_000))}))
+        .collect();
+    user.gh_script(json!({"pulls": {"acme/api": {"feature-1": open}}}));
+    declare(&user, github(), Value::Null);
+    refresh(&user);
+
+    let listed = list(&user, json!({}));
+    assert_eq!(listed[0]["details"].get("description"), None, "{listed:?}");
+    assert_eq!(listed[0]["details"].get("discussion"), None, "{listed:?}");
+    let shown = user
+        .call(
+            "items.show",
+            json!({"project": "app", "kind": "pull", "id": "1"}),
+        )
+        .unwrap();
+    let details = &shown["details"];
+    let description = details["description"].as_str().unwrap();
+    assert_eq!(
+        description.chars().count(),
+        20_000 + "… (cut)".chars().count()
+    );
+    let discussion = details["discussion"].as_array().unwrap();
+    assert_eq!(discussion.len(), 30);
+    assert_eq!(
+        details["discussion_older"], 10,
+        "the comments left out are counted"
+    );
+    let first = discussion[0]["body"].as_str().unwrap();
+    assert!(first.starts_with("10 "), "the newest are kept");
+    assert_eq!(first.chars().count(), 4_000 + "… (cut)".chars().count());
+}
+
+#[test]
+fn a_bitbucket_pull_never_read_in_full_keeps_the_description_its_list_says() {
+    let user = user();
+    project(&user, "git@bitbucket.org:acme/api.git");
+    user.bkt_script(json!({
+        "contexts": [{"name": "cloud", "host": "bitbucket.org", "active": true}],
+        "api": {"/repositories/acme/api/pullrequests": {"values": [{
+            "id": 2, "title": "Old work", "state": "MERGED", "description": "Moves the **old** work.",
+            "author": {"display_name": "Alice"},
+            "source": {"branch": {"name": "old"}, "commit": {"hash": "abcdef2"},
+                "repository": {"full_name": "acme/api"}},
+            "destination": {"branch": {"name": "main"}, "repository": {"full_name": "acme/api"}},
+            "links": {"html": {"href": "https://bitbucket.org/acme/api/pull-requests/2"}},
+            "comment_count": 0, "updated_on": "2020-01-01T00:00:00+00:00",
+            "created_on": "2020-01-01T00:00:00+00:00"
+        }]}}
+    }));
+    declare(
+        &user,
+        json!({"kind": "bitbucket-cloud", "repository": "acme/api"}),
+        Value::Null,
+    );
+    refresh(&user);
+
+    let shown = user
+        .call(
+            "items.show",
+            json!({"project": "app", "kind": "pull", "id": "2"}),
+        )
+        .unwrap();
+    assert_eq!(
+        shown["details"]["description"], "Moves the **old** work.",
+        "{shown}"
+    );
+}

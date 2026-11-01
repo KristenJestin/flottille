@@ -67,7 +67,7 @@ impl Said {
     /// As an item's `details.discussion` keeps it: `kind` is `comment` or `review`.
     fn in_discussion(&self, kind: &str) -> Value {
         json!({"kind": kind, "author": self.author, "bot": self.bot, "by_agent": self.by_agent,
-            "state": self.state, "body": self.body})
+            "state": self.state, "body": tickets::cut(&self.body, tickets::COMMENT_CHARS)})
     }
 
     fn to_json(&self) -> Value {
@@ -686,7 +686,10 @@ async fn read_round(
                 Ok(true) if fetched.detailed => {
                     let comments = fetched.comments.iter().map(|c| c.in_discussion("comment"));
                     let reviews = fetched.reviews.iter().map(|r| r.in_discussion("review"));
-                    fetched.item.details["discussion"] = comments.chain(reviews).collect();
+                    let said: Vec<Value> = comments.chain(reviews).collect();
+                    let older = said.len().saturating_sub(tickets::COMMENTS);
+                    fetched.item.details["discussion"] = said[older..].into();
+                    fetched.item.details["discussion_older"] = json!(older);
                 }
                 Ok(true) => {}
                 Ok(false) => {
@@ -699,6 +702,10 @@ async fn read_round(
                     return Err(error);
                 }
             }
+        }
+        if let Some(description) = fetched.item.details["description"].as_str() {
+            let cut = tickets::cut(description, tickets::DESCRIPTION_CHARS);
+            fetched.item.details["description"] = json!(cut);
         }
         if let Some(old) = old
             && !fetched.detailed
@@ -949,7 +956,15 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
                 repository: asked.repository,
                 mine: asked.mine,
             };
-            let items = daemon.read(|store| store.items(&asked.project, &filter))?;
+            let mut items = daemon.read(|store| store.items(&asked.project, &filter))?;
+            // The texts are `items.show`'s: a list of every item stays small.
+            for item in &mut items {
+                if let Some(details) = item.details.as_object_mut() {
+                    for text in ["description", "discussion", "discussion_older"] {
+                        details.remove(text);
+                    }
+                }
+            }
             Ok(json!({"project": asked.project, "items": items,
                 "sources": sources_json(&daemon, &asked.project)?}))
         }

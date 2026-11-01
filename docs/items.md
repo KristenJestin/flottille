@@ -35,11 +35,13 @@ tracker.
   `head_commit`, `mergeable`, `review`, the number of its `comments` and `reviews`, and on
   Bitbucket its `reviewers`; of an issue the number of its `comments`; of a work item its
   `status`, `type`, `priority` and status `category`. A pull request or an issue whose details
-  were read also has its `description` (what its author wrote, `""` when nothing) and its
-  `discussion`: its comments, then its reviews, each `{kind, author, bot, by_agent, state,
-  body}` (`kind` is `comment` or `review`, `state` a review's verdict, `body` the whole text
-  without Flottille's mark, `by_agent` when an agent of Flottille posted it), which the window's
-  detail shows. An item the forge no longer has, or an
+  were read also has its `description` (what its author wrote, `""` when nothing; a Bitbucket
+  pull request has it from its list too) and its `discussion`: its comments, then its reviews,
+  each `{kind, author, bot, by_agent, state, body}` (`kind` is `comment` or `review`, `state` a
+  review's verdict, `body` the text without Flottille's mark, `by_agent` when an agent of
+  Flottille posted it), which the window's detail shows. They are cut as a ticket's are: the
+  description at 20,000 characters, each body at 4,000, and only the newest 30 of the discussion
+  kept, `discussion_older` counting the ones left out. An item the forge no longer has, or an
   issue transferred to another repository, is `closed` with `details.removed: true`.
 - **`mine`**: opened by, or assigned to, the user the forge says it is signed in as: GitHub's
   `gh api user` (`login`), asked once per daemon, for pull requests and issues alike; Bitbucket
@@ -167,9 +169,9 @@ stores it (`docs/events.md`): `item.opened`, `item.changed` (with what changed: 
 ## The protocol
 
 - `items.list {project, kind?, state?, repository?, mine?}`: the stored items, the most recently
-  changed first, each with its checks and `seen_at`, and the project's `sources`, each with its
-  cursor and problem.
-- `items.show {project, kind, id, repository?}`: one stored item.
+  changed first, each with its checks and `seen_at` but without its `description` and
+  `discussion` (`items.show`'s), and the project's `sources`, each with its cursor and problem.
+- `items.show {project, kind, id, repository?}`: one stored item, its texts included.
 - `items.refresh {project}`: a round now; answers the sources as they stand after it.
 
 ## Not yet
