@@ -456,8 +456,8 @@ impl Conversation {
                 }
                 let call = Call {
                     id: text("id"),
+                    args: args_of(&name, &data["raw_input"]),
                     name,
-                    args: shown_args(&data["raw_input"]),
                     state: call_state(data["status"].as_str()),
                     since: event.at,
                     until: None,
@@ -658,7 +658,7 @@ impl Conversation {
         let launch =
             (call.name == "agent_launch" && !data["raw_input"].is_null()).then(|| call.id.clone());
         if !data["raw_input"].is_null() {
-            call.args = shown_args(&data["raw_input"]);
+            call.args = args_of(&call.name, &data["raw_input"]);
             if call.name == "fs_edit" {
                 self.edits
                     .insert(call.id.clone(), data["raw_input"].clone());
@@ -1207,7 +1207,19 @@ const ARGS: usize = 300;
 
 /// A call's arguments on one line, cut for its line.
 fn shown_args(value: &Value) -> String {
-    let line = one_line(value);
+    cut_args(one_line(value))
+}
+
+/// A call's arguments as its line shows them: a page read or a search says its URL or its words,
+/// which are what it asks.
+fn args_of(tool: &str, input: &Value) -> String {
+    match (tool, input["url"].as_str().or(input["query"].as_str())) {
+        ("web", Some(asked)) => cut_args(asked.to_owned()),
+        _ => shown_args(input),
+    }
+}
+
+fn cut_args(line: String) -> String {
     match line.char_indices().nth(ARGS) {
         Some((cut, _)) => format!("{}…", &line[..cut]),
         None => line,
@@ -2114,6 +2126,32 @@ mod tests {
                 "you allowed run (request #4) but nothing was done: cannot run it",
             ]
         );
+    }
+
+    #[test]
+    fn a_web_step_shows_the_url_it_reads_or_the_words_it_searches() {
+        let mut c = root();
+        for (seq, id, input) in [
+            (
+                1,
+                "r",
+                json!({"action": "read", "url": "https://docs.example/select"}),
+            ),
+            (3, "s", json!({"action": "search", "query": "tokio select"})),
+        ] {
+            c.apply(&event(
+                seq,
+                "agent.tool_call",
+                json!({"id": id, "title": "mcp__flottille__web", "status": "in_progress",
+                    "raw_input": input}),
+            ));
+        }
+        let Block::Steps { calls } = &c.blocks()[0] else {
+            panic!("{:?}", c.blocks());
+        };
+        assert_eq!(calls[0].name, "web");
+        assert_eq!(calls[0].args, "https://docs.example/select");
+        assert_eq!(calls[1].args, "tokio select");
     }
 
     #[test]

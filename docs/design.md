@@ -148,6 +148,10 @@ tools off, no environment in any thread, the agent's instructions in place of Co
 Flottille's server alone; Codex has no allowlist, so the bridge also fails a turn in which a tool
 of Codex's own starts.
 
+Nor does it reach the web but through Flottille: no fetch or search tool of its provider's, only
+`web`, which the daemon performs under the gate, never to this machine nor a private network,
+and which judges a URL the agent built (`tools.md`, "The web").
+
 This is what makes the rest hold: with no shell and no native sub-agent tool, an agent **cannot**
 start another agent (no `Task`, no `claude --bg`, no background shell) except through
 `agent_launch`, and it cannot do anything the gate did not see. Nor can it drive the daemon from
@@ -172,6 +176,10 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
   creates and prepares them, and removes one it does not work in, always held for the user, its
   card saying what would be lost;
 - skills: `skill_read`, one of the project's skills, texts read when relevant (`skills.md`);
+- the web (every agent): `web`, which reads a page (its main content as Markdown, a PDF's text)
+  or searches through DuckDuckGo, never this machine nor a private network; a URL the agent was
+  shown passes, one it built is judged, since a GET sends out what the URL holds (`tools.md`,
+  "The web");
 - tickets (every agent of a project that declares a tracker, in `main` as in a workspace):
   `tickets`, which lists, searches, reads and writes the tracker's tickets, GitHub issues or Jira
   work items, each write a call to judge (`tickets.md`);
@@ -217,7 +225,7 @@ Flottille's own tools:
 The tool list of a session is fixed for its whole life (prompt cache, `reference/hemera.md` §7)
 and depends on what the agent can do, known when it starts: a root gets `ask_user`, `session_send`, `session_read`, `skills`,
 `commands`, `setup` and `project`, a child `ask_parent`; a child, whatever its role, gets no `agent_*` tools
-and no `approval_answer`. A root lead has 23 tools, a child 12; one more each when the
+and no `approval_answer`. A root lead has 25 tools, a child 14; one more each when the
 project's repositories declare a forge (`forge`), one more when it declares a tracker
 (`tickets`), whatever the place (`reference/mcp.md` §4).
 
@@ -756,7 +764,10 @@ eight waits, whatever the length). At rest nothing moves and nothing is redrawn.
 the window without its animations is incomplete.
 
 Colours: Flottille's own palette, or, on an Omarchy desktop, the current Omarchy theme's colours
-followed live. Shapes, type and motion do not change with the theme. A state is drawn the same
+followed live. Only the keys of a theme file that name a colour are read: another string (`mode = "light"`, a name) is ignored, a colour key with a value that is not a colour refuses the theme. A light theme
+gets a light palette: the body and the bars are shaded toward the foreground (below the background in lightness), and
+the cards toward it too, never to white.
+Shapes, type and motion do not change with the theme. A state is drawn the same
 everywhere, by shape as well as colour.
 
 Rules from `reference/gpui.md` apply from day one: a view per moving part, the reply field in its

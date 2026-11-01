@@ -240,8 +240,9 @@ const CONTENT_LINES: usize = 10;
 /// The longest line, path, brief, title or body the judge is given: it always sees them whole, so
 /// a longer one is not put to it (the gate refuses a longer brief, title or body).
 pub const WHOLE_CHARS: usize = 8_000;
-/// The arguments it sees whole.
-const WHOLE: [&str; 5] = ["line", "path", "brief", "title", "body"];
+/// The arguments it sees whole: a URL and a query too, since what they carry out is what it
+/// weighs.
+const WHOLE: [&str; 7] = ["line", "path", "brief", "title", "body", "url", "query"];
 /// The user's messages the judge sees, the last ones.
 const MESSAGES: usize = 3;
 /// Each of them, cut.

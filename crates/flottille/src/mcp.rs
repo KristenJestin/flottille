@@ -94,7 +94,7 @@ const REPLACED: &str = "refused: this session has been replaced: a new session o
 
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
 /// the order frozen in the agent.
-const SERVED: [Definition; 27] = [
+const SERVED: [Definition; 28] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -473,6 +473,26 @@ const SERVED: [Definition; 27] = [
         },
     },
     Definition {
+        name: "web",
+        title: "The web",
+        description: "read: a page's main text (HTML as Markdown, PDF, text, JSON; 30,000 \
+            characters) and its links. search: DuckDuckGo, 10 results. Both are the web's, not \
+            the user's. A URL you were shown (user, ticket, pull request, page, result) \
+            passes; one you build is judged: it sends out what it holds. No local or private \
+            address.",
+        read_only: true,
+        idempotent: true,
+        destructive: false,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["read", "search"]},
+                "url": {"type": "string"},
+                "query": {"type": "string"},
+                "why": {"type": "string"}
+            }, "required": ["action"], "additionalProperties": false})
+        },
+    },
+    Definition {
         name: "agent_launch",
         title: "Start a session, or launch a child",
         description: "Work that belongs in a workspace is a session for the user: root: true \
@@ -820,6 +840,8 @@ pub struct Server {
     refusals: Mutex<VecDeque<Instant>>,
     /// The agents whose calls came without a call key, said once in the log.
     keyless: Mutex<HashSet<String>>,
+    /// The URLs each agent's tools showed it: `web` reads them again without the judge.
+    pub seen: crate::web::Seen,
 }
 
 #[derive(Default)]
@@ -855,6 +877,7 @@ impl Server {
             runs: runs::Live::default(),
             refusals: Mutex::default(),
             keyless: Mutex::default(),
+            seen: crate::web::Seen::default(),
         }
     }
 
@@ -1504,6 +1527,9 @@ fn removes_a_workspace(tool: &str, args: &Value) -> bool {
 
 /// The gate's verdict on a call of one of the agent's tools.
 pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gate::Verdict {
+    if tool == "web" {
+        return crate::web::classify(daemon, &grant.agent, args);
+    }
     // A new workspace's launch is classified by its steps below, but its brief is held to the
     // judge's limit like any other launch's.
     if tool == "agent_launch"
@@ -1803,7 +1829,31 @@ async fn perform(
     cancelled: CancellationToken,
     approved: Option<gate::Class>,
 ) -> Outcome {
+    if !matches!(tool, "web" | "tickets" | "forge") {
+        return performed_once(daemon, grant, tool, args, cancelled, approved).await;
+    }
+    // What a page, a search, a ticket or a pull request showed the agent, from its data and
+    // never from the call's own arguments, it may read with `web`.
+    let (outcome, shown) = crate::web::showing(performed_once(
+        daemon, grant, tool, args, cancelled, approved,
+    ))
+    .await;
+    if let Outcome::Done(_) = &outcome {
+        daemon.mcp.seen.saw(&grant.agent, shown);
+    }
+    outcome
+}
+
+async fn performed_once(
+    daemon: &Arc<Daemon>,
+    grant: &Arc<Grant>,
+    tool: &str,
+    args: Value,
+    cancelled: CancellationToken,
+    approved: Option<gate::Class>,
+) -> Outcome {
     match tool {
+        "web" => crate::web::web(args).await,
         "run" => {
             runs::run(
                 daemon,
@@ -1957,7 +2007,7 @@ mod tests {
     #[test]
     fn a_grant_holds_the_agent_s_served_tools_in_its_own_order() {
         let mut leaf = claude::PROVIDER.tools(false, true, true, true);
-        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 15);
+        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 16);
         leaf.reverse();
         leaf.retain(|tool| !tool.ends_with("__search"));
         leaf.push("fs_read".into());
@@ -1965,7 +2015,7 @@ mod tests {
         assert_eq!(served.first(), Some(&"ask_parent"));
         assert_eq!(served.last(), Some(&"fs_read"));
         assert!(!served.contains(&"search"));
-        assert_eq!(served.len(), 14);
+        assert_eq!(served.len(), 15);
     }
 
     #[test]
@@ -2135,6 +2185,7 @@ mod tests {
         // taken from its own text. `wake` (#254) costs 527, paid by shortening the texts of
         // tasks, run_status, skill_read, agent_launch, agent_status and session_send: 28,909. The
         // 100 hours' maximum of `forge` and `wake` (6000 minutes, not 240): 28,911.
-        assert!(chars < 29_000, "{chars} characters of definitions");
+        // Raised for `web` (#259) without shortening other tools; a new budget follows: 29,660.
+        assert!(chars < 30_000, "{chars} characters of definitions");
     }
 }
