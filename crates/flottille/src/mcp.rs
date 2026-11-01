@@ -1523,8 +1523,7 @@ fn removes_a_workspace(tool: &str, args: &Value) -> bool {
 /// The gate's verdict on a call of one of the agent's tools.
 pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gate::Verdict {
     if tool == "web" {
-        let seen = crate::web::seen_by(daemon, &grant.agent);
-        return crate::web::verdict(args, seen, judge::mode(daemon, &grant.agent));
+        return crate::web::classify(daemon, &grant.agent, args);
     }
     // A new workspace's launch is classified by its steps below, but its brief is held to the
     // judge's limit like any other launch's.
@@ -1825,12 +1824,17 @@ async fn perform(
     cancelled: CancellationToken,
     approved: Option<gate::Class>,
 ) -> Outcome {
-    let outcome = performed_once(daemon, grant, tool, args, cancelled, approved).await;
-    // What a page, a search, a ticket or a pull request showed the agent, it may read with `web`.
-    if let Outcome::Done(text) = &outcome
-        && matches!(tool, "web" | "tickets" | "forge")
-    {
-        daemon.mcp.seen.saw(&grant.agent, text);
+    if !matches!(tool, "web" | "tickets" | "forge") {
+        return performed_once(daemon, grant, tool, args, cancelled, approved).await;
+    }
+    // What a page, a search, a ticket or a pull request showed the agent, from its data and
+    // never from the call's own arguments, it may read with `web`.
+    let (outcome, shown) = crate::web::showing(performed_once(
+        daemon, grant, tool, args, cancelled, approved,
+    ))
+    .await;
+    if let Outcome::Done(_) = &outcome {
+        daemon.mcp.seen.saw(&grant.agent, shown);
     }
     outcome
 }

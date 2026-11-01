@@ -31,8 +31,8 @@ use crate::mcp::{Outcome, arguments};
 /// The text of a page the agent is given, at most: a result stays under 40,000 characters
 /// (`docs/reference/mcp.md` §4 rule 5), with room for its header and links.
 pub const TEXT_CHARS: usize = 30_000;
-/// What is downloaded of a page, at most.
-pub const DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
+/// What is downloaded of a page, at most: what its reader is given.
+pub const DOWNLOAD_BYTES: usize = 5 * 1024 * 1024;
 /// How long a read or a search may take, every redirect included.
 pub const TOTAL: Duration = Duration::from_secs(30);
 /// The redirects followed, at most.
@@ -47,6 +47,17 @@ const LONGEST: usize = crate::judge::WHOLE_CHARS;
 const SEEN_KEPT: usize = 10_000;
 /// The user's messages looked through for the URLs they hold.
 const MESSAGES_READ: usize = 200;
+/// The reads of one host an agent makes through links of pages, tickets and pull requests
+/// before each further one is judged: links chosen one at a time can spell out data.
+pub const LINK_READS: usize = 10;
+/// A page's reader, a process of its own: its memory, its CPU seconds, its time on the clock,
+/// and what it may answer.
+const READER_MEMORY: u64 = 512 * 1024 * 1024;
+const READER_CPU_SECONDS: u64 = 20;
+const READER_TIME: Duration = Duration::from_secs(25);
+const READER_ANSWER_BYTES: u64 = 4 * 1024 * 1024;
+/// The hidden subcommand the reader runs as.
+pub const READER: &str = "read-page";
 
 const USER_AGENT: &str = concat!(
     "Flottille/",
@@ -67,6 +78,10 @@ pub const BUILT: &str = "the agent built this URL itself: it is in no message of
     ticket, pull request, page or search result of this session, and a GET sends out whatever \
     the URL holds; look for data carried out: a long query string, encoded blobs, pieces of \
     code, file contents, paths, names from the workspace";
+/// Why the gate holds a link read once its host was read often through links.
+pub const OFTEN: &str = "this URL is a link of a page, a ticket or a pull request, and its host \
+    was already read 10 times through such links in this session: links chosen one at a time \
+    can spell out data; look at the sequence of what was read";
 /// Why the gate holds a search in Ask.
 pub const SEARCHED: &str = "it sends this query to the search provider, DuckDuckGo";
 
@@ -130,10 +145,28 @@ fn asked(args: &Value) -> Result<Asked, String> {
     }
 }
 
+/// How the agent came by a URL: shown by the user or a search, which passes; a link of a page,
+/// a ticket or a pull request, which passes until its host was read often that way; or not at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    Free,
+    Link,
+}
+
+/// What the gate knows of a URL the agent asks to read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pass {
+    Free,
+    /// A link, its host read so many times through links already.
+    Link(usize),
+    Unseen,
+}
+
 /// The gate's verdict on a call of `web`, in every mode: an address that can never be read is
-/// refused; a URL the agent has seen passes and one it built is to judge; a search is to judge
-/// only in Ask (`docs/tools.md`, "The web").
-pub fn verdict(args: &Value, seen: impl Fn(&str) -> bool, mode: GateMode) -> gate::Verdict {
+/// refused; a URL the agent was shown passes, a link only until its host was read
+/// [`LINK_READS`] times through links, and one it built is to judge; a search is to judge only
+/// in Ask (`docs/tools.md`, "The web").
+pub fn verdict(args: &Value, pass: impl Fn(&Url) -> Pass, mode: GateMode) -> gate::Verdict {
     let held = |why: &str| {
         gate::Verdict::Ask(gate::Ask {
             reasons: vec![why.to_owned()],
@@ -143,11 +176,39 @@ pub fn verdict(args: &Value, seen: impl Fn(&str) -> bool, mode: GateMode) -> gat
     };
     match asked(args) {
         Err(why) => gate::Verdict::Deny(why),
-        Ok(Asked::Read(url)) if seen(url.as_str()) => gate::Verdict::Allow,
-        Ok(Asked::Read(_)) => held(BUILT),
+        Ok(Asked::Read(url)) => match pass(&url) {
+            Pass::Free => gate::Verdict::Allow,
+            Pass::Link(reads) if reads < LINK_READS => gate::Verdict::Allow,
+            Pass::Link(_) => held(OFTEN),
+            Pass::Unseen => held(BUILT),
+        },
         Ok(Asked::Search(_)) if mode == GateMode::Ask => held(SEARCHED),
         Ok(Asked::Search(_)) => gate::Verdict::Allow,
     }
+}
+
+/// The gate's verdict on a call of the agent's, a link it lets through counted against its host.
+pub fn classify(daemon: &crate::daemon::Daemon, agent: &str, args: &Value) -> gate::Verdict {
+    let root = crate::tree::root_of(daemon, agent);
+    let said: HashSet<String> = daemon
+        .read(|store| store.last_deliveries_of(&root, "user", MESSAGES_READ))
+        .unwrap_or_default()
+        .iter()
+        .flat_map(|delivery| urls_in(&delivery.body))
+        .collect();
+    let seen = &daemon.mcp.seen;
+    let pass = |url: &Url| match said.contains(url.as_str()) {
+        true => Pass::Free,
+        false => seen.pass(agent, url),
+    };
+    let verdict = verdict(args, pass, crate::judge::mode(daemon, agent));
+    if verdict == gate::Verdict::Allow
+        && let Ok(Asked::Read(url)) = asked(args)
+        && let Pass::Link(_) = pass(&url)
+    {
+        seen.read_through_link(agent, &url);
+    }
+    verdict
 }
 
 /// The URL as web reads it, or the refusal saying why it never can: `http` and `https` only, no
@@ -159,6 +220,10 @@ pub fn checked(text: &str) -> Result<Url, String> {
 
 /// The addresses a test opened, from the daemon's environment: none, outside a test.
 fn opened_by_test() -> Vec<SocketAddr> {
+    // A release build never opens an address of this machine, whatever its environment says.
+    if !cfg!(debug_assertions) {
+        return Vec::new();
+    }
     std::env::var(TEST_OPEN)
         .unwrap_or_default()
         .split(',')
@@ -269,6 +334,7 @@ fn refused_v6(ip: Ipv6Addr) -> Option<&'static str> {
         // Teredo and the IETF's assignments, the documentation range.
         0x2001 if segments[1] < 0x0200 => "a reserved address",
         0x2001 if segments[1] == 0x0db8 => "a documentation address",
+        0x3fff if segments[1] & 0xf000 == 0 => "a documentation address",
         // Only global unicast is public.
         _ if first & 0xe000 != 0x2000 => "a reserved address",
         _ => return None,
@@ -281,6 +347,8 @@ pub struct Net {
     open: Vec<SocketAddr>,
     search: String,
     hosts: Vec<(String, IpAddr)>,
+    /// The program a page's reader runs: Flottille's own.
+    reader: std::path::PathBuf,
 }
 
 impl Net {
@@ -288,55 +356,98 @@ impl Net {
     /// one.
     pub fn of_env() -> Net {
         let open = opened_by_test();
-        let search = std::env::var(TEST_SEARCH).unwrap_or_else(|_| DUCKDUCKGO.into());
+        let search = std::env::var(TEST_SEARCH)
+            .ok()
+            .filter(|_| cfg!(debug_assertions))
+            .unwrap_or_else(|| DUCKDUCKGO.into());
         Net {
             open,
             search,
             hosts: Vec::new(),
+            // The daemon's own program, even when an update replaced its file since it started.
+            reader: "/proc/self/exe".into(),
         }
     }
 }
 
-/// The URLs each agent was shown, by the results of its tools: a URL it reads again passes.
+/// The URLs each agent was shown by data it did not write, and how often it read each host
+/// through links.
 #[derive(Default)]
-pub struct Seen(Mutex<HashMap<String, HashSet<String>>>);
+pub struct Seen(Mutex<HashMap<String, Shown>>);
+
+#[derive(Default)]
+struct Shown {
+    urls: HashMap<String, Source>,
+    link_reads: HashMap<String, usize>,
+}
 
 impl Seen {
-    /// Remembers the URLs a result showed the agent.
-    pub fn saw(&self, agent: &str, text: &str) {
+    /// Remembers URLs shown to the agent; one the user or a search gave stays free.
+    pub fn saw(&self, agent: &str, urls: Vec<(String, Source)>) {
         let mut seen = self.0.lock().unwrap();
-        let urls = seen.entry(agent.to_owned()).or_default();
-        for url in urls_in(text) {
-            if urls.len() >= SEEN_KEPT {
-                break;
+        let shown = seen.entry(agent.to_owned()).or_default();
+        for (url, source) in urls {
+            if shown.urls.len() >= SEEN_KEPT && !shown.urls.contains_key(&url) {
+                continue;
             }
-            urls.insert(url);
+            let kept = shown.urls.entry(url).or_insert(source);
+            if source == Source::Free {
+                *kept = Source::Free;
+            }
         }
     }
 
-    pub fn has(&self, agent: &str, url: &str) -> bool {
-        self.0
-            .lock()
-            .unwrap()
-            .get(agent)
-            .is_some_and(|urls| urls.contains(url))
+    pub fn pass(&self, agent: &str, url: &Url) -> Pass {
+        let seen = self.0.lock().unwrap();
+        let Some(shown) = seen.get(agent) else {
+            return Pass::Unseen;
+        };
+        match shown.urls.get(url.as_str()) {
+            Some(Source::Free) => Pass::Free,
+            Some(Source::Link) => Pass::Link(
+                shown
+                    .link_reads
+                    .get(url.host_str().unwrap_or_default())
+                    .copied()
+                    .unwrap_or(0),
+            ),
+            None => Pass::Unseen,
+        }
+    }
+
+    fn read_through_link(&self, agent: &str, url: &Url) {
+        let mut seen = self.0.lock().unwrap();
+        let shown = seen.entry(agent.to_owned()).or_default();
+        *shown
+            .link_reads
+            .entry(url.host_str().unwrap_or_default().to_owned())
+            .or_default() += 1;
     }
 }
 
-/// Whether the agent was shown the URL: by its tools' results, or in the user's messages to its
-/// tree's root.
-pub fn seen_by<'a>(
-    daemon: &'a crate::daemon::Daemon,
-    agent: &'a str,
-) -> impl Fn(&str) -> bool + 'a {
-    let root = crate::tree::root_of(daemon, agent);
-    let said: HashSet<String> = daemon
-        .read(|store| store.last_deliveries_of(&root, "user", MESSAGES_READ))
-        .unwrap_or_default()
-        .iter()
-        .flat_map(|delivery| urls_in(&delivery.body))
-        .collect();
-    move |url| said.contains(url) || daemon.mcp.seen.has(agent, url)
+tokio::task_local! {
+    /// The URLs a call's data showed the agent, gathered while it is performed.
+    static SHOWING: std::cell::RefCell<Vec<(String, Source)>>;
+}
+
+/// Records the URLs of a text the agent did not write (a page's text, a search result, a
+/// ticket's description): only within [`showing`], and never from the call's own arguments.
+pub fn shown(text: &str, source: Source) {
+    let _ = SHOWING.try_with(|showing| {
+        showing
+            .borrow_mut()
+            .extend(urls_in(text).into_iter().map(|url| (url, source)))
+    });
+}
+
+/// Performs `call`, with the URLs its data showed.
+pub async fn showing<T>(call: impl std::future::Future<Output = T>) -> (T, Vec<(String, Source)>) {
+    SHOWING
+        .scope(std::cell::RefCell::new(Vec::new()), async {
+            let done = call.await;
+            (done, SHOWING.with(|showing| showing.take()))
+        })
+        .await
 }
 
 /// The `http` and `https` URLs a text holds, as web compares them: parsed, without fragment.
@@ -416,14 +527,51 @@ async fn read(net: &Net, url: Url) -> Outcome {
         Ok(Err(missed)) => return missed.into(),
         Ok(Ok(page)) => page,
     };
-    // Turning a page into text is work on the CPU, off the daemon's workers.
-    tokio::task::spawn_blocking(move || rendered(page))
-        .await
-        .unwrap_or_else(|error| Outcome::Failed(format!("the page could not be read: {error}")))
+    let read = match kind_of(&page) {
+        Ok(Body::Text) => Ok(Extracted {
+            title: None,
+            text: String::from_utf8_lossy(&page.bytes).into_owned(),
+            links: Vec::new(),
+        }),
+        Ok(Body::Pdf) if page.cut => Err(format!(
+            "the PDF is over the {} MiB web downloads: it cannot be read cut",
+            DOWNLOAD_BYTES / 1024 / 1024
+        )),
+        Ok(kind) => in_reader(net, kind, &page).await,
+        Err(why) => Err(why),
+    };
+    match read {
+        Ok(read) => {
+            // What the page holds is the web's: its links pass as links, never free.
+            shown(&read.text, Source::Link);
+            for link in &read.links {
+                shown(link, Source::Link);
+            }
+            Outcome::Done(answer(&page, read))
+        }
+        Err(why) => Outcome::Failed(format!("the page could not be read: {why}")),
+    }
 }
 
-/// The page as the agent reads it: its main content, its title and its links.
-fn rendered(page: Page) -> Outcome {
+/// What a page is, as web reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Body {
+    Html,
+    Pdf,
+    Text,
+}
+
+impl Body {
+    fn word(self) -> &'static str {
+        match self {
+            Body::Html => "html",
+            Body::Pdf => "pdf",
+            Body::Text => "text",
+        }
+    }
+}
+
+fn kind_of(page: &Page) -> Result<Body, String> {
     let mime = page
         .kind
         .split(';')
@@ -431,63 +579,57 @@ fn rendered(page: Page) -> Outcome {
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase();
-    let pdf = mime == "application/pdf" || page.bytes.starts_with(b"%PDF-");
-    let html = !pdf
-        && (mime == "text/html"
-            || mime == "application/xhtml+xml"
-            || (mime.is_empty() && looks_like_html(&page.bytes)));
-    let text_like = mime.starts_with("text/")
+    if mime == "application/pdf" || page.bytes.starts_with(b"%PDF-") {
+        return Ok(Body::Pdf);
+    }
+    if mime == "text/html"
+        || mime == "application/xhtml+xml"
+        || (mime.is_empty() && looks_like_html(&page.bytes))
+    {
+        return Ok(Body::Html);
+    }
+    if mime.starts_with("text/")
         || mime.ends_with("/json")
         || mime.ends_with("+json")
         || mime.ends_with("/xml")
         || mime.ends_with("+xml")
-        || mime.is_empty();
-    let (title, text, links) = if pdf {
-        if page.cut {
-            return Outcome::Failed(format!(
-                "the PDF is over the {} MiB web downloads: it cannot be read cut",
-                DOWNLOAD_BYTES / 1024 / 1024
-            ));
-        }
-        match pdf_text(page.bytes) {
-            Ok(text) => (None, text, Vec::new()),
-            Err(why) => return Outcome::Failed(format!("the PDF could not be read: {why}")),
-        }
-    } else if html {
-        let source = String::from_utf8_lossy(&page.bytes);
-        let text = match readex::extract_to_markdown(
-            &source,
-            Some(page.url.as_str()),
-            &readex::Options::default(),
-        ) {
-            Ok(text) if !text.trim().is_empty() => text,
-            _ => return Outcome::Failed("the page holds no text web could find".into()),
-        };
-        (title_of(&source), text, links_of(&source, &page.url))
-    } else if text_like {
-        let text = String::from_utf8_lossy(&page.bytes).into_owned();
-        (None, text, Vec::new())
-    } else {
-        return Outcome::Failed(format!(
-            "the page is {mime}, which web does not read: it reads HTML, PDF, text and JSON"
-        ));
-    };
-    let mut answer = format!("{UNTRUSTED}\nURL: {}\n", page.url);
-    if let Some(title) = title {
-        answer.push_str(&format!("Title: {}\n", one_line(&title)));
+        || mime.is_empty()
+    {
+        return Ok(Body::Text);
     }
-    let count = text.chars().count();
-    answer.push_str(&format!(
-        "{OPEN}\n{}\n",
-        contained(&cut_at(&text, TEXT_CHARS))
-    ));
-    if !links.is_empty() {
-        answer.push_str("\nLinks:\n");
-        for link in links {
-            answer.push_str(&format!("- {link}\n"));
+    Err(format!(
+        "it is {mime}, which web does not read: it reads HTML, PDF, text and JSON"
+    ))
+}
+
+/// What a page's reader gives: its title, its text and its links.
+#[derive(Debug, Deserialize, serde::Serialize)]
+pub struct Extracted {
+    title: Option<String>,
+    text: String,
+    links: Vec<String>,
+}
+
+/// The page as the agent reads it: everything of the page, its title included, inside the
+/// block of the web's text.
+fn answer(page: &Page, read: Extracted) -> String {
+    let mut inside = String::new();
+    if let Some(title) = &read.title {
+        inside.push_str(&format!("Title: {}\n\n", one_line(title)));
+    }
+    let count = read.text.chars().count();
+    inside.push_str(&cut_at(&read.text, TEXT_CHARS));
+    if !read.links.is_empty() {
+        inside.push_str("\n\nLinks:\n");
+        for link in &read.links {
+            inside.push_str(&format!("- {link}\n"));
         }
     }
-    answer.push_str(CLOSE);
+    let mut answer = format!(
+        "{UNTRUSTED}\nURL: {}\n{OPEN}\n{}\n{CLOSE}",
+        page.url,
+        contained(inside.trim_end())
+    );
     if count > TEXT_CHARS {
         answer.push_str(&format!(
             "\n(cut: the text has {count} characters, the first {TEXT_CHARS} are shown)"
@@ -498,7 +640,148 @@ fn rendered(page: Page) -> Outcome {
             DOWNLOAD_BYTES / 1024 / 1024
         ));
     }
-    Outcome::Done(answer)
+    answer
+}
+
+/// The page read by a process of its own, Flottille's program run as its reader: an HTML or a
+/// PDF that would take its reader's memory, its stack or its time kills that process, never the
+/// daemon.
+async fn in_reader(net: &Net, kind: Body, page: &Page) -> Result<Extracted, String> {
+    use std::os::unix::process::CommandExt as _;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut command = std::process::Command::new(&net.reader);
+    command
+        .args([READER, kind.word(), page.url.as_str()])
+        .env_clear()
+        .current_dir("/")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    // SAFETY: setrlimit is async-signal-safe, and nothing else runs between fork and exec.
+    unsafe {
+        command.pre_exec(|| {
+            let limit = |value: u64| libc::rlimit {
+                rlim_cur: value,
+                rlim_max: value,
+            };
+            for (resource, value) in [
+                (libc::RLIMIT_AS, READER_MEMORY),
+                (libc::RLIMIT_CPU, READER_CPU_SECONDS),
+                // A reader that dies leaves no core behind.
+                (libc::RLIMIT_CORE, 0),
+            ] {
+                if libc::setrlimit(resource, &limit(value)) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+    let mut command = tokio::process::Command::from(command);
+    command.kill_on_drop(true);
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("its reader could not start: {e}"))?;
+    let mut input = child.stdin.take().expect("piped");
+    let bytes = page.bytes.clone();
+    tokio::spawn(async move {
+        let _ = input.write_all(&bytes).await;
+    });
+    let mut output = child.stdout.take().expect("piped");
+    let done = tokio::time::timeout(READER_TIME, async {
+        let mut said = Vec::new();
+        let read = (&mut output)
+            .take(READER_ANSWER_BYTES)
+            .read_to_end(&mut said)
+            .await;
+        (read.map(|_| said), child.wait().await)
+    })
+    .await;
+    let (said, status) = match done {
+        Err(_) => {
+            let _ = child.start_kill();
+            return Err(format!(
+                "its reader took more than {} seconds and was stopped",
+                READER_TIME.as_secs()
+            ));
+        }
+        Ok((said, status)) => (said, status),
+    };
+    let status = status.map_err(|e| format!("its reader was lost: {e}"))?;
+    let said = said.map_err(|e| format!("its reader's answer was lost: {e}"))?;
+    if !status.success() {
+        use std::os::unix::process::ExitStatusExt as _;
+        return Err(match status.signal() {
+            Some(_) => "its reader was stopped: the page took more memory, stack or time than a \
+                        page may"
+                .into(),
+            None => "its reader failed on it".into(),
+        });
+    }
+    let answer: Value = serde_json::from_slice(&said)
+        .map_err(|e| format!("its reader's answer could not be read: {e}"))?;
+    match answer.get("error").and_then(Value::as_str) {
+        Some(why) => Err(why.to_owned()),
+        None => serde_json::from_value(answer["read"].clone())
+            .map_err(|e| format!("its reader's answer could not be read: {e}")),
+    }
+}
+
+/// The reader, run as `flottille read-page <html|pdf> <url>`: the page on its standard input,
+/// what it holds on its standard output, as JSON.
+pub fn read_page(kind: &str, url: &str) -> std::process::ExitCode {
+    use std::io::{Read as _, Write as _};
+    let mut bytes = Vec::new();
+    let read = std::io::stdin()
+        .take(DOWNLOAD_BYTES as u64)
+        .read_to_end(&mut bytes);
+    let answer = match read {
+        Err(error) => {
+            serde_json::json!({"error": format!("the page did not reach its reader: {error}")})
+        }
+        Ok(_) => match extracted(kind, bytes, url) {
+            Ok(read) => serde_json::json!({ "read": read }),
+            Err(why) => serde_json::json!({ "error": why }),
+        },
+    };
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{answer}");
+    std::process::ExitCode::SUCCESS
+}
+
+/// What an HTML page or a PDF holds: done in the reader alone.
+fn extracted(kind: &str, bytes: Vec<u8>, url: &str) -> Result<Extracted, String> {
+    match kind {
+        "pdf" => Ok(Extracted {
+            title: None,
+            text: pdf_text(bytes)?,
+            links: Vec::new(),
+        }),
+        "html" => {
+            let base = Url::parse(url).map_err(|e| e.to_string())?;
+            let source = String::from_utf8_lossy(&bytes);
+            let config = dom_smoothie::Config {
+                text_mode: dom_smoothie::TextMode::Markdown,
+                ..Default::default()
+            };
+            let article = dom_smoothie::Readability::new(source.as_ref(), Some(url), Some(config))
+                .and_then(|mut reader| reader.parse())
+                .map_err(|_| "it holds no text web could find".to_owned())?;
+            let text = article.text_content.trim().to_owned();
+            if text.is_empty() {
+                return Err("it holds no text web could find".into());
+            }
+            let title = Some(article.title)
+                .filter(|title| !title.trim().is_empty())
+                .or_else(|| title_of(&source));
+            Ok(Extracted {
+                title,
+                text,
+                links: links_of(&source, &base),
+            })
+        }
+        other => Err(format!("no reader for {other}")),
+    }
 }
 
 fn looks_like_html(bytes: &[u8]) -> bool {
@@ -830,6 +1113,8 @@ async fn search(net: &Net, query: &str) -> Outcome {
                 provider.name()
             );
             for (n, hit) in hits.iter().enumerate() {
+                // A result's own URL is the search's, never the query's echo.
+                shown(&hit.url, Source::Free);
                 answer.push_str(&format!("{}. {}\n   {}\n", n + 1, hit.title, hit.url));
                 if !hit.excerpt.is_empty() {
                     answer.push_str(&format!("   {}\n", hit.excerpt));
@@ -870,15 +1155,26 @@ async fn fetch_any(net: &Net, mut url: Url) -> Result<(StatusCode, Page), Missed
         let Some(location) = location.filter(|_| status.is_redirection()) else {
             return Ok((status, page));
         };
-        let next = url
-            .join(&location)
-            .map_err(|e| Missed::Failed(format!("{url} redirects to {location:?}, no URL: {e}")))?;
-        url = checked_in(next.as_str(), &net.open)
-            .map_err(|why| Missed::Refused(format!("{why} (a redirect of {url} leads there)")))?;
+        url = redirected(&url, &location, &net.open)?;
     }
     Err(Missed::Failed(format!(
         "more than {REDIRECTS} redirects: web stopped following them"
     )))
+}
+
+/// Where a redirect of `url` leads, checked as a URL the agent asked: never from https to http.
+fn redirected(url: &Url, location: &str, open: &[SocketAddr]) -> Result<Url, Missed> {
+    let next = url
+        .join(location)
+        .map_err(|e| Missed::Failed(format!("{url} redirects to {location:?}, no URL: {e}")))?;
+    if url.scheme() == "https" && next.scheme() == "http" {
+        return Err(Missed::Refused(format!(
+            "refused: {url} redirects to {next}, from https to http: web never follows a \
+             redirect that drops the encryption"
+        )));
+    }
+    checked_in(next.as_str(), open)
+        .map_err(|why| Missed::Refused(format!("{why} (a redirect of {url} leads there)")))
 }
 
 /// The addresses of the URL's host, each checked: one that is not public refuses the whole host,
@@ -1101,6 +1397,8 @@ mod tests {
             "2001:db8::1",
             "2001::1",
             "100::1",
+            "3fff::1",
+            "3fff:0fff::1",
         ] {
             let parsed: IpAddr = ip.parse().unwrap();
             assert!(refused(parsed).is_some(), "{ip} passed");
@@ -1111,6 +1409,7 @@ mod tests {
             "172.32.0.1",
             "100.128.0.1",
             "2606:4700::1111",
+            "3fff:1000::1",
             "::ffff:1.1.1.1",
             "64:ff9b::101:101",
             "2002:101:101::1",
@@ -1169,7 +1468,12 @@ mod tests {
 
     #[test]
     fn a_seen_url_passes_a_built_one_is_judged_and_a_search_only_in_ask() {
-        let seen = |url: &str| url == "https://docs.rs/tokio";
+        let seen = |url: &Url| match url.as_str() {
+            "https://docs.rs/tokio" => Pass::Free,
+            "https://docs.rs/tokio/a" => Pass::Link(LINK_READS - 1),
+            "https://docs.rs/tokio/b" => Pass::Link(LINK_READS),
+            _ => Pass::Unseen,
+        };
         let read = |url: &str| json!({"action": "read", "url": url});
         assert_eq!(
             verdict(&read("https://docs.rs/tokio#top"), seen, GateMode::Auto),
@@ -1185,9 +1489,18 @@ mod tests {
             }
             // A local address is refused whatever the mode, seen or not.
             assert!(matches!(
-                verdict(&read("http://127.0.0.1/"), |_| true, mode),
+                verdict(&read("http://127.0.0.1/"), |_| Pass::Free, mode),
                 gate::Verdict::Deny(_)
             ));
+        }
+        // A link passes until its host was read often through links, then is judged.
+        assert_eq!(
+            verdict(&read("https://docs.rs/tokio/a"), seen, GateMode::Auto),
+            gate::Verdict::Allow
+        );
+        match verdict(&read("https://docs.rs/tokio/b"), seen, GateMode::Auto) {
+            gate::Verdict::Ask(ask) => assert_eq!(ask.reasons, [OFTEN]),
+            other => panic!("{other:?}"),
         }
         let search = json!({"action": "search", "query": "tokio select"});
         assert!(matches!(
@@ -1228,10 +1541,37 @@ mod tests {
             ]
         );
         let seen = Seen::default();
-        seen.saw("a1", text);
-        assert!(seen.has("a1", "http://example.com/a?b=c"));
-        assert!(!seen.has("a1", "http://example.com/a?b=c&d=secret"));
-        assert!(!seen.has("a2", "http://example.com/a?b=c"));
+        let url = |text: &str| Url::parse(text).unwrap();
+        let shown = |source| urls_in(text).into_iter().map(|u| (u, source)).collect();
+        seen.saw("a1", shown(Source::Link));
+        assert_eq!(
+            seen.pass("a1", &url("http://example.com/a?b=c")),
+            Pass::Link(0)
+        );
+        seen.read_through_link("a1", &url("http://example.com/other"));
+        assert_eq!(
+            seen.pass("a1", &url("http://example.com/a?b=c")),
+            Pass::Link(1)
+        );
+        assert_eq!(
+            seen.pass("a1", &url("http://example.com/a?b=c&d=secret")),
+            Pass::Unseen
+        );
+        assert_eq!(
+            seen.pass("a2", &url("http://example.com/a?b=c")),
+            Pass::Unseen
+        );
+        // Shown by a search too, it is free.
+        seen.saw("a1", shown(Source::Free));
+        assert_eq!(
+            seen.pass("a1", &url("http://example.com/a?b=c")),
+            Pass::Free
+        );
+        seen.saw("a1", shown(Source::Link));
+        assert_eq!(
+            seen.pass("a1", &url("http://example.com/a?b=c")),
+            Pass::Free
+        );
     }
 
     #[test]
@@ -1292,6 +1632,7 @@ mod tests {
             open: servers.iter().map(|server| server.addr).collect(),
             search: String::new(),
             hosts: Vec::new(),
+            reader: "/nonexistent".into(),
         }
     }
 
@@ -1334,19 +1675,26 @@ mod tests {
         href=\"/guide/join.html\">the join page</a> says more about it.</p></article>\
         <footer>Copyright notice of the site</footer></body></html>";
 
+    /// A page of `url` as it came back, and what its reader made of it, as the agent reads it.
+    fn read_by_hand(kind: Body, url: &str, bytes: &[u8]) -> String {
+        let page = Page {
+            url: Url::parse(url).unwrap(),
+            kind: String::new(),
+            bytes: bytes.to_vec(),
+            cut: false,
+        };
+        let read = extracted(kind.word(), page.bytes.clone(), url).unwrap();
+        answer(&page, read)
+    }
+
     #[test]
     fn an_html_page_is_its_main_content_as_markdown_without_navigation() {
-        let server = serve(|_| {
-            response(
-                "200 OK",
-                &[("Content-Type", "text/html")],
-                ARTICLE.as_bytes(),
-            )
-        });
-        let url = local(&format!("http://{}/guide/select.html", server.addr));
-        let text = done(runtime().block_on(read(&opened(&[&server]), url)));
+        let text = read_by_hand(
+            Body::Html,
+            "https://guide.example/select.html",
+            ARTICLE.as_bytes(),
+        );
         assert!(text.starts_with(UNTRUSTED), "{text}");
-        assert!(text.contains("Title: Select & join - The Guide"), "{text}");
         assert!(
             text.contains("The select macro waits on several branches"),
             "{text}"
@@ -1354,9 +1702,21 @@ mod tests {
         assert!(!text.contains("News menu"), "{text}");
         assert!(!text.contains("Copyright notice"), "{text}");
         assert!(
-            text.contains(&format!("- http://{}/guide/join.html", server.addr)),
+            text.contains("- https://guide.example/guide/join.html"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn the_title_of_a_page_is_inside_the_block_of_the_web_s_text() {
+        let text = read_by_hand(
+            Body::Html,
+            "https://guide.example/select.html",
+            ARTICLE.as_bytes(),
+        );
+        let (before, inside) = text.split_once(OPEN).unwrap();
+        assert!(!before.contains("Select"), "{text}");
+        assert!(inside.contains("Title: Select & join"), "{text}");
     }
 
     /// A one-page PDF saying `text` in Helvetica, its cross-reference table counted.
@@ -1400,10 +1760,7 @@ mod tests {
     #[test]
     fn a_pdf_is_its_text() {
         let file = pdf("The release notes of version two");
-        let server =
-            serve(move |_| response("200 OK", &[("Content-Type", "application/pdf")], &file));
-        let url = local(&format!("http://{}/notes.pdf", server.addr));
-        let text = done(runtime().block_on(read(&opened(&[&server]), url)));
+        let text = read_by_hand(Body::Pdf, "https://guide.example/notes.pdf", &file);
         assert!(text.starts_with(UNTRUSTED), "{text}");
         assert!(text.contains("The release notes of version two"), "{text}");
     }
@@ -1450,6 +1807,7 @@ mod tests {
         let net = Net {
             open: Vec::new(),
             search: String::new(),
+            reader: "/nonexistent".into(),
             hosts: vec![
                 ("inside.example".into(), "127.0.0.1".parse().unwrap()),
                 ("router.example".into(), "192.168.1.1".parse().unwrap()),
@@ -1496,6 +1854,18 @@ mod tests {
             Outcome::Failed(why) => assert!(why.contains("more than 5 redirects"), "{why}"),
             _ => panic!("a loop of redirects was followed"),
         }
+    }
+
+    #[test]
+    fn a_redirect_from_https_to_http_is_refused() {
+        let from = Url::parse("https://docs.example/a").unwrap();
+        match redirected(&from, "http://docs.example/b", &[]) {
+            Err(Missed::Refused(why)) => assert!(why.contains("from https to http"), "{why}"),
+            _ => panic!("followed"),
+        }
+        assert!(redirected(&from, "https://docs.example/b", &[]).is_ok());
+        let plain = Url::parse("http://docs.example/a").unwrap();
+        assert!(redirected(&plain, "https://docs.example/b", &[]).is_ok());
     }
 
     const DUCKDUCKGO_PAGE: &str = r#"<html><body><div class="results">

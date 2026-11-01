@@ -120,6 +120,12 @@ impl Ticket {
             (Some(repository), _) => format!(" of {repository} (GitHub)"),
             (None, _) => " (Jira)".to_owned(),
         };
+        // The tracker's own fields may lead the agent to a page; what it asked with never does.
+        crate::web::shown(&self.title, crate::web::Source::Link);
+        crate::web::shown(&self.description, crate::web::Source::Link);
+        if let Some(url) = &self.url {
+            crate::web::shown(url, crate::web::Source::Link);
+        }
         let mut text = format!(
             "Ticket {}{place}, {}: {}\n",
             self.reference, self.state, self.title
@@ -151,6 +157,9 @@ impl Ticket {
                 text.push_str(&format!("  ({} older ones are not shown)\n", self.older));
             }
             for comment in &self.comments {
+                if !comment.agent {
+                    crate::web::shown(&comment.body, crate::web::Source::Link);
+                }
                 let at = comment
                     .at
                     .as_deref()
@@ -864,6 +873,10 @@ async fn listed(project: &Project, asked: &TicketsCall) -> Outcome {
     }
     let mut text = format!("{header}: {}\n", tickets.len());
     for ticket in &tickets {
+        crate::web::shown(&ticket.title, crate::web::Source::Link);
+        if let Some(url) = &ticket.url {
+            crate::web::shown(url, crate::web::Source::Link);
+        }
         let mut line = format!("- {} {}: {}", ticket.reference, ticket.state, ticket.title);
         if !ticket.labels.is_empty() {
             line.push_str(&format!(" [{}]", ticket.labels.join(", ")));

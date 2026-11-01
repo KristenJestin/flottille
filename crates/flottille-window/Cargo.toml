@@ -21,4 +21,4 @@ flottille-ui = { version = "0.1.0", path = "../flottille-ui", default-features =
 futures = { version = "0.3.32", default-features = false, features = ["std"] }
 gpui-kit = { version = "=0.8.0", default-features = false, features = ["assets"] }
 libc = "0.2.191"
-serde_json = "1.0.149"
+serde_json = "1.0.154"

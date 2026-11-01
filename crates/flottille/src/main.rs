@@ -172,6 +172,10 @@ enum Command {
         #[command(subcommand)]
         agent: BridgeAgent,
     },
+    /// Read a page given on standard input, for the daemon's `web` tool, under the limits the
+    /// daemon set: what it holds, as JSON
+    #[command(name = "read-page", hide = true)]
+    ReadPage { kind: String, url: String },
     /// Open the window: your projects, where their work happens, their sessions, and what waits
     /// for you
     Window,
@@ -259,6 +263,10 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    // The page's reader runs with no environment: it needs no folder of Flottille's.
+    if let Command::ReadPage { kind, url } = &cli.command {
+        return Ok(web::read_page(kind, url));
+    }
     let paths = Paths::from_env()?;
     match cli.command {
         Command::Daemon { action: None } => daemon::run(&paths)?,
@@ -358,6 +366,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Bridge {
             agent: BridgeAgent::Codex,
         } => return codex_bridge::run(&paths),
+        Command::ReadPage { .. } => unreachable!("the page's reader returns before the paths"),
         Command::Window => {
             let paths = paths.clone();
             flottille_window::run(std::sync::Arc::new(move || {
