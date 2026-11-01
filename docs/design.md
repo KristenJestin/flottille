@@ -677,7 +677,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   edited, removed and reordered, each with its kind, where it is done and its time limit), then
   its Rules (a text editor, Reset to default, and a line saying a change reaches the agents
   created from now on);
-- Settings: the Auto judge (two lines on Auto: the rules pass what is known to be harmless, a
+- Settings, in tabs (one section shown at a time, as in a project's settings; the first, the Auto judge, is
+  the one it opens on, and a link to a section opens its tab): the Auto judge (two lines on Auto: the rules pass what is known to be harmless, a
   small model on the user's own quota decides the rest, base calls always come to the user; "No
   judge (Auto asks like Ask)" among its choices), the providers, then the Judge guidance and the
   Rules for every project, both edited the same way, and last the Developer mode, a switch with the
