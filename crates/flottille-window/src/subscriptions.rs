@@ -6,7 +6,9 @@
 
 use std::time::Duration;
 
-use flottille_ui::{Button, Icon, Item, Listing, Palette, Type, icon, palette, presence, space};
+use flottille_ui::{
+    Button, Icon, Item, Listing, Palette, Type, icon, palette, presence, presence_of, space,
+};
 use gpui_kit::{
     AnyElement, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Render,
     SharedString, StatefulInteractiveElement, Styled, Task, TestSupportExt as _, WeakEntity,
@@ -241,16 +243,22 @@ impl Render for SubscriptionList {
                     .test_support(),
             )
             .children(rows)
-            .children(self.error.clone().map(|error| {
-                div()
-                    .id("rail-subscriptions-error")
-                    .px(space::SM)
-                    .py(space::XS)
-                    .text_size(px(11.5))
-                    .text_color(p.fail)
-                    .child(error)
-                    .test_support()
-            }))
+            .child(presence_of(
+                "rail-subscriptions-error-block",
+                self.error.clone(),
+                move |error| {
+                    div()
+                        .id("rail-subscriptions-error")
+                        .px(space::SM)
+                        .py(space::XS)
+                        .text_size(px(11.5))
+                        .text_color(p.fail)
+                        .aria_label(error.clone())
+                        .child(error)
+                        .test_support()
+                        .into_any_element()
+                },
+            ))
             .test_support();
         presence("rail-subscriptions-presence", present, section)
     }

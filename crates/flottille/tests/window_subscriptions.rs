@@ -439,6 +439,49 @@ fn the_delivery_is_a_folded_step_that_says_what_woke_the_agent_and_a_click_unfol
 }
 
 #[gpui_kit::test]
+fn the_error_of_a_cancel_unfolds_and_folds_away_it_does_not_jump(cx: &mut TestAppContext) {
+    let user = user();
+    script(&user, pull());
+    let (lead, mcp) = lead(&user);
+    subscribe(&mcp, json!(["checks"]));
+    let (shell, cx) = open_session(&user, &lead, cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the rail lists the subscription", |cx| {
+        !rows(&page, cx).is_empty()
+    });
+    settle(cx);
+    let list = page.read_with(cx, |page, cx| page.subscriptions(cx));
+
+    list.update(cx, |list, cx| {
+        list.failed(Some("the daemon said no".into()), cx)
+    });
+    settle(cx);
+    assert_eq!(
+        label(cx, "rail-subscriptions-error").as_deref(),
+        Some("the daemon said no")
+    );
+
+    list.update(cx, |list, cx| list.failed(None, cx));
+    one_frame(cx);
+    assert!(
+        present(cx, "rail-subscriptions-error"),
+        "the line is still drawn while it folds away"
+    );
+    settle(cx);
+    assert!(
+        !present(cx, "rail-subscriptions-error"),
+        "and gone once folded"
+    );
+}
+
+/// One frame of the clock and of drawing.
+fn one_frame(cx: &mut VisualTestContext) {
+    cx.executor().advance_clock(Duration::from_millis(16));
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+}
+
+#[gpui_kit::test]
 fn a_failure_and_an_ending_say_their_whole_reason_and_are_never_folded(cx: &mut TestAppContext) {
     let user = user();
     script(&user, pull());
