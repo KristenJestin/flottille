@@ -2299,6 +2299,12 @@ fn the_mode_is_a_compact_ask_auto_control_with_a_warning_icon_when_auto_has_no_j
     until(&shell, cx, "Settings opens", |cx| {
         shell.read_with(cx, |s, _| s.selected() == Some(&Selection::Settings))
     });
+    settle(cx);
+    assert_eq!(
+        settings_shown(cx),
+        ["judge"],
+        "the warning leads to the judge"
+    );
     shell.update_in(cx, |shell, window, cx| {
         shell.open(Selection::Session(lead.clone()), window, cx)
     });
@@ -2465,6 +2471,7 @@ fn the_judge_section_edits_the_judge_s_guidance_and_resets_it_to_the_default(
     // Tall enough to show the whole page: a click reaches only what is on screen.
     cx.simulate_resize(size(px(1280.), px(2400.)));
     let page = open_settings(&shell, cx);
+    choose_settings_tab("guidance", cx);
     let editor = page.read_with(cx, |page, _| page.judge_guidance().clone());
     until(&shell, cx, "the default guidance is shown", |cx| {
         editor.read_with(cx, |e, _| e.shown().is_some())
@@ -2528,6 +2535,7 @@ fn the_judge_section_shows_a_guidance_it_cannot_follow_and_follows_an_edit_made_
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     cx.simulate_resize(size(px(1280.), px(2400.)));
     let page = open_settings(&shell, cx);
+    choose_settings_tab("guidance", cx);
     let editor = page.read_with(cx, |page, _| page.judge_guidance().clone());
     let rules = page.read_with(cx, |page, _| page.rules().clone());
     until(&shell, cx, "the error is shown", |cx| {
@@ -2549,13 +2557,19 @@ fn the_judge_section_shows_a_guidance_it_cannot_follow_and_follows_an_edit_made_
     user.call("rules.set", json!({"text": "Write tests first."}))
         .unwrap();
 
-    until(&shell, cx, "the editors show the new texts", |cx| {
+    until(&shell, cx, "the guidance shows the new text", |cx| {
         editor.read_with(cx, |e, cx| {
             e.typed(cx).as_deref() == Some("Ask about every migration.")
-        }) && rules.read_with(cx, |e, cx| {
+        })
+    });
+    // An editor is drawn only on its own tab: the rules follow the edit once it is shown.
+    choose_settings_tab("rules", cx);
+    until(&shell, cx, "the rules show the new text", |cx| {
+        rules.read_with(cx, |e, cx| {
             e.typed(cx).as_deref() == Some("Write tests first.")
         })
     });
+    choose_settings_tab("guidance", cx);
     editor.read_with(cx, |e, _| {
         assert_eq!(e.shown().unwrap().source, Source::Global);
         assert_eq!(e.shown().unwrap().error, None);
@@ -2593,6 +2607,12 @@ fn a_judge_flottille_picked_is_said_once_in_a_notice_that_opens_settings(cx: &mu
         shell.read_with(cx, |s, _| s.judge_notice().is_none())
     });
     cx.update(|window, _| assert!(window.try_find("judge-notice").is_none()));
+    settle(cx);
+    assert_eq!(
+        settings_shown(cx),
+        ["judge"],
+        "the notice leads to the judge"
+    );
     // Seen once, said no more: the daemon keeps the judge and drops the notice. The window hides
     // the notice at once and tells the daemon after, so the daemon's answer is waited for.
     until(&shell, cx, "the daemon dropped the notice", |cx| {
@@ -3356,6 +3376,164 @@ fn open_settings(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<Se
         .unwrap()
 }
 
+/// The sections of the global Settings page, by key.
+fn settings_keys() -> Vec<&'static str> {
+    flottille_window::settings::SECTIONS
+        .iter()
+        .map(|(key, _)| *key)
+        .collect()
+}
+
+/// The sections of Settings that are drawn.
+fn settings_shown(cx: &mut VisualTestContext) -> Vec<&'static str> {
+    cx.update(|window, _| {
+        settings_keys()
+            .into_iter()
+            .filter(|key| {
+                window
+                    .try_find(format!("{key}-title"))
+                    .is_some_and(|found| found.visible())
+            })
+            .collect()
+    })
+}
+
+/// Clicks the tab of the section `key` in Settings and lets its section arrive.
+fn choose_settings_tab(key: &str, cx: &mut VisualTestContext) {
+    let id = format!("settings-tabs-{key}");
+    cx.update(|window, cx| window.click(id, cx));
+    settle(cx);
+}
+
+#[gpui_kit::test]
+fn opening_settings_shows_the_auto_judge_alone(cx: &mut TestAppContext) {
+    let user = providers_user();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_settings(&shell, cx);
+    until(&shell, cx, "the providers are read", |cx| {
+        page.read_with(cx, |p, _| p.providers().known)
+    });
+    settle(cx);
+    assert_eq!(page.read_with(cx, |p, _| p.tab()), 0);
+    assert_eq!(settings_shown(cx), ["judge"]);
+    cx.update(|window, _| {
+        assert_eq!(
+            window.find("settings-tabs-judge").selected(),
+            Some(true),
+            "the first tab is the chosen one"
+        );
+        assert_eq!(
+            window.find("settings-tabs-providers").selected(),
+            Some(false)
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn choosing_each_settings_tab_shows_its_section_alone(cx: &mut TestAppContext) {
+    let user = providers_user();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_settings(&shell, cx);
+    until(&shell, cx, "the providers are read", |cx| {
+        page.read_with(cx, |p, _| p.providers().known)
+    });
+    settle(cx);
+    // Forwards, then backwards: each one alone, whichever one it comes from.
+    let keys = settings_keys();
+    for (at, key) in keys
+        .iter()
+        .enumerate()
+        .skip(1)
+        .chain(keys.iter().enumerate().rev())
+    {
+        choose_settings_tab(key, cx);
+        assert_eq!(page.read_with(cx, |p, _| p.tab()), at, "{key}");
+        assert_eq!(settings_shown(cx), [*key], "{key} alone");
+        cx.update(|window, _| {
+            assert_eq!(
+                window.find(format!("settings-tabs-{key}")).selected(),
+                Some(true),
+                "{key} is marked"
+            );
+        });
+    }
+}
+
+#[gpui_kit::test]
+fn choosing_a_settings_tab_slides_the_marker_and_brings_the_section_in(cx: &mut TestAppContext) {
+    let user = providers_user();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_settings(&shell, cx);
+    until(&shell, cx, "the providers are read", |cx| {
+        page.read_with(cx, |p, _| p.providers().known)
+    });
+    settle(cx);
+    let before = cx.update(|window, _| window.find("settings-tabs-marker").bounds());
+    cx.update(|window, cx| window.click("settings-tabs-providers", cx));
+    cx.update(|window, cx| window.render_frame(cx));
+    assert!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)) > 0,
+        "the marker moves and the section arrives"
+    );
+    settle(cx);
+    let after = cx.update(|window, _| window.find("settings-tabs-marker").bounds());
+    let tab = cx.update(|window, _| window.find("settings-tabs-providers").bounds());
+    assert!(after.left() > before.left());
+    assert_eq!(after.left(), tab.left(), "under the chosen tab");
+    assert_eq!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)),
+        0,
+        "nothing moves once it is there"
+    );
+}
+
+#[gpui_kit::test]
+fn the_providers_tab_says_how_many_providers_there_are(cx: &mut TestAppContext) {
+    let user = providers_user();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_settings(&shell, cx);
+    until(&shell, cx, "the providers are listed", |cx| {
+        page.read_with(cx, |p, _| p.providers().known)
+    });
+    settle(cx);
+    let listed = page.read_with(cx, |p, _| p.providers().list.len());
+    assert!(listed > 0, "the daemon lists providers");
+    let count = |key: &str, cx: &mut VisualTestContext| {
+        let id = format!("settings-tabs-{key}-count");
+        cx.update(|window, _| {
+            window
+                .try_find(id)
+                .and_then(|found| found.label().map(str::to_owned))
+        })
+    };
+    assert_eq!(count("providers", cx), Some(listed.to_string()));
+    for key in ["judge", "guidance", "rules", "developer"] {
+        assert_eq!(count(key, cx), None, "{key} has no count");
+    }
+}
+
+#[gpui_kit::test]
+fn settings_keep_the_chosen_tab_while_open_and_open_afresh_on_the_first(cx: &mut TestAppContext) {
+    let user = providers_user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_settings(&shell, cx);
+    until(&shell, cx, "the providers are read", |cx| {
+        page.read_with(cx, |p, _| p.providers().known)
+    });
+    choose_settings_tab("rules", cx);
+    // The page read again (the daemon's events, the settings button again): the tab stays.
+    cx.update(|window, cx| window.click("settings", cx));
+    settle(cx);
+    assert_eq!(settings_shown(cx), ["rules"]);
+    // Gone elsewhere and back, it opens afresh.
+    open_project(&shell, "atlas", cx);
+    cx.update(|window, cx| window.click("settings", cx));
+    settle(cx);
+    assert_eq!(page.read_with(cx, |p, _| p.tab()), 0);
+    assert_eq!(settings_shown(cx), ["judge"]);
+}
+
 /// What the settings page says of a provider, line by line.
 fn said_of(page: &Entity<SettingsPage>, name: &str, cx: &mut VisualTestContext) -> Vec<String> {
     page.read_with(cx, |page, _| page.said_of(name))
@@ -3373,6 +3551,7 @@ fn disabling_one_in_settings_removes_it_from_the_composer_s_picker(cx: &mut Test
     });
 
     let page = open_settings(&shell, cx);
+    choose_settings_tab("providers", cx);
     assert!(said_of(&page, "opencode", cx).contains(&"Ready".to_owned()));
     cx.update(|window, cx| window.click("provider-switch-opencode", cx));
     until(&shell, cx, "the page shows it disabled", |cx| {
@@ -3532,6 +3711,12 @@ fn when_nothing_is_ready_the_composer_says_why_and_links_to_the_settings_page(
     until(&shell, cx, "the settings page opens", |cx| {
         shell.read_with(cx, |s, _| s.selected() == Some(&Selection::Settings))
     });
+    settle(cx);
+    assert_eq!(
+        settings_shown(cx),
+        ["providers"],
+        "the composer leads to the providers"
+    );
 }
 
 #[gpui_kit::test]
@@ -3935,6 +4120,7 @@ fn a_switch_the_daemon_refuses_goes_back_and_shows_the_daemon_s_sentence(cx: &mu
     let user = providers_user();
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     let page = open_settings(&shell, cx);
+    choose_settings_tab("providers", cx);
     until(&shell, cx, "opencode is shown on", |cx| {
         switch_on(&page, "opencode", cx)
     });
@@ -3962,6 +4148,7 @@ fn a_switch_to_what_the_file_already_says_ends_without_an_event_and_without_a_pe
     let user = providers_user();
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     let page = open_settings(&shell, cx);
+    choose_settings_tab("providers", cx);
     until(&shell, cx, "opencode is shown on", |cx| {
         switch_on(&page, "opencode", cx)
     });
@@ -8146,6 +8333,7 @@ fn the_rules_page_edits_the_rules_of_every_project_saves_them_and_resets_them_to
     // Tall enough to show the whole page: a click reaches only what is on screen.
     cx.simulate_resize(size(px(1280.), px(2400.)));
     let page = open_settings(&shell, cx);
+    choose_settings_tab("rules", cx);
     let editor = page.read_with(cx, |page, _| page.rules().clone());
     until(&shell, cx, "the default rules are shown", |cx| {
         editor.read_with(cx, |e, _| e.shown().is_some())
@@ -8310,6 +8498,7 @@ fn the_rules_editor_says_when_rules_edited_by_hand_were_cut(cx: &mut TestAppCont
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     cx.simulate_resize(size(px(1280.), px(2400.)));
     let page = open_settings(&shell, cx);
+    choose_settings_tab("rules", cx);
     let editor = page.read_with(cx, |page, _| page.rules().clone());
     until(&shell, cx, "the rules are shown", |cx| {
         editor.read_with(cx, |e, _| e.shown().is_some())
@@ -9625,6 +9814,7 @@ fn the_developer_mode_is_switched_in_settings_with_its_log_s_path_beside_the_swi
     let user = User::new();
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     let page = open_settings(&shell, cx);
+    choose_settings_tab("developer", cx);
     let file = user.path("state/flottille/developer.log");
     until(&shell, cx, "the page knows the developer mode", |cx| {
         page.read_with(cx, |page, _| page.developer().is_some())

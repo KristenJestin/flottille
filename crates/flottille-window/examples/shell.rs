@@ -19,7 +19,7 @@
 //! session's "End the session?" confirmation, `--ended` unfolds the "Ended" group at the bottom of the
 //! left tree, `--open-run` opens the detail of the open session's first run whose line holds the text, in its drawer,
 //! `--details` unfolds the details of the first request waiting in the rail, `--workspace-menu` opens the
-//! rail's Workspace "⋯" menu, `--project-settings` a project's settings page (`--repository` and `--tracker` open its dialogs, `--section` chooses its n-th tab, `--use-forge` uses the forge offered for a repository, `--remove-repository` and `--remove-project` ask their confirmation), `--how` opens "How Auto works" in the settings, `--size` the window's size. The daemon is found on
+//! rail's Workspace "⋯" menu, `--project-settings` a project's settings page (`--repository` and `--tracker` open its dialogs, `--section` chooses the n-th tab of the project's settings or of Settings, `--use-forge` uses the forge offered for a repository, `--remove-repository` and `--remove-project` ask their confirmation), `--how` opens "How Auto works" in the settings, `--size` the window's size. The daemon is found on
 //! `$XDG_RUNTIME_DIR/flottille/daemon.sock`; it is not started.
 
 use std::os::unix::net::UnixStream;
@@ -293,8 +293,13 @@ fn main() {
                 window
                     .update(cx, |_, window, cx| {
                         let main = shell.read(cx).main().clone();
-                        if how && let Some(page) = main.read(cx).settings_page().cloned() {
-                            page.update(cx, |page, cx| page.toggle_how(cx));
+                        if let Some(page) = main.read(cx).settings_page().cloned() {
+                            if how {
+                                page.update(cx, |page, cx| page.toggle_how(cx));
+                            }
+                            if let Some(entry) = section {
+                                page.update(cx, |page, cx| page.choose(entry, cx));
+                            }
                         }
                         let Some(page) = main.read(cx).project_settings_page().cloned() else {
                             return;
