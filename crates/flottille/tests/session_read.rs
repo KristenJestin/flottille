@@ -405,6 +405,58 @@ fn in_ask_the_read_is_a_card_that_names_the_session_and_the_page() {
     assert_eq!(messages(&done), ["M1", "R1"], "{done}");
 }
 
+fn set_mode(user: &User, agent: &str, mode: &str) {
+    let output = user.run(&["agent", "mode", agent, mode]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn a_session_reads_its_own_mode_without_its_id() {
+    let user = user();
+    project(&user, "app");
+    let (id, mcp) = root(&user, "app", "lead the work");
+    for mode in ["ask", "auto", "full"] {
+        set_mode(&user, &id, mode);
+        let judged = judge_prompts(&user);
+
+        let own = ok(mcp.call("session_read", json!({})));
+
+        assert!(own.starts_with("This is your own session"), "{own}");
+        assert!(own.contains(&format!("agent {id}")), "{own}");
+        assert!(own.contains("role lead"), "{own}");
+        assert!(
+            own.contains(&format!("Your session's tree is in {mode} mode")),
+            "{own}"
+        );
+        assert!(!own.contains("<session_message>"), "{own}");
+        assert!(no_request(&user), "{mode}: asked of nobody");
+        assert_eq!(judge_prompts(&user), judged, "{mode}: the judge was asked");
+    }
+}
+
+#[test]
+fn reading_another_session_says_its_mode() {
+    let user = user();
+    project(&user, "app");
+    let (_, mcp) = root(&user, "app", "lead the work");
+    let (session, _) = root(&user, "app", "M1");
+    for mode in ["auto", "full"] {
+        set_mode(&user, &session, mode);
+
+        let page = ok(mcp.call("session_read", json!({"session": session})));
+
+        assert!(
+            page.contains(&format!("That session's tree is in {mode} mode")),
+            "{page}"
+        );
+        assert_eq!(messages(&page), ["M1", "R1"], "{page}");
+    }
+}
+
 #[test]
 fn a_session_of_another_project_cannot_be_read() {
     let user = user();
