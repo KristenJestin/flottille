@@ -306,6 +306,54 @@ fn toasts(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
     })
 }
 
+fn label_of(id: &str, cx: &mut VisualTestContext) -> Option<String> {
+    let id = id.to_owned();
+    cx.update(|window, _| {
+        window
+            .try_find(id)
+            .and_then(|found| found.label().map(str::to_owned))
+    })
+}
+
+#[gpui_kit::test]
+fn an_appearance_the_daemon_cannot_read_is_said_in_one_line_and_a_choice_writes_it_again(
+    cx: &mut TestAppContext,
+) {
+    let user = user(false);
+    let file = user.path("config/flottille/appearance.toml");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "theme = [\n").unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_appearance(&shell, cx);
+
+    let line = label_of("appearance-unread", cx).expect("one line says it could not be read");
+    assert!(
+        line.contains("could not be read") && line.contains("appearance.toml"),
+        "it gives the daemon's message: {line}"
+    );
+    assert!(
+        user.call("appearance.show", json!({})).is_err(),
+        "the daemon still cannot read it"
+    );
+
+    // The tab stays usable: a choice writes the file again.
+    click("appearance-shade-light", cx);
+    until(&shell, cx, "the choice is kept", |_| {
+        stored_ok(&user) == Some(json!({"theme": "flottille", "shade": "light"}))
+    });
+    // It folds away: the clock moves along while the answer is waited for.
+    until(&shell, cx, "the line goes once it is read", |cx| {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        !shown("appearance-unread", cx)
+    });
+    settle(cx);
+    assert_eq!(selected("appearance-shade-light", cx), Some(true));
+}
+
+fn stored_ok(user: &User) -> Option<serde_json::Value> {
+    user.call("appearance.show", json!({})).ok()
+}
+
 /// The folder `path` cannot be written in until this is dropped.
 struct Locked(std::path::PathBuf);
 

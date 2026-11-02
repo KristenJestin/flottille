@@ -100,6 +100,9 @@ pub struct SettingsPage {
     developer_pending: Option<bool>,
     /// The window's appearance, once the daemon said it.
     appearance: Option<Appearance>,
+    /// Why the daemon could not read the appearance it keeps: the tab says so and stays usable,
+    /// a choice writes it again.
+    appearance_unread: Option<String>,
     /// The tab chosen: the index of its section in [`SECTIONS`].
     tab: usize,
 }
@@ -148,6 +151,7 @@ impl SettingsPage {
             developer: None,
             developer_pending: None,
             appearance: None,
+            appearance_unread: None,
             tab: 0,
         }
     }
@@ -500,9 +504,10 @@ impl SettingsPage {
             .child(card)
     }
 
-    /// Whether the daemon said the window's appearance: until then it cannot be chosen.
+    /// Whether the daemon answered about the window's appearance, with it or with why it cannot
+    /// read it: until then it cannot be chosen.
     pub fn appearance_known(&self) -> bool {
-        self.appearance.is_some()
+        self.appearance.is_some() || self.appearance_unread.is_some()
     }
 
     /// Uses `appearance` at once, and asks the daemon to keep it for every window.
@@ -527,21 +532,25 @@ impl SettingsPage {
         cx: &mut Context<Self>,
     ) {
         match shown {
-            Ok(appearance) => self.appearance = Some(appearance),
+            Ok(appearance) => {
+                self.appearance = Some(appearance);
+                self.appearance_unread = None;
+            }
             Err(why) if written => toast(
                 Toast::failure("The appearance was not kept").detail(why),
                 cx,
             ),
-            Err(_) => {}
+            // What it keeps cannot be read: the window shows what it uses, a choice writes it.
+            Err(why) => self.appearance_unread = Some(why),
         }
         cx.notify();
     }
 
     fn appearance_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let known = self.appearance.is_some();
+        let known = self.appearance_known();
         let shown = omarchy::shown(cx);
-        let kept = self.appearance.unwrap_or_default();
+        let kept = self.appearance.unwrap_or(shown);
         let refused = omarchy::omarchy_refused(cx);
         let row = |label: &'static str, hint: &'static str, control: AnyElement| {
             div()
@@ -638,6 +647,25 @@ impl SettingsPage {
                             .text_size(px(12.5))
                             .text_color(p.faint)
                             .child(why)
+                            .test_support()
+                            .into_any_element()
+                    },
+                )
+                .gap(space::MD),
+            )
+            .child(
+                presence_of(
+                    "appearance-unread-line",
+                    self.appearance_unread.as_ref().map(|why| {
+                        SharedString::from(format!("The kept appearance could not be read: {why}"))
+                    }),
+                    move |line| {
+                        div()
+                            .id("appearance-unread")
+                            .aria_label(line.clone())
+                            .text_size(px(12.5))
+                            .text_color(p.faint)
+                            .child(line)
                             .test_support()
                             .into_any_element()
                     },
