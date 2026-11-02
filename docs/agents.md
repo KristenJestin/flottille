@@ -555,7 +555,7 @@ bridge runs one session.
 - **The model** is an option (`model`) whose values are the `models` of `claude`'s answer to
   `initialize` (their `value`, `default` first when it does not list it), with the model `default`
   stands for as its `recommendedValue`: the one whose `resolvedModel` (or `value`) is the
-  `resolvedModel` of `default`, else the longest `displayName` its description gives, else none.
+  `resolvedModel` of `default`, else the one `displayName` its description gives (none when it gives two), else none.
   It is set with a `set_model` control request; a value it did not list is refused with the
   list.
 - **The effort** is an option (`effort`, category `thought_level`) when the model set has effort

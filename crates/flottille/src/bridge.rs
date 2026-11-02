@@ -1116,9 +1116,9 @@ fn config_options(claude: &Claude) -> Value {
     Value::Array(options)
 }
 
-/// The model `claude`'s `default` stands for: the one it resolves to as well, else the longest
-/// name its description gives (a version that does not say what it resolves to); `None` when
-/// neither says.
+/// The model `claude`'s `default` stands for: the one it resolves to as well, else the one name
+/// its description gives (a version that does not say what it resolves to); `None` when neither
+/// says, or when the description names more than one model.
 fn stands_for(models: &[Value]) -> Option<&str> {
     let alias = models.iter().find(|m| m["value"] == "default")?;
     let others = || models.iter().filter(|m| m["value"] != "default");
@@ -1129,13 +1129,12 @@ fn stands_for(models: &[Value]) -> Option<&str> {
     });
     let description = alias["description"].as_str().unwrap_or_default();
     let by_description = || {
-        others()
-            .filter(|m| {
-                m["displayName"]
-                    .as_str()
-                    .is_some_and(|name| !name.is_empty() && description.contains(name))
-            })
-            .max_by_key(|m| m["displayName"].as_str().map_or(0, str::len))
+        let mut named = others().filter(|m| {
+            m["displayName"]
+                .as_str()
+                .is_some_and(|name| !name.is_empty() && description.contains(name))
+        });
+        named.next().filter(|_| named.next().is_none())
     };
     by_resolution.or_else(by_description)?["value"].as_str()
 }

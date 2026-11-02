@@ -821,11 +821,11 @@ fn claude_s_default_alias_is_resolved_to_the_model_it_stands_for() {
     ]));
     assert_eq!(current(&resolved, "model"), "default");
     assert_eq!(recommended(&resolved), "fable");
-    // Without it, the longest model's name its description gives.
+    // Without it, the one model's name its description gives.
     let described = opened(json!([
         {"value": "default", "displayName": "Default (recommended)",
             "description": "Fable Max 5 · the largest, for complex work"},
-        {"value": "fable", "displayName": "Fable", "description": "f"},
+        {"value": "haiku", "displayName": "Haiku", "description": "h"},
         {"value": "fable-max", "displayName": "Fable Max", "description": "f"}
     ]));
     assert_eq!(recommended(&described), "fable-max");
@@ -835,6 +835,25 @@ fn claude_s_default_alias_is_resolved_to_the_model_it_stands_for() {
         {"value": "fable", "displayName": "Fable", "description": "f"}
     ]));
     assert_eq!(recommended(&unsaid), Value::Null);
+}
+
+#[test]
+fn a_description_naming_two_models_does_not_make_either_the_default() {
+    let user = User::with_fake_claude();
+    user.claude_script(json!({ "models": [
+        {"value": "default", "displayName": "Default (recommended)",
+            "description": "Fable for complex work, Haiku for quick answers"},
+        {"value": "fable", "displayName": "Fable", "description": "f"},
+        {"value": "haiku", "displayName": "Haiku", "description": "h"}
+    ]}));
+    let mut bridge = Bridge::start(&user);
+
+    let opened = bridge
+        .request("session/new", new_session(&user, &[]))
+        .0
+        .unwrap();
+
+    assert_eq!(recommended(&opened), Value::Null);
 }
 
 #[test]
