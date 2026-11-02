@@ -6,6 +6,9 @@
 //! green and red the states. Missing keys are derived by mixing `background` and `foreground`;
 //! every ink is then checked for contrast and moved until it reads. A theme missing a required
 //! key, or unreadable, leaves the base theme in place, with the reason logged.
+//!
+//! The user chooses ([`appear`]): Omarchy, or Flottille's own palette, light or dark, even on an
+//! Omarchy desktop. Omarchy chosen and no theme that can be used, Flottille's in its shade.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,7 +17,7 @@ use std::time::{Duration, SystemTime};
 use gpui_kit::{App, Global, Hsla};
 
 use crate::color::{hex, mix, over, parse_hex};
-use crate::theme::{self, Palette};
+use crate::theme::{self, Palette, Shade};
 
 /// Where the desktop is described; injectable so tests never read the real machine.
 #[derive(Clone, Debug)]
@@ -192,29 +195,106 @@ pub fn choose(env: &Environment) -> Choice {
     }
 }
 
-/// The last reason the Omarchy theme was set aside, kept beside the log line for whoever asks.
-#[derive(Default)]
-struct ThemeLog {
-    fallback: Option<String>,
+/// What the desktop last gave, and what the user wants of it.
+struct Desktop {
+    /// The Omarchy theme as last read.
+    read: Choice,
+    wanted: Appearance,
 }
 
-impl Global for ThemeLog {}
-
-pub fn last_fallback(cx: &App) -> Option<String> {
-    cx.try_global::<ThemeLog>()
-        .and_then(|log| log.fallback.clone())
-}
-
-fn apply(choice: Choice, cx: &mut App) {
-    let fallback = match &choice {
-        Choice::Fallback(reason) => {
-            eprintln!("flottille: the Omarchy theme is not used, the base theme is: {reason}");
-            Some(reason.clone())
+impl Default for Desktop {
+    fn default() -> Self {
+        Self {
+            read: Choice::Base,
+            wanted: Appearance::default(),
         }
-        Choice::Base | Choice::Omarchy(_) => None,
+    }
+}
+
+impl Global for Desktop {}
+
+/// The last reason the Omarchy theme was set aside, kept beside the log line for whoever asks.
+pub fn last_fallback(cx: &App) -> Option<String> {
+    match cx.try_global::<Desktop>().map(|d| &d.read) {
+        Some(Choice::Fallback(reason)) => Some(reason.clone()),
+        _ => None,
+    }
+}
+
+/// The Omarchy theme as read now.
+fn apply(choice: Choice, cx: &mut App) {
+    if let Choice::Fallback(reason) = &choice {
+        eprintln!("flottille: the Omarchy theme is not used, the base theme is: {reason}");
+    }
+    cx.default_global::<Desktop>().read = choice;
+    show(cx);
+}
+
+/// Cross-fades to the palette of what is shown.
+fn show(cx: &mut App) {
+    let shown = shown(cx);
+    let palette = match (shown.source, &cx.default_global::<Desktop>().read) {
+        (Source::Omarchy, Choice::Omarchy(palette)) => **palette,
+        _ => Palette::flottille(shown.shade),
     };
-    cx.default_global::<ThemeLog>().fallback = fallback;
-    theme::set_palette(choice.palette(), cx);
+    theme::set_palette(palette, cx);
+}
+
+/// Where the window's colours come from, as the user chose it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Source {
+    /// The desktop's current Omarchy theme, followed live.
+    #[default]
+    Omarchy,
+    /// Flottille's own palette, in the shade chosen.
+    Flottille,
+}
+
+/// The user's choice of the window's colours: Omarchy, or Flottille light or dark. The shade is
+/// kept with Omarchy too: it is Flottille's when no Omarchy theme can be used.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Appearance {
+    pub source: Source,
+    pub shade: Shade,
+}
+
+/// Uses `appearance` from now on, cross-fading to its palette.
+pub fn appear(appearance: Appearance, cx: &mut App) {
+    let desktop = cx.default_global::<Desktop>();
+    if desktop.wanted == appearance {
+        return;
+    }
+    desktop.wanted = appearance;
+    show(cx);
+}
+
+/// The appearance the window shows: the one chosen, or Flottille's in its shade when Omarchy is
+/// chosen and cannot be used.
+pub fn shown(cx: &App) -> Appearance {
+    let desktop = cx.try_global::<Desktop>();
+    let wanted = desktop.map(|d| d.wanted).unwrap_or_default();
+    let usable = desktop.is_some_and(|d| matches!(d.read, Choice::Omarchy(_)));
+    match wanted.source {
+        Source::Omarchy if !usable => Appearance {
+            source: Source::Flottille,
+            ..wanted
+        },
+        _ => wanted,
+    }
+}
+
+/// Why Omarchy cannot be chosen here: no Omarchy theme on this desktop, or one that cannot be
+/// used. `None` when it can.
+pub fn omarchy_refused(cx: &App) -> Option<String> {
+    match cx.try_global::<Desktop>().map(|d| &d.read) {
+        Some(Choice::Omarchy(_)) => None,
+        Some(Choice::Fallback(reason)) => Some(format!(
+            "The Omarchy theme cannot be used ({reason}): the window uses Flottille's colours."
+        )),
+        Some(Choice::Base) | None => {
+            Some("Not an Omarchy desktop: the window uses Flottille's colours.".to_owned())
+        }
+    }
 }
 
 /// How often the theme file is looked at. A look is one `stat`; nothing is redrawn unless the

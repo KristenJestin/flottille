@@ -39,6 +39,7 @@ pub struct Segmented {
     options: Vec<(SharedString, SharedString)>,
     chosen: usize,
     disabled: bool,
+    unavailable: Option<usize>,
     alarm: Option<usize>,
     on_choose: Option<OnChoose>,
 }
@@ -78,6 +79,7 @@ impl Segmented {
             options,
             chosen,
             disabled: false,
+            unavailable: None,
             alarm: None,
             on_choose: None,
         }
@@ -92,6 +94,13 @@ impl Segmented {
     /// Faded, and a click does nothing.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// The choice at `index` is shown faded, and a click on it does nothing: it cannot be taken
+    /// here (the line beside the control says why).
+    pub fn unavailable(mut self, index: usize) -> Self {
+        self.unavailable = Some(index);
         self
     }
 
@@ -163,6 +172,7 @@ impl RenderOnce for Segmented {
         let on_choose: Option<Arc<OnChoose>> = self.on_choose.map(Arc::new);
         let chosen = self.chosen;
         let disabled = self.disabled;
+        let unavailable = self.unavailable;
         let name = |key: &SharedString| match &self.id {
             ElementId::Name(name) => ElementId::Name(format!("{name}-{key}").into()),
             other => ElementId::NamedChild(Arc::new(other.clone()), key.clone()),
@@ -190,7 +200,11 @@ impl RenderOnce for Segmented {
                     .rounded(px(6.))
                     .text_size(px(TEXT))
                     .child(words.clone());
-                if !disabled && index != chosen {
+                let taken = unavailable == Some(index);
+                if taken {
+                    segment = segment.opacity(0.4);
+                }
+                if !disabled && !taken && index != chosen {
                     segment = segment.cursor_pointer();
                     if let Some(on_choose) = on_choose {
                         segment = segment.on_click(move |_: &ClickEvent, window, cx| {

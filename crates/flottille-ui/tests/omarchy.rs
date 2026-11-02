@@ -8,8 +8,8 @@ use std::time::Duration;
 use common::{Desktop, init};
 use flottille_ui::Palette;
 use flottille_ui::color::{TEXT_CONTRAST, contrast, hex};
-use flottille_ui::omarchy;
-use flottille_ui::theme::{palette, target_palette};
+use flottille_ui::omarchy::{self, Appearance, Source};
+use flottille_ui::theme::{Shade, palette, target_palette};
 use gpui_kit::TestAppContext;
 
 /// A theme of invented colours, every key given.
@@ -151,4 +151,112 @@ fn without_omarchy_the_base_theme_is_used(cx: &mut TestAppContext) {
     init(cx, desktop.env());
     assert_eq!(cx.update(|cx| palette(cx)), Palette::base());
     assert!(omarchy::last_fallback(&cx.app.borrow()).is_none());
+}
+
+const FLOTTILLE_LIGHT: Appearance = Appearance {
+    source: Source::Flottille,
+    shade: Shade::Light,
+};
+
+fn appear(appearance: Appearance, cx: &mut TestAppContext) {
+    cx.update(|cx| omarchy::appear(appearance, cx));
+    cx.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn choosing_flottille_on_omarchy_uses_flottille_s_palette_and_stops_following_the_theme(
+    cx: &mut TestAppContext,
+) {
+    let desktop = Desktop::new(true);
+    desktop.write_colors(THEME);
+    init(cx, desktop.env());
+    assert_eq!(cx.update(|cx| omarchy::shown(cx)).source, Source::Omarchy);
+
+    appear(FLOTTILLE_LIGHT, cx);
+    assert_eq!(cx.update(|cx| target_palette(cx)), Palette::light());
+    assert_eq!(cx.update(|cx| omarchy::shown(cx)), FLOTTILLE_LIGHT);
+    // A theme switched on the desktop meanwhile leaves Flottille's palette in place.
+    std::thread::sleep(Duration::from_millis(20));
+    desktop.write_colors(&THEME.replace("#f0883e", "#7aa2f7"));
+    touch_later(&desktop.env().colors_path());
+    cx.executor()
+        .advance_clock(omarchy::POLL + Duration::from_millis(10));
+    cx.run_until_parked();
+    assert_eq!(cx.update(|cx| target_palette(cx)), Palette::light());
+
+    appear(
+        Appearance {
+            source: Source::Flottille,
+            shade: Shade::Dark,
+        },
+        cx,
+    );
+    assert_eq!(cx.update(|cx| target_palette(cx)), Palette::base());
+
+    // Back to Omarchy: the desktop's theme as it is now.
+    appear(
+        Appearance {
+            source: Source::Omarchy,
+            shade: Shade::Dark,
+        },
+        cx,
+    );
+    assert_eq!(cx.update(|cx| target_palette(cx)).acc, hex(0x7aa2f7));
+}
+
+#[gpui_kit::test]
+fn a_new_appearance_cross_fades_then_settles(cx: &mut TestAppContext) {
+    let desktop = Desktop::new(false);
+    init(cx, desktop.env());
+    appear(FLOTTILLE_LIGHT, cx);
+    // Partway, the colours sit between the two palettes.
+    let early = cx.update(|cx| palette(cx));
+    assert_ne!(early, Palette::light(), "no jump to the new colours");
+    cx.executor().advance_clock(Duration::from_millis(100));
+    let partway = cx.update(|cx| palette(cx));
+    assert!(
+        partway.bg.l > Palette::base().bg.l && partway.bg.l < Palette::light().bg.l,
+        "{partway:?}"
+    );
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    assert_eq!(cx.update(|cx| palette(cx)), Palette::light());
+}
+
+#[gpui_kit::test]
+fn off_omarchy_the_omarchy_choice_is_refused_and_flottille_is_shown(cx: &mut TestAppContext) {
+    let desktop = Desktop::new(false);
+    init(cx, desktop.env());
+    let why = cx
+        .update(|cx| omarchy::omarchy_refused(cx))
+        .expect("Omarchy cannot be chosen");
+    assert!(why.contains("Omarchy"), "{why}");
+    // Omarchy wanted, by default: what is shown is Flottille, in the shade kept.
+    assert_eq!(
+        cx.update(|cx| omarchy::shown(cx)),
+        Appearance {
+            source: Source::Flottille,
+            shade: Shade::Dark,
+        }
+    );
+    appear(
+        Appearance {
+            source: Source::Omarchy,
+            shade: Shade::Light,
+        },
+        cx,
+    );
+    assert_eq!(cx.update(|cx| target_palette(cx)), Palette::light());
+    assert_eq!(cx.update(|cx| omarchy::shown(cx)), FLOTTILLE_LIGHT);
+}
+
+#[gpui_kit::test]
+fn an_omarchy_theme_that_cannot_be_used_says_why_it_cannot_be_chosen(cx: &mut TestAppContext) {
+    let desktop = Desktop::new(true);
+    desktop.write_colors("background = \"#0e1116\"\nforeground = \"#c9d1d9\"\n");
+    init(cx, desktop.env());
+    let why = cx
+        .update(|cx| omarchy::omarchy_refused(cx))
+        .expect("Omarchy cannot be chosen");
+    assert!(why.contains("accent"), "{why}");
 }
