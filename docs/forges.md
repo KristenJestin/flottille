@@ -166,7 +166,7 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
 | `bkt api <path> --context C [--param k=v]` (GET) | the server's own JSON, unchanged | `pkg/cmd/api/api.go:23-48`, `:138-140` |
 | `bkt pr create --context C … --source <branch> --target <base> --title T --description D [--reviewer N]…` | `✓ Created pull request #<id>` | `pkg/cmd/pr/pr.go:597-615`, `:664`, `:696`; `--reviewer` at `:614`, sent as `{"username": N}` on Cloud (`pkg/bbcloud/pullrequests.go:232-237`) and `{"user": {"name": N}}` on Data Center (`pkg/bbdc/pullrequests.go:75-82`) |
 | `bkt pr merge <id> --context C … --strategy S --close-source=false` | the exit code | `pkg/cmd/pr/pr.go:1314-1334`; `pkg/bbcloud/pullrequests.go:351-388` (Cloud takes `merge_commit`, `squash` and `fast_forward` only, `:352-356`, `:363-365`); `pkg/bbdc/pullrequests.go:108-132` (`mergeStrategyId`, given as it is) |
-| `bkt api /repositories/W/R/pipelines/ --context C --param pagelen=50 --param sort=-created_on` (GET; the sort is a `--param`, not a `?` in the path: `bkt api` is not known to merge one into the other) | `values[]`: `build_number`, `state.result.name`, `target.type`, then `target.ref_name` (a branch's pipeline) or `target.source` (a pull request's: `pipeline_pullrequest_target`), `target.selector.pattern` | Atlassian's REST documentation (Pipelines, list pipelines). Not `bkt pipeline list`: it decodes `target.ref.name` (`pkg/bbcloud/client.go:140-152`) while the API sends `ref_name`, so every branch it prints is empty (seen live with v0.37.0), and a pull request's pipeline has no `ref` at all |
+| `bkt api /repositories/W/R/pipelines/ --context C --param pagelen=50 --param sort=-created_on` (GET; the sort is a `--param`, not a `?` in the path: `bkt api` is not known to merge one into the other) | `values[]`: `build_number`, `state.result.name`, `target.type`, then `target.ref_name` (a branch's pipeline) or `target.source` and `target.destination` (a pull request's: `pipeline_pullrequest_target`), `target.selector.type`, `target.selector.pattern` | Atlassian's REST documentation (Pipelines, list pipelines). Not `bkt pipeline list`: it decodes `target.ref.name` (`pkg/bbcloud/client.go:140-152`) while the API sends `ref_name`, so every branch it prints is empty (seen live with v0.37.0), and a pull request's pipeline has no `ref` at all |
 | `bkt pipeline list --context C --workspace W --repo R --limit 50 --json`, for the CI durations only ("How long CI takes") | `pipelines[]`: `state.result.name`, `created_on`, `completed_on` (`pkg/bbcloud/client.go:139-152`; the list has no duration field; its `target.ref.name` is empty, which the durations do not need) | `pkg/cmd/pipeline/pipeline.go:177-210`; `pkg/bbcloud/client.go:100-120`, `:145` (newest first: `sort=-created_on`) |
 | `bkt pipeline run --context C --workspace W --repo R --ref <branch> [--selector-type pull-requests --selector-pattern <p>]` | the exit code | `pkg/cmd/pipeline/pipeline.go:81-133` (v0.37.0; the selector flags at `:127-128`), `pkg/bbcloud/client.go:431-482` (`ref_type: branch`, `ref_name`, `selector`) |
 | `bkt pipeline view <build> --context C --workspace W --repo R --json` | `steps[]`: `uuid`, `state.result.name` | `pkg/cmd/pipeline/pipeline.go:416-480` (v0.37.0; `{pipeline, steps}`), `pkg/bbcloud/client.go:559-604` (`PipelineStep`) |
@@ -235,6 +235,34 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
   and the other build tools report: `SUCCESSFUL` is `passing`, `FAILED`, `STOPPED` and the like
   are `failing`, anything else (`INPROGRESS`) is `pending`. Pipelines are on Cloud only
   (`pkg/cmd/pipeline/pipeline.go:20-27`).
+- **Which statuses count (Cloud).** A Pipelines build leaves its statuses on the commit, and
+  a rerun leaves new ones beside the earlier build's, so the statuses are told apart by the pipeline
+  each links to (`…/pipelines/results/<build>`, found among the newest 50 pipelines of the API):
+  only the **latest build of each pipeline** counts. **Every pipeline that ran on the head
+  counts**, a branch's own push included, as Bitbucket's own merge check counts every status of the
+  source commit: a failed branch pipeline fails the pull request's checks. A pipeline is told
+  apart by its target (`pipeline_pullrequest_target`, or a branch, a tag, a custom one with its
+  `ref_name`), its `selector.type` and `selector.pattern`, and, for a pull request's, its
+  `destination`: one branch can be the source of two pull requests, and a passing build for one
+  does not hide a failed build for the other. A status no pipeline of the list explains (another
+  CI's, an older build) is kept. When the pipelines cannot be read, the statuses are shown as `bkt`
+  gives them. **Known limits**: only the newest 50 pipelines are read (no second page), so a status
+  of an older build is kept as it is; and a "re-run failed steps" in Bitbucket's page keeps the
+  build number, so the statuses of the build are all that are read. Both fail safe.
+- **Flottille's own rerun is a branch run.** `bkt` has no way to start a pull request's pipeline:
+  `forge` `checks` runs the branch with `--selector-type pull-requests`, which Bitbucket records as
+  a branch run (`pipeline_ref_target`) of the pull requests' definition. It has no `BITBUCKET_PR_*`
+  variable and no merge with the destination, so it does not test what a real pull request
+  pipeline tests. It is kept as the replacement of the pull request's failed run (it replaces the
+  run of the one pull request pipeline of its pattern); with two pull requests from the branch it
+  is not known which it was for, so it replaces neither and the failed run still counts.
+- **Checks that have not started.** A Cloud pull request whose head has no status, changed
+  less than 10 minutes ago (its `updated_on`, which a push moves) and in a repository whose newest
+  pipelines are not empty, says `checks: not started yet for <short sha>` (`forge` `show`, and
+  `not_started` in the JSON read, `checks not started` in the workspace summary) instead of `none
+  ran on this pull request`; later, or in a repository with no pipeline, it is `none ran`. A merge
+  is refused either way, there being no check, and says `its checks have not started yet for <short
+  sha>` in the first case.
 - **Draft is not modelled.** A pull request is `open`, `merged` (`MERGED`) or `closed`
   (`DECLINED`, `SUPERSEDED`); `bkt` has no draft flag, so none is shown, and `forge` `create` refuses
   `draft: true` for Bitbucket.

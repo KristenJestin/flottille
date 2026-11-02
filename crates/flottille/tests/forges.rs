@@ -1019,6 +1019,282 @@ fn bkt_calls(user: &User) -> Vec<String> {
         .collect()
 }
 
+// The checks of a Bitbucket Cloud pull request are the commit statuses of its head, told apart by
+// the pipeline each one comes from (`docs/forges.md`, "Checks on Bitbucket").
+
+const HEAD: &str = "abc1234def5678";
+
+/// Now, as the RFC 3339 text Bitbucket gives a time.
+fn now_text() -> String {
+    let out = std::process::Command::new("date")
+        .args(["-u", "+%Y-%m-%dT%H:%M:%S+00:00"])
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+/// A pipeline of `acme/api` as Bitbucket's API lists it: `target` is a pull request's
+/// (`pipeline_pullrequest_target`), a branch's push (`pipeline_ref_target`, `branches`) or a
+/// branch run for the pull requests' definition (`pipeline_ref_target`, `pull-requests`, which is
+/// how `bkt pipeline run --selector-type pull-requests` starts one).
+fn cloud_pipeline(build: u64, kind: &str, commit: &str, result: &str) -> Value {
+    let target = match kind {
+        "pull request" => json!({"type": "pipeline_pullrequest_target", "source": "app/login",
+            "destination": "main", "commit": {"hash": commit},
+            "selector": {"type": "pull-requests", "pattern": "**"}}),
+        "rerun" => json!({"type": "pipeline_ref_target", "ref_type": "branch",
+            "ref_name": "app/login", "commit": {"hash": commit},
+            "selector": {"type": "pull-requests", "pattern": "**"}}),
+        _ => json!({"type": "pipeline_ref_target", "ref_type": "branch",
+            "ref_name": "app/login", "commit": {"hash": commit},
+            "selector": {"type": "branches", "pattern": "app/**"}}),
+    };
+    json!({"uuid": format!("{{{build}}}"), "build_number": build, "target": target,
+        "state": {"name": "COMPLETED", "result": {"name": result}}})
+}
+
+/// The commit status a step of pipeline `build` leaves on the head.
+fn step_status(build: u64, name: &str, state: &str) -> Value {
+    json!({"state": state, "key": format!("{build}-{name}"), "name": name,
+        "url": format!("https://bitbucket.org/acme/api/pipelines/results/{build}")})
+}
+
+/// What `forge show` says of the Cloud pull request #12 of `app/login`, whose head is `HEAD`, last
+/// changed at `updated`, with these statuses (none when null) and these pipelines in the repository.
+fn shown_with(updated: &str, statuses: Value, pipelines: Value) -> String {
+    let user = User::with_fake_agent().with_fake_bkt();
+    bitbucket_fixture(&user);
+    cloud_script(&user, updated, statuses, pipelines);
+    let (_, mcp) = agent_in(&user, Some("login"));
+
+    let answer = mcp.call("forge", json!({"action": "show"}));
+
+    assert!(!answer.error, "{}", answer.text);
+    answer.text
+}
+
+/// The fake `bkt`'s script of `shown_with`.
+fn cloud_script(user: &User, updated: &str, statuses: Value, pipelines: Value) {
+    let mut pull = cloud_pull(12, "app/login", "OPEN");
+    pull["source"]["commit"]["hash"] = json!(HEAD);
+    pull["updated_on"] = json!(updated);
+    user.bkt_script(json!({
+        "contexts": contexts(),
+        "pulls": {"acme/api": [pull], "APP/web": []},
+        "checks": {"acme/api": {"12": statuses}},
+        "pipelines": {"acme/api": pipelines},
+        "api": {
+            "/repositories/acme/api/pullrequests/12": {"participants": []},
+            "/repositories/acme/api/pullrequests/12/comments": {"values": []}
+        }
+    }));
+}
+
+/// The `checks:` line of a `forge show`.
+fn checks_line(text: &str) -> &str {
+    text.lines()
+        .find(|line| line.trim_start().starts_with("checks:"))
+        .unwrap_or_else(|| panic!("a checks line in {text}"))
+        .trim()
+}
+
+#[test]
+fn right_after_a_push_the_checks_have_not_started_yet() {
+    // The repository runs pipelines (one ran for an older commit); the head was pushed a moment
+    // ago and has no status, nor a pipeline, yet.
+    let text = shown_with(
+        &now_text(),
+        Value::Null,
+        json!([cloud_pipeline(
+            40,
+            "pull request",
+            "0000000aaaa",
+            "SUCCESSFUL"
+        )]),
+    );
+
+    let line = checks_line(&text);
+
+    assert!(line.contains("not started"), "{line}");
+    assert!(line.contains("abc1234"), "{line}");
+    assert!(!line.contains("none ran"), "{line}");
+}
+
+#[test]
+fn a_pull_request_without_pipelines_says_none_ran() {
+    // A repository with no pipeline at all, a head pushed a moment ago: nothing will run.
+    let text = shown_with(&now_text(), Value::Null, json!([]));
+    assert_eq!(
+        checks_line(&text),
+        "checks: none ran on this pull request",
+        "{text}"
+    );
+
+    // A repository that runs pipelines, a head with none for a long time: none ran either.
+    let text = shown_with(
+        "2020-01-01T00:00:00+00:00",
+        Value::Null,
+        json!([cloud_pipeline(
+            40,
+            "pull request",
+            "0000000aaaa",
+            "SUCCESSFUL"
+        )]),
+    );
+    assert_eq!(
+        checks_line(&text),
+        "checks: none ran on this pull request",
+        "{text}"
+    );
+}
+
+#[test]
+fn a_rerun_replaces_the_failed_run_in_the_count() {
+    let failed = ["test", "lint", "build"].map(|step| step_status(41, step, "FAILED"));
+    // The pull request's pipeline ran again as it was (a new build, the same pipeline).
+    let again = ["test", "lint", "build"].map(|step| step_status(43, step, "SUCCESSFUL"));
+    let statuses: Vec<Value> = failed.iter().chain(&again).cloned().collect();
+    let text = shown_with(
+        &now_text(),
+        json!(statuses),
+        json!([
+            cloud_pipeline(43, "pull request", HEAD, "SUCCESSFUL"),
+            cloud_pipeline(41, "pull request", HEAD, "FAILED")
+        ]),
+    );
+    assert_eq!(
+        checks_line(&text),
+        "checks: passing (test passing, lint passing, build passing)",
+        "{text}"
+    );
+
+    // What `bkt pipeline run` starts for a pull request's pipeline is a run of the same one.
+    let statuses: Vec<Value> = [
+        step_status(41, "test", "FAILED"),
+        step_status(44, "test", "INPROGRESS"),
+    ]
+    .to_vec();
+    let text = shown_with(
+        &now_text(),
+        json!(statuses),
+        json!([
+            cloud_pipeline(44, "rerun", HEAD, "SUCCESSFUL"),
+            cloud_pipeline(41, "pull request", HEAD, "FAILED")
+        ]),
+    );
+    assert_eq!(
+        checks_line(&text),
+        "checks: pending (test pending)",
+        "{text}"
+    );
+}
+
+#[test]
+fn a_failed_branch_pipeline_fails_the_pull_request_s_checks() {
+    let statuses = vec![
+        step_status(50, "test", "SUCCESSFUL"),
+        step_status(51, "pullrequests", "FAILED"),
+        // Another CI's status, which no pipeline of the repository explains, is kept.
+        json!({"state": "SUCCESSFUL", "key": "jenkins", "name": "Jenkins", "url": "https://x"}),
+    ];
+    let text = shown_with(
+        &now_text(),
+        json!(statuses),
+        json!([
+            cloud_pipeline(51, "branch", HEAD, "FAILED"),
+            cloud_pipeline(50, "pull request", HEAD, "SUCCESSFUL")
+        ]),
+    );
+
+    assert_eq!(
+        checks_line(&text),
+        "checks: failing (test passing, pullrequests failing, Jenkins passing)",
+        "{text}"
+    );
+}
+
+#[test]
+fn a_failed_build_for_one_destination_is_not_hidden_by_a_passing_one_for_another() {
+    // The same branch is the source of two pull requests, into `main` and into `release`: each
+    // has its own pipeline on the same head.
+    let into = |build, destination, result| {
+        let mut pipeline = cloud_pipeline(build, "pull request", HEAD, result);
+        pipeline["target"]["destination"] = json!(destination);
+        pipeline
+    };
+    let statuses = vec![
+        step_status(60, "test", "FAILED"),
+        step_status(61, "test", "SUCCESSFUL"),
+    ];
+    let text = shown_with(
+        &now_text(),
+        json!(statuses),
+        json!([
+            into(61, "release", "SUCCESSFUL"),
+            into(60, "main", "FAILED")
+        ]),
+    );
+
+    assert_eq!(
+        checks_line(&text),
+        "checks: failing (test failing, test passing)",
+        "{text}"
+    );
+}
+
+#[test]
+fn a_rerun_without_a_destination_replaces_no_pull_request_s_run_when_there_are_two() {
+    let into = |build, destination, result| {
+        let mut pipeline = cloud_pipeline(build, "pull request", HEAD, result);
+        pipeline["target"]["destination"] = json!(destination);
+        pipeline
+    };
+    let statuses = vec![
+        step_status(60, "test", "FAILED"),
+        step_status(61, "test", "SUCCESSFUL"),
+        step_status(62, "test", "SUCCESSFUL"),
+    ];
+    let text = shown_with(
+        &now_text(),
+        json!(statuses),
+        json!([
+            cloud_pipeline(62, "rerun", HEAD, "SUCCESSFUL"),
+            into(61, "release", "SUCCESSFUL"),
+            into(60, "main", "FAILED")
+        ]),
+    );
+
+    // It is not known which pull request the rerun was for: the failed run stays.
+    assert!(checks_line(&text).starts_with("checks: failing"), "{text}");
+}
+
+#[test]
+fn the_workspace_summary_says_the_checks_have_not_started_for_a_head_just_pushed() {
+    let user = User::new().with_fake_bkt();
+    bitbucket_fixture(&user);
+    cloud_script(
+        &user,
+        &now_text(),
+        Value::Null,
+        json!([cloud_pipeline(
+            40,
+            "pull request",
+            "0000000aaaa",
+            "SUCCESSFUL"
+        )]),
+    );
+
+    let output = user.run(&["workspace", "show", "app", "login"]);
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+
+    assert!(output.status.success(), "{text}");
+    assert!(
+        text.contains("#12 open into main, checks not started"),
+        "{text}"
+    );
+    assert!(!text.contains("no checks"), "{text}");
+}
+
 #[test]
 fn a_declared_bitbucket_cloud_and_data_center_repository_is_read_and_an_old_forges_table_is_not() {
     let user = User::new()

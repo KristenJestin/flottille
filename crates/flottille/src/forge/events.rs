@@ -222,6 +222,7 @@ pub(crate) fn offer(
             mergeable: None,
             review: None,
             checks: Vec::new(),
+            not_started: None,
             comments: Vec::new(),
             reviews: Vec::new(),
             reviewers: Vec::new(),

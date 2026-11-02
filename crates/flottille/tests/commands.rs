@@ -1803,6 +1803,43 @@ fn a_pull_request_with_no_check_is_refused_and_merged_after_the_user_s_explicit_
 }
 
 #[test]
+fn a_bitbucket_merge_on_a_head_whose_checks_have_not_started_says_so() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
+    command(&user, "merge");
+    let (_, mcp) = run(&user, "merge");
+    let mut pull = cloud_pull(12, "acme/app", "acme/app", "main");
+    pull["source"]["commit"]["hash"] = json!("abc1234def5678");
+    let now = String::from_utf8(
+        std::process::Command::new("date")
+            .args(["-u", "+%Y-%m-%dT%H:%M:%S+00:00"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    pull["updated_on"] = json!(now.trim());
+    user.bkt_script(json!({
+        "pulls": {"acme/app": [pull]},
+        "pipelines": {"acme/app": [{"build_number": 3, "target": {
+            "type": "pipeline_pullrequest_target", "commit": {"hash": "0000000aaaa"}}}]},
+        "api": {"/repositories/acme/app/pullrequests/12": cloud_page(&["approved"])}}));
+
+    let answer = write(&user, &mcp, json!({"action": "merge", "repository": "."}));
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("its checks have not started yet for abc1234"),
+        "{}",
+        answer.text
+    );
+    assert!(!answer.text.contains("no check ran"), "{}", answer.text);
+    assert_eq!(bkt_calls_starting(&user, "pr merge"), 0);
+}
+
+#[test]
 fn a_bitbucket_pull_request_with_no_check_is_refused_and_merged_after_the_user_s_explicit_words() {
     let user = User::with_fake_agent().with_fake_bkt();
     on_bitbucket(&user, "git@bitbucket.org:acme/app.git");

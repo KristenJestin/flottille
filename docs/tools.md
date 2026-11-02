@@ -313,8 +313,9 @@ pending requests.
   that names another is refused): number, state, its branch and base, link, whether it is
   mergeable (`mergeable: yes, no conflict with main`, `no, it conflicts with main`, or `not known
   yet` while the forge computes it), review (`none` when there is none), each check with its state
-  (`checks: none ran on this pull request` when none did), **for each failed check the end of its
-  log, or why there is none** ([`forges.md`](forges.md), "Why a check failed"), one line on how long the
+  (`checks: none ran on this pull request` when none did, `checks: not started yet for <sha>` for
+  a Bitbucket head pushed a moment ago), **for each failed check the end of its log, or why there
+  is none** ([`forges.md`](forges.md), "Why a check failed"), one line on how long the
   repository's recent CI runs took (`Recent CI runs of acme/app took 4 min on average (3 to 6 min,
   last 5).`, nothing when there is no finished run to measure; [`forges.md`](forges.md), "How long
   CI takes"), and how many comments and reviews it has (`comments: 2, read them with forge {"action":

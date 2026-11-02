@@ -441,6 +441,7 @@ fn forge_text(forge: &Value) -> String {
             );
             said.push_str(&match pull["mark"].as_str() {
                 Some(mark) => format!(", checks {mark}"),
+                None if pull["not_started"].is_string() => ", checks not started".to_owned(),
                 None => ", no checks".to_owned(),
             });
             if let Some(review) = pull["review"].as_str() {
