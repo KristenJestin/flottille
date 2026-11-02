@@ -102,6 +102,15 @@ The user switched the developer mode (`developer.set`, `docs/developer.md`).
 |---|---|
 | `log` | Whether the log is written now. |
 
+### `appearance.changed`
+
+The user chose the window's appearance (`appearance.set`): every window takes it.
+
+| Field | |
+|---|---|
+| `theme` | `omarchy` or `flottille`. |
+| `shade` | `light` or `dark`. |
+
 ### `workspace.created`
 
 A workspace was written, before anything is made on disk (`docs/workspaces.md`). Every event of a

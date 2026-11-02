@@ -681,8 +681,10 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   the one it opens on, and a link to a section opens its tab): the Auto judge (two lines on Auto: the rules pass what is known to be harmless, a
   small model on the user's own quota decides the rest, base calls always come to the user; "No
   judge (Auto asks like Ask)" among its choices), the providers, then the Judge guidance and the
-  Rules for every project, both edited the same way, and last the Developer mode, a switch with the
-  path of its log (`developer.md`: what the daemon decides and why, off by default); a judge
+  Rules for every project, both edited the same way, the Appearance (the window's colours: Omarchy
+  or Flottille, and for Flottille Light or Dark, each a segmented choice; off an Omarchy desktop
+  the Omarchy choice is shown disabled with one line saying why), and last the Developer mode, a
+  switch with the path of its log (`developer.md`: what the daemon decides and why, off by default); a judge
   Flottille picked is said once in a notice, with Open Settings and Dismiss;
 - a session page: the root's conversation, live (messages, the user's own as selectable as the agent's, thoughts collapsed (their head says how long the thinking lasted, from the event before it
   to the one after it, and no time when it lasted less than a tenth of a second), tool calls with
@@ -773,8 +775,14 @@ fold; a panel or a menu that opens or closes; a page and its sections, one after
 eight waits, whatever the length). At rest nothing moves and nothing is redrawn. An issue about
 the window without its animations is incomplete.
 
-Colours: Flottille's own palette, or, on an Omarchy desktop, the current Omarchy theme's colours
-followed live. Only the keys of a theme file that name a colour are read: another string (`mode = "light"`, a name) is ignored, a colour key with a value that is not a colour refuses the theme. A light theme
+Colours: the user chooses them in Settings, Appearance, and the daemon keeps the choice
+(`appearance.toml`, `docs/protocol.md`) for every window and a restart: **Omarchy**, the current
+Omarchy theme's colours followed live, or **Flottille**, Flottille's own palette, **Light** or
+**Dark**, even on an Omarchy desktop. Until the user chooses, Omarchy when an Omarchy theme is
+found, Flottille Dark otherwise; Omarchy chosen and no theme that can be used, Flottille in its
+shade. A change applies at once: the colours cross-fade, as when the Omarchy theme changes. The
+light palette has the dark one's roles, its surfaces a step toward the ink from a near-white page
+(never white cards), every text at WCAG AA on each surface it is drawn on. Only the keys of a theme file that name a colour are read: another string (`mode = "light"`, a name) is ignored, a colour key with a value that is not a colour refuses the theme. A light theme
 gets a light palette: the body and the bars are shaded toward the foreground (below the background in lightness), and
 the cards toward it too, never to white.
 Shapes, type and motion do not change with the theme. A state is drawn the same

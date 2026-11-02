@@ -163,7 +163,7 @@ The components that hold them:
 | `toast(Toast::success(t).detail(d), cx)` / `Toast::failure` | rule 3; the shell owns the `ToastStack` |
 | `Field::new(id, label, control)` | `.optional()`, `.hint(h)`, `.hint_mono()`, `.error(Option<e>)` |
 | `Switch::new(id, on, label)` | `.hint(h)`, `.on_click(f)`; the whole row toggles |
-| `Segmented::new(id, label, choices, chosen)` | at most three choices, never in a dialog |
+| `Segmented::new(id, label, choices, chosen)` | at most three choices, never in a dialog; `.unavailable(i)` shows a choice that cannot be taken here, faded, a line beside it saying why |
 | `RadioChoices::new(id, label)` | `.choice(key, title, line)`, `.leading(Icon)`, `.chosen(i)`, `.on_choose(f)`; two to four |
 | `Select::new(id, options, chosen)` | `SelectOption::new(key, title).line(l)`, `.fit()`, `.disabled(b)`, `.on_choose(f)` |
 | `Drawer::detail(id, view, cx)` | a run's detail: 520 px from the right, no scrim, Escape closes; `.show(window, cx)` |
