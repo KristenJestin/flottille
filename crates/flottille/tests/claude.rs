@@ -446,8 +446,90 @@ fn through_the_bridge_claude_s_models_are_listed_by_their_names_once_a_session_o
             ("haiku", "Haiku")
         ]
     );
-    assert_eq!(models[0]["default"], true);
     assert_eq!(claude["models_outdated"], false);
+}
+
+#[test]
+fn through_the_bridge_claude_s_default_alias_is_listed_as_the_model_it_stands_for() {
+    let user = User::with_fake_claude();
+    project(&user);
+    let (id, after) = run(&user, "hello");
+    events_until(&user, &id, after, "agent.turn_ended");
+
+    let listed = user.call("provider.list", Value::Null).unwrap();
+    let claude = listed["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "claude")
+        .unwrap()
+        .clone();
+    let models = claude["models"].as_array().unwrap();
+    // The alias stays listed, `--model default` is still offered, but it is not the default:
+    // the model it stands for is, and, as none of its own efforts was recorded yet, it takes
+    // the alias's.
+    assert_eq!(models[0]["id"], "default");
+    assert_eq!(models[0]["stands_for"], "fable");
+    assert_eq!(models[0].get("default"), None);
+    assert_eq!(models[1]["id"], "fable");
+    assert_eq!(models[1]["default"], true);
+    assert_eq!(models[1]["efforts"], models[0]["efforts"]);
+    // Claude does not say which effort it runs with when none is asked.
+    assert!(
+        models.iter().all(|m| m.get("default_effort").is_none()),
+        "{models:?}"
+    );
+    // The agent is said to run on the model, not on the alias.
+    assert_eq!(show(&user, &id)["agent"]["taken"]["model"], "fable");
+}
+
+#[test]
+fn a_model_keeps_its_own_efforts_after_a_default_session() {
+    let user = User::with_fake_claude();
+    project(&user);
+    // A session on the model itself records its efforts, `max` among them.
+    let answer = user
+        .call(
+            "agent.start",
+            json!({"project": "app", "message": "hello", "model": "fable"}),
+        )
+        .unwrap();
+    let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+    events_until(
+        &user,
+        &id,
+        answer["after"].as_u64().unwrap(),
+        "agent.turn_ended",
+    );
+    // Then a session on the provider's default, whose alias lists fewer efforts.
+    let (id, after) = run(&user, "again");
+    events_until(&user, &id, after, "agent.turn_ended");
+
+    let listed = user.call("provider.list", Value::Null).unwrap();
+    let claude = listed["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "claude")
+        .unwrap()
+        .clone();
+    let models = claude["models"].as_array().unwrap();
+    let fable = models.iter().find(|m| m["id"] == "fable").unwrap();
+    assert!(
+        fable["efforts"].as_array().unwrap().contains(&json!("max")),
+        "{fable:?}"
+    );
+    // The alias keeps its own list.
+    let alias = models.iter().find(|m| m["id"] == "default").unwrap();
+    assert!(!alias["efforts"].as_array().unwrap().contains(&json!("max")));
+    // So the model can still be asked with `max`.
+    let answer = user
+        .call(
+            "agent.start",
+            json!({"project": "app", "message": "hello", "model": "fable", "effort": "max"}),
+        )
+        .unwrap();
+    assert!(answer["agent"]["id"].is_string());
 }
 
 #[test]

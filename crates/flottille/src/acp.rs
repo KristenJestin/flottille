@@ -69,8 +69,9 @@ pub trait Events: Send + Sync + 'static {
     /// An event of the agent's conversation; `activity` when it is a sign of activity.
     fn conversation(&self, name: &str, data: Value, activity: bool);
     /// What the session offers in its config options: once it is open, and once the choices
-    /// are set. `fresh` when it is a new session none was set on yet: its model is the default.
-    fn offered(&self, options: &Value, fresh: bool);
+    /// are set. `fresh` when it is a new session none was set on yet: its model is the default;
+    /// `own_effort` when no effort was set on the new session: its effort is its model's own.
+    fn offered(&self, options: &Value, fresh: bool, own_effort: bool);
     /// The session is open: how, its id, the agent's version, what the agent took, and whether
     /// the agent can resume or load a session (`reopens`).
     fn opened(
@@ -271,7 +272,8 @@ async fn drive(
         }
     };
 
-    events.offered(&options, opened == "new");
+    let new = opened == "new";
+    events.offered(&options, new, new);
     // The user's choices, in this order, each checked: a model is never silently replaced.
     let mut options = options;
     let chosen = [
@@ -321,7 +323,9 @@ async fn drive(
         }
     }
     if chosen.iter().any(|(_, _, value)| value.is_some()) {
-        events.offered(&options, false);
+        // The effort a session keeps once a model is set may be the previous model's: no effort
+        // is learned from it.
+        events.offered(&options, false, false);
     }
     // A value named `default` stands for the agent's recommended one, when it names it.
     let current = |category| {

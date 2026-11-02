@@ -1764,9 +1764,10 @@ fn a_root_agent_s_reply_has_no_label_while_a_child_s_has_its_name(cx: &mut TestA
             "a child keeps its name"
         );
     });
+    let providers = shell.read_with(cx, |s, _| s.providers().clone());
     let runs_on = page.read_with(cx, |p, cx| {
         let agent = &p.rail().read(cx).agents()[0];
-        flottille_window::session::runs_on(&agent.provider, agent.model.as_deref())
+        flottille_window::session::runs_on(&providers, &agent.provider, agent.model.as_deref())
     });
     assert!(runs_on.starts_with("claude · "), "{runs_on}");
 
@@ -2403,9 +2404,21 @@ fn the_auto_judge_is_chosen_in_settings_which_say_it_uses_the_quota(cx: &mut Tes
     cx.update(|window, cx| window.click("judge-provider-choice-opencode", cx));
     until(&shell, cx, "the page shows the judge chosen", |cx| {
         page.read_with(cx, |page, _| {
-            page.judge_shown() == ("OpenCode".into(), Some("default model".into()))
+            page.judge_shown() == ("OpenCode".into(), Some("model chosen by OpenCode".into()))
         })
     });
+    // No session of OpenCode said its models: the picker never says "default".
+    let labels: Vec<String> = page.read_with(cx, |page, _| {
+        page.judge_entries(flottille_window::settings::JudgeMenu::Model)
+            .into_iter()
+            .map(|entry| entry.1)
+            .collect()
+    });
+    assert_eq!(labels[0], "Chosen by OpenCode");
+    assert!(
+        labels.iter().all(|l| !l.to_lowercase().contains("default")),
+        "{labels:?}"
+    );
     let file = std::fs::read_to_string(user.path("config/flottille/providers.toml")).unwrap();
     assert!(
         file.contains("[judge]") && file.contains("provider = \"opencode\""),
@@ -2576,6 +2589,83 @@ fn the_judge_section_shows_a_guidance_it_cannot_follow_and_follows_an_edit_made_
     });
     settle(cx);
     cx.update(|window, _| assert!(window.try_find("judge-guidance-error").is_none()));
+}
+
+#[gpui_kit::test]
+fn the_judge_s_model_picker_names_the_provider_s_default_model_once_it_is_known(
+    cx: &mut TestAppContext,
+) {
+    let user = providers_user();
+    project(&user, "atlas");
+    // A session of OpenCode says its models, and the one it takes.
+    learn_models(&user, "atlas", "opencode", "open/small");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_settings(&shell, cx);
+    until(&shell, cx, "the judge's picker shows none", |cx| {
+        page.read_with(cx, |page, _| page.judge_shown().0 == "No judge")
+    });
+    cx.update(|window, cx| window.click("judge-provider", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("judge-provider-choice-opencode", cx));
+    until(
+        &shell,
+        cx,
+        "the page shows the judge's model by its name",
+        |cx| {
+            page.read_with(cx, |page, _| {
+                page.judge_shown() == ("OpenCode".into(), Some("open/small".into()))
+            })
+        },
+    );
+    let labels: Vec<String> = page.read_with(cx, |page, _| {
+        page.judge_entries(flottille_window::settings::JudgeMenu::Model)
+            .into_iter()
+            .map(|entry| entry.1)
+            .collect()
+    });
+    assert_eq!(labels, ["open/small", "open/medium"]);
+    let first = page.read_with(cx, |page, _| {
+        page.judge_entries(flottille_window::settings::JudgeMenu::Model)[0].clone()
+    });
+    assert!(first.2, "the default model's row is the chosen one");
+    assert_eq!(
+        first.3,
+        Some(("opencode".to_owned(), None)),
+        "it names none"
+    );
+}
+
+#[test]
+fn a_line_that_says_what_an_agent_runs_on_never_says_default_model() {
+    let listed = |models: serde_json::Value| {
+        flottille_window::providers::Providers::of(Ok(&json!({"providers": [
+            {"name": "claude", "title": "Claude", "enabled": true, "ready": true,
+                "models": models}
+        ]})))
+    };
+    let runs_on = flottille_window::session::runs_on;
+    let known = listed(json!([
+        {"id": "default", "name": "Default (recommended)", "stands_for": "fable"},
+        {"id": "fable", "name": "Fable", "default": true},
+        {"id": "haiku", "name": "Haiku"}
+    ]));
+    // No model named, or the provider's own `default`: the real one, by its name.
+    assert_eq!(runs_on(&known, "claude", None), "claude · Fable");
+    assert_eq!(runs_on(&known, "claude", Some("default")), "claude · Fable");
+    assert_eq!(runs_on(&known, "claude", Some("haiku")), "claude · haiku");
+    // Not known: the provider chooses.
+    let unknown = listed(serde_json::Value::Null);
+    assert_eq!(
+        runs_on(&unknown, "claude", None),
+        "claude · model chosen by Claude"
+    );
+    assert_eq!(
+        runs_on(&unknown, "claude", Some("default")),
+        "claude · model chosen by Claude"
+    );
+    // The notice of a judge Flottille picked leaves the model out rather than say it twice.
+    assert_eq!(known.model_said("claude", None).as_deref(), Some("Fable"));
+    assert_eq!(unknown.model_said("claude", None), None);
 }
 
 #[gpui_kit::test]
@@ -3610,7 +3700,9 @@ fn choosing_the_other_and_a_model_starts_the_session_on_them_and_the_tree_shows_
     let lead = page.read_with(cx, |p, _| p.id().to_owned());
     let shown = user.call("agent.show", json!({"agent": lead})).unwrap()["agent"].clone();
     assert_eq!(shown["provider"], "opencode");
-    assert_eq!(shown["chosen"]["model"], "open/small");
+    // open/small is OpenCode's default: its row names no model, and the session takes it.
+    assert_eq!(shown["chosen"]["model"], serde_json::Value::Null);
+    assert_eq!(shown["taken"]["model"], "open/small");
     assert_eq!(shown["chosen"]["effort"], "high");
     until(&shell, cx, "the rail shows both agents", |cx| {
         page.read_with(cx, |p, cx| p.rail().read(cx).agents().len() == 2)
@@ -3841,7 +3933,7 @@ fn a_project_with_a_model_and_no_provider_shows_that_model_and_its_efforts_and_s
     // Another provider is not the one the project's model goes to: its own default there.
     cx.update(|window, cx| window.click("provider-picker", cx));
     cx.update(|window, cx| window.click("provider-choice-opencode", cx));
-    assert_eq!(model_shown(&composer, cx), "default model");
+    assert_eq!(model_shown(&composer, cx), "model chosen by OpenCode");
     cx.update(|window, cx| window.click("provider-picker", cx));
     cx.update(|window, cx| window.click("provider-choice-claude", cx));
     assert_eq!(model_shown(&composer, cx), "fake-large · the project's");
@@ -4180,6 +4272,11 @@ fn a_switch_to_what_the_file_already_says_ends_without_an_event_and_without_a_pe
 #[gpui_kit::test]
 fn an_open_dropdown_is_above_the_elements_under_it_and_inside_the_window(cx: &mut TestAppContext) {
     let user = providers_user();
+    // Three efforts: a list tall enough to reach the cards under it.
+    user.provider_script(
+        "claude",
+        json!({"models": ["fake-small", "fake-large"], "efforts": ["low", "medium", "high"]}),
+    );
     project(&user, "atlas");
     workspace(&user, "atlas", "login");
     learn_models(&user, "atlas", "claude", "fake-small");
@@ -4254,8 +4351,31 @@ fn an_open_dropdown_is_above_the_elements_under_it_and_inside_the_window(cx: &mu
     );
 }
 
+/// The labels of a picker's list.
+fn menu_labels(composer: &Entity<Composer>, menu: Menu, cx: &mut VisualTestContext) -> Vec<String> {
+    composer.read_with(cx, |c, _| {
+        c.entries(menu).into_iter().map(|e| e.label).collect()
+    })
+}
+
+/// No "default model" nor "default effort" in what the pickers say: neither on them nor in their
+/// lists, a "default" note aside.
+fn no_default_wording(composer: &Entity<Composer>, cx: &mut VisualTestContext) {
+    let mut said = vec![
+        model_shown(composer, cx),
+        composer.read_with(cx, |c, _| c.effort_shown()),
+    ];
+    said.extend(menu_labels(composer, Menu::Model, cx));
+    said.extend(menu_labels(composer, Menu::Effort, cx));
+    for said in said {
+        assert!(!said.to_lowercase().contains("default"), "{said:?}");
+    }
+}
+
 #[gpui_kit::test]
-fn the_model_picker_lists_claude_s_models_by_name_with_default_model_once(cx: &mut TestAppContext) {
+fn a_provider_s_default_alias_shows_as_the_model_it_stands_for_selected_with_a_default_note(
+    cx: &mut TestAppContext,
+) {
     let user = User::with_fake_claude();
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     project(&user, "atlas");
@@ -4273,21 +4393,158 @@ fn the_model_picker_lists_claude_s_models_by_name_with_default_model_once(cx: &m
         })
     });
 
-    let labels = |menu: Menu, cx: &mut VisualTestContext| -> Vec<String> {
-        composer.read_with(cx, |c, _| {
-            c.entries(menu).into_iter().map(|e| e.label).collect()
-        })
-    };
-    assert_eq!(model_shown(&composer, cx), "default model");
-    assert_eq!(labels(Menu::Model, cx), ["default model", "Fable", "Haiku"]);
-    assert_eq!(
-        labels(Menu::Effort, cx),
-        ["default effort", "low", "medium", "high", "xhigh"],
-        "one default entry"
-    );
+    assert_eq!(model_shown(&composer, cx), "Fable");
+    assert_eq!(menu_labels(&composer, Menu::Model, cx), ["Fable", "Haiku"]);
+    let fable = composer.read_with(cx, |c, _| c.entries(Menu::Model)[0].clone());
+    assert!(fable.on, "the default model's row is the selected one");
+    assert_eq!(fable.note.as_deref(), Some("default"));
+    no_default_wording(&composer, cx);
+
+    // Another model, then the default's row again: that is picking none.
+    cx.update(|window, cx| window.click("model-picker", cx));
+    cx.update(|window, cx| window.click("model-choice-haiku", cx));
+    assert_eq!(model_shown(&composer, cx), "Haiku");
     cx.update(|window, cx| window.click("model-picker", cx));
     cx.update(|window, cx| window.click("model-choice-fable", cx));
     assert_eq!(model_shown(&composer, cx), "Fable");
+    assert_eq!(composer.read_with(cx, |c, _| c.pick().model.clone()), None);
+
+    type_task("A first task", cx);
+    cx.simulate_keystrokes("enter");
+    until(&shell, cx, "the session's page opens", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+    });
+    let page = session_page(&shell, cx);
+    let lead = page.read_with(cx, |p, _| p.id().to_owned());
+    let shown = user.call("agent.show", json!({"agent": lead})).unwrap()["agent"].clone();
+    assert_eq!(
+        shown["chosen"]["model"],
+        serde_json::Value::Null,
+        "no model named"
+    );
+}
+
+#[gpui_kit::test]
+fn picking_the_default_model_s_row_while_the_project_has_its_own_model_names_the_default_model(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_claude();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    project(&user, "atlas");
+    start(&user, "atlas", None, "hello");
+    let file = user.project_file("atlas");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, format!("model = \"haiku\"\n{text}")).unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let composer = composer_of(&shell, "atlas", cx);
+    until(
+        &shell,
+        cx,
+        "the composer starts on the project's model",
+        |cx| composer.read_with(cx, |c, _| c.pick().model.as_deref() == Some("haiku")),
+    );
+    assert_eq!(model_shown(&composer, cx), "Haiku · the project's");
+
+    // The default's row names its model: left unnamed, the project's would be taken instead.
+    cx.update(|window, cx| window.click("model-picker", cx));
+    cx.update(|window, cx| window.click("model-choice-fable", cx));
+    assert_eq!(model_shown(&composer, cx), "Fable");
+    assert_eq!(
+        composer
+            .read_with(cx, |c, _| c.pick().model.clone())
+            .as_deref(),
+        Some("fable")
+    );
+
+    type_task("A first task", cx);
+    cx.simulate_keystrokes("enter");
+    until(&shell, cx, "the session's page opens", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+    });
+    let page = session_page(&shell, cx);
+    let lead = page.read_with(cx, |p, _| p.id().to_owned());
+    let shown = user.call("agent.show", json!({"agent": lead})).unwrap()["agent"].clone();
+    assert_eq!(shown["chosen"]["model"], "fable");
+}
+
+#[gpui_kit::test]
+fn an_effort_its_provider_does_not_say_is_chosen_by_it_and_never_a_default_effort(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_claude();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    project(&user, "atlas");
+    start(&user, "atlas", None, "hello");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let composer = composer_of(&shell, "atlas", cx);
+    until(&shell, cx, "the efforts are known", |cx| {
+        composer.read_with(cx, |c, _| !c.entries(Menu::Effort).is_empty())
+    });
+
+    assert_eq!(
+        composer.read_with(cx, |c, _| c.effort_shown()),
+        "effort chosen by Claude"
+    );
+    assert_eq!(
+        menu_labels(&composer, Menu::Effort, cx),
+        ["Chosen by Claude", "low", "medium", "high", "xhigh"]
+    );
+    assert!(composer.read_with(cx, |c, _| c.entries(Menu::Effort)[0].on));
+    no_default_wording(&composer, cx);
+}
+
+#[gpui_kit::test]
+fn the_effort_a_model_runs_with_is_shown_selected_with_a_default_note(cx: &mut TestAppContext) {
+    let user = providers_user();
+    project(&user, "atlas");
+    learn_models(&user, "atlas", "claude", "fake-small");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let composer = composer_of(&shell, "atlas", cx);
+    until(&shell, cx, "the efforts are known", |cx| {
+        composer.read_with(cx, |c, _| !c.entries(Menu::Effort).is_empty())
+    });
+    settle(cx);
+
+    assert_eq!(composer.read_with(cx, |c, _| c.effort_shown()), "low");
+    assert_eq!(menu_labels(&composer, Menu::Effort, cx), ["low", "high"]);
+    let low = composer.read_with(cx, |c, _| c.entries(Menu::Effort)[0].clone());
+    assert!(low.on);
+    assert_eq!(low.note.as_deref(), Some("default"));
+    no_default_wording(&composer, cx);
+
+    cx.update(|window, cx| window.click("effort-picker", cx));
+    cx.update(|window, cx| window.click("effort-choice-high", cx));
+    assert_eq!(composer.read_with(cx, |c, _| c.effort_shown()), "high");
+    cx.update(|window, cx| window.click("effort-picker", cx));
+    cx.update(|window, cx| window.click("effort-choice-low", cx));
+    assert_eq!(composer.read_with(cx, |c, _| c.pick().effort.clone()), None);
+    assert_eq!(composer.read_with(cx, |c, _| c.effort_shown()), "low");
+}
+
+#[gpui_kit::test]
+fn before_a_session_said_its_models_the_picker_says_the_provider_chooses(cx: &mut TestAppContext) {
+    let user = providers_user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let composer = composer_of(&shell, "atlas", cx);
+    until(&shell, cx, "the composer starts on claude", |cx| {
+        composer.read_with(cx, |c, _| c.pick().provider.as_deref() == Some("claude"))
+    });
+
+    assert_eq!(model_shown(&composer, cx), "model chosen by Claude");
+    assert_eq!(
+        menu_labels(&composer, Menu::Model, cx),
+        [
+            "Chosen by Claude",
+            "Claude's models are known once one of its sessions opened"
+        ]
+    );
+    assert!(composer.read_with(cx, |c, _| c.entries(Menu::Model)[0].on));
+    no_default_wording(&composer, cx);
 }
 
 /// A secret the daemon knows through its environment (#63).

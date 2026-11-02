@@ -553,8 +553,11 @@ bridge runs one session.
   answer allows the call with its input unchanged, or denies it. In bare mode they should almost
   never come: Flottille's tools are pre-allowed.
 - **The model** is an option (`model`) whose values are the `models` of `claude`'s answer to
-  `initialize` (their `value`, `default` first when it does not list it), set with a `set_model`
-  control request; a value it did not list is refused with the list.
+  `initialize` (their `value`, `default` first when it does not list it), with the model `default`
+  stands for as its `recommendedValue`: the one whose `resolvedModel` (or `value`) is the
+  `resolvedModel` of `default`, else the one `displayName` its description gives (none when it gives two), else none.
+  It is set with a `set_model` control request; a value it did not list is refused with the
+  list.
 - **The effort** is an option (`effort`, category `thought_level`) when the model set has effort
   levels (`supportsEffort`, `supportedEffortLevels` in the same answer): `default` and those
   levels, set with an `apply_flag_settings` control request (`effortLevel`, `null` for

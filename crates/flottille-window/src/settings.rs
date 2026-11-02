@@ -276,7 +276,7 @@ impl SettingsPage {
                     .map_or_else(|| name.clone(), |p| p.title.clone());
                 (
                     title,
-                    Some(model.clone().unwrap_or_else(|| "default model".into())),
+                    Some(self.providers.model_line(name, model.as_deref())),
                 )
             }
         }
@@ -312,15 +312,22 @@ impl SettingsPage {
                     .get(name)
                     .and_then(|p| p.models.clone())
                     .unwrap_or_default();
+                // The row that names none: the provider's default model by its name, when known.
+                let first = self.providers.model_said(name, None).unwrap_or_else(|| {
+                    let title = self.providers.get(name).map_or(name.as_str(), |p| &p.title);
+                    format!("Chosen by {title}")
+                });
+                let default = models.iter().find(|m| m.default).map(|m| m.id.clone());
                 let mut entries = vec![(
                     "judge-model-default".to_owned(),
-                    "default model".to_owned(),
-                    model.is_none(),
+                    first,
+                    model.is_none() || model == &default,
                     Some((name.clone(), None)),
                 )];
+                // The default model is that first row, not a second one.
                 for listed in models
                     .into_iter()
-                    .filter(|m| m.id != crate::composer::DEFAULT)
+                    .filter(|m| m.id != crate::composer::DEFAULT && !m.default)
                 {
                     entries.push((
                         format!("judge-model-{}", listed.id),

@@ -1085,7 +1085,12 @@ sure: a version other than the one Flottille was checked against, no sign-in it 
 program standing for the provider (`docs/agents.md`, "For tests and development"). `models` is
 `null` until a session of the provider's agent said them, and `efforts` of a model `null` until a
 session had that model; `name` is what the provider shows the model by; `default` is there, `true`,
-on the model a new session takes when none is asked, once one said it. `models_outdated` is `true`
+on the model a new session takes when none is asked, once one said it. A provider's own `default`
+value that names the model it stands for (`_meta.jetbrains.air.recommendedValue` of the `model`
+option) is an alias: it stays listed with `stands_for`, that model's id, and the model it stands
+for is the `default` one, with the alias's `efforts`. `default_effort` is the effort a model runs
+with when none is asked, once a new session none was set on said it by its name (Claude says it
+as `default` only: never there for Claude). `models_outdated` is `true`
 when they were said by another version of the program or with other API keys set: they are listed
 as they were, but refuse no model and no effort until a session says them again. `project` is there only when one is named; its `provider` is `null` when
 none is enabled, its `model` `null` when the project names none. `judge` is the Auto judge the user
