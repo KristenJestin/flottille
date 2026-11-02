@@ -507,15 +507,13 @@ impl SettingsPage {
 
     /// Uses `appearance` at once, and asks the daemon to keep it for every window.
     pub fn choose_appearance(&mut self, appearance: Appearance, cx: &mut Context<Self>) {
-        if self.appearance.is_none() || self.appearance == Some(appearance) {
+        if !self.appearance_known() || self.appearance == Some(appearance) {
             return;
         }
         self.appearance = Some(appearance);
         omarchy::appear(appearance, cx);
         self.shell
-            .update(cx, |shell, _| {
-                shell.perform(Command::AppearanceSet(appearance))
-            })
+            .update(cx, |shell, _| shell.ask_appearance(Some(appearance)))
             .ok();
         cx.notify();
     }
@@ -542,8 +540,8 @@ impl SettingsPage {
     fn appearance_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let known = self.appearance.is_some();
-        let kept = self.appearance.unwrap_or_default();
         let shown = omarchy::shown(cx);
+        let kept = self.appearance.unwrap_or_default();
         let refused = omarchy::omarchy_refused(cx);
         let row = |label: &'static str, hint: &'static str, control: AnyElement| {
             div()

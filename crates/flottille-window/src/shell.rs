@@ -142,6 +142,8 @@ pub struct Shell {
     /// The notice of the Auto judge Flottille picked was dismissed here, before the daemon says
     /// it was seen.
     judge_noticed: bool,
+    /// The number of the latest request about the appearance (see [`Shell::ask_appearance`]).
+    appearance_asked: u64,
     /// The open project's settings page; made again for another project.
     project_settings: Option<Entity<ProjectSettingsPage>>,
     /// The form that adds a project, one for the window's life.
@@ -274,6 +276,7 @@ impl Shell {
             settings,
             rules,
             judge_noticed: false,
+            appearance_asked: 0,
             project_settings: None,
             add_project,
             updates: Some(updates),
@@ -282,7 +285,7 @@ impl Shell {
         };
         shell.relayout(true, window, cx);
         // The colours the user chose, kept by the daemon for every window.
-        shell.actions.send(Command::AppearanceRead);
+        shell.ask_appearance(None);
         // Given once the window is built: a root built after would take it back.
         cx.defer_in(window, |this, window, cx| window.focus(&this.focus, cx));
         shell
@@ -469,6 +472,17 @@ impl Shell {
         self.actions.send(command);
     }
 
+    /// Asks the daemon to keep `choice` as the appearance, or what it keeps when there is none.
+    /// Each request is numbered; the window only believes the answer to the latest.
+    pub fn ask_appearance(&mut self, choice: Option<flottille_ui::omarchy::Appearance>) {
+        self.appearance_asked += 1;
+        let seq = self.appearance_asked;
+        self.actions.send(match choice {
+            Some(appearance) => Command::AppearanceSet { appearance, seq },
+            None => Command::AppearanceRead { seq },
+        });
+    }
+
     /// "New session in …": the composer, set to start there.
     pub fn compose_in(
         &mut self,
@@ -596,7 +610,7 @@ impl Shell {
             Update::Providers(read, providers) => self.set_providers(read, providers, cx),
             Update::TextChanged { judge: true, .. } => self.actions.send(Command::JudgeRead),
             Update::DeveloperChanged => self.actions.send(Command::DeveloperRead),
-            Update::AppearanceChanged => self.actions.send(Command::AppearanceRead),
+            Update::AppearanceChanged => self.ask_appearance(None),
             Update::Forged(forged) => self.forged(forged, cx),
             Update::News(news) => self.news(news, cx),
             Update::Items { project, item } => {
@@ -929,11 +943,14 @@ impl Shell {
                 self.settings
                     .update(cx, |page, cx| page.developer_answered(shown, written, cx));
             }
-            Outcome::Appearance { written, shown } => {
+            // Only the answer to the latest request counts: an older one would take the window
+            // back to a choice the user has since changed.
+            Outcome::Appearance { seq, .. } if seq != self.appearance_asked => {}
+            Outcome::Appearance { written, shown, .. } => {
                 match &shown {
                     Ok(appearance) => flottille_ui::omarchy::appear(*appearance, cx),
                     // A choice not kept: the window goes back to what the daemon keeps.
-                    Err(_) if written => self.actions.send(Command::AppearanceRead),
+                    Err(_) if written => self.ask_appearance(None),
                     Err(_) => {}
                 }
                 self.settings
@@ -1759,7 +1776,7 @@ impl Shell {
             self.actions.send(Command::RulesRead { project: None });
             self.actions.send(Command::JudgeRead);
             self.actions.send(Command::DeveloperRead);
-            self.actions.send(Command::AppearanceRead);
+            self.ask_appearance(None);
         }
         let page = self.page_of(&selection, cx);
         self.selected = Some(selection);

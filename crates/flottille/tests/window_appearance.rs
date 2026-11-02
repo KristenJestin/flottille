@@ -6,6 +6,7 @@
 mod common;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use common::User;
@@ -55,8 +56,17 @@ fn window<'a>(
     user: &User,
     cx: &'a mut TestAppContext,
 ) -> (Entity<Shell>, &'a mut VisualTestContext) {
-    cx.update(|cx| flottille_ui::init_with(env_of(user), cx));
     let connect: Connect = Arc::new(user.connector());
+    window_through(user, connect, cx)
+}
+
+/// A window whose every connection to the daemon is made through `connect`.
+fn window_through<'a>(
+    user: &User,
+    connect: Connect,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    cx.update(|cx| flottille_ui::init_with(env_of(user), cx));
     let (shell, cx) = cx.add_window_view(|window, cx| Shell::new_polled(connect, window, cx));
     cx.simulate_resize(size(px(1280.), px(1600.)));
     (shell, cx)
@@ -207,7 +217,17 @@ fn choosing_omarchy_with_a_test_theme_folder_follows_it(cx: &mut TestAppContext)
 #[gpui_kit::test]
 fn off_omarchy_the_omarchy_choice_is_disabled_and_says_why(cx: &mut TestAppContext) {
     let user = user(false);
-    let (shell, cx) = window(&user, cx);
+    // Flottille is already kept: a request for Omarchy would be a change.
+    let kept = json!({"theme": "flottille", "shade": "light"});
+    user.call("appearance.set", kept.clone()).unwrap();
+    let connections = Arc::new(AtomicUsize::new(0));
+    let counted = connections.clone();
+    let through = user.connector();
+    let connect: Connect = Arc::new(move || {
+        counted.fetch_add(1, Ordering::SeqCst);
+        through()
+    });
+    let (shell, cx) = window_through(&user, connect, cx);
     open_appearance(&shell, cx);
     assert_eq!(
         selected("appearance-theme-flottille", cx),
@@ -227,13 +247,23 @@ fn off_omarchy_the_omarchy_choice_is_disabled_and_says_why(cx: &mut TestAppConte
         "it names what is missing"
     );
 
+    let before = connections.load(Ordering::SeqCst);
     click("appearance-theme-omarchy", cx);
     settle(cx);
-    shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
-    assert!(
-        !user.path("config/flottille/appearance.toml").exists(),
+    // A request would reach the daemon within milliseconds: the window is given the time of
+    // many, polling as it does, before it is said to have asked nothing.
+    let until = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < until {
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(
+        connections.load(Ordering::SeqCst),
+        before,
         "nothing was asked of the daemon"
     );
+    assert_eq!(stored(&user), kept, "nothing was kept");
     assert_eq!(selected("appearance-theme-flottille", cx), Some(true));
 }
 
@@ -264,4 +294,96 @@ fn the_choice_survives_a_new_window_read_back_from_the_daemon(cx: &mut TestAppCo
     });
     settle(cx);
     assert_eq!(cx.update(|_, cx| palette(cx)).acc, hex(0xf0883e));
+}
+
+fn toasts(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
+    shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .map(|toast| toast.title().to_owned())
+            .collect()
+    })
+}
+
+/// The folder `path` cannot be written in until this is dropped.
+struct Locked(std::path::PathBuf);
+
+impl Locked {
+    fn new(path: std::path::PathBuf) -> Locked {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
+        Locked(path)
+    }
+}
+
+impl Drop for Locked {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+#[gpui_kit::test]
+fn a_choice_the_daemon_refuses_says_so_in_a_toast_and_shows_the_kept_appearance_again(
+    cx: &mut TestAppContext,
+) {
+    let user = user(false);
+    let (shell, cx) = window(&user, cx);
+    open_appearance(&shell, cx);
+    assert_eq!(selected("appearance-shade-dark", cx), Some(true));
+
+    // The daemon cannot write its file: it refuses the choice.
+    let _locked = Locked::new(user.path("config/flottille"));
+    click("appearance-shade-light", cx);
+    until(&shell, cx, "a toast says it was not kept", |cx| {
+        toasts(&shell, cx) == ["The appearance was not kept"]
+    });
+    until(&shell, cx, "the kept appearance is shown again", |cx| {
+        cx.update(|_, cx| omarchy::shown(cx)).shade == flottille_ui::theme::Shade::Dark
+    });
+    settle(cx);
+    assert_eq!(selected("appearance-shade-dark", cx), Some(true));
+    assert_eq!(cx.update(|_, cx| palette(cx)), Palette::base());
+}
+
+#[gpui_kit::test]
+fn two_quick_choices_end_on_the_last_one_in_the_window_and_in_the_daemon(cx: &mut TestAppContext) {
+    let user = user(false);
+    // The first connection made after the clicks is slow: the answer to the first choice would
+    // come after the second one was made.
+    let slow = Arc::new(AtomicBool::new(false));
+    let late = slow.clone();
+    let through = user.connector();
+    let connect: Connect = Arc::new(move || {
+        if late.swap(false, Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(600));
+        }
+        through()
+    });
+    let (shell, cx) = window_through(&user, connect, cx);
+    open_appearance(&shell, cx);
+
+    slow.store(true, Ordering::SeqCst);
+    click("appearance-shade-light", cx);
+    click("appearance-shade-dark", cx);
+    let dark = flottille_ui::theme::Shade::Dark;
+    let until_late = Instant::now() + Duration::from_millis(1500);
+    while Instant::now() < until_late {
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            cx.update(|_, cx| omarchy::shown(cx)).shade,
+            dark,
+            "a late answer to the first choice does not take the window back to it"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    until(&shell, cx, "the last choice is kept", |_| {
+        stored(&user) == json!({"theme": "flottille", "shade": "dark"})
+    });
+    settle(cx);
+    assert_eq!(cx.update(|_, cx| palette(cx)), Palette::base());
+    assert_eq!(selected("appearance-shade-dark", cx), Some(true));
 }
