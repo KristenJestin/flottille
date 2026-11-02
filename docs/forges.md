@@ -235,6 +235,25 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
   and the other build tools report: `SUCCESSFUL` is `passing`, `FAILED`, `STOPPED` and the like
   are `failing`, anything else (`INPROGRESS`) is `pending`. Pipelines are on Cloud only
   (`pkg/cmd/pipeline/pipeline.go:20-27`).
+- **Which statuses count (Cloud).** A Pipelines build leaves its statuses on the commit, and
+  a rerun leaves new ones beside the earlier build's, so the statuses are told apart by the pipeline
+  each links to (`…/pipelines/results/<build>`, found among the newest 50 pipelines of the API):
+  only the **latest build of each pipeline** counts, a pipeline being the pull request's own
+  (`pipeline_pullrequest_target`, or the branch run of the pull requests' definition that `bkt
+  pipeline run --selector-type pull-requests` starts, which is how Flottille's `checks` re-runs
+  one) or a branch's own push, by its `selector.pattern`. A **branch's own pipeline is not counted
+  on the pull request** when a pull request's pipeline ran for the head (Bitbucket runs both when
+  the repository defines both, and the branch run has no `BITBUCKET_PR_*` variable); a repository
+  that defines no pull request pipeline keeps its branch pipeline as the pull request's checks. A
+  status no pipeline of the list explains (another CI's, an older build) is kept. When the
+  pipelines cannot be read, the statuses are shown as `bkt` gives them. **Assumed, and the
+  maintainer checks it**: Bitbucket's own pull request view may also list the branch pipeline.
+- **Checks that have not started.** A Cloud pull request whose head has no status, changed
+  less than 10 minutes ago (its `updated_on`, which a push moves) and in a repository whose newest
+  pipelines are not empty, says `checks: not started yet for <short sha>` (`forge` `show`, and
+  `not_started` in the JSON read) instead of `none ran on this pull request`; later, or in a
+  repository with no pipeline, it is `none ran`. A merge is refused either way, there being no
+  check.
 - **Draft is not modelled.** A pull request is `open`, `merged` (`MERGED`) or `closed`
   (`DECLINED`, `SUPERSEDED`); `bkt` has no draft flag, so none is shown, and `forge` `create` refuses
   `draft: true` for Bitbucket.

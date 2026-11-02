@@ -223,6 +223,8 @@ struct Listed {
     description: String,
     /// From the repository itself, not from a fork of it.
     own: bool,
+    /// When Cloud says the pull request last changed (a push does), in milliseconds.
+    updated: Option<u64>,
     /// Data Center says its reviewers in the list; Cloud does not.
     reviewers: Vec<(String, &'static str)>,
 }
@@ -252,6 +254,9 @@ fn listed(forge: &Forge, pull: &Value) -> Option<Listed> {
             description: text(&pull["description"]),
             own: matches!((from, to), (Some(from), Some(to))
                 if !from.is_empty() && from.eq_ignore_ascii_case(to)),
+            updated: pull["updated_on"]
+                .as_str()
+                .and_then(crate::session_read::form),
             reviewers: Vec::new(),
         });
     }
@@ -278,6 +283,7 @@ fn listed(forge: &Forge, pull: &Value) -> Option<Listed> {
         url: text(&pull["links"]["self"][0]["href"]),
         description: text(&pull["description"]),
         own: !from.0.is_empty() && from == to,
+        updated: None,
         reviewers: pull["participants"]
             .as_array()
             .into_iter()
@@ -478,6 +484,12 @@ async fn detailed_with(
     let id = found.id.to_string();
     let statuses = statuses_of(forge, context, &id).await?;
     let checks: Vec<_> = statuses.iter().map(check_of).collect();
+    let not_started = match (&found.head_commit, found.updated) {
+        (Some(head), Some(updated)) if checks.is_empty() => {
+            not_started(forge, context, head, updated).await
+        }
+        _ => None,
+    };
     let mergeable = mergeable(forge, context, &id).await;
     let (reviewers, comments) = if cloud(forge) {
         let base = cloud_page(forge, &id);
@@ -521,6 +533,7 @@ async fn detailed_with(
         mergeable,
         review: decision(&reviewers),
         checks,
+        not_started,
         comments,
         reviews: Vec::new(),
         reviewers,
@@ -556,6 +569,7 @@ fn cheap(forge: &Forge, path: &str, found: Listed) -> crate::items::Fetched {
         mergeable: None,
         review: None,
         checks: Vec::new(),
+        not_started: None,
         comments: Vec::new(),
         reviews: Vec::new(),
         reviewers: found.reviewers,
@@ -695,6 +709,10 @@ fn listed_of(item: &flottille_core::item::Item) -> Option<Listed> {
         url: item.url.clone().unwrap_or_default(),
         description: text("description"),
         own: true,
+        updated: item
+            .updated_at
+            .as_deref()
+            .and_then(crate::session_read::form),
         reviewers: item.details["reviewers"]
             .as_array()
             .into_iter()
@@ -814,19 +832,106 @@ async fn checks_of(
     Ok(statuses.iter().map(check_of).collect())
 }
 
-/// The commit statuses of the pull request `id`, as `bkt pr checks --json` gives them.
+/// The commit statuses of the pull request `id`, as `bkt pr checks --json` gives them, on Cloud
+/// only the ones that count (`counted`).
 async fn statuses_of(forge: &Forge, context: &str, id: &str) -> Result<Vec<Value>, String> {
     let said = json(&command(forge, context, &["pr", "checks", id], &["--json"])).await?;
-    match said.get("statuses") {
+    let statuses = match said.get("statuses") {
         // A commit with no status: `bkt` answers `null` (a nil Go slice), and no check ran.
-        Some(Value::Null) => Ok(Vec::new()),
-        Some(Value::Array(statuses)) => Ok(statuses.clone()),
+        Some(Value::Null) => Vec::new(),
+        Some(Value::Array(statuses)) => statuses.clone(),
         // Without its `statuses` (or in another shape), `bkt` said nothing about them.
-        _ => Err(format!(
-            "the checks of the pull request #{id} could not be read: `bkt pr checks --json` \
-             answered without `statuses`"
-        )),
+        _ => {
+            return Err(format!(
+                "the checks of the pull request #{id} could not be read: `bkt pr checks --json` \
+                 answered without `statuses`"
+            ));
+        }
+    };
+    if statuses
+        .iter()
+        .any(|s| build_of(forge, s["url"].as_str()).is_some())
+        && let Some(pipelines) = recent_pipelines(forge, context).await
+    {
+        return Ok(counted(forge, statuses, &pipelines));
     }
+    Ok(statuses)
+}
+
+/// The newest 50 pipelines of a Cloud repository, as the API gives them; none on Data Center and
+/// when they cannot be read, which leaves the statuses as `bkt` gave them.
+async fn recent_pipelines(forge: &Forge, context: &str) -> Option<Vec<Value>> {
+    if !cloud(forge) {
+        return None;
+    }
+    let path = format!("{}/pipelines/", cloud_repository(forge));
+    let (pipelines, _) = cloud_values_with(context, &path, PAGE, &["sort=-created_on"])
+        .await
+        .ok()?;
+    Some(pipelines)
+}
+
+/// What a pipeline is on a pull request: the pull request's own (`pipeline_pullrequest_target`),
+/// a branch run of the pull requests' definition (which is how `bkt pipeline run` starts one again,
+/// `forge` `checks`), or a branch's own push. Bitbucket's pipelines are told apart by it and by the
+/// pattern they were selected by.
+fn pipeline_kind(pipeline: &Value) -> (bool, &str) {
+    let target = &pipeline["target"];
+    let selector = &target["selector"];
+    let for_pull_requests =
+        target["type"] == "pipeline_pullrequest_target" || selector["type"] == "pull-requests";
+    (
+        for_pull_requests,
+        selector["pattern"].as_str().unwrap_or(""),
+    )
+}
+
+/// The statuses that count on the pull request: the latest run of each pipeline, and a branch's own
+/// pipeline only when no pull request's ran for the head (a repository that defines none still
+/// has its checks). A status that no pipeline of the repository explains (another CI's, or a
+/// build older than the 50 newest pipelines) is kept.
+///
+/// A rerun is a new build of the same pipeline with new statuses, and the earlier build's stay on
+/// the commit: they are what made a fixed run still count as failed.
+fn counted(forge: &Forge, statuses: Vec<Value>, pipelines: &[Value]) -> Vec<Value> {
+    let pipeline_of = |status: &Value| {
+        let build = build_of(forge, status["url"].as_str())?;
+        pipelines
+            .iter()
+            .find(|p| p["build_number"].as_u64() == Some(build))
+            .map(|p| (build, pipeline_kind(p)))
+    };
+    let known: Vec<_> = statuses.iter().map(pipeline_of).collect();
+    let pull_request_ran = known.iter().flatten().any(|(_, (pull, _))| *pull);
+    let mut latest: std::collections::HashMap<(bool, &str), u64> = Default::default();
+    for (build, kind) in known.iter().flatten() {
+        let newest = latest.entry(*kind).or_default();
+        *newest = (*newest).max(*build);
+    }
+    statuses
+        .iter()
+        .zip(&known)
+        .filter(|(_, known)| match known {
+            None => true,
+            Some((build, kind)) => latest[kind] == *build && (kind.0 || !pull_request_ran),
+        })
+        .map(|(status, _)| status.clone())
+        .collect()
+}
+
+/// How long after a pull request last changed its head may still be waiting for its pipeline: past
+/// it, a head with no check is one nothing ran for.
+const STARTING: u64 = 10 * 60 * 1000;
+
+/// The short commit whose checks have not started yet: the head of a Cloud pull request that
+/// changed a moment ago, in a repository that runs pipelines (one of its newest pipelines exists),
+/// with no check yet. None when it is rather that none ran.
+async fn not_started(forge: &Forge, context: &str, head: &str, updated: u64) -> Option<String> {
+    if !cloud(forge) || flottille_core::store::now_ms().saturating_sub(updated) > STARTING {
+        return None;
+    }
+    let pipelines = recent_pipelines(forge, context).await?;
+    (!pipelines.is_empty()).then(|| head.chars().take(7).collect())
 }
 
 /// Whether the pull request `id` merges without conflict: on Cloud, no file of its diffstat is

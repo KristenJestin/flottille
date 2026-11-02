@@ -294,6 +294,9 @@ pub struct Pull {
     pub review: Option<&'static str>,
     /// Each check's name and state: `passing`, `failing`, `pending` or `skipped`.
     pub checks: Vec<(String, &'static str)>,
+    /// The short commit whose checks have not started yet, when Bitbucket has no check for a head
+    /// pushed a moment ago; none otherwise, and then no check at all means none ran.
+    pub not_started: Option<String>,
     pub comments: Vec<Comment>,
     pub reviews: Vec<Comment>,
     /// The reviewers asked and their verdict (`approved`, `changes requested`, `pending`), of
@@ -378,6 +381,9 @@ impl Pull {
             "mark": self.mark(),
             "comments": self.comments.len(),
         });
+        if let Some(commit) = &self.not_started {
+            pull["not_started"] = json!(commit);
+        }
         if !self.reviewers.is_empty() {
             pull["reviewers"] = self
                 .reviewers
@@ -436,6 +442,7 @@ impl Pull {
                 .flatten()
                 .map(check_of)
                 .collect(),
+            not_started: None,
             comments: comments("comments"),
             reviews: comments("reviews"),
             reviewers: Vec::new(),
@@ -2235,7 +2242,12 @@ fn pull_text(text: &mut String, named: &str, pull: &Pull, full: bool, again: &st
         text.push_str(&format!("  reviewers: {}\n", each.join(", ")));
     }
     match pull.mark() {
-        None => text.push_str("  checks: none ran on this pull request\n"),
+        None => match &pull.not_started {
+            Some(commit) => text.push_str(&format!(
+                "  checks: not started yet for {commit}, ask again in a moment\n"
+            )),
+            None => text.push_str("  checks: none ran on this pull request\n"),
+        },
         Some(mark) => {
             let each: Vec<String> = pull
                 .checks
