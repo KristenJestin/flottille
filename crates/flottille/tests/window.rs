@@ -4335,6 +4335,50 @@ fn a_provider_s_default_alias_shows_as_the_model_it_stands_for_selected_with_a_d
 }
 
 #[gpui_kit::test]
+fn picking_the_default_model_s_row_while_the_project_has_its_own_model_names_the_default_model(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_claude();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    project(&user, "atlas");
+    start(&user, "atlas", None, "hello");
+    let file = user.project_file("atlas");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, format!("model = \"haiku\"\n{text}")).unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let composer = composer_of(&shell, "atlas", cx);
+    until(
+        &shell,
+        cx,
+        "the composer starts on the project's model",
+        |cx| composer.read_with(cx, |c, _| c.pick().model.as_deref() == Some("haiku")),
+    );
+    assert_eq!(model_shown(&composer, cx), "Haiku · the project's");
+
+    // The default's row names its model: left unnamed, the project's would be taken instead.
+    cx.update(|window, cx| window.click("model-picker", cx));
+    cx.update(|window, cx| window.click("model-choice-fable", cx));
+    assert_eq!(model_shown(&composer, cx), "Fable");
+    assert_eq!(
+        composer
+            .read_with(cx, |c, _| c.pick().model.clone())
+            .as_deref(),
+        Some("fable")
+    );
+
+    type_task("A first task", cx);
+    cx.simulate_keystrokes("enter");
+    until(&shell, cx, "the session's page opens", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+    });
+    let page = session_page(&shell, cx);
+    let lead = page.read_with(cx, |p, _| p.id().to_owned());
+    let shown = user.call("agent.show", json!({"agent": lead})).unwrap()["agent"].clone();
+    assert_eq!(shown["chosen"]["model"], "fable");
+}
+
+#[gpui_kit::test]
 fn an_effort_its_provider_does_not_say_is_chosen_by_it_and_never_a_default_effort(
     cx: &mut TestAppContext,
 ) {
