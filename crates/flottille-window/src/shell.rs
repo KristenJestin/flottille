@@ -281,6 +281,8 @@ impl Shell {
             _clock,
         };
         shell.relayout(true, window, cx);
+        // The colours the user chose, kept by the daemon for every window.
+        shell.actions.send(Command::AppearanceRead);
         // Given once the window is built: a root built after would take it back.
         cx.defer_in(window, |this, window, cx| window.focus(&this.focus, cx));
         shell
@@ -594,6 +596,7 @@ impl Shell {
             Update::Providers(read, providers) => self.set_providers(read, providers, cx),
             Update::TextChanged { judge: true, .. } => self.actions.send(Command::JudgeRead),
             Update::DeveloperChanged => self.actions.send(Command::DeveloperRead),
+            Update::AppearanceChanged => self.actions.send(Command::AppearanceRead),
             Update::Forged(forged) => self.forged(forged, cx),
             Update::News(news) => self.news(news, cx),
             Update::Items { project, item } => {
@@ -925,6 +928,16 @@ impl Shell {
             Outcome::Developer { written, shown } => {
                 self.settings
                     .update(cx, |page, cx| page.developer_answered(shown, written, cx));
+            }
+            Outcome::Appearance { written, shown } => {
+                match &shown {
+                    Ok(appearance) => flottille_ui::omarchy::appear(*appearance, cx),
+                    // A choice not kept: the window goes back to what the daemon keeps.
+                    Err(_) if written => self.actions.send(Command::AppearanceRead),
+                    Err(_) => {}
+                }
+                self.settings
+                    .update(cx, |page, cx| page.appearance_answered(shown, written, cx));
             }
             Outcome::JudgeGuidance { written, shown } => {
                 let editor = self.settings.read(cx).judge_guidance().clone();
@@ -1746,6 +1759,7 @@ impl Shell {
             self.actions.send(Command::RulesRead { project: None });
             self.actions.send(Command::JudgeRead);
             self.actions.send(Command::DeveloperRead);
+            self.actions.send(Command::AppearanceRead);
         }
         let page = self.page_of(&selection, cx);
         self.selected = Some(selection);

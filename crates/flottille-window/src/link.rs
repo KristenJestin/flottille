@@ -44,6 +44,8 @@ pub enum Update {
     },
     /// The developer mode was switched, from any client: the settings page reads it again.
     DeveloperChanged,
+    /// The window's appearance was chosen, from any client: the window reads it again.
+    AppearanceChanged,
     /// An agent created or changed a ticket or a pull request.
     Forged(model::Forged),
     /// An agent said something, reported, or was woken: news for its session.
@@ -162,6 +164,9 @@ fn follow(
         }
         if event.name == "developer.changed" {
             let _ = updates.unbounded_send(Update::DeveloperChanged);
+        }
+        if event.name == "appearance.changed" {
+            let _ = updates.unbounded_send(Update::AppearanceChanged);
         }
         if let Some(forged) = model::Forged::of(event) {
             let _ = updates.unbounded_send(Update::Forged(forged));

@@ -94,6 +94,10 @@ pub enum Command {
     DeveloperSet {
         log: bool,
     },
+    /// The window's appearance (`appearance.show`).
+    AppearanceRead,
+    /// Keeps the window's appearance (`appearance.set`).
+    AppearanceSet(flottille_ui::omarchy::Appearance),
     /// The user saw the notice of the Auto judge Flottille picked (`provider.judge_noticed`);
     /// the providers are read again.
     JudgeNoticed,
@@ -601,6 +605,12 @@ pub enum Outcome {
         written: bool,
         shown: Result<crate::settings::Developer, String>,
     },
+    /// The window's appearance as the daemon keeps it, after a read (`written` false) or a
+    /// choice.
+    Appearance {
+        written: bool,
+        shown: Result<flottille_ui::omarchy::Appearance, String>,
+    },
     /// The judge's guidance as the daemon says it, after a read (`written` false) or a save or
     /// a reset.
     JudgeGuidance {
@@ -960,6 +970,17 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 }
             });
             Outcome::Developer { written, shown }
+        }
+        Command::AppearanceRead | Command::AppearanceSet(_) => {
+            let (method, params, written) = match command {
+                Command::AppearanceSet(appearance) => {
+                    ("appearance.set", appearance_json(appearance), true)
+                }
+                _ => ("appearance.show", json!({}), false),
+            };
+            let shown = answer(ask_alone(connect, method, params, bounds.quick))
+                .and_then(|shown| appearance_of(&shown));
+            Outcome::Appearance { written, shown }
         }
         Command::ReadProviders => {
             let read = crate::providers::next_read();
@@ -1680,6 +1701,38 @@ pub(crate) fn read_providers(
 }
 
 /// The daemon's answer, or its sentence (or the window's) when there is none.
+/// The appearance in the words of `appearance.show`.
+fn appearance_json(appearance: flottille_ui::omarchy::Appearance) -> Value {
+    use flottille_ui::omarchy::Source;
+    use flottille_ui::theme::Shade;
+    let theme = match appearance.source {
+        Source::Omarchy => "omarchy",
+        Source::Flottille => "flottille",
+    };
+    let shade = match appearance.shade {
+        Shade::Light => "light",
+        Shade::Dark => "dark",
+    };
+    json!({"theme": theme, "shade": shade})
+}
+
+/// What `appearance.show` says, or why it says nothing the window knows.
+pub fn appearance_of(shown: &Value) -> Result<flottille_ui::omarchy::Appearance, String> {
+    use flottille_ui::omarchy::{Appearance, Source};
+    use flottille_ui::theme::Shade;
+    let source = match shown["theme"].as_str() {
+        Some("omarchy") => Source::Omarchy,
+        Some("flottille") => Source::Flottille,
+        other => return Err(format!("an unknown theme: {other:?}")),
+    };
+    let shade = match shown["shade"].as_str() {
+        Some("light") => Shade::Light,
+        Some("dark") => Shade::Dark,
+        other => return Err(format!("an unknown shade: {other:?}")),
+    };
+    Ok(Appearance { source, shade })
+}
+
 fn answer(asked: Result<Result<Value, String>, String>) -> Result<Value, String> {
     match asked {
         Ok(answer) => answer,
