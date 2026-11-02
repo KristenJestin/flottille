@@ -362,7 +362,7 @@ impl Pull {
     /// What blocks its merge: no check, its checks failing or still running, or a review asking
     /// for changes; none when nothing does.
     pub fn blocks(&self) -> Option<String> {
-        blocks(&self.checks, self.review)
+        blocks(&self.checks, self.review, self.not_started.as_deref())
     }
 
     fn to_json(&self) -> Value {
@@ -1879,8 +1879,13 @@ async fn forge_read(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall) -> Ou
 
 /// What blocks the merge of a pull request with these checks and this review; none when nothing
 /// does. A pull request no check ran on, or whose checks were all skipped, is blocked as a failing
-/// one is: nothing verified it.
-fn blocks(checks: &[(String, &'static str)], review: Option<&str>) -> Option<String> {
+/// one is: nothing verified it. A head whose checks have not started yet (`not_started`, its short
+/// commit) says so instead of saying none ran.
+fn blocks(
+    checks: &[(String, &'static str)],
+    review: Option<&str>,
+    not_started: Option<&str>,
+) -> Option<String> {
     let named = |state: &str| {
         let names: Vec<&str> = checks
             .iter()
@@ -1891,7 +1896,10 @@ fn blocks(checks: &[(String, &'static str)], review: Option<&str>) -> Option<Str
     };
     let mut blocks = Vec::new();
     if checks.is_empty() {
-        blocks.push("no check ran on this pull request".to_owned());
+        blocks.push(match not_started {
+            Some(commit) => format!("its checks have not started yet for {commit}"),
+            None => "no check ran on this pull request".to_owned(),
+        });
     } else if let Some(names) = named("skipped")
         && checks.iter().all(|(_, s)| *s == "skipped")
     {
@@ -2695,7 +2703,7 @@ mod tests {
         let blocked = |checks: &[(&str, &'static str)]| {
             let checks: Vec<(String, &'static str)> =
                 checks.iter().map(|(n, s)| ((*n).to_owned(), *s)).collect();
-            blocks(&checks, None)
+            blocks(&checks, None, None)
         };
         assert_eq!(
             blocked(&[]).as_deref(),

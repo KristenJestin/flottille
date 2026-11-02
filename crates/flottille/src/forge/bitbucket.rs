@@ -871,50 +871,93 @@ async fn recent_pipelines(forge: &Forge, context: &str) -> Option<Vec<Value>> {
     Some(pipelines)
 }
 
-/// What a pipeline is on a pull request: the pull request's own (`pipeline_pullrequest_target`),
-/// a branch run of the pull requests' definition (which is how `bkt pipeline run` starts one again,
-/// `forge` `checks`), or a branch's own push. Bitbucket's pipelines are told apart by it and by the
-/// pattern they were selected by.
-fn pipeline_kind(pipeline: &Value) -> (bool, &str) {
-    let target = &pipeline["target"];
-    let selector = &target["selector"];
-    let for_pull_requests =
-        target["type"] == "pipeline_pullrequest_target" || selector["type"] == "pull-requests";
-    (
-        for_pull_requests,
-        selector["pattern"].as_str().unwrap_or(""),
-    )
+/// Which pipeline a build is of, so that a rerun is told from another pipeline: the pull request's
+/// own (by its destination and the pattern it was selected by), or any other (a branch's push, a
+/// tag, a custom one: by its target and its pattern). A pull request's pipeline has a destination
+/// of its own: one branch can be the source of two pull requests.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct Pipeline {
+    target: String,
+    destination: String,
+    pattern: String,
 }
 
-/// The statuses that count on the pull request: the latest run of each pipeline, and a branch's own
-/// pipeline only when no pull request's ran for the head (a repository that defines none still
-/// has its checks). A status that no pipeline of the repository explains (another CI's, or a
+fn pipeline_of(pipeline: &Value) -> Pipeline {
+    let target = &pipeline["target"];
+    let text = |value: &Value| value.as_str().unwrap_or_default().to_owned();
+    let selector = &target["selector"];
+    let kind = match target["type"].as_str() {
+        Some("pipeline_pullrequest_target") => "pull request".to_owned(),
+        // A run started by `bkt pipeline run --selector-type pull-requests`, which is how Flottille
+        // runs a pull request's pipeline again: a branch run, without a destination.
+        _ if selector["type"] == "pull-requests" => "pull request rerun".to_owned(),
+        other => format!(
+            "{} {} {} {}",
+            other.unwrap_or_default(),
+            text(&target["ref_type"]),
+            text(&target["ref_name"]),
+            text(&selector["type"])
+        ),
+    };
+    Pipeline {
+        target: kind,
+        destination: text(&target["destination"]),
+        pattern: text(&selector["pattern"]),
+    }
+}
+
+/// The statuses that count on the pull request: every pipeline that ran on its head counts, a
+/// branch's own as well (Bitbucket's own merge check counts every status of the source commit), but
+/// only the latest build of each. A status that no pipeline of the list explains (another CI's, or a
 /// build older than the 50 newest pipelines) is kept.
 ///
 /// A rerun is a new build of the same pipeline with new statuses, and the earlier build's stay on
-/// the commit: they are what made a fixed run still count as failed.
+/// the commit: they are what made a fixed run still count as failed. A run that `forge` `checks`
+/// started again has no destination: it replaces the run of the one pull request pipeline of its
+/// pattern, and with two (two destinations) it is not known which it ran for, so it replaces
+/// none and the failed one still counts.
 fn counted(forge: &Forge, statuses: Vec<Value>, pipelines: &[Value]) -> Vec<Value> {
-    let pipeline_of = |status: &Value| {
-        let build = build_of(forge, status["url"].as_str())?;
-        pipelines
+    let known: Vec<Option<(u64, Pipeline)>> = statuses
+        .iter()
+        .map(|status| {
+            let build = build_of(forge, status["url"].as_str())?;
+            let found = pipelines
+                .iter()
+                .find(|p| p["build_number"].as_u64() == Some(build))?;
+            Some((build, pipeline_of(found)))
+        })
+        .collect();
+    let own = |pattern: &str| {
+        let destinations: std::collections::HashSet<&str> = known
             .iter()
-            .find(|p| p["build_number"].as_u64() == Some(build))
-            .map(|p| (build, pipeline_kind(p)))
+            .flatten()
+            .filter(|(_, p)| p.target == "pull request" && p.pattern == pattern)
+            .map(|(_, p)| p.destination.as_str())
+            .collect();
+        (destinations.len() == 1).then(|| destinations.into_iter().next().unwrap().to_owned())
     };
-    let known: Vec<_> = statuses.iter().map(pipeline_of).collect();
-    let pull_request_ran = known.iter().flatten().any(|(_, (pull, _))| *pull);
-    let mut latest: std::collections::HashMap<(bool, &str), u64> = Default::default();
-    for (build, kind) in known.iter().flatten() {
-        let newest = latest.entry(*kind).or_default();
+    let keyed: Vec<Option<(u64, Pipeline)>> = known
+        .iter()
+        .map(|known| {
+            let (build, mut pipeline) = known.clone()?;
+            if pipeline.target == "pull request rerun"
+                && let Some(destination) = own(&pipeline.pattern)
+            {
+                pipeline.target = "pull request".to_owned();
+                pipeline.destination = destination;
+            }
+            Some((build, pipeline))
+        })
+        .collect();
+    let mut latest: std::collections::HashMap<&Pipeline, u64> = Default::default();
+    for (build, pipeline) in keyed.iter().flatten() {
+        let newest = latest.entry(pipeline).or_default();
         *newest = (*newest).max(*build);
     }
     statuses
         .iter()
-        .zip(&known)
-        .filter(|(_, known)| match known {
-            None => true,
-            Some((build, kind)) => latest[kind] == *build && (kind.0 || !pull_request_ran),
-        })
+        .zip(&keyed)
+        .filter(|(_, keyed)| keyed.as_ref().is_none_or(|(build, p)| latest[p] == *build))
         .map(|(status, _)| status.clone())
         .collect()
 }
@@ -1333,7 +1376,13 @@ pub(super) async fn write(
                 } else {
                     pull.reviewers.clone()
                 };
-                if let Some(blocks) = blocks(&checks, decision(&reviewers)) {
+                let starting = match (&pull.head_commit, pull.updated) {
+                    (Some(head), Some(updated)) if checks.is_empty() => {
+                        not_started(forge, context, head, updated).await
+                    }
+                    _ => None,
+                };
+                if let Some(blocks) = blocks(&checks, decision(&reviewers), starting.as_deref()) {
                     return Outcome::Refused(format!(
                         "refused: the pull request #{number} of {branch} in {slug} is not \
                          merged: {blocks}; wait for its checks, or have it waived by the user \
