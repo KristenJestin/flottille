@@ -15,7 +15,8 @@
 //!
 //! - `script.json`, written by the test (optional: without it, signed in with no work item); read
 //!   again at every call;
-//! - `received.jsonl`, written by the fake: one `{"args": [...], "env": {...}}` per call.
+//! - `received.jsonl`, written by the fake: one `{"args": [...], "env": {...}}` per call;
+//! - `moved.json`, written by the fake: the status each moved work item is in.
 //!
 //! # The script
 //!
@@ -37,7 +38,8 @@
 //! A JQL that names `currentUser()` is answered with the script's `mine_search`, none without:
 //! the work items of the signed-in user.
 //!
-//! The writes change nothing: the test reads them in the record.
+//! The writes change nothing but the status a transition moves: the test reads them in the
+//! record.
 //!
 //! - `acli jira workitem create --project P --summary S … --json` prints `{"key": …}`, the
 //!   script's `created` (`P-1` without it); without `--project` or `--summary` it ends with 2.
@@ -45,10 +47,18 @@
 //!   --yes` end with 0 for a key of `items`, with 1 for another.
 //! - `acli jira workitem transition --key K --status S --yes` ends with 0 when S is one of the
 //!   script's `transitions` of K (`{"ABC-1": ["In Progress", "Done"]}`), in any case, and with 1
-//!   saying so otherwise.
+//!   saying so otherwise. These are the work item's transitions as Jira would answer them: the
+//!   fake is the only place they are known, since the real `acli` lists none.
+//!
+//! A transition that ends with 0 moves the work item: a later `view` shows the status as the
+//! script spells it in `transitions` (kept in `moved.json`). Three more script keys, each a list
+//! of work item keys (`die` a map of key to `"before"` or `"after"`), play what a real `acli` does:
+//! `no_move` ends with 0 without moving, as a bulk command ignoring a refused transition may;
+//! `die` ends the process by a signal, before or after the move; `unreadable_after_move` makes
+//! a `view` end with 1 once the work item has moved.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
@@ -72,11 +82,11 @@ fn main() {
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_else(|| json!({}));
-    std::process::exit(answer(&script, &args));
+    std::process::exit(answer(&dir, &script, &args));
 }
 
 /// What `acli` prints for `args`, and its exit code.
-fn answer(script: &Value, args: &[String]) -> i32 {
+fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     match words.as_slice() {
         ["jira", "auth", "status", ..] => {
@@ -92,8 +102,17 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 eprintln!("{failure}");
                 return 1;
             }
+            let moved = moved(dir);
+            if moved.get(*key).is_some() && listed(&script["unreadable_after_move"], key) {
+                eprintln!("Error: work item {key} could not be fetched");
+                return 1;
+            }
             match script["items"].get(*key) {
                 Some(item) => {
+                    let mut item = item.clone();
+                    if let Some(status) = moved.get(*key) {
+                        item["fields"]["status"]["name"] = status.clone();
+                    }
                     println!("{item}");
                     0
                 }
@@ -154,20 +173,49 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             let (Some(key), Some(status)) = (value(rest, "--key"), value(rest, "--status")) else {
                 return not_run(&words);
             };
-            let possible = script["transitions"][key].as_array().into_iter().flatten();
-            if possible
+            let Some(to) = script["transitions"][key]
+                .as_array()
+                .into_iter()
+                .flatten()
                 .filter_map(Value::as_str)
-                .any(|to| to.eq_ignore_ascii_case(status))
-            {
-                println!("✓ Work item {key} transitioned to {status}");
-                0
-            } else {
+                .find(|to| to.eq_ignore_ascii_case(status))
+            else {
                 eprintln!("✗ Error: no transition to status {status} for work item {key}");
-                1
+                return 1;
+            };
+            let die = script["die"][key].as_str();
+            if die == Some("before") {
+                std::process::abort();
             }
+            // Like the real bulk command, it may end with 0 on a transition it did not take.
+            if !listed(&script["no_move"], key) {
+                let mut moved = moved(dir);
+                moved.insert(key.to_owned(), Value::from(to));
+                std::fs::write(dir.join("moved.json"), Value::from(moved).to_string())
+                    .expect("the moves");
+            }
+            if die == Some("after") {
+                std::process::abort();
+            }
+            println!("✓ Work item {key} transitioned to {to}");
+            0
         }
         _ => not_run(&words),
     }
+}
+
+/// Where the transitions that took left the work items: `moved.json`, written by the fake.
+fn moved(dir: &Path) -> Map<String, Value> {
+    std::fs::read_to_string(dir.join("moved.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// Whether the script's `list` (an array of keys) holds `key`.
+fn listed(list: &Value, key: &str) -> bool {
+    list.as_array()
+        .is_some_and(|keys| keys.iter().any(|k| k == key))
 }
 
 /// What follows `flag` in `args`.

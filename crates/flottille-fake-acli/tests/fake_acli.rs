@@ -124,3 +124,89 @@ fn the_writes_follow_the_script_and_change_nothing() {
     assert_eq!(not_moved.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&not_moved.stderr).contains("no transition to status Done"));
 }
+
+/// The status a view of ABC-1 shows.
+fn status_of(dir: &std::path::Path) -> Value {
+    let viewed = fake(dir)
+        .args(["jira", "workitem", "view", "ABC-1", "--json"])
+        .output()
+        .unwrap();
+    serde_json::from_slice::<Value>(&viewed.stdout).unwrap()["fields"]["status"]["name"].clone()
+}
+
+fn transition(dir: &std::path::Path, status: &str) -> std::process::Output {
+    fake(dir)
+        .args([
+            "jira",
+            "workitem",
+            "transition",
+            "--key",
+            "ABC-1",
+            "--status",
+            status,
+            "--yes",
+        ])
+        .output()
+        .unwrap()
+}
+
+fn scripted(extra: Value) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let mut script = json!({
+        "items": {"ABC-1": {"key": "ABC-1", "fields": {"status": {"name": "To Do"}}}},
+        "transitions": {"ABC-1": ["In Progress", "Done"]}});
+    for (name, value) in extra.as_object().unwrap() {
+        script[name] = value.clone();
+    }
+    std::fs::write(dir.path().join("script.json"), script.to_string()).unwrap();
+    dir
+}
+
+#[test]
+fn a_transition_moves_the_work_item_to_the_status_as_the_workflow_spells_it() {
+    let dir = scripted(json!({}));
+
+    let before = status_of(dir.path());
+    let moved = transition(dir.path(), "in progress");
+
+    assert_eq!(before, "To Do");
+    assert!(moved.status.success());
+    assert_eq!(status_of(dir.path()), "In Progress");
+}
+
+#[test]
+fn a_transition_the_script_says_does_not_move_ends_with_0_and_moves_nothing() {
+    let dir = scripted(json!({"no_move": ["ABC-1"]}));
+
+    let moved = transition(dir.path(), "Done");
+
+    assert!(moved.status.success());
+    assert_eq!(status_of(dir.path()), "To Do");
+}
+
+#[test]
+fn a_transition_the_script_kills_ends_by_a_signal_before_or_after_moving() {
+    use std::os::unix::process::ExitStatusExt;
+    for (when, status) in [("before", "To Do"), ("after", "Done")] {
+        let dir = scripted(json!({"die": {"ABC-1": when}}));
+
+        let killed = transition(dir.path(), "Done");
+
+        assert!(killed.status.signal().is_some(), "{when}");
+        assert_eq!(status_of(dir.path()), status, "{when}");
+    }
+}
+
+#[test]
+fn a_view_after_a_move_the_script_says_is_unreadable_ends_with_1() {
+    let dir = scripted(json!({"unreadable_after_move": ["ABC-1"]}));
+
+    assert_eq!(status_of(dir.path()), "To Do");
+    transition(dir.path(), "Done");
+    let viewed = fake(dir.path())
+        .args(["jira", "workitem", "view", "ABC-1", "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(viewed.status.code(), Some(1));
+}
