@@ -11,6 +11,7 @@
 //! `search` answer from and whose events a subscription to a ticket filters (`events`). Every
 //! text kept from a tracker is masked before it is shown or stored.
 
+use std::os::unix::process::ExitStatusExt;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -552,6 +553,11 @@ async fn acli(args: &[&str]) -> Result<(bool, String, String), Gh> {
         _ => Gh::Failed(error.to_string()),
     })?;
     match tokio::time::timeout(ACLI_TIME, child.wait_with_output()).await {
+        // Killed from outside: it said nothing, which is not a refusal.
+        Ok(Ok(output)) if output.status.signal().is_some() => Err(Gh::Failed(format!(
+            "acli {} was killed",
+            args.iter().take(3).copied().collect::<Vec<_>>().join(" ")
+        ))),
         Ok(Ok(output)) => Ok((
             output.status.success(),
             String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -1565,11 +1571,62 @@ async fn statuses_of(site: &str, project: &str) -> Result<Vec<Status>, String> {
     Ok(statuses)
 }
 
+/// The status a Jira work item is in now, with its category, once `acli` is checked to be signed
+/// in to `site`.
+async fn status_now(site: &str, key: &str) -> Result<Status, String> {
+    let item = viewed(key, site, "status").await?;
+    Ok(Status {
+        name: said(&item["fields"]["status"]["name"]),
+        category: item["fields"]["status"]["statusCategory"]["key"]
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase(),
+    })
+}
+
+/// The one status `close` (`done`) or `reopen` (`new`) moves a work item to, among the statuses
+/// seen on its project's work items: the only one seen, else the one named `preferred`, else
+/// (none seen) `preferred`. Several and none named so are refused, saying them: which one is
+/// meant is the agent's to say with `status`, never a try of each (a project may have "Won't do"
+/// beside "Done").
+fn target_of(
+    seen: &[Status],
+    category: &str,
+    kind: &str,
+    preferred: &str,
+    project: &str,
+    key: &str,
+) -> Result<String, String> {
+    let found: Vec<&str> = seen
+        .iter()
+        .filter(|s| s.category == category)
+        .map(|s| s.name.as_str())
+        .collect();
+    match found.as_slice() {
+        [] => Ok(preferred.to_owned()),
+        [one] => Ok((*one).to_owned()),
+        several => several
+            .iter()
+            .find(|name| name.eq_ignore_ascii_case(preferred))
+            .map(|name| (*name).to_owned())
+            .ok_or_else(|| {
+                format!(
+                    "refused: {project} has several {kind} statuses, {}, and none is named \
+                     {preferred}: move {key} with status, naming one of them; nothing was \
+                     written",
+                    and_listed(several)
+                )
+            }),
+    }
+}
+
 /// `tickets close`, `reopen` and `status` of a Jira work item. `acli jira workitem transition
 /// --status` asks Jira for the work item's transitions and takes the one that leads to the status
-/// named, or refuses and writes nothing: that is the only judge of what the work item can move to.
-/// `status` hands it the name asked; `close` and `reopen` hand it, in turn, the candidates of the
-/// category they need, until Jira takes one.
+/// named, or refuses: that is the only judge of what the work item can move to. Exactly one
+/// status is attempted (`status` hands it the name asked; `close` and `reopen` the one
+/// [`target_of`] chooses). The transition is a bulk command that may end with 0 on one it did not
+/// take, and may be killed on one it did: the status is read back, and what is said is what was
+/// read.
 async fn transition(site: &str, key: &str, asked: &TicketsCall) -> Outcome {
     let project = key.rsplit_once('-').map_or(key, |(project, _)| project);
     let action = asked.action.as_str();
@@ -1579,96 +1636,129 @@ async fn transition(site: &str, key: &str, asked: &TicketsCall) -> Outcome {
             "refused: tickets status needs status, the name of a status".into(),
         );
     }
-    let current = match viewed(key, site, "status").await {
-        Ok(item) => Status {
-            name: said(&item["fields"]["status"]["name"]),
-            category: item["fields"]["status"]["statusCategory"]["key"]
-                .as_str()
-                .unwrap_or_default()
-                .to_ascii_lowercase(),
-        },
+    let current = match status_now(site, key).await {
+        Ok(current) => current,
         Err(why) => return Outcome::Failed(why),
     };
     let closed = current.category == "done";
-    match action {
-        "reopen" if !closed => {
-            return Outcome::Done(format!(
-                "{key} is already open: it is in {}; nothing was written.",
-                current.name
-            ));
-        }
-        "close" if closed => {
-            return Outcome::Done(format!(
-                "{key} is already closed: it is in {}; nothing was written.",
-                current.name
-            ));
-        }
-        _ => {}
+    let already = match action {
+        "reopen" if !closed => Some("open"),
+        "close" if closed => Some("closed"),
+        _ => None,
+    };
+    if let Some(already) = already {
+        return Outcome::Done(format!(
+            "{key} is already {already}: it is in {}; nothing was written.",
+            current.name
+        ));
     }
-    let candidates: Vec<String> = if action == "status" {
-        vec![masked(wanted)]
+    if action == "status" && current.name.eq_ignore_ascii_case(wanted) {
+        return Outcome::Done(format!(
+            "{key} is already in {}; nothing was written.",
+            current.name
+        ));
+    }
+    let mut seen: Option<Vec<Status>> = None;
+    let target = if action == "status" {
+        masked(wanted)
     } else {
-        // Where the project's work items are seen first (never a status the work item is in),
-        // then the name Jira's default workflow gives the category.
-        let seen = statuses_of(site, project).await.unwrap_or_default();
-        let (categories, fallback): (&[&str], &str) = if action == "close" {
-            (&["done"], "Done")
+        let found = match statuses_of(site, project).await {
+            Ok(found) => seen.insert(found),
+            Err(why) => return Outcome::Failed(why),
+        };
+        let chosen = if action == "close" {
+            target_of(found, "done", "done", "Done", project, key)
         } else {
-            (&["new", "indeterminate"], "To Do")
+            target_of(found, "new", "to-do", "To Do", project, key)
         };
-        let named = |category: &str| -> Vec<String> {
-            seen.iter()
-                .filter(|s| s.category == category && !s.name.eq_ignore_ascii_case(&current.name))
-                .map(|s| s.name.clone())
-                .collect()
-        };
-        let mut names = named(categories[0]);
-        if names.is_empty() {
-            names.push(fallback.to_owned());
+        match chosen {
+            Ok(target) => target,
+            Err(refusal) => return Outcome::Refused(refusal),
         }
-        names.extend(categories[1..].iter().flat_map(|category| named(category)));
-        names
     };
-    let mut refusals: Vec<String> = Vec::new();
-    for target in &candidates {
-        let args = [
-            "jira",
-            "workitem",
-            "transition",
-            "--key",
-            key,
-            "--status",
-            target,
-            "--yes",
-        ];
-        match acli_run(&args).await {
-            Ok(_) => {
-                return Outcome::Done(match action {
-                    "close" => format!("{key} was closed: moved to {target}."),
-                    "reopen" => format!("{key} was reopened: moved to {target}."),
-                    _ => format!("{key} was moved to {target}."),
-                });
+    let args = [
+        "jira",
+        "workitem",
+        "transition",
+        "--key",
+        key,
+        "--status",
+        &target,
+        "--yes",
+    ];
+    let done = |now: &str| {
+        Outcome::Done(match action {
+            "close" => format!("{key} was closed: moved to {now}."),
+            "reopen" => format!("{key} was reopened: moved to {now}."),
+            _ => format!("{key} was moved to {now}."),
+        })
+    };
+    let refusal = match acli(&args).await {
+        Ok((true, ..)) => None,
+        Ok((false, stdout, stderr)) => {
+            let said = stderr
+                .lines()
+                .chain(stdout.lines())
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("");
+            Some(masked(&said.chars().take(300).collect::<String>()))
+        }
+        Err(Gh::Missing) => return Outcome::Failed("acli is not on the daemon's PATH".into()),
+        Err(Gh::Failed(why)) => {
+            // Cut or killed: whether Jira took it is not known; the status says.
+            return match status_now(site, key).await {
+                Ok(now) if now.name.eq_ignore_ascii_case(&target) => done(&now.name),
+                Ok(now) if now.name.eq_ignore_ascii_case(&current.name) => {
+                    Outcome::Failed(format!(
+                        "{key} was not moved to {target}: it is in {} (acli did not finish: \
+                         {why}); nothing was written",
+                        now.name
+                    ))
+                }
+                Ok(now) => Outcome::Failed(format!(
+                    "{key} was not moved to {target}: it is in {}, not in {} where it was (acli \
+                     did not finish: {why})",
+                    now.name, current.name
+                )),
+                Err(read) => Outcome::Failed(format!(
+                    "the result is unknown: acli did not finish ({why}) and the status of {key} \
+                     could not be read back ({read}); look at it before asking again"
+                )),
+            };
+        }
+    };
+    if let Some(line) = refusal {
+        let seen = match match seen {
+            Some(seen) => Ok(seen),
+            None => statuses_of(site, project).await,
+        } {
+            Ok(seen) if !seen.is_empty() => {
+                let names: Vec<&str> = seen.iter().map(|s| s.name.as_str()).collect();
+                format!(
+                    "; seen on {project}'s work items: {} (that does not say where {key} can \
+                     move)",
+                    and_listed(&names)
+                )
             }
-            Err(why) => refusals.push(why),
-        }
+            _ => String::new(),
+        };
+        return Outcome::Failed(format!(
+            "acli could not move {key} from {} to {target}: {line}; nothing was written; move it \
+             with status, naming a status{seen}",
+            current.name
+        ));
     }
-    let seen = match statuses_of(site, project).await {
-        Ok(seen) if !seen.is_empty() => {
-            let names: Vec<&str> = seen.iter().map(|s| s.name.as_str()).collect();
-            format!(
-                "; seen on {project}'s work items: {} (that does not say where {key} can move)",
-                and_listed(&names)
-            )
-        }
-        _ => String::new(),
-    };
-    let tried = and_listed(&candidates.iter().map(String::as_str).collect::<Vec<_>>());
-    let why = refusals.first().map_or("", String::as_str);
-    Outcome::Failed(format!(
-        "acli could not move {key} from {} to {tried}: {why}; nothing was written; move it \
-         with status, naming a status{seen}",
-        current.name
-    ))
+    match status_now(site, key).await {
+        Ok(now) if now.name.eq_ignore_ascii_case(&target) => done(&now.name),
+        Ok(now) => Outcome::Failed(format!(
+            "{key} was not moved to {target}: it is in {} (acli answered without an error)",
+            now.name
+        )),
+        Err(read) => Outcome::Failed(format!(
+            "the result is unknown: acli answered without an error but the status of {key} \
+             could not be read back ({read}); look at it before asking again"
+        )),
+    }
 }
 
 /// What `gh` says without the `project` scope, which `gh project` and the project items of an

@@ -480,10 +480,11 @@ reasons.
   one of the tracker's projects (it may be left out when the tracker has one), the type the
   project's default when none is given; `acli jira workitem comment create --key <K> --body
   <body>`; `acli jira workitem edit --key <K> [--summary] [--description] --yes`; and `close`,
-  `reopen` and `status` as `acli jira workitem transition --key <K> --status <name> --yes`, after
-  reading the work item's own status: Jira's transition decides whether a status can be reached, not
-  the statuses seen on other work items, and a `reopen` of a work item that is not closed says it is
-  already open and writes nothing ([`tickets.md`](tickets.md), "Jira's writes"). A ticket or a project the tracker does not take,
+  `reopen` and `status` as `acli jira workitem transition --key <K> --status <name> --yes`: one
+  status is attempted, which Jira's transitions accept or refuse, and the work item's status is
+  read back to say what happened; a `reopen` of a work item that is not closed says it is already
+  open and writes nothing ([`tickets.md`](tickets.md), "Jira's writes"). A ticket or a project the
+  tracker does not take,
   a `status` with no name, a `reason` that is neither value, and, for an argument of another action
   (`reason` is for close, `remove_labels`, `assignees` and `remove_assignees` for edit) or of the
   other tracker (on Jira, a label, an assignee or a reason), is refused before anything is asked. A

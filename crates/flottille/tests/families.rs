@@ -1537,14 +1537,15 @@ fn move_a_jira_work_item_to_a_named_status() {
         "jira workitem transition",
     );
 
-    // The name as the agent wrote it: Jira's transition resolves it.
-    assert!(done.contains("ABC-1 was moved to in progress."), "{done}");
+    // Jira's spelling of the status, read back, not the agent's.
+    assert!(done.contains("ABC-1 was moved to In Progress."), "{done}");
     assert_eq!(
         calls(),
         [
             "jira auth status",
             VIEW_OF_ABC_1,
-            "jira workitem transition --key ABC-1 --status in progress --yes"
+            "jira workitem transition --key ABC-1 --status in progress --yes",
+            VIEW_OF_ABC_1
         ]
     );
 }
@@ -1552,14 +1553,23 @@ fn move_a_jira_work_item_to_a_named_status() {
 /// A tracker where every work item is to do and the done status is no work item's yet; ABC-1 can
 /// move to the given statuses (invented workflow names).
 fn jira_all_to_do(user: &User, moves: Value) {
+    jira_all_to_do_with(user, moves, json!({}));
+}
+
+/// [`jira_all_to_do`], `more` added to the script of the fake `acli`.
+fn jira_all_to_do_with(user: &User, moves: Value, more: Value) {
     let site = "example.atlassian.net";
     let first = in_status(work_item("ABC-1", "The login fails", site), "To Do", "new");
     let second = in_status(work_item("ABC-2", "Add search", site), "To Do", "new");
-    user.acli_script(json!({
+    let mut script = json!({
         "items": {"ABC-1": first, "ABC-2": second},
         "search": [first, second],
         "transitions": {"ABC-1": moves},
-    }));
+    });
+    for (name, value) in more.as_object().unwrap() {
+        script[name] = value.clone();
+    }
+    user.acli_script(script);
 }
 
 /// `args` on Jira, held for the user then allowed: what the agent is handed, and the calls of
@@ -1595,14 +1605,15 @@ fn a_jira_item_moves_to_a_status_no_item_has_yet() {
         [
             "jira auth status",
             VIEW_OF_ABC_1,
-            "jira workitem transition --key ABC-1 --status Done --yes"
+            "jira workitem transition --key ABC-1 --status Done --yes",
+            VIEW_OF_ABC_1
         ]
     );
 }
 
 #[test]
 fn close_takes_the_transition_to_a_done_status() {
-    // The project's done status is not named Done: the one a work item is in is taken.
+    // The project's one done status seen is not named Done: it is the one taken.
     let user = user();
     on_jira(&user);
     let site = "example.atlassian.net";
@@ -1626,7 +1637,8 @@ fn close_takes_the_transition_to_a_done_status() {
             "jira auth status",
             VIEW_OF_ABC_1,
             STATUSES_OF_ABC,
-            "jira workitem transition --key ABC-1 --status Shipped --yes"
+            "jira workitem transition --key ABC-1 --status Shipped --yes",
+            VIEW_OF_ABC_1
         ]
     );
 }
@@ -1665,7 +1677,7 @@ fn close_on_a_closed_item_says_it_is_already_closed() {
 }
 
 #[test]
-fn a_status_no_transition_leads_to_is_refused_with_the_ones_that_do() {
+fn a_status_acli_refuses_is_reported_with_its_line_and_the_statuses_seen_and_nothing_is_written() {
     let user = user();
     on_jira(&user);
     jira_items(&user);
@@ -1724,24 +1736,115 @@ fn reopen_on_an_open_item_says_it_is_already_open() {
     );
 }
 
+/// A tracker whose work items are `seen` as (key, status, category); the one that moves is the first, which can go to `moves`.
+fn jira_seen(user: &User, seen: &[(&str, &str, &str)], moves: Value) {
+    let site = "example.atlassian.net";
+    let items: Vec<Value> = seen
+        .iter()
+        .map(|(key, status, category)| in_status(work_item(key, "An item", site), status, category))
+        .collect();
+    let mut by_key = serde_json::Map::new();
+    for item in &items {
+        by_key.insert(item["key"].as_str().unwrap().to_owned(), item.clone());
+    }
+    user.acli_script(json!({
+        "items": by_key,
+        "search": items,
+        "transitions": {seen[0].0: moves},
+    }));
+}
+
 #[test]
-fn reopen_on_a_done_item_takes_the_transition_to_a_new_status() {
-    // It can move to a started status and to a to-do one: the to-do one is taken.
+fn close_picks_done_among_several_done_statuses_and_never_won_t_do() {
+    // "Won't do" was set more recently than "Done": the search lists it first.
     let user = user();
     on_jira(&user);
-    let site = "example.atlassian.net";
-    let todo = in_status(work_item("ABC-1", "The login fails", site), "To Do", "new");
-    let progress = in_status(
-        work_item("ABC-2", "Add search", site),
-        "In Progress",
-        "indeterminate",
+    jira_seen(
+        &user,
+        &[
+            ("ABC-1", "To Do", "new"),
+            ("ABC-4", "Won't do", "done"),
+            ("ABC-3", "Done", "done"),
+        ],
+        json!(["Won't do", "Done"]),
     );
-    let done = in_status(work_item("ABC-3", "Shipped", site), "Done", "done");
-    user.acli_script(json!({
-        "items": {"ABC-1": todo, "ABC-2": progress, "ABC-3": done},
-        "search": [progress, todo, done],
-        "transitions": {"ABC-3": ["In Progress", "To Do"]},
-    }));
+
+    let (answer, calls) = jira_asked(&user, json!({"action": "close", "ticket": "ABC-1"}));
+
+    assert!(
+        answer.contains("ABC-1 was closed: moved to Done."),
+        "{answer}"
+    );
+    assert_eq!(
+        transitions_of(&calls),
+        ["jira workitem transition --key ABC-1 --status Done --yes"]
+    );
+}
+
+#[test]
+fn close_with_several_done_statuses_and_none_named_done_is_refused_and_lists_them() {
+    let user = user();
+    on_jira(&user);
+    jira_seen(
+        &user,
+        &[
+            ("ABC-1", "To Do", "new"),
+            ("ABC-4", "Won't do", "done"),
+            ("ABC-3", "Shipped", "done"),
+        ],
+        json!(["Won't do", "Shipped"]),
+    );
+
+    let (answer, calls) = jira_asked(&user, json!({"action": "close", "ticket": "ABC-1"}));
+
+    assert!(answer.contains("refused:"), "{answer}");
+    assert!(
+        answer.contains("several done statuses, Won't do and Shipped"),
+        "{answer}"
+    );
+    assert!(answer.contains("move ABC-1 with status"), "{answer}");
+    assert!(answer.contains("nothing was written"), "{answer}");
+    assert!(transitions_of(&calls).is_empty(), "{calls:?}");
+}
+
+#[test]
+fn reopen_with_two_new_statuses_and_none_named_to_do_is_refused_and_lists_them() {
+    let user = user();
+    on_jira(&user);
+    jira_seen(
+        &user,
+        &[
+            ("ABC-3", "Done", "done"),
+            ("ABC-1", "Backlog", "new"),
+            ("ABC-2", "Selected", "new"),
+        ],
+        json!(["Backlog", "Selected"]),
+    );
+
+    let (answer, calls) = jira_asked(&user, json!({"action": "reopen", "ticket": "ABC-3"}));
+
+    assert!(answer.contains("refused:"), "{answer}");
+    assert!(
+        answer.contains("several to-do statuses, Backlog and Selected"),
+        "{answer}"
+    );
+    assert!(answer.contains("nothing was written"), "{answer}");
+    assert!(transitions_of(&calls).is_empty(), "{calls:?}");
+}
+
+#[test]
+fn reopen_on_a_done_item_takes_the_transition_to_the_to_do_status_among_new_ones() {
+    let user = user();
+    on_jira(&user);
+    jira_seen(
+        &user,
+        &[
+            ("ABC-3", "Done", "done"),
+            ("ABC-1", "Backlog", "new"),
+            ("ABC-2", "To Do", "new"),
+        ],
+        json!(["Backlog", "To Do"]),
+    );
 
     let (answer, calls) = jira_asked(&user, json!({"action": "reopen", "ticket": "ABC-3"}));
 
@@ -1753,6 +1856,112 @@ fn reopen_on_a_done_item_takes_the_transition_to_a_new_status() {
         transitions_of(&calls),
         ["jira workitem transition --key ABC-3 --status To Do --yes"]
     );
+}
+
+#[test]
+fn reopen_never_falls_back_to_a_started_status() {
+    // Only a started status is seen: To Do is the one attempted, and Jira has no such transition.
+    let user = user();
+    on_jira(&user);
+    jira_seen(
+        &user,
+        &[
+            ("ABC-3", "Done", "done"),
+            ("ABC-2", "In Progress", "indeterminate"),
+        ],
+        json!(["In Progress"]),
+    );
+
+    let (answer, calls) = jira_asked(&user, json!({"action": "reopen", "ticket": "ABC-3"}));
+
+    assert!(answer.contains("acli could not move ABC-3"), "{answer}");
+    assert!(answer.contains("nothing was written"), "{answer}");
+    assert_eq!(
+        transitions_of(&calls),
+        ["jira workitem transition --key ABC-3 --status To Do --yes"]
+    );
+}
+
+#[test]
+fn a_transition_acli_answers_without_moving_is_not_reported_as_moved() {
+    // The bulk command may end with 0 on a transition it did not take.
+    let user = user();
+    on_jira(&user);
+    jira_all_to_do_with(&user, json!(["Done"]), json!({"no_move": ["ABC-1"]}));
+
+    let (answer, _) = jira_asked(
+        &user,
+        json!({"action": "status", "ticket": "ABC-1", "status": "Done"}),
+    );
+
+    assert!(
+        answer.contains("ABC-1 was not moved to Done: it is in To Do"),
+        "{answer}"
+    );
+    assert!(
+        !answer.contains("was moved") && !answer.contains("was closed"),
+        "{answer}"
+    );
+}
+
+#[test]
+fn a_status_the_item_is_already_in_says_so_and_writes_nothing() {
+    let user = user();
+    on_jira(&user);
+    jira_items(&user);
+
+    let (answer, calls) = jira_asked(
+        &user,
+        json!({"action": "status", "ticket": "ABC-1", "status": "to do"}),
+    );
+
+    assert!(
+        answer.contains("ABC-1 is already in To Do; nothing was written"),
+        "{answer}"
+    );
+    assert!(transitions_of(&calls).is_empty(), "{calls:?}");
+}
+
+/// ABC-1 can move to Done and the fake `acli` is killed at the transition, `when` (`before` or
+/// `after` the move), with `more` added to the script.
+fn killed_during_a_transition(when: &str, more: Value) -> String {
+    let user = user();
+    on_jira(&user);
+    let mut script = json!({"die": {"ABC-1": when}});
+    for (name, value) in more.as_object().unwrap() {
+        script[name] = value.clone();
+    }
+    jira_all_to_do_with(&user, json!(["Done"]), script);
+    jira_asked(
+        &user,
+        json!({"action": "status", "ticket": "ABC-1", "status": "Done"}),
+    )
+    .0
+}
+
+#[test]
+fn acli_killed_during_a_transition_that_took_is_reported_moved_from_the_status_read_back() {
+    let answer = killed_during_a_transition("after", json!({}));
+
+    assert!(answer.contains("ABC-1 was moved to Done"), "{answer}");
+}
+
+#[test]
+fn acli_killed_during_a_transition_that_did_not_take_says_the_status_it_is_in() {
+    let answer = killed_during_a_transition("before", json!({}));
+
+    assert!(
+        answer.contains("ABC-1 was not moved to Done: it is in To Do"),
+        "{answer}"
+    );
+}
+
+#[test]
+fn acli_killed_during_a_transition_with_no_status_to_read_back_says_the_result_is_unknown() {
+    let answer = killed_during_a_transition("after", json!({"unreadable_after_move": ["ABC-1"]}));
+
+    assert!(answer.contains("result is unknown"), "{answer}");
+    assert!(!answer.contains("nothing was written"), "{answer}");
 }
 
 #[test]
