@@ -210,3 +210,66 @@ fn a_view_after_a_move_the_script_says_is_unreadable_ends_with_1() {
 
     assert_eq!(viewed.status.code(), Some(1));
 }
+
+/// What a view of ABC-1 prints, asked for `fields` (all of them without).
+fn view_of(dir: &std::path::Path, fields: Option<&str>) -> Value {
+    let mut args = vec!["jira", "workitem", "view", "ABC-1", "--json"];
+    if let Some(fields) = fields {
+        args.extend(["--fields", fields]);
+    }
+    let viewed = fake(dir).args(args).output().unwrap();
+    serde_json::from_slice(&viewed.stdout).unwrap()
+}
+
+#[test]
+fn a_view_shows_the_fields_it_was_asked_for_beside_its_key_and_self() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        json!({"items": {"ABC-1": {"key": "ABC-1", "self": "https://example.atlassian.net/x",
+            "fields": {"summary": "Log in", "status": {"name": "To Do"},
+                "comment": {"comments": []}}}}})
+        .to_string(),
+    )
+    .unwrap();
+
+    let status = view_of(dir.path(), Some("status"));
+    let both = view_of(dir.path(), Some("summary,comment"));
+    let all = view_of(dir.path(), None);
+
+    assert_eq!(status["key"], "ABC-1");
+    assert_eq!(status["self"], "https://example.atlassian.net/x");
+    assert_eq!(status["fields"], json!({"status": {"name": "To Do"}}));
+    assert_eq!(
+        both["fields"],
+        json!({"summary": "Log in", "comment": {"comments": []}})
+    );
+    assert_eq!(all["fields"].as_object().unwrap().len(), 3);
+}
+
+#[test]
+fn a_comment_created_shows_in_the_next_view_as_the_script_s_user_wrote_it() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        json!({"user": "Casey Example",
+            "items": {"ABC-1": {"key": "ABC-1", "fields": {"comment": {"comments": [
+                {"author": {"displayName": "Alice"}, "body": "First"}]}}}}})
+        .to_string(),
+    )
+    .unwrap();
+
+    let posted = fake(dir.path())
+        .args([
+            "jira", "workitem", "comment", "create", "--key", "ABC-1", "--body", "Second",
+        ])
+        .status()
+        .unwrap();
+
+    assert!(posted.success());
+    let comments = &view_of(dir.path(), Some("comment"))["fields"]["comment"]["comments"];
+    assert_eq!(comments.as_array().unwrap().len(), 2, "{comments}");
+    assert_eq!(comments[0]["body"], "First");
+    assert_eq!(comments[1]["author"]["displayName"], "Casey Example");
+    assert_eq!(comments[1]["body"], "Second");
+}

@@ -16,7 +16,8 @@
 //! - `script.json`, written by the test (optional: without it, signed in with no work item); read
 //!   again at every call;
 //! - `received.jsonl`, written by the fake: one `{"args": [...], "env": {...}}` per call;
-//! - `moved.json`, written by the fake: the status each moved work item is in.
+//! - `moved.json`, written by the fake: the status each moved work item is in;
+//! - `posted.json`, written by the fake: the comments `comment create` added to each work item.
 //!
 //! # The script
 //!
@@ -28,7 +29,10 @@
 //!
 //! `signed_in: false` makes `acli jira auth status` end with 1. `items` gives, by key, what
 //! `acli jira workitem view KEY --json` prints; a key with none ends with 1. `fail` makes the view
-//! of that key end with 1, saying its text.
+//! of that key end with 1, saying its text. With `--fields a,b`, the view prints the work item's
+//! `key`, its `self` and only those of its `fields`, as the real one is assumed to: a read that
+//! forgot to ask for a field does not find it. Its `fields.comment.comments` are the script's,
+//! then those posted (below). A script's `user` (`Casey Example` by default) is whom they are by.
 //!
 //! `acli jira workitem search --jql Q --json [--limit N]` prints the script's `search` (an array
 //! of work items, Jira's REST shape assumed as for `view`), or every item of `items` without it,
@@ -38,13 +42,14 @@
 //! A JQL that names `currentUser()` is answered with the script's `mine_search`, none without:
 //! the work items of the signed-in user.
 //!
-//! The writes change nothing but the status a transition moves: the test reads them in the
-//! record.
+//! The writes change nothing but the status a transition moves and the comments a `comment
+//! create` adds: the test reads them in the record.
 //!
 //! - `acli jira workitem create --project P --summary S … --json` prints `{"key": …}`, the
 //!   script's `created` (`P-1` without it); without `--project` or `--summary` it ends with 2.
 //! - `acli jira workitem comment create --key K --body B` and `acli jira workitem edit --key K …
-//!   --yes` end with 0 for a key of `items`, with 1 for another.
+//!   --yes` end with 0 for a key of `items`, with 1 for another. A comment created is added, as
+//!   the script's `user` wrote it, to the next views of the work item.
 //! - `acli jira workitem transition --key K --status S --yes` ends with 0 when S is one of the
 //!   script's `transitions` of K (`{"ABC-1": ["In Progress", "Done"]}`), in any case, and with 1
 //!   saying so otherwise. These are the work item's transitions as Jira would answer them: the
@@ -113,6 +118,8 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
                     if let Some(status) = moved.get(*key) {
                         item["fields"]["status"]["name"] = status.clone();
                     }
+                    add_posted(dir, script, key, &mut item);
+                    only_asked(rest, &mut item);
                     println!("{item}");
                     0
                 }
@@ -166,7 +173,12 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
             0
         }
         ["jira", "workitem", "comment", "create", rest @ ..] if rest.contains(&"--body") => {
-            known(script, rest)
+            let done = known(script, rest);
+            if let (0, Some(key), Some(body)) = (done, value(rest, "--key"), value(rest, "--body"))
+            {
+                post(dir, key, body);
+            }
+            done
         }
         ["jira", "workitem", "edit", rest @ ..] if rest.contains(&"--yes") => known(script, rest),
         ["jira", "workitem", "transition", rest @ ..] if rest.contains(&"--yes") => {
@@ -210,6 +222,56 @@ fn moved(dir: &Path) -> Map<String, Value> {
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default()
+}
+
+/// The comments `comment create` added, by work item: `posted.json`, written by the fake.
+fn posted(dir: &Path) -> Map<String, Value> {
+    std::fs::read_to_string(dir.join("posted.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// Keeps a comment created on `key`, its text as it was passed.
+fn post(dir: &Path, key: &str, body: &str) {
+    let mut all = posted(dir);
+    let mut comments = all
+        .get(key)
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    comments.push(Value::from(body));
+    all.insert(key.to_owned(), Value::from(comments));
+    std::fs::write(dir.join("posted.json"), Value::from(all).to_string()).expect("the comments");
+}
+
+/// Adds the comments created on `key` to the work item's, by the script's `user`.
+fn add_posted(dir: &Path, script: &Value, key: &str, item: &mut Value) {
+    let Some(created) = posted(dir).get(key).and_then(Value::as_array).cloned() else {
+        return;
+    };
+    let user = script["user"].as_str().unwrap_or("Casey Example");
+    let comments = &mut item["fields"]["comment"]["comments"];
+    if !comments.is_array() {
+        *comments = json!([]);
+    }
+    for body in created {
+        comments.as_array_mut().expect("an array").push(
+            json!({"author": {"displayName": user}, "created": "2026-10-01T12:00:00.000+0000",
+                "body": body}),
+        );
+    }
+}
+
+/// With `--fields a,b` among `args`, only those of the work item's fields stay.
+fn only_asked(args: &[&str], item: &mut Value) {
+    let Some(asked) = value(args, "--fields") else {
+        return;
+    };
+    let asked: Vec<&str> = asked.split(',').map(str::trim).collect();
+    if let Some(fields) = item["fields"].as_object_mut() {
+        fields.retain(|name, _| asked.contains(&name.as_str()));
+    }
 }
 
 /// Whether the script's `list` (an array of keys) holds `key`.
