@@ -47,7 +47,9 @@ pub(super) async fn attach(forge: &Forge, pull: &mut Pull) {
                         asked += 1;
                         let log = bitbucket::failed_step_log(forge, context, build)
                             .await
-                            .and_then(|raw| tail_with(&raw, JOB_BYTES.min(left), plain));
+                            .and_then(|raw| {
+                                tail_with(&raw, JOB_BYTES.min(left), plain, bitbucket_part)
+                            });
                         if let Ok(log) = &log {
                             left -= log.text.len().min(left);
                         }
@@ -75,7 +77,7 @@ pub(super) async fn attach(forge: &Forge, pull: &mut Pull) {
                         &forge.gh_repository(),
                     ])
                     .await
-                    .and_then(|raw| tail(&raw, JOB_BYTES.min(left)));
+                    .and_then(|raw| tail_with(&raw, JOB_BYTES.min(left), clean, github_part));
                     if let Ok(log) = &log {
                         left -= log.text.len().min(left);
                     }
@@ -96,20 +98,25 @@ fn actions_job(link: Option<&str>) -> Option<u64> {
 }
 
 /// The end of `raw`, cleaned: at most `LINES` lines and `bytes` bytes of text, the oldest lines
-/// going first and whole; a single line longer than `bytes` keeps its end.
-fn tail(raw: &str, bytes: usize) -> Result<Log, String> {
-    tail_with(raw, bytes, clean)
-}
-
-/// `tail`, each line made plain by `line_of`: GitHub's lines start with names and a timestamp,
-/// Bitbucket's do not.
-fn tail_with(raw: &str, bytes: usize, line_of: fn(&str) -> String) -> Result<Log, String> {
+/// going first and whole; a single line longer than `bytes` keeps its end. The failing part is
+/// what `part_of` finds in the lines, the whole log when it finds none. Each line is made plain
+/// by `line_of`: GitHub's lines start with names and a timestamp, Bitbucket's do not.
+fn tail_with(
+    raw: &str,
+    bytes: usize,
+    line_of: fn(&str) -> String,
+    part_of: fn(&[String]) -> Option<Vec<String>>,
+) -> Result<Log, String> {
     let mut lines: Vec<String> = raw.lines().map(line_of).collect();
-    while lines.last().is_some_and(String::is_empty) {
-        lines.pop();
-    }
-    while lines.first().is_some_and(String::is_empty) {
-        lines.remove(0);
+    trim(&mut lines);
+    // The failing command's lines when the source's markers find them, else the whole log.
+    let part = part_of(&lines).map(|mut part| {
+        trim(&mut part);
+        part
+    });
+    let found = part.as_ref().is_some_and(|part| !part.is_empty());
+    if let Some(part) = part.filter(|part| !part.is_empty()) {
+        lines = part;
     }
     let total = lines.len();
     if total == 0 {
@@ -132,8 +139,99 @@ fn tail_with(raw: &str, bytes: usize, line_of: fn(&str) -> String) -> Result<Log
     Ok(Log {
         shown: lines.len(),
         total,
+        part: found,
         text: lines.join("\n"),
     })
+}
+
+/// `lines` without the empty ones at both ends.
+fn trim(lines: &mut Vec<String>) {
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    while lines.first().is_some_and(String::is_empty) {
+        lines.remove(0);
+    }
+}
+
+/// What Bitbucket Pipelines prints once the script is over, by the start of the line
+/// (`docs/forges.md`, "Why a check failed": only the first is documented by Atlassian).
+const TEARDOWN: [&str; 4] = [
+    "Searching for test report files in directories named",
+    "Searching for files matching artifact pattern",
+    "Uploading cache",
+    "Uploading artifact",
+];
+/// The commands that only list the environment.
+const ENVIRONMENT: [&str; 4] = ["env", "printenv", "export", "set"];
+/// How many `NAME=value` lines in a row are an environment listing.
+const LISTING: usize = 3;
+
+/// The lines of the failing command in a Bitbucket Pipelines step log (`docs/forges.md`, "Why a
+/// check failed"): from the last command echoed (`+ <command>`) that is not an environment
+/// listing, to the teardown or to a command that lists the environment. The `NAME=value` listings
+/// in between are left out. None when no command is echoed.
+fn bitbucket_part(lines: &[String]) -> Option<Vec<String>> {
+    fn command(line: &str) -> Option<&str> {
+        line.strip_prefix("+ ").map(str::trim)
+    }
+    let lists =
+        |command: &str| ENVIRONMENT.contains(&command.split_whitespace().next().unwrap_or(""));
+    let from = lines
+        .iter()
+        .rposition(|line| command(line).is_some_and(|command| !lists(command)))?;
+    let to = lines[from + 1..]
+        .iter()
+        .position(|line| {
+            TEARDOWN.iter().any(|mark| line.starts_with(mark)) || command(line).is_some_and(lists)
+        })
+        .map_or(lines.len(), |at| from + 1 + at);
+    let part = &lines[from..to];
+    let mut kept = Vec::with_capacity(part.len());
+    let mut at = 0;
+    while at < part.len() {
+        let run = part[at..]
+            .iter()
+            .take_while(|line| is_variable(line))
+            .count();
+        if run >= LISTING {
+            at += run;
+        } else {
+            kept.push(part[at].clone());
+            at += 1;
+        }
+    }
+    Some(kept)
+}
+
+/// `NAME=value`, a line of an environment listing.
+fn is_variable(line: &str) -> bool {
+    line.split_once('=').is_some_and(|(name, _)| {
+        name.starts_with(|c: char| c.is_ascii_uppercase() || c == '_')
+            && name
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    })
+}
+
+/// The lines of the failing step's command in a GitHub Actions log: after the group that echoes
+/// the command and its `env:` (`##[group]Run …` to `##[endgroup]`), up to the last `##[error]`
+/// line, which is kept. None without an `##[error]` line.
+fn github_part(lines: &[String]) -> Option<Vec<String>> {
+    let error = lines
+        .iter()
+        .rposition(|line| line.starts_with("##[error]"))?;
+    let start = lines[..error]
+        .iter()
+        .rposition(|line| line.starts_with("##[group]Run "))
+        .and_then(|group| {
+            lines[group..error]
+                .iter()
+                .position(|line| line == "##[endgroup]")
+                .map(|at| group + at + 1)
+        })
+        .unwrap_or(0);
+    Some(lines[start..=error].to_vec())
 }
 
 /// One line of `gh run view --log-failed` (`<job>\t<step>\t<timestamp> <text>`) as its text: without
@@ -201,8 +299,13 @@ pub(super) fn text(jobs: &[Job]) -> String {
     for job in jobs {
         match &job.log {
             Some(Ok(log)) => {
+                let of = if log.part {
+                    "of the failing command's output"
+                } else {
+                    "of its log"
+                };
                 text.push_str(&format!(
-                    "  - {}: the last {} of {} lines of its log:\n",
+                    "  - {}: the last {} of {} lines {of}:\n",
                     job.name, log.shown, log.total
                 ));
                 for line in log.text.lines() {
@@ -219,6 +322,10 @@ pub(super) fn text(jobs: &[Job]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tail(raw: &str, bytes: usize) -> Result<Log, String> {
+        tail_with(raw, bytes, clean, |_| None)
+    }
 
     #[test]
     fn a_log_line_loses_its_names_timestamp_and_colours() {
@@ -269,5 +376,138 @@ mod tests {
         assert_eq!(log.shown, 1);
         assert!(log.text.starts_with('…') && log.text.ends_with("xEND"));
         assert!(log.text.len() <= 20, "{}", log.text.len());
+    }
+
+    /// A Bitbucket Pipelines step log as `bkt pipeline logs --step` prints it: its setup, each
+    /// script command echoed with `+ `, the environment listing of a command, then the teardown.
+    fn bitbucket_log(failing_output: &[&str]) -> String {
+        let mut lines = vec![
+            "Images used:",
+            "    build : docker.io/library/rust@sha256:0000",
+            "Cloning into '/opt/atlassian/pipelines/agent/build'...",
+            "+ cargo build",
+            "   Compiling app v0.1.0",
+            "+ cargo test",
+        ];
+        lines.extend(failing_output);
+        lines.extend([
+            "Searching for test report files in directories named [test-results, failsafe-reports, test-reports, TestResults, surefire-reports] down to a depth of 4",
+            "Finished scanning for test reports. Found 0 test report files.",
+            "Merged test suites, total number tests is 0, with 0 failures and 0 errors.",
+            "Uploading cache cargo",
+            "Uploading artifact target",
+        ]);
+        lines.join("\n") + "\n"
+    }
+
+    const FAILURE: [&str; 3] = [
+        "test login::form ... FAILED",
+        "thread 'login::form' panicked at src/login.rs:42:9:",
+        "error: test failed, to rerun pass `--lib`",
+    ];
+
+    #[test]
+    fn a_bitbucket_log_keeps_the_failing_commands_output() {
+        let log = tail_with(&bitbucket_log(&FAILURE), 4000, plain, bitbucket_part).unwrap();
+
+        assert_eq!(
+            log.text.lines().collect::<Vec<_>>(),
+            ["+ cargo test", FAILURE[0], FAILURE[1], FAILURE[2]]
+        );
+        assert_eq!((log.shown, log.total, log.part), (4, 4, true));
+    }
+
+    #[test]
+    fn the_environment_listing_and_teardown_are_left_out() {
+        let environment = [
+            "HOME=/root",
+            "BITBUCKET_BUILD_NUMBER=31",
+            "BITBUCKET_REPO_SLUG=api",
+            "CI=true",
+            "PATH=/usr/local/bin:/usr/bin",
+        ];
+        // The listing after the failing command, then a command that lists it again.
+        let output: Vec<&str> = FAILURE
+            .into_iter()
+            .chain(environment)
+            .chain(["+ env"])
+            .chain(environment)
+            .collect();
+        let log = tail_with(&bitbucket_log(&output), 4000, plain, bitbucket_part).unwrap();
+
+        for left_out in [
+            "HOME=",
+            "BITBUCKET_",
+            "Uploading",
+            "Searching for test report",
+            "Merged test suites",
+            "Images used",
+        ] {
+            assert!(!log.text.contains(left_out), "{left_out}: {}", log.text);
+        }
+        assert!(log.text.starts_with("+ cargo test\n"), "{}", log.text);
+        assert!(log.text.ends_with(FAILURE[2]), "{}", log.text);
+    }
+
+    #[test]
+    fn a_long_failing_output_keeps_its_end() {
+        let output: Vec<String> = (1..=100).map(|n| format!("output {n:03}")).collect();
+        let output: Vec<&str> = output.iter().map(String::as_str).collect();
+
+        let log = tail_with(&bitbucket_log(&output), 4000, plain, bitbucket_part).unwrap();
+
+        assert_eq!((log.shown, log.total), (LINES, 101));
+        assert!(log.text.ends_with("output 100"), "{}", log.text);
+        assert!(!log.text.contains("Uploading"), "{}", log.text);
+    }
+
+    #[test]
+    fn a_log_without_markers_keeps_its_tail() {
+        let raw: String = (1..=100).map(|n| format!("line {n:03}\n")).collect();
+
+        for log in [
+            tail_with(&raw, 4000, plain, bitbucket_part).unwrap(),
+            tail_with(&raw, 4000, clean, github_part).unwrap(),
+            // Teardown lines and no command echoed: nothing says which part failed.
+            tail_with(
+                "setup\nUploading cache x\nSearching for test report files in directories named []\n",
+                4000,
+                plain,
+                bitbucket_part,
+            )
+            .unwrap(),
+        ] {
+            assert!(!log.part);
+            assert_eq!(log.shown, log.total.min(LINES));
+        }
+        let log = tail_with(&raw, 4000, plain, bitbucket_part).unwrap();
+        assert!(log.text.starts_with("line 061") && log.text.ends_with("line 100"));
+    }
+
+    #[test]
+    fn a_github_log_keeps_the_failing_commands_output() {
+        let raw = [
+            "test\tRun cargo test\t2026-01-01T00:00:00.0000000Z ##[group]Run cargo test",
+            "test\tRun cargo test\t2026-01-01T00:00:00.0000000Z cargo test",
+            "test\tRun cargo test\t2026-01-01T00:00:00.0000000Z shell: /usr/bin/bash -e {0}",
+            "test\tRun cargo test\t2026-01-01T00:00:00.0000000Z env:",
+            "test\tRun cargo test\t2026-01-01T00:00:00.0000000Z   CARGO_TERM_COLOR: always",
+            "test\tRun cargo test\t2026-01-01T00:00:00.0000000Z ##[endgroup]",
+            "test\tRun cargo test\t2026-01-01T00:00:01.0000000Z test login::form ... FAILED",
+            "test\tRun cargo test\t2026-01-01T00:00:01.0000000Z ##[error]Process completed with exit code 101.",
+            "",
+        ]
+        .join("\n");
+
+        let log = tail_with(&raw, 4000, clean, github_part).unwrap();
+
+        assert_eq!(
+            log.text.lines().collect::<Vec<_>>(),
+            [
+                "test login::form ... FAILED",
+                "##[error]Process completed with exit code 101."
+            ]
+        );
+        assert!(log.part);
     }
 }

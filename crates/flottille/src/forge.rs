@@ -318,12 +318,15 @@ pub struct Job {
     pub log: Option<Result<Log, String>>,
 }
 
-/// The end of a job's log: `shown` of its `total` lines, cleaned and masked.
+/// The end of a job's log: `shown` of its `total` lines (the failing command's when `part`),
+/// cleaned and masked.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Log {
     pub text: String,
     pub shown: usize,
     pub total: usize,
+    /// The lines are the failing command's, found by the forge's markers, not the log's end.
+    pub part: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
