@@ -323,7 +323,9 @@ async fn drive(
         }
     }
     if chosen.iter().any(|(_, _, value)| value.is_some()) {
-        events.offered(&options, false, new && agent.chosen.effort.is_none());
+        // The effort a session keeps once a model is set may be the previous model's: no effort
+        // is learned from it.
+        events.offered(&options, false, false);
     }
     // A value named `default` stands for the agent's recommended one, when it names it.
     let current = |category| {

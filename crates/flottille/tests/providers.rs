@@ -481,12 +481,25 @@ fn the_effort_a_model_runs_with_when_none_is_asked_is_listed_and_never_one_asked
         Value::Null,
         "high was asked, not its own"
     );
+}
 
-    // A model asked without an effort: the one it runs with is its own.
+#[test]
+fn an_effort_carried_over_from_the_previous_model_is_not_learned_as_the_new_model_s_default() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"models": ["fake-small", "fake-large"], "efforts": ["low", "high"]}));
+    project(&user);
+    let default_effort = |model: usize| {
+        user.call("provider.list", Value::Null).unwrap()["providers"][0]["models"][model]
+            ["default_effort"]
+            .clone()
+    };
+    // A model asked without an effort: the session keeps the effort it had on the default
+    // model, which says nothing of what the asked model runs with.
     let large = json!({"message": "hello", "model": "fake-large"});
     let own = id(&start(&user, large).unwrap());
     eventually("the session", || agent(&user, &own)["state"] == "idle");
-    assert_eq!(default_effort(1), "low");
+    assert_eq!(default_effort(0), "low", "the default model's own");
+    assert_eq!(default_effort(1), Value::Null);
 }
 
 #[test]
@@ -547,8 +560,7 @@ fn the_providers_method_lists_every_provider_enabled_ready_and_why_its_models_an
         json!([
             {"id": "fake-small", "name": "fake-small", "efforts": ["low", "high"], "default": true,
                 "default_effort": "low"},
-            {"id": "fake-large", "name": "fake-large", "efforts": ["low", "high"],
-                "default_effort": "low"}
+            {"id": "fake-large", "name": "fake-large", "efforts": ["low", "high"]}
         ])
     );
     assert!(listed.get("project").is_none());
