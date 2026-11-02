@@ -17,7 +17,8 @@ use gpui_kit::{
 
 use crate::actions::{Command, Pick, Target};
 use crate::providers::{Provider, Providers};
-use crate::shell::{Selection, Shell};
+use crate::settings::Reveal;
+use crate::shell::Shell;
 
 /// A place the composer can start a session in.
 #[derive(Clone, Debug, PartialEq)]
@@ -805,7 +806,9 @@ impl Composer {
                         .child("Open the settings")
                         .on_click(move |_, window, cx| {
                             shell
-                                .update(cx, |shell, cx| shell.open(Selection::Settings, window, cx))
+                                .update(cx, |shell, cx| {
+                                    shell.open_settings_at(Reveal::Providers, window, cx)
+                                })
                                 .ok();
                         }),
                     move |d, t| d.text_color(mix(p.mute, p.text, t)),
