@@ -18,7 +18,7 @@ use std::sync::Arc;
 use gpui_kit::{
     AnyElement, App, BoxShadow, ElementId, FocusHandle, InteractiveElement, IntoElement,
     MouseButton, ParentElement, RenderOnce, SharedString, StatefulInteractiveElement, Styled,
-    TestSupportExt, Window, anchored, deferred, div, hsla, point, px,
+    TestSupportExt, Window, anchored, deferred, div, point, px,
 };
 
 use crate::button::Button;
@@ -275,7 +275,7 @@ impl RenderOnce for Modal {
             .border_1()
             .border_color(p.line2)
             .shadow(vec![BoxShadow {
-                color: hsla(0., 0., 0., 0.6),
+                color: p.shadow.opacity(0.6),
                 offset: point(px(0.), px(24.)),
                 blur_radius: px(60.),
                 spread_radius: px(0.),

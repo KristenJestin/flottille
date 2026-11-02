@@ -159,6 +159,7 @@ pub fn palette_from_toml(text: &str) -> Result<Palette, String> {
         add: over(green, 0.13, bg),
         del: over(red, 0.13, bg),
         scrim: hex(0x000000).opacity(0.5),
+        shadow: hex(0x000000),
     }
     .with_readable_inks())
 }
@@ -352,6 +353,15 @@ mod tests {
         )
         .unwrap();
         assert!(env.is_omarchy());
+    }
+
+    #[test]
+    fn an_omarchy_theme_keeps_the_shadows_full_strength() {
+        let p = palette_from_toml(
+            "background = \"#1a1b26\"\nforeground = \"#a9b1d6\"\naccent = \"#7aa2f7\"\n",
+        )
+        .unwrap();
+        assert_eq!(p.shadow, Palette::base().shadow, "as today");
     }
 
     #[test]

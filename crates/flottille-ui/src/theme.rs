@@ -67,6 +67,10 @@ pub struct Palette {
     pub del: Hsla,
     /// What dims the content under a drawer.
     pub scrim: Hsla,
+    /// The black of the shadow of a drawer, a menu, a dialog or a toast, at full strength: each
+    /// takes its own share (`p.shadow.opacity(0.5)`). Lighter in Light, where the same share
+    /// would be heavy.
+    pub shadow: Hsla,
 }
 
 /// Flottille's own palette comes light or dark.
@@ -126,6 +130,7 @@ impl Palette {
             add: hex(0xe4f3e8),
             del: hex(0xfbe8e6),
             scrim: gpui_kit::rgba(0x0000004d).into(),
+            shadow: gpui_kit::rgba(0x0000004d).into(),
         }
     }
 
@@ -167,6 +172,7 @@ impl Palette {
             add: hex(0x132a1b),
             del: hex(0x2c1515),
             scrim: gpui_kit::rgba(0x00000080).into(),
+            shadow: gpui_kit::rgba(0x000000ff).into(),
         }
     }
 
@@ -225,6 +231,7 @@ impl Palette {
             add: m(self.add, to.add),
             del: m(self.del, to.del),
             scrim: m(self.scrim, to.scrim),
+            shadow: m(self.shadow, to.shadow),
         }
     }
 }
@@ -337,6 +344,16 @@ mod tests {
         );
         assert!(contrast(p.text, p.bg) >= TEXT_CONTRAST);
         assert!(contrast(p.on_acc, p.acc) >= TEXT_CONTRAST);
+    }
+
+    #[test]
+    fn the_shadows_of_light_are_lighter_and_those_of_dark_are_unchanged() {
+        let (light, dark) = (Palette::flottille(Shade::Light), Palette::base());
+        // Dark: a black at full strength, each overlay takes its own share, as before.
+        assert_eq!((dark.shadow.l, dark.shadow.a), (0.0, 1.0));
+        // A shadow that is deep on a dark page is heavy on a light one.
+        assert_eq!(light.shadow.l, 0.0);
+        assert!(light.shadow.a < 0.5, "a lighter shadow: {}", light.shadow.a);
     }
 
     #[test]
