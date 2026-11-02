@@ -456,6 +456,29 @@ fn a_segmented_control_is_sized_to_its_words(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_segment_that_cannot_be_chosen_is_shown_and_a_click_on_it_does_nothing(
+    cx: &mut TestAppContext,
+) {
+    let chosen = Rc::new(Cell::new(None::<usize>));
+    let seen = chosen.clone();
+    let (_, cx) = host(cx, move |_, _| {
+        let seen = seen.clone();
+        Segmented::new(
+            "theme",
+            "Theme",
+            [("omarchy", "Omarchy"), ("flottille", "Flottille")],
+            1,
+        )
+        .unavailable(0)
+        .on_choose(move |index, _, _| seen.set(Some(index)))
+        .into_any_element()
+    });
+    assert!(shown("theme-omarchy", cx), "it stays in sight");
+    cx.update(|window, cx| window.click("theme-omarchy", cx));
+    assert_eq!(chosen.get(), None, "it cannot be chosen");
+}
+
+#[gpui_kit::test]
 fn choosing_a_radio_choice_reports_it_and_its_dot_scales_in(cx: &mut TestAppContext) {
     let chosen = Rc::new(Cell::new(0usize));
     let seen = chosen.clone();

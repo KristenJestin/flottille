@@ -2,6 +2,7 @@ mod acp;
 mod actions;
 mod agent_command;
 mod agents;
+mod appearance;
 mod approval_command;
 mod approvals;
 mod bridge;

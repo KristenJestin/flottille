@@ -94,6 +94,16 @@ pub enum Command {
     DeveloperSet {
         log: bool,
     },
+    /// The window's appearance (`appearance.show`); `seq` numbers the request (see
+    /// `Shell::ask_appearance`).
+    AppearanceRead {
+        seq: u64,
+    },
+    /// Keeps the window's appearance (`appearance.set`).
+    AppearanceSet {
+        appearance: flottille_ui::omarchy::Appearance,
+        seq: u64,
+    },
     /// The user saw the notice of the Auto judge Flottille picked (`provider.judge_noticed`);
     /// the providers are read again.
     JudgeNoticed,
@@ -601,6 +611,14 @@ pub enum Outcome {
         written: bool,
         shown: Result<crate::settings::Developer, String>,
     },
+    /// The window's appearance as the daemon keeps it, after a read (`written` false) or a
+    /// choice.
+    Appearance {
+        /// The number of the request this answers.
+        seq: u64,
+        written: bool,
+        shown: Result<flottille_ui::omarchy::Appearance, String>,
+    },
     /// The judge's guidance as the daemon says it, after a read (`written` false) or a save or
     /// a reset.
     JudgeGuidance {
@@ -765,6 +783,7 @@ const DETAILS_EVERY: Duration = Duration::from_secs(1);
 #[derive(Clone)]
 pub struct Actions {
     details: Sender<String>,
+    appearance: Sender<Command>,
     connect: Connect,
     updates: UnboundedSender<Update>,
     bounds: Bounds,
@@ -787,8 +806,24 @@ impl Actions {
             .name("flottille-details".into())
             .spawn(move || read_details(to, asked, updates_to, bounds))
             .expect("a thread for the project page's details");
+        // The appearance is asked one request at a time, in the order of the clicks: on threads of
+        // their own, two quick choices could reach the daemon in the other order.
+        let (appearance, chosen) = channel();
+        let (to, updates_to) = (connect.clone(), updates.clone());
+        std::thread::Builder::new()
+            .name("flottille-appearance".into())
+            .spawn(move || {
+                while let Ok(command) = chosen.recv() {
+                    let outcome = perform(&to, command, bounds);
+                    if updates_to.unbounded_send(Update::Done(outcome)).is_err() {
+                        return;
+                    }
+                }
+            })
+            .expect("a thread for the window's appearance");
         Actions {
             details,
+            appearance,
             connect,
             updates,
             bounds,
@@ -798,6 +833,13 @@ impl Actions {
     pub fn send(&self, command: Command) {
         if let Command::Details(project) = command {
             let _ = self.details.send(project);
+            return;
+        }
+        if matches!(
+            command,
+            Command::AppearanceRead { .. } | Command::AppearanceSet { .. }
+        ) {
+            let _ = self.appearance.send(command);
             return;
         }
         let (connect, updates, bounds) = (self.connect.clone(), self.updates.clone(), self.bounds);
@@ -960,6 +1002,21 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 }
             });
             Outcome::Developer { written, shown }
+        }
+        Command::AppearanceRead { seq } | Command::AppearanceSet { seq, .. } => {
+            let (method, params, written) = match command {
+                Command::AppearanceSet { appearance, .. } => {
+                    ("appearance.set", appearance_json(appearance), true)
+                }
+                _ => ("appearance.show", json!({}), false),
+            };
+            let shown = answer(ask_alone(connect, method, params, bounds.quick))
+                .and_then(|shown| appearance_of(&shown));
+            Outcome::Appearance {
+                seq,
+                written,
+                shown,
+            }
         }
         Command::ReadProviders => {
             let read = crate::providers::next_read();
@@ -1677,6 +1734,38 @@ pub(crate) fn read_providers(
         )),
         Err(_) => None,
     }
+}
+
+/// The appearance in the words of `appearance.show`.
+fn appearance_json(appearance: flottille_ui::omarchy::Appearance) -> Value {
+    use flottille_ui::omarchy::Source;
+    use flottille_ui::theme::Shade;
+    let theme = match appearance.source {
+        Source::Omarchy => "omarchy",
+        Source::Flottille => "flottille",
+    };
+    let shade = match appearance.shade {
+        Shade::Light => "light",
+        Shade::Dark => "dark",
+    };
+    json!({"theme": theme, "shade": shade})
+}
+
+/// What `appearance.show` says, or why it says nothing the window knows.
+pub fn appearance_of(shown: &Value) -> Result<flottille_ui::omarchy::Appearance, String> {
+    use flottille_ui::omarchy::{Appearance, Source};
+    use flottille_ui::theme::Shade;
+    let source = match shown["theme"].as_str() {
+        Some("omarchy") => Source::Omarchy,
+        Some("flottille") => Source::Flottille,
+        other => return Err(format!("an unknown theme: {other:?}")),
+    };
+    let shade = match shown["shade"].as_str() {
+        Some("light") => Shade::Light,
+        Some("dark") => Shade::Dark,
+        other => return Err(format!("an unknown shade: {other:?}")),
+    };
+    Ok(Appearance { source, shade })
 }
 
 /// The daemon's answer, or its sentence (or the window's) when there is none.

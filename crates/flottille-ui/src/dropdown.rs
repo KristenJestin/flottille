@@ -13,7 +13,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Anchor, AnyElement, App, BoxShadow, ElementId, InteractiveElement, IntoElement, MouseButton,
     ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement, Styled,
-    TestSupportExt, Window, anchored, deferred, div, hsla, point, px,
+    TestSupportExt, Window, anchored, deferred, div, point, px,
 };
 
 use crate::color::mix;
@@ -240,7 +240,7 @@ pub(crate) fn list_overlay(
         .border_1()
         .border_color(p.line2)
         .shadow(vec![BoxShadow {
-            color: hsla(0., 0., 0., 0.5),
+            color: p.shadow.opacity(0.5),
             offset: point(px(0.), px(12.)),
             blur_radius: px(32.),
             spread_radius: px(0.),

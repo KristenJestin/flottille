@@ -67,9 +67,73 @@ pub struct Palette {
     pub del: Hsla,
     /// What dims the content under a drawer.
     pub scrim: Hsla,
+    /// The black of the shadow of a drawer, a menu, a dialog or a toast, at full strength: each
+    /// takes its own share (`p.shadow.opacity(0.5)`). Lighter in Light, where the same share
+    /// would be heavy.
+    pub shadow: Hsla,
+}
+
+/// Flottille's own palette comes light or dark.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Shade {
+    Light,
+    #[default]
+    Dark,
 }
 
 impl Palette {
+    /// Flottille's own palette in that shade.
+    pub fn flottille(shade: Shade) -> Self {
+        match shade {
+            Shade::Light => Self::light(),
+            Shade::Dark => Self::base(),
+        }
+    }
+
+    /// Flottille's own light palette: the dark one's roles on a near-white page. The bars and the
+    /// cards sit a step toward the ink (never white, which would be the page itself), the states
+    /// are deepened until they read as text on every surface, and the primary is a near-black.
+    pub fn light() -> Self {
+        Self {
+            body: hex(0xebebea),
+            bg: hex(0xfbfbfa),
+            rail: hex(0xf2f2f1),
+            side: hex(0xf5f5f4),
+            card: hex(0xf4f4f3),
+            card2: hex(0xebebea),
+            line: hex(0xe2e2e0),
+            line2: hex(0xd4d4d2),
+            hover: hex(0xededec),
+            sel: hex(0xe5e5e3),
+            text: hex(0x171717),
+            mute: hex(0x4f4f4e),
+            faint: hex(0x636362),
+            acc: hex(0x1c1c1c),
+            on_acc: hex(0xfafafa),
+            shell: hex(0xf4f4f3),
+            field: hex(0xfdfdfd),
+            field_line: hex(0xdadad8),
+            focus_line: hex(0xb8b8b6),
+            focus_ring: hex(0xe9e9e7),
+            run: hex(0x2251c4),
+            run_bg: hex(0xe7edfb),
+            wait: hex(0x8f5200),
+            wait_bg: hex(0xfaefdc),
+            on_wait: hex(0xffffff),
+            wait_line: hex(0xe8cf9e),
+            ok: hex(0x17703a),
+            ok_bg: hex(0xe2f2e7),
+            fail: hex(0xb3261e),
+            fail_bg: hex(0xfbe7e5),
+            on_fail: hex(0xffffff),
+            fail_line: hex(0xeab8b3),
+            add: hex(0xe4f3e8),
+            del: hex(0xfbe8e6),
+            scrim: gpui_kit::rgba(0x0000004d).into(),
+            shadow: gpui_kit::rgba(0x0000004d).into(),
+        }
+    }
+
     /// Flottille's own dark palette: neutral greys, an off-white primary.
     pub fn base() -> Self {
         Self {
@@ -108,6 +172,7 @@ impl Palette {
             add: hex(0x132a1b),
             del: hex(0x2c1515),
             scrim: gpui_kit::rgba(0x00000080).into(),
+            shadow: gpui_kit::rgba(0x000000ff).into(),
         }
     }
 
@@ -166,6 +231,7 @@ impl Palette {
             add: m(self.add, to.add),
             del: m(self.del, to.del),
             scrim: m(self.scrim, to.scrim),
+            shadow: m(self.shadow, to.shadow),
         }
     }
 }
@@ -278,5 +344,76 @@ mod tests {
         );
         assert!(contrast(p.text, p.bg) >= TEXT_CONTRAST);
         assert!(contrast(p.on_acc, p.acc) >= TEXT_CONTRAST);
+    }
+
+    #[test]
+    fn the_shadows_of_light_are_lighter_and_those_of_dark_are_unchanged() {
+        let (light, dark) = (Palette::flottille(Shade::Light), Palette::base());
+        // Dark: a black at full strength, each overlay takes its own share, as before.
+        assert_eq!((dark.shadow.l, dark.shadow.a), (0.0, 1.0));
+        // A shadow that is deep on a dark page is heavy on a light one.
+        assert_eq!(light.shadow.l, 0.0);
+        assert!(light.shadow.a < 0.5, "a lighter shadow: {}", light.shadow.a);
+    }
+
+    #[test]
+    fn the_light_palette_has_every_role_and_its_text_reads() {
+        let light = Palette::flottille(Shade::Light);
+        let dark = Palette::flottille(Shade::Dark);
+        assert_eq!(dark, Palette::base(), "Flottille Dark is today's palette");
+        assert!(light.bg.l > 0.9, "a light background");
+        assert_eq!(light.with_readable_inks(), light, "it needs no correction");
+        // The surfaces keep the dark palette's order of distance from the background: the body
+        // and the bars set back, the cards a step toward the ink, never white.
+        assert!(light.body.l < light.rail.l && light.rail.l < light.bg.l);
+        assert!(light.card.l < light.bg.l && light.card2.l < light.card.l);
+        assert!(light.line.l < light.card.l && light.line2.l < light.line.l);
+        // Every ink against every surface it is drawn on.
+        let surfaces = [
+            ("body", light.body),
+            ("bg", light.bg),
+            ("rail", light.rail),
+            ("side", light.side),
+            ("card", light.card),
+            ("card2", light.card2),
+            ("hover", light.hover),
+            ("sel", light.sel),
+            ("shell", light.shell),
+            ("field", light.field),
+        ];
+        let inks = [
+            ("text", light.text),
+            ("mute", light.mute),
+            ("faint", light.faint),
+            ("run", light.run),
+            ("wait", light.wait),
+            ("ok", light.ok),
+            ("fail", light.fail),
+        ];
+        for (ink_name, ink) in inks {
+            for (surface_name, surface) in surfaces {
+                let ratio = contrast(ink, surface);
+                assert!(
+                    ratio >= TEXT_CONTRAST,
+                    "{ink_name} on {surface_name}: {ratio:.2}"
+                );
+            }
+        }
+        for (name, ink, fill) in [
+            ("on_acc", light.on_acc, light.acc),
+            ("run", light.run, light.run_bg),
+            ("wait", light.wait, light.wait_bg),
+            ("on_wait", light.on_wait, light.wait),
+            ("ok", light.ok, light.ok_bg),
+            ("fail", light.fail, light.fail_bg),
+            ("on_fail", light.on_fail, light.fail),
+            ("ok on add", light.ok, light.add),
+            ("fail on del", light.fail, light.del),
+            ("text on add", light.text, light.add),
+            ("text on del", light.text, light.del),
+        ] {
+            let ratio = contrast(ink, fill);
+            assert!(ratio >= TEXT_CONTRAST, "{name}: {ratio:.2}");
+        }
     }
 }

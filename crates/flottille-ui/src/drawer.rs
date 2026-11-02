@@ -8,7 +8,7 @@ use std::sync::Arc;
 use gpui_kit::{
     AnyView, App, BoxShadow, Context, ElementId, EventEmitter, FocusHandle, InteractiveElement,
     IntoElement, KeyDownEvent, ParentElement, Pixels, Render, StatefulInteractiveElement, Styled,
-    TestSupportExt, Window, div, hsla, point, px,
+    TestSupportExt, Window, div, point, px,
 };
 
 use crate::interact::{dismiss_on_navigate, open_overlay};
@@ -136,7 +136,7 @@ impl Render for Drawer {
             .w(self.width)
             .bg(p.side)
             .shadow(vec![BoxShadow {
-                color: hsla(0., 0., 0., 0.8),
+                color: p.shadow.opacity(0.8),
                 offset: point(shadow_x, px(0.)),
                 blur_radius: px(40.),
                 spread_radius: px(-20.),
@@ -205,7 +205,7 @@ impl Drawer {
             .border_l_1()
             .border_color(p.line2)
             .shadow(vec![BoxShadow {
-                color: hsla(0., 0., 0., 0.5),
+                color: p.shadow.opacity(0.5),
                 offset: point(px(-24.), px(0.)),
                 blur_radius: px(60.),
                 spread_radius: px(0.),

@@ -321,6 +321,22 @@ configuration folder.
 `developer.set` emits `developer.changed`. The user's door alone reaches them: no tool of an agent
 does.
 
+### The appearance methods
+
+`appearance.show` and `appearance.set` read and keep the window's appearance (`docs/design.md`
+§10): `theme` and `shade` in `appearance.toml` of Flottille's configuration folder, so that every
+window and a restart show the same colours.
+
+- `appearance.show` answers `{"theme", "shade"}`: `theme` is `omarchy` (the desktop's Omarchy
+  theme, followed live) or `flottille` (Flottille's own palette), `shade` is `light` or `dark`
+  (Flottille's, also used when Omarchy is chosen and no Omarchy theme can be used). With no file,
+  `omarchy` and `dark`. `invalid-config` when the file cannot be read or names another word.
+- `appearance.set {theme, shade}` writes the file and answers as `appearance.show`;
+  `invalid-params` for another word.
+
+`appearance.set` emits `appearance.changed` with what it answers. The user's door alone reaches
+them: no tool of an agent does.
+
 ### The skill methods
 
 A project's skills (`docs/skills.md`). The daemon edits the project's file in place, the rest of it

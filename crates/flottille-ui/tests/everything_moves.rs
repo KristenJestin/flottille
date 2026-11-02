@@ -228,6 +228,69 @@ fn a_segmented_control_slides_its_highlight_over_frames_and_then_stops(cx: &mut 
     assert_eq!(pending_frames(cx), 0, "it stopped once it was there");
 }
 
+struct Reach {
+    taken: bool,
+}
+
+impl Render for Reach {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let segmented = Segmented::new(
+            "theme",
+            "Theme",
+            [("omarchy", "Omarchy"), ("flottille", "Flottille")],
+            1,
+        );
+        div().size_full().child(if self.taken {
+            segmented.unavailable(0)
+        } else {
+            segmented
+        })
+    }
+}
+
+fn reach(cx: &mut TestAppContext) -> (gpui_kit::Entity<Reach>, &mut VisualTestContext) {
+    init(cx, Desktop::new(false).env());
+    let (view, cx) = cx.add_window_view(|_, _| Reach { taken: false });
+    cx.update(|window, cx| window.render_frame(cx));
+    advance(cx, HOVER * 2);
+    (view, cx)
+}
+
+fn take(view: &gpui_kit::Entity<Reach>, taken: bool, cx: &mut VisualTestContext) {
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.taken = taken;
+            cx.notify();
+        })
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+}
+
+#[gpui_kit::test]
+fn a_segment_that_becomes_unavailable_fades_over_hover_and_fades_back_instead_of_switching(
+    cx: &mut TestAppContext,
+) {
+    let (view, cx) = reach(cx);
+    assert_eq!(pending_frames(cx), 0, "at rest nothing is drawn");
+    take(&view, true, cx);
+    assert!(pending_frames(cx) > 0, "the segment is fading out");
+    advance(cx, HOVER * 2);
+    assert_eq!(pending_frames(cx), 0, "it stopped once it was faded");
+    take(&view, false, cx);
+    assert!(pending_frames(cx) > 0, "the segment is fading back in");
+    advance(cx, HOVER * 2);
+    assert_eq!(pending_frames(cx), 0, "it stopped once it was back");
+}
+
+#[gpui_kit::test]
+fn a_segment_that_is_unavailable_has_no_hover(cx: &mut TestAppContext) {
+    let (view, cx) = reach(cx);
+    take(&view, true, cx);
+    advance(cx, HOVER * 2);
+    cx.update(|window, cx| window.hover("theme-omarchy", cx));
+    assert_eq!(pending_frames(cx), 0, "the pointer on it moves nothing");
+}
+
 #[test]
 fn a_segmented_control_fills_its_alarm_choice_in_the_alarm_colour_and_fades_to_it_along_the_slide()
 {

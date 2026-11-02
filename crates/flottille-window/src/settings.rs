@@ -2,15 +2,18 @@
 //! in, and whether its agents can run here, as the daemon says it (`provider.list`). The window
 //! never writes `providers.toml` itself: a switch asks the daemon (`provider.enable`,
 //! `provider.disable`), and the page follows what the daemon lists next. The Auto judge is
-//! chosen here too (`provider.set_judge`), and its guidance edited (`judge.set`). Last, the
-//! developer mode is switched (`developer.set`), its log's path beside the switch. The page is
-//! tabs, one section shown at a time.
+//! chosen here too (`provider.set_judge`), and its guidance edited (`judge.set`). The window's
+//! appearance is chosen (`appearance.set`): the Omarchy theme or Flottille's own, light or dark.
+//! Last, the developer mode is switched (`developer.set`), its log's path beside the switch. The
+//! page is tabs, one section shown at a time.
 
 use std::collections::HashMap;
 
+use flottille_ui::omarchy::{self, Appearance, Source};
+use flottille_ui::theme::Shade;
 use flottille_ui::{
-    Field, Icon, ListCard, ListRow, PageHeader, Section, Select, SelectOption, Switch, Tabs, Toast,
-    enter, hoverable, icon, palette, presence, presence_of, space, toast, turning,
+    Field, Icon, ListCard, ListRow, PageHeader, Section, Segmented, Select, SelectOption, Switch,
+    Tabs, Toast, enter, hoverable, icon, palette, presence, presence_of, space, toast, turning,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -25,11 +28,12 @@ use crate::rules::RulesEditor;
 use crate::shell::Shell;
 
 /// The sections of the page, in order: each index entry's key and label.
-pub const SECTIONS: [(&str, &str); 5] = [
+pub const SECTIONS: [(&str, &str); 6] = [
     ("judge", "Auto judge"),
     ("providers", "Providers"),
     ("guidance", "Judge guidance"),
     ("rules", "Rules"),
+    ("appearance", "Appearance"),
     ("developer", "Developer mode"),
 ];
 
@@ -94,6 +98,11 @@ pub struct SettingsPage {
     developer: Option<Developer>,
     /// The developer mode's switch flipped, until the daemon answers: what it was asked to become.
     developer_pending: Option<bool>,
+    /// The window's appearance, once the daemon said it.
+    appearance: Option<Appearance>,
+    /// Why the daemon could not read the appearance it keeps: the tab says so and stays usable,
+    /// a choice writes it again.
+    appearance_unread: Option<String>,
     /// The tab chosen: the index of its section in [`SECTIONS`].
     tab: usize,
 }
@@ -141,6 +150,8 @@ impl SettingsPage {
             how: false,
             developer: None,
             developer_pending: None,
+            appearance: None,
+            appearance_unread: None,
             tab: 0,
         }
     }
@@ -493,6 +504,195 @@ impl SettingsPage {
             .child(card)
     }
 
+    /// Whether the daemon answered about the window's appearance, with it or with why it cannot
+    /// read it: until then it cannot be chosen.
+    pub fn appearance_known(&self) -> bool {
+        self.appearance.is_some() || self.appearance_unread.is_some()
+    }
+
+    /// Uses `appearance` at once, and asks the daemon to keep it for every window.
+    pub fn choose_appearance(&mut self, appearance: Appearance, cx: &mut Context<Self>) {
+        if !self.appearance_known() || self.appearance == Some(appearance) {
+            return;
+        }
+        self.appearance = Some(appearance);
+        omarchy::appear(appearance, cx);
+        self.shell
+            .update(cx, |shell, _| shell.ask_appearance(Some(appearance)))
+            .ok();
+        cx.notify();
+    }
+
+    /// The daemon's answer to a read or a choice: a choice not kept is said in a toast (the
+    /// window reads the appearance again).
+    pub fn appearance_answered(
+        &mut self,
+        shown: Result<Appearance, String>,
+        written: bool,
+        cx: &mut Context<Self>,
+    ) {
+        match shown {
+            Ok(appearance) => {
+                self.appearance = Some(appearance);
+                self.appearance_unread = None;
+            }
+            Err(why) if written => toast(
+                Toast::failure("The appearance was not kept").detail(why),
+                cx,
+            ),
+            // What it keeps cannot be read: the window shows what it uses, a choice writes it.
+            Err(why) => self.appearance_unread = Some(why),
+        }
+        cx.notify();
+    }
+
+    fn appearance_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let known = self.appearance_known();
+        let shown = omarchy::shown(cx);
+        let kept = self.appearance.unwrap_or(shown);
+        let refused = omarchy::omarchy_refused(cx);
+        let row = |label: &'static str, hint: &'static str, control: AnyElement| {
+            div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(space::LG)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(space::XS)
+                        .child(div().text_size(px(13.)).child(label))
+                        .child(div().text_size(px(12.5)).text_color(p.mute).child(hint)),
+                )
+                .child(control)
+        };
+        let this = cx.entity().downgrade();
+        let theme = Segmented::new(
+            "appearance-theme",
+            "Theme",
+            [("omarchy", "Omarchy"), ("flottille", "Flottille")],
+            match shown.source {
+                Source::Omarchy => 0,
+                Source::Flottille => 1,
+            },
+        )
+        .disabled(!known)
+        .when(refused.is_some(), |s| s.unavailable(0))
+        .on_choose(move |index, _, cx| {
+            let source = if index == 0 {
+                Source::Omarchy
+            } else {
+                Source::Flottille
+            };
+            this.update(cx, |this, cx| {
+                this.choose_appearance(Appearance { source, ..kept }, cx)
+            })
+            .ok();
+        });
+        let this = cx.entity().downgrade();
+        let shade = Segmented::new(
+            "appearance-shade",
+            "Shade",
+            [("light", "Light"), ("dark", "Dark")],
+            match shown.shade {
+                Shade::Light => 0,
+                Shade::Dark => 1,
+            },
+        )
+        .disabled(!known)
+        .on_choose(move |index, _, cx| {
+            let shade = if index == 0 {
+                Shade::Light
+            } else {
+                Shade::Dark
+            };
+            this.update(cx, |this, cx| {
+                this.choose_appearance(
+                    Appearance {
+                        source: Source::Flottille,
+                        shade,
+                    },
+                    cx,
+                )
+            })
+            .ok();
+        });
+        let card = div()
+            .id("appearance")
+            .p(space::LG)
+            .flex()
+            .flex_col()
+            .gap(space::MD)
+            .rounded(px(12.))
+            .bg(p.card)
+            .border_1()
+            .border_color(p.line)
+            .child(row(
+                "Theme",
+                "Omarchy follows your desktop's theme as it changes.",
+                theme.into_any_element(),
+            ))
+            .child(
+                presence_of(
+                    "appearance-omarchy-why-line",
+                    refused.map(SharedString::from),
+                    move |why| {
+                        div()
+                            .id("appearance-omarchy-why")
+                            .aria_label(why.clone())
+                            .text_size(px(12.5))
+                            .text_color(p.faint)
+                            .child(why)
+                            .test_support()
+                            .into_any_element()
+                    },
+                )
+                .gap(space::MD),
+            )
+            .child(
+                presence_of(
+                    "appearance-unread-line",
+                    self.appearance_unread.as_ref().map(|why| {
+                        SharedString::from(format!("The kept appearance could not be read: {why}"))
+                    }),
+                    move |line| {
+                        div()
+                            .id("appearance-unread")
+                            .aria_label(line.clone())
+                            .text_size(px(12.5))
+                            .text_color(p.faint)
+                            .child(line)
+                            .test_support()
+                            .into_any_element()
+                    },
+                )
+                .gap(space::MD),
+            )
+            .child(
+                presence(
+                    "appearance-shade-block",
+                    shown.source == Source::Flottille,
+                    row(
+                        "Shade",
+                        "Flottille's own colours, light or dark.",
+                        shade.into_any_element(),
+                    ),
+                )
+                .gap(space::MD),
+            )
+            .test_support();
+        Section::new("appearance", "Appearance")
+            .sentence(
+                "Where the window's colours come from: your desktop's Omarchy theme, or \
+                 Flottille's own. A choice applies at once, in every window.",
+            )
+            .child(card)
+    }
+
     /// Whether "How Auto works" is unfolded.
     pub fn is_how_open(&self) -> bool {
         self.how
@@ -740,6 +940,7 @@ impl Render for SettingsPage {
             providers,
             self.judge_guidance.clone().into_any_element(),
             self.rules.clone().into_any_element(),
+            self.appearance_section(cx).into_any_element(),
             self.developer_section(cx).into_any_element(),
         ];
         let chosen = self.tab.min(sections.len() - 1);

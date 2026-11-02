@@ -13,7 +13,7 @@ use std::time::Duration;
 use gpui_kit::{
     App, BoxShadow, Context, ElementId, FontWeight, Global, InteractiveElement, IntoElement,
     ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Task, TestSupportExt,
-    WeakEntity, Window, anchored, deferred, div, hsla, point, px,
+    WeakEntity, Window, anchored, deferred, div, point, px,
 };
 
 use crate::color::mix;
@@ -255,7 +255,7 @@ impl ToastStack {
             .border_1()
             .border_color(if failed { p.fail_line } else { p.line2 })
             .shadow(vec![BoxShadow {
-                color: hsla(0., 0., 0., 0.55),
+                color: p.shadow.opacity(0.55),
                 offset: point(px(0.), px(14.)),
                 blur_radius: px(36.),
                 spread_radius: px(0.),
