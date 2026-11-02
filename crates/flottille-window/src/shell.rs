@@ -452,6 +452,8 @@ impl Shell {
         }
         let (follow, layout, status) = (self.follow.clone(), self.layout, status.clone());
         let page = cx.new(|cx| SessionPage::new(this, opened, status, reply, follow, layout, cx));
+        let providers = self.providers.clone();
+        page.update(cx, |page, cx| page.set_providers(&providers, cx));
         self._chose = Some(cx.subscribe(&page, |shell, page, Chose(agent), cx| {
             let session = page.read(cx).id().to_owned();
             shell.history.show_agent(&session, agent);
@@ -1277,6 +1279,9 @@ impl Shell {
                 composer.set_providers(&providers, default, last, cx)
             });
         }
+        if let Some(page) = self.session_page.clone() {
+            page.update(cx, |page, cx| page.set_providers(&providers, cx));
+        }
         // The notice of a judge Flottille picked comes and goes with them.
         let notice = self.judge_notice();
         self.providers = providers;
@@ -1578,9 +1583,13 @@ impl Shell {
             .providers
             .get(name)
             .map_or(name.as_str(), |p| p.title.as_str());
-        let model = model.as_deref().unwrap_or("default model");
+        // A model that is not known is left out: the provider chooses it.
+        let model = self
+            .providers
+            .model_said(name, model.as_deref())
+            .map_or_else(String::new, |model| format!(" {model}"));
         Some(format!(
-            "Flottille chose {title} {model} as your Auto judge: {title} is installed and signed \
+            "Flottille chose {title}{model} as your Auto judge: {title} is installed and signed \
              in here. In Auto, it decides the calls the rules do not know, on your quota. Change \
              it, or choose no judge, in Settings."
         ))

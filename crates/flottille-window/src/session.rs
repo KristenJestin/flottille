@@ -53,6 +53,7 @@ use crate::link::{Connect, Update};
 use crate::mode::ModeSwitch;
 use crate::model::Place;
 use crate::open::Opener;
+use crate::providers::Providers;
 use crate::queued::QueuedMessages;
 use crate::runs::{self, CommandList, CommandPanel, rail_label};
 use crate::session_link::{
@@ -220,6 +221,8 @@ pub struct SessionPage {
     shown: String,
     link: Option<SessionLink>,
     tree: Vec<TreeAgent>,
+    /// The providers as the daemon lists them, to name the model an agent runs on.
+    providers: Providers,
     /// An agent was shown before the tree was read: `set_tree` checks that it is in it.
     unchecked: bool,
     /// One state per agent, read by its rail row and its line in the sub-agents list.
@@ -305,6 +308,7 @@ impl SessionPage {
             shown,
             link: None,
             tree: Vec::new(),
+            providers: Providers::default(),
             unchecked: false,
             statuses: HashMap::new(),
             conversation,
@@ -347,6 +351,20 @@ impl SessionPage {
 
     pub fn shown(&self) -> &str {
         &self.shown
+    }
+
+    /// The providers as the daemon lists them: the lines that say what the agents run on name
+    /// each provider's default model by what they say.
+    pub fn set_providers(&mut self, providers: &Providers, cx: &mut Context<Self>) {
+        if self.providers == *providers {
+            return;
+        }
+        self.providers = providers.clone();
+        let facts = self.reply.read(cx).facts.clone();
+        facts.update(cx, |facts, cx| facts.set_providers(providers, cx));
+        if !self.tree.is_empty() {
+            self.set_tree(self.tree.clone(), cx);
+        }
     }
 
     pub fn token(&self) -> Option<u64> {
@@ -1018,6 +1036,7 @@ impl SessionPage {
                     name: name_of(agent),
                     provider: agent.provider.clone(),
                     model: agent.model.clone(),
+                    runs_on: runs_on(&self.providers, &agent.provider, agent.model.as_deref()),
                     depth: agent.depth,
                     parent: agent.parent.clone(),
                     ended: matches!(state_of(agent), AgentState::Completed | AgentState::Stopped),
@@ -1165,6 +1184,7 @@ impl SessionPage {
                     name: name_of(agent),
                     provider: agent.provider.clone(),
                     model: agent.model.clone(),
+                    runs_on: runs_on(&self.providers, &agent.provider, agent.model.as_deref()),
                     doing: agent.doing.clone(),
                     status: self.statuses.get(&agent.id)?.clone(),
                 })
@@ -1783,6 +1803,8 @@ pub struct SubAgent {
     pub name: String,
     pub provider: String,
     pub model: Option<String>,
+    /// Its provider and model, as a line.
+    pub runs_on: String,
     pub doing: String,
     pub status: Entity<Status>,
 }
@@ -2959,10 +2981,7 @@ impl Render for Row {
                         SharedString::from(agent.name.clone()),
                     )
                     .leading(self.icons[&agent.id].clone())
-                    .detail(SharedString::from(runs_on(
-                        &agent.provider,
-                        agent.model.as_deref(),
-                    )))
+                    .detail(SharedString::from(agent.runs_on.clone()))
                     .meta(SharedString::from(agent.doing.clone()))
                     .trailing(self.pills[&agent.id].clone())
                     .on_click(move |_, _, cx| {
@@ -3359,6 +3378,8 @@ pub struct RailAgent {
     pub name: String,
     pub provider: String,
     pub model: Option<String>,
+    /// Its provider and model, as a line.
+    pub runs_on: String,
     pub depth: u64,
     /// The agent that launched it; `None` for the root.
     pub parent: Option<String>,
@@ -3761,7 +3782,7 @@ impl Render for SessionRail {
             let target = agent.id.clone();
             let kid = agent.depth > 0;
             let indent = space::LG * agent.depth as f32;
-            let runs = runs_on(&agent.provider, agent.model.as_deref());
+            let runs = agent.runs_on.clone();
             // The root has no name on screen: what it runs on says it, alone on its row.
             let top_id = match kid {
                 false => format!("rail-runs-on-{}", agent.id),
@@ -4712,6 +4733,7 @@ impl Reply {
             facts: cx.new(|_| ReplyFacts {
                 provider: None,
                 model: None,
+                providers: Providers::default(),
             }),
             status_line: cx.new(|_| StatusLine::new()),
             mode,
@@ -5514,12 +5536,8 @@ impl Render for StatusLine {
 }
 
 /// What an agent runs on, as a line: its provider and its model.
-pub fn runs_on(provider: &str, model: Option<&str>) -> String {
-    let model = match model {
-        None | Some(crate::composer::DEFAULT) => "default model",
-        Some(model) => model,
-    };
-    format!("{provider} · {model}")
+pub fn runs_on(providers: &Providers, provider: &str, model: Option<&str>) -> String {
+    format!("{provider} · {}", providers.model_line(provider, model))
 }
 
 /// The root's provider and model, below the field. The context it used is on its row in the
@@ -5527,18 +5545,22 @@ pub fn runs_on(provider: &str, model: Option<&str>) -> String {
 pub struct ReplyFacts {
     provider: Option<String>,
     model: Option<String>,
+    providers: Providers,
 }
 
 impl ReplyFacts {
-    pub fn model(&self) -> Option<&str> {
-        self.model.as_deref()
-    }
-
     /// What it shows of what the root runs on.
     pub fn shown(&self) -> String {
         match &self.provider {
-            Some(provider) => runs_on(provider, self.model.as_deref()),
-            None => self.model.clone().unwrap_or_else(|| "default model".into()),
+            Some(provider) => runs_on(&self.providers, provider, self.model.as_deref()),
+            None => self.model.clone().unwrap_or_default(),
+        }
+    }
+
+    fn set_providers(&mut self, providers: &Providers, cx: &mut Context<Self>) {
+        if self.providers != *providers {
+            self.providers = providers.clone();
+            cx.notify();
         }
     }
 

@@ -173,6 +173,27 @@ impl Provider {
 }
 
 impl Providers {
+    /// The model a provider's session runs on, as the window names it: the model asked as it is;
+    /// none asked, or the provider's own `default`, the model it takes by its name; `None` when no
+    /// session said which that is.
+    pub fn model_said(&self, provider: &str, model: Option<&str>) -> Option<String> {
+        match model {
+            Some(model) if model != crate::composer::DEFAULT => Some(model.to_owned()),
+            _ => {
+                let provider = self.get(provider)?;
+                crate::composer::named(Some(provider), provider.default_model()?)
+            }
+        }
+    }
+
+    /// The same as a sentence says it: when the model is not known, that the provider chooses it.
+    pub fn model_line(&self, provider: &str, model: Option<&str>) -> String {
+        self.model_said(provider, model).unwrap_or_else(|| {
+            let title = self.get(provider).map_or(provider, |p| p.title.as_str());
+            format!("model chosen by {title}")
+        })
+    }
+
     pub fn of(answer: Result<&Value, String>) -> Providers {
         match answer {
             Ok(answer) => Providers {

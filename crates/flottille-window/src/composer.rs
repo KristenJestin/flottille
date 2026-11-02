@@ -931,7 +931,10 @@ pub const DEFAULT: &str = "default";
 
 /// A model's name, its provider's `default` named by the model it stands for; `None` for a
 /// `default` that does not say which.
-fn named(provider: Option<&Provider>, model: &crate::providers::Model) -> Option<String> {
+pub(crate) fn named(
+    provider: Option<&Provider>,
+    model: &crate::providers::Model,
+) -> Option<String> {
     if model.id != DEFAULT {
         return Some(model.label());
     }

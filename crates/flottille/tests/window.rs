@@ -1764,9 +1764,10 @@ fn a_root_agent_s_reply_has_no_label_while_a_child_s_has_its_name(cx: &mut TestA
             "a child keeps its name"
         );
     });
+    let providers = shell.read_with(cx, |s, _| s.providers().clone());
     let runs_on = page.read_with(cx, |p, cx| {
         let agent = &p.rail().read(cx).agents()[0];
-        flottille_window::session::runs_on(&agent.provider, agent.model.as_deref())
+        flottille_window::session::runs_on(&providers, &agent.provider, agent.model.as_deref())
     });
     assert!(runs_on.starts_with("claude · "), "{runs_on}");
 
@@ -2403,9 +2404,21 @@ fn the_auto_judge_is_chosen_in_settings_which_say_it_uses_the_quota(cx: &mut Tes
     cx.update(|window, cx| window.click("judge-provider-choice-opencode", cx));
     until(&shell, cx, "the page shows the judge chosen", |cx| {
         page.read_with(cx, |page, _| {
-            page.judge_shown() == ("OpenCode".into(), Some("default model".into()))
+            page.judge_shown() == ("OpenCode".into(), Some("model chosen by OpenCode".into()))
         })
     });
+    // No session of OpenCode said its models: the picker never says "default".
+    let labels: Vec<String> = page.read_with(cx, |page, _| {
+        page.judge_entries(flottille_window::settings::JudgeMenu::Model)
+            .into_iter()
+            .map(|entry| entry.1)
+            .collect()
+    });
+    assert_eq!(labels[0], "Chosen by OpenCode");
+    assert!(
+        labels.iter().all(|l| !l.to_lowercase().contains("default")),
+        "{labels:?}"
+    );
     let file = std::fs::read_to_string(user.path("config/flottille/providers.toml")).unwrap();
     assert!(
         file.contains("[judge]") && file.contains("provider = \"opencode\""),
@@ -2576,6 +2589,83 @@ fn the_judge_section_shows_a_guidance_it_cannot_follow_and_follows_an_edit_made_
     });
     settle(cx);
     cx.update(|window, _| assert!(window.try_find("judge-guidance-error").is_none()));
+}
+
+#[gpui_kit::test]
+fn the_judge_s_model_picker_names_the_provider_s_default_model_once_it_is_known(
+    cx: &mut TestAppContext,
+) {
+    let user = providers_user();
+    project(&user, "atlas");
+    // A session of OpenCode says its models, and the one it takes.
+    learn_models(&user, "atlas", "opencode", "open/small");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_settings(&shell, cx);
+    until(&shell, cx, "the judge's picker shows none", |cx| {
+        page.read_with(cx, |page, _| page.judge_shown().0 == "No judge")
+    });
+    cx.update(|window, cx| window.click("judge-provider", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("judge-provider-choice-opencode", cx));
+    until(
+        &shell,
+        cx,
+        "the page shows the judge's model by its name",
+        |cx| {
+            page.read_with(cx, |page, _| {
+                page.judge_shown() == ("OpenCode".into(), Some("open/small".into()))
+            })
+        },
+    );
+    let labels: Vec<String> = page.read_with(cx, |page, _| {
+        page.judge_entries(flottille_window::settings::JudgeMenu::Model)
+            .into_iter()
+            .map(|entry| entry.1)
+            .collect()
+    });
+    assert_eq!(labels, ["open/small", "open/medium"]);
+    let first = page.read_with(cx, |page, _| {
+        page.judge_entries(flottille_window::settings::JudgeMenu::Model)[0].clone()
+    });
+    assert!(first.2, "the default model's row is the chosen one");
+    assert_eq!(
+        first.3,
+        Some(("opencode".to_owned(), None)),
+        "it names none"
+    );
+}
+
+#[test]
+fn a_line_that_says_what_an_agent_runs_on_never_says_default_model() {
+    let listed = |models: serde_json::Value| {
+        flottille_window::providers::Providers::of(Ok(&json!({"providers": [
+            {"name": "claude", "title": "Claude", "enabled": true, "ready": true,
+                "models": models}
+        ]})))
+    };
+    let runs_on = flottille_window::session::runs_on;
+    let known = listed(json!([
+        {"id": "default", "name": "Default (recommended)", "stands_for": "fable"},
+        {"id": "fable", "name": "Fable", "default": true},
+        {"id": "haiku", "name": "Haiku"}
+    ]));
+    // No model named, or the provider's own `default`: the real one, by its name.
+    assert_eq!(runs_on(&known, "claude", None), "claude · Fable");
+    assert_eq!(runs_on(&known, "claude", Some("default")), "claude · Fable");
+    assert_eq!(runs_on(&known, "claude", Some("haiku")), "claude · haiku");
+    // Not known: the provider chooses.
+    let unknown = listed(serde_json::Value::Null);
+    assert_eq!(
+        runs_on(&unknown, "claude", None),
+        "claude · model chosen by Claude"
+    );
+    assert_eq!(
+        runs_on(&unknown, "claude", Some("default")),
+        "claude · model chosen by Claude"
+    );
+    // The notice of a judge Flottille picked leaves the model out rather than say it twice.
+    assert_eq!(known.model_said("claude", None).as_deref(), Some("Fable"));
+    assert_eq!(unknown.model_said("claude", None), None);
 }
 
 #[gpui_kit::test]
