@@ -1429,7 +1429,10 @@ fn jira_written(args: Value, verb: &str) -> (String, Vec<String>) {
     (done, asked)
 }
 
-/// The search that finds the statuses of the work items of ABC.
+/// The read of the status of ABC-1 a move starts with.
+const VIEW_OF_ABC_1: &str = "jira workitem view ABC-1 --json --fields status";
+
+/// The search that finds the statuses the work items of ABC are in.
 const STATUSES_OF_ABC: &str = "jira workitem search --jql project = \"ABC\" ORDER BY updated \
     DESC --fields key,status --json --limit 200";
 
@@ -1534,57 +1537,221 @@ fn move_a_jira_work_item_to_a_named_status() {
         "jira workitem transition",
     );
 
-    assert!(done.contains("ABC-1 was moved to In Progress."), "{done}");
+    // The name as the agent wrote it: Jira's transition resolves it.
+    assert!(done.contains("ABC-1 was moved to in progress."), "{done}");
     assert_eq!(
         calls(),
         [
             "jira auth status",
-            STATUSES_OF_ABC,
-            "jira workitem transition --key ABC-1 --status In Progress --yes"
+            VIEW_OF_ABC_1,
+            "jira workitem transition --key ABC-1 --status in progress --yes"
+        ]
+    );
+}
+
+/// A tracker where every work item is to do and the done status is no work item's yet; ABC-1 can
+/// move to the given statuses (invented workflow names).
+fn jira_all_to_do(user: &User, moves: Value) {
+    let site = "example.atlassian.net";
+    let first = in_status(work_item("ABC-1", "The login fails", site), "To Do", "new");
+    let second = in_status(work_item("ABC-2", "Add search", site), "To Do", "new");
+    user.acli_script(json!({
+        "items": {"ABC-1": first, "ABC-2": second},
+        "search": [first, second],
+        "transitions": {"ABC-1": moves},
+    }));
+}
+
+/// `args` on Jira, held for the user then allowed: what the agent is handed, and the calls of
+/// `acli`.
+fn jira_asked(user: &User, args: Value) -> (String, Vec<String>) {
+    let (_, mcp) = root_in(user, None);
+    let answer = allow(user, held(&mcp.call("tickets", args)));
+    (answer, words(user.acli_received()))
+}
+
+fn transitions_of(calls: &[String]) -> Vec<&String> {
+    calls
+        .iter()
+        .filter(|call| call.starts_with("jira workitem transition"))
+        .collect()
+}
+
+#[test]
+fn a_jira_item_moves_to_a_status_no_item_has_yet() {
+    let user = user();
+    on_jira(&user);
+    jira_all_to_do(&user, json!(["In Progress", "Done"]));
+
+    let (answer, calls) = jira_asked(
+        &user,
+        json!({"action": "status", "ticket": "ABC-1", "status": "Done"}),
+    );
+
+    assert!(answer.contains("ABC-1 was moved to Done."), "{answer}");
+    // Jira's transition decides: no guess among the statuses the items are in.
+    assert_eq!(
+        calls,
+        [
+            "jira auth status",
+            VIEW_OF_ABC_1,
+            "jira workitem transition --key ABC-1 --status Done --yes"
         ]
     );
 }
 
 #[test]
-fn an_unknown_status_is_refused_with_the_statuses_it_can_move_to() {
+fn close_takes_the_transition_to_a_done_status() {
+    // The project's done status is not named Done: the one a work item is in is taken.
+    let user = user();
+    on_jira(&user);
+    let site = "example.atlassian.net";
+    let todo = in_status(work_item("ABC-1", "The login fails", site), "To Do", "new");
+    let shipped = in_status(work_item("ABC-3", "Shipped", site), "Shipped", "done");
+    user.acli_script(json!({
+        "items": {"ABC-1": todo, "ABC-3": shipped},
+        "search": [todo, shipped],
+        "transitions": {"ABC-1": ["In Progress", "Shipped"]},
+    }));
+
+    let (answer, calls) = jira_asked(&user, json!({"action": "close", "ticket": "ABC-1"}));
+
+    assert!(
+        answer.contains("ABC-1 was closed: moved to Shipped."),
+        "{answer}"
+    );
+    assert_eq!(
+        calls,
+        [
+            "jira auth status",
+            VIEW_OF_ABC_1,
+            STATUSES_OF_ABC,
+            "jira workitem transition --key ABC-1 --status Shipped --yes"
+        ]
+    );
+}
+
+#[test]
+fn close_with_no_done_status_in_sight_asks_jira_for_done() {
+    let user = user();
+    on_jira(&user);
+    jira_all_to_do(&user, json!(["Done"]));
+
+    let (answer, calls) = jira_asked(&user, json!({"action": "close", "ticket": "ABC-1"}));
+
+    assert!(
+        answer.contains("ABC-1 was closed: moved to Done."),
+        "{answer}"
+    );
+    assert_eq!(
+        transitions_of(&calls),
+        ["jira workitem transition --key ABC-1 --status Done --yes"]
+    );
+}
+
+#[test]
+fn close_on_a_closed_item_says_it_is_already_closed() {
+    let user = user();
+    on_jira(&user);
+    jira_items(&user);
+
+    let (answer, calls) = jira_asked(&user, json!({"action": "close", "ticket": "ABC-3"}));
+
+    assert!(
+        answer.contains("ABC-3 is already closed: it is in Done; nothing was written"),
+        "{answer}"
+    );
+    assert!(transitions_of(&calls).is_empty(), "{calls:?}");
+}
+
+#[test]
+fn a_status_no_transition_leads_to_is_refused_with_the_ones_that_do() {
+    let user = user();
+    on_jira(&user);
+    jira_items(&user);
+
+    let (answer, calls) = jira_asked(
+        &user,
+        json!({"action": "status", "ticket": "ABC-1", "status": "Blocked"}),
+    );
+
+    assert!(
+        answer.contains("acli could not move ABC-1 from To Do to Blocked"),
+        "{answer}"
+    );
+    // acli's own line, and what the work items of ABC are in, said apart from the transitions
+    // (acli lists none: `docs/tickets.md`).
+    assert!(
+        answer.contains("no transition to status Blocked for work item ABC-1"),
+        "{answer}"
+    );
+    assert!(
+        answer.contains("seen on ABC's work items: To Do, In Progress and Done"),
+        "{answer}"
+    );
+    assert!(answer.contains("nothing was written"), "{answer}");
+    // The one attempt Jira refused; no other status was tried.
+    assert_eq!(
+        transitions_of(&calls),
+        ["jira workitem transition --key ABC-1 --status Blocked --yes"]
+    );
+}
+
+#[test]
+fn reopen_on_an_open_item_says_it_is_already_open() {
     let user = user();
     on_jira(&user);
     jira_items(&user);
     let (_, mcp) = root_in(&user, None);
 
-    let number = held(&mcp.call(
-        "tickets",
-        json!({"action": "status", "ticket": "ABC-1", "status": "Blocked"}),
-    ));
-    let answer = allow(&user, number);
-
+    // To do, and in progress: both are open.
+    for (key, status) in [("ABC-1", "To Do"), ("ABC-2", "In Progress")] {
+        let answer = allow(
+            &user,
+            held(&mcp.call("tickets", json!({"action": "reopen", "ticket": key}))),
+        );
+        assert!(
+            answer.contains(&format!(
+                "{key} is already open: it is in {status}; nothing was written"
+            )),
+            "{answer}"
+        );
+    }
     assert!(
-        answer.contains(
-            "refused: Blocked is not a status of ABC's work items, which are To Do, In Progress \
-             and Done; nothing was written"
-        ),
-        "{answer}"
-    );
-    // A status the work item has no transition to: acli's refusal, and the statuses again.
-    let number = held(&mcp.call(
-        "tickets",
-        json!({"action": "status", "ticket": "ABC-3", "status": "In Progress"}),
-    ));
-    let answer = allow(&user, number);
-    assert!(
-        answer.contains("acli could not move ABC-3 to In Progress"),
-        "{answer}"
-    );
-    assert!(
-        answer.contains("the statuses of ABC's work items are To Do, In Progress and Done"),
-        "{answer}"
-    );
-    assert!(
-        !words(user.acli_received())
-            .iter()
-            .any(|call| call.contains("--status Blocked")),
+        transitions_of(&words(user.acli_received())).is_empty(),
         "{:?}",
         user.acli_received()
+    );
+}
+
+#[test]
+fn reopen_on_a_done_item_takes_the_transition_to_a_new_status() {
+    // It can move to a started status and to a to-do one: the to-do one is taken.
+    let user = user();
+    on_jira(&user);
+    let site = "example.atlassian.net";
+    let todo = in_status(work_item("ABC-1", "The login fails", site), "To Do", "new");
+    let progress = in_status(
+        work_item("ABC-2", "Add search", site),
+        "In Progress",
+        "indeterminate",
+    );
+    let done = in_status(work_item("ABC-3", "Shipped", site), "Done", "done");
+    user.acli_script(json!({
+        "items": {"ABC-1": todo, "ABC-2": progress, "ABC-3": done},
+        "search": [progress, todo, done],
+        "transitions": {"ABC-3": ["In Progress", "To Do"]},
+    }));
+
+    let (answer, calls) = jira_asked(&user, json!({"action": "reopen", "ticket": "ABC-3"}));
+
+    assert!(
+        answer.contains("ABC-3 was reopened: moved to To Do."),
+        "{answer}"
+    );
+    assert_eq!(
+        transitions_of(&calls),
+        ["jira workitem transition --key ABC-3 --status To Do --yes"]
     );
 }
 

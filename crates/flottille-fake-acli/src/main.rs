@@ -46,6 +46,8 @@
 //! - `acli jira workitem transition --key K --status S --yes` ends with 0 when S is one of the
 //!   script's `transitions` of K (`{"ABC-1": ["In Progress", "Done"]}`), in any case, and with 1
 //!   saying so otherwise.
+//!   These are the work item's transitions as Jira would answer them: the fake is the only place
+//!   they are known, since the real `acli` lists none.
 
 use std::io::Write;
 use std::path::PathBuf;

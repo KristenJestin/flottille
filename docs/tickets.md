@@ -245,27 +245,37 @@ are written (a text holding what looks like a secret is base for the gate, as on
 | `edit` | `jira workitem edit --key <K> [--summary <title>] [--description <body>] --yes` |
 | `close`, `reopen`, `status` | `jira workitem transition --key <K> --status <name> --yes` |
 
-**`acli` lists no work item's transitions**: its commands
-(<https://developer.atlassian.com/cloud/acli/reference/commands/jira-workitem/>) move a work item
-to a status (`transition --status`) but none says which statuses it can move to, and `view` has no
-transitions field. So the statuses of the work item's project are read first, as its work items
-stand: `acli jira workitem search --jql 'project = "<P>" ORDER BY updated DESC' --fields
-key,status --json --limit 200`, each status with its category (`fields.status.statusCategory.key`:
-`new`, `indeterminate`, `done`), and a name is only ever one of them, never guessed:
+**`acli` lists no work item's transitions** (its commands,
+<https://developer.atlassian.com/cloud/acli/reference/commands/jira-workitem/>, have no listing
+and no way to call Jira's REST API, and `view` has no transitions field), and Flottille never reads
+`acli`'s sign-in to call `GET /rest/api/3/issue/{key}/transitions` itself. What `acli jira workitem
+transition --status` does is ask Jira for the work item's transitions and take the one that leads
+to the status named, so **that is the judge**: a status is never refused because no work item is in
+it. Each of the three first reads the work item's own status, `acli jira workitem view <K> --json
+--fields status` (its name and `statusCategory.key`: `new`, `indeterminate`, `done`), then:
 
-- `status` takes the one its `status` names, in any case; a name that is not one of them is
-  refused with them (`refused: Blocked is not a status of ABC's work items, which are To Do, In
-  Progress and Done; nothing was written`);
-- `close` moves to the project's done status, `reopen` to its to-do one; when the project has
-  none in sight, or several, it is refused, saying them, and `status` names the one meant;
-- a transition `acli` refuses (the work item has none to that status from where it is) is said
-  with `acli`'s own first line and the statuses again.
+- `status` hands `acli` the name asked, as it was written;
+- `close` on a work item already in a `done` category answers `ABC-3 is already closed: it is in
+  Done; nothing was written.`; otherwise it hands `acli`, one after the other until one is taken,
+  the `done` statuses seen on the project's work items (`acli jira workitem search --jql 'project
+  = "<P>" ORDER BY updated DESC' --fields key,status --json --limit 200`), or `Done` when none is
+  seen;
+- `reopen` on a work item that is not in a `done` category answers `ABC-1 is already open: it is in
+  To Do; nothing was written.`; otherwise it hands `acli` the `new` statuses seen, then the
+  `indeterminate` ones, or `To Do` when no `new` one is seen;
+- when `acli` takes none, nothing is written and the answer says `acli`'s own first line and the
+  statuses seen on the project's work items, which are **not** where the work item can move:
+  `acli could not move ABC-1 from To Do to Blocked: acli jira workitem transition failed: …;
+  nothing was written; move it with status, naming a status; seen on ABC's work items: To Do and
+  Done (that does not say where ABC-1 can move)`.
 
-A status no work item of the project is in yet is not offered: the maintainer checks on their
-own Jira whether `acli` gains a way to list transitions. **Also assumed**, from the same pages,
-which give flags and no output: `create --json` prints the created work item with its `key`; a
-create with no `--type` takes the project's default type; a refused transition ends with a
-non-zero code.
+The names `Done` and `To Do` are Jira's own for its default workflow, tried only when no work item
+shows the project's: `acli` refuses a name no transition leads to and writes nothing, but a
+workflow whose `Done` is not of the `done` category would be moved to it. **Assumed**, from the
+same pages, which give flags and no output: `--status` is matched by Jira or `acli` without regard
+to case; `create --json` prints the created work item with its `key`; a create with no `--type`
+takes the project's default type; a refused transition ends with a non-zero code. The list of the
+statuses a work item can move to now (the issue's `GET …/transitions`) waits for `acli` to give it.
 
 ### What `acli jira workitem search` prints is assumed too
 
