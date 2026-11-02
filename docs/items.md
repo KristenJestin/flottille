@@ -34,7 +34,8 @@ tracker.
 - **`details`** holds what is proper to a kind or a source: of a pull request `head`, `base`,
   `head_commit`, `mergeable`, `review`, the number of its `comments` and `reviews`, and on
   Bitbucket its `reviewers`; of an issue the number of its `comments`; of a work item its
-  `status`, `type`, `priority` and status `category`. A pull request or an issue whose details
+  `status`, `type`, `priority` and status `category`, and, once a subscription followed it, the
+  number of its `comments`. A pull request or an issue whose details
   were read also has its `description` (what its author wrote, `""` when nothing; a Bitbucket
   pull request has it from its list too) and its `discussion`: its comments, then its reviews,
   each `{kind, author, bot, by_agent, state, body}` (`kind` is `comment` or `review`, `state` a
@@ -84,7 +85,7 @@ what was left, its cursor not having moved.
 | GitHub issues | `gh issue list -R … --state all --limit 1000 [--search "updated:>=<cursor>"] --json number,title,state,author,assignees,labels,url,updatedAt,createdAt`; only the tracker's repository's issues are kept, as `tickets list` keeps them | `gh issue view <n> --json comments,body` |
 | Bitbucket Cloud | `bkt api /repositories/<w>/<r>/pullrequests --param pagelen=50 --param sort=-updated_on --param state=OPEN --param state=MERGED --param state=DECLINED --param state=SUPERSEDED [--param q=updated_on>="<cursor>"]`, page after page up to 1,000, the filter and the order as `--param`, never in the path (#245) | as `forge show` reads it (its commit statuses, reviewers, comments, conflicts) |
 | Bitbucket Data Center | no filter in what `bkt` reads: every **open** pull request, `bkt api /rest/api/1.0/projects/<p>/repos/<r>/pull-requests` page after page (`limit`, `start`) up to 1,000; one stored open that left the list is read by itself (`…/pull-requests/<id>`) to say whether it was merged or declined, a 404 making it removed | as `forge show` reads it, only when its `version` or `updatedDate` moved since it was stored |
-| Jira | for each project of the tracker, `acli jira workitem search --jql 'project = "<KEY>" [AND updated >= "-<n>m"] ORDER BY updated DESC' --fields key,summary,status,assignee,reporter,labels,issuetype,priority,updated,created --json --limit 1000`, once `acli` is checked to be on the tracker's site (`tickets.md`, "The Jira site"), then the same search with `currentUser()` and `--fields key` for `mine` | none: the search holds them |
+| Jira | for each project of the tracker, `acli jira workitem search --jql 'project = "<KEY>" [AND updated >= "-<n>m"] ORDER BY updated DESC' --fields key,summary,status,assignee,reporter,labels,issuetype,priority,updated,created --json --limit 1000`, once `acli` is checked to be on the tracker's site (`tickets.md`, "The Jira site"), then the same search with `currentUser()` and `--fields key` for `mine` | `acli jira workitem view <KEY> --json --fields comment`, read as `forge show` reads a work item's comments (`tickets.md`), **only for a work item a subscription to its comments follows** (one open or changed, as for any item), the search holding the rest |
 
 - **The checks of an open pull request whose CI still runs** are read again at every round, even
   when the pull request did not change, whether its list showed it again or not (Data Center
@@ -134,7 +135,7 @@ what was left, its cursor not having moved.
 | GitHub issues | `gh auth status`, 1 list, 1 `gh issue view` per open issue | `gh auth status`, 1 list, 1 `gh issue view` per changed one; once an hour, 1 open list and 1 `gh issue view` per stored open one missing from it |
 | Bitbucket Cloud | the contexts, 1 page per 50 pull requests, about 4 calls per open one (its checks, the pull request, its comments, its diffstat), `/user` once per daemon | the contexts, 1 page per 50 changed, about 4 calls per changed one, 1 checks read per open one whose CI still runs |
 | Bitbucket Data Center | the contexts, 1 page per 50 open pull requests, about 3 calls per open one | the contexts, 1 page per 50 open, about 3 calls per changed one, 1 per stored open one that left the list, 1 checks read per open one whose CI still runs |
-| Jira | `acli jira auth status`, 2 searches per project of the tracker | the same |
+| Jira | `acli jira auth status`, 2 searches per project of the tracker, 1 `acli … view` per followed work item | the same, the view per followed work item that changed |
 
 ## Rhythm
 
@@ -205,8 +206,10 @@ again on its own (#257):
   read found it, once its source had a first round, so that what happens to it before the next
   round is an event of that round; it is `item.opened` as in a round, only open and not made
   before that first round (a live read says no creation time: an open one is opened). Its
-  assignees and labels, which a live read does not say, are no change then. A Jira work item no
-  round stored is not, its live read saying no state.
+  assignees and labels, which a live read does not say, are no change then. A Jira work item's live
+  read says its status category (`fields.status.statusCategory.key`, the same `view` that gives
+  its status), so its state is the rounds' (`done` is `closed`, any other `open`): one no round
+  stored is stored then. It is not when Jira gives no category, the live read then saying no state.
 - **A live read takes the project's round lock before it reads**, so that no round lands between
   the read and its write and none is written over by an older read: `show` reads without storing
   while a round runs (the round stores a read of its own), and holds the lock for its one read,
@@ -231,9 +234,9 @@ again on its own (#257):
 
 ## Not yet
 
-- `mine` on Bitbucket Data Center; Jira's description and comments (`item.commented` is not
-  emitted for a work item: no comment field is asked of the search); a Jira work item deleted or
-  moved to another project stays as it was last read.
+- `mine` on Bitbucket Data Center; Jira's description, and the comments of the work items no
+  subscription follows (their `item.commented` is not emitted: no comment field is asked of the
+  search); a Jira work item deleted or moved to another project stays as it was last read.
 
 ## Tests
 

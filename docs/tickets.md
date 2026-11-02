@@ -61,8 +61,9 @@ user's), so that the user's own sign-in works; a call is cut after 30 s.
 - **What a tracker says is masked** before it is shown or stored (titles, descriptions, comments,
   errors), as every output is (`flottille_core::secrets`).
 - **The reads and the writes Flottille runs are known.** Of `acli`, the reads are `acli jira auth
-  status`, `acli jira workitem view <KEY> --json --fields summary,status,description,comment` and
-  `acli jira workitem search --jql <JQL> --fields key,summary,status,assignee,labels --json
+  status`, `acli jira workitem view <KEY> --json --fields summary,status,description,comment`
+  (`--fields status` or `--fields comment` alone for the status of a write and the rounds'
+  comments), and `acli jira workitem search --jql <JQL> --fields key,summary,status,assignee,labels --json
   --limit 200`; its writes (`workitem create`, `comment create`, `edit`, `transition`, below) run
   only for a `tickets` call the gate let through, and the tests look at every call the fake
   received. Of `gh`, the reads are `gh issue view <n> -R github.com/owner/name --json
@@ -101,7 +102,7 @@ is signed in to (`acli jira auth status`)`. A work item with no `self` is not sh
 | | GitHub issue | Jira work item |
 |---|---|---|
 | title | `title` | `fields.summary` |
-| state | `open` or `closed` | the status's name (`In Progress`) |
+| state | `open` or `closed` | the status's name (`In Progress`), and its category (`statusCategory.key`) |
 | link | `url` | `https://<site>/browse/<KEY>`, the tracker's configured site |
 | description | `body` | `fields.description` |
 | comments | `comments[]`: `author.login`, `createdAt`, `body` | `fields.comment.comments[]`: `author.displayName`, `created`, `body` |
@@ -163,7 +164,8 @@ is as fresh as the call.
 
 **And continuously**: every ticket of a declared tracker is read by the daemon on its own,
 incrementally, its title, state, assignee, labels and status kept in the store and its changes
-said as `item.*` events ([`items.md`](items.md)); its description and comments are not kept.
+said as `item.*` events ([`items.md`](items.md)); its description is not kept, nor its comments,
+except those of a Jira work item a subscription follows (below).
 `tickets` `list` and `search` answer from that store once a round of the tracker worked, saying
 its age; `show` reads live and stores what it read; a subscription to a ticket hears those
 events.
@@ -225,8 +227,12 @@ a bot (a GitHub login `app/<name>` or `<name>[bot]`, as for a pull request) and 
 as posted by an agent; `minutes` is 60 by default, 6000 at most. The
 ticket is read once and stored first: what is so now is no event. The answer says when the rounds
 do not see it yet, and so miss what happens before their next one: the tracker had no complete
-round (it never worked), or a Jira work item made since the last round is not stored. Jira's comments are not read
-by the rounds: `commented` on a work item is refused, saying so. Subscribing again to the same
+round (it never worked), or the item is not stored (a Jira work item whose status Jira gives no
+category for). **A Jira work item's comments are read by the rounds only while a subscription
+to its `commented` follows it** (`acli jira workitem view <KEY> --json --fields comment`, one
+call per work item that changed), since a tracker's every work item would cost one call each;
+a comment is then an `item.commented` as on GitHub, and an agent's own, ending with the footer,
+is said `posted by an agent` and left out of `from: people`. Subscribing again to the same
 ticket replaces the agent's subscription; **`unsubscribe {ticket?}`** cancels those to the ticket
 named, every one when it names none. The events are the rounds' (`item.commented`,
 `item.changed`, `item.closed`): a subscription hears as often as the rounds come. It is listed,

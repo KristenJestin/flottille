@@ -534,6 +534,22 @@ fn wants_detail(old: Option<&Item>, new: &Fetched, first: bool) -> bool {
         })
 }
 
+/// The keys of the Jira work items of a project whose comments a subscription waits for. Every
+/// work item costs an `acli` call to read its comments, which a tracker of a thousand cannot
+/// carry: a round reads those of the ones followed alone.
+fn followed_work_items(daemon: &Daemon, project: &str) -> Vec<String> {
+    crate::subscriptions::all(daemon)
+        .into_iter()
+        .filter(|s| {
+            s.source == crate::subscriptions::TICKETS
+                && s.target["project"] == project
+                && s.target["repository"] == ""
+                && s.events.iter().any(|e| e == "commented")
+        })
+        .filter_map(|s| s.target["key"].as_str().map(str::to_owned))
+        .collect()
+}
+
 /// A listed item that was not read in full keeps what was read in full of it before: its checks
 /// and its details, the listed fields over them.
 fn keep_details(old: &Item, new: &mut Item) {
@@ -691,7 +707,7 @@ pub fn put_live(daemon: &Arc<Daemon>, mut fetched: Fetched) {
             .iter()
             .find(|c| c.kind == item.kind && c.target == target)
             .and_then(|c| c.first_at);
-        // A Jira work item's state is not said by its live read.
+        // A Jira work item whose live read gives no status category says no state.
         let Some(first_at) = first_at.filter(|_| !item.state.is_empty()) else {
             return;
         };
@@ -849,6 +865,7 @@ async fn read_round(
     };
     let (mut items, mut events) = (Vec::new(), Vec::new());
     let mut listed_keys = Vec::new();
+    let followed = followed_work_items(daemon, &project.name);
     for mut fetched in listing.items {
         let item = &mut fetched.item;
         item.project = project.name.clone();
@@ -863,7 +880,11 @@ async fn read_round(
             None if knows_me => item.mine = old.is_some_and(|old| old.mine),
             None => {}
         }
-        if listing.details && !fetched.detailed && wants_detail(old, &fetched, first) {
+        if listing.details
+            && !fetched.detailed
+            && wants_detail(old, &fetched, first)
+            && (fetched.item.source != "jira" || followed.contains(&fetched.item.key))
+        {
             match reader.detail(&mut fetched).await {
                 Ok(true) if fetched.detailed => {
                     let comments = fetched.comments.iter().map(|c| c.in_discussion("comment"));

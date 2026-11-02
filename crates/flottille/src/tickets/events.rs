@@ -57,27 +57,22 @@ fn item_of(project: &Project, key: &Key) -> Option<(String, String)> {
     }
 }
 
-/// A ticket read live, as an item: its state is said for GitHub alone (a Jira status is in its
-/// details, its state is kept), its comments counted for GitHub alone, as the rounds count them.
+/// A ticket read live, as an item: its state is the issue's for GitHub, a work item's status
+/// category's (done is closed, as the rounds say it) for Jira, none when Jira gives no category;
+/// its comments are counted as the rounds count them.
 fn fetched_of(project: &Project, key: &Key, ticket: &Ticket) -> Option<crate::items::Fetched> {
     let (repository, key) = item_of(project, key)?;
     let jira = repository.is_empty();
-    let details = match jira {
-        true => json!({"status": ticket.state}),
-        false => json!({"comments": ticket.comments.len() + ticket.older}),
-    };
-    let comments = ticket
-        .comments
-        .iter()
-        .map(|comment| crate::items::Said {
-            author: comment.author.clone(),
-            bot: crate::forge::is_bot(&json!({"login": comment.author})),
-            by_agent: comment.agent,
-            state: None,
-            excerpt: crate::items::excerpt(&comment.body),
-            body: comment.body.clone(),
-        })
-        .collect();
+    let count = ticket.comments.len() + ticket.older;
+    let mut details = json!({"comments": count});
+    if jira {
+        details["status"] = json!(ticket.state);
+        // A round keeps the category it stored when this read says none.
+        if !ticket.category.is_empty() {
+            details["category"] = json!(ticket.category);
+        }
+    }
+    let comments = crate::tickets::comments_said(&ticket.comments);
     Some(crate::items::Fetched {
         item: Item {
             project: project.name.clone(),
@@ -89,9 +84,11 @@ fn fetched_of(project: &Project, key: &Key, ticket: &Ticket) -> Option<crate::it
             repository,
             key,
             title: ticket.title.clone(),
-            state: match jira {
-                true => String::new(),
-                false => ticket.state.clone(),
+            state: match (jira, ticket.category.as_str()) {
+                (false, _) => ticket.state.clone(),
+                (true, "done") => "closed".into(),
+                (true, "") => String::new(),
+                (true, _) => "open".into(),
             },
             author: None,
             assignees: Vec::new(),
@@ -268,13 +265,6 @@ pub(super) async fn subscribe(
         Ok(key) => key,
         Err(refusal) => return refusal,
     };
-    if matches!(key, Key::Jira(_)) && events.iter().any(|e| e == "commented") {
-        return Outcome::Refused(
-            "refused: the comments of a Jira work item are not read yet: subscribe to status, \
-             assigned or closed"
-                .into(),
-        );
-    }
     // The read now is stored before the subscription opens, unless a round wrote meanwhile.
     let before = crate::items::before_live(daemon, &project.name);
     let ticket = match super::read(project, &key).await {

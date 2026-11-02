@@ -57,6 +57,9 @@ pub struct Ticket {
     pub title: String,
     /// `open` or `closed` for GitHub; Jira's own word for the status (`In Progress`).
     pub state: String,
+    /// Jira's category of that status (`new`, `indeterminate`, `done`); empty for GitHub, and
+    /// when Jira says none.
+    pub category: String,
     pub url: Option<String>,
     pub description: String,
     /// The description ended with Flottille's mark: an agent wrote it.
@@ -286,6 +289,7 @@ async fn read_issue(forge: &Forge, number: u64) -> Result<Ticket, String> {
         repository: Some(slug),
         title: said(&issue["title"]),
         state: said(&issue["state"]).to_lowercase(),
+        category: String::new(),
         url: issue["url"].as_str().map(masked),
         description: cut(description, DESCRIPTION_CHARS),
         description_by_agent,
@@ -428,7 +432,29 @@ fn answered_by(item: &Value, host: &str, site: &str) -> bool {
 /// `self`, `fields`). Its description and comments are Atlassian Document Format, or plain text.
 fn work_item(key: &str, item: &Value, site: &str) -> Ticket {
     let fields = &item["fields"];
-    let comments: Vec<Comment> = fields["comment"]["comments"]
+    let comments = work_item_comments(fields);
+    let description = masked(&document_text(&fields["description"]));
+    let (description, description_by_agent) = forge::unmarked(&description);
+    let status = status_of(item);
+    Ticket {
+        reference: key.to_owned(),
+        tracker: Tracker::Jira,
+        repository: None,
+        title: said(&fields["summary"]),
+        state: status.name,
+        category: status.category,
+        // The configured site: the host of `self` may be an Atlassian one that is no site.
+        url: Some(masked(&format!("https://{site}/browse/{key}"))),
+        description: cut(description, DESCRIPTION_CHARS),
+        description_by_agent,
+        older: comments.len().saturating_sub(COMMENTS),
+        comments: newest(comments),
+    }
+}
+
+/// All the comments of a Jira work item's `fields`, oldest first, their texts masked.
+fn work_item_comments(fields: &Value) -> Vec<Comment> {
+    fields["comment"]["comments"]
         .as_array()
         .or(fields["comment"].as_array())
         .into_iter()
@@ -440,22 +466,22 @@ fn work_item(key: &str, item: &Value, site: &str) -> Ticket {
                 &masked(&document_text(&comment["body"])),
             )
         })
-        .collect();
-    let description = masked(&document_text(&fields["description"]));
-    let (description, description_by_agent) = forge::unmarked(&description);
-    Ticket {
-        reference: key.to_owned(),
-        tracker: Tracker::Jira,
-        repository: None,
-        title: said(&fields["summary"]),
-        state: said(&fields["status"]["name"]),
-        // The configured site: the host of `self` may be an Atlassian one that is no site.
-        url: Some(masked(&format!("https://{site}/browse/{key}"))),
-        description: cut(description, DESCRIPTION_CHARS),
-        description_by_agent,
-        older: comments.len().saturating_sub(COMMENTS),
-        comments: newest(comments),
-    }
+        .collect()
+}
+
+/// Comments as a round or a live read stores them (`docs/items.md`).
+pub(crate) fn comments_said(comments: &[Comment]) -> Vec<crate::items::Said> {
+    comments
+        .iter()
+        .map(|comment| crate::items::Said {
+            author: comment.author.clone(),
+            bot: forge::is_bot(&json!({"login": comment.author})),
+            by_agent: comment.agent,
+            state: None,
+            excerpt: crate::items::excerpt(&comment.body),
+            body: comment.body.clone(),
+        })
+        .collect()
 }
 
 /// The plain text of a Jira text field: a string as it is, an Atlassian Document Format tree as
@@ -1574,14 +1600,20 @@ async fn statuses_of(site: &str, project: &str) -> Result<Vec<Status>, String> {
 /// The status a Jira work item is in now, with its category, once `acli` is checked to be signed
 /// in to `site`.
 async fn status_now(site: &str, key: &str) -> Result<Status, String> {
-    let item = viewed(key, site, "status").await?;
-    Ok(Status {
-        name: said(&item["fields"]["status"]["name"]),
-        category: item["fields"]["status"]["statusCategory"]["key"]
+    Ok(status_of(&viewed(key, site, "status").await?))
+}
+
+/// The status of a Jira work item as `view` printed it: its name, and its category's key in
+/// lower case (empty when Jira says none).
+fn status_of(item: &Value) -> Status {
+    let status = &item["fields"]["status"];
+    Status {
+        name: said(&status["name"]),
+        category: status["statusCategory"]["key"]
             .as_str()
             .unwrap_or_default()
             .to_ascii_lowercase(),
-    })
+    }
 }
 
 /// The one status `close` (`done`) or `reopen` (`new`) moves a work item to, among the statuses
@@ -1997,7 +2029,7 @@ impl Tickets {
                 return Ok(crate::items::Listing {
                     items,
                     note: (!notes.is_empty()).then(|| notes.join("; ")),
-                    details: false,
+                    details: true,
                 });
             }
             Tickets::GitHub { forge, repository } => (forge, repository),
@@ -2069,8 +2101,18 @@ impl Tickets {
     /// Reads the description and the comments of a listed issue; false when GitHub no longer has
     /// it.
     pub async fn detail(&self, fetched: &mut crate::items::Fetched) -> Result<bool, String> {
-        let Tickets::GitHub { forge, .. } = self else {
-            return Ok(true);
+        let forge = match self {
+            Tickets::GitHub { forge, .. } => forge,
+            // Jira's list carries no comment: a work item's are read by itself, as its live read
+            // does (`read_work_item`), only for the ones a subscription follows.
+            Tickets::Jira { site, .. } => {
+                let item = viewed(&fetched.item.key, site, "comment").await?;
+                let comments = work_item_comments(&item["fields"]);
+                fetched.comments = comments_said(&comments);
+                fetched.item.details["comments"] = json!(comments.len());
+                fetched.detailed = true;
+                return Ok(true);
+            }
         };
         let viewed = match forge::gh_json(&[
             "issue",
@@ -2362,5 +2404,24 @@ mod tests {
         );
         assert_eq!(ticket.comments[0].author, "Alice");
         assert_eq!(ticket.comments[0].body, "On it");
+    }
+
+    #[test]
+    fn a_work_item_gives_its_status_category_in_lower_case() {
+        let item = json!({"fields": {"status": {"name": "Done",
+            "statusCategory": {"key": "DONE"}}}});
+        let none = json!({"fields": {"status": {"name": "Done"}}});
+
+        let status = status_of(&item);
+
+        assert_eq!(
+            (status.name.as_str(), status.category.as_str()),
+            ("Done", "done")
+        );
+        assert_eq!(
+            work_item("ABC-1", &item, "acme.atlassian.net").category,
+            "done"
+        );
+        assert_eq!(status_of(&none).category, "");
     }
 }
