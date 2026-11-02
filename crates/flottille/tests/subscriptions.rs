@@ -908,18 +908,82 @@ fn script_issue(user: &User, issue: Value) {
 
 /// The work item ABC-1 in `status`, as `acli` is assumed to print it.
 fn work_item(status: &str) -> Value {
+    work_item_in("ABC-1", status, "indeterminate")
+}
+
+/// The work item `key` in `status`, which Jira puts in the category `category` (`new`,
+/// `indeterminate`, `done`).
+fn work_item_in(key: &str, status: &str, category: &str) -> Value {
     json!({
-        "key": "ABC-1",
+        "key": key,
         "self": "https://example.atlassian.net/rest/api/3/issue/10001",
         "fields": {
             "summary": "Log in", "description": null,
-            "status": {"name": status, "statusCategory": {"key": "indeterminate"}},
+            "status": {"name": status, "statusCategory": {"key": category}},
             "assignee": {"displayName": "Alice"}, "labels": [],
             "issuetype": {"name": "Story"}, "priority": {"name": "High"},
             "updated": "2026-10-01T10:00:00.000+0000",
             "comment": {"comments": [], "total": 0}
         }
     })
+}
+
+/// A comment of a work item, its text in Atlassian Document Format, as `acli` is assumed to
+/// print it.
+fn jira_comment(author: &str, text: &str) -> Value {
+    json!({
+        "author": {"displayName": author}, "created": "2026-10-01T11:00:00.000+0000",
+        "body": {"type": "doc", "version": 1, "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": text}]}]}
+    })
+}
+
+/// The work item `key` with `comments`, updated at `minute` past ten: what Jira says of a work
+/// item that was commented.
+fn commented_item(key: &str, comments: &[Value], minute: u32) -> Value {
+    let mut item = work_item_in(key, "To Do", "new");
+    item["fields"]["comment"] = json!({"comments": comments, "total": comments.len()});
+    item["fields"]["updated"] = format!("2026-10-02T10:{minute:02}:00.000+0000").into();
+    item
+}
+
+/// A project tracked in Jira's ABC, an agent in its workspace, and the fake `acli` answering
+/// `items`.
+fn jira_agent(user: &User, items: &[Value]) -> (String, Mcp) {
+    track(
+        user,
+        json!({"kind": "jira", "site": "example.atlassian.net", "projects": ["ABC"]}),
+    );
+    script(user, pull());
+    jira_script(user, items);
+    agent(user)
+}
+
+/// The fake `acli` answers `items`, in its searches and in its views.
+fn jira_script(user: &User, items: &[Value]) {
+    let by_key: serde_json::Map<String, Value> = items
+        .iter()
+        .map(|item| (item["key"].as_str().unwrap().to_owned(), item.clone()))
+        .collect();
+    user.acli_script(json!({"items": by_key, "search": items}));
+}
+
+/// How many times a round read the comments of the work item `key` alone (`acli … view KEY
+/// --fields comment`).
+fn comment_reads(user: &User, key: &str) -> usize {
+    user.acli_received()
+        .iter()
+        .filter(|call| {
+            let args: Vec<&str> = call["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a.as_str().unwrap())
+                .collect();
+            args.starts_with(&["jira", "workitem", "view", key])
+                && args.windows(2).any(|w| w == ["--fields", "comment"])
+        })
+        .count()
 }
 
 fn subscribe_ticket(mcp: &Mcp, args: Value) -> String {
@@ -974,6 +1038,175 @@ fn a_ticket_subscription_wakes_the_agent_on_a_status_change() {
     a_round(&user);
     let delivery = the_delivery(&user);
     for part in ["News of the ticket ABC-1", "To Do", "In Progress"] {
+        assert!(delivery.contains(part), "{part} in {delivery}");
+    }
+}
+
+#[test]
+fn a_subscription_to_a_jira_items_comments_is_accepted() {
+    let user = user().with_fake_acli();
+    fixture(&user);
+    let (id, mcp) = jira_agent(&user, &[commented_item("ABC-1", &[], 0)]);
+
+    let said = subscribe_ticket(&mcp, json!({"ticket": "ABC-1", "events": ["commented"]}));
+
+    assert!(said.contains("Subscribed"), "{said}");
+    assert!(said.contains("ticket ABC-1"), "{said}");
+    assert!(!said.contains("Flottille's rounds have not"), "{said}");
+    assert!(!said.contains("not read yet"), "{said}");
+    let open = listed(&user, &id);
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0]["named"], "ticket ABC-1");
+    assert_eq!(open[0]["events"], json!(["commented"]));
+}
+
+#[test]
+fn a_new_jira_comment_wakes_the_subscribed_agent() {
+    let user = user().with_fake_acli();
+    fixture(&user);
+    let (id, mcp) = jira_agent(&user, &[commented_item("ABC-1", &[], 0)]);
+    subscribe_ticket(&mcp, json!({"ticket": "ABC-1", "events": ["commented"]}));
+
+    let comment = jira_comment("Bob", "Can you add a test?");
+    jira_script(&user, &[commented_item("ABC-1", &[comment], 5)]);
+    a_round(&user);
+    let delivery = the_delivery(&user);
+    for part in [
+        "News of the ticket ABC-1",
+        "A comment by Bob: Can you add a test?",
+    ] {
+        assert!(delivery.contains(part), "{part} in {delivery}");
+    }
+    assert!(listed(&user, &id).is_empty(), "the delivery ends it");
+}
+
+#[test]
+fn a_jira_comment_flottille_posted_is_marked_posted_by_an_agent() {
+    let user = user().with_fake_acli();
+    fixture(&user);
+    let (_, mcp) = jira_agent(&user, &[commented_item("ABC-1", &[], 0)]);
+    subscribe_ticket(
+        &mcp,
+        json!({"ticket": "ABC-1", "events": ["commented"], "from": "people"}),
+    );
+
+    // The footer Flottille ends what an agent posts with: no wake for `people`.
+    let posted = jira_comment(
+        "Casey",
+        "Done on the branch.\n\n— posted by a Flottille agent",
+    );
+    jira_script(
+        &user,
+        &[commented_item("ABC-1", std::slice::from_ref(&posted), 5)],
+    );
+    a_round(&user);
+    assert!(delivered(&user).is_empty(), "{:?}", delivered(&user));
+
+    // And it is said so to the agent that hears everyone.
+    subscribe_ticket(&mcp, json!({"ticket": "ABC-1", "events": ["commented"]}));
+    let person = jira_comment("Bob", "Thanks");
+    jira_script(
+        &user,
+        &[commented_item("ABC-1", &[posted.clone(), person], 10)],
+    );
+    a_round(&user);
+    let delivery = the_delivery(&user);
+    assert!(delivery.contains("A comment by Bob: Thanks"), "{delivery}");
+    assert!(!delivery.contains("Casey"), "{delivery}");
+
+    subscribe_ticket(&mcp, json!({"ticket": "ABC-1", "events": ["commented"]}));
+    let again = jira_comment("Casey", "Pushed.\n\n— posted by a Flottille agent");
+    jira_script(
+        &user,
+        &[commented_item(
+            "ABC-1",
+            &[posted, jira_comment("Bob", "Thanks"), again],
+            15,
+        )],
+    );
+    a_round(&user);
+    eventually("the second delivery", || delivered(&user).len() == 2);
+    let delivery = delivered(&user).pop().unwrap();
+    assert!(
+        delivery.contains("A comment by Casey (posted by an agent): Pushed."),
+        "{delivery}"
+    );
+    assert!(
+        !delivery.contains("— posted by a Flottille agent"),
+        "{delivery}"
+    );
+}
+
+#[test]
+fn the_comments_of_a_jira_item_no_subscription_follows_are_not_read() {
+    let user = user().with_fake_acli();
+    fixture(&user);
+    let (_, mcp) = jira_agent(
+        &user,
+        &[
+            commented_item("ABC-1", &[], 0),
+            commented_item("ABC-2", &[], 0),
+        ],
+    );
+    subscribe_ticket(&mcp, json!({"ticket": "ABC-1", "events": ["commented"]}));
+
+    let said = jira_comment("Bob", "Over here");
+    jira_script(
+        &user,
+        &[
+            commented_item("ABC-1", std::slice::from_ref(&said), 5),
+            commented_item("ABC-2", &[said], 5),
+        ],
+    );
+    a_round(&user);
+
+    let delivery = the_delivery(&user);
+    assert!(
+        delivery.contains("A comment by Bob: Over here"),
+        "{delivery}"
+    );
+    assert_eq!(
+        comment_reads(&user, "ABC-1"),
+        1,
+        "the round read the followed one"
+    );
+    assert_eq!(comment_reads(&user, "ABC-2"), 0, "and not the other");
+}
+
+#[test]
+fn the_live_read_of_a_jira_item_has_its_status_category() {
+    let user = user().with_fake_acli();
+    fixture(&user);
+    // The rounds read the tracker and do not list ABC-1: made since, or too old to be listed.
+    let (_, mcp) = jira_agent(&user, &[]);
+    user.acli_script(json!({
+        "items": {"ABC-1": work_item_in("ABC-1", "Done", "done")}, "search": []}));
+
+    let said = subscribe_ticket(&mcp, json!({"ticket": "ABC-1", "events": ["status"]}));
+    assert!(!said.contains("Flottille's rounds have not"), "{said}");
+
+    // Stored by that read, closed because its status is in the done category.
+    let stored = user
+        .call("items.list", json!({"project": "app", "kind": "ticket"}))
+        .unwrap()["items"]
+        .clone();
+    let stored = stored.as_array().unwrap();
+    assert_eq!(stored.len(), 1, "{stored:?}");
+    assert_eq!(stored[0]["key"], "ABC-1");
+    assert_eq!(stored[0]["state"], "closed");
+    assert_eq!(stored[0]["details"]["status"], "Done");
+    assert_eq!(stored[0]["details"]["category"], "done");
+
+    // So its reopening, the next round finds, is a change from there.
+    let mut reopened = work_item_in("ABC-1", "In Progress", "indeterminate");
+    reopened["fields"]["updated"] = "2026-10-02T10:05:00.000+0000".into();
+    jira_script(&user, &[reopened]);
+    a_round(&user);
+    let delivery = the_delivery(&user);
+    for part in [
+        "Its state changed from closed to open.",
+        "Its status changed from Done to In Progress.",
+    ] {
         assert!(delivery.contains(part), "{part} in {delivery}");
     }
 }
@@ -1135,8 +1368,11 @@ fn a_subscription_to_a_work_item_no_round_stored_says_what_is_not_seen() {
         json!({"kind": "jira", "site": "example.atlassian.net", "projects": ["ABC"]}),
     );
     script(&user, pull());
-    // The rounds read the tracker, and not ABC-1: created since, as `tickets create` does.
-    user.acli_script(json!({"items": {"ABC-1": work_item("To Do")}, "search": []}));
+    // The rounds read the tracker, and not ABC-1: created since, as `tickets create` does. Its
+    // status has no category, so its read says no state and stores nothing.
+    let mut item = work_item("To Do");
+    item["fields"]["status"] = json!({"name": "To Do"});
+    user.acli_script(json!({"items": {"ABC-1": item}, "search": []}));
     let (_, mcp) = agent(&user);
 
     let said = subscribe_ticket(&mcp, json!({"ticket": "ABC-1", "events": ["status"]}));

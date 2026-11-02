@@ -465,8 +465,8 @@ reasons.
 - **`subscribe {ticket?, workspace?, events, from?, minutes?}`**: the next of `events`
   (`commented`, `status`, `assigned`, `closed`) of the ticket wakes the agent once, as a
   `subscription` delivery, the same shape as `forge` `subscribe` (60 minutes by default, 6000 at
-  most, `from: people` without bots nor what an agent posted); `commented` on a Jira work item is
-  refused, its comments not being read. **`unsubscribe {ticket?}`** cancels the agent's
+  most, `from: people` without bots nor what an agent posted); a Jira work item's comments are
+  read by the rounds while a subscription to them follows it. **`unsubscribe {ticket?}`** cancels the agent's
   subscriptions to the ticket, every one when it names none ([`tickets.md`](tickets.md),
   "Subscribing to a ticket"). Both are allowed in every mode, never held.
 - **The writes**, on every tracker: `create {title, body?, labels?}`, `comment {ticket?, body}`,
