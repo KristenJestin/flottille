@@ -12,7 +12,8 @@ use gpui_kit::{
 };
 
 use crate::actions::Command;
-use crate::shell::{Selection, Shell};
+use crate::settings::Reveal;
+use crate::shell::Shell;
 
 /// What the warning icon says: Auto has no judge to answer, so each call to judge comes to the
 /// user as in Ask.
@@ -161,7 +162,7 @@ impl Render for ModeSwitch {
                                 move |_, window, cx| {
                                     shell
                                         .update(cx, |shell, cx| {
-                                            shell.open(Selection::Settings, window, cx)
+                                            shell.open_settings_at(Reveal::Judge, window, cx)
                                         })
                                         .ok();
                                 },

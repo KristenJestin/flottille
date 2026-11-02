@@ -3,13 +3,14 @@
 //! never writes `providers.toml` itself: a switch asks the daemon (`provider.enable`,
 //! `provider.disable`), and the page follows what the daemon lists next. The Auto judge is
 //! chosen here too (`provider.set_judge`), and its guidance edited (`judge.set`). Last, the
-//! developer mode is switched (`developer.set`), its log's path beside the switch.
+//! developer mode is switched (`developer.set`), its log's path beside the switch. The page is
+//! tabs, one section shown at a time.
 
 use std::collections::HashMap;
 
 use flottille_ui::{
-    Field, Icon, ListCard, ListRow, PageHeader, PageIndex, Section, Select, SelectOption, Switch,
-    Toast, hoverable, icon, palette, presence, presence_of, space, toast, turning,
+    Field, Icon, ListCard, ListRow, PageHeader, Section, Select, SelectOption, Switch, Tabs, Toast,
+    enter, hoverable, icon, palette, presence, presence_of, space, toast, turning,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -21,7 +22,6 @@ use gpui_kit::{
 use crate::actions::Command;
 use crate::providers::{Provider, Providers};
 use crate::rules::RulesEditor;
-use crate::sections::Sections;
 use crate::shell::Shell;
 
 /// The sections of the page, in order: each index entry's key and label.
@@ -32,6 +32,29 @@ pub const SECTIONS: [(&str, &str); 5] = [
     ("rules", "Rules"),
     ("developer", "Developer mode"),
 ];
+
+/// Where Settings was opened at, from a warning or a notice that leads to a section.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reveal {
+    /// No judge is chosen (the mode's warning, the judge notice).
+    Judge,
+    /// No provider can start a session (the composer's "Open the settings").
+    Providers,
+}
+
+impl Reveal {
+    /// The index of its section in [`SECTIONS`].
+    fn entry(self) -> usize {
+        let key = match self {
+            Reveal::Judge => "judge",
+            Reveal::Providers => "providers",
+        };
+        SECTIONS
+            .iter()
+            .position(|(k, _)| *k == key)
+            .expect("a section of the page")
+    }
+}
 
 /// The developer mode as the daemon says it (`developer.show`).
 #[derive(Clone, Debug, PartialEq)]
@@ -71,7 +94,8 @@ pub struct SettingsPage {
     developer: Option<Developer>,
     /// The developer mode's switch flipped, until the daemon answers: what it was asked to become.
     developer_pending: Option<bool>,
-    sections: Sections,
+    /// The tab chosen: the index of its section in [`SECTIONS`].
+    tab: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,8 +141,27 @@ impl SettingsPage {
             how: false,
             developer: None,
             developer_pending: None,
-            sections: Sections::default(),
+            tab: 0,
         }
+    }
+
+    /// The tab chosen: the index of its section in [`SECTIONS`].
+    pub fn tab(&self) -> usize {
+        self.tab
+    }
+
+    /// Chooses the tab of that section: it shows alone.
+    pub fn choose(&mut self, entry: usize, cx: &mut Context<Self>) {
+        let entry = entry.min(SECTIONS.len() - 1);
+        if self.tab != entry {
+            self.tab = entry;
+            cx.notify();
+        }
+    }
+
+    /// Opened at a section: its tab is the one chosen.
+    pub fn reveal(&mut self, at: Reveal, cx: &mut Context<Self>) {
+        self.choose(at.entry(), cx);
     }
 
     pub fn rules(&self) -> &Entity<RulesEditor> {
@@ -680,43 +723,80 @@ impl Render for SettingsPage {
                 ListCard::new("provider-list").rows(rows),
             ))
             .into_any_element();
-        let sections: Vec<(&'static str, AnyElement)> = vec![
-            (
-                "judge",
-                if self.providers.known {
-                    judge
-                } else {
-                    div().into_any_element()
-                },
-            ),
-            ("providers", providers),
-            ("guidance", self.judge_guidance.clone().into_any_element()),
-            ("rules", self.rules.clone().into_any_element()),
-            ("developer", self.developer_section(cx).into_any_element()),
+        // Every section is built on each frame, as on a project's settings.
+        let mut sections: Vec<AnyElement> = vec![
+            if self.providers.known {
+                judge
+            } else {
+                div().into_any_element()
+            },
+            providers,
+            self.judge_guidance.clone().into_any_element(),
+            self.rules.clone().into_any_element(),
+            self.developer_section(cx).into_any_element(),
         ];
+        let chosen = self.tab.min(sections.len() - 1);
+        let shown = sections.swap_remove(chosen);
         let this = cx.entity().downgrade();
-        let index = move |id: ElementId, current: usize| {
-            let this = this.clone();
-            PageIndex::new(id, SECTIONS)
-                .current(current)
-                .on_pick(move |entry, _, cx| {
-                    this.update(cx, |this, cx| {
-                        this.sections.go_to(entry, cx);
-                        cx.notify();
-                    })
-                    .ok();
-                })
+        let tabs = SECTIONS
+            .iter()
+            .fold(
+                Tabs::new("settings-tabs", "Sections", chosen),
+                |tabs, (key, label)| match *key {
+                    // The count shows once the daemon listed them, so it does not jump.
+                    "providers" if self.providers.known => {
+                        tabs.counted(*key, *label, count.to_string())
+                    }
+                    _ => tabs.tab(*key, *label),
+                },
+            )
+            .on_choose(move |entry, _, cx| {
+                this.update(cx, |this, cx| this.choose(entry, cx)).ok();
+            });
+        let key = |part: &str| ElementId::Name(format!("enter-settings-{part}").into());
+        let column = |element: AnyElement| {
+            div()
+                .w_full()
+                .max_w(space::COLUMN)
+                .flex_none()
+                .child(element)
         };
-        let page = self.sections.page(
-            "settings-page",
-            "settings",
-            pad,
-            header.into_any_element(),
-            index,
-            sections,
-            window,
-            cx,
-        );
-        div().size_full().text_color(p.text).child(page)
+        // The header and the tabs stay in place; the section under them scrolls.
+        let top = div()
+            .w_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .items_center()
+            .px(pad)
+            .pt(space::XXL)
+            .child(column(
+                enter(key("header"), 0, div().pb(space::LG).child(header)).into_any_element(),
+            ))
+            .child(column(enter(key("tabs"), 1, tabs).into_any_element()));
+        // Each section enters as it is shown (its state is dropped while it is not drawn, so it
+        // plays again), after the tabs.
+        let page = div()
+            .id("settings-page")
+            .w_full()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .items_center()
+            .px(pad)
+            .pt(space::XL)
+            .pb(space::XXXL)
+            .child(column(
+                enter(key(SECTIONS[chosen].0), 2, shown).into_any_element(),
+            ));
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .text_color(p.text)
+            .child(top)
+            .child(page)
     }
 }

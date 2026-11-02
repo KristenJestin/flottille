@@ -22,7 +22,6 @@ pub mod queued;
 pub mod repositories;
 pub mod rules;
 pub mod runs;
-pub mod sections;
 pub mod session;
 pub mod session_link;
 pub mod settings;

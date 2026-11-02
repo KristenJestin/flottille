@@ -35,7 +35,7 @@ use crate::project_settings::ProjectSettingsPage;
 use crate::providers::Providers;
 use crate::rules::RulesEditor;
 use crate::session::{Chose, Follow, Opened, Reply, SessionPage};
-use crate::settings::SettingsPage;
+use crate::settings::{Reveal, SettingsPage};
 use crate::tree::{PlaceNode, ProjectNode, SessionRow, Sidebar};
 
 /// Below this width the session page's rail becomes a drawer from the right.
@@ -1610,7 +1610,7 @@ impl Shell {
                 Button::primary("judge-notice-open", "Open Settings").on_click(cx.listener(
                     |this, _, window, cx| {
                         this.dismiss_judge_notice(cx);
-                        this.open(Selection::Settings, window, cx);
+                        this.open_settings_at(Reveal::Judge, window, cx);
                     },
                 )),
             );
@@ -1656,6 +1656,17 @@ impl Shell {
         if let Some(page) = self.settings_of_project(project, cx) {
             page.update(cx, |page, cx| page.reveal(at, cx));
         }
+    }
+
+    /// Opens Settings at a section: its tab is the one chosen.
+    pub fn open_settings_at(
+        &mut self,
+        at: crate::settings::Reveal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open(Selection::Settings, window, cx);
+        self.settings.update(cx, |page, cx| page.reveal(at, cx));
     }
 
     /// Opens a project's page or a session's: a choice made in a drawer closes it.
@@ -1720,6 +1731,8 @@ impl Shell {
         }
         // Opened, the page reads the providers again: the file is the user's to edit by hand.
         if selection == Selection::Settings && self.selected != Some(Selection::Settings) {
+            // A page opened afresh starts on its first tab; a link then chooses its own.
+            self.settings.update(cx, |page, cx| page.choose(0, cx));
             self.actions.send(Command::ReadProviders);
             self.actions.send(Command::RulesRead { project: None });
             self.actions.send(Command::JudgeRead);
