@@ -18,8 +18,8 @@ use gpui_kit::{
 };
 
 use crate::color::mix;
-use crate::interact::hoverable;
-use crate::motion::{Motion, PANEL};
+use crate::interact::{fade, hoverable};
+use crate::motion::{HOVER, Motion, PANEL};
 use crate::theme::{Palette, palette};
 
 type OnChoose = Box<dyn Fn(usize, &mut Window, &mut App) + 'static>;
@@ -31,6 +31,8 @@ const INSET: f32 = 2.;
 /// The space on each side of a segment's words.
 const PAD: f32 = 9.;
 const TEXT: f32 = 12.;
+/// How much of its opacity a segment that cannot be taken loses.
+const UNAVAILABLE: f32 = 0.6;
 
 #[derive(IntoElement)]
 pub struct Segmented {
@@ -97,8 +99,9 @@ impl Segmented {
         self
     }
 
-    /// The choice at `index` is shown faded, and a click on it does nothing: it cannot be taken
-    /// here (the line beside the control says why).
+    /// The choice at `index` is shown faded (over [`HOVER`], as it becomes so and back), and a
+    /// click or a hover on it does nothing: it cannot be taken here (the line beside the control
+    /// says why).
     pub fn unavailable(mut self, index: usize) -> Self {
         self.unavailable = Some(index);
         self
@@ -201,9 +204,9 @@ impl RenderOnce for Segmented {
                     .text_size(px(TEXT))
                     .child(words.clone());
                 let taken = unavailable == Some(index);
-                if taken {
-                    segment = segment.opacity(0.4);
-                }
+                // Faded over HOVER as it becomes unavailable, and back: never at once.
+                let gone = fade(name(key), taken, HOVER, window, cx);
+                segment = segment.opacity(1.0 - UNAVAILABLE * gone);
                 if !disabled && !taken && index != chosen {
                     segment = segment.cursor_pointer();
                     if let Some(on_choose) = on_choose {
@@ -212,10 +215,19 @@ impl RenderOnce for Segmented {
                         });
                     }
                 }
+                if taken {
+                    // It cannot be taken, so the pointer moves nothing on it.
+                    return segment
+                        .text_color(mix(p.mute, ink, near))
+                        .test_support()
+                        .into_any_element();
+                }
                 hoverable(segment, move |d, hover| {
                     d.text_color(mix(mix(p.mute, p.text, hover), ink, near))
                 })
-            });
+                .into_any_element()
+            })
+            .collect::<Vec<_>>();
         // Border-box: the 1 px border takes a pixel on each side.
         let width = widths.iter().sum::<f32>() + 2. * INSET + 2.;
         let mut control = div()
