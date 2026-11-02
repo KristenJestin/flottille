@@ -2238,6 +2238,47 @@ fn the_failed_step_of_a_bitbucket_cloud_check_gives_the_end_of_its_log_masked() 
 }
 
 #[test]
+fn secrets_in_the_kept_lines_are_masked() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    bitbucket_fixture(&user);
+    bitbucket_failed_checks(
+        &user,
+        json!([{"state": "FAILED", "key": "pipelines", "name": "Pipeline #31", "url": BUILD_31}]),
+    );
+    let token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let log = format!(
+        "Images used:\n+ cargo build\n+ ./deploy.sh\ncurl -H 'Authorization: token {token}'\n\
+         error: upload refused\nSearching for test report files in directories named [test-results] \
+         down to a depth of 4\nUploading cache cargo\n"
+    );
+    bitbucket_build(
+        &user,
+        json!([{"uuid": TEST_STEP, "name": "test", "state": {"name": "COMPLETED", "result": {"name": "FAILED"}}}]),
+        json!({TEST_STEP: log}),
+    );
+    let (_, mcp) = agent_in(&user, Some("login"));
+
+    let answer = mcp.call("forge", json!({"action": "show", "repository": "api"}));
+
+    assert!(!answer.error, "{}", answer.text);
+    for said in [
+        "- Pipeline #31: the last 3 of 3 lines of the failing command's output:",
+        "    + ./deploy.sh",
+        "    error: upload refused",
+        "[masked]",
+    ] {
+        assert!(answer.text.contains(said), "{said} in {}", answer.text);
+    }
+    for left_out in [token, "+ cargo build", "Uploading cache", "Images used"] {
+        assert!(
+            !answer.text.contains(left_out),
+            "{left_out} in {}",
+            answer.text
+        );
+    }
+}
+
+#[test]
 fn a_bitbucket_cloud_check_of_another_ci_says_it_is_not_a_pipelines_build() {
     let user = User::with_fake_agent().with_fake_bkt();
     bitbucket_fixture(&user);

@@ -364,6 +364,11 @@ log, or why there is none:
   view --job <job> --log-failed -R github.com/owner/name`, which prints the failed steps of that
   job. A commit status of another CI, a check with no such link, and a log that `gh` cannot read
   (expired, not ready) say so (`no log: …`); the pull request is still shown.
+  Its markers are GitHub's workflow commands (`##[group]`, `##[endgroup]`, `##[error]`, printed
+  by the runner itself): the lines kept are those after the `##[endgroup]` that closes the last
+  `##[group]Run …` (the command and its `env:`), up to the last `##[error]` line, which is kept.
+  A log with no `##[error]` line keeps its end. This is a change for GitHub too: the command
+  echoed with its `shell:` and `env:` block, and what follows the last error, are no longer shown.
 - **Bitbucket Cloud**: a failed check whose link is a Pipelines build of the repository
   (`https://bitbucket.org/<workspace>/<repo>/pipelines/results/<build>`, the `url` of the commit
   status) names the build number, which is all `bkt` needs. The first failed step is found with
@@ -371,6 +376,29 @@ log, or why there is none:
   log is read with `bkt pipeline logs <build> --step <uuid>`. A status of another CI, or of
   another repository, says so (`no log: it is not a Bitbucket Pipelines build, see …`). Its lines
   have no names nor timestamp to drop.
+- **The failing command's output** (Bitbucket Cloud): the log of a step holds its setup, each
+  script command, then Bitbucket's teardown, and an agent needs the part of the command that
+  failed. The kept lines run from the **last command echoed** (`+ <command>`) to the **teardown**
+  (or to the end of the log, or to a command that lists the environment), the command line
+  included. In between, a run of 3 or more `NAME=value` lines (capitals, digits and `_` in the
+  name) is an environment listing and is left out; a command that is only `env`, `printenv`,
+  `export` or `set` is not taken for the failing one. When no command is echoed, or nothing
+  is left, the end of the log is given as before, and the line says `lines of its log` instead
+  of `lines of the failing command's output`.
+  - **Documented** by Atlassian: the test reports are searched for in the "Build Teardown"
+    phase, with the lines `Searching for test report files in directories named …`, `Found
+    matching test report file …`, `Located test suite containing …`, `Finished scanning for test
+    reports.`, `Merged test suites, total number tests is …` and `Uploading test results`
+    (support article "Successful test reports not showing in the Pipelines UI"). The first one
+    is the teardown marker.
+  - **Assumed**, from logs seen and not from documentation (Atlassian describes no log format):
+    that each script command is echoed as `+ <command>`; that the failing command is the last
+    one echoed (an `after-script` command that is not an environment listing would take its
+    place; output that itself starts with `+ ` too); that a teardown line starting
+    `Searching for files matching artifact pattern`, `Uploading cache` or `Uploading artifact`
+    comes after the commands; that an environment listing is `NAME=value` lines. Each marker is
+    a constant of `crates/flottille/src/forge/logs.rs`: a wrong one makes the log fall back to
+    its end, or to a wrong part, never to an error.
 - **Bitbucket Data Center**: `no log: bkt gives no job logs, read it on Bitbucket`; `bkt` has no
   pipelines there.
 - **Cleaned**: the job's and step's names and the timestamp that start every line, the colours and
