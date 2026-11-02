@@ -631,10 +631,14 @@ pub fn learn(
         .map(|(id, name)| {
             let known = before.iter().find(|m| m["id"] == id.as_str());
             let now = id == current || id == has;
-            let efforts = if now {
+            let recorded = known.map_or(Value::Null, |m| m["efforts"].clone());
+            // The model an alias stands for has its own efforts once a session ran on it; the
+            // alias's list only fills in until then.
+            let own_list = id != current && recorded.as_array().is_some_and(|l| !l.is_empty());
+            let efforts = if now && !own_list {
                 json!(efforts)
             } else {
-                known.map_or(Value::Null, |m| m["efforts"].clone())
+                recorded
             };
             let stands_for = alias.filter(|_| id == "default");
             let default = if fresh {
