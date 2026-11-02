@@ -2,11 +2,11 @@
 //! window") on one page, still, so that it can be captured in a headless compositor.
 //!
 //! ```text
-//! cargo run -p flottille-ui --example components [-- --dialog | --confirm | --drawer | --menu]
+//! cargo run -p flottille-ui --example components [-- --dialog | --confirm | --drawer | --menu] [--light]
 //! ```
 //!
 //! `--dialog` opens a form dialog, `--confirm` a confirmation, `--drawer` a detail drawer,
-//! `--menu` a list row's "⋯" menu. Two toasts are said when the window opens: a failure, which
+//! `--menu` a list row's "⋯" menu, `--light` draws Flottille's light palette. Two toasts are said when the window opens: a failure, which
 //! stays, and a success, which leaves after four seconds.
 
 use flottille_ui::{
@@ -31,8 +31,13 @@ enum Shown {
 
 fn main() {
     let mut shown = Shown::Page;
+    let mut light = false;
     for arg in std::env::args().skip(1) {
         shown = match arg.as_str() {
+            "--light" => {
+                light = true;
+                shown
+            }
             "--dialog" => Shown::Dialog,
             "--confirm" => Shown::Confirm,
             "--drawer" => Shown::Drawer,
@@ -42,6 +47,15 @@ fn main() {
     }
     gpui_kit::application().with_assets(Icons).run(move |cx| {
         flottille_ui::init(cx);
+        if light {
+            flottille_ui::omarchy::appear(
+                flottille_ui::omarchy::Appearance {
+                    source: flottille_ui::omarchy::Source::Flottille,
+                    shade: flottille_ui::theme::Shade::Light,
+                },
+                cx,
+            );
+        }
         let bounds = Bounds::centered(None, size(px(1400.), px(1000.)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
