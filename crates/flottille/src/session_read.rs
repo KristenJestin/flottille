@@ -32,7 +32,8 @@ const BATCH: usize = 500;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionRead {
-    pub session: String,
+    /// Left out: the caller's own session.
+    pub session: Option<String>,
     pub last: Option<u64>,
     pub since: Option<String>,
     pub until: Option<String>,
@@ -67,7 +68,7 @@ fn failed(error: impl std::fmt::Display) -> Outcome {
 }
 
 /// The session `session_read` reads, or the refusal: a root of the caller's project, other than
-/// the caller (whose own is answered with its mode, `own_mode`).
+/// the caller (whose own, or none given, is answered with its mode, `own_mode`).
 pub fn session_of(daemon: &Daemon, caller: &Agent, id: &str) -> Result<Agent, Outcome> {
     let session = daemon
         .read(|store| store.agent(id))
@@ -88,6 +89,12 @@ pub fn session_of(daemon: &Daemon, caller: &Agent, id: &str) -> Result<Agent, Ou
         )));
     }
     Ok(session)
+}
+
+/// The session the request names when it is not the caller's own: no `session`, or the caller's
+/// id, is the caller's.
+fn other<'a>(read: &'a SessionRead, caller: &Agent) -> Option<&'a str> {
+    read.session.as_deref().filter(|id| *id != caller.id)
 }
 
 fn caller_of(daemon: &Daemon, grant: &Grant) -> Result<Agent, Outcome> {
@@ -149,10 +156,10 @@ fn asked(read: &SessionRead) -> Result<Asked, Outcome> {
 pub fn says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<String>, Outcome> {
     let read: SessionRead = arguments("session_read", args.clone())?;
     let caller = caller_of(daemon, grant)?;
-    if read.session == caller.id {
+    let Some(id) = other(&read, &caller) else {
         return Ok(Vec::new());
-    }
-    let session = session_of(daemon, &caller, &read.session)?;
+    };
+    let session = session_of(daemon, &caller, id)?;
     let page = asked(&read)?;
     let which = match &page.reading {
         _ if read.cursor.is_some() => "the next page of a reading it began".to_owned(),
@@ -188,10 +195,10 @@ pub fn read(daemon: &Daemon, grant: &Grant, args: Value) -> Outcome {
 fn page(daemon: &Daemon, grant: &Grant, args: Value) -> Result<String, Outcome> {
     let read: SessionRead = arguments("session_read", args)?;
     let caller = caller_of(daemon, grant)?;
-    if read.session == caller.id {
+    let Some(id) = other(&read, &caller) else {
         return Ok(own_mode(daemon, &caller));
-    }
-    let session = session_of(daemon, &caller, &read.session)?;
+    };
+    let session = session_of(daemon, &caller, id)?;
     let asked = asked(&read)?;
     // Each message is masked of the secrets of the session's place and of the reader's before it
     // is cut: masking the page afterwards would leave the start of a secret the cut went through.
@@ -215,6 +222,11 @@ fn page(daemon: &Daemon, grant: &Grant, args: Value) -> Result<String, Outcome> 
         named(&session),
         session.project
     );
+    // Each tree keeps its own mode: the one read is that session's, not the reader's.
+    text.push_str(&format!(
+        "That session's tree is in {} mode.\n",
+        crate::judge::mode(daemon, &session.id).as_str()
+    ));
     if messages.is_empty() {
         text.push_str("\n(no message here)\n");
     }
@@ -257,10 +269,11 @@ fn own_mode(daemon: &Daemon, caller: &Agent) -> String {
         GateMode::Full => "a call the gate would hold passes without a request",
     };
     format!(
-        "This is your own session, {}: its conversation is already yours. Your session's tree is \
-         in {} mode: {means}; a base call comes to the user in Ask and Auto, and what the gate \
+        "This is your own session, {}, role {}: its conversation is already yours. Your session's \
+         tree is in {} mode: {means}; a base call comes to the user in Ask and Auto, and what the gate \
          refuses stays refused in every mode. Only the user changes it.",
         named(caller),
+        caller.role,
         mode.as_str()
     )
 }

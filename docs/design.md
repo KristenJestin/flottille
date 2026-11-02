@@ -200,11 +200,12 @@ Flottille's own tools:
 - `session_send {session, text}` (a root): a message to a session the caller started, or to the
   agent that started it, judged as a write is; it arrives as a delivery labelled with its sender,
   never as the user's, and the answer comes back the same way.
-- `session_read {session, last?, since?, until?, cursor?}` (a root): a page of the conversation
+- `session_read {session?, last?, since?, until?, cursor?}` (a root): a page of the conversation
   of another session of the caller's project (the user's messages to it and its agent's replies,
-  with their times), the last messages or those between two dates, with a cursor to the next page;
-  framed as that session's data, never instructions; judged in Ask and Auto; a session of another
-  project is refused.
+  with their times), the last messages or those between two dates, with a cursor to the next page,
+  and the mode of that session's tree; framed as that session's data, never instructions; judged
+  in Ask and Auto; a session of another project is refused. Without `session` (or with the
+  caller's own id) it reads this session: its id, its role and its tree's mode, asked of nobody.
 - `agent_send {agent_id, message}`: a message to one of the caller's children.
 - `agent_status {agent_id?, action?, detail?, after?}`: for one child or all of them: state, what
   it is doing now (thinking, in a tool call, which command runs and for how long, waiting for
@@ -439,8 +440,9 @@ user (`agent_launch` with `root`) takes the mode of the tree that started it, Fu
 above it: an agent in Full can already do what the session would do, the session caps still apply,
 and the rules refused in every mode stay refused in it. Each tree keeps its own mode afterwards: a
 switch of the launcher's tree does not reach it. It is kept when the session resumes. An agent
-reads its mode, never sets it: `session_read` of its own session answers with its tree's mode,
-and the text Flottille starts every session with says so.
+reads its mode, never sets it: `session_read` with no `session` (its own id is not told to it)
+answers with its id, its role and its tree's mode, and the text Flottille starts every session
+with says so. Reading another session says the mode of that session's tree too.
 
 - In **Ask**, a call to judge is a card for the user.
 - In **Auto**, it goes to the **judge**, which allows it or asks the user: it cannot refuse, and
