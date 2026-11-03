@@ -88,12 +88,22 @@ pub fn actions(projects: &[String]) -> Vec<Action> {
             then: Do::Settings,
         },
     ];
-    found.extend(SECTIONS.iter().enumerate().map(|(at, (_, label))| Action {
-        title: format!("Settings: {label}"),
-        words: "preferences options tab",
-        icon: Icon::Settings,
-        then: Do::SettingsTab(at),
-    }));
+    found.extend(
+        SECTIONS
+            .iter()
+            .enumerate()
+            .map(|(at, (key, label))| Action {
+                title: format!("Settings: {label}"),
+                // The judge's guidance has no tab of its own: it is found on the Judge tab.
+                words: if *key == "judge" {
+                    "preferences options tab auto guidance"
+                } else {
+                    "preferences options tab"
+                },
+                icon: Icon::Settings,
+                then: Do::SettingsTab(at),
+            }),
+    );
     found.extend(projects.iter().map(|project| Action {
         title: format!("Settings of {project}"),
         words: "project preferences options",

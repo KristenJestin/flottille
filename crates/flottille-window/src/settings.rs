@@ -5,7 +5,8 @@
 //! chosen here too (`provider.set_judge`), and its guidance edited (`judge.set`). The window's
 //! appearance is chosen (`appearance.set`): the Omarchy theme or Flottille's own, light or dark.
 //! Last, the developer mode is switched (`developer.set`), its log's path beside the switch. The
-//! page is tabs, one section shown at a time.
+//! page is tabs, one section shown at a time; the Judge tab holds two, the Auto judge and then
+//! its guidance.
 
 use std::collections::HashMap;
 
@@ -18,8 +19,8 @@ use flottille_ui::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, Render,
-    SharedString, StatefulInteractiveElement, Styled, TestSupportExt as _, Transformation,
-    WeakEntity, Window, div, px, radians,
+    ScrollHandle, SharedString, StatefulInteractiveElement, Styled, TestSupportExt as _,
+    Transformation, WeakEntity, Window, div, px, radians,
 };
 
 use crate::actions::Command;
@@ -28,10 +29,9 @@ use crate::rules::RulesEditor;
 use crate::shell::Shell;
 
 /// The sections of the page, in order: each index entry's key and label.
-pub const SECTIONS: [(&str, &str); 6] = [
-    ("judge", "Auto judge"),
+pub const SECTIONS: [(&str, &str); 5] = [
+    ("judge", "Judge"),
     ("providers", "Providers"),
-    ("guidance", "Judge guidance"),
     ("rules", "Rules"),
     ("appearance", "Appearance"),
     ("developer", "Developer mode"),
@@ -44,13 +44,15 @@ pub enum Reveal {
     Judge,
     /// No provider can start a session (the composer's "Open the settings").
     Providers,
+    /// The Auto judge's guidance: the Judge tab, scrolled to the guidance under the judge.
+    Guidance,
 }
 
 impl Reveal {
     /// The index of its section in [`SECTIONS`].
     fn entry(self) -> usize {
         let key = match self {
-            Reveal::Judge => "judge",
+            Reveal::Judge | Reveal::Guidance => "judge",
             Reveal::Providers => "providers",
         };
         SECTIONS
@@ -105,6 +107,8 @@ pub struct SettingsPage {
     appearance_unread: Option<String>,
     /// The tab chosen: the index of its section in [`SECTIONS`].
     tab: usize,
+    /// The scroll of the section shown, to bring the guidance in view from a link.
+    scroll: ScrollHandle,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,6 +157,7 @@ impl SettingsPage {
             appearance: None,
             appearance_unread: None,
             tab: 0,
+            scroll: ScrollHandle::new(),
         }
     }
 
@@ -173,6 +178,11 @@ impl SettingsPage {
     /// Opened at a section: its tab is the one chosen.
     pub fn reveal(&mut self, at: Reveal, cx: &mut Context<Self>) {
         self.choose(at.entry(), cx);
+        if at == Reveal::Guidance {
+            // The Judge tab shows the judge, then the guidance: the second block of the page.
+            self.scroll.scroll_to_top_of_item(1);
+            cx.notify();
+        }
     }
 
     pub fn rules(&self) -> &Entity<RulesEditor> {
@@ -931,17 +941,23 @@ impl Render for SettingsPage {
             ))
             .into_any_element();
         // Every section is built on each frame, as on a project's settings.
-        let mut sections: Vec<AnyElement> = vec![
-            if self.providers.known {
-                judge
-            } else {
-                div().into_any_element()
-            },
-            providers,
-            self.judge_guidance.clone().into_any_element(),
-            self.rules.clone().into_any_element(),
-            self.appearance_section(cx).into_any_element(),
-            self.developer_section(cx).into_any_element(),
+        // The Judge tab holds two: the Auto judge, then its guidance.
+        let mut sections: Vec<Vec<(&str, AnyElement)>> = vec![
+            vec![
+                (
+                    "judge",
+                    if self.providers.known {
+                        judge
+                    } else {
+                        div().into_any_element()
+                    },
+                ),
+                ("guidance", self.judge_guidance.clone().into_any_element()),
+            ],
+            vec![("providers", providers)],
+            vec![("rules", self.rules.clone().into_any_element())],
+            vec![("appearance", self.appearance_section(cx).into_any_element())],
+            vec![("developer", self.developer_section(cx).into_any_element())],
         ];
         let chosen = self.tab.min(sections.len() - 1);
         let shown = sections.swap_remove(chosen);
@@ -986,6 +1002,7 @@ impl Render for SettingsPage {
         // plays again), after the tabs.
         let page = div()
             .id("settings-page")
+            .track_scroll(&self.scroll)
             .w_full()
             .flex_1()
             .min_h_0()
@@ -996,9 +1013,10 @@ impl Render for SettingsPage {
             .px(pad)
             .pt(space::XL)
             .pb(space::XXXL)
-            .child(column(
-                enter(key(SECTIONS[chosen].0), 2, shown).into_any_element(),
-            ));
+            .children(shown.into_iter().enumerate().map(|(n, (part, section))| {
+                column(enter(key(part), 2 + n, section).into_any_element())
+                    .when(n > 0, |d| d.mt(space::XXL))
+            }));
         div()
             .size_full()
             .flex()

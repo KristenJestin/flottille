@@ -348,9 +348,27 @@ fn an_action_is_done_when_chosen(cx: &mut TestAppContext) {
         .expect("Settings is open");
     assert_eq!(
         page.read_with(cx, |page, _| page.tab()),
-        4,
+        3,
         "the Appearance tab"
     );
+}
+
+#[gpui_kit::test]
+fn the_switcher_finds_the_guidance_on_the_judge_tab(cx: &mut TestAppContext) {
+    let world = world();
+    let (shell, cx) = ready(&world, cx);
+    open_with_keys(&shell, cx);
+    cx.simulate_input("settings guidance");
+    settle(cx);
+    assert_eq!(marked(&shell, cx), Some(action_key("Settings: Judge")));
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    let page = shell
+        .read_with(cx, |shell, cx| {
+            shell.main().read(cx).settings_page().cloned()
+        })
+        .expect("Settings is open");
+    assert_eq!(page.read_with(cx, |page, _| page.tab()), 0, "the Judge tab");
 }
 
 #[gpui_kit::test]
@@ -403,7 +421,7 @@ fn with_nothing_typed_the_recent_sessions_and_the_actions_are_listed(cx: &mut Te
         "New session",
         "Add a project",
         "Settings",
-        "Settings: Auto judge",
+        "Settings: Judge",
     ] {
         assert!(
             actions.iter().any(|a| a == wanted),
