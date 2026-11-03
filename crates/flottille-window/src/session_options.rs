@@ -6,10 +6,10 @@
 //! `docs/agents.md`, "The options"). Nothing under the bar, so the composer keeps its height.
 
 use flottille_ui::motion::{HOVER, PANEL};
-use flottille_ui::{Align, Dropdown, MenuItem, fade, palette, space};
+use flottille_ui::{Align, Dropdown, MenuItem, fade, palette, section_label, space};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, Context, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
+    AnyElement, App, Context, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
     StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, Window, div, px,
 };
 
@@ -33,6 +33,9 @@ pub struct Runs {
 /// What the picker's menu says of a change waiting.
 pub const AFTER_TURN: &str = "Applies after this turn";
 pub const WITH_NEXT: &str = "Applies with your next message";
+
+/// The id of the menu's line that says it.
+const APPLIES: &str = "session-options-applies";
 
 pub struct SessionOptions {
     shell: WeakEntity<Shell>,
@@ -169,7 +172,7 @@ impl SessionOptions {
         .entries(menu);
         let when = self.waiting().filter(|_| self.waits(menu));
         let applies = when.map(|when| Entry {
-            id: "session-options-applies".into(),
+            id: APPLIES.into(),
             label: when.into(),
             note: None,
             on: false,
@@ -291,10 +294,19 @@ impl SessionOptions {
         }
     }
 
-    fn items(&self, menu: Menu, cx: &mut Context<Self>) -> Vec<MenuItem> {
+    fn items(&self, menu: Menu, cx: &mut Context<Self>) -> Vec<AnyElement> {
         self.entries(menu)
             .into_iter()
             .map(|entry| {
+                // When a change applies is a heading of the menu, not a choice: nothing to hover
+                // or press.
+                if entry.id == APPLIES {
+                    return div()
+                        .id(APPLIES)
+                        .test_support()
+                        .child(section_label(&entry.label, cx))
+                        .into_any_element();
+                }
                 let item = MenuItem::new(entry.id, entry.label).selected(entry.on);
                 let item = match entry.note {
                     Some(note) => item.note(note),
@@ -306,6 +318,7 @@ impl SessionOptions {
                     })),
                     None => item,
                 }
+                .into_any_element()
             })
             .collect()
     }

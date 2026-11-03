@@ -556,3 +556,29 @@ fn only_the_picker_whose_change_waits_says_when_it_applies(cx: &mut TestAppConte
         with_next
     );
 }
+
+#[gpui_kit::test]
+fn the_line_that_says_when_a_change_applies_does_not_answer_the_pointer(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let id = start(&user, "slow", false);
+    eventually("the turn runs", || shown(&user, &id)["state"] == "working");
+    let (shell, cx) = open_session(&user, &id, cx);
+    pick_model(&shell, "fake-large", cx);
+    until(&shell, cx, "the change is marked", |cx| {
+        settle(cx);
+        marked(cx)
+    });
+    cx.update(|window, cx| window.click("session-model-picker", cx));
+    until(&shell, cx, "the menu says when it applies", |cx| {
+        has("session-options-applies", cx)
+    });
+    settle(cx);
+    cx.update(|window, cx| window.hover("session-options-applies", cx));
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)),
+        0,
+        "no hover fades on a line that is not a choice"
+    );
+}
