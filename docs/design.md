@@ -649,14 +649,19 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   the focus goes back to what had it. It finds, in groups with their headings, **Sessions** (by
   title; each with its project and place and its state as the tree shows it, `NEEDS YOU` or
   running, else how long ago), **Projects** (a project and each of its workspaces, which open
-  the project's page) and **Actions** (New session, Add a project, Settings and each tab of
-  it: one list in code, `actions()` of the switcher, where a new screen adds its entry). It
-  matches each word typed, ignoring case and accents, in the title or in the words around it
-  (the project a session is in), the best match first and the most recently active among equal
-  ones, and draws what matched in the accent; with nothing typed it lists the recent sessions
-  and the actions. The arrows move the marked result, Enter chooses it, and the pointer marks the
-  row it is on and a click chooses it. It searches what the window already holds from the daemon
-  (the tree, the projects), never the content of conversations (that needs an index);
+  the project's page) and **Actions** (New session, Add a project, Notifications, Settings
+  and each tab of it, each project's settings: one list in code, `actions()` of the switcher,
+  where a new screen adds its entry). It
+  matches each word typed, ignoring case, accents and ligatures, in the title (its letters in
+  order, close together, are enough) or as a whole in the words around it (the project and
+  the place a session is in), the best match first and the most recently active among equal
+  ones, and draws what matched in the accent; the best match of all groups is the marked one.
+  With nothing typed it lists the recent sessions and the actions. While it is open, a read of
+  the daemon changes what the results say (a state, how long ago) but not their order: nothing
+  moves under the pointer until something is typed. The arrows move the marked result, Enter
+  chooses it, and the pointer marks the row it is on and a click chooses it. Ctrl K waits while
+  a dialog or a list is open. It searches what the window already holds from the daemon (the
+  tree, the projects), never the content of conversations (that needs an index);
 - left: the tree project › place › session. `main` and the workspaces sit at the same level
   under their project; a session is titled by the first line of its first message that says what the
   work is (a greeting or a single word does not: the session is `agent <id>` until a later message
