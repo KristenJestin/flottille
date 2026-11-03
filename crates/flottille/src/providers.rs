@@ -613,8 +613,8 @@ pub fn learn(
     let current = model["currentValue"].as_str().unwrap_or_default();
     let listed = named_values(model);
     let alias = recommended(model).filter(|r| listed.iter().any(|(id, _)| id == r));
-    // The model the session has, the alias resolved: what it stands for, else the first model
-    // listed, the one Flottille applies (`acp::own_choice`).
+    // The model the session has, the alias resolved: what it stands for (itself when no other id
+    // runs it), else the first model listed, the one Flottille applies (`acp::own_choice`).
     let has = if current == provider::OWN_CHOICE {
         provider::default_model(listed.iter().map(|(id, _)| id.as_str()), alias).unwrap_or(current)
     } else {
@@ -647,9 +647,10 @@ pub fn learn(
             } else {
                 recorded
             };
-            let stands_for = alias.filter(|_| id == "default");
+            // A `default` that stands for itself runs a model no other id does: it is that model.
+            let stands_for = alias.filter(|a| id == "default" && *a != provider::OWN_CHOICE);
             let default = if fresh {
-                id == has && id != provider::OWN_CHOICE
+                id == has && (id != provider::OWN_CHOICE || alias == Some(provider::OWN_CHOICE))
             } else {
                 known.is_some_and(|m| m["default"] == true)
             };

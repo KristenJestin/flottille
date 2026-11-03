@@ -541,24 +541,27 @@ fn claudes_default_alias_is_shown_and_applied_as_its_model() {
     let (id, after) = run(&user, "hello");
     events_until(&user, &id, after, "agent.turn_ended");
 
+    // Its `default` resolves to the 1M-context model, which no row resolves to: the bare `opus`
+    // row runs the standard context, a smaller model. The default is applied by its own value
+    // and shown by the model its description names.
     let claude = listed_claude(&user);
     let models = claude["models"].as_array().unwrap();
-    let alias = models.iter().find(|m| m["id"] == "default").unwrap();
-    assert_eq!(alias["stands_for"], "opus", "{models:?}");
     let defaults: Vec<&Value> = models.iter().filter(|m| m["default"] == true).collect();
     assert_eq!(defaults.len(), 1, "{models:?}");
-    assert_eq!(defaults[0]["id"], "opus");
-    // The session is started with the model named, and the effort it runs with: Claude does not
-    // say one, so the middle of the levels the model offers.
+    assert_eq!(defaults[0]["id"], "default");
+    assert_eq!(defaults[0]["name"], "Opus 5.5 (1M context)");
+    assert_eq!(defaults[0].get("stands_for"), None, "{models:?}");
+    // The session is started on the default by its value, and the effort it runs with: Claude
+    // does not say one, so the middle of the levels the model offers.
     assert_eq!(
         asked(&user),
         [
-            json!({"subtype": "set_model", "model": "opus"}),
+            json!({"subtype": "set_model"}),
             json!({"subtype": "apply_flag_settings", "settings": {"effortLevel": "high"}})
         ]
     );
     let taken = &show(&user, &id)["agent"]["taken"];
-    assert_eq!(taken["model"], "opus");
+    assert_eq!(taken["model"], "default");
     assert_eq!(taken["effort"], "high");
 }
 

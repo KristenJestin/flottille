@@ -877,9 +877,11 @@ impl Pickers<'_> {
                                 .unwrap_or(picked),
                         ),
                     });
+                    // The provider's own `default` is a row only when it runs a model no other
+                    // row does.
                     for model in models
                         .iter()
-                        .filter(|m| m.stands_for.is_none() && m.id != DEFAULT)
+                        .filter(|m| m.stands_for.is_none() && (m.id != DEFAULT || m.default))
                     {
                         let is_default = default == Some(model.id.as_str());
                         let on = match picked {

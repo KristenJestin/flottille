@@ -1150,7 +1150,8 @@ on the model a new session takes when none is asked, once one said it: what the 
 "The options"). A provider's own `default`
 value that names the model it stands for (`_meta.jetbrains.air.recommendedValue` of the `model`
 option) is an alias: it stays listed with `stands_for`, that model's id, and the model it stands
-for is the `default` one, with the alias's `efforts`. `default_effort` is the effort a model runs
+for is the `default` one, with the alias's `efforts`. A `default` whose `recommendedValue` is
+itself runs a model no other value does: it is no alias, and is the `default` one, by its name. `default_effort` is the effort a model runs
 with when none is asked, once a new session none was set on said it by its name (Claude says it
 as `default` only: never there for Claude). `models_outdated` is `true`
 when they were said by another version of the program or with other API keys set: they are listed

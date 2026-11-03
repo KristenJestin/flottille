@@ -162,14 +162,12 @@ impl Provider {
         }
     }
 
-    /// The model a new session takes, once a session said the models: the one marked, else the
-    /// one Flottille applies, what the provider's own `default` stands for or its first model.
+    /// The model a new session takes, once a session said the models: the one marked (the
+    /// provider's own `default` when it stands for no other), else the one Flottille applies,
+    /// what that `default` stands for or the first model.
     pub fn default_model(&self) -> Option<&Model> {
         let models = self.models.as_ref()?;
-        if let Some(marked) = models
-            .iter()
-            .find(|m| m.default && m.id != provider::OWN_CHOICE)
-        {
+        if let Some(marked) = models.iter().find(|m| m.default && m.stands_for.is_none()) {
             return Some(marked);
         }
         let stands_for = models
@@ -373,6 +371,42 @@ mod tests {
         assert_eq!(
             (fable.id.as_str(), fable.default_effort.as_deref()),
             ("fable", Some("low"))
+        );
+    }
+
+    #[test]
+    fn a_default_with_no_row_of_its_own_is_shown_and_picked_by_its_name() {
+        let providers = Providers::of(Ok(&json!({"providers": [
+            {"name": "claude", "title": "Claude", "enabled": true, "ready": true,
+             "models": [
+                {"id": "default", "name": "Opus 5.5 (1M context)", "efforts": ["low", "high"],
+                 "default": true},
+                {"id": "opus", "name": "Claude Opus 5.5", "efforts": ["low", "high"]}]}
+        ]})));
+        let claude = providers.get("claude").unwrap();
+        assert_eq!(claude.default_model().unwrap().id, "default");
+        let pick = crate::actions::Pick {
+            provider: Some("claude".into()),
+            model: None,
+            effort: None,
+        };
+        let pickers = crate::composer::Pickers {
+            providers: &providers,
+            pick: &pick,
+            project: (None, None),
+        };
+        assert_eq!(pickers.model_shown(), "Opus 5.5 (1M context)");
+        let rows: Vec<(String, bool, Option<String>)> = pickers
+            .entries(crate::composer::Menu::Model)
+            .into_iter()
+            .map(|e| (e.label, e.on, e.note))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Opus 5.5 (1M context)".into(), true, Some("default".into())),
+                ("Claude Opus 5.5".into(), false, None)
+            ]
         );
     }
 }

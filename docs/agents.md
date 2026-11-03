@@ -198,8 +198,8 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   saying what it offers. A model is never replaced by another. What the agent took is kept.
   A new session whose model or effort is not chosen (nor waiting, below) and that the agent left
   on its own choice (`currentValue` `default`) is set to that choice by its name, checked the same
-  way: the model the agent says `default` stands for (`recommendedValue`), else the first model it
-  lists; the effort it says, else the middle of the levels the model offers (the upper of the two
+  way: the model the agent says `default` stands for (`recommendedValue`; `default` itself when it
+  runs a model no other value does), else the first model it lists; the effort it says, else the middle of the levels the model offers (the upper of the two
   middles). The window shows these same names, never that a provider chooses.
   **Changed between turns** (`agent.options`, `flottille agent options`, the session page's
   pickers, `agent_send`'s `model` and `effort`): the model and the effort of a running agent
@@ -615,11 +615,12 @@ bridge runs one session.
 - **The model** is an option (`model`) whose values are the `models` of `claude`'s answer to
   `initialize` (their `value`, `default` first when it does not list it), with the model `default`
   stands for as its `recommendedValue`: the one whose `resolvedModel` (or `value`) is the
-  `resolvedModel` of `default`, else the one whose `resolvedModel` is that of `default` without
-  its context window (`claude` 2.1.295 resolves a subscriber's `default` to `<model>[1m]` and its
-  `opus` row to `<model>`), else the one `displayName` its description gives (none when it gives
-  two), else none: the session then takes the first model listed ("How an agent runs", the
-  options).
+  `resolvedModel` of `default`; when no row resolves to it, `default` itself, named by the model
+  its description gives ("Use the default model (currently …)"), else by its `resolvedModel`:
+  `claude` 2.1.295 resolves a subscriber's `default` to `<model>[1m]` and its `opus` row to
+  `<model>`, a smaller context, never applied for it. Without a `resolvedModel`, the one
+  `displayName` its description gives (none when it gives two), else none: the session then
+  takes the first model listed ("How an agent runs", the options).
   It is set with a `set_model` control request; a value it did not list is refused with the
   list.
 - **The effort** is an option (`effort`, category `thought_level`) when the model set has effort

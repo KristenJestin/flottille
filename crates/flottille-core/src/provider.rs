@@ -42,15 +42,16 @@ pub fn listed_model<'a>(
 pub const OWN_CHOICE: &str = "default";
 
 /// The model a provider's session takes when none is asked, among the ids it lists: the one its
-/// `default` stands for (`stands_for`) when listed, else the first one that is not `default`.
+/// `default` stands for (`stands_for`) when listed, `default` itself when it stands for a model
+/// no other id runs, else the first one that is not `default`.
 pub fn default_model<'a>(
     offered: impl IntoIterator<Item = &'a str>,
     stands_for: Option<&str>,
 ) -> Option<&'a str> {
-    let concrete: Vec<&str> = offered.into_iter().filter(|v| *v != OWN_CHOICE).collect();
+    let offered: Vec<&str> = offered.into_iter().collect();
     stands_for
-        .and_then(|s| concrete.iter().copied().find(|v| *v == s))
-        .or_else(|| concrete.first().copied())
+        .and_then(|s| offered.iter().copied().find(|v| *v == s))
+        .or_else(|| offered.iter().copied().find(|v| *v != OWN_CHOICE))
 }
 
 /// The effort a model runs with when its provider does not say one: the middle of the levels it
@@ -343,6 +344,7 @@ mod tests {
         assert_eq!(default_model(offered, Some("fable")), Some("fable"));
         assert_eq!(default_model(offered, Some("gone")), Some("haiku"));
         assert_eq!(default_model(offered, None), Some("haiku"));
+        assert_eq!(default_model(offered, Some("default")), Some("default"));
         assert_eq!(default_model(["default"], None), None);
     }
 

@@ -1097,6 +1097,14 @@ fn config_options(claude: &Claude) -> Value {
     if !models.iter().any(|m| m["value"] == "default") {
         models.insert(0, json!({"value": "default", "name": "Default"}));
     }
+    // A default no row stands for is shown by the model it runs.
+    let alias = claude.models.iter().find(|m| m["value"] == "default");
+    if stands_for(&claude.models) == Some("default")
+        && let Some(name) = alias.and_then(own_name)
+        && let Some(row) = models.iter_mut().find(|m| m["value"] == "default")
+    {
+        row["name"] = name.into();
+    }
     let mut model = json!({"id": "model", "name": "Model", "category": "model", "type": "select",
         "currentValue": claude.model, "options": models});
     if let Some(stands_for) = stands_for(&claude.models) {
@@ -1116,40 +1124,38 @@ fn config_options(claude: &Claude) -> Value {
     Value::Array(options)
 }
 
-/// The model `claude`'s `default` stands for: the one it resolves to as well, else the one that
-/// resolves to the same model without its context window (`claude` 2.1.295 resolves a
-/// subscriber's `default` to `<model>[1m]` and its `opus` to `<model>`: `Ore`, `Pv`, `Dt` in its
-/// source), else the one name its description gives (a version that does not say what it resolves
-/// to); `None` when none says, or when the description names more than one model.
+/// The model `claude`'s `default` stands for: the row that resolves to the same model, else,
+/// from a version that does not say what it resolves to, the one name its description gives.
+/// Itself (`default`) when it resolves to a model no row does: `claude` 2.1.295 resolves a
+/// subscriber's `default` to `<model>[1m]` and its `opus` to `<model>` (`Ore`, `Pv`, `Dt` in its
+/// source), and the bare row runs a smaller context. `None` when nothing says which model it is.
 fn stands_for(models: &[Value]) -> Option<&str> {
     let alias = models.iter().find(|m| m["value"] == "default")?;
     let others = || models.iter().filter(|m| m["value"] != "default");
-    let resolved = alias["resolvedModel"].as_str();
-    let resolves = |m: &Value, same: &dyn Fn(&str, &str) -> bool| {
-        resolved.is_some_and(|resolved| {
-            [&m["resolvedModel"], &m["value"]]
-                .iter()
-                .filter_map(|v| v.as_str())
-                .any(|v| same(v, resolved))
-        })
-    };
-    let bare = |id: &str| {
-        let id = id.trim().to_lowercase();
-        id.strip_suffix("[1m]").map(str::to_owned).unwrap_or(id)
-    };
-    let by_resolution = others()
-        .find(|m| resolves(m, &|a, b| a == b))
-        .or_else(|| others().find(|m| resolves(m, &|a, b| bare(a) == bare(b))));
+    if let Some(resolved) = alias["resolvedModel"].as_str() {
+        let row = others()
+            .find(|m| m["resolvedModel"].as_str() == Some(resolved) || m["value"] == resolved);
+        return Some(row.map_or("default", |m| m["value"].as_str().unwrap_or("default")));
+    }
     let description = alias["description"].as_str().unwrap_or_default();
-    let by_description = || {
-        let mut named = others().filter(|m| {
-            m["displayName"]
-                .as_str()
-                .is_some_and(|name| !name.is_empty() && description.contains(name))
-        });
-        named.next().filter(|_| named.next().is_none())
-    };
-    by_resolution.or_else(by_description)?["value"].as_str()
+    let mut named = others().filter(|m| {
+        m["displayName"]
+            .as_str()
+            .is_some_and(|name| !name.is_empty() && description.contains(name))
+    });
+    named.next().filter(|_| named.next().is_none())?["value"].as_str()
+}
+
+/// The name of the model `claude`'s `default` runs, when no row stands for it: the one its
+/// description gives ("Use the default model (currently …)", `Mi` in its source), else the model
+/// it resolves to.
+fn own_name(alias: &Value) -> Option<&str> {
+    let description = alias["description"].as_str().unwrap_or_default();
+    let currently = description
+        .split_once("(currently ")
+        .and_then(|(_, rest)| rest.strip_suffix(')'))
+        .filter(|name| !name.trim().is_empty());
+    currently.or_else(|| alias["resolvedModel"].as_str())
 }
 
 /// The models offered, `default` first when `claude` did not list it.
