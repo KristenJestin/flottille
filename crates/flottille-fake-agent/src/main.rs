@@ -88,6 +88,7 @@
 //! `{prompt:agent}` by the first agent id of the turn's prompt. Together they let a scripted lead
 //! launch a worker and write to it, or a parent answer the request its child's ask names.
 //! | `{"wait": 500}` | waits that many milliseconds; a cancel ends the turn `cancelled` |
+//! | `{"hold": "release"}` | waits until a file of that name exists in the agent's folder (the test creates it), so that a turn lasts exactly as long as the test needs; a cancel ends the turn `cancelled` |
 //! | `{"hang": true}` | goes silent until the turn is cancelled |
 //! | `{"child": true}` | starts a `sleep` in its own process group, as the CLI the adapter runs would be, and records its pid (`{"child": <pid>}`) |
 //! | `{"die": 3}` | exits at once with that code |
@@ -117,6 +118,7 @@ fn main() {
     };
     let agent = Agent {
         record: Record(dir.join("received.jsonl")),
+        dir: dir.clone(),
         sessions: dir.join("sessions"),
         script,
         out: Arc::new(Mutex::new(std::io::stdout())),
@@ -211,6 +213,7 @@ impl Record {
 
 struct Agent {
     record: Record,
+    dir: PathBuf,
     sessions: PathBuf,
     script: Value,
     out: Arc<Mutex<std::io::Stdout>>,
@@ -504,6 +507,14 @@ impl Agent {
             } else if let Some(ms) = step["wait"].as_u64() {
                 let deadline = Instant::now() + Duration::from_millis(ms);
                 while Instant::now() < deadline {
+                    if is_cancelled() {
+                        return "cancelled".into();
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            } else if let Some(name) = step["hold"].as_str() {
+                let released = self.dir.join(name);
+                while !released.exists() {
                     if is_cancelled() {
                         return "cancelled".into();
                     }

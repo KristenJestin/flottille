@@ -123,7 +123,7 @@ fn a_change_chosen_during_a_turn_waits_for_its_end() {
     let user = User::with_fake_agent();
     user.fake_script(json!({
         "models": ["fake-small", "fake-large"],
-        "turns": [{"when": "slow", "do": [{"wait": 1500}, {"say": "done"}]}]
+        "turns": [{"when": "slow", "do": [{"hold": "release"}, {"say": "done"}]}]
     }));
     project(&user);
     let (id, after) = run(&user, json!({"message": "slow"}));
@@ -140,6 +140,7 @@ fn a_change_chosen_during_a_turn_waits_for_its_end() {
         "set during the turn: {:?}",
         received(&user)
     );
+    std::fs::write(user.path("fake/release"), "").unwrap();
     let events = events_until(&user, &id, after, "agent.options_taken");
     let names: Vec<&str> = events.iter().map(|e| e["name"].as_str().unwrap()).collect();
     let ended = names.iter().position(|n| *n == "agent.turn_ended").unwrap();

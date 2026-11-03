@@ -23,7 +23,7 @@ fn user() -> User {
     user.fake_script(json!({
         "models": ["fake-small", "fake-large"],
         "efforts": ["low", "high"],
-        "turns": [{"when": "slow", "do": [{"wait": 2500}, {"say": "done"}]}]
+        "turns": [{"when": "slow", "do": [{"hold": "release"}, {"say": "done"}]}]
     }));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     user
@@ -226,11 +226,21 @@ fn a_change_chosen_during_a_turn_is_said_pending_and_the_mark_goes_when_it_is_se
         has("session-options-pending", cx)
     });
 
-    assert_eq!(shown(&user, &id)["pending"]["model"], "fake-large");
+    // The mark may come from the window's own echo: the daemon's record is what is waited for,
+    // while the turn is still held.
+    eventually("the daemon keeps the change as pending", || {
+        shown(&user, &id)["pending"]["model"] == "fake-large"
+    });
+    assert_eq!(shown(&user, &id)["state"], "working");
     assert!(
         options(&shell, &id, cx).read_with(cx, |o, _| o.model_shown().contains("fake-large")),
         "the picker already says the model asked"
     );
+    assert!(
+        has("session-options-pending", cx),
+        "the mark stays while the turn is held"
+    );
+    std::fs::write(user.path("fake/release"), "").unwrap();
     eventually("the turn ends", || shown(&user, &id)["state"] == "idle");
     until(&shell, cx, "the mark is cleared", |cx| {
         settle(cx);
@@ -361,6 +371,7 @@ fn a_change_made_elsewhere_during_a_turn_is_said_pending_until_it_is_set(cx: &mu
         has("session-options-pending", cx)
             && options(&shell, &id, cx).read_with(cx, |o, _| o.model_shown().contains("fake-large"))
     });
+    std::fs::write(user.path("fake/release"), "").unwrap();
     until(&shell, cx, "the mark is cleared once it is set", |cx| {
         settle(cx);
         !has("session-options-pending", cx)
