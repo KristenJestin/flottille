@@ -515,6 +515,13 @@ fn the_picker_s_menu_says_when_a_change_applies(cx: &mut TestAppContext) {
             .label
             .clone()
     };
+    // The models arrive from the daemon after the composer shows.
+    until(&shell, cx, "the model menu has its models", |cx| {
+        o.read_with(cx, |o, _| {
+            !o.entries(flottille_window::composer::Menu::Model)
+                .is_empty()
+        })
+    });
     assert_ne!(first(cx), flottille_window::session_options::WITH_NEXT);
 
     // The tree says a change waits, the agent between turns.
