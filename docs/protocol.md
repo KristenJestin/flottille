@@ -1102,7 +1102,8 @@ not and what to do. `warnings` say what may stop its agents that the daemon cann
 sure: a version other than the one Flottille was checked against, no sign-in it can see.
 `login.api_key` is the name of the API key found set, never its value. `override` is the test
 program standing for the provider (`docs/agents.md`, "For tests and development"). `models` is
-`null` until a session of the provider's agent said them, and `efforts` of a model `null` until a
+`null` until the daemon read them from the provider's agent (as soon as it is enabled and ready, with
+no prompt) or a session said them, and `efforts` of a model `null` until a
 session had that model; `name` is what the provider shows the model by; `default` is there, `true`,
 on the model a new session takes when none is asked, once one said it. A provider's own `default`
 value that names the model it stands for (`_meta.jetbrains.air.recommendedValue` of the `model`

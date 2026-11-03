@@ -224,7 +224,7 @@ fn items_of(event: &Event) -> Option<(String, Option<crate::items::ItemKey>)> {
 }
 
 /// Whether an event may change what `provider.list` says: a provider enabled or disabled, or a
-/// session opened, which says the models its provider offers.
+/// session opened or the models of a provider read, which say the models it offers.
 fn about_providers(event: &Event) -> bool {
     event.name.starts_with("provider.") || event.name == "agent.started"
 }
@@ -700,6 +700,7 @@ mod tests {
     #[test]
     fn a_provider_changed_or_a_session_opened_reads_the_providers_again() {
         assert!(about_providers(&event("provider.changed", json!({}))));
+        assert!(about_providers(&event("provider.models_read", json!({}))));
         assert!(about_providers(&event("agent.started", json!({}))));
         assert!(!about_providers(&event("agent.turn_ended", json!({}))));
         assert!(!about_providers(&event("agent.message", json!({}))));

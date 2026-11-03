@@ -842,75 +842,150 @@ impl Bridge {
 /// rollouts and its rows in Codex's databases under Codex's locks: a `codex app-server` started
 /// bare for that alone, with no thread of its own and no turn.
 pub fn delete_thread(program: &std::path::Path, paths: &Paths, thread: &str) -> Result<(), String> {
-    use std::io::{BufRead, Write};
-    let mut command = std::process::Command::new(program);
-    for (name, _) in std::env::vars_os() {
-        if name.to_str().is_some_and(codex::withheld) {
-            command.env_remove(name);
+    let mut server = Server::start(program, paths, Duration::from_secs(30))?;
+    let deleted = server
+        .request(1, "initialize", initialize_params())
+        .and_then(|_| server.write(json!({"method": "initialized"})))
+        .and_then(|()| server.request(2, "thread/delete", json!({"threadId": thread})));
+    server.end();
+    deleted.map(|_| ())
+}
+
+/// The options a session of Flottille's Codex would offer, its models and the efforts of its
+/// default one, read with `model/list` from a `codex app-server` started bare for that alone:
+/// its account read as a session's is, and no thread, no turn (`docs/agents.md`, "The models").
+pub fn list_models(
+    program: &std::path::Path,
+    paths: &Paths,
+    limit: Duration,
+) -> Result<Value, String> {
+    let mut server = Server::start(program, paths, limit)?;
+    let listed = (|| {
+        server.request(1, "initialize", initialize_params())?;
+        server.write(json!({"method": "initialized"}))?;
+        let read = server.request(2, "account/read", json!({}))?;
+        if read["account"].is_null() && read["requiresOpenaiAuth"] == true {
+            return Err(format!(
+                "Codex is not signed in: {}",
+                codex::PROVIDER.sign_in
+            ));
         }
-    }
-    let mut child = command
-        .args(codex::arguments())
-        .envs(codex::environment(paths))
-        .current_dir(codex::folder(paths).join("home"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("cannot start {}: {e}", program.display()))?;
-    let mut stdin = child.stdin.take().expect("piped");
-    let stdout = child.stdout.take().expect("piped");
-    let (lines, answers) = std::sync::mpsc::channel::<Value>();
-    std::thread::spawn(move || {
-        for line in std::io::BufReader::new(stdout).lines() {
-            let Ok(line) = line else { break };
-            if let Ok(message) = serde_json::from_str(&line)
-                && lines.send(message).is_err()
-            {
-                break;
+        if let Some(why) = codex::refused_account(&read["account"]) {
+            return Err(why);
+        }
+        server.request(3, "model/list", json!({}))
+    })();
+    server.end();
+    let models: Vec<Value> = listed?["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["hidden"] != true && m["model"].is_string())
+        .cloned()
+        .collect();
+    let model = models
+        .iter()
+        .find(|m| m["isDefault"] == true)
+        .or(models.first())
+        .and_then(|m| m["model"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    let effort = default_effort(&models, &model);
+    Ok(options(&models, &model, &effort))
+}
+
+/// A `codex app-server` started bare for a few requests of the daemon's, with a time limit.
+struct Server {
+    child: std::process::Child,
+    stdin: Option<std::process::ChildStdin>,
+    answers: std::sync::mpsc::Receiver<Value>,
+    deadline: std::time::Instant,
+}
+
+impl Server {
+    fn start(program: &std::path::Path, paths: &Paths, limit: Duration) -> Result<Server, String> {
+        use std::io::BufRead;
+        let mut command = std::process::Command::new(program);
+        for (name, _) in std::env::vars_os() {
+            if name.to_str().is_some_and(codex::withheld) {
+                command.env_remove(name);
             }
         }
-    });
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    let mut write = |message: Value| {
+        let mut child = command
+            .args(codex::arguments())
+            .envs(codex::environment(paths))
+            .current_dir(codex::folder(paths).join("home"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("cannot start {}: {e}", program.display()))?;
+        let stdin = child.stdin.take().expect("piped");
+        let stdout = child.stdout.take().expect("piped");
+        let (lines, answers) = std::sync::mpsc::channel::<Value>();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if let Ok(message) = serde_json::from_str(&line)
+                    && lines.send(message).is_err()
+                {
+                    break;
+                }
+            }
+        });
+        Ok(Server {
+            child,
+            stdin: Some(stdin),
+            answers,
+            deadline: std::time::Instant::now() + limit,
+        })
+    }
+
+    fn write(&mut self, message: Value) -> Result<(), String> {
+        use std::io::Write;
+        let stdin = self.stdin.as_mut().ok_or("codex went")?;
         writeln!(stdin, "{message}")
             .and_then(|()| stdin.flush())
             .map_err(|e| format!("codex went: {e}"))
-    };
-    let answer = |id: u64| -> Result<(), String> {
+    }
+
+    /// The request sent, and its answer's result.
+    fn request(&mut self, id: u64, method: &str, params: Value) -> Result<Value, String> {
+        self.write(json!({"id": id, "method": method, "params": params}))?;
         loop {
-            let left = deadline.saturating_duration_since(std::time::Instant::now());
-            let message = answers
+            let left = self
+                .deadline
+                .saturating_duration_since(std::time::Instant::now());
+            let message = self
+                .answers
                 .recv_timeout(left)
                 .map_err(|_| "codex did not answer in time".to_owned())?;
             if message["id"] == id && message.get("method").is_none() {
                 return match message["error"]["message"].as_str() {
                     Some(error) => Err(error.to_owned()),
-                    None => Ok(()),
+                    None => Ok(message["result"].clone()),
                 };
             }
         }
-    };
-    let deleted = write(json!({"id": 1, "method": "initialize", "params": {
-        "clientInfo": {"name": "flottille", "title": "Flottille", "version": VERSION},
-        "capabilities": {"experimentalApi": true}}}))
-    .and_then(|()| answer(1))
-    .and_then(|()| write(json!({"method": "initialized"})))
-    .and_then(|()| {
-        write(json!({"id": 2, "method": "thread/delete", "params": {"threadId": thread}}))
-    })
-    .and_then(|()| answer(2));
-    // Its input closed, `codex` ends by itself; one that does not is killed.
-    drop(stdin);
-    for _ in 0..20 {
-        if child.try_wait().ok().flatten().is_some() {
-            return deleted;
-        }
-        std::thread::sleep(Duration::from_millis(100));
     }
-    let _ = child.kill();
-    let _ = child.wait();
-    deleted
+
+    /// Its input closed, `codex` ends by itself; one that does not is killed.
+    fn end(mut self) {
+        drop(self.stdin.take());
+        for _ in 0..20 {
+            if self.child.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn initialize_params() -> Value {
+    json!({"clientInfo": {"name": "flottille", "title": "Flottille", "version": VERSION},
+        "capabilities": {"experimentalApi": true}})
 }
 
 /// An item of a bare thread: the prompt, a reply or a thought, a call of Flottille's server, the
@@ -1008,8 +1083,12 @@ fn mcp_server(servers: &Value, tools: &[String]) -> Result<Value, String> {
 
 /// The session's options: the models Codex listed, and the efforts of the one set.
 fn config_options(codex: &Codex) -> Value {
-    let models: Vec<Value> = codex
-        .models
+    options(&codex.models, &codex.model, &codex.effort)
+}
+
+/// The options of these models, `model` the one set with `effort`.
+fn options(models: &[Value], model: &str, effort: &str) -> Value {
+    let values: Vec<Value> = models
         .iter()
         .filter_map(|model| {
             let value = model["model"].as_str()?;
@@ -1017,18 +1096,18 @@ fn config_options(codex: &Codex) -> Value {
             Some(json!({"value": value, "name": name}))
         })
         .collect();
-    let levels: Vec<Value> = efforts(&codex.models, &codex.model)
+    let levels: Vec<Value> = efforts(models, model)
         .iter()
         .map(|level| json!({"value": level, "name": level}))
         .collect();
     let mut options = vec![
         json!({"id": "model", "name": "Model", "category": "model", "type": "select",
-        "currentValue": codex.model, "options": models}),
+        "currentValue": model, "options": values}),
     ];
     if !levels.is_empty() {
         options.push(
             json!({"id": "effort", "name": "Effort", "category": "thought_level",
-            "type": "select", "currentValue": codex.effort, "options": levels}),
+            "type": "select", "currentValue": effort, "options": levels}),
         );
     }
     Value::Array(options)

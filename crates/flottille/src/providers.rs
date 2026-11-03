@@ -560,7 +560,7 @@ fn first_version(text: &str) -> Option<String> {
 /// which a new version replaces (a test override for a test's), and the names of its API keys
 /// set, which decide some of the models it offers; never their values. Never `--version`: the
 /// daemon runs on one thread, and a program slow to answer would hold every client.
-fn models_version(check: &Check) -> Option<String> {
+pub(crate) fn models_version(check: &Check) -> Option<String> {
     let program = if check.overridden.is_some() {
         "override".to_owned()
     } else {
@@ -576,7 +576,7 @@ fn models_version(check: &Check) -> Option<String> {
 /// `null` until the model was seen chosen), `"default": true` on the one a new session takes,
 /// `"default_effort"` on one whose own effort was seen and `"stands_for"` on an alias, and
 /// whether they were read from the version of the provider there is now.
-fn last_models(daemon: &Daemon, check: &Check) -> Option<(Vec<Value>, bool)> {
+pub(crate) fn last_models(daemon: &Daemon, check: &Check) -> Option<(Vec<Value>, bool)> {
     let (version, models) = daemon
         .read(|store| store.provider_models(check.provider.name))
         .ok()??;
@@ -881,6 +881,9 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
             } else {
                 Ok(())
             };
+            if enabled {
+                crate::models::enabled(&daemon, provider);
+            }
             Ok(switched(provider.name, enabled, announced))
         }
         "provider.set_judge" => {

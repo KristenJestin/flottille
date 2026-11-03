@@ -839,8 +839,8 @@ them, those of an older version of its program included), then the model's effor
 some. Neither says "default": with nothing picked, each shows the provider's real default by its
 name, already selected, its row marked "default" (the provider's own `default` entry is the row of
 the model it stands for, and picking that row names no model, so that a later change of the
-provider's default is followed); when it is not known (no session said the models yet, or the
-provider does not say which is its default), it says the provider chooses. It starts on the project's
+provider's default is followed); when it is not known (the daemon has not read the models yet, which it does as soon as the
+provider is ready, or the provider does not say which is its default), it says the provider chooses. It starts on the project's
 provider and model, else on those the last session started from the window used. A project that
 names a model and no provider gives it to the first provider enabled, as the daemon does: on that
 provider the composer shows the project's model, marked so, with its efforts, and the provider's
