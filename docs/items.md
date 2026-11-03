@@ -85,7 +85,7 @@ what was left, its cursor not having moved.
 | GitHub issues | `gh issue list -R … --state all --limit 1000 [--search "updated:>=<cursor>"] --json number,title,state,author,assignees,labels,url,updatedAt,createdAt`; only the tracker's repository's issues are kept, as `tickets list` keeps them | `gh issue view <n> --json comments,body` |
 | Bitbucket Cloud | `bkt api /repositories/<w>/<r>/pullrequests --param pagelen=50 --param sort=-updated_on --param state=OPEN --param state=MERGED --param state=DECLINED --param state=SUPERSEDED [--param q=updated_on>="<cursor>"]`, page after page up to 1,000, the filter and the order as `--param`, never in the path (#245) | as `forge show` reads it (its commit statuses, reviewers, comments, conflicts) |
 | Bitbucket Data Center | no filter in what `bkt` reads: every **open** pull request, `bkt api /rest/api/1.0/projects/<p>/repos/<r>/pull-requests` page after page (`limit`, `start`) up to 1,000; one stored open that left the list is read by itself (`…/pull-requests/<id>`) to say whether it was merged or declined, a 404 making it removed | as `forge show` reads it, only when its `version` or `updatedDate` moved since it was stored |
-| Jira | for each project of the tracker, `acli jira workitem search --jql 'project = "<KEY>" [AND updated >= "-<n>m"] ORDER BY updated DESC' --fields key,summary,status,assignee,reporter,labels,issuetype,priority,updated,created --json --limit 1000`, once `acli` is checked to be on the tracker's site (`tickets.md`, "The Jira site"), then the same search with `currentUser()` and `--fields key` for `mine` | `acli jira workitem view <KEY> --json --fields comment`, read as `forge show` reads a work item's comments (`tickets.md`), **only for a work item a subscription to its comments follows** (one open or changed, as for any item), the search holding the rest |
+| Jira | for each project of the tracker, `acli jira workitem search --jql 'project = "<KEY>" [AND updated >= "-<n>m"] ORDER BY updated DESC' --fields key,summary,status,assignee,reporter,labels,issuetype,priority --json --limit 1000`, once `acli` is checked to be on the tracker's site (`tickets.md`, "The Jira site"), then the same search with `currentUser()` and `--fields key` for `mine` | `acli jira workitem view <KEY> --json --fields comment`, read as `forge show` reads a work item's comments (`tickets.md`), **only for a work item a subscription to its comments follows** (one open or changed, as for any item), the search holding the rest |
 
 - **The checks of an open pull request whose CI still runs** are read again at every round, even
   when the pull request did not change, whether its list showed it again or not (Data Center
@@ -123,7 +123,8 @@ what was left, its cursor not having moved.
   `author.display_name`, `updated_on` and `created_on`, and `/user` says `display_name`; that Data
   Center's says `version`, `updatedDate` and `createdDate` in milliseconds; that `acli … search
   --limit 1000` reads up to that many, takes `currentUser()`, and its fields hold `reporter`,
-  `issuetype`, `priority`, `updated` and `created` in Jira's REST shape; that `gh api user` prints
+  `issuetype` and `priority` in Jira's REST shape (`updated` and `created` are refused by
+  `--fields`: a work item has a date only when `acli` prints one, `tickets.md`); that `gh api user` prints
   the user's `login`; that `gh pr view` and `gh issue view` say "Could not resolve to" for a
   number the repository no longer has.
 

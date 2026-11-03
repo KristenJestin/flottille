@@ -1963,9 +1963,9 @@ async fn status(project: &Project, asked: &TicketsCall, key: &Key) -> Outcome {
 /// What `gh issue list` is asked of each issue a round of the items lists: the cheap fields
 /// alone; the comments are read one issue at a time (`Tickets::detail`).
 const LIST_FIELDS: &str = "number,title,state,author,assignees,labels,url,updatedAt,createdAt";
-/// What a round of the items asks Jira of each work item.
-const ITEM_JIRA_FIELDS: &str =
-    "key,summary,status,assignee,reporter,labels,issuetype,priority,updated,created";
+/// What a round of the items asks Jira of each work item. `acli` refuses `updated` and `created`
+/// in `--fields` (`docs/tickets.md`): a date is read when its output holds one, never asked for.
+const ITEM_JIRA_FIELDS: &str = "key,summary,status,assignee,reporter,labels,issuetype,priority";
 const ALL_COUNT: usize = 1000;
 
 /// The tickets of a project's tracker as the items read them (`docs/items.md`): its sign-in

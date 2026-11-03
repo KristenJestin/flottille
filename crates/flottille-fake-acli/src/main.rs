@@ -36,7 +36,8 @@
 //!
 //! `acli jira workitem search --jql Q --json [--limit N]` prints the script's `search` (an array
 //! of work items, Jira's REST shape assumed as for `view`), or every item of `items` without it,
-//! at most `--limit`. The fake does not read the JQL: the test reads it in the record. Without
+//! at most `--limit`. A `--fields` with a field the real one refuses (`updated`, `created`, …) ends
+//! with 1, saying `✗ Error: fields '<those>' are not allowed`. The fake does not read the JQL: the test reads it in the record. Without
 //! `--jql` (or `--filter`) or `--json` it ends with 2, as a call Flottille never makes.
 //!
 //! A JQL that names `currentUser()` is answered with the script's `mine_search`, none without:
@@ -136,6 +137,10 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
         {
             if let Some(failure) = script["fail"]["search"].as_str() {
                 eprintln!("{failure}");
+                return 1;
+            }
+            if let Some(refused) = not_allowed(rest) {
+                eprintln!("✗ Error: fields '{refused}' are not allowed");
                 return 1;
             }
             let limit = rest
@@ -272,6 +277,28 @@ fn only_asked(args: &[&str], item: &mut Value) {
     if let Some(fields) = item["fields"].as_object_mut() {
         fields.retain(|name, _| asked.contains(&name.as_str()));
     }
+}
+
+/// What the search's `--fields` holds that the real `acli` refuses, as it says it, in the order
+/// asked. The documentation lists no allowed field; these are those a real site was seen to take
+/// (`docs/tickets.md`), and `updated` and `created` are seen refused. `view` takes any.
+fn not_allowed(args: &[&str]) -> Option<String> {
+    const ALLOWED: [&str; 8] = [
+        "key",
+        "summary",
+        "status",
+        "assignee",
+        "reporter",
+        "labels",
+        "issuetype",
+        "priority",
+    ];
+    let refused: Vec<&str> = value(args, "--fields")?
+        .split(',')
+        .map(str::trim)
+        .filter(|field| !ALLOWED.contains(field))
+        .collect();
+    (!refused.is_empty()).then(|| refused.join(", "))
 }
 
 /// Whether the script's `list` (an array of keys) holds `key`.
