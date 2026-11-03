@@ -263,6 +263,40 @@ fn forge_list_lists_the_pull_requests_by_state_and_branch() {
 }
 
 #[test]
+fn the_list_of_all_pull_requests_says_no_state() {
+    let user = user();
+    on_github(&user);
+    user.gh_script(pulls());
+    let (_, mcp) = root_in(&user, None);
+
+    let all = read(
+        &user,
+        mcp.call("forge", json!({"action": "list", "state": "all"})),
+    );
+    assert!(all.starts_with("The pull requests:\n"), "{all}");
+    assert!(!all.contains("The all"), "{all}");
+
+    let branch = read(
+        &user,
+        mcp.call(
+            "forge",
+            json!({"action": "list", "state": "all", "branch": "app/old"}),
+        ),
+    );
+    assert!(
+        branch.starts_with("The pull requests of app/old:\n"),
+        "{branch}"
+    );
+    assert!(!branch.contains("The all"), "{branch}");
+
+    let open = read(
+        &user,
+        mcp.call("forge", json!({"action": "list", "state": "open"})),
+    );
+    assert!(open.starts_with("The open pull requests:\n"), "{open}");
+}
+
+#[test]
 fn forge_show_reads_a_pull_request_by_its_number_or_the_workspace_s_branch() {
     let user = user();
     on_github(&user);

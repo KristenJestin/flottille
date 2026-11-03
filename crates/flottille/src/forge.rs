@@ -1417,9 +1417,15 @@ async fn forge_list(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
         Err(refusal) => return refusal,
     };
     let branch = asked.branch.as_deref();
+    // "all" is no state a pull request has: the heading names the pull requests alone.
+    let kind = if state == "all" {
+        String::new()
+    } else {
+        format!("{state} ")
+    };
     let mut text = match branch {
-        Some(branch) => format!("The {state} pull requests of {branch}:\n"),
-        None => format!("The {state} pull requests:\n"),
+        Some(branch) => format!("The {kind}pull requests of {branch}:\n"),
+        None => format!("The {kind}pull requests:\n"),
     };
     let mut contexts = bitbucket::Contexts::default();
     let cursors = daemon
