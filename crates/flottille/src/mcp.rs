@@ -547,14 +547,17 @@ const SERVED: [Definition; 28] = [
         title: "Write to a child",
         description: "Writes to one of your children. It reaches it at once: on its next tool \
             result when it is in a turn, as a new turn otherwise. Use it to answer a child's \
-            question, to steer it, or for a small follow-up.",
+            question, to steer it, or for a small follow-up. With model or effort it also changes \
+            the child's, set between its turns (its provider never changes).",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
                 "agent_id": {"type": "string", "description": "The child's id, as agent_launch gave it."},
-                "message": {"type": "string"}
+                "message": {"type": "string"},
+                "model": {"type": "string", "description": "The model the child runs on from its next turn, one its provider offers."},
+                "effort": {"type": "string", "description": "The effort the child runs at from its next turn, one its model offers."}
             }, "required": ["agent_id", "message"], "additionalProperties": false})
         },
     },

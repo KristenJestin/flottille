@@ -720,6 +720,110 @@ fn project_provider(project: &Project, settings: &Settings) -> Option<&'static P
     }
 }
 
+/// A model and an effort checked against the models a provider is known to offer: the model is
+/// replaced by the id the provider lists, and a refusal names what is offered. An effort asked
+/// with no model is the `current` model's, else the default model's.
+fn check_known(
+    provider: &Provider,
+    models: &[Value],
+    model: &mut Option<String>,
+    effort: Option<&str>,
+    current: Option<&str>,
+) -> Result<(), Failure> {
+    let offered: Vec<&str> = models.iter().filter_map(|m| m["id"].as_str()).collect();
+    // The id the provider lists, whichever way the user spelled it (`listed_model`).
+    if let Some(listed) = model
+        .as_deref()
+        .and_then(|asked| provider::listed_model(offered.iter().copied(), asked))
+    {
+        *model = Some(listed.to_owned());
+    }
+    let target = match model.as_deref().or(current) {
+        Some(model) => match models.iter().find(|m| m["id"] == model) {
+            Some(known) => Some((known, format!("model {model}"))),
+            None => {
+                return Err(Failure::refused(format!(
+                    "provider {} offers no model {model}: it offers {}",
+                    provider.name,
+                    offered.join(", ")
+                )));
+            }
+        },
+        None => models
+            .iter()
+            .find(|m| m["default"] == true)
+            .and_then(|known| Some((known, format!("default model {}", known["id"].as_str()?)))),
+    };
+    if let (Some(effort), Some((known, named))) = (effort, target)
+        && let Some(efforts) = known["efforts"].as_array()
+        && !efforts.iter().any(|e| e == effort)
+    {
+        let efforts: Vec<&str> = efforts.iter().filter_map(Value::as_str).collect();
+        return Err(Failure::refused(if efforts.is_empty() {
+            format!(
+                "provider {}'s {named} has no effort to choose",
+                provider.name
+            )
+        } else {
+            format!(
+                "provider {}'s {named} offers no effort {effort}: it offers {}",
+                provider.name,
+                efforts.join(", ")
+            )
+        }));
+    }
+    Ok(())
+}
+
+/// A change of a running agent's model and effort, as checked.
+pub struct Checked {
+    /// The model as the provider lists it.
+    pub model: Option<String>,
+    /// Why the effort waiting goes: the new model does not offer it.
+    pub dropped: Option<String>,
+}
+
+/// A change of a running agent's model and effort, checked against what its provider is known to
+/// offer, as at its start: the model as the provider lists it. An effort waiting that the new
+/// model does not offer goes, said. Nothing is refused while the models are not known; the
+/// agent's session then refuses what it does not offer, and goes on.
+pub fn check_change(
+    daemon: &Daemon,
+    agent: &Agent,
+    model: Option<String>,
+    effort: Option<String>,
+) -> Result<Checked, Failure> {
+    let provider = of(agent).map_err(Failure::refused)?;
+    let settings =
+        Settings::load(&daemon.paths).map_err(|error| Failure::new("invalid-config", error))?;
+    let check = Check::of(provider, &settings, Version::Skip);
+    let mut model = model;
+    let mut dropped = None;
+    if let Some(models) = known_models(daemon, &check) {
+        // The model the agent runs on, or will once the change a model asked before is set.
+        let current = agent
+            .pending
+            .model
+            .as_deref()
+            .or(agent.taken.model.as_deref())
+            .or(agent.chosen.model.as_deref());
+        check_known(provider, &models, &mut model, effort.as_deref(), current)?;
+        if effort.is_none()
+            && let (Some(new), Some(waiting)) = (&model, &agent.pending.effort)
+            && let Some(efforts) = models
+                .iter()
+                .find(|m| m["id"] == new.as_str())
+                .and_then(|m| m["efforts"].as_array())
+            && !efforts.iter().any(|e| e == waiting.as_str())
+        {
+            dropped = Some(format!(
+                "The effort {waiting} no longer waits: the model {new} does not offer it"
+            ));
+        }
+    }
+    Ok(Checked { model, dropped })
+}
+
 /// The provider and the choices of a new agent, checked against the providers enabled and ready
 /// and the models they offer: a refusal names what is available.
 pub fn choose(
@@ -774,50 +878,7 @@ pub fn choose(
     let check = Check::of(provider, &settings, Version::Skip);
     let mut model = model;
     if let Some(models) = known_models(daemon, &check) {
-        let offered: Vec<&str> = models.iter().filter_map(|m| m["id"].as_str()).collect();
-        // The id the provider lists, whichever way the user spelled it (`listed_model`).
-        if let Some(listed) = model
-            .as_deref()
-            .and_then(|asked| provider::listed_model(offered.iter().copied(), asked))
-        {
-            model = Some(listed.to_owned());
-        }
-        let target = match &model {
-            Some(model) => match models.iter().find(|m| m["id"] == model.as_str()) {
-                Some(known) => Some((known, format!("model {model}"))),
-                None => {
-                    return Err(Failure::refused(format!(
-                        "provider {} offers no model {model}: it offers {}",
-                        provider.name,
-                        offered.join(", ")
-                    )));
-                }
-            },
-            None => models
-                .iter()
-                .find(|m| m["default"] == true)
-                .and_then(|known| {
-                    Some((known, format!("default model {}", known["id"].as_str()?)))
-                }),
-        };
-        if let (Some(effort), Some((known, named))) = (&asked.effort, target)
-            && let Some(efforts) = known["efforts"].as_array()
-            && !efforts.iter().any(|e| e == effort.as_str())
-        {
-            let efforts: Vec<&str> = efforts.iter().filter_map(Value::as_str).collect();
-            return Err(Failure::refused(if efforts.is_empty() {
-                format!(
-                    "provider {}'s {named} has no effort to choose",
-                    provider.name
-                )
-            } else {
-                format!(
-                    "provider {}'s {named} offers no effort {effort}: it offers {}",
-                    provider.name,
-                    efforts.join(", ")
-                )
-            }));
-        }
+        check_known(provider, &models, &mut model, asked.effort.as_deref(), None)?;
     }
     Ok((
         provider,

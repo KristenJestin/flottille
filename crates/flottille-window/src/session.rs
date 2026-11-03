@@ -60,6 +60,7 @@ use crate::session_link::{
     self, PlaceFacts, PullRequest, RepositoryFacts, Request, SessionLink, SessionUpdate, TreeAgent,
     Where,
 };
+use crate::session_options::{Runs, SessionOptions};
 use crate::shell::{Layout, Selection, Shell, now_ms};
 use crate::subscriptions::SubscriptionList;
 use crate::tree::place_name;
@@ -371,8 +372,8 @@ impl SessionPage {
             return;
         }
         self.providers = providers.clone();
-        let facts = self.reply.read(cx).facts.clone();
-        facts.update(cx, |facts, cx| facts.set_providers(providers, cx));
+        let options = self.reply.read(cx).options.clone();
+        options.update(cx, |options, cx| options.set_providers(providers, cx));
         if !self.tree.is_empty() {
             self.set_tree(self.tree.clone(), cx);
         }
@@ -887,6 +888,10 @@ impl SessionPage {
                 self.command_panel
                     .update(cx, |panel, cx| panel.set(*output, cx));
             }
+            SessionUpdate::OptionsRefused(reason) => {
+                let options = self.reply.read(cx).options.clone();
+                options.update(cx, |options, cx| options.refused(reason, cx));
+            }
         }
     }
 
@@ -1021,9 +1026,15 @@ impl SessionPage {
             }
         }
         if let Some(root) = tree.iter().find(|a| a.parent.is_none()) {
-            let runs_on = (root.provider.clone(), root.model.clone());
-            let facts = self.reply.read(cx).facts.clone();
-            facts.update(cx, |facts, cx| facts.set_model(runs_on, cx));
+            let runs = Runs {
+                provider: root.provider.clone(),
+                model: root.model.clone(),
+                effort: root.effort.clone(),
+                pending: root.pending.clone(),
+                working: root.state == "working",
+            };
+            let options = self.reply.read(cx).options.clone();
+            options.update(cx, |options, cx| options.set_runs(runs, cx));
             let mode = self.reply.read(cx).mode.clone();
             let gate_mode = root.gate_mode.clone();
             mode.update(cx, |mode, cx| mode.set_mode(gate_mode, cx));
@@ -4679,7 +4690,7 @@ pub struct Reply {
     /// Escape closed the `/` list: it stays closed until the message is no longer a `/` word.
     dismissed: bool,
     field: Entity<TextareaState>,
-    facts: Entity<ReplyFacts>,
+    options: Entity<SessionOptions>,
     /// What the root does while its turn runs, in the bar under the field.
     status_line: Entity<StatusLine>,
     pub mode: Entity<ModeSwitch>,
@@ -4755,6 +4766,7 @@ impl Reply {
             },
         )];
         let mode = cx.new(|_| ModeSwitch::new(shell.clone(), session.clone()));
+        let options = cx.new(|_| SessionOptions::new(shell.clone(), session.clone()));
         Self {
             shell,
             session,
@@ -4764,11 +4776,7 @@ impl Reply {
             highlighted: 0,
             dismissed: false,
             field,
-            facts: cx.new(|_| ReplyFacts {
-                provider: None,
-                model: None,
-                providers: Providers::default(),
-            }),
+            options,
             status_line: cx.new(|_| StatusLine::new()),
             mode,
             has_text: false,
@@ -4796,8 +4804,9 @@ impl Reply {
         &self.field
     }
 
-    pub fn facts(&self) -> &Entity<ReplyFacts> {
-        &self.facts
+    /// The provider shown and the model and effort pickers under the field.
+    pub fn options(&self) -> &Entity<SessionOptions> {
+        &self.options
     }
 
     pub fn is_sending(&self) -> bool {
@@ -5420,7 +5429,7 @@ impl Render for Reply {
                     .gap(space::XS)
                     .pt(space::SM)
                     .px(space::XS)
-                    .child(self.facts.clone())
+                    .child(self.options.clone())
                     .child(self.mode.clone())
                     .child(
                         Button::quiet("attach", "Attach")
@@ -5472,6 +5481,23 @@ impl Render for Reply {
                             .test_support(),
                     ),
             )
+            // A change of model or effort that waits for the turn's end, until the agent took it.
+            .child(presence_of(
+                "session-options-pending",
+                self.options.read(cx).waiting().map(SharedString::from),
+                move |line| {
+                    div()
+                        .id("session-options-pending-line")
+                        .aria_label(line.clone())
+                        .px(space::MD)
+                        .pt(space::SM)
+                        .text_size(px(12.5))
+                        .text_color(p.mute)
+                        .child(line)
+                        .test_support()
+                        .into_any_element()
+                },
+            ))
             .child(presence_of(
                 "reply-error-line",
                 self.error.clone(),
@@ -5572,58 +5598,6 @@ impl Render for StatusLine {
 /// What an agent runs on, as a line: its provider and its model.
 pub fn runs_on(providers: &Providers, provider: &str, model: Option<&str>) -> String {
     format!("{provider} · {}", providers.model_line(provider, model))
-}
-
-/// The root's provider and model, below the field. The context it used is on its row in the
-/// rail, as each agent's is.
-pub struct ReplyFacts {
-    provider: Option<String>,
-    model: Option<String>,
-    providers: Providers,
-}
-
-impl ReplyFacts {
-    /// What it shows of what the root runs on.
-    pub fn shown(&self) -> String {
-        match &self.provider {
-            Some(provider) => runs_on(&self.providers, provider, self.model.as_deref()),
-            None => self.model.clone().unwrap_or_default(),
-        }
-    }
-
-    fn set_providers(&mut self, providers: &Providers, cx: &mut Context<Self>) {
-        if self.providers != *providers {
-            self.providers = providers.clone();
-            cx.notify();
-        }
-    }
-
-    fn set_model(&mut self, (provider, model): (String, Option<String>), cx: &mut Context<Self>) {
-        let provider = Some(provider).filter(|p| !p.is_empty());
-        if self.model != model || self.provider != provider {
-            self.model = model;
-            self.provider = provider;
-            cx.notify();
-        }
-    }
-}
-
-impl Render for ReplyFacts {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let p = palette(cx);
-        div()
-            .id("reply-model")
-            .h(px(28.))
-            .px(space::SM)
-            .flex()
-            .items_center()
-            .gap(space::SM)
-            .text_size(px(12.5))
-            .text_color(p.mute)
-            .aria_label(SharedString::from(self.shown()))
-            .child(SharedString::from(self.shown()))
-            .test_support()
-    }
 }
 
 #[cfg(test)]
@@ -5736,6 +5710,8 @@ mod tests {
             state_reason: None,
             provider: "claude".into(),
             model: None,
+            effort: None,
+            pending: crate::session_link::Pending::default(),
             doing: String::new(),
             waiting_on: None,
             needs_user: false,

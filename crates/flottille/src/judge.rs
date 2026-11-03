@@ -872,6 +872,7 @@ fn as_agent(folder: &Path, instructions: &str) -> Agent {
         ended_at: None,
         chosen: Choices::default(),
         taken: Choices::default(),
+        pending: Choices::default(),
         native_id: None,
         agent_version: None,
         reopens: false,

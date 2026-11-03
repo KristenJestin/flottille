@@ -325,6 +325,13 @@ pub enum Command {
         session: String,
         mode: String,
     },
+    /// Changes the session's model and effort between turns (`agent.options`): the daemon holds
+    /// the change until the turn ends. The provider never changes.
+    SetOptions {
+        session: String,
+        model: Option<String>,
+        effort: Option<String>,
+    },
     /// Stops a command of the session and everything it started, or dismisses one that ended.
     Run {
         session: String,
@@ -751,6 +758,12 @@ pub enum Outcome {
     },
     /// The session's mode was changed, or the daemon refused with why.
     ModeSet {
+        session: String,
+        refused: Option<String>,
+    },
+    /// The session's model and effort were taken for its next prompt, or the daemon refused with
+    /// why.
+    OptionsSet {
         session: String,
         refused: Option<String>,
     },
@@ -1607,6 +1620,22 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 Ok(Err(why)) | Err(why) => Some(why),
             };
             Outcome::ModeSet { session, refused }
+        }
+        Command::SetOptions {
+            session,
+            model,
+            effort,
+        } => {
+            let refused = match ask_alone(
+                connect,
+                "agent.options",
+                json!({"agent": session, "model": model, "effort": effort}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::OptionsSet { session, refused }
         }
         Command::Interrupt { session } => {
             let refused = match ask_alone(

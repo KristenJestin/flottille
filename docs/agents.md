@@ -195,6 +195,27 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   order, each set with `session/set_config_option` and checked: an option the agent does not
   have, a value it does not offer, or a value other than the one asked once set fails the agent,
   saying what it offers. A model is never replaced by another. What the agent took is kept.
+  **Changed between turns** (`agent.options`, `flottille agent options`, the session page's
+  pickers, `agent_send`'s `model` and `effort`): the model and the effort of a running agent
+  change in the same session of the same CLI, never its provider (a provider change needs a new
+  session of another CLI, which the compactor's handoff brings). The daemon checks the change as
+  at the start, against the models the provider is known to offer (a refusal names what it
+  offers; nothing is refused while they are not known), then keeps it as the agent's **pending**
+  options (`pending` in the agent, `agent.options_pending`). The session loop sets them, the model
+  first, only between turns: at once for an agent between turns whose process runs, once the turn
+  ends for one in a turn, and at the next start of the process for one that was let go, always
+  before the next prompt. A change asked while the previous one is being set is merged with it
+  and kept: only the values set leave `pending`. A model change makes a pending effort the new
+  model is known not to offer go, said in the answer (`dropped`). A value the agent's session
+  refuses never fails the agent, unlike at start: it goes on with its previous options, that value
+  leaves `pending`, and `agent.options_refused` says why. A value it replaces with another is
+  what it has now. An error that is not a refusal (its process or its service failing) leaves the
+  change pending, logged, and it is tried again before the next prompt. What the agent has once
+  set is its `taken` and its `chosen` (what a later process opens with, so that the new options
+  outlive a release or a replacement), and `agent.options_taken` says it; an effort chosen earlier
+  that the new model does not offer goes from `chosen`, so that no later start fails on it. A
+  process that opens with a pending model sets it before the chosen options, the chosen model
+  skipped: a model the agent no longer offers never fails a start the change replaces it in.
 - **A prompt** is one text block. The turn ends with the agent's stop reason (`end_turn`,
   `max_tokens`, `max_turn_requests`, `refusal`, `cancelled`), or `interrupted` when the process
   died during it. Prompts sent while a turn runs wait their turn.

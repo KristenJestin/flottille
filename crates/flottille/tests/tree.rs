@@ -1280,3 +1280,42 @@ fn the_tree_says_how_much_of_its_context_each_agent_used() {
         "agent.trees too"
     );
 }
+
+#[test]
+fn a_parent_changes_its_child_s_model_with_agent_send_and_a_refused_change_sends_nothing() {
+    let user = user();
+    let mut script = script();
+    script["models"] = json!(["fake-small", "fake-large"]);
+    user.fake_script(script);
+    let (_, lead) = lead(&user);
+    let worker_id = launch(&lead, "reader", "HANG and read");
+    let _worker = titled(&user, "reader");
+    eventually("the worker's turn", || {
+        state(&user, &worker_id) == "working"
+    });
+
+    let text = refused(lead.call(
+        "agent_send",
+        json!({"agent_id": worker_id, "message": "switch NEVER-SENT", "model": "fake-huge"}),
+    ));
+    assert!(
+        text.contains("fake-huge") && text.contains("fake-small, fake-large"),
+        "{text}"
+    );
+    never_prompted(&user, "NEVER-SENT");
+    assert_eq!(
+        show(&user, &worker_id)["agent"]["pending"]["model"],
+        Value::Null
+    );
+
+    let text = ok(lead.call(
+        "agent_send",
+        json!({"agent_id": worker_id, "message": "go on", "model": "fake-large"}),
+    ));
+    assert!(text.contains("between its turns"), "{text}");
+    assert_eq!(
+        show(&user, &worker_id)["agent"]["pending"]["model"],
+        "fake-large",
+        "held until its turn ends"
+    );
+}

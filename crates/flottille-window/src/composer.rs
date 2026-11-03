@@ -318,6 +318,29 @@ impl Composer {
         (self.default.0.as_deref(), self.default.1.as_deref())
     }
 
+    fn pickers(&self) -> Pickers<'_> {
+        Pickers {
+            providers: &self.providers,
+            pick: &self.pick,
+            project: self.project_default(),
+        }
+    }
+
+    /// What the model picker shows (`Pickers::model_shown`).
+    pub fn model_shown(&self) -> String {
+        self.pickers().model_shown()
+    }
+
+    /// What the effort picker shows (`Pickers::effort_shown`).
+    pub fn effort_shown(&self) -> String {
+        self.pickers().effort_shown()
+    }
+
+    /// What the provider, model or effort picker's list offers, in order.
+    pub fn entries(&self, menu: Menu) -> Vec<Entry> {
+        self.pickers().entries(menu)
+    }
+
     /// Picks the provider; its model and effort go back to its defaults (the project's model, when
     /// it is the provider the daemon gives it to).
     pub fn pick_provider(&mut self, name: &str, cx: &mut Context<Self>) {
@@ -355,78 +378,22 @@ impl Composer {
         cx.notify();
     }
 
-    /// The project's model, when a session on the provider picked takes it.
-    fn projects_model(&self) -> Option<&str> {
-        let provider = self.pick.provider.as_deref()?;
-        project_model(&self.providers, self.project_default(), provider)
-    }
-
-    /// What the model picker shows: the model's name, the project's model marked so. Without a
-    /// model, the provider's default by its name; when it is not known, that the provider
-    /// chooses, never a "default" it cannot name.
-    pub fn model_shown(&self) -> String {
-        let provider = self.provider();
-        let chosen = || format!("model chosen by {}", self.title());
-        let label = |id: &str| match provider.and_then(|p| p.model(id)) {
-            Some(model) => named(provider, model).unwrap_or_else(chosen),
-            None if id == DEFAULT => chosen(),
-            None => id.to_owned(),
-        };
-        match &self.pick.model {
-            Some(model) if self.projects_model() == Some(model.as_str()) => {
-                format!("{} · the project's", label(model))
-            }
-            Some(model) => label(model),
-            None => provider
-                .and_then(Provider::default_model)
-                .and_then(|default| named(provider, default))
-                .unwrap_or_else(chosen),
-        }
-    }
-
-    /// What the effort picker shows: the effort picked, else the one the model runs with, else
-    /// that the provider chooses.
-    pub fn effort_shown(&self) -> String {
-        self.pick
-            .effort
-            .clone()
-            .or_else(|| self.own_effort().cloned())
-            .unwrap_or_else(|| format!("effort chosen by {}", self.title()))
-    }
-
-    /// The effort the model picked (the provider's default one when none) runs with when none
-    /// is asked, once a session said it.
-    fn own_effort(&self) -> Option<&String> {
-        let provider = self.provider()?;
-        let model = match self.pick.model.as_deref() {
-            Some(model) => provider.model(model)?,
-            None => provider.default_model()?,
-        };
-        let own = model.default_effort.as_ref()?;
-        let efforts = efforts_of(provider, self.pick.model.as_deref())?;
-        levels(efforts).any(|e| e == own).then_some(own)
-    }
-
-    /// The provider picked's title, "the provider" before the daemon listed it.
-    fn title(&self) -> String {
-        self.provider()
-            .map_or_else(|| "the provider".to_owned(), |p| p.title.clone())
-    }
-
     /// Why the model picked cannot start: the project's, which its provider is known not to
     /// offer. Another model picked starts. Models said by another version refuse nothing.
     pub fn model_refused(&self) -> Option<String> {
         let provider = self.provider().filter(|p| !p.models_outdated)?;
         let model = self.pick.model.as_deref()?;
         let models = provider.models.as_ref()?;
-        (self.projects_model() == Some(model) && provider.model(model).is_none()).then(|| {
-            let offered: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
-            format!(
-                "provider {} offers no model {model}, the project's: it offers {}",
-                provider.name,
-                offered.join(", ")
-            )
-        })
+        (self.pickers().projects_model() == Some(model) && provider.model(model).is_none()).then(
+            || {
+                let offered: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+                format!(
+                    "provider {} offers no model {model}, the project's: it offers {}",
+                    provider.name,
+                    offered.join(", ")
+                )
+            },
+        )
     }
 
     fn provider(&self) -> Option<&Provider> {
@@ -688,6 +655,180 @@ impl Composer {
             .collect()
     }
 
+    /// Why no session can start, as the daemon says it, and the way to the settings page.
+    fn render_not_ready(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let why = self.providers.why_none();
+        if why.is_empty() {
+            return None;
+        }
+        let p = palette(cx);
+        let shell = self.shell.clone();
+        Some(
+            div()
+                .id("composer-not-ready")
+                .px(space::MD)
+                .pt(space::SM)
+                .pb(space::XS)
+                .flex()
+                .flex_col()
+                .gap(space::XS)
+                .text_size(px(12.5))
+                .text_color(p.faint)
+                .child(
+                    div()
+                        .text_color(p.mute)
+                        .child("No provider can start a session:"),
+                )
+                .children(
+                    why.into_iter()
+                        .map(|line| div().child(SharedString::from(line))),
+                )
+                .child(hoverable(
+                    div()
+                        .id("open-settings")
+                        .mt(px(2.))
+                        .cursor_pointer()
+                        .child("Open the settings")
+                        .on_click(move |_, window, cx| {
+                            shell
+                                .update(cx, |shell, cx| {
+                                    shell.open_settings_at(Reveal::Providers, window, cx)
+                                })
+                                .ok();
+                        }),
+                    move |d, t| d.text_color(mix(p.mute, p.text, t)),
+                )),
+        )
+    }
+
+    fn place_items(&self, cx: &mut Context<Self>) -> Vec<MenuItem> {
+        let item = |id: String,
+                    glyph: Icon,
+                    label: String,
+                    note: Option<&'static str>,
+                    choice: Option<Choice>| {
+            let entry = MenuItem::new(id, label)
+                .leading(glyph)
+                .selected(choice.as_ref() == Some(&self.choice));
+            let entry = match note {
+                Some(note) => entry.note(note),
+                None => entry,
+            };
+            match choice {
+                Some(choice) => entry.on_click(Self::handler(cx, move |this, window, cx| {
+                    this.choose(choice.clone(), window, cx)
+                })),
+                None => entry,
+            }
+        };
+        let mut items = vec![item(
+            "place-choice-main".into(),
+            Icon::Folder,
+            "main".into(),
+            Some("project folder"),
+            Some(Choice::Main),
+        )];
+        for place in self.places.iter().filter(|p| p.workspace.is_some()) {
+            let name = place.workspace.clone().unwrap_or_default();
+            items.push(item(
+                format!("place-choice-{name}"),
+                Icon::Branch,
+                name.clone(),
+                (!place.ready).then_some("not ready"),
+                place.ready.then(|| Choice::Workspace(name.clone())),
+            ));
+        }
+        // Not a place: it opens the page's new-workspace modal, the one its own button opens.
+        items.push(
+            MenuItem::new("place-choice-new", "New workspace")
+                .leading(Icon::Plus)
+                .on_click(Self::handler(cx, |this, window, cx| {
+                    this.menu = None;
+                    let form = this
+                        .shell
+                        .update(cx, |shell, _| {
+                            shell.new_workspace_of(&this.project).cloned()
+                        })
+                        .ok()
+                        .flatten();
+                    if let Some(form) = form {
+                        form.update(cx, |form, cx| form.open_for_composer(window, cx));
+                    }
+                    cx.notify();
+                })),
+        );
+        items
+    }
+}
+
+/// What the model and effort pickers show and offer for a pick: the start composer's and the
+/// session page's are these, never a second set.
+#[derive(Clone, Copy)]
+pub struct Pickers<'a> {
+    pub providers: &'a Providers,
+    pub pick: &'a Pick,
+    pub project: ProjectDefault<'a>,
+}
+
+impl Pickers<'_> {
+    /// The project's model, when a session on the provider picked takes it.
+    pub fn projects_model(&self) -> Option<&str> {
+        let provider = self.pick.provider.as_deref()?;
+        project_model(self.providers, self.project, provider)
+    }
+
+    /// What the model picker shows: the model's name, the project's model marked so. Without a
+    /// model, the provider's default by its name; when it is not known, that the provider
+    /// chooses, never a "default" it cannot name.
+    pub fn model_shown(&self) -> String {
+        let provider = self.provider();
+        let chosen = || format!("model chosen by {}", self.title());
+        let label = |id: &str| match provider.and_then(|p| p.model(id)) {
+            Some(model) => named(provider, model).unwrap_or_else(chosen),
+            None if id == DEFAULT => chosen(),
+            None => id.to_owned(),
+        };
+        match &self.pick.model {
+            Some(model) if self.projects_model() == Some(model.as_str()) => {
+                format!("{} · the project's", label(model))
+            }
+            Some(model) => label(model),
+            None => provider
+                .and_then(Provider::default_model)
+                .and_then(|default| named(provider, default))
+                .unwrap_or_else(chosen),
+        }
+    }
+
+    /// What the effort picker shows: the effort picked, else the one the model runs with, else
+    /// that the provider chooses.
+    pub fn effort_shown(&self) -> String {
+        self.pick
+            .effort
+            .clone()
+            .or_else(|| self.own_effort().cloned())
+            .unwrap_or_else(|| format!("effort chosen by {}", self.title()))
+    }
+
+    /// The effort the model picked (the provider's default one when none) runs with when none
+    /// is asked, once a session said it.
+    pub fn own_effort(&self) -> Option<&String> {
+        let provider = self.provider()?;
+        let model = match self.pick.model.as_deref() {
+            Some(model) => provider.model(model)?,
+            None => provider.default_model()?,
+        };
+        let own = model.default_effort.as_ref()?;
+        let efforts = efforts_of(provider, self.pick.model.as_deref())?;
+        levels(efforts).any(|e| e == own).then_some(own)
+    }
+
+    /// The provider picked's title, "the provider" before the daemon listed it.
+    pub fn title(&self) -> String {
+        self.provider()
+            .map_or_else(|| "the provider".to_owned(), |p| p.title.clone())
+    }
+
     /// What the provider, model or effort picker's list offers, in order.
     pub fn entries(&self, menu: Menu) -> Vec<Entry> {
         let item =
@@ -819,109 +960,8 @@ impl Composer {
         items
     }
 
-    /// Why no session can start, as the daemon says it, and the way to the settings page.
-    fn render_not_ready(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let why = self.providers.why_none();
-        if why.is_empty() {
-            return None;
-        }
-        let p = palette(cx);
-        let shell = self.shell.clone();
-        Some(
-            div()
-                .id("composer-not-ready")
-                .px(space::MD)
-                .pt(space::SM)
-                .pb(space::XS)
-                .flex()
-                .flex_col()
-                .gap(space::XS)
-                .text_size(px(12.5))
-                .text_color(p.faint)
-                .child(
-                    div()
-                        .text_color(p.mute)
-                        .child("No provider can start a session:"),
-                )
-                .children(
-                    why.into_iter()
-                        .map(|line| div().child(SharedString::from(line))),
-                )
-                .child(hoverable(
-                    div()
-                        .id("open-settings")
-                        .mt(px(2.))
-                        .cursor_pointer()
-                        .child("Open the settings")
-                        .on_click(move |_, window, cx| {
-                            shell
-                                .update(cx, |shell, cx| {
-                                    shell.open_settings_at(Reveal::Providers, window, cx)
-                                })
-                                .ok();
-                        }),
-                    move |d, t| d.text_color(mix(p.mute, p.text, t)),
-                )),
-        )
-    }
-
-    fn place_items(&self, cx: &mut Context<Self>) -> Vec<MenuItem> {
-        let item = |id: String,
-                    glyph: Icon,
-                    label: String,
-                    note: Option<&'static str>,
-                    choice: Option<Choice>| {
-            let entry = MenuItem::new(id, label)
-                .leading(glyph)
-                .selected(choice.as_ref() == Some(&self.choice));
-            let entry = match note {
-                Some(note) => entry.note(note),
-                None => entry,
-            };
-            match choice {
-                Some(choice) => entry.on_click(Self::handler(cx, move |this, window, cx| {
-                    this.choose(choice.clone(), window, cx)
-                })),
-                None => entry,
-            }
-        };
-        let mut items = vec![item(
-            "place-choice-main".into(),
-            Icon::Folder,
-            "main".into(),
-            Some("project folder"),
-            Some(Choice::Main),
-        )];
-        for place in self.places.iter().filter(|p| p.workspace.is_some()) {
-            let name = place.workspace.clone().unwrap_or_default();
-            items.push(item(
-                format!("place-choice-{name}"),
-                Icon::Branch,
-                name.clone(),
-                (!place.ready).then_some("not ready"),
-                place.ready.then(|| Choice::Workspace(name.clone())),
-            ));
-        }
-        // Not a place: it opens the page's new-workspace modal, the one its own button opens.
-        items.push(
-            MenuItem::new("place-choice-new", "New workspace")
-                .leading(Icon::Plus)
-                .on_click(Self::handler(cx, |this, window, cx| {
-                    this.menu = None;
-                    let form = this
-                        .shell
-                        .update(cx, |shell, _| {
-                            shell.new_workspace_of(&this.project).cloned()
-                        })
-                        .ok()
-                        .flatten();
-                    if let Some(form) = form {
-                        form.update(cx, |form, cx| form.open_for_composer(window, cx));
-                    }
-                    cx.notify();
-                })),
-        );
-        items
+    pub fn provider(&self) -> Option<&Provider> {
+        self.providers.get(self.pick.provider.as_deref()?)
     }
 }
 

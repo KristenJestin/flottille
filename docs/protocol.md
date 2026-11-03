@@ -939,6 +939,22 @@ agent starts from a tree in `full` starts in `auto`), and the mode is kept when 
 `invalid-params` for another mode, `not-found` for an agent that does not exist. The user's door
 alone reaches it: no tool of an agent changes a mode.
 
+#### `agent.options`
+
+`{"agent", "model"?, "effort"?}`, at least one of the two. Changes the model and the effort of a
+running agent between turns (`docs/agents.md`, "The options"); its provider never changes. The
+change is checked as an agent's start is, against the models its provider is known to offer, then
+held as the agent's `pending` options and set on its session before its next prompt: at once when
+it is between turns, once its turn ends otherwise. Answers `{"agent", "after", "dropped"?}`, the
+agent with its `pending` options, the event number to follow the change from, and, when a model
+change made a pending effort the new model does not offer go, a sentence that says so; the events
+are `agent.options_pending`, then `agent.options_taken` or `agent.options_refused`
+(`docs/events.md`).
+`refused` for an agent that has ended or failed, a model its provider is known not to offer, and an
+effort its model is known not to offer, each naming what is offered; `invalid-params` when neither
+is named; `not-found` for an agent that does not exist. A child can be changed as well: its parent
+does it with `agent_send` (`docs/tools.md`).
+
 #### `agent.tree`
 
 `{"agent"}`. The whole tree of the agent's root, each agent before its children:
@@ -946,7 +962,8 @@ alone reaches it: no tool of an agent changes a mode.
 (`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `launched_by`, `depth`, `epoch`, `state`,
 `state_reason`, `created_at`, `active_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
 took at the last start of its process, else the one asked, `null` for the agent's default before it
-started; `resumable`: whether `agent.resume` takes it once its last process is gone; `stopping`:
+started; `effort`: the same for its effort; `pending`: `{"model", "effort"}` the user changed to and
+the session has not taken yet, `null` when nothing waits; `resumable`: whether `agent.resume` takes it once its last process is gone; `stopping`:
 whether the process of an agent that ended is still stopping; `images`: as in the agent's full
 form; `tools_outdated`: whether its running session runs an older list of tools than its role
 has, which a restart replaces, `docs/tools.md`, "When the tools change"); `doing` a sentence of what it does

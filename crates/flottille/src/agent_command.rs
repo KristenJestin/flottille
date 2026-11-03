@@ -100,6 +100,17 @@ pub enum AgentAction {
         #[arg(long)]
         json: bool,
     },
+    /// Change a session's model and effort between turns: set before its next prompt (the
+    /// provider never changes; a model or an effort it does not offer is refused)
+    Options {
+        agent: String,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        effort: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// The agents, of every project or of one
     List {
         #[arg(long)]
@@ -320,6 +331,30 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                     text(&set["agent"], "id"),
                     text(&set["agent"], "gate_mode")
                 );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        AgentAction::Options {
+            agent,
+            model,
+            effort,
+            json,
+        } => {
+            let set = Client::connect_or_start(paths)?.request(
+                "agent.options",
+                serde_json::json!({"agent": agent, "model": model, "effort": effort}),
+            )?;
+            if json {
+                println!("{set}");
+            } else {
+                println!(
+                    "Agent {} will run on {} before its next prompt.",
+                    text(&set["agent"], "id"),
+                    pending_text(&set["agent"]),
+                );
+                if let Some(dropped) = set["dropped"].as_str() {
+                    println!("{dropped}.");
+                }
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -608,6 +643,19 @@ fn agent_line(agent: &Value, entry: Option<&Value>) -> String {
 pub const OUTDATED: &str = "its session runs an older list of tools than its role has now: \
     restart the session (stop, then resume) for the new one";
 
+/// The model and the effort an agent is to change to, as a phrase.
+fn pending_text(agent: &Value) -> String {
+    let pending = &agent["pending"];
+    let mut parts = Vec::new();
+    if let Some(model) = pending["model"].as_str() {
+        parts.push(format!("model {model}"));
+    }
+    if let Some(effort) = pending["effort"].as_str() {
+        parts.push(format!("effort {effort}"));
+    }
+    parts.join(" and ")
+}
+
 /// The agent, then its conversation: chunks joined, thoughts and tool calls in brief.
 fn show_text(shown: &Value) -> String {
     let agent = &shown["agent"];
@@ -628,6 +676,19 @@ fn show_text(shown: &Value) -> String {
             .or(agent["chosen"]["model"].as_str())
             .unwrap_or("the agent's default"),
     );
+    out.push_str(&format!(
+        "  effort: {}\n",
+        agent["taken"]["effort"]
+            .as_str()
+            .or(agent["chosen"]["effort"].as_str())
+            .unwrap_or("the model's default"),
+    ));
+    if agent["pending"]["model"].is_string() || agent["pending"]["effort"].is_string() {
+        out.push_str(&format!(
+            "  pending: {} (set before its next prompt)\n",
+            pending_text(agent)
+        ));
+    }
     if agent["tools_outdated"] == true {
         out.push_str(&format!("  {OUTDATED}\n"));
     }
@@ -680,6 +741,12 @@ fn show_text(shown: &Value) -> String {
             "agent.failed" => format!("[failed: {}]", text(data, "reason")),
             "agent.ended" => format!("[ended: {}]", text(data, "reason")),
             "agent.resumed" => "[resumed by the user]".into(),
+            "agent.options_taken" => format!(
+                "[now on model {}, effort {}]",
+                text(data, "model"),
+                data["effort"].as_str().unwrap_or("the model's default")
+            ),
+            "agent.options_refused" => format!("[change refused: {}]", text(data, "reason")),
             _ => continue,
         };
         speaking = None;

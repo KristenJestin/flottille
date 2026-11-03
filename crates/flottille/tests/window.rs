@@ -3873,7 +3873,7 @@ fn choosing_the_other_and_a_model_starts_the_session_on_them_and_the_tree_shows_
         .read_with(cx, |s, _| s.reply_of(&lead).cloned())
         .unwrap();
     assert_eq!(
-        reply.read_with(cx, |r, cx| r.facts().read(cx).shown()),
+        reply.read_with(cx, |r, cx| r.options().read(cx).shown()),
         "opencode · open/small"
     );
 }
