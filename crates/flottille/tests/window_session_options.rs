@@ -246,9 +246,7 @@ fn a_change_chosen_during_a_turn_is_said_pending_and_the_mark_goes_when_it_is_se
         has("model-choice-fake-large", cx)
     });
     cx.update(|window, cx| window.click("model-choice-fake-large", cx));
-    until(&shell, cx, "the pending mark shows", |cx| {
-        has("session-options-pending", cx)
-    });
+    until(&shell, cx, "the pending mark shows", |cx| marked(cx));
 
     // The mark may come from the window's own echo: the daemon's record is what is waited for,
     // while the turn is still held.
@@ -260,15 +258,12 @@ fn a_change_chosen_during_a_turn_is_said_pending_and_the_mark_goes_when_it_is_se
         options(&shell, &id, cx).read_with(cx, |o, _| o.model_shown().contains("fake-large")),
         "the picker already says the model asked"
     );
-    assert!(
-        has("session-options-pending", cx),
-        "the mark stays while the turn is held"
-    );
+    assert!(marked(cx), "the mark stays while the turn is held");
     std::fs::write(user.path("fake/release"), "").unwrap();
     eventually("the turn ends", || shown(&user, &id)["state"] == "idle");
     until(&shell, cx, "the mark is cleared", |cx| {
         settle(cx);
-        !has("session-options-pending", cx)
+        !marked(cx)
     });
     assert_eq!(shown(&user, &id)["taken"]["model"], "fake-large");
 }
@@ -317,7 +312,7 @@ fn a_change_of_a_session_between_turns_is_set_at_once_and_leaves_no_mark(cx: &mu
         |cx| {
             settle(cx);
             options(&shell, &id, cx).read_with(cx, |o, _| o.shown().contains("fake-large"))
-                && !has("session-options-pending", cx)
+                && !marked(cx)
         },
     );
 }
@@ -341,7 +336,7 @@ fn a_change_made_from_the_command_line_shows_in_the_session_s_pickers(cx: &mut T
             o.shown().contains("fake-large")
                 && o.model_shown().contains("fake-large")
                 && o.effort_shown().contains("high")
-        }) && !has("session-options-pending", cx)
+        }) && !marked(cx)
     });
 }
 
@@ -374,7 +369,7 @@ fn a_change_the_session_refuses_is_said_in_a_toast_naming_what_it_offers(cx: &mu
         |cx| {
             settle(cx);
             options(&shell, &id, cx).read_with(cx, |o, _| o.model_shown().contains("fake-small"))
-                && !has("session-options-pending", cx)
+                && !marked(cx)
         },
     );
 }
@@ -392,13 +387,133 @@ fn a_change_made_elsewhere_during_a_turn_is_said_pending_until_it_is_set(cx: &mu
 
     until(&shell, cx, "the pending mark shows", |cx| {
         settle(cx);
-        has("session-options-pending", cx)
+        marked(cx)
             && options(&shell, &id, cx).read_with(cx, |o, _| o.model_shown().contains("fake-large"))
     });
     std::fs::write(user.path("fake/release"), "").unwrap();
     until(&shell, cx, "the mark is cleared once it is set", |cx| {
         settle(cx);
-        !has("session-options-pending", cx)
+        !marked(cx)
             && options(&shell, &id, cx).read_with(cx, |o, _| o.shown().contains("fake-large"))
     });
+}
+
+/// Whether a picker carries the mark of a change waiting.
+fn marked(cx: &mut VisualTestContext) -> bool {
+    has("session-model-pending", cx) || has("session-effort-pending", cx)
+}
+
+/// The height of the session's composer.
+fn composer_height(cx: &mut VisualTestContext) -> gpui_kit::Pixels {
+    cx.update(|window, _| window.find("reply").bounds().size.height)
+}
+
+#[gpui_kit::test]
+fn a_pending_change_does_not_change_the_composer_s_height(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let id = start(&user, "slow", false);
+    eventually("the turn runs", || shown(&user, &id)["state"] == "working");
+    let (shell, cx) = open_session(&user, &id, cx);
+    let before = composer_height(cx);
+
+    pick_model(&shell, "fake-large", cx);
+    until(&shell, cx, "the change is marked", |cx| {
+        settle(cx);
+        marked(cx)
+    });
+    assert_eq!(composer_height(cx), before, "while the change waits");
+    assert!(
+        !has("session-options-pending-line", cx),
+        "no line under the bar"
+    );
+
+    std::fs::write(user.path("fake/release"), "").unwrap();
+    until(&shell, cx, "the mark is cleared once it is set", |cx| {
+        settle(cx);
+        !marked(cx)
+    });
+    assert_eq!(composer_height(cx), before, "once it is set");
+}
+
+#[gpui_kit::test]
+fn a_pending_change_is_marked_on_its_picker(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let id = start(&user, "slow", false);
+    eventually("the turn runs", || shown(&user, &id)["state"] == "working");
+    let (shell, cx) = open_session(&user, &id, cx);
+    assert!(!marked(cx), "nothing waits");
+
+    pick_model(&shell, "fake-large", cx);
+    // The mark fades in: drawn at once, not yet whole.
+    until(&shell, cx, "the model's picker is marked", |cx| {
+        has("session-model-pending", cx)
+    });
+    assert!(
+        !has("session-effort-pending", cx),
+        "only the picker changed"
+    );
+    assert!(
+        options(&shell, &id, cx).read_with(cx, |o, _| o.model_shown().contains("fake-large")),
+        "the picker says the model asked"
+    );
+    settle(cx);
+    assert!(
+        has("session-model-pending", cx),
+        "the mark stays while the change waits"
+    );
+
+    std::fs::write(user.path("fake/release"), "").unwrap();
+    until(&shell, cx, "the mark leaves once the change is set", |cx| {
+        settle(cx);
+        !marked(cx)
+    });
+    assert_eq!(shown(&user, &id)["taken"]["model"], "fake-large");
+    settle(cx);
+    assert_eq!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)),
+        0,
+        "nothing moves at rest"
+    );
+}
+
+#[gpui_kit::test]
+fn the_picker_s_menu_says_when_a_change_applies(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let id = start(&user, "hello", true);
+    let (shell, cx) = open_session(&user, &id, cx);
+    let o = options(&shell, &id, cx);
+    let first = |cx: &mut VisualTestContext| {
+        o.read_with(cx, |o, _| {
+            o.entries(flottille_window::composer::Menu::Model)
+        })[0]
+            .label
+            .clone()
+    };
+    assert_ne!(first(cx), flottille_window::session_options::WITH_NEXT);
+
+    // The tree says a change waits, the agent between turns.
+    o.update(cx, |o, cx| {
+        o.set_runs(
+            flottille_window::session_options::Runs {
+                provider: "claude".into(),
+                model: Some("fake-small".into()),
+                effort: Some("low".into()),
+                pending: flottille_window::session_link::Pending {
+                    model: Some("fake-large".into()),
+                    effort: None,
+                },
+                working: false,
+            },
+            cx,
+        )
+    });
+    assert_eq!(first(cx), flottille_window::session_options::WITH_NEXT);
+    let entry = o.read_with(cx, |o, _| {
+        o.entries(flottille_window::composer::Menu::Model)
+    })[0]
+        .clone();
+    assert!(entry.pick.is_none(), "the line picks nothing");
 }

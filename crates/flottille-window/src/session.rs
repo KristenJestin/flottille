@@ -5481,23 +5481,6 @@ impl Render for Reply {
                             .test_support(),
                     ),
             )
-            // A change of model or effort that waits for the turn's end, until the agent took it.
-            .child(presence_of(
-                "session-options-pending",
-                self.options.read(cx).waiting().map(SharedString::from),
-                move |line| {
-                    div()
-                        .id("session-options-pending-line")
-                        .aria_label(line.clone())
-                        .px(space::MD)
-                        .pt(space::SM)
-                        .text_size(px(12.5))
-                        .text_color(p.mute)
-                        .child(line)
-                        .test_support()
-                        .into_any_element()
-                },
-            ))
             .child(presence_of(
                 "reply-error-line",
                 self.error.clone(),
