@@ -1557,6 +1557,30 @@ pub(super) async fn seen(forge: &Forge, number: u64) -> Result<Option<Seen>, Str
     }
 }
 
+/// The state of the pull request `number` from its own page, not from the list's newest: `open`,
+/// `merged`, `declined` or `superseded`. None when it cannot be read (no context, no such page, a
+/// state not known), which `forge edit` takes for a pull request it may write to.
+pub(super) async fn state_now(forge: &Forge, number: u64) -> Option<&'static str> {
+    let context = Contexts::default().of(forge).await.ok()?;
+    let id = number.to_string();
+    let path = if cloud(forge) {
+        cloud_page(forge, &id)
+    } else {
+        let Forge::Bitbucket { owner, name, .. } = forge else {
+            unreachable!()
+        };
+        format!("/rest/api/1.0/projects/{owner}/repos/{name}/pull-requests/{id}")
+    };
+    let page = json(&["api", &path, "--context", &context]).await.ok()?;
+    match page["state"].as_str()? {
+        "OPEN" => Some("open"),
+        "MERGED" => Some("merged"),
+        "DECLINED" => Some("declined"),
+        "SUPERSEDED" => Some("superseded"),
+        _ => None,
+    }
+}
+
 /// `forge close` of a Bitbucket pull request: `bkt pr decline <id> [--comment T]
 /// [--delete-source]` (v0.37.0, `pkg/cmd/pr/pr.go`, `newDeclineCmd`).
 pub(super) async fn decline(

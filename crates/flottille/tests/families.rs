@@ -408,51 +408,104 @@ fn updating_a_merged_pull_request_is_refused_before_the_forge_is_called() {
     assert!(!calls.iter().any(|call| call.starts_with("pr edit")));
 }
 
+/// A Cloud pull request of `acme/app` as `bkt pr list` prints it.
+fn cloud_pull(id: u64, state: &str) -> Value {
+    json!({"id": id, "title": "Work", "state": state,
+        "source": {"branch": {"name": format!("app/b{id}")},
+            "repository": {"full_name": "acme/app"}},
+        "destination": {"branch": {"name": "main"}, "repository": {"full_name": "acme/app"}},
+        "links": {"html": {"href": format!("https://bitbucket.org/acme/app/pull-requests/{id}")}}})
+}
+
+/// The page of a Cloud pull request of `acme/app`, whose `state` is what `forge edit` reads.
+fn cloud_page(id: u64, state: &str) -> (String, Value) {
+    (
+        format!("/repositories/acme/app/pullrequests/{id}"),
+        json!({"id": id, "state": state}),
+    )
+}
+
 #[test]
 fn updating_a_declined_bitbucket_pull_request_is_refused_before_bkt_is_called() {
     let user = user();
     on_bitbucket(&user);
-    let pull = |id: u64, state: &str| {
-        json!({"id": id, "title": "Work", "state": state,
-            "source": {"branch": {"name": format!("app/b{id}")},
-                "repository": {"full_name": "acme/app"}},
-            "destination": {"branch": {"name": "main"}, "repository": {"full_name": "acme/app"}},
-            "links": {"html": {"href": format!("https://bitbucket.org/acme/app/pull-requests/{id}")}}})
-    };
+    let pages: serde_json::Map<String, Value> = [
+        cloud_page(2, "MERGED"),
+        cloud_page(3, "DECLINED"),
+        cloud_page(4, "OPEN"),
+        cloud_page(5, "SUPERSEDED"),
+    ]
+    .into_iter()
+    .collect();
     user.bkt_script(json!({"pulls": {"acme/app": [
-        pull(2, "MERGED"), pull(3, "DECLINED"), pull(4, "OPEN")]}}));
+        cloud_pull(2, "MERGED"), cloud_pull(3, "DECLINED"), cloud_pull(4, "OPEN"),
+        cloud_pull(5, "SUPERSEDED")]}, "api": pages}));
     let (_, mcp) = root_in(&user, None);
+    let edit = |number: u64| {
+        allowed_then_refused(
+            &user,
+            mcp.call(
+                "forge",
+                json!({"action": "edit", "number": number, "title": "feat: new title"}),
+            ),
+        )
+    };
 
-    let merged = allowed_then_refused(
-        &user,
-        mcp.call(
-            "forge",
-            json!({"action": "edit", "number": 2, "title": "feat: new title"}),
-        ),
-    );
-    let declined = allowed_then_refused(
-        &user,
-        mcp.call(
-            "forge",
-            json!({"action": "edit", "number": 3, "body": "A new description"}),
-        ),
-    );
+    let (merged, declined, superseded) = (edit(2), edit(3), edit(5));
 
-    assert!(
-        merged.contains("the pull request #2 of acme/app is merged, not open")
-            && merged.contains("nothing was written"),
-        "{merged}"
-    );
-    assert!(
-        declined.contains("the pull request #3 of acme/app is declined, not open")
-            && declined.contains("nothing was written"),
-        "{declined}"
-    );
+    for (text, number, state) in [
+        (&merged, 2, "merged"),
+        (&declined, 3, "declined"),
+        (&superseded, 5, "superseded"),
+    ] {
+        assert!(
+            text.contains(&format!(
+                "the pull request #{number} of acme/app is {state}, not open"
+            )) && text.contains("nothing was written"),
+            "{text}"
+        );
+    }
     assert!(
         !words(user.bkt_received())
             .iter()
             .any(|call| call.starts_with("pr edit"))
     );
+}
+
+#[test]
+fn editing_an_open_pull_request_outside_the_newest_page_still_works() {
+    let user = user();
+    on_bitbucket(&user);
+    // Fifty newer pull requests fill the page `bkt pr list` reads: #3 is not in it, #4 neither and
+    // its page cannot be read.
+    let mut pulls: Vec<Value> = (100..150).map(|id| cloud_pull(id, "OPEN")).collect();
+    for id in [3, 4] {
+        let mut older = cloud_pull(id, "OPEN");
+        older["unlisted"] = json!(true);
+        pulls.push(older);
+    }
+    let pages: serde_json::Map<String, Value> = [cloud_page(3, "OPEN")].into_iter().collect();
+    user.bkt_script(json!({"pulls": {"acme/app": pulls}, "api": pages}));
+    let (_, mcp) = root_in(&user, None);
+    let calls = || words(user.bkt_received());
+
+    for number in [3, 4] {
+        let edit = mcp.call(
+            "forge",
+            json!({"action": "edit", "number": number, "body": "Adds the login page"}),
+        );
+        let done = judged_then_done(&user, edit, calls, &format!("pr edit {number} "));
+        assert!(
+            done.contains(&format!("Pull request #{number} of acme/app was changed.")),
+            "{done}"
+        );
+    }
+
+    let edits: Vec<String> = calls()
+        .into_iter()
+        .filter(|call| call.starts_with("pr edit"))
+        .collect();
+    assert_eq!(edits.len(), 2, "{edits:?}");
 }
 
 /// `pulls_to_close()` with the comments of a merged pull request (#7, merged by bob after his

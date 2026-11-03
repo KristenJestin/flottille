@@ -454,3 +454,24 @@ fn pipeline_fail_makes_the_pipeline_list_alone_fail() {
     assert!(String::from_utf8_lossy(&listed.stderr).contains("502 Bad Gateway"));
     assert!(pulls.status.success());
 }
+
+#[test]
+fn an_unlisted_pull_request_is_left_out_of_the_list_but_still_edited() {
+    let dir = tempfile::tempdir().unwrap();
+    script(
+        dir.path(),
+        json!({"pulls": {"acme/api": [
+            {"id": 12, "state": "OPEN"}, {"id": 3, "state": "OPEN", "unlisted": true}]}}),
+    );
+    let run = |args: &[&str]| {
+        let mut all = args.to_vec();
+        all.extend(["--context", "cloud", "--workspace", "acme", "--repo", "api"]);
+        fake(dir.path()).args(all).output().unwrap()
+    };
+
+    let listed = json_of(run(&["pr", "list", "--state", "all", "--json"]));
+    let edited = run(&["pr", "edit", "3", "--title", "New title"]);
+
+    assert_eq!(listed["pull_requests"].as_array().unwrap().len(), 1);
+    assert!(edited.status.success());
+}

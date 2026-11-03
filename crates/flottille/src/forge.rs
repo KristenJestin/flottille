@@ -1652,23 +1652,24 @@ async fn forge_note(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
         Err(Some(why)) => return Outcome::Refused(why),
     };
     let slug = forge.slug();
+    if matches!(forge, Forge::GitHub { .. })
+        && let Err(problem) = signed_in().await
+    {
+        return Outcome::Failed(problem);
+    }
     // Only an open pull request is changed, and Bitbucket's own refusal says too little: the state
     // is read, which writes nothing, before anything is asked of the forge to write.
     if action == "edit" {
-        if matches!(forge, Forge::GitHub { .. })
-            && let Err(problem) = signed_in().await
-        {
-            return Outcome::Failed(problem);
-        }
-        let seen = match seen_of(&forge, number).await {
-            Ok(seen) => seen,
-            Err(refusal) => return refusal,
+        let state = match &forge {
+            Forge::GitHub { .. } => match seen_of(&forge, number).await {
+                Ok(seen) => Some(seen.state),
+                Err(refusal) => return refusal,
+            },
+            // Its own page, not the list's newest 50: a pull request outside them is still
+            // edited, and so is one whose state cannot be read (the forge then says).
+            Forge::Bitbucket { .. } => bitbucket::state_now(&forge, number).await,
         };
-        if seen.state != "open" {
-            let state = match (seen.state, &forge) {
-                ("closed", Forge::Bitbucket { .. }) => "declined",
-                (state, _) => state,
-            };
+        if let Some(state) = state.filter(|state| *state != "open") {
             return Outcome::Refused(format!(
                 "refused: the pull request #{number} of {slug} is {state}, not open; nothing was \
                  written: comment on it, or open a new pull request for the change"
@@ -1681,9 +1682,6 @@ async fn forge_note(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
     let done = match &forge {
         Forge::Bitbucket { .. } => bitbucket::note(&forge, action, &number, title, body).await,
         Forge::GitHub { .. } => {
-            if let Err(problem) = signed_in().await {
-                return Outcome::Failed(problem);
-            }
             let repo = forge.gh_repository();
             let mut args = vec!["pr", action, &number, "-R", &repo];
             // `gh pr comment` takes no title, and the gate refused one there.
