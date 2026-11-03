@@ -888,6 +888,10 @@ impl SessionPage {
                 self.command_panel
                     .update(cx, |panel, cx| panel.set(*output, cx));
             }
+            SessionUpdate::OptionsRefused(reason) => {
+                let options = self.reply.read(cx).options.clone();
+                options.update(cx, |options, cx| options.refused(reason, cx));
+            }
         }
     }
 

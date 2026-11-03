@@ -414,6 +414,8 @@ pub enum SessionUpdate {
     CommandOutput(Box<CommandOutput>),
     /// What the agents of the session's tree wait for (`subscription.list`).
     Subscriptions(Vec<SubscriptionRow>),
+    /// The root's session refused a model or an effort the user changed to, with why.
+    OptionsRefused(String),
 }
 
 /// Where the session works.
@@ -469,6 +471,10 @@ const TREE_EVENTS: &[&str] = &[
     "agent.ended",
     "agent.resumed",
     "agent.gate_mode_changed",
+    // The model and the effort the composer's pickers say, and the mark of a change waiting.
+    "agent.options_pending",
+    "agent.options_taken",
+    "agent.options_refused",
     "agent.reported",
     "agent.asked",
     // The rail's gauge of each agent's context.
@@ -709,6 +715,12 @@ impl Link {
                 "approval.cancelled" => Some("cancelled"),
                 _ => None,
             };
+            if name == "agent.options_refused" && agent == self.root {
+                let reason = data["reason"].as_str().unwrap_or_default().to_owned();
+                if !self.send(SessionUpdate::OptionsRefused(reason)) {
+                    return Ok(());
+                }
+            }
             if let Some(decision) = decided {
                 let number = data["number"].as_u64().unwrap_or(0);
                 let decision = decision.to_owned();

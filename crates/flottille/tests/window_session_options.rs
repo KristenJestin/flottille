@@ -238,3 +238,132 @@ fn a_change_chosen_during_a_turn_is_said_pending_and_the_mark_goes_when_it_is_se
     });
     assert_eq!(shown(&user, &id)["taken"]["model"], "fake-large");
 }
+
+/// The toasts shown, as their title and their second line.
+fn toasts(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<(String, String)> {
+    shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .map(|toast| {
+                (
+                    toast.title().to_owned(),
+                    toast.second_line().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect()
+    })
+}
+
+fn pick_model(shell: &Entity<Shell>, model: &str, cx: &mut VisualTestContext) {
+    cx.update(|window, cx| window.click("session-model-picker", cx));
+    let choice = format!("model-choice-{model}");
+    until(shell, cx, "the models are offered", |cx| {
+        has(choice.clone(), cx)
+    });
+    cx.update(|window, cx| window.click(choice.clone(), cx));
+}
+
+#[gpui_kit::test]
+fn a_change_of_a_session_between_turns_is_set_at_once_and_leaves_no_mark(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let id = start(&user, "hello", true);
+    let (shell, cx) = open_session(&user, &id, cx);
+
+    pick_model(&shell, "fake-large", cx);
+    eventually("the model is set on the agent", || {
+        shown(&user, &id)["taken"]["model"] == "fake-large"
+    });
+
+    until(
+        &shell,
+        cx,
+        "the session says it runs on the new model",
+        |cx| {
+            settle(cx);
+            options(&shell, &id, cx).read_with(cx, |o, _| o.shown().contains("fake-large"))
+                && !has("session-options-pending", cx)
+        },
+    );
+}
+
+#[gpui_kit::test]
+fn a_change_made_from_the_command_line_shows_in_the_session_s_pickers(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let id = start(&user, "hello", true);
+    let (shell, cx) = open_session(&user, &id, cx);
+
+    user.call(
+        "agent.options",
+        json!({"agent": id, "model": "fake-large", "effort": "high"}),
+    )
+    .unwrap();
+
+    until(&shell, cx, "the pickers say the change", |cx| {
+        settle(cx);
+        options(&shell, &id, cx).read_with(cx, |o, _| {
+            o.shown().contains("fake-large")
+                && o.model_shown().contains("fake-large")
+                && o.effort_shown().contains("high")
+        }) && !has("session-options-pending", cx)
+    });
+}
+
+#[gpui_kit::test]
+fn a_change_the_session_refuses_is_said_in_a_toast_naming_what_it_offers(cx: &mut TestAppContext) {
+    let user = user();
+    // The provider lists `fake-large`, and the session refuses to take it.
+    user.fake_script(json!({
+        "models": ["fake-small", "fake-large"],
+        "efforts": ["low", "high"],
+        "refuse": ["fake-large"]
+    }));
+    project(&user, "app");
+    let id = start(&user, "hello", true);
+    let (shell, cx) = open_session(&user, &id, cx);
+
+    pick_model(&shell, "fake-large", cx);
+
+    until(&shell, cx, "a toast says the refusal", |cx| {
+        toasts(&shell, cx).iter().any(|(title, detail)| {
+            title == "The model or effort was not changed"
+                && detail.contains("fake-large")
+                && detail.contains("fake-small")
+        })
+    });
+    until(
+        &shell,
+        cx,
+        "the picker is back on the model it runs",
+        |cx| {
+            settle(cx);
+            options(&shell, &id, cx).read_with(cx, |o, _| o.model_shown().contains("fake-small"))
+                && !has("session-options-pending", cx)
+        },
+    );
+}
+
+#[gpui_kit::test]
+fn a_change_made_elsewhere_during_a_turn_is_said_pending_until_it_is_set(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let id = start(&user, "slow", false);
+    eventually("the turn runs", || shown(&user, &id)["state"] == "working");
+    let (shell, cx) = open_session(&user, &id, cx);
+
+    user.call("agent.options", json!({"agent": id, "model": "fake-large"}))
+        .unwrap();
+
+    until(&shell, cx, "the pending mark shows", |cx| {
+        settle(cx);
+        has("session-options-pending", cx)
+            && options(&shell, &id, cx).read_with(cx, |o, _| o.model_shown().contains("fake-large"))
+    });
+    until(&shell, cx, "the mark is cleared once it is set", |cx| {
+        settle(cx);
+        !has("session-options-pending", cx)
+            && options(&shell, &id, cx).read_with(cx, |o, _| o.shown().contains("fake-large"))
+    });
+}

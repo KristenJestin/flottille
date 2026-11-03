@@ -520,7 +520,10 @@ async fn set_option(
         .block_task()
         .await
         .map_err(|e| {
-            let reason = format!("the agent refused the {word} {value}: {e}");
+            let reason = format!(
+                "the agent refused the {word} {value}: {e}; it offers {}",
+                offered.join(", ")
+            );
             // An agent refuses a value as invalid; any other error is its process's or its
             // service's.
             match e.code {

@@ -42,6 +42,9 @@ pub struct SessionOptions {
     menu: Option<Menu>,
     /// What was chosen and the tree has not said yet: the pickers already show it.
     asked: Pending,
+    /// The daemon holds what was asked: the next tree it says has it, waiting, set or replaced
+    /// by another change.
+    held: bool,
 }
 
 impl SessionOptions {
@@ -53,6 +56,7 @@ impl SessionOptions {
             providers: Providers::default(),
             menu: None,
             asked: Pending::default(),
+            held: false,
         }
     }
 
@@ -76,16 +80,19 @@ impl SessionOptions {
     }
 
     /// What the tree says the root runs on. A change asked for is no longer only asked once the
-    /// tree holds it, waiting or done.
+    /// tree holds it, waiting or done; a refusal takes it back (`refused`).
     pub fn set_runs(&mut self, runs: Runs, cx: &mut Context<Self>) {
         let caught_up = |asked: &Option<String>, pending: &Option<String>, now: &Option<String>| {
-            asked.is_some() && (pending.is_some() || now == asked)
+            asked.is_some() && (pending == asked || now == asked)
         };
         if caught_up(&self.asked.model, &runs.pending.model, &runs.model) {
             self.asked.model = None;
         }
         if caught_up(&self.asked.effort, &runs.pending.effort, &runs.effort) {
             self.asked.effort = None;
+        }
+        if std::mem::take(&mut self.held) {
+            self.asked = Pending::default();
         }
         if self.runs != runs {
             self.runs = runs;
@@ -213,6 +220,7 @@ impl SessionOptions {
         if model.is_none() && effort.is_none() {
             return;
         }
+        self.held = false;
         if model.is_some() {
             self.asked.model = model.clone();
         }
@@ -231,6 +239,7 @@ impl SessionOptions {
 
     /// The daemon's answer: a refusal takes the change back and a toast says why.
     pub fn answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
+        self.held = refused.is_none() && !self.asked.is_empty();
         if let Some(why) = refused {
             self.asked = Pending::default();
             flottille_ui::toast(
@@ -238,6 +247,17 @@ impl SessionOptions {
                 cx,
             );
         }
+        cx.notify();
+    }
+
+    /// The agent's session refused the change: it goes on with what it ran on, which the
+    /// pickers say again, and a toast says why, naming what it offers.
+    pub fn refused(&mut self, reason: String, cx: &mut Context<Self>) {
+        self.asked = Pending::default();
+        flottille_ui::toast(
+            flottille_ui::Toast::failure("The model or effort was not changed").detail(reason),
+            cx,
+        );
         cx.notify();
     }
 
