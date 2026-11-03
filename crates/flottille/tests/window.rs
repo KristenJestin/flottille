@@ -3597,6 +3597,11 @@ fn the_judge_tab_holds_the_auto_judge_and_its_guidance(cx: &mut TestAppContext) 
         );
         assert!(guidance.bottom() <= window.find("judge-guidance-text").bounds().top());
     });
+    assert_eq!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)),
+        0,
+        "nothing moves once both sections are there"
+    );
 }
 
 #[gpui_kit::test]
