@@ -354,13 +354,18 @@ fn an_action_is_done_when_chosen(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn the_switcher_finds_the_guidance_on_the_judge_tab(cx: &mut TestAppContext) {
+fn the_switcher_opens_the_judge_tab_with_the_guidance_in_view(cx: &mut TestAppContext) {
     let world = world();
     let (shell, cx) = ready(&world, cx);
+    // A window too short for the judge and its guidance together.
+    cx.simulate_resize(size(px(1280.), px(520.)));
     open_with_keys(&shell, cx);
     cx.simulate_input("settings guidance");
     settle(cx);
-    assert_eq!(marked(&shell, cx), Some(action_key("Settings: Judge")));
+    assert_eq!(
+        marked(&shell, cx),
+        Some(action_key("Settings: Judge guidance"))
+    );
     cx.simulate_keystrokes("enter");
     settle(cx);
     let page = shell
@@ -369,6 +374,13 @@ fn the_switcher_finds_the_guidance_on_the_judge_tab(cx: &mut TestAppContext) {
         })
         .expect("Settings is open");
     assert_eq!(page.read_with(cx, |page, _| page.tab()), 0, "the Judge tab");
+    cx.update(|window, _| {
+        let text = window.find("judge-guidance-text").bounds();
+        assert!(
+            text.top() >= px(0.) && text.bottom() <= window.viewport_size().height,
+            "the guidance is in view"
+        );
+    });
 }
 
 #[gpui_kit::test]

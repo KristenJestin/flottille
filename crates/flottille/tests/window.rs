@@ -2303,7 +2303,7 @@ fn the_mode_is_a_compact_ask_auto_control_with_a_warning_icon_when_auto_has_no_j
     settle(cx);
     assert_eq!(
         settings_shown(cx),
-        ["judge"],
+        ["judge", "guidance"],
         "the warning leads to the judge"
     );
     shell.update_in(cx, |shell, window, cx| {
@@ -2706,7 +2706,7 @@ fn a_judge_flottille_picked_is_said_once_in_a_notice_that_opens_settings(cx: &mu
     settle(cx);
     assert_eq!(
         settings_shown(cx),
-        ["judge"],
+        ["judge", "guidance"],
         "the notice leads to the judge"
     );
     // Seen once, said no more: the daemon keeps the judge and drops the notice. The window hides
@@ -3480,11 +3480,13 @@ fn settings_keys() -> Vec<&'static str> {
         .collect()
 }
 
-/// The sections of Settings that are drawn.
+/// The sections of Settings that are drawn: the tabs' sections, and the guidance the Judge tab
+/// holds under the judge.
 fn settings_shown(cx: &mut VisualTestContext) -> Vec<&'static str> {
     cx.update(|window, _| {
         settings_keys()
             .into_iter()
+            .chain(["guidance"])
             .filter(|key| {
                 window
                     .try_find(format!("{key}-title"))
@@ -3502,7 +3504,7 @@ fn choose_settings_tab(key: &str, cx: &mut VisualTestContext) {
 }
 
 #[gpui_kit::test]
-fn opening_settings_shows_the_auto_judge_alone(cx: &mut TestAppContext) {
+fn opening_settings_shows_the_judge_and_its_guidance_alone(cx: &mut TestAppContext) {
     let user = providers_user();
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     let page = open_settings(&shell, cx);
@@ -3511,7 +3513,7 @@ fn opening_settings_shows_the_auto_judge_alone(cx: &mut TestAppContext) {
     });
     settle(cx);
     assert_eq!(page.read_with(cx, |p, _| p.tab()), 0);
-    assert_eq!(settings_shown(cx), ["judge"]);
+    assert_eq!(settings_shown(cx), ["judge", "guidance"]);
     cx.update(|window, _| {
         assert_eq!(
             window.find("settings-tabs-judge").selected(),
@@ -3629,12 +3631,18 @@ fn a_link_to_the_guidance_opens_the_judge_tab(cx: &mut TestAppContext) {
             text.top() >= px(0.) && text.bottom() <= window.viewport_size().height
         })
     };
+    let judge_in_sight = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| {
+            let picker = window.find("judge-provider").bounds();
+            picker.top() >= px(0.) && picker.bottom() <= window.viewport_size().height
+        })
+    };
 
     // The judge's own link (the warning, the notice) shows the judge, from the top.
     choose_settings_tab("developer", cx);
     follow(At::Judge, cx);
     assert_eq!(page.read_with(cx, |p, _| p.tab()), 0);
-    assert_eq!(settings_shown(cx), ["judge"]);
+    assert!(judge_in_sight(cx), "the judge is in sight");
     assert!(!in_sight(cx), "the guidance is further down");
 
     // A link to the guidance opens the same tab with the guidance in view.
@@ -3646,6 +3654,13 @@ fn a_link_to_the_guidance_opens_the_judge_tab(cx: &mut TestAppContext) {
         assert!(window.find("guidance-title").visible());
     });
     assert!(in_sight(cx), "the guidance is in view");
+
+    // The judge's link after it, with the Judge tab already chosen (the guidance link, then the
+    // mode's warning): the page goes back up to the judge.
+    follow(At::Judge, cx);
+    assert_eq!(page.read_with(cx, |p, _| p.tab()), 0);
+    assert!(judge_in_sight(cx), "the judge is in sight again");
+    assert!(!in_sight(cx), "the guidance is further down again");
 }
 
 #[gpui_kit::test]
@@ -3667,7 +3682,13 @@ fn choosing_each_settings_tab_shows_its_section_alone(cx: &mut TestAppContext) {
     {
         choose_settings_tab(key, cx);
         assert_eq!(page.read_with(cx, |p, _| p.tab()), at, "{key}");
-        assert_eq!(settings_shown(cx), [*key], "{key} alone");
+        // The Judge tab holds the guidance too; no other holds more than its own section.
+        let wanted: &[&str] = if *key == "judge" {
+            &["judge", "guidance"]
+        } else {
+            &[*key]
+        };
+        assert_eq!(settings_shown(cx), wanted, "{key} alone");
         cx.update(|window, _| {
             assert_eq!(
                 window.find(format!("settings-tabs-{key}")).selected(),
@@ -3750,7 +3771,7 @@ fn settings_keep_the_chosen_tab_while_open_and_open_afresh_on_the_first(cx: &mut
     cx.update(|window, cx| window.click("settings", cx));
     settle(cx);
     assert_eq!(page.read_with(cx, |p, _| p.tab()), 0);
-    assert_eq!(settings_shown(cx), ["judge"]);
+    assert_eq!(settings_shown(cx), ["judge", "guidance"]);
 }
 
 /// What the settings page says of a provider, line by line.

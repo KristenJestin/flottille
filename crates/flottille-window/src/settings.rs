@@ -18,8 +18,8 @@ use flottille_ui::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, Render,
-    ScrollHandle, SharedString, StatefulInteractiveElement, Styled, TestSupportExt as _,
+    AnyElement, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, Point,
+    Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, TestSupportExt as _,
     Transformation, WeakEntity, Window, div, px, radians,
 };
 
@@ -36,6 +36,10 @@ pub const SECTIONS: [(&str, &str); 5] = [
     ("appearance", "Appearance"),
     ("developer", "Developer mode"),
 ];
+
+/// The blocks of the Judge tab, top to bottom: each one is a section of the page, entering on its
+/// own.
+const JUDGE_BLOCKS: [&str; 2] = ["judge", "guidance"];
 
 /// Where Settings was opened at, from a warning or a notice that leads to a section.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,11 +182,20 @@ impl SettingsPage {
     /// Opened at a section: its tab is the one chosen.
     pub fn reveal(&mut self, at: Reveal, cx: &mut Context<Self>) {
         self.choose(at.entry(), cx);
-        if at == Reveal::Guidance {
-            // The Judge tab shows the judge, then the guidance: the second block of the page.
-            self.scroll.scroll_to_top_of_item(1);
-            cx.notify();
+        // The Judge tab is already shown when the link comes from where the page was left
+        // scrolled: the link says where the page starts.
+        match at {
+            Reveal::Guidance => {
+                let at = JUDGE_BLOCKS
+                    .iter()
+                    .position(|key| *key == "guidance")
+                    .expect("a block of the Judge tab");
+                self.scroll.scroll_to_top_of_item(at);
+            }
+            Reveal::Judge => self.scroll.set_offset(Point::default()),
+            Reveal::Providers => {}
         }
+        cx.notify();
     }
 
     pub fn rules(&self) -> &Entity<RulesEditor> {
@@ -898,7 +911,6 @@ impl Render for SettingsPage {
         let p = palette(cx);
         let pad = if self.narrow { space::LG } else { space::XXL };
         let header = PageHeader::new("settings-header", "Settings");
-        let judge = self.judge_section(window, cx).into_any_element();
         let rows: Vec<ListRow> = self
             .providers
             .list
@@ -942,18 +954,21 @@ impl Render for SettingsPage {
             .into_any_element();
         // Every section is built on each frame, as on a project's settings.
         // The Judge tab holds two: the Auto judge, then its guidance.
+        let judge_tab: Vec<(&str, AnyElement)> = JUDGE_BLOCKS
+            .iter()
+            .map(|key| {
+                let block = match *key {
+                    "judge" if self.providers.known => {
+                        self.judge_section(window, cx).into_any_element()
+                    }
+                    "judge" => div().into_any_element(),
+                    _ => self.judge_guidance.clone().into_any_element(),
+                };
+                (*key, block)
+            })
+            .collect();
         let mut sections: Vec<Vec<(&str, AnyElement)>> = vec![
-            vec![
-                (
-                    "judge",
-                    if self.providers.known {
-                        judge
-                    } else {
-                        div().into_any_element()
-                    },
-                ),
-                ("guidance", self.judge_guidance.clone().into_any_element()),
-            ],
+            judge_tab,
             vec![("providers", providers)],
             vec![("rules", self.rules.clone().into_any_element())],
             vec![("appearance", self.appearance_section(cx).into_any_element())],

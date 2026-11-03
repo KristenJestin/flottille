@@ -26,7 +26,7 @@ use gpui_kit::{
 use super::{Selection, Shell, now_ms};
 use crate::model::{Snapshot, ago};
 use crate::project_settings::{field_frame, styled_input};
-use crate::settings::SECTIONS;
+use crate::settings::{Reveal, SECTIONS};
 use crate::tree::place_name;
 
 /// The most results of each group while something is typed, and the recent sessions shown while
@@ -44,6 +44,8 @@ pub enum Do {
     Settings,
     /// Settings, on the tab of that section of [`SECTIONS`].
     SettingsTab(usize),
+    /// Settings, opened as a link to that place does.
+    SettingsAt(Reveal),
     /// That project's own settings.
     ProjectSettings(String),
     /// The bell's list: what waits for the user.
@@ -88,22 +90,19 @@ pub fn actions(projects: &[String]) -> Vec<Action> {
             then: Do::Settings,
         },
     ];
-    found.extend(
-        SECTIONS
-            .iter()
-            .enumerate()
-            .map(|(at, (key, label))| Action {
-                title: format!("Settings: {label}"),
-                // The judge's guidance has no tab of its own: it is found on the Judge tab.
-                words: if *key == "judge" {
-                    "preferences options tab auto guidance"
-                } else {
-                    "preferences options tab"
-                },
-                icon: Icon::Settings,
-                then: Do::SettingsTab(at),
-            }),
-    );
+    found.extend(SECTIONS.iter().enumerate().map(|(at, (_, label))| Action {
+        title: format!("Settings: {label}"),
+        words: "preferences options tab",
+        icon: Icon::Settings,
+        then: Do::SettingsTab(at),
+    }));
+    // The judge's guidance is no tab: it is the second block of the Judge tab.
+    found.push(Action {
+        title: "Settings: Judge guidance".into(),
+        words: "preferences options auto judge",
+        icon: Icon::Settings,
+        then: Do::SettingsAt(Reveal::Guidance),
+    });
     found.extend(projects.iter().map(|project| Action {
         title: format!("Settings of {project}"),
         words: "project preferences options",
@@ -120,6 +119,7 @@ impl Do {
             Do::AddProject => shell.add_project(window, cx),
             Do::Settings => shell.open(Selection::Settings, window, cx),
             Do::SettingsTab(tab) => shell.open_settings_tab(*tab, window, cx),
+            Do::SettingsAt(at) => shell.open_settings_at(*at, window, cx),
             Do::ProjectSettings(project) => {
                 shell.open(Selection::ProjectSettings(project.clone()), window, cx)
             }
