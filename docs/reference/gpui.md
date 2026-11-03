@@ -65,6 +65,7 @@ durations and the easing of `crates/flottille-ui/src/motion.rs` (`HOVER` 140 ms,
 | a page's blocks, a card, anything that shows once | `enter(id, index, element)` |
 | a block that comes and goes while its view stays (an empty-list line, the fields a choice needs, a body that unfolds) | `presence(id, present, element).gap(..)`: build it on every frame, outside a `when`; `.gap` is the gap the parent flex puts between its children, which folds with the block |
 | a line that goes away with its text (an error, a refusal) | `presence_of(id, Option<line>, build)`: it still shows the last line while it folds |
+| a block whose height follows its content (a field that wraps its text and grows by a line) | `growing(id, element)`: it eases to the new height over `PANEL`, also when it shrinks; build it on every frame; `<id>` is the animated frame, so its bounds are the height drawn |
 | the rows of a list that comes from elsewhere | `Listing::sync` on each render, each row drawn inside an `Item`: it unfolds when it arrives, folds away when it leaves (it stays drawn until then), slides when it moves |
 | a level that folds | `Fold` (a view) or `fold_frame` |
 | a panel over the page (a menu, a drawer, a modal, the bell's list) | rises a little and fades in, fades out, and stays drawn until it has |
@@ -85,8 +86,8 @@ description:
 
 - [ ] every element that is clicked fades its hover (a component, `hoverable` or `selectable`);
 - [ ] every state that changes (selected, chosen, focused, open, enabled) moves, not jumps;
-- [ ] everything that appears, leaves or changes size is an `enter`, a `presence`, an `Item` or a
-      `Fold`, and the gap around it goes with it;
+- [ ] everything that appears, leaves or changes size is an `enter`, a `presence`, a `growing`,
+      an `Item` or a `Fold`, and the gap around it goes with it;
 - [ ] every list that gains, loses or reorders rows is a `Listing` of `Item`s;
 - [ ] every new page, section or panel enters (staggered), and every overlay rises and fades;
 - [ ] reduced motion jumps (the helpers do it; a `Motion` kept by hand must pass `reduce`);
