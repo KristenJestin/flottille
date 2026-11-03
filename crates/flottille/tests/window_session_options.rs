@@ -97,6 +97,9 @@ fn until(
             return;
         }
         assert!(Instant::now() < deadline, "{what} never happened");
+        // The platform's clock stands still while the test waits, and a picker that fades in
+        // after the first frame would stay at nothing: it moves with the time spent waiting.
+        cx.executor().advance_clock(Duration::from_millis(25));
         std::thread::sleep(Duration::from_millis(25));
     }
 }
@@ -205,6 +208,27 @@ fn the_session_composer_offers_the_model_and_effort_not_the_provider(cx: &mut Te
         0,
         "nothing is redrawn at rest"
     );
+}
+
+#[gpui_kit::test]
+fn the_effort_picker_comes_when_the_efforts_are_learned_after_the_window_opened(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    // A first session whose agent has no effort: its picker has nothing to offer.
+    user.fake_script(json!({"models": ["fake-small", "fake-large"]}));
+    project(&user, "app");
+    let id = start(&user, "hello", true);
+    let (shell, cx) = open_session(&user, &id, cx);
+    assert!(!has("session-effort-picker", cx));
+
+    // Another session says the efforts of the model: the window reads them once drawn, as on a
+    // machine slow enough to read the providers after the first frame.
+    user.fake_script(json!({"models": ["fake-small", "fake-large"], "efforts": ["low", "high"]}));
+    start(&user, "again", true);
+    until(&shell, cx, "the efforts are offered", |cx| {
+        has("session-effort-picker", cx)
+    });
 }
 
 #[gpui_kit::test]
