@@ -381,3 +381,48 @@ fn a_page_of_fs_read_follows_the_limit_the_user_chose() {
     assert!(at_small > at_default, "{at_small} pages, then {at_default}");
     assert_eq!(whole, 1);
 }
+
+/// The session of a second root agent of the project `app`, which `session` set up.
+fn another_root(user: &User) -> Mcp {
+    let opened = user.received_requests("session/new").len();
+    user.call(
+        "agent.run",
+        json!({"project": "app", "message": "read another log"}),
+    )
+    .unwrap();
+    let (url, authorization) = server_of(user, opened);
+    Mcp::initialize(&url, &authorization)
+}
+
+/// The session of a child the agent launched.
+fn child_of(user: &User, mcp: &Mcp) -> Mcp {
+    let opened = user.received_requests("session/new").len();
+    ok(mcp.call(
+        "agent_launch",
+        json!({"title": "worker", "brief": "Read the log."}),
+    ));
+    let (url, authorization) = server_of(user, opened);
+    Mcp::initialize(&url, &authorization)
+}
+
+#[test]
+fn a_child_and_another_agent_cannot_read_the_cut_result_of_a_session() {
+    let user = User::with_fake_agent().with_cut_results();
+    let (_, mcp, _) = session(&user);
+    let id = id_of(&long(&mcp));
+    let child = child_of(&user, &mcp);
+    let other = another_root(&user);
+
+    let own = ok(mcp.call("run_status", json!({"run": id})));
+    assert!(own.contains("line 0001 of the log"), "{own}");
+    for (who, session) in [("child", &child), ("other agent", &other)] {
+        let answer = session.call("run_status", json!({"run": id}));
+        assert!(answer.error, "{who}: {}", answer.text);
+        assert!(
+            answer.text.contains("no cut result of this session"),
+            "{who}: {}",
+            answer.text
+        );
+        assert!(!answer.text.contains("line 0001"), "{who}: {}", answer.text);
+    }
+}
