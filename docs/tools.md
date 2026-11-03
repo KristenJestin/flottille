@@ -368,7 +368,10 @@ pending requests.
   "show", "workspace": "login", "detail": "full"}`); `detail full` gives their texts, cut and
   under the result limit. **`show {number, repository?, detail?}`**: that pull request of a
   repository of the place, the same way; `repository` is needed when the place has several.
-  `show` reads the forge now, and stores what it read over what the rounds keep of it.
+  `show` reads the forge now, and stores what it read over what the rounds keep of it. A merged,
+  declined or closed pull request also gives `closing comment (<author>): …`, the comment it was
+  closed with (not an older one of its closer), when the forge has it ([`forges.md`](forges.md),
+  "The closing comment").
   `show` ends with the agent's subscriptions, when it has some (`Your subscriptions:` then `- pull
   request #12 of api, workspace login: checks, review, for 52 min more`).
 - **`subscribe {workspace?, repository?, events, from?, minutes?}`**: the next of `events`
@@ -403,7 +406,9 @@ pending requests.
 - **`comment {number, repository?, body}`** posts a comment on a pull request of a repository of
   the place; **`edit {number, repository?, title?, body?}`** changes its title or description, at
   least one of them (`gh pr comment`, `gh pr edit`; `bkt pr comment --text`, `bkt pr edit --title
-  --description`). A `title` on `comment` is refused before anything is asked (`refused: forge
+  --description`). `edit` of a pull request that is not open is refused once allowed, before
+  anything is written (`refused: the pull request #7 of acme/app is merged, not open; nothing was
+  written: …`). A `title` on `comment` is refused before anything is asked (`refused: forge
   comment takes no title: title is for edit and create`).
 - **`close {number, repository?, comment?, delete_branch?}`** closes a pull request of a
   repository of the place (GitHub: `gh pr close`; Bitbucket: `bkt pr decline`), posting `comment`

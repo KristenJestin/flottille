@@ -491,11 +491,12 @@ async fn detailed_with(
         _ => None,
     };
     let mergeable = mergeable(forge, context, &id).await;
-    let (reviewers, comments) = if cloud(forge) {
+    let (reviewers, comments, closing) = if cloud(forge) {
         let base = cloud_page(forge, &id);
         let pull = json(&["api", &base, "--context", context]).await?;
         let (comments, _) = cloud_values(context, &format!("{base}/comments"), COMMENTS).await?;
-        (cloud_reviewers(&pull), cloud_comments(&comments))
+        let closing = cloud_closing(found.state, &pull);
+        (cloud_reviewers(&pull), cloud_comments(&comments), closing)
     } else {
         let Forge::Bitbucket { owner, name, .. } = forge else {
             unreachable!()
@@ -506,7 +507,8 @@ async fn detailed_with(
             COMMENTS,
         )
         .await?;
-        (found.reviewers, dc_comments(&activities))
+        let closing = dc_closing(found.state, &activities);
+        (found.reviewers, dc_comments(&activities), closing)
     };
     let jobs = statuses
         .iter()
@@ -539,6 +541,8 @@ async fn detailed_with(
         reviewers,
         jobs,
         ci: None,
+        closing,
+        ended: None,
     };
     Ok((pull, statuses))
 }
@@ -575,6 +579,8 @@ fn cheap(forge: &Forge, path: &str, found: Listed) -> crate::items::Fetched {
         reviewers: found.reviewers,
         jobs: Vec::new(),
         ci: None,
+        closing: None,
+        ended: None,
     };
     let mut fetched = super::fetched_pull(path, "bitbucket", &pull, false);
     if !cloud(forge) {
@@ -1201,8 +1207,63 @@ fn cloud_comments(comments: &[Value]) -> Vec<Comment> {
             body: masked(c["content"]["raw"].as_str().unwrap_or_default()),
             // What says a Bitbucket bot is not read: every author is taken for a person.
             bot: false,
+            at: None,
         })
         .collect()
+}
+
+/// What a merged or declined Cloud pull request was closed with, from its own page: the reason it
+/// was declined with (`reason`), said without an author when the page names no `closed_by`. Cloud
+/// keeps no comment as the one a pull request was closed with, and gives no time of the closing to
+/// tell one from the others, so no comment stands in for it. None for an open one, or with no
+/// reason.
+fn cloud_closing(state: &str, page: &Value) -> Option<Comment> {
+    let reason = page["reason"].as_str().filter(|r| !r.trim().is_empty());
+    let reason = reason.filter(|_| state != "open")?;
+    Some(Comment {
+        author: if page["closed_by"].is_object() {
+            person(&page["closed_by"], &["display_name", "nickname"])
+        } else {
+            String::new()
+        },
+        state: None,
+        body: masked(reason),
+        bot: false,
+        at: None,
+    })
+}
+
+/// What a merged or declined Data Center pull request was closed with: the newest comment of whoever
+/// merged or declined it, written in the minute before that activity (`createdDate`, in
+/// milliseconds, on both). `activities` come newest first. None for an open one, when they wrote
+/// none then, or when the activities give no time.
+fn dc_closing(state: &str, activities: &[Value]) -> Option<Comment> {
+    if state == "open" {
+        return None;
+    }
+    let ended = activities
+        .iter()
+        .find(|a| matches!(a["action"].as_str(), Some("MERGED" | "DECLINED")))?;
+    let at = ended["createdDate"].as_u64()?;
+    let closer = person(&ended["user"], &["displayName", "name"]);
+    activities
+        .iter()
+        .filter(|a| a["action"] == "COMMENTED")
+        .find(|a| {
+            let comment = &a["comment"];
+            person(&comment["author"], &["displayName", "name"]) == closer
+                && !comment["text"].as_str().unwrap_or_default().is_empty()
+                && a["createdDate"]
+                    .as_u64()
+                    .is_some_and(|w| w <= at && at - w <= super::closing::WITHIN_MS)
+        })
+        .map(|a| Comment {
+            author: closer.clone(),
+            state: None,
+            body: masked(a["comment"]["text"].as_str().unwrap_or_default()),
+            bot: false,
+            at: None,
+        })
 }
 
 /// The comments among a Data Center pull request's activities, replies after what they answer.
@@ -1213,6 +1274,7 @@ fn dc_comments(activities: &[Value]) -> Vec<Comment> {
             state: None,
             body: masked(comment["text"].as_str().unwrap_or_default()),
             bot: false,
+            at: None,
         });
         for reply in comment["comments"].as_array().into_iter().flatten() {
             walk(reply, out);
@@ -1490,6 +1552,30 @@ pub(super) async fn seen(forge: &Forge, number: u64) -> Result<Option<Seen>, Str
             forge.slug()
         )),
         None => Ok(None),
+    }
+}
+
+/// The state of the pull request `number` from its own page, not from the list's newest: `open`,
+/// `merged`, `declined` or `superseded`. None when it cannot be read (no context, no such page, a
+/// state not known), which `forge edit` takes for a pull request it may write to.
+pub(super) async fn state_now(forge: &Forge, number: u64) -> Option<&'static str> {
+    let context = Contexts::default().of(forge).await.ok()?;
+    let id = number.to_string();
+    let path = if cloud(forge) {
+        cloud_page(forge, &id)
+    } else {
+        let Forge::Bitbucket { owner, name, .. } = forge else {
+            unreachable!()
+        };
+        format!("/rest/api/1.0/projects/{owner}/repos/{name}/pull-requests/{id}")
+    };
+    let page = json(&["api", &path, "--context", &context]).await.ok()?;
+    match page["state"].as_str()? {
+        "OPEN" => Some("open"),
+        "MERGED" => Some("merged"),
+        "DECLINED" => Some("declined"),
+        "SUPERSEDED" => Some("superseded"),
+        _ => None,
     }
 }
 

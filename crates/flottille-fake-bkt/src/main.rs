@@ -31,7 +31,8 @@
 //! repositories are keyed `<workspace or project>/<repo>`. `pulls` holds what `bkt pr list --json`
 //! prints in `pull_requests` (`--state` filters, `all` keeps every one; a Cloud pull request's
 //! `source.commit.hash` and a Data Center one's `fromRef.latestCommit` are passed through as the
-//! script gives them), `checks` the `statuses`
+//! script gives them; one with `"unlisted": true` is left out of the list, as one older than the
+//! newest `bkt` lists is, while `pr edit` and the like still find it), `checks` the `statuses`
 //! of `bkt pr checks <id> --json` (a pull request with no entry answers `null`, as a commit with
 //! no status does), `api` the body `bkt api <path>` prints (a path it does not hold
 //! is a 404), `pipelines` the pipelines of a Cloud repository as Bitbucket's API gives them (newest
@@ -189,6 +190,7 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 .as_array()
                 .into_iter()
                 .flatten()
+                .filter(|pull| pull["unlisted"] != true)
                 .filter(|pull| state == "ALL" || pull["state"].as_str() == Some(&state))
                 .cloned()
                 .collect();

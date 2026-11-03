@@ -60,6 +60,11 @@
 //! of `pr list` and `issue list`, while `pr view` and `issue view` still answer them: an issue
 //! transferred elsewhere, which GitHub still answers by its old number with its new url.
 //!
+//! `events` gives, by repository and number, what `gh api repos/<owner>/<name>/issues/<number>/events`
+//! lists (`{"acme/app": {"7": [{"event": "merged", "actor": {"login": "bob"}, "created_at":
+//! "2026-01-01T10:00:00Z"}]}}`), `[]` without; with a `--jq`, the `merged` and `closed` ones as
+//! tab-separated lines (`event`, login, time), the filter Flottille asks.
+//!
 //! `run_fail` (`{"acme/app": "HTTP 502: Bad Gateway"}`) makes `run list` alone fail that way, the
 //! pull request calls still working.
 //!
@@ -217,6 +222,35 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             if flags.iter().any(|flag| option(flag).is_none()) {
                 eprintln!("fake gh: item-edit needs --id, --project-id, --field-id and an option");
                 return 2;
+            }
+            0
+        }
+        ["api", path, ..] if path.starts_with("repos/") && path.contains("/issues/") => {
+            // `repos/<owner>/<name>/issues/<number>/events`, the events of an issue or pull
+            // request, oldest first.
+            let parts: Vec<&str> = path.split('?').next().unwrap_or(path).split('/').collect();
+            let [_, owner, name, _, number, "events"] = parts[..] else {
+                eprintln!("fake gh: api {path} is not a call Flottille makes");
+                return 2;
+            };
+            let key = format!("{owner}/{name}");
+            let events = script["events"][&key][number].clone();
+            let events = if events.is_null() { json!([]) } else { events };
+            // The one `--jq` Flottille gives, which the fake does not run: the `merged` and
+            // `closed` events as `event`, the actor's login and the time, tab-separated.
+            if words.contains(&"--jq") {
+                for event in events.as_array().into_iter().flatten() {
+                    if matches!(event["event"].as_str(), Some("merged" | "closed")) {
+                        println!(
+                            "{}\t{}\t{}",
+                            event["event"].as_str().unwrap_or_default(),
+                            event["actor"]["login"].as_str().unwrap_or_default(),
+                            event["created_at"].as_str().unwrap_or_default()
+                        );
+                    }
+                }
+            } else {
+                println!("{events}");
             }
             0
         }

@@ -486,3 +486,36 @@ fn run_fail_makes_the_run_list_alone_fail() {
     assert!(String::from_utf8_lossy(&runs.stderr).contains("502"));
     assert!(pulls.status.success());
 }
+
+#[test]
+fn the_events_of_a_pull_request_are_answered_from_the_script_and_filtered_for_jq() {
+    let dir = tempfile::tempdir().unwrap();
+    let event = |event: &str, login: &str| json!({"event": event, "actor": {"login": login}, "created_at": "2026-01-01T10:00:00Z"});
+    std::fs::write(
+        dir.path().join("script.json"),
+        json!({"events": {"acme/api": {"7": [event("labeled", "alice"), event("merged", "bob")]}}})
+            .to_string(),
+    )
+    .unwrap();
+    let asked = |number: &str, jq: bool| {
+        let path = format!("repos/acme/api/issues/{number}/events");
+        let mut args = vec!["api", &path, "--hostname", "github.com", "--paginate"];
+        if jq {
+            args.extend(["--jq", "the filter"]);
+        }
+        let out = fake(dir.path()).args(args).output().unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap()
+    };
+
+    assert_eq!(
+        serde_json::from_str::<Value>(&asked("7", false))
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(asked("7", true), "merged\tbob\t2026-01-01T10:00:00Z\n");
+    assert_eq!(asked("8", true), "");
+}

@@ -287,6 +287,8 @@ pub(crate) fn offer(
             reviewers: Vec::new(),
             jobs,
             ci: None,
+            closing: None,
+            ended: None,
         };
         logs::attach(&forge, &mut pull).await;
         let jobs: Vec<(Job, Option<u64>)> = pull.jobs.into_iter().zip(took).collect();

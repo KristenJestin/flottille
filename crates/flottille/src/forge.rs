@@ -34,6 +34,7 @@ use crate::projects::{self, Failure};
 
 mod bitbucket;
 mod ci;
+mod closing;
 mod events;
 mod logs;
 
@@ -52,7 +53,7 @@ const SSH_TIME: Duration = Duration::from_secs(5);
 const COMMENT_CHARS: usize = 2000;
 /// What `gh pr view` is asked for.
 const FIELDS: &str = "number,title,state,isDraft,headRefName,headRefOid,baseRefName,url,\
-    mergeable,reviewDecision,statusCheckRollup,comments,reviews,body";
+    mergeable,reviewDecision,statusCheckRollup,comments,reviews,body,mergedBy,mergedAt";
 /// The ways `forge` `merge` merges a pull request, the first by default.
 pub const MERGE_METHODS: [&str; 3] = ["squash", "merge", "rebase"];
 
@@ -306,6 +307,12 @@ pub struct Pull {
     pub jobs: Vec<Job>,
     /// How long its repository's CI usually takes, when the forge says it (`ci::attach`).
     pub ci: Option<ci::Runs>,
+    /// The comment a merged or closed pull request was closed with, when the forge gives one
+    /// (`closing`); its author is whoever closed it.
+    pub closing: Option<Comment>,
+    /// Who merged it and when (milliseconds), when `gh pr view` says it: the closing comment is
+    /// then found without asking the issue's events (`closing`).
+    pub ended: Option<(String, u64)>,
 }
 
 /// A failing check of a pull request.
@@ -337,6 +344,9 @@ pub struct Comment {
     pub body: String,
     /// Written by a bot (an app), as far as the forge says it.
     pub bot: bool,
+    /// When it was written, in milliseconds, where a closing comment is told from the others
+    /// (GitHub's); none elsewhere.
+    pub at: Option<u64>,
 }
 
 impl Comment {
@@ -411,6 +421,9 @@ impl Pull {
                         .as_str()
                         .map(|s| s.to_lowercase().replace('_', " ")),
                     body: text(&comment["body"]),
+                    at: comment["createdAt"]
+                        .as_str()
+                        .and_then(crate::session_read::form),
                 })
                 .collect()
         };
@@ -465,6 +478,15 @@ impl Pull {
                 })
                 .collect(),
             ci: None,
+            closing: None,
+            ended: value["mergedBy"]["login"]
+                .as_str()
+                .zip(
+                    value["mergedAt"]
+                        .as_str()
+                        .and_then(crate::session_read::form),
+                )
+                .map(|(login, at)| (masked(login), at)),
         })
     }
 }
@@ -1586,6 +1608,7 @@ async fn forge_show(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall, numbe
             drop(held);
             logs::attach(&forge, &mut pull).await;
             ci::attach(&forge, &mut pull).await;
+            closing::attach(&forge, &mut pull).await;
             let again = format!(
                 "{{\"action\": \"show\", \"repository\": {}, \"number\": {number}, \
                  \"detail\": \"full\"}}",
@@ -1643,15 +1666,36 @@ async fn forge_note(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
         Err(Some(why)) => return Outcome::Refused(why),
     };
     let slug = forge.slug();
+    if matches!(forge, Forge::GitHub { .. })
+        && let Err(problem) = signed_in().await
+    {
+        return Outcome::Failed(problem);
+    }
+    // Only an open pull request is changed, and Bitbucket's own refusal says too little: the state
+    // is read, which writes nothing, before anything is asked of the forge to write.
+    if action == "edit" {
+        let state = match &forge {
+            Forge::GitHub { .. } => match seen_of(&forge, number).await {
+                Ok(seen) => Some(seen.state),
+                Err(refusal) => return refusal,
+            },
+            // Its own page, not the list's newest 50: a pull request outside them is still
+            // edited, and so is one whose state cannot be read (the forge then says).
+            Forge::Bitbucket { .. } => bitbucket::state_now(&forge, number).await,
+        };
+        if let Some(state) = state.filter(|state| *state != "open") {
+            return Outcome::Refused(format!(
+                "refused: the pull request #{number} of {slug} is {state}, not open; nothing was \
+                 written: comment on it, or open a new pull request for the change"
+            ));
+        }
+    }
     let number = number.to_string();
     let marked_body = body.map(marked);
     let body = marked_body.as_deref();
     let done = match &forge {
         Forge::Bitbucket { .. } => bitbucket::note(&forge, action, &number, title, body).await,
         Forge::GitHub { .. } => {
-            if let Err(problem) = signed_in().await {
-                return Outcome::Failed(problem);
-            }
             let repo = forge.gh_repository();
             let mut args = vec!["pr", action, &number, "-R", &repo];
             // `gh pr comment` takes no title, and the gate refused one there.
@@ -1680,6 +1724,39 @@ pub(crate) struct Seen {
     pub branch: String,
     /// From the repository itself, not from a fork of it.
     pub own: bool,
+}
+
+/// What `forge edit`, `close` and `reopen` read of the pull request `number` before they act: a
+/// refusal when the forge has none, a failure when it cannot be read. GitHub's `gh` must be
+/// signed in, which the caller checked.
+async fn seen_of(forge: &Forge, number: u64) -> Result<Seen, Outcome> {
+    if matches!(forge, Forge::Bitbucket { .. }) {
+        return match bitbucket::seen(forge, number).await {
+            Ok(Some(seen)) => Ok(seen),
+            Ok(None) => Err(Outcome::Refused(format!(
+                "refused: {} has no pull request #{number}: forge list lists them",
+                forge.slug()
+            ))),
+            Err(why) => Err(Outcome::Failed(why)),
+        };
+    }
+    let (repo, numbered) = (forge.gh_repository(), number.to_string());
+    let fields = "state,headRefName,isCrossRepository";
+    match gh_json(&["pr", "view", &numbered, "-R", &repo, "--json", fields]).await {
+        Ok(viewed) => Ok(Seen {
+            state: match viewed["state"].as_str() {
+                Some("MERGED") => "merged",
+                Some("CLOSED") => "closed",
+                _ => "open",
+            },
+            branch: viewed["headRefName"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            own: viewed["isCrossRepository"] != true,
+        }),
+        Err(why) => Err(Outcome::Failed(why)),
+    }
 }
 
 /// `forge close` and `reopen` of a pull request of a repository of the place, by its number: only
@@ -1727,33 +1804,9 @@ async fn forge_close(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
     if !bitbucket && let Err(problem) = signed_in().await {
         return Outcome::Failed(problem);
     }
-    let seen = if bitbucket {
-        match bitbucket::seen(&forge, number).await {
-            Ok(Some(seen)) => seen,
-            Ok(None) => {
-                return Outcome::Refused(format!(
-                    "refused: {slug} has no pull request #{number}: forge list lists them"
-                ));
-            }
-            Err(why) => return Outcome::Failed(why),
-        }
-    } else {
-        let fields = "state,headRefName,isCrossRepository";
-        match gh_json(&["pr", "view", &numbered, "-R", &repo, "--json", fields]).await {
-            Ok(viewed) => Seen {
-                state: match viewed["state"].as_str() {
-                    Some("MERGED") => "merged",
-                    Some("CLOSED") => "closed",
-                    _ => "open",
-                },
-                branch: viewed["headRefName"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_owned(),
-                own: viewed["isCrossRepository"] != true,
-            },
-            Err(why) => return Outcome::Failed(why),
-        }
+    let seen = match seen_of(&forge, number).await {
+        Ok(seen) => seen,
+        Err(refusal) => return refusal,
     };
     let (wanted, other) = match action {
         "close" => ("open", "closed"),
@@ -1870,6 +1923,7 @@ async fn forge_read(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall) -> Ou
         if let (Some(forge), Some(pull)) = (&repository.forge, &mut repository.pull) {
             logs::attach(forge, pull).await;
             ci::attach(forge, pull).await;
+            closing::attach(forge, pull).await;
         }
     }
     Outcome::Done(read_text(
@@ -2222,6 +2276,18 @@ fn read_text(workspace: &Workspace, read: &Read, full: bool, asked: Option<&str>
     text
 }
 
+/// A comment's text as `forge show` says it, cut, its lines indented under the one that names its
+/// author, and whether an agent of Flottille posted it. What a user wrote may lead the agent to a
+/// page; what an agent wrote never does.
+fn comment_body(comment: &Comment) -> (String, bool) {
+    let (body, agent) = comment.unmarked();
+    let body: String = body.chars().take(COMMENT_CHARS).collect();
+    if !agent {
+        crate::web::shown(&body, crate::web::Source::Link);
+    }
+    (body.replace('\n', "\n    "), agent)
+}
+
 /// A pull request, as `forge show` says it: the texts of its comments and reviews only when
 /// `full`, otherwise their number and `again`, the call that gives them.
 fn pull_text(text: &mut String, named: &str, pull: &Pull, full: bool, again: &str) {
@@ -2272,6 +2338,16 @@ fn pull_text(text: &mut String, named: &str, pull: &Pull, full: bool, again: &st
     if let Some(ci) = &pull.ci {
         text.push_str(&format!("  {}\n", ci.line()));
     }
+    if let Some(closing) = &pull.closing {
+        let (body, agent) = comment_body(closing);
+        let who = match (closing.author.as_str(), agent) {
+            ("", false) => String::new(),
+            ("", true) => format!(" ({BY_AGENT})"),
+            (author, false) => format!(" ({author})"),
+            (author, true) => format!(" ({author}, {BY_AGENT})"),
+        };
+        text.push_str(&format!("  closing comment{who}: {body}\n"));
+    }
     for (title, comments) in [("comments", &pull.comments), ("reviews", &pull.reviews)] {
         let said: Vec<&Comment> = comments.iter().filter(|c| !c.body.is_empty()).collect();
         if said.is_empty() {
@@ -2290,21 +2366,13 @@ fn pull_text(text: &mut String, named: &str, pull: &Pull, full: bool, again: &st
                 .state
                 .as_deref()
                 .map_or(String::new(), |s| format!(", {s}"));
-            let (body, agent) = comment.unmarked();
-            let body: String = body.chars().take(COMMENT_CHARS).collect();
-            if !agent {
-                crate::web::shown(&body, crate::web::Source::Link);
-            }
+            let (body, agent) = comment_body(comment);
             let agent = if agent {
                 format!(" ({BY_AGENT})")
             } else {
                 String::new()
             };
-            text.push_str(&format!(
-                "  - {}{agent}{state}: {}\n",
-                comment.author,
-                body.replace('\n', "\n    ")
-            ));
+            text.push_str(&format!("  - {}{agent}{state}: {body}\n", comment.author));
         }
     }
 }
