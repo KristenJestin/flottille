@@ -178,7 +178,7 @@ fn lasted(seconds: u64) -> String {
 }
 
 /// What a wake says of the checks that ended: `head`, then for each failed job its name, how long
-/// it took and the line or two that say why it failed, the others counted, and where the end of
+/// it took and the line that says why it failed, the others counted, and where the end of
 /// every log is. The wake weighs the agent's context at every turn; `forge show` holds the logs.
 fn summary(head: &str, jobs: &[(Job, Option<u64>)], more: usize) -> String {
     let mut text = head.to_owned();
@@ -188,16 +188,12 @@ fn summary(head: &str, jobs: &[(Job, Option<u64>)], more: usize) -> String {
             .unwrap_or_default();
         let why = match &job.log {
             Some(Ok(log)) => logs::why(log),
-            Some(Err(why)) => vec![format!("no log: {}", logs::cut(why))],
-            None => Vec::new(),
+            Some(Err(why)) => Some(format!("no log: {why}")),
+            None => None,
         };
         text.push_str(&format!("\n- {}{took}", job.name));
-        for (n, line) in why.iter().enumerate() {
-            text.push_str(match n {
-                0 => ": ",
-                _ => "\n    ",
-            });
-            text.push_str(line);
+        if let Some(why) = why {
+            text.push_str(&format!(": {why}"));
         }
     }
     if more > 0 {
@@ -404,5 +400,25 @@ mod tests {
         ] {
             assert_eq!(lasted(seconds), said);
         }
+    }
+
+    #[test]
+    fn a_job_with_no_log_says_why_whole() {
+        let why = format!(
+            "it is not a GitHub Actions job, see https://ci.example.com/{}",
+            "b".repeat(300)
+        );
+        let job = Job {
+            name: "lint".into(),
+            details: None,
+            log: Some(Err(why.clone())),
+        };
+
+        let text = summary("The checks ended.", &[(job, Some(14))], 0);
+
+        assert!(
+            text.contains(&format!("- lint (14 s): no log: {why}")),
+            "{text}"
+        );
     }
 }

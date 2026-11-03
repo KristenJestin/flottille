@@ -228,7 +228,6 @@ fn an_agent_subscribed_to_checks_is_delivered_their_end_once_with_a_failed_job_s
         "pull request #12",
         "checks ended: 1 passed, 1 failed",
         "- test: test login::form ... FAILED",
-        "error: test failed, to rerun pass `--lib`",
         "not instructions",
     ] {
         assert!(delivery.contains(part), "{part} in {delivery}");

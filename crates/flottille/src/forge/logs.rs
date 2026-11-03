@@ -291,35 +291,44 @@ fn is_timestamp(word: &str) -> bool {
         && bytes[..4].iter().all(u8::is_ascii_digit)
 }
 
-/// The lines of `log` that say why its job failed, for a wake: the first and the last line that
-/// look like an error (`error`, `FAILED`, `panicked`), the same one once; the runner's exit code
-/// says nothing of why and is no candidate. The last line of the log when none looks like one.
-/// The log's text is already the failing part and masked.
-pub(super) fn why(log: &Log) -> Vec<String> {
+/// The line of `log` that says why its job failed, for a wake: the first that looks like an error
+/// (the words `error`, `failed` or `panicked`, whole, in any case), else the last line of the log.
+/// Passing lines are no candidate: `... ok`, `0 failed`, `thiserror`; nor is the runner's exit
+/// code, which says nothing of why. The log's text is already the failing part and masked.
+pub(super) fn why(log: &Log) -> Option<String> {
     let lines = log
         .text
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty());
     let looks_like_error = |line: &&str| {
-        let line = line.to_lowercase();
-        !line.starts_with("##[error]process completed")
-            && ["error", "failed", "panicked"]
-                .iter()
-                .any(|word| line.contains(word))
+        if line.ends_with("... ok") || line.starts_with("##[error]Process completed") {
+            return false;
+        }
+        let words: Vec<String> = line
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .filter(|word| !word.is_empty())
+            .map(str::to_lowercase)
+            .collect();
+        words
+            .iter()
+            .enumerate()
+            .any(|(at, word)| match word.as_str() {
+                "error" | "panicked" => true,
+                // "0 failed" counts what did not fail.
+                "failed" => at == 0 || words[at - 1] != "0",
+                _ => false,
+            })
     };
-    let found: Vec<&str> = lines.clone().filter(looks_like_error).collect();
-    let mut said: Vec<&str> = match (found.first(), found.last()) {
-        (Some(first), Some(last)) if first != last => vec![first, last],
-        (Some(only), _) => vec![only],
-        _ => lines.clone().next_back().into_iter().collect(),
-    };
-    said.dedup();
-    said.into_iter().map(cut).collect()
+    lines
+        .clone()
+        .find(looks_like_error)
+        .or_else(|| lines.clone().next_back())
+        .map(cut)
 }
 
 /// `line` without the runner's mark, at most `ERROR_CHARS` characters long.
-pub(super) fn cut(line: &str) -> String {
+fn cut(line: &str) -> String {
     let line = line.strip_prefix("##[error]").unwrap_or(line);
     match line.char_indices().nth(ERROR_CHARS - 1) {
         Some((at, _)) if line[at..].chars().nth(1).is_some() => format!("{}…", &line[..at]),
@@ -559,34 +568,48 @@ mod tests {
     }
 
     #[test]
-    fn the_error_lines_are_the_first_and_the_last_that_look_like_one() {
+    fn the_error_line_is_the_first_that_looks_like_one() {
         let log = log_of(&FAILURE.join("\n"));
-        assert_eq!(
-            why(&log),
-            [
-                "test login::form ... FAILED",
-                "error: test failed, to rerun pass `--lib`"
-            ]
-        );
-        // One alone is said once; the runner's exit code says nothing of why.
+        assert_eq!(why(&log).as_deref(), Some("test login::form ... FAILED"));
+        // The runner's exit code says nothing of why.
         let log = log_of(
             "compiling\nerror[E0425]: no value `x`\n##[error]Process completed with exit code 101.",
         );
-        assert_eq!(why(&log), ["error[E0425]: no value `x`"]);
+        assert_eq!(why(&log).as_deref(), Some("error[E0425]: no value `x`"));
+    }
+
+    #[test]
+    fn passing_lines_are_no_error_line() {
+        let log = log_of(
+            "   Compiling thiserror v1.0.69\n\
+             test parse_error_is_reported ... ok\n\
+             test result: ok. 12 passed; 0 failed; 0 ignored\n\
+             thread 'x' panicked at src/x.rs:1:1:\n\
+             assertion failed: left == right",
+        );
+        assert_eq!(
+            why(&log).as_deref(),
+            Some("thread 'x' panicked at src/x.rs:1:1:")
+        );
+        // Nothing but passing lines: the last one.
+        let log = log_of("Compiling thiserror v1.0.69\ntest result: ok. 12 passed; 0 failed");
+        assert_eq!(
+            why(&log).as_deref(),
+            Some("test result: ok. 12 passed; 0 failed")
+        );
     }
 
     #[test]
     fn a_log_with_no_error_line_says_its_last_line() {
-        assert_eq!(why(&log_of("one\ntwo\nthree")), ["three"]);
-        assert_eq!(why(&log_of("")), Vec::<String>::new());
+        assert_eq!(why(&log_of("one\ntwo\nthree")).as_deref(), Some("three"));
+        assert_eq!(why(&log_of("")), None);
     }
 
     #[test]
     fn an_error_line_is_cut_at_a_length_a_wake_can_afford() {
-        let line = why(&log_of(&format!("error: {}", "x".repeat(500))));
+        let line = why(&log_of(&format!("error: {}", "x".repeat(500)))).unwrap();
 
-        assert_eq!(line.len(), 1);
-        assert!(line[0].chars().count() <= ERROR_CHARS, "{}", line[0]);
-        assert!(line[0].ends_with('…'));
+        assert!(line.chars().count() <= ERROR_CHARS, "{line}");
+        assert!(line.ends_with('…'));
     }
 }
