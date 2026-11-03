@@ -150,3 +150,38 @@ fn a_failed_listing_leaves_the_models_as_they_were() {
     assert_eq!(ids(&claude), ["fake-small", "fake-large"]);
     assert_eq!(claude["models_outdated"], true, "changed nothing: {claude}");
 }
+
+/// A program standing for `claude` that only writes down that it was started: a test's daemon
+/// must never start the agents of the machine.
+#[test]
+fn a_test_daemon_lists_nothing_unless_its_test_asks() {
+    // A daemon that reads items, which sets a test variable of its own to nothing.
+    let user = User::new().with_fetcher();
+    std::fs::create_dir(user.path("bin")).unwrap();
+    let marker = user.path("claude-started");
+    let program = user.path("bin/claude");
+    std::fs::write(
+        &program,
+        format!("#!/bin/sh\necho \"$@\" >> '{}'\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        &program,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    std::fs::create_dir_all(user.path("home/.claude")).unwrap();
+    std::fs::write(user.path("home/.claude/.credentials.json"), "{}").unwrap();
+    // Nothing of the machine's own on its PATH but the system's commands.
+    let path = format!("{}:/usr/bin:/bin", user.path("bin").display());
+    let user = user.with_env("PATH", &path);
+
+    let projects = user.call("project.list", Value::Null);
+    assert!(projects.is_ok(), "{projects:?}");
+    std::thread::sleep(Duration::from_secs(2));
+    assert!(
+        !marker.exists(),
+        "the daemon started `claude`: {:?}",
+        std::fs::read_to_string(&marker)
+    );
+}

@@ -37,11 +37,15 @@ static TRIED: Mutex<Option<HashMap<&'static str, String>>> = Mutex::new(None);
 /// The providers a listing is running for.
 static RUNNING: Mutex<Option<HashSet<&'static str>>> = Mutex::new(None);
 
-/// A test's daemon lists the models only where the test asks for it, so that the fakes of the
-/// other tests see no start of their own.
+/// A test's daemon, one with any `FLOTTILLE_TEST_` variable set, lists the models only where the
+/// test asks for it: the fakes of the other tests see no start of their own, and the programs of
+/// the machine on a test's `PATH` are never started.
 fn silenced() -> bool {
-    std::env::var_os("FLOTTILLE_TEST_NO_FETCH").is_some_and(|v| !v.is_empty())
-        && std::env::var_os("FLOTTILLE_TEST_LIST_MODELS").is_none()
+    std::env::var_os("FLOTTILLE_TEST_LIST_MODELS").is_none()
+        && std::env::vars_os().any(|(name, _)| {
+            name.to_str()
+                .is_some_and(|name| name.starts_with("FLOTTILLE_TEST_"))
+        })
 }
 
 /// The provider is enabled again: its models are asked for once more, even from a state a
