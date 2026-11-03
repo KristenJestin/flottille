@@ -317,7 +317,9 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 events.remove(0);
             }
             events.truncate(PAGE);
-            Ok(json!({"agent": agent.to_json(), "events": events, "more": more}))
+            let mut shown = agent.to_json();
+            shown["tools_outdated"] = daemon.mcp.outdated(&agent.id).into();
+            Ok(json!({"agent": shown, "events": events, "more": more}))
         }
         method => Err(Failure::new(
             "unknown-method",
@@ -585,13 +587,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
     let now = now_ms();
     let depth = new.parent.as_ref().map_or(0, |(_, depth)| depth + 1);
     let at_depth_limit = depth >= DEPTH_LIMIT;
-    let forge = project.repositories.iter().any(|r| r.forge.is_some());
-    let tools = provider.tools(
-        new.parent.is_none(),
-        at_depth_limit,
-        forge,
-        project.tracker.is_some(),
-    );
+    let tools = tools_of(provider, project, new.parent.is_none(), depth);
     let files = roles::project_files(&project.folder, &repositories);
     let skills: Vec<(String, String)> = project
         .skills
@@ -848,6 +844,17 @@ pub fn forget_kept_sessions(daemon: &Daemon) {
     }
 }
 
+/// The tools of an agent of `project`, a root or a child at `depth`, as its provider names them:
+/// what its role has in the project as it is now.
+pub fn tools_of(provider: &Provider, project: &Project, root: bool, depth: u32) -> Vec<String> {
+    provider.tools(
+        root,
+        depth >= DEPTH_LIMIT,
+        project.repositories.iter().any(|r| r.forge.is_some()),
+        project.tracker.is_some(),
+    )
+}
+
 /// The life of one agent: a process per stretch of work, until it stops or fails.
 async fn agent_life(daemon: Arc<Daemon>, id: String, mut orders: mpsc::UnboundedReceiver<Order>) {
     let mut turns = Turns {
@@ -908,6 +915,13 @@ async fn process(
     tokio::task::spawn_blocking(move || providers::startable(&paths, provider))
         .await
         .map_err(|e| e.to_string())??;
+    // A session made by an older version, or before its project gained a forge or a tracker,
+    // starts on the tools its role has now: a new process is a new connection, which lists
+    // them.
+    let refreshed = projects::load_project(daemon, &agent.project)
+        .ok()
+        .and_then(|project| mcp::with_tools_now(daemon, agent, &project));
+    let agent = refreshed.as_ref().unwrap_or(agent);
     let launch = providers::launch(provider, &daemon.paths, agent)?;
     // A token of this process's own, which revokes the last one.
     let grant = mcp::grant_of(daemon, agent)?;
@@ -1314,6 +1328,13 @@ impl Recorder {
 }
 
 impl acp::Events for Recorder {
+    fn tools(&self) -> Vec<String> {
+        match self.daemon.read(|store| store.agent(&self.agent)) {
+            Ok(Some(agent)) => agent.tools,
+            _ => Vec::new(),
+        }
+    }
+
     fn conversation(&self, name: &str, data: Value, activity: bool) {
         // The history a load replays is held already, as it happened: never recorded twice
         // (`docs/reference/hemera.md` §8.7).

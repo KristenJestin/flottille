@@ -223,8 +223,11 @@ Flottille's own tools:
   caller by one of its children (§7). `forward` passes it to the caller's parent, or to the user
   when the caller is a root. There is no way to allow a request.
 
-The tool list of a session is fixed for its whole life (prompt cache, `reference/hemera.md` §7)
-and depends on what the agent can do, known when it starts: a root gets `ask_user`, `session_send`, `session_read`, `skills`,
+The tool list of a session is its role's, and changes only when the role's does (prompt cache,
+`reference/hemera.md` §7): a project that declares or drops a forge or a tracker, a new version.
+A running session is then told (`notifications/tools/list_changed`) and served the new list, or
+said to run an older one until a restart (`docs/tools.md`, "When the tools change"). It depends
+on what the agent can do: a root gets `ask_user`, `session_send`, `session_read`, `skills`,
 `commands`, `setup` and `project`, a child `ask_parent`; a child, whatever its role, gets no `agent_*` tools
 and no `approval_answer`. A root lead has 25 tools, a child 14; one more each when the
 project's repositories declare a forge (`forge`), one more when it declares a tracker

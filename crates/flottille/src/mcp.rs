@@ -18,7 +18,9 @@ use std::time::Instant;
 use bytes::Bytes;
 use flottille_core::agent::{Agent, GateMode};
 use flottille_core::approval::{Judgement, Kind};
+use flottille_core::project::Project;
 use flottille_core::secrets;
+use flottille_core::store::Store;
 use http::{Request, Response, StatusCode};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
@@ -27,9 +29,9 @@ use hyper_util::rt::TokioIo;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
     Implementation, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig,
-    Tool,
+    SubscriptionFilter, Tool,
 };
-use rmcp::service::{RequestContext, RoleServer};
+use rmcp::service::{RequestContext, RoleServer, SubscriptionContext};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::{ErrorData, ServerHandler};
@@ -69,7 +71,8 @@ const KEYS_KEPT: usize = 1024;
 const REVOKED_KEPT: usize = 256;
 /// Log lines of refused tokens, at most, in a minute.
 const REFUSALS_LOGGED: usize = 20;
-/// How long a list of tools may be cached: as long as the token, which a new process replaces.
+/// How long a list of tools may be cached: as long as the token, which a new process replaces;
+/// a client told the list changed reads it again (`docs/tools.md`, "When the tools change").
 const LIST_TTL_MS: u64 = 24 * 3600 * 1000;
 
 /// One served tool: its name, what the agent's client shows of it, how it is called. The pilot
@@ -741,6 +744,7 @@ pub fn tool_of(definition: &Definition, always_load: bool) -> Tool {
 }
 
 /// What a token lets its bearer do: the agent's tools that exist, in its order, in its place.
+#[derive(Clone)]
 pub struct Grant {
     pub agent: String,
     /// The agent's epoch when its process started: a call made after a replacement is refused.
@@ -857,6 +861,25 @@ pub struct Server {
     keyless: Mutex<HashSet<String>>,
     /// The URLs each agent's tools showed it: `web` reads them again without the judge.
     pub seen: crate::web::Seen,
+    /// The sessions whose tools changed under them and that have not listed them since, by agent.
+    notices: Mutex<HashMap<String, Notice>>,
+    /// Moves at every change of a session's tools: what listens for them looks again.
+    changes: watch::Sender<u64>,
+}
+
+/// Where a running session stands with tools that changed under it (`docs/tools.md`, "When the
+/// tools change"). A session that lists its tools again has the new list, and is in none.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Notice {
+    /// Not told yet: its stream, or the answer to its next request, tells it.
+    Due,
+    /// Told, not listed yet.
+    Told,
+    /// It called a tool after it was told, without listing them: it runs an older list.
+    Ignored,
+    /// Its agent cannot take new tools (`Provider::takes_new_tools`): it runs an older list
+    /// until its next process.
+    Stuck,
 }
 
 #[derive(Default)]
@@ -893,7 +916,84 @@ impl Server {
             refusals: Mutex::default(),
             keyless: Mutex::default(),
             seen: crate::web::Seen::default(),
+            notices: Mutex::default(),
+            changes: watch::Sender::new(0),
         }
+    }
+
+    /// The agent's running session now has `tools`: its grant serves them, and the session is
+    /// told, or said to run an older list when its agent cannot take them (`takes`). Nothing
+    /// when no process of the agent runs.
+    fn change_tools(&self, agent: &str, tools: Vec<&'static str>, takes: bool) {
+        {
+            let mut tokens = self.tokens.lock().unwrap();
+            let Some(digest) = tokens.by_agent.get(agent).cloned() else {
+                return;
+            };
+            let Some(grant) = tokens.grants.get(&digest) else {
+                return;
+            };
+            let grant = Grant {
+                tools,
+                ..Grant::clone(grant)
+            };
+            tokens.grants.insert(digest, Arc::new(grant));
+        }
+        let notice = if takes { Notice::Due } else { Notice::Stuck };
+        self.notices
+            .lock()
+            .unwrap()
+            .insert(agent.to_owned(), notice);
+        self.changes.send_modify(|n| *n += 1);
+    }
+
+    /// Whether the agent's running session runs an older list of tools than its role has now.
+    pub fn outdated(&self, agent: &str) -> bool {
+        matches!(
+            self.notices.lock().unwrap().get(agent),
+            Some(Notice::Ignored | Notice::Stuck)
+        )
+    }
+
+    /// The session is due a notice: it is told now. Whether it was due.
+    fn tell(&self, agent: &str) -> bool {
+        let mut notices = self.notices.lock().unwrap();
+        match notices.get_mut(agent) {
+            Some(notice @ Notice::Due) => {
+                *notice = Notice::Told;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The session calls a tool: told and not listed since, it ignored the notice. Whether it
+    /// just did.
+    fn called(&self, agent: &str) -> bool {
+        let mut notices = self.notices.lock().unwrap();
+        match notices.get_mut(agent) {
+            Some(notice @ Notice::Told) => {
+                *notice = Notice::Ignored;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The session listed its tools: it has the new list. Whether it was said to run an older
+    /// one.
+    fn listed(&self, agent: &str) -> bool {
+        let mut notices = self.notices.lock().unwrap();
+        match notices.get(agent) {
+            // Its agent lists them in vain.
+            Some(Notice::Stuck) | None => false,
+            Some(_) => notices.remove(agent) == Some(Notice::Ignored),
+        }
+    }
+
+    /// A new process of the agent starts on the tools its role has now; one gone has none.
+    fn forget_notice(&self, agent: &str) {
+        self.notices.lock().unwrap().remove(agent);
     }
 
     /// A new token for the agent, revoking the one it had.
@@ -908,6 +1008,8 @@ impl Server {
             revoke_digest(&mut tokens, old, &agent);
         }
         tokens.grants.insert(digest, Arc::new(grant));
+        drop(tokens);
+        self.forget_notice(&agent);
         Ok(token)
     }
 
@@ -931,6 +1033,8 @@ impl Server {
         if let Some(old) = tokens.by_agent.remove(agent) {
             revoke_digest(&mut tokens, old, agent);
         }
+        drop(tokens);
+        self.forget_notice(agent);
     }
 
     fn grant(&self, headers: &http::HeaderMap) -> Result<Arc<Grant>, Option<String>> {
@@ -1053,6 +1157,80 @@ pub fn grant_of(daemon: &Daemon, agent: &Agent) -> Result<Grant, String> {
     })
 }
 
+/// The agent given the tools its role has now in `project`, when they are not those it has: they
+/// are stored, its running session is served them and told, or said to run an older list when
+/// its agent cannot take them (`docs/tools.md`, "When the tools change"). `None` when nothing
+/// changed.
+pub fn with_tools_now(daemon: &Daemon, agent: &Agent, project: &Project) -> Option<Agent> {
+    let provider = providers::of(agent).ok()?;
+    let tools = crate::agents::tools_of(provider, project, agent.parent.is_none(), agent.depth);
+    // The same tools in another order are the same list: a new order would only cost the
+    // session its prompt cache.
+    let (now, had): (HashSet<&String>, HashSet<&String>) =
+        (tools.iter().collect(), agent.tools.iter().collect());
+    if now == had {
+        return None;
+    }
+    let short = |list: &HashSet<&String>, other: &HashSet<&String>| -> Vec<String> {
+        let mut names: Vec<String> = list
+            .difference(other)
+            .filter_map(|tool| provider.tool_of(tool))
+            .map(str::to_owned)
+            .collect();
+        names.sort();
+        names
+    };
+    let data = json!({"agent": agent.id, "added": short(&now, &had),
+        "removed": short(&had, &now)});
+    if let Err(error) =
+        daemon.write(|store| Ok(((), store.set_agent_tools(&agent.id, &tools, data)?)))
+    {
+        eprintln!("flottille daemon: agent {}: its tools: {error}", agent.id);
+        return None;
+    }
+    daemon.mcp.change_tools(
+        &agent.id,
+        served(provider, &tools),
+        provider.takes_new_tools,
+    );
+    if daemon.mcp.outdated(&agent.id) {
+        say_outdated(daemon, &agent.id, true);
+    }
+    Some(Agent {
+        tools,
+        ..agent.clone()
+    })
+}
+
+/// The project changed (a forge or a tracker declared or gone): its agents that have not ended
+/// get the tools their roles have now.
+pub fn project_changed(daemon: &Daemon, project: &Project) {
+    let agents = match daemon.read(Store::agents) {
+        Ok(agents) => agents,
+        Err(error) => {
+            eprintln!("flottille daemon: reading agents: {error}");
+            return;
+        }
+    };
+    for agent in agents {
+        if agent.project == project.name && !agent.state.is_final() {
+            with_tools_now(daemon, &agent, project);
+        }
+    }
+}
+
+/// Says that the agent's session runs an older list of tools than its role has, or no longer.
+fn say_outdated(daemon: &Daemon, agent: &str, outdated: bool) {
+    let data = json!({"agent": agent, "outdated": outdated});
+    let said = daemon.write(|store| {
+        let event = store.append_agent_event(agent, "agent.tools_outdated", data, false)?;
+        Ok(((), event))
+    });
+    if let Err(error) = said {
+        eprintln!("flottille daemon: agent {agent}: {error}");
+    }
+}
+
 // HTTP.
 
 type Body = BoxBody<Bytes, Infallible>;
@@ -1168,10 +1346,40 @@ fn grant_in(context: &RequestContext<RoleServer>) -> Result<Arc<Grant>, ErrorDat
 impl ServerHandler for Handler {
     fn get_info(&self) -> ServerConfig {
         let capabilities: ServerCapabilities =
-            serde_json::from_value(json!({"tools": {"listChanged": false}})).expect("capabilities");
+            serde_json::from_value(json!({"tools": {"listChanged": true}})).expect("capabilities");
         ServerConfig::new(capabilities)
             .with_server_info(Implementation::new("flottille", VERSION))
             .with_instructions(GUIDE)
+    }
+
+    fn accepted_subscription_filter(
+        &self,
+        _requested: &SubscriptionFilter,
+    ) -> Option<SubscriptionFilter> {
+        serde_json::from_value(json!({"toolsListChanged": true})).ok()
+    }
+
+    /// A 2026-07-28 client's stream: told as soon as its tools change.
+    async fn listen(&self, subscription: SubscriptionContext) -> Result<(), ErrorData> {
+        let grant = grant_in(subscription.request_context())?;
+        let mut changes = self.daemon.mcp.changes.subscribe();
+        loop {
+            if self.daemon.mcp.tell(&grant.agent)
+                && subscription
+                    .sink()
+                    .notify_tool_list_changed()
+                    .await
+                    .is_err()
+            {
+                return Ok(());
+            }
+            tokio::select! {
+                changed = changes.changed() => if changed.is_err() {
+                    return Ok(());
+                },
+                _ = subscription.cancelled() => return Ok(()),
+            }
+        }
     }
 
     async fn list_tools(
@@ -1180,6 +1388,9 @@ impl ServerHandler for Handler {
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
         let grant = grant_in(&context)?;
+        if self.daemon.mcp.listed(&grant.agent) {
+            say_outdated(&self.daemon, &grant.agent, false);
+        }
         let tools = grant
             .tools
             .iter()
@@ -1205,6 +1416,14 @@ impl ServerHandler for Handler {
             .and_then(Value::as_str)
             .map(str::to_owned);
         let args = request.arguments.map(Value::Object).unwrap_or(Value::Null);
+        let agent = grant.agent.clone();
+        if self.daemon.mcp.called(&agent) {
+            say_outdated(&self.daemon, &agent, true);
+        }
+        // A client with no stream of its own is told with this answer, before it.
+        if self.daemon.mcp.tell(&agent) {
+            let _ = context.peer.notify_tool_list_changed().await;
+        }
         let (text, error) = call(
             &self.daemon,
             grant,

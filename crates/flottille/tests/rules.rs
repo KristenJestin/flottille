@@ -686,7 +686,7 @@ fn the_server_explains_flottille_on_both_protocol_revisions() {
     let initialized: Value = serde_json::from_str(&initialize.1).unwrap();
     let text = initialized["result"]["instructions"].as_str().unwrap();
     assert!(text.starts_with("# How Flottille works"), "{text}");
-    assert!(text.contains("fixed for this whole session"));
+    assert!(text.contains("a tool you do not see is work your role does not do"));
     assert!(text.split_whitespace().count() < 400);
 
     let meta = json!({

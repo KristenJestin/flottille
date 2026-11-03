@@ -34,12 +34,13 @@ or `ask_parent`, `approval_answer`, and `session_send` and `session_read` for a 
   401 with `{"error":"unauthorized"}`; the daemon's log says when a revoked token was used and
   whose it was, never the token, at most 20 lines a minute.
 - **Per request**: the server that answers holds the grant of the request's token, so that it
-  lists and calls the tools of that agent only, in the order frozen in the agent
-  (`docs/agents.md`), and works in that agent's place. The list is fixed (`listChanged: false`):
-  it is part of the prompt cache.
+  lists and calls the tools of that agent only, in the order kept in the agent
+  (`docs/agents.md`), and works in that agent's place. The list changes only when the agent's
+  role does (`listChanged: true`, "When the tools change" below): it is part of the prompt cache.
 - **Instructions**: the `initialize` result (and `server/discover`'s) carries
   `crates/flottille/roles/guide.md`, one text for every agent, under 400 words: what Flottille is
-  and that the agent runs in bare mode with a tool list fixed for the session; what a project,
+  and that the agent runs in bare mode with its role's tools, a list that changes only with the
+  role, the client then told; what a project,
   `main` and a workspace are; what the skills, the tasks, the commands and the rules are
   and which tool reads each; that the gate decides every call and a held call's result comes later
   as a delivery; what deliveries are and what wakes the agent. The names it uses for the
@@ -67,6 +68,41 @@ or `ask_parent`, `approval_answer`, and `session_send` and `session_read` for a 
 - **Every call is recorded** as an `agent.tool_served` event of the agent (`docs/events.md`):
   the tool, the key, the arguments with every text cut at 500 characters and masked, the outcome
   and the duration.
+
+### When the tools change
+
+An agent's tools are its role's in its project as it is (`docs/design.md` §4.3), stored with the
+agent. They change in two ways, and a session never keeps a list its role no longer has:
+
+- **Flottille is updated.** An update stops the daemon, and its agents with it (`flottille
+  update`, `docs/releases.md`): no connection survives it. The next process of each agent starts
+  on the tools its role has in the new version (the tools and actions added since included), its
+  store entry rewritten first (`agent.tools_changed`), and a new process is a new connection,
+  which lists them.
+- **The project gains or loses a forge or a tracker** while sessions run: each running session
+  of the project that has not ended is given the new list at once, before the change is
+  answered. Its grant serves it, its tools are stored (`agent.tools_changed`), and its client is
+  told `notifications/tools/list_changed`: on its `subscriptions/listen` stream for a
+  2026-07-28 client that opened one, which hears it at once; with the answer to its next request
+  for a client that keeps no stream (2025-11-25 with no protocol session), before that answer.
+  A tool the role lost is refused from then on (`has no tool`).
+
+Bare mode is kept: only Flottille's tools, only the role's. A session that lists its tools again
+has the new list. One that calls a tool after it was told without listing them again, or whose
+agent cannot take new tools while it runs, **runs an older list**: `agent.show` and
+`agent.tree` say `tools_outdated: true`, `flottille agent show` says that the session runs an
+older list of tools than its role has now and that a restart (stop, then resume) gives the new
+one, the window says so above the composer, and `agent.tools_outdated` says when that starts and
+ends (`docs/events.md`). The next process of the agent starts on the new list.
+
+What the agents Flottille runs do with the notice (checked in November 2026, from their
+documentation, changelogs and published source, never by running one):
+
+| Agent | Honours `list_changed` | In Flottille |
+|---|---|---|
+| Claude Code (`claude`, checked at 2.1.295) | Yes: in `-p` mode it lists the tools again, its v2 runtime over its listen stream | Takes the new tools: the bridge's `--allowedTools` is the start's, but a tool it lacks asks permission of the bridge, which the daemon answers from the role's list as it is now |
+| Codex (`codex app-server`, checked at 0.162.0) | Not by default: its own issues say it keeps the list it first read; an opt-in feature, `mcp_tool_list_changed`, was proposed | Runs an older list until its next process: the server's `enabled_tools`, set when its thread starts, filter out every tool they do not name |
+| OpenCode (`opencode acp`, checked at 1.19.0) | Yes, since its pull request #5913 (December 2025) | Runs an older list until its next process: its permissions, written when its process starts, deny every tool they do not name |
 
 ## The place and its paths
 

@@ -61,6 +61,10 @@ pub struct Provider {
     pub env: fn(&Paths, &Agent) -> Result<Env, String>,
     /// `_meta` of `session/new`, `session/load` and `session/resume`.
     pub session_meta: fn(&str, &[String]) -> Value,
+    /// Whether a running session of its agent can take tools its role gained (`docs/tools.md`,
+    /// "When the tools change"): told the list changed, it lists them again and may call them.
+    /// When it cannot, the tools its process was started with are the only ones it can call.
+    pub takes_new_tools: bool,
     /// Why its agents cannot run on this machine whatever the user does in Flottille, as a
     /// clause after the provider's name; `None` when nothing stops them.
     pub unready: fn() -> Option<String>,

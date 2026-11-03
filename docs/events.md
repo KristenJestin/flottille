@@ -359,6 +359,28 @@ activity.
 | `duration_ms` | How long it took. |
 | `request` | For a call the user allowed, performed once they did: the request's number; else `null`. |
 
+#### `agent.tools_changed`
+
+The agent was given the tools its role has now: its project declared or dropped a forge or a
+tracker, or its process starts on a version whose tools differ from those it was made with
+(`docs/tools.md`, "When the tools change").
+
+| Field | |
+|---|---|
+| `agent` | |
+| `added`, `removed` | The tools' names, without their prefix, sorted. |
+
+#### `agent.tools_outdated`
+
+The agent's running session runs an older list of tools than its role has (`outdated: true`):
+told the list changed, it called a tool without listing them again, or its agent cannot take new
+tools while it runs. `outdated: false` once it listed them.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `outdated` | |
+
 #### `approval.requested`
 
 The gate held one of the agent's calls: a request was written (`docs/tools.md`, "The gate").

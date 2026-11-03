@@ -1039,6 +1039,18 @@ impl Store {
 
     /// An event of the agent's conversation; `activity` says it is a sign of activity, which
     /// moves the agent's `active_at`.
+    /// Gives the agent the tools its role has now, with the agent's event, in one transaction.
+    pub fn set_agent_tools(&mut self, agent: &str, tools: &[String], data: Value) -> Result<Event> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "UPDATE agents SET tools = ?2 WHERE id = ?1",
+            params![agent, serde_json::to_string(tools)?],
+        )?;
+        let event = append_agent_event(&transaction, agent, "agent.tools_changed", data)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
     pub fn append_agent_event(
         &mut self,
         agent: &str,

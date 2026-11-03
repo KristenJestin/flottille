@@ -228,7 +228,10 @@ bridge sets on `claude` ("The Claude bridge", below):
   with neither gets, in this order, the first eight, `skill_read`, `workspace`, the four
   `agent_*`, `skills`, `commands`, `setup`, `project`, `report`, `ask_user`, `approval_answer`
   (21). The list is
-  frozen in the agent when it is created (the prompt cache depends on it).
+  kept with the agent and changes only when its role's does (the prompt cache depends on it):
+  a forge or a tracker declared or gone, a new version (`docs/tools.md`, "When the tools
+  change"). `--allowedTools` is the list of the process's start; a tool the role gained since
+  asks permission of the bridge, which the daemon answers from the list as it is now.
 - `settingSources: []`: Claude Code's own default loads the user's settings, hooks, plugins,
   skills and instruction files; this overrides it.
 - `strictMcpConfig`: only the MCP servers given with the session.

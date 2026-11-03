@@ -89,6 +89,9 @@ pub trait Events: Send + Sync + 'static {
     fn image(&self, name: &str) -> Option<(&'static str, String)>;
     fn turn_started(&self, text: &str, images: &[String]);
     fn turn_ended(&self, stop_reason: &str, usage: Value);
+    /// The agent's tools as they are now: its role may have gained some since the session began
+    /// (`docs/tools.md`, "When the tools change").
+    fn tools(&self) -> Vec<String>;
 }
 
 /// Flottille's MCP server as the agent's session gets it: its address and the process's token.
@@ -128,7 +131,6 @@ pub async fn session(
     let transport = Lines::new(Box::pin(outgoing), Box::pin(incoming));
 
     let replay = Arc::new(AtomicBool::new(false));
-    let tools = agent.tools.clone();
     let (updates, answers) = (events.clone(), events.clone());
     let replaying = replay.clone();
     let result = Client
@@ -149,7 +151,8 @@ pub async fn session(
         )
         .on_receive_request(
             async move |request: RequestPermissionRequest, responder, _cx| {
-                let (tool, outcome, allowed) = answer_permission(&request, &tools, provider);
+                let (tool, outcome, allowed) =
+                    answer_permission(&request, &answers.tools(), provider);
                 answers.conversation(
                     "agent.permission_answered",
                     json!({"tool": tool, "allowed": allowed, "replay": false}),

@@ -5,10 +5,18 @@
 mod common;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use common::User;
 use common::mcp::{Answer, Mcp, post, server_of};
+use flottille_core::store::Store;
+use rmcp::model::{CallToolRequestParams, ClientConfig, ProtocolVersion, SubscriptionFilter};
+use rmcp::service::{NotificationContext, RoleClient, RunningService};
+use rmcp::transport::StreamableHttpClientTransport;
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use rmcp::{ClientHandler, ClientLifecycleMode, ClientServiceExt};
 use serde_json::{Value, json};
 
 /// The limit every normal result stays under (`docs/reference/mcp.md` §4 rule 5).
@@ -342,10 +350,7 @@ fn a_2025_11_25_client_with_initialize_lists_and_calls_the_tools() {
     assert!(!headers.contains_key("mcp-session-id"), "{headers:?}");
     let body: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(body["result"]["protocolVersion"], "2025-11-25");
-    assert_eq!(
-        body["result"]["capabilities"]["tools"]["listChanged"],
-        false
-    );
+    assert_eq!(body["result"]["capabilities"]["tools"]["listChanged"], true);
     let (status, body, _) = post(
         &url,
         &[
@@ -1404,4 +1409,322 @@ fn run_status_reads_by_default_stops_on_request_and_refuses_what_does_not_fit() 
         let text = refused(mcp.call(old, json!({"run": run})));
         assert!(text.contains(&format!("has no tool {old}")), "{text}");
     }
+}
+
+// Tools that change while a session runs (`docs/tools.md`, "When the tools change").
+
+/// How many `notifications/tools/list_changed` reached a client.
+#[derive(Clone, Default)]
+struct Told(Arc<AtomicUsize>);
+
+impl ClientHandler for Told {
+    fn get_info(&self) -> ClientConfig {
+        let mut info = ClientConfig::default();
+        info.protocol_version = ProtocolVersion::V_2025_11_25;
+        info
+    }
+
+    async fn on_tool_list_changed(&self, _: NotificationContext<RoleClient>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// rmcp's client, as an agent's own would be, counting the notices it gets.
+struct Noticing {
+    runtime: tokio::runtime::Runtime,
+    client: RunningService<RoleClient, Told>,
+    told: Told,
+}
+
+impl Noticing {
+    fn connect(url: &str, authorization: &str, lifecycle: ClientLifecycleMode) -> Noticing {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let token = authorization.strip_prefix("Bearer ").unwrap();
+        let config = StreamableHttpClientTransportConfig::with_uri(url).auth_header(token);
+        let told = Told::default();
+        let client = runtime.block_on(async {
+            told.clone()
+                .serve_with_lifecycle(
+                    StreamableHttpClientTransport::from_config(config),
+                    lifecycle,
+                )
+                .await
+                .expect("the client connects")
+        });
+        Noticing {
+            runtime,
+            client,
+            told,
+        }
+    }
+
+    fn told(&self) -> usize {
+        // Notices are handled on the client's runtime.
+        self.runtime
+            .block_on(async { tokio::time::sleep(Duration::from_millis(20)).await });
+        self.told.0.load(Ordering::SeqCst)
+    }
+
+    fn names(&self) -> Vec<String> {
+        self.runtime
+            .block_on(self.client.list_all_tools())
+            .unwrap()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect()
+    }
+
+    fn call(&self, tool: &str, arguments: Value) -> Answer {
+        let params = CallToolRequestParams::new(tool.to_owned())
+            .with_arguments(arguments.as_object().cloned().unwrap_or_default());
+        let result = self
+            .runtime
+            .block_on(self.client.call_tool(params))
+            .unwrap();
+        let result = serde_json::to_value(result).unwrap();
+        Answer {
+            text: result["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            error: result["isError"] == true,
+        }
+    }
+}
+
+/// The project declares its forge and a tracker, or neither: its sessions gain or lose `forge`
+/// and `tickets`.
+fn track(user: &User, tracked: bool) {
+    let (forge, tracker) = if tracked {
+        (
+            json!({"kind": "github", "repository": "acme/app"}),
+            json!({"kind": "github", "repository": "."}),
+        )
+    } else {
+        (Value::Null, Value::Null)
+    };
+    // A forge is declared on a remote that is on it.
+    user.git(
+        &user.path("work/app"),
+        &["remote", "set-url", "origin", "git@github.com:acme/app.git"],
+    );
+    user.call(
+        "project.set_settings",
+        json!({"name": "app", "repositories": [{"path": ".", "forge": forge}],
+            "tracker": tracker}),
+    )
+    .unwrap();
+}
+
+fn shown(user: &User, id: &str) -> Value {
+    user.call("agent.show", json!({"agent": id})).unwrap()["agent"].clone()
+}
+
+#[test]
+fn a_running_session_is_told_its_tools_changed() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (_, url, authorization) = agent(&user, json!({}));
+
+    // A 2025-11-25 client keeps no stream open: the notice comes with its next answer, once.
+    let old = Noticing::connect(&url, &authorization, ClientLifecycleMode::Initialize);
+    let (_, body, _) = post(
+        &url,
+        &[("Authorization", &authorization)],
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": {"name": "test", "version": "1"}}}),
+    );
+    let body: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body["result"]["capabilities"]["tools"]["listChanged"], true);
+    assert!(!old.names().contains(&"tickets".to_owned()));
+    track(&user, true);
+    ok(old.call("fs_list", json!({"path": "."})));
+    assert_eq!(old.told(), 1);
+    ok(old.call("fs_list", json!({"path": "."})));
+    assert_eq!(old.told(), 1, "told once");
+
+    // A 2026-07-28 client that listens is told on its stream, without a request.
+    let (_, url, authorization) = agent(&user, json!({}));
+    let new = Noticing::connect(
+        &url,
+        &authorization,
+        ClientLifecycleMode::Discover {
+            preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+        },
+    );
+    let filter: SubscriptionFilter =
+        serde_json::from_value(json!({"toolsListChanged": true})).unwrap();
+    let mut listening = new
+        .runtime
+        .block_on(new.client.peer().listen(filter))
+        .expect("the server accepts a listen for its tools");
+    track(&user, false);
+    let notice = new
+        .runtime
+        .block_on(async { tokio::time::timeout(Duration::from_secs(10), listening.next()).await })
+        .expect("a notice within 10 s")
+        .expect("the stream works")
+        .expect("the stream is open");
+    let notice = serde_json::to_value(notice).unwrap();
+    assert_eq!(
+        notice["method"], "notifications/tools/list_changed",
+        "{notice}"
+    );
+}
+
+#[test]
+fn the_new_list_is_served_after_the_change() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (id, url, authorization) = agent(&user, json!({}));
+    let mcp = Mcp::initialize(&url, &authorization);
+    let text = refused(mcp.call("tickets", json!({"action": "list"})));
+    assert!(text.contains("has no tool tickets"), "{text}");
+
+    track(&user, true);
+    let names = mcp.names();
+    let at = names.iter().position(|name| name == "tickets");
+    assert_eq!(
+        at,
+        Some(10),
+        "after skill_read, as a new session lists it: {names:?}"
+    );
+    let answer = mcp.call("tickets", json!({"action": "list"}));
+    assert!(!answer.text.contains("has no tool"), "{}", answer.text);
+    let tools = shown(&user, &id)["tools"].clone();
+    assert!(
+        tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t.as_str().unwrap().ends_with("tickets")),
+        "{tools}"
+    );
+
+    // And back: a tool the role lost is no longer listed nor called. The client keeps the list
+    // it read until it is told, with the answer to its next call.
+    track(&user, false);
+    let text = refused(mcp.call("tickets", json!({"action": "list"})));
+    assert!(text.contains("has no tool tickets"), "{text}");
+    assert!(!mcp.names().contains(&"tickets".to_owned()));
+}
+
+#[test]
+fn a_session_started_before_an_update_gets_the_new_list_at_its_next_process() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (id, _, _) = agent(&user, json!({}));
+    eventually("the first turn ends", || {
+        shown(&user, &id)["state"] == "idle"
+    });
+    // An older version gave its sessions no `web` and no `wake`.
+    assert!(user.run(&["daemon", "stop"]).status.success());
+    {
+        let mut store = Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+        let older: Vec<String> = store
+            .agent(&id)
+            .unwrap()
+            .unwrap()
+            .tools
+            .into_iter()
+            .filter(|tool| !tool.ends_with("web") && !tool.ends_with("wake"))
+            .collect();
+        store
+            .set_agent_tools(&id, &older, json!({"agent": id}))
+            .unwrap();
+    }
+
+    let reopened = user.received_requests("session/resume").len();
+    user.call("agent.send", json!({"agent": id, "message": "go on"}))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let server = loop {
+        if let Some(resumed) = user.received_requests("session/resume").get(reopened) {
+            break resumed["params"]["mcpServers"][0].clone();
+        }
+        assert!(Instant::now() < deadline, "the session was not resumed");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let authorization = server["headers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["name"] == "Authorization")
+        .unwrap()["value"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mcp = Mcp::initialize(server["url"].as_str().unwrap(), &authorization);
+    let names = mcp.names();
+    assert!(names.contains(&"web".to_owned()), "{names:?}");
+    assert!(names.contains(&"wake".to_owned()), "{names:?}");
+    let tools = shown(&user, &id)["tools"].clone();
+    assert!(
+        tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t.as_str().unwrap().ends_with("web")),
+        "{tools}"
+    );
+}
+
+#[test]
+fn a_session_whose_client_ignores_the_change_is_said_to_run_an_older_list() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (id, url, authorization) = agent(&user, json!({}));
+    // rmcp's client does nothing with the notice: it lists nothing again.
+    let mcp = Mcp::initialize(&url, &authorization);
+    mcp.names();
+    assert_eq!(shown(&user, &id)["tools_outdated"], false);
+
+    track(&user, true);
+    ok(mcp.call("fs_list", json!({"path": "."})));
+    // Told with that answer, it calls again on its older list.
+    ok(mcp.call("fs_list", json!({"path": "."})));
+    eventually("the session is said to run an older list", || {
+        shown(&user, &id)["tools_outdated"] == true
+    });
+    let tree = user.call("agent.tree", json!({"agent": id})).unwrap();
+    assert_eq!(tree["agents"][0]["agent"]["tools_outdated"], true, "{tree}");
+    let out = user.run(&["agent", "show", &id]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains(
+            "runs an older list of tools than its role has now: restart the session (stop, then \
+             resume) for the new one"
+        ),
+        "{text}"
+    );
+
+    // Once it lists them, it has the new list.
+    assert!(mcp.names().contains(&"tickets".to_owned()));
+    eventually("the session has the new list", || {
+        shown(&user, &id)["tools_outdated"] == false
+    });
+}
+
+#[test]
+fn a_session_whose_agent_cannot_take_new_tools_is_said_to_run_an_older_list_at_once() {
+    let user = User::with_fake_providers();
+    project(&user);
+    let answer = user
+        .call(
+            "agent.run",
+            json!({"project": "app", "message": "hello", "provider": "opencode"}),
+        )
+        .unwrap();
+    let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+    eventually("its process runs", || shown(&user, &id)["state"] == "idle");
+    assert_eq!(shown(&user, &id)["tools_outdated"], false);
+
+    // OpenCode's permissions, written when its process started, deny the tools it gains.
+    track(&user, true);
+    assert_eq!(shown(&user, &id)["tools_outdated"], true);
 }

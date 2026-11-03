@@ -1048,6 +1048,10 @@ fn announce_edits(
             event,
             json!({"name": project.name, "folder": project.folder}),
         )?;
+        if event == "project.changed" {
+            // Before the answer: the next call of a session is served the tools it has now.
+            crate::mcp::project_changed(daemon, project);
+        }
         projects.known.insert(project.name.clone(), project.clone());
     }
     let gone: Vec<String> = projects

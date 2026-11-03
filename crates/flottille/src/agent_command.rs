@@ -583,6 +583,10 @@ fn agent_line(agent: &Value, entry: Option<&Value>) -> String {
     line
 }
 
+/// What is said of a session that did not take the tools its role gained.
+pub const OUTDATED: &str = "its session runs an older list of tools than its role has now: \
+    restart the session (stop, then resume) for the new one";
+
 /// The agent, then its conversation: chunks joined, thoughts and tool calls in brief.
 fn show_text(shown: &Value) -> String {
     let agent = &shown["agent"];
@@ -603,6 +607,9 @@ fn show_text(shown: &Value) -> String {
             .or(agent["chosen"]["model"].as_str())
             .unwrap_or("the agent's default"),
     );
+    if agent["tools_outdated"] == true {
+        out.push_str(&format!("  {OUTDATED}\n"));
+    }
     let mut speaking: Option<&str> = None;
     for event in shown["events"].as_array().into_iter().flatten() {
         let data = &event["data"];

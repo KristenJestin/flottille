@@ -205,8 +205,8 @@ tracker does not take, or a creation in a Jira project that is not one of the tr
 refused, and nothing is asked of any tracker. A GitHub search stays in the tracker's repository:
 a query holding `repo:`, `org:`, `user:`, `is:pr` or `type:pr` is refused, and only the issues
 whose link is the tracker repository's are kept, the others counted. Every agent of a project that declares a tracker has
-the tool, in `main` as in a workspace, whether a ticket is linked or not (the tool list of a
-session is fixed when it starts). Until #141 `show` was `ticket_read`.
+the tool, in `main` as in a workspace, whether a ticket is linked or not (a session running
+when the tracker is declared is told, `docs/tools.md`, "When the tools change"). Until #141 `show` was `ticket_read`.
 
 `list` and `search` answer from what the daemon's rounds keep ([`items.md`](items.md), "What
 reads this stream"), with its age (`… : 2 (as of 3 min ago)`); a `search` finds the words in the

@@ -795,7 +795,9 @@ was asked, or the project's default model, `null` for the agent's default; `take
 at the last start of its process; `reopens` whether its agent offered to resume or load a session
 when it last opened one, `false` once Flottille forgot an ended root's session; `images` whether
 it took images in a prompt when it last started, `null` before it did. `active_at` is its last sign of activity, `null` before the
-first. `instructions` and `tools` are frozen when the agent is created. `parent` is the agent that
+first. `instructions` are frozen when the agent is created, `tools` are its role's and change with
+it (`docs/tools.md`, "When the tools change"); `tools_outdated` says whether its running session
+runs an older list than that. `parent` is the agent that
 launched it (`null` for a root), `depth` its depth in the tree, `epoch` the number of its session
 (each replacement adds one), `title` and `brief` a child's task, `launched_by` the id of the agent
 that started a root for the user (`null` for a root the user started, and for a child), whose
@@ -923,7 +925,8 @@ alone reaches it: no tool of an agent changes a mode.
 took at the last start of its process, else the one asked, `null` for the agent's default before it
 started; `resumable`: whether `agent.resume` takes it once its last process is gone; `stopping`:
 whether the process of an agent that ended is still stopping; `images`: as in the agent's full
-form); `doing` a sentence of what it does
+form; `tools_outdated`: whether its running session runs an older list of tools than its role
+has, which a restart replaces, `docs/tools.md`, "When the tools change"); `doing` a sentence of what it does
 (`working`, `idle`, `running \`cargo test\` for 12 min`, `waiting for approval #3`, `failed: …`);
 `waiting_on` `parent` for a child whose request or question waits for its parent, `user` for a
 root whose own does, `subscription` for an agent between turns that has an open subscription (`doing` then
