@@ -2260,6 +2260,7 @@ dependencies = [
  "flottille-ui",
  "futures",
  "gpui-kit",
+ "image",
  "libc",
  "serde_json",
 ]

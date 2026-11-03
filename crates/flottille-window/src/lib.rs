@@ -52,6 +52,7 @@ pub fn run(connect: Connect, instance: Option<Instance>) {
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             app_id: Some("flottille".into()),
+            icon: Some(icon()),
             ..Default::default()
         };
         let window = gpui_kit::open_window(options, cx, |window, cx| {
@@ -74,10 +75,20 @@ pub fn run(connect: Connect, instance: Option<Instance>) {
     });
 }
 
+/// The window's icon, the 256 px PNG of the package, decoded once. GPUI uses it on X11 only; on
+/// Wayland the desktop takes the icon from the entry the window's app id names.
+fn icon() -> std::sync::Arc<image::RgbaImage> {
+    const PNG: &[u8] =
+        include_bytes!("../../../packaging/linux/icons/hicolor/256x256/apps/flottille.png");
+    let decoded = image::load_from_memory_with_format(PNG, image::ImageFormat::Png)
+        .expect("the icon committed in packaging/linux is a PNG");
+    std::sync::Arc::new(decoded.into_rgba8())
+}
+
 /// Brings the window to the front each time another `flottille window` asks for it. Where the
 /// desktop does not let a program take the focus (a Wayland compositor often only marks the
 /// window as asking for attention), that is all that can be done.
-fn raise_on_request(instance: Instance, window: &mut gpui_kit::Window, cx: &mut gpui_kit::App) {
+pub fn raise_on_request(instance: Instance, window: &mut gpui_kit::Window, cx: &mut gpui_kit::App) {
     let (ask, mut asked) = futures::channel::mpsc::unbounded();
     instance.serve(move || {
         let _ = ask.unbounded_send(());
@@ -121,3 +132,15 @@ pub fn frame_counter(window: &mut gpui_kit::Window, cx: &mut gpui_kit::App) {
 
 #[cfg(not(feature = "frames"))]
 pub fn frame_counter(_: &mut gpui_kit::Window, _: &mut gpui_kit::App) {}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_window_icon_is_the_256_px_png_of_the_package() {
+        let icon = super::icon();
+        assert_eq!(icon.dimensions(), (256, 256));
+        // The tile is light and opaque at its middle, transparent at its rounded corner.
+        assert_eq!(icon.get_pixel(128, 20).0[3], 255);
+        assert_eq!(icon.get_pixel(0, 0).0[3], 0);
+    }
+}

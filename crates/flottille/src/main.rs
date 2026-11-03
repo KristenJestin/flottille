@@ -377,7 +377,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             let instance = match flottille_window::instance::acquire(&paths) {
                 Ok(flottille_window::instance::Start::First(instance)) => Some(instance),
                 Ok(flottille_window::instance::Start::Raised) => {
-                    println!("Flottille's window is already open: brought it to the front.");
+                    println!("Flottille's window is already open: asked it to come to the front.");
                     return Ok(ExitCode::SUCCESS);
                 }
                 Err(error) => {
