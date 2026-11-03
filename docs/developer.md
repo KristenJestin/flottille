@@ -35,7 +35,7 @@ and a field is never renamed.
 | Field | |
 |---|---|
 | `at` | When it was written, in milliseconds since the Unix epoch. |
-| `kind` | `call` or `event`. |
+| `kind` | `call`, `event` or `models`. |
 | `agent` | The agent the line is about; `null` for an event about no agent. |
 
 ### `call`
@@ -76,6 +76,18 @@ stop.
 | `seq` | The event's number. |
 | `name` | The event's name. |
 | `data` | Its fields, as `docs/events.md` gives them. |
+
+### `models`
+
+A provider's models were read with no session (`docs/agents.md`, "The models"), or could not be.
+`agent` is `null`.
+
+| Field | |
+|---|---|
+| `provider` | The provider's name. |
+| `outcome` | `read` or `failed`. |
+| `models` | For `read`: how many models it offers. |
+| `error` | For `failed`: why, masked (the program is missing or failed, it is not signed in, it was over time). |
 
 ## Reading it
 

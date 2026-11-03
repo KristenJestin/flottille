@@ -127,7 +127,11 @@ Flottille is an ACP client. Each agent session is one process speaking ACP on st
   Codex"). Gemini CLI speaks ACP natively too.
 
 Each is a provider, an entry of its own in the daemon; which are enabled is the user's
-(`providers.toml`), and each agent runs on one for life (`docs/agents.md`, "Providers").
+(`providers.toml`), and each agent runs on one for life (`docs/agents.md`, "Providers"). The
+daemon reads the models of each provider that is enabled and ready as soon as it is, and again
+when its program or its API keys change, in the background and without a prompt (no provider
+lists its models by asking one): the first session can be given a model (`docs/agents.md`, "The
+models").
 
 Handshake, session open order (resume, else load, else new), model/effort/mode options, event
 mapping, cancel, idle release of processes and death handling follow `reference/hemera.md` §1.
