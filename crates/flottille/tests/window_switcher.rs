@@ -525,6 +525,35 @@ fn escape_gives_the_focus_back_to_the_composer_that_had_it(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
+fn escape_gives_the_focus_to_the_window_when_what_had_it_is_no_longer_drawn(
+    cx: &mut TestAppContext,
+) {
+    let world = world();
+    let (shell, cx) = ready(&world, cx);
+    // A handle that is alive but that no frame draws any more: a composer whose session left the
+    // snapshot while the switcher was open still has its handle held by the switcher.
+    let gone = cx.update(|_, cx| cx.focus_handle());
+    cx.update(|window, cx| window.focus(&gone, cx));
+    settle(cx);
+    let found = switcher(&shell, cx);
+    cx.update(|window, cx| found.update(cx, |switcher, cx| switcher.open(window, cx)));
+    settle(cx);
+    assert!(is_open(&shell, cx));
+    cx.simulate_keystrokes("escape");
+    settle(cx);
+    assert!(!is_open(&shell, cx));
+    let window_focus = shell.read_with(cx, |shell, _| shell.focus_handle());
+    assert!(
+        cx.update(|window, _| window_focus.is_focused(window)),
+        "the window has the focus, not the handle nothing draws"
+    );
+    // Keys still reach the window: Ctrl K opens it again.
+    cx.simulate_keystrokes("ctrl-k");
+    settle(cx);
+    assert!(is_open(&shell, cx), "keys reach the window");
+}
+
+#[gpui_kit::test]
 fn the_best_match_is_marked_whatever_its_group(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "app");

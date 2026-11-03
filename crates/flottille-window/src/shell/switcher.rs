@@ -419,9 +419,12 @@ impl Switcher {
             return;
         }
         self.open = false;
+        // What had the focus may have left the window while this was open (a composer whose
+        // session is gone): a handle nothing draws takes the keys from the window.
         let back = self
             .before
             .take()
+            .filter(|before| self.window_focus.contains(before, window))
             .unwrap_or_else(|| self.window_focus.clone());
         window.focus(&back, cx);
         self.forget = Some(cx.spawn(async move |this, cx| {
