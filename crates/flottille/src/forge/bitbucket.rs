@@ -495,9 +495,8 @@ async fn detailed_with(
         let base = cloud_page(forge, &id);
         let pull = json(&["api", &base, "--context", context]).await?;
         let (comments, _) = cloud_values(context, &format!("{base}/comments"), COMMENTS).await?;
-        let comments = cloud_comments(&comments);
-        let closing = cloud_closing(found.state, &pull, &comments);
-        (cloud_reviewers(&pull), comments, closing)
+        let closing = cloud_closing(found.state, &pull);
+        (cloud_reviewers(&pull), cloud_comments(&comments), closing)
     } else {
         let Forge::Bitbucket { owner, name, .. } = forge else {
             unreachable!()
@@ -543,6 +542,7 @@ async fn detailed_with(
         jobs,
         ci: None,
         closing,
+        ended: None,
     };
     Ok((pull, statuses))
 }
@@ -580,6 +580,7 @@ fn cheap(forge: &Forge, path: &str, found: Listed) -> crate::items::Fetched {
         jobs: Vec::new(),
         ci: None,
         closing: None,
+        ended: None,
     };
     let mut fetched = super::fetched_pull(path, "bitbucket", &pull, false);
     if !cloud(forge) {
@@ -1206,63 +1207,60 @@ fn cloud_comments(comments: &[Value]) -> Vec<Comment> {
             body: masked(c["content"]["raw"].as_str().unwrap_or_default()),
             // What says a Bitbucket bot is not read: every author is taken for a person.
             bot: false,
-            at: c["created_on"].as_str().map(str::to_owned),
+            at: None,
         })
         .collect()
 }
 
 /// What a merged or declined Cloud pull request was closed with, from its own page: the reason it
-/// was declined with, else the last comment of whoever closed it (`closed_by`; Cloud gives no time
-/// of the closing to compare the comments with). None for an open one, or one nobody is said to
-/// have closed and with no reason.
-fn cloud_closing(state: &str, page: &Value, comments: &[Comment]) -> Option<Comment> {
-    if state == "open" {
-        return None;
-    }
-    let closer = page["closed_by"]
-        .is_object()
-        .then(|| person(&page["closed_by"], &["display_name", "nickname"]));
+/// was declined with (`reason`), said without an author when the page names no `closed_by`. Cloud
+/// keeps no comment as the one a pull request was closed with, and gives no time of the closing to
+/// tell one from the others, so no comment stands in for it. None for an open one, or with no
+/// reason.
+fn cloud_closing(state: &str, page: &Value) -> Option<Comment> {
     let reason = page["reason"].as_str().filter(|r| !r.trim().is_empty());
-    if let (Some(reason), Some(closer)) = (reason, &closer) {
-        return Some(Comment {
-            author: closer.clone(),
-            state: None,
-            body: masked(reason),
-            bot: false,
-            at: None,
-        });
-    }
-    let closer = closer?;
-    comments
-        .iter()
-        .rev()
-        .find(|c| c.author == closer && !c.body.is_empty())
-        .cloned()
+    let reason = reason.filter(|_| state != "open")?;
+    Some(Comment {
+        author: if page["closed_by"].is_object() {
+            person(&page["closed_by"], &["display_name", "nickname"])
+        } else {
+            String::new()
+        },
+        state: None,
+        body: masked(reason),
+        bot: false,
+        at: None,
+    })
 }
 
-/// What a merged or declined Data Center pull request was closed with: the comment of whoever
-/// merged or declined it, the newest before that activity (`activities` come newest first, so
-/// the comments listed after it are the older ones). None for an open one, or when they wrote none.
+/// What a merged or declined Data Center pull request was closed with: the newest comment of whoever
+/// merged or declined it, written in the minute before that activity (`createdDate`, in
+/// milliseconds, on both). `activities` come newest first. None for an open one, when they wrote
+/// none then, or when the activities give no time.
 fn dc_closing(state: &str, activities: &[Value]) -> Option<Comment> {
     if state == "open" {
         return None;
     }
-    let at = activities
+    let ended = activities
         .iter()
-        .position(|a| matches!(a["action"].as_str(), Some("MERGED" | "DECLINED")))?;
-    let closer = person(&activities[at]["user"], &["displayName", "name"]);
-    activities[at + 1..]
+        .find(|a| matches!(a["action"].as_str(), Some("MERGED" | "DECLINED")))?;
+    let at = ended["createdDate"].as_u64()?;
+    let closer = person(&ended["user"], &["displayName", "name"]);
+    activities
         .iter()
         .filter(|a| a["action"] == "COMMENTED")
-        .map(|a| &a["comment"])
-        .find(|c| {
-            person(&c["author"], &["displayName", "name"]) == closer
-                && !c["text"].as_str().unwrap_or_default().is_empty()
+        .find(|a| {
+            let comment = &a["comment"];
+            person(&comment["author"], &["displayName", "name"]) == closer
+                && !comment["text"].as_str().unwrap_or_default().is_empty()
+                && a["createdDate"]
+                    .as_u64()
+                    .is_some_and(|w| w <= at && at - w <= super::closing::WITHIN_MS)
         })
-        .map(|c| Comment {
+        .map(|a| Comment {
             author: closer.clone(),
             state: None,
-            body: masked(c["text"].as_str().unwrap_or_default()),
+            body: masked(a["comment"]["text"].as_str().unwrap_or_default()),
             bot: false,
             at: None,
         })

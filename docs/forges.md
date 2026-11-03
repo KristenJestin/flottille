@@ -108,30 +108,33 @@ itself (`gh pr view <n> -R github.com/owner/name --json …`):
 
 `forge` `show` of a merged, declined or closed pull request says `closing comment (<author>): …`
 under its other lines, in the short detail as in the full one, and nothing when the forge gives
-none (no empty line). No forge calls a pull request's last words a field of its own, so each gives
-what it really exposes:
+none (no empty line). It is the comment the pull request was **closed with** (`gh pr close
+--comment`, `bkt pr decline --comment`), not any comment its closer wrote earlier: an "LGTM" from
+the day before the merge is not one. No forge calls a pull request's last words a field of its
+own, so each gives what it really exposes:
 
-- **GitHub**: `gh pr view --json` has no closing comment and no closer for a closed pull request
-  (`mergedBy` is the merger of a merged one alone). The closer is read from the issue events
-  (`gh api repos/{owner}/{name}/issues/{n}/events --paginate --slurp`, documented REST: the last
-  `merged` or `closed` event, its `actor.login` and `created_at`), and the closing comment is the
-  last comment that person wrote at or before that event (`gh pr close --comment` posts it just
-  before closing). It may be older than the closing itself when they said nothing at that moment;
-  the author is named so that it reads as theirs. Only a merged or closed pull request costs this
-  call; when it fails, nothing is said of a closing comment and the rest of `show` is as usual.
+- **GitHub**: `gh pr view --json` has no closing comment, and no closer for a closed pull request
+  (`mergedBy` and `mergedAt` are the merger's of a merged one alone, and are read with the rest).
+  A merged pull request with them costs no call; otherwise the closer is read from the issue
+  events (`gh api repos/{owner}/{name}/issues/{n}/events --paginate --jq …`, documented REST: the
+  last `merged` or `closed` event's `actor.login` and `created_at`, one line each for those
+  events). The closing comment is the closer's last comment **in the minute before** that
+  instant; none when they wrote none then. An app is the same whether `gh` names it `app/stale` or
+  the events `stale[bot]`. When the events cannot be read, nothing is said of a closing comment,
+  the rest of `show` is as usual, and the daemon's log says it once.
 - **Bitbucket Cloud**: the pull request's own page (`bkt api`, already read) says `reason`, the
-  text it was declined with, and `closed_by`. The reason is the closing comment; without one, it is
-  the last comment `closed_by` wrote (Cloud gives no time of the closing, so none is compared). A
-  merge message lives in the merge commit, not on the pull request: a merged pull request has its
-  closer's last comment or nothing.
+  text it was declined with, and `closed_by`. The reason is the closing comment, said without an
+  author when the page names no `closed_by`. Cloud keeps no comment as the one a pull request was
+  closed with and gives no time of the closing, so no comment stands in for the reason; a merge
+  message lives in the merge commit, not on the pull request: a merged pull request has none.
 - **Bitbucket Data Center**: its activities (already read) hold a `MERGED` or `DECLINED` one with
-  the `user` who did it; the closing comment is the first comment of that user listed after it
-  (activities come newest first), that is, written before. Data Center's decline and merge take no
-  message.
+  the `user` who did it and its `createdDate`; the closing comment is that user's newest comment
+  in the minute before it (each `COMMENTED` activity has its `createdDate`). Without those times,
+  none. Data Center's decline and merge take no message.
 
-**These shapes (`reason`, `closed_by`, the activities' `user`, the issue events) are assumed from
-the forges' REST documentation, not from `gh`'s or `bkt`'s source, and the maintainer checks them
-on a real server.**
+**These shapes (`reason`, `closed_by`, the activities' `user` and `createdDate`, the issue
+events) are assumed from the forges' REST documentation, not from `gh`'s or `bkt`'s source, and
+the maintainer checks them on a real server.**
 
 **`gh` missing or not signed in** is said once for the workspace, in `problem`, with what to do
 (install it, `gh auth login`), and in the daemon's log once when it starts being so. Nothing else

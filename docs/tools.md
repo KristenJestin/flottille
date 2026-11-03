@@ -323,8 +323,9 @@ pending requests.
   under the result limit. **`show {number, repository?, detail?}`**: that pull request of a
   repository of the place, the same way; `repository` is needed when the place has several.
   `show` reads the forge now, and stores what it read over what the rounds keep of it. A merged,
-  declined or closed pull request also gives `closing comment (<author>): …` when the forge has one
-  ([`forges.md`](forges.md), "The closing comment").
+  declined or closed pull request also gives `closing comment (<author>): …`, the comment it was
+  closed with (not an older one of its closer), when the forge has it ([`forges.md`](forges.md),
+  "The closing comment").
   `show` ends with the agent's subscriptions, when it has some (`Your subscriptions:` then `- pull
   request #12 of api, workspace login: checks, review, for 52 min more`).
 - **`subscribe {workspace?, repository?, events, from?, minutes?}`**: the next of `events`

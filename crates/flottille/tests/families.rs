@@ -508,18 +508,23 @@ fn editing_an_open_pull_request_outside_the_newest_page_still_works() {
     assert_eq!(edits.len(), 2, "{edits:?}");
 }
 
-/// `pulls_to_close()` with the comments of a merged pull request (#7, merged by bob after his
-/// comment and before alice's thanks), of a closed one (#9, closed by carol with a comment) and
-/// of one closed by dave, who said nothing (#8).
+/// `pulls_to_close()` with the comments of a merged pull request (#7, merged by bob, who commented
+/// a first time long before, and a second time as he merged), of a closed one (#9, closed by carol
+/// with a comment, the issue's events saying who closed it), of one closed by dave, whose only
+/// comment is of the day before (#8), of one closed by an app (#6), and of a merged one whose
+/// merger only said "LGTM" hours earlier (#10).
 fn closed_pulls() -> Value {
     let mut script = pulls_to_close();
     let comment = |login: &str, body: &str, at: &str| json!({"author": {"login": login}, "body": body, "createdAt": at});
     let held = &mut script["pulls"]["acme/app"];
     held["app/old"]["comments"] = json!([
+        comment("bob", "LGTM", "2026-01-01T08:00:00Z"),
         comment("alice", "Looks good", "2026-01-01T09:00:00Z"),
         comment("bob", "Merging after the freeze", "2026-01-01T10:00:00Z"),
         comment("alice", "Thanks", "2026-01-01T11:00:00Z")
     ]);
+    held["app/old"]["mergedBy"] = json!({"login": "bob"});
+    held["app/old"]["mergedAt"] = json!("2026-01-01T10:00:01Z");
     held["app/closed"]["comments"] = json!([
         comment("carol", "Superseded by #20", "2026-01-02T09:59:59Z"),
         comment("alice", "Fine", "2026-01-02T12:00:00Z")
@@ -527,13 +532,23 @@ fn closed_pulls() -> Value {
     held["app/dropped"] = json!({"number": 8, "title": "Dropped too", "state": "CLOSED",
         "isDraft": false, "baseRefName": "main", "headRefName": "app/dropped",
         "url": "https://github.com/acme/app/pull/8",
-        "comments": [comment("alice", "Why?", "2026-01-03T09:00:00Z")]});
+        "comments": [comment("dave", "I will look at it", "2026-01-02T10:00:00Z"),
+                     comment("alice", "Why?", "2026-01-03T09:00:00Z")]});
+    held["app/stale"] = json!({"number": 6, "title": "Stale work", "state": "CLOSED",
+        "isDraft": false, "baseRefName": "main", "headRefName": "app/stale",
+        "url": "https://github.com/acme/app/pull/6",
+        "comments": [comment("app/stale", "Closing for inactivity", "2026-01-04T09:59:30Z")]});
+    held["app/lgtm"] = json!({"number": 10, "title": "Quiet merge", "state": "MERGED",
+        "isDraft": false, "baseRefName": "main", "headRefName": "app/lgtm",
+        "url": "https://github.com/acme/app/pull/10",
+        "mergedBy": {"login": "bob"}, "mergedAt": "2026-01-05T10:00:00Z",
+        "comments": [comment("bob", "LGTM", "2026-01-05T08:00:00Z")]});
     let event = |event: &str, login: &str, at: &str| json!({"event": event, "actor": {"login": login}, "created_at": at});
     script["events"] = json!({"acme/app": {
-        "7": [event("labeled", "alice", "2026-01-01T08:00:00Z"),
-              event("merged", "bob", "2026-01-01T10:00:01Z")],
-        "9": [event("closed", "carol", "2026-01-02T10:00:00Z")],
-        "8": [event("closed", "dave", "2026-01-03T10:00:00Z")]}});
+        "9": [event("labeled", "alice", "2026-01-02T08:00:00Z"),
+              event("closed", "carol", "2026-01-02T10:00:00Z")],
+        "8": [event("closed", "dave", "2026-01-03T10:00:00Z")],
+        "6": [event("closed", "stale[bot]", "2026-01-04T10:00:00Z")]}});
     script
 }
 
@@ -555,9 +570,10 @@ fn show_of_a_closed_pull_request_has_its_closing_comment() {
     };
     let merged = show(7, "full");
     let closed = show(9, "short");
+    let by_an_app = show(6, "full");
     let silent = show(8, "full");
 
-    // The last comment of whoever merged it, before they did: not alice's thanks after it.
+    // The comment of whoever merged it as they did: not their old "LGTM", nor alice's thanks.
     assert!(
         merged.contains("closing comment (bob): Merging after the freeze"),
         "{merged}"
@@ -567,13 +583,44 @@ fn show_of_a_closed_pull_request_has_its_closing_comment() {
         closed.contains("closing comment (carol): Superseded by #20"),
         "{closed}"
     );
+    // `gh` names an app `app/stale` where the events say `stale[bot]`.
+    assert!(
+        by_an_app.contains("closing comment (app/stale): Closing for inactivity"),
+        "{by_an_app}"
+    );
     // The forge gives none: nothing is said, not an empty line.
     assert!(!silent.contains("closing comment"), "{silent}");
+    // The merger of a merged one is in the pull request itself: no event is read for it.
+    let calls = words(user.gh_received());
     assert!(
-        words(user.gh_received())
+        calls
             .iter()
-            .any(|call| call.starts_with("api repos/acme/app/issues/7/events"))
+            .any(|call| call.starts_with("api repos/acme/app/issues/9/events"))
     );
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.starts_with("api repos/acme/app/issues/7/"))
+    );
+}
+
+#[test]
+fn an_old_comment_of_the_merger_is_not_its_closing_comment() {
+    let user = user();
+    on_github(&user);
+    user.gh_script(closed_pulls());
+    let (_, mcp) = root_in(&user, None);
+
+    let merged = read(
+        &user,
+        mcp.call(
+            "forge",
+            json!({"action": "show", "number": 10, "detail": "full"}),
+        ),
+    );
+
+    assert!(merged.contains("bob: LGTM"), "{merged}");
+    assert!(!merged.contains("closing comment"), "{merged}");
 }
 
 #[test]
@@ -615,8 +662,8 @@ fn show_of_a_closed_pull_request_has_its_comment_count() {
         ),
     );
 
-    assert!(short.contains("comments: 3, read them with"), "{short}");
-    assert!(full.contains("comments (3):"), "{full}");
+    assert!(short.contains("comments: 4, read them with"), "{short}");
+    assert!(full.contains("comments (4):"), "{full}");
 }
 
 #[test]

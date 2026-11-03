@@ -53,7 +53,7 @@ const SSH_TIME: Duration = Duration::from_secs(5);
 const COMMENT_CHARS: usize = 2000;
 /// What `gh pr view` is asked for.
 const FIELDS: &str = "number,title,state,isDraft,headRefName,headRefOid,baseRefName,url,\
-    mergeable,reviewDecision,statusCheckRollup,comments,reviews,body";
+    mergeable,reviewDecision,statusCheckRollup,comments,reviews,body,mergedBy,mergedAt";
 /// The ways `forge` `merge` merges a pull request, the first by default.
 pub const MERGE_METHODS: [&str; 3] = ["squash", "merge", "rebase"];
 
@@ -310,6 +310,9 @@ pub struct Pull {
     /// The comment a merged or closed pull request was closed with, when the forge gives one
     /// (`closing`); its author is whoever closed it.
     pub closing: Option<Comment>,
+    /// Who merged it and when (milliseconds), when `gh pr view` says it: the closing comment is
+    /// then found without asking the issue's events (`closing`).
+    pub ended: Option<(String, u64)>,
 }
 
 /// A failing check of a pull request.
@@ -341,8 +344,9 @@ pub struct Comment {
     pub body: String,
     /// Written by a bot (an app), as far as the forge says it.
     pub bot: bool,
-    /// When it was written, as the forge says it (an RFC 3339 text), when it does.
-    pub at: Option<String>,
+    /// When it was written, in milliseconds, where a closing comment is told from the others
+    /// (GitHub's); none elsewhere.
+    pub at: Option<u64>,
 }
 
 impl Comment {
@@ -417,7 +421,9 @@ impl Pull {
                         .as_str()
                         .map(|s| s.to_lowercase().replace('_', " ")),
                     body: text(&comment["body"]),
-                    at: comment["createdAt"].as_str().map(str::to_owned),
+                    at: comment["createdAt"]
+                        .as_str()
+                        .and_then(crate::session_read::form),
                 })
                 .collect()
         };
@@ -473,6 +479,14 @@ impl Pull {
                 .collect(),
             ci: None,
             closing: None,
+            ended: value["mergedBy"]["login"]
+                .as_str()
+                .zip(
+                    value["mergedAt"]
+                        .as_str()
+                        .and_then(crate::session_read::form),
+                )
+                .map(|(login, at)| (masked(login), at)),
         })
     }
 }
@@ -2262,6 +2276,18 @@ fn read_text(workspace: &Workspace, read: &Read, full: bool, asked: Option<&str>
     text
 }
 
+/// A comment's text as `forge show` says it, cut, its lines indented under the one that names its
+/// author, and whether an agent of Flottille posted it. What a user wrote may lead the agent to a
+/// page; what an agent wrote never does.
+fn comment_body(comment: &Comment) -> (String, bool) {
+    let (body, agent) = comment.unmarked();
+    let body: String = body.chars().take(COMMENT_CHARS).collect();
+    if !agent {
+        crate::web::shown(&body, crate::web::Source::Link);
+    }
+    (body.replace('\n', "\n    "), agent)
+}
+
 /// A pull request, as `forge show` says it: the texts of its comments and reviews only when
 /// `full`, otherwise their number and `again`, the call that gives them.
 fn pull_text(text: &mut String, named: &str, pull: &Pull, full: bool, again: &str) {
@@ -2313,21 +2339,14 @@ fn pull_text(text: &mut String, named: &str, pull: &Pull, full: bool, again: &st
         text.push_str(&format!("  {}\n", ci.line()));
     }
     if let Some(closing) = &pull.closing {
-        let (body, agent) = closing.unmarked();
-        let body: String = body.chars().take(COMMENT_CHARS).collect();
-        if !agent {
-            crate::web::shown(&body, crate::web::Source::Link);
-        }
-        let agent = if agent {
-            format!(", {BY_AGENT}")
-        } else {
-            String::new()
+        let (body, agent) = comment_body(closing);
+        let who = match (closing.author.as_str(), agent) {
+            ("", false) => String::new(),
+            ("", true) => format!(" ({BY_AGENT})"),
+            (author, false) => format!(" ({author})"),
+            (author, true) => format!(" ({author}, {BY_AGENT})"),
         };
-        text.push_str(&format!(
-            "  closing comment ({}{agent}): {}\n",
-            closing.author,
-            body.replace('\n', "\n    ")
-        ));
+        text.push_str(&format!("  closing comment{who}: {body}\n"));
     }
     for (title, comments) in [("comments", &pull.comments), ("reviews", &pull.reviews)] {
         let said: Vec<&Comment> = comments.iter().filter(|c| !c.body.is_empty()).collect();
@@ -2347,21 +2366,13 @@ fn pull_text(text: &mut String, named: &str, pull: &Pull, full: bool, again: &st
                 .state
                 .as_deref()
                 .map_or(String::new(), |s| format!(", {s}"));
-            let (body, agent) = comment.unmarked();
-            let body: String = body.chars().take(COMMENT_CHARS).collect();
-            if !agent {
-                crate::web::shown(&body, crate::web::Source::Link);
-            }
+            let (body, agent) = comment_body(comment);
             let agent = if agent {
                 format!(" ({BY_AGENT})")
             } else {
                 String::new()
             };
-            text.push_str(&format!(
-                "  - {}{agent}{state}: {}\n",
-                comment.author,
-                body.replace('\n', "\n    ")
-            ));
+            text.push_str(&format!("  - {}{agent}{state}: {body}\n", comment.author));
         }
     }
 }

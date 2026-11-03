@@ -2457,22 +2457,34 @@ fn bitbucket_forge_show_of_a_pull_request_by_its_number_answers_it() {
     );
 }
 
-/// A Bitbucket script with closed pull requests: Cloud's #20 declined with a reason, #21 merged
-/// by Bob after his comment, #22 merged by Bob who said nothing; Data Center's #30 merged by Bob
-/// (his comment before it, his thanks after) and #31 declined by Bob who said nothing.
+/// The time Data Center's activities of `closed_bitbucket_pulls` are told from, in milliseconds.
+const CLOSED_AT: u64 = 1_700_000_000_000;
+
+/// A Bitbucket script with closed pull requests: Cloud's #20 declined with a reason by Carol, #21
+/// merged by Bob (who commented before: not a closing comment), #22 merged by Bob and #23
+/// declined with a reason, both naming no one; Data Center's #30 merged by Bob (a comment ten
+/// seconds before it, his "LGTM" an hour before, his thanks after), #31 declined by Bob who only
+/// commented two hours before, and #32 merged by Bob whose activities give no time.
 fn closed_bitbucket_pulls(user: &User) {
     let cloud_comment = |name: &str, text: &str| json!({"content": {"raw": text}, "user": {"display_name": name}, "deleted": false});
-    let activity = |action: &str, name: &str, text: Option<&str>| match text {
-        Some(text) => json!({"action": action, "comment": {"text": text,
-            "author": {"displayName": name}, "comments": []}}),
-        None => json!({"action": action, "user": {"displayName": name}}),
+    let activity = |action: &str, name: &str, text: Option<&str>, ago_ms: Option<i64>| {
+        let mut activity = match text {
+            Some(text) => json!({"action": action, "comment": {"text": text,
+                "author": {"displayName": name}, "comments": []}}),
+            None => json!({"action": action, "user": {"displayName": name}}),
+        };
+        if let Some(ago) = ago_ms {
+            activity["createdDate"] = json!(CLOSED_AT.checked_add_signed(-ago).unwrap());
+        }
+        activity
     };
     user.bkt_script(json!({
         "contexts": contexts(),
         "pulls": {
             "acme/api": [cloud_pull(20, "app/a", "DECLINED"), cloud_pull(21, "app/b", "MERGED"),
-                cloud_pull(22, "app/c", "MERGED")],
-            "APP/web": [dc_pull(30, "app/d", "MERGED"), dc_pull(31, "app/e", "DECLINED")]
+                cloud_pull(22, "app/c", "MERGED"), cloud_pull(23, "app/d", "DECLINED")],
+            "APP/web": [dc_pull(30, "app/d", "MERGED"), dc_pull(31, "app/e", "DECLINED"),
+                dc_pull(32, "app/f", "MERGED")]
         },
         "checks": {"acme/api": {}, "APP/web": {}},
         "api": {
@@ -2485,18 +2497,24 @@ fn closed_bitbucket_pulls(user: &User) {
             "/repositories/acme/api/pullrequests/21/comments": {"values": [
                 cloud_comment("Alice", "Looks good"),
                 cloud_comment("Bob", "Merging after the freeze")]},
-            "/repositories/acme/api/pullrequests/22": {"participants": [],
-                "closed_by": {"display_name": "Bob"}},
-            "/repositories/acme/api/pullrequests/22/comments": {"values": [
-                cloud_comment("Alice", "Looks good")]},
+            "/repositories/acme/api/pullrequests/22": {"participants": []},
+            "/repositories/acme/api/pullrequests/22/comments": {"values": []},
+            "/repositories/acme/api/pullrequests/23": {"participants": [],
+                "reason": "Out of date"},
+            "/repositories/acme/api/pullrequests/23/comments": {"values": []},
             "/rest/api/1.0/projects/APP/repos/web/pull-requests/30/activities": {"values": [
-                activity("COMMENTED", "Bob", Some("Thanks all")),
-                activity("MERGED", "Bob", None),
-                activity("COMMENTED", "Alice", Some("Ship it")),
-                activity("COMMENTED", "Bob", Some("Merging after the freeze"))]},
+                activity("COMMENTED", "Bob", Some("Thanks all"), Some(-5_000)),
+                activity("MERGED", "Bob", None, Some(0)),
+                activity("COMMENTED", "Bob", Some("Merging after the freeze"), Some(10_000)),
+                activity("COMMENTED", "Alice", Some("Ship it"), Some(20_000)),
+                activity("COMMENTED", "Bob", Some("LGTM"), Some(3_600_000))]},
             "/rest/api/1.0/projects/APP/repos/web/pull-requests/31/activities": {"values": [
-                activity("DECLINED", "Bob", None),
-                activity("COMMENTED", "Alice", Some("Why?"))]}
+                activity("DECLINED", "Bob", None, Some(0)),
+                activity("COMMENTED", "Alice", Some("Why?"), Some(5_000)),
+                activity("COMMENTED", "Bob", Some("I will look"), Some(7_200_000))]},
+            "/rest/api/1.0/projects/APP/repos/web/pull-requests/32/activities": {"values": [
+                activity("MERGED", "Bob", None, None),
+                activity("COMMENTED", "Bob", Some("Done"), None)]}
         }
     }));
 }
@@ -2518,27 +2536,36 @@ fn show_of_a_closed_pull_request_has_its_closing_comment_on_bitbucket() {
     };
 
     let declined = show("api", 20);
-    let merged = show("api", 21);
-    let silent = show("api", 22);
+    let old_comment = show("api", 21);
+    let nobody_said = show("api", 22);
+    let no_closer = show("api", 23);
     let data_center = show("web", 30);
-    let data_center_silent = show("web", 31);
+    let data_center_old = show("web", 31);
+    let data_center_untimed = show("web", 32);
 
-    // Cloud: the reason it was declined with, else the last comment of whoever closed it.
+    // Cloud: the reason it was declined with, said with its author when the page names one and
+    // without when it does not.
     assert!(
         declined.contains("closing comment (Carol): Superseded by the rewrite"),
         "{declined}"
     );
     assert!(
-        merged.contains("closing comment (Bob): Merging after the freeze"),
-        "{merged}"
+        no_closer.contains("closing comment: Out of date"),
+        "{no_closer}"
     );
-    // Data Center: the comment of whoever closed it, before the activity that closed it.
+    // Data Center: the closer's comment of the minute before, not the one of an hour before nor
+    // their thanks after.
     assert!(
         data_center.contains("closing comment (Bob): Merging after the freeze"),
         "{data_center}"
     );
-    assert!(!data_center.contains("Thanks all)"), "{data_center}");
-    for none in [&silent, &data_center_silent] {
+    // The others are no closing comment: an old one, or one nothing dates.
+    for none in [
+        &old_comment,
+        &nobody_said,
+        &data_center_old,
+        &data_center_untimed,
+    ] {
         assert!(!none.contains("closing comment"), "{none}");
     }
 }
@@ -2565,7 +2592,7 @@ fn show_of_a_closed_pull_request_has_its_comment_count_on_bitbucket() {
         cloud.text
     );
     assert!(
-        data_center.text.contains("comments: 3, read them with"),
+        data_center.text.contains("comments: 4, read them with"),
         "{}",
         data_center.text
     );
