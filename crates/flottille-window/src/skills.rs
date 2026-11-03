@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 
 use flottille_ui::{
     Button, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, RadioChoices,
-    Section, Toast, Type, hoverable, icon, palette, presence, space, toast,
+    Section, Toast, Type, growing, hoverable, icon, palette, presence, space, toast,
 };
-use gpui_kit::base::input::{Input, InputEvent, InputState, TextareaState};
+use gpui_kit::base::input::{Enter, Input, InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement, IntoElement,
@@ -30,6 +30,9 @@ use crate::shell::Shell;
 
 /// How many entries of a folder the picker lists.
 const LISTED: usize = 200;
+
+/// How many lines "Read it when" grows to before it scrolls.
+const DESCRIPTION_ROWS: usize = 4;
 
 /// What the section says a skill is for.
 pub const SENTENCE: &str = "Texts an agent reads when its task needs them. It sees their names \
@@ -91,7 +94,7 @@ pub fn entries(dir: &Path) -> Vec<Entry> {
 
 struct Fields {
     name: Entity<InputState>,
-    description: Entity<InputState>,
+    description: Entity<TextareaState>,
     path: Entity<InputState>,
     text: Entity<TextareaState>,
 }
@@ -200,7 +203,7 @@ impl SkillsSection {
         self.fields.as_ref().map(|f| &f.name)
     }
 
-    pub fn description_field(&self) -> Option<&Entity<InputState>> {
+    pub fn description_field(&self) -> Option<&Entity<TextareaState>> {
         self.fields.as_ref().map(|f| &f.description)
     }
 
@@ -280,7 +283,16 @@ impl SkillsSection {
     fn fields(&mut self, window: &mut Window, cx: &mut Context<Self>) -> &Fields {
         if self.fields.is_none() {
             let name = line_field("style", window, cx);
-            let description = line_field("writing code", window, cx);
+            // A sentence that is long: it wraps and grows up to a few lines, then scrolls. Enter
+            // adds no line, as in the one-line field it replaces.
+            let description = cx.new(|cx| {
+                let mut field = TextareaState::new(window, cx)
+                    .auto_grow(1, DESCRIPTION_ROWS)
+                    .submit_on_enter(true)
+                    .placeholder("writing code");
+                field.set_editor_style(editor_style(cx));
+                field
+            });
             let path = line_field("docs/STYLE.md", window, cx);
             let text = cx.new(|cx| {
                 let mut field = TextareaState::new(window, cx)
@@ -289,7 +301,7 @@ impl SkillsSection {
                 field.set_editor_style(editor_style(cx));
                 field
             });
-            for input in [&name, &description, &path] {
+            for input in [&name, &path] {
                 self._subscriptions
                     .push(cx.subscribe(input, |this, _, event, cx| {
                         if matches!(event, InputEvent::Change) && this.form_error.take().is_some() {
@@ -297,6 +309,12 @@ impl SkillsSection {
                         }
                     }));
             }
+            self._subscriptions
+                .push(cx.subscribe(&description, |this, _, event, cx| {
+                    if matches!(event, InputEvent::Change) && this.form_error.take().is_some() {
+                        cx.notify();
+                    }
+                }));
             self.fields = Some(Fields {
                 name,
                 description,
@@ -336,9 +354,11 @@ impl SkillsSection {
         });
         self.editing = info.map(|info| info.name.clone());
         self.as_text = info.is_some_and(|info| info.path.is_none());
-        let focus = if info.is_some() { description } else { name }
-            .read(cx)
-            .focus_handle(cx);
+        let focus = if info.is_some() {
+            description.read(cx).focus_handle(cx)
+        } else {
+            name.read(cx).focus_handle(cx)
+        };
         window.focus(&focus, cx);
         self.browsing = info
             .and_then(|info| info.path.as_deref())
@@ -444,7 +464,14 @@ impl SkillsSection {
             Some(name) => name.clone(),
             None => fields.name.read(cx).value().trim().to_owned(),
         };
-        let description = fields.description.read(cx).value().trim().to_owned();
+        // One line for the agent: a line break typed with Shift or pasted is a space.
+        let description = fields
+            .description
+            .read(cx)
+            .value()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         let (path, text) = if self.as_text {
             (None, Some(fields.text.read(cx).value().to_string()))
         } else {
@@ -753,26 +780,28 @@ impl SkillsSection {
                 .into_any_element(),
             None => boxed("skill-name", Input::new(&fields.name), cx).into_any_element(),
         };
+        // The sentence is long: it has the dialog's width under the name, and its box eases to
+        // the height its lines need.
+        let description = growing(
+            "skill-description-grow",
+            div()
+                .id("skill-description-field")
+                .min_h(px(32.))
+                .px(space::MD)
+                .py(space::XS)
+                .rounded(px(8.))
+                .bg(p.field)
+                .border_1()
+                .border_color(p.line2)
+                .mono(12.5)
+                .child(fields.description.clone())
+                // The field passes Enter on to its parents, which would turn it into a line.
+                .on_action(cx.listener(|_, _: &Enter, _, _| {}))
+                .test_support(),
+        );
         modal
-            .child(
-                div()
-                    .flex()
-                    .gap(space::MD)
-                    .child(div().flex_1().min_w_0().child(Field::new(
-                        "skill-name-field",
-                        "Name",
-                        name,
-                    )))
-                    .child(div().flex_1().min_w_0().child(Field::new(
-                        "skill-description",
-                        "Read it when",
-                        boxed(
-                            "skill-description-field",
-                            Input::new(&fields.description),
-                            cx,
-                        ),
-                    ))),
-            )
+            .child(Field::new("skill-name-field", "Name", name))
+            .child(Field::new("skill-description", "Read it when", description))
             .child(Field::new("skill-kind-field", "What it is", kind))
             // The text and the path with its picker fold into each other with the choice.
             .child(

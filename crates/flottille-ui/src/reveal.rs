@@ -372,6 +372,99 @@ impl RenderOnce for PresenceOf {
     }
 }
 
+/// `content` whose height follows its own: when it grows or shrinks (a field that wraps its text
+/// onto a new line) the block eases to its new height over [`PANEL`] instead of jumping, and
+/// what is below it moves with it. Build it on every frame; it is its own state, and settles at
+/// the content's height the first time it is drawn.
+pub fn growing(id: impl Into<ElementId>, content: impl IntoElement) -> Growing {
+    Growing {
+        id: id.into(),
+        content: content.into_any_element(),
+    }
+}
+
+#[derive(IntoElement)]
+pub struct Growing {
+    id: ElementId,
+    content: AnyElement,
+}
+
+/// What a [`Growing`] remembers: its height in motion, and the content's own height as the last
+/// frame measured it (cells, because the measure runs while the frame is drawn).
+struct Grown {
+    motion: Motion,
+    known: bool,
+    measured: Rc<Cell<f32>>,
+    target: Rc<Cell<f32>>,
+}
+
+impl RenderOnce for Growing {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let key = ElementId::NamedChild(Arc::new(self.id.clone()), "growing".into());
+        let state = window.use_keyed_state(key, cx, |_, _| Grown {
+            motion: Motion::settled(0.0),
+            known: false,
+            measured: Rc::new(Cell::new(0.0)),
+            target: Rc::new(Cell::new(0.0)),
+        });
+        let now = cx.background_executor().now();
+        let reduce = cx.reduce_motion();
+        let (height, running, known, measured, target) = state.update(cx, |grown, _| {
+            let seen = grown.measured.get();
+            if seen > 0.0 {
+                if !grown.known {
+                    grown.known = true;
+                    grown.motion = Motion::settled(seen);
+                } else if (seen - grown.motion.target()).abs() > 0.5 {
+                    grown.motion.animate(seen, PANEL, now, reduce);
+                }
+            }
+            let running = grown.motion.is_running(now);
+            if !running {
+                grown.motion.settle(now);
+            }
+            grown.target.set(grown.motion.target());
+            (
+                grown.motion.value(now),
+                running,
+                grown.known,
+                grown.measured.clone(),
+                grown.target.clone(),
+            )
+        });
+        if running {
+            window.request_animation_frame();
+        }
+        // Measures the content's own height, laid out free of the clip. A height that is not the
+        // one aimed at asks for a frame, which retargets the motion.
+        let measure = canvas(
+            move |bounds: Bounds<Pixels>, window, _| {
+                let seen = f32::from(bounds.size.height);
+                measured.set(seen);
+                if (seen - target.get()).abs() > 0.5 {
+                    window.request_animation_frame();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
+        // Clipped from the second frame on, also at rest: a content that grows is then never
+        // drawn at its new height before the motion starts.
+        let outer = div().id(self.id).w_full().relative();
+        let inner = div().w_full().child(self.content).child(measure);
+        if known {
+            outer
+                .h(px(height))
+                .overflow_hidden()
+                .child(inner.absolute().top_0().left_0())
+                .test_support()
+        } else {
+            outer.child(inner.relative()).test_support()
+        }
+    }
+}
+
 /// The "Thinking" label: while active its colour pulses between faint and text, once every
 /// [`PULSE`]; at rest it is still.
 pub struct PulsingLabel {

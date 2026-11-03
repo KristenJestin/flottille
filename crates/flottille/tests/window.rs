@@ -7801,6 +7801,163 @@ fn add_skill_offers_two_radio_choices_each_with_its_line(cx: &mut TestAppContext
     });
 }
 
+/// The bounds of the skill dialog's element `id`.
+fn bounds_in_dialog(id: &str, cx: &mut VisualTestContext) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+    cx.update(|window, _| window.find(id.to_owned()).bounds())
+}
+
+/// The skill dialog open to add one, its description set to `text`, the animations over.
+fn skill_dialog_with_description(
+    text: &str,
+    cx: &mut VisualTestContext,
+    shell: &Entity<Shell>,
+) -> Entity<flottille_window::skills::SkillsSection> {
+    sections_of(shell, "atlas", "skills", cx);
+    let section = skills_section(shell, cx);
+    cx.update(|window, cx| window.click("add-skill", cx));
+    settle(cx);
+    let description = section.read_with(cx, |s, _| s.description_field().unwrap().clone());
+    cx.update(|window, cx| description.update(cx, |f, cx| f.set_value(text, window, cx)));
+    settle(cx);
+    section
+}
+
+#[gpui_kit::test]
+fn read_it_when_is_under_the_name_at_full_width(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    skill_dialog_with_description("", cx, &shell);
+
+    let name = bounds_in_dialog("skill-name", cx);
+    let description = bounds_in_dialog("skill-description-field", cx);
+    let file = bounds_in_dialog("skill-path-field", cx);
+    assert!(
+        description.top() >= name.bottom(),
+        "under the name: {description:?} against {name:?}"
+    );
+    assert_eq!(description.left(), name.left(), "on the name's left edge");
+    assert_eq!(
+        description.size.width, file.size.width,
+        "the dialog's width"
+    );
+    assert_eq!(name.size.width, file.size.width, "the name has it too");
+    let label = bounds_in_dialog("skill-description-label", cx);
+    assert!(label.bottom() <= description.top(), "its label is above it");
+}
+
+#[gpui_kit::test]
+fn a_long_read_it_when_wraps_on_several_lines(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let short = "writing code";
+    let long = "when a task touches the components of the window, their state, their motion or \
+                the way a screen is built from them, and before any new screen is started";
+    let section = skill_dialog_with_description(short, cx, &shell);
+    let one_line = bounds_in_dialog("skill-description-field", cx).size.height;
+    assert_eq!(
+        one_line,
+        bounds_in_dialog("skill-name", cx).size.height,
+        "one line is as high as the name's"
+    );
+
+    let description = section.read_with(cx, |s, _| s.description_field().unwrap().clone());
+    cx.update(|window, cx| description.update(cx, |f, cx| f.set_value(long, window, cx)));
+    settle(cx);
+    let wrapped = bounds_in_dialog("skill-description-field", cx).size.height;
+    assert!(
+        wrapped >= one_line * 2.0,
+        "{wrapped:?} against {one_line:?}"
+    );
+
+    // Past a few lines it stops growing and scrolls.
+    let endless = [long; 12].join(" ");
+    cx.update(|window, cx| description.update(cx, |f, cx| f.set_value(&endless, window, cx)));
+    settle(cx);
+    let most = bounds_in_dialog("skill-description-field", cx).size.height;
+    assert!(most > wrapped, "{most:?} against {wrapped:?}");
+    assert!(most < wrapped * 3.0, "it stops growing: {most:?}");
+
+    // And it shrinks back with the text.
+    cx.update(|window, cx| description.update(cx, |f, cx| f.set_value(short, window, cx)));
+    settle(cx);
+    assert_eq!(
+        bounds_in_dialog("skill-description-field", cx).size.height,
+        one_line
+    );
+}
+
+#[gpui_kit::test]
+fn enter_in_read_it_when_adds_no_line(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let section = skill_dialog_with_description("", cx, &shell);
+    let description = section.read_with(cx, |s, _| s.description_field().unwrap().clone());
+    cx.update(|window, cx| window.click("skill-description-field", cx));
+    cx.simulate_input("writing code");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(
+        description.read_with(cx, |f, _| f.value().to_string()),
+        "writing code",
+        "Enter keeps its meaning: no new line"
+    );
+    assert!(
+        section.read_with(cx, |s, _| s.is_open()),
+        "and it saves nothing"
+    );
+}
+
+#[gpui_kit::test]
+fn a_line_break_in_read_it_when_is_saved_as_a_space(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let section = skill_dialog_with_description("when a task\n  touches the style\n", cx, &shell);
+    cx.update(|window, cx| window.click("skill-name", cx));
+    cx.simulate_input("style");
+    cx.update(|window, cx| window.click("skill-kind-text", cx));
+    settle(cx);
+    let text = section.read_with(cx, |s, _| s.text_field().unwrap().clone());
+    cx.update(|window, cx| text.update(cx, |f, cx| f.set_value("Short functions.", window, cx)));
+    cx.update(|window, cx| window.click("save-skill", cx));
+    until(&shell, cx, "the skill is listed", |cx| {
+        !skills_listed(&shell, cx).is_empty()
+    });
+    assert_eq!(
+        skills_listed(&shell, cx)[0].description,
+        "when a task touches the style"
+    );
+}
+
+#[gpui_kit::test]
+fn the_height_of_read_it_when_changes_over_the_panel_duration_not_at_once(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let section = skill_dialog_with_description("writing code", cx, &shell);
+    let before = bounds_in_dialog("skill-description-grow", cx).size.height;
+    let description = section.read_with(cx, |s, _| s.description_field().unwrap().clone());
+    let long = ["when a task touches the components of the window"; 4].join(" ");
+    cx.update(|window, cx| description.update(cx, |f, cx| f.set_value(&long, window, cx)));
+    // A few frames in, it is on its way: taller than before, not yet at its height.
+    for _ in 0..3 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    }
+    let midway = bounds_in_dialog("skill-description-grow", cx).size.height;
+    settle(cx);
+    let after = bounds_in_dialog("skill-description-grow", cx).size.height;
+    assert!(after > before, "{after:?} against {before:?}");
+    assert!(
+        midway > before && midway < after,
+        "{before:?} < {midway:?} < {after:?}"
+    );
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+}
+
 #[gpui_kit::test]
 fn every_switch_of_the_task_dialog_draws_its_label_and_its_hint(cx: &mut TestAppContext) {
     let user = user();
