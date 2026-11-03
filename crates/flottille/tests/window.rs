@@ -10457,7 +10457,7 @@ fn the_developer_mode_is_switched_in_settings_with_its_log_s_path_beside_the_swi
 fn the_limit_of_tool_results_is_chosen_in_a_section_at_the_end_of_the_providers_tab(
     cx: &mut TestAppContext,
 ) {
-    let user = User::new();
+    let user = User::new().with_cut_results();
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     let page = open_settings(&shell, cx);
     choose_settings_tab("providers", cx);

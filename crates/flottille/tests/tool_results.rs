@@ -466,3 +466,17 @@ fn only_the_latest_cut_results_of_an_agent_are_kept_and_a_dropped_one_says_so() 
         "{oldest_kept}"
     );
 }
+
+#[test]
+fn a_daemon_cuts_whatever_its_environment_says() {
+    // The tests' own daemons are told to return results whole by the setting file of their
+    // temporary folder; no variable of the environment turns the cut off in a daemon.
+    let user = User::with_fake_agent()
+        .with_cut_results()
+        .with_env("FLOTTILLE_TEST_NO_CUT_RESULTS", "1");
+    let (_, mcp, _) = session(&user);
+
+    let text = long(&mcp);
+
+    assert!(text.contains("characters left out"), "{text}");
+}

@@ -80,9 +80,6 @@ fn read(paths: &Paths) -> Result<Option<usize>, String> {
 /// The limit a call is held to now. A file that cannot be read is the default's: a cut is the
 /// safe side.
 fn limit(paths: &Paths) -> Option<usize> {
-    if std::env::var_os("FLOTTILLE_TEST_NO_CUT_RESULTS").is_some_and(|v| !v.is_empty()) {
-        return None;
-    }
     read(paths).unwrap_or(Some(DEFAULT_LIMIT))
 }
 
