@@ -81,9 +81,10 @@ An edit of `providers.toml` by hand is not announced: it is read again at the ne
 
 ### `provider.models_read`
 
-The daemon read a provider's models, with no session (`docs/agents.md`, "The models"): as soon as
-the provider was enabled and ready, or its program or API keys changed. The window reads the
-providers again.
+The daemon read a provider's models with no prompt (`docs/agents.md`, "The models"): at its
+start, when the provider was enabled, or when its program (path or modification time), the names
+of its API keys set or the presence of its sign-in file changed. The window reads the providers
+again.
 
 | Field | |
 |---|---|

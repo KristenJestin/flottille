@@ -126,27 +126,37 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   (signing in or out with `opencode auth login`), OpenCode's model catalogue (fetched from
   `models.dev`, `core/src/models-dev.ts`) and its own state, and such a change shows only at the
   next session.
-  **No prompt is ever sent to list them**, and no provider's listing reaches a model: Claude
-  Code answers `initialize` with its models before any user message (the Agent SDK's
-  `startup()` completes that handshake "before a prompt is available", and
-  `initializationResult()` holds the models; Claude's ACP adapter reads them when it opens a
-  session), Codex's `model/list` reads its catalogue (bundled, cached, and a `/models` request of
-  the catalogue, not of a model: `models-manager/src/manager.rs`) and needs no thread, and
-  OpenCode's `session/new` loads its provider and model catalogue and makes a session record
-  (`acp/service.ts`, `newSession`). So the daemon reads the models of an enabled provider whose
-  program is there, in the background, at its start, when the provider is enabled, and when the
-  state of the provider differs from the one its models were read in: its program (path or
-  modification time), the names of its API keys set, or the presence of its sign-in file. It is
-  the judge's way (`docs/design.md` §7): the provider's agent started bare in an empty folder with
-  no tool and no MCP server, `initialize`, one `session/new`, the options kept as a session's are,
-  the process ended, 60 s at most. The session is not asked anything else: Claude's and Codex's
-  go with their process (Codex's thread is deleted as an agent's is), OpenCode's empty session
-  stays in its database in Flottille's folder. A failure (program missing or failing, not signed
-  in, over time) is one line in the developer log (`docs/developer.md`) and changes nothing: the
-  models stay as they were, and are not asked again before the state of the provider changes or
-  it is enabled again. A read is announced by `provider.models_read` (`docs/events.md`). Until
-  they are read, from either, they are `null`, an
-  agent may ask any model and effort, and one its session does not offer fails the agent
+  **No prompt is ever sent to list them.** Codex's `model/list` reads its catalogue (bundled,
+  cached, and a `/models` request of the catalogue, not of a model:
+  `models-manager/src/manager.rs`) and needs no thread: the daemon starts `codex app-server` bare,
+  as for a thread's deletion, sends `initialize`, `account/read` (a Codex not signed in is a
+  failure, as for a session) and `model/list`, and ends it; no thread is started. Claude and
+  OpenCode go through their ACP agent started as a session's is, the judge's way
+  (`docs/design.md` §7): bare, in Flottille's own empty folder `<state>/models`, no tool and no MCP
+  server, `initialize` and one `session/new`, its options kept as a session's are, and no user
+  message. For Claude it is the same startup as a session: Claude Code answers `initialize` with
+  its models before any user message (the Agent SDK's `startup()` completes that handshake
+  "before a prompt is available", and `initializationResult()` holds the models), and nothing
+  more is asked of it; that no request reaches a model then was not captured on the network.
+  Claude Code keeps what it keeps of a session in the user's `~/.claude` as for every agent, under
+  the session's folder, here `<state>/models`; Flottille never writes there. OpenCode's
+  `session/new` loads its provider and model catalogue and makes a session record
+  (`acp/service.ts`, `newSession`); the session is deleted at once with ACP's `session/delete`,
+  which OpenCode offers, so that its database in Flottille's folder keeps no empty session per
+  listing. An agent that does not offer `session/delete` keeps its empty session. Whatever the
+  outcome, the process is ended (its process group killed, 60 s at most) and what Flottille kept
+  for it and its session goes, as for an agent's.
+
+  The daemon lists the models of an enabled provider whose program is there, in the background:
+  at its start, when the provider is enabled, and when the state of the provider differs from the
+  one a listing was last made in: its program (path or modification time), the names of its API
+  keys set, or the presence of its sign-in file. A listing during which the program or the keys
+  changed keeps nothing, and the next check lists again. A failure (program missing or failing,
+  not signed in, over time) is one line in the developer log when developer mode is on
+  (`docs/developer.md`) and changes nothing: the models stay as they were, and are not asked again
+  before the state of the provider changes or it is enabled again. A read is announced by
+  `provider.models_read` (`docs/events.md`). Until a listing or a session said them, they are
+  `null`, an agent may ask any model and effort, and one its session does not offer fails the agent
   ("The options", below). Once they are known, a model or an effort they do not hold is refused
   at once, naming those the provider offers. A model asked as a listed model's id without its
   date suffix (`-YYYYMMDD`) is that model (`claude-haiku-4-5` for `claude-haiku-4-5-20251001`),

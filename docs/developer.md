@@ -79,7 +79,8 @@ stop.
 
 ### `models`
 
-A provider's models were read with no session (`docs/agents.md`, "The models"), or could not be.
+A provider's models were read with no prompt (`docs/agents.md`, "The models"), or could not be.
+Written only while developer mode is on, as every line: a failed listing is said nowhere else.
 `agent` is `null`.
 
 | Field | |
