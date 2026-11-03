@@ -171,6 +171,7 @@ The components that hold them:
 | `ListCard::new(id).row(ListRow)` | rule 7's list; `ListRow` has `.mono()`, `.tag(t)`, `.line(l)`, `.more(Entity<Menu>)` (its clicks stay its own), `.below(el)` (labelled values, a reason under the title); `.item(id, placement, row)` draws a row of a `Listing` in its `Item` |
 | `Tabs::new(id, label, chosen).tab(key, words)`, `.counted(key, words, count)`, `.on_choose(f)` | a page of sections shown one at a time (the project's settings, Settings): as many tabs as sections, a count after the name of a list, the marker slides to the tab chosen over `PANEL`; the page draws the chosen section alone, inside an `enter` that plays again as it is chosen again |
 | `EmptyLine::new(id, Icon, text)` | an empty list; `.action(Button)` |
+| `QuickPanel::new(id)` / `QuickRow::new(id, title)` | a quick switcher's look (the window's Ctrl K): the panel (`.field(..)`, `.results(..)` as `Item`s of a `Listing`, `.scroll(&handle)`, `.on_key(f)`, `.on_close(f)`, `.open(bool)`; ids `<id>`, `<id>-scrim`, `<id>-results`) rises and fades like `Modal`; a row has `.pieces(Match::pieces(..))` (what matched, in the accent), `.icon`, `.line`, `.trailing`, `.marked(bool)` (its fill moves over `PANEL`), `.on_click`, `.on_mark` (the pointer entered it). `fuzzy::find(query, title, context)` scores the match, ignoring case and accents |
 | `space::{XS, SM, MD, LG, XL, XXL, XXXL}`, `COLUMN`, `DIALOG`, `DIALOG_WIDE` | rule 9 |
 
 `cargo run -p flottille-ui --example components` shows them on one page (`--dialog`, `--confirm`,

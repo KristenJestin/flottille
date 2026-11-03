@@ -6,11 +6,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use flottille_ui::color::mix;
 use flottille_ui::motion::{ENTER, HOVER, Motion, RISE};
 use flottille_ui::{
     AgentState, Badge, Button, Card, Drawer, Icon, Item, ListRow, Listing, Side, StateIcon, Status,
-    ToastStack, Type, dismiss_on_navigate, dismiss_top_overlay, enter, forget_overlays, icon,
-    open_overlay, palette, presence, space,
+    ToastStack, Type, dismiss_on_navigate, dismiss_top_overlay, enter, forget_overlays, hoverable,
+    icon, open_overlay, palette, presence, space,
 };
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
@@ -37,6 +38,9 @@ use crate::rules::RulesEditor;
 use crate::session::{Chose, Follow, Opened, Reply, SessionPage};
 use crate::settings::{Reveal, SettingsPage};
 use crate::tree::{PlaceNode, ProjectNode, SessionRow, Sidebar};
+
+pub mod switcher;
+use switcher::Switcher;
 
 /// Below this width the session page's rail becomes a drawer from the right.
 pub const WIDE: f32 = 1240.;
@@ -148,6 +152,8 @@ pub struct Shell {
     project_settings: Option<Entity<ProjectSettingsPage>>,
     /// The form that adds a project, one for the window's life.
     add_project: Entity<AddProject>,
+    /// The quick switcher (Ctrl K): sessions, projects and actions found by what is typed.
+    switcher: Entity<Switcher>,
     /// The link's updates, until a task takes them.
     updates: Option<UnboundedReceiver<Update>>,
     _link: Task<()>,
@@ -231,6 +237,10 @@ impl Shell {
             let this = this.clone();
             cx.new(|cx| AddProject::new(this, window, cx))
         };
+        let switcher = {
+            let this = this.clone();
+            cx.new(|cx| Switcher::new(this, window, cx))
+        };
         let _clock = cx.spawn(async move |this: WeakEntity<Shell>, cx| {
             loop {
                 cx.background_executor().timer(CLOCK).await;
@@ -279,6 +289,7 @@ impl Shell {
             appearance_asked: 0,
             project_settings: None,
             add_project,
+            switcher,
             updates: Some(updates),
             _link: Task::ready(()),
             _clock,
@@ -376,6 +387,30 @@ impl Shell {
         self.left.update(cx, |drawer, cx| drawer.close(cx));
         self.add_project
             .update(cx, |form, cx| form.open(window, cx));
+    }
+
+    /// The quick switcher.
+    pub fn switcher(&self) -> &Entity<Switcher> {
+        &self.switcher
+    }
+
+    /// What the window's own focus is, which the switcher gives back when nothing had it.
+    pub fn focus_handle(&self) -> FocusHandle {
+        self.focus.clone()
+    }
+
+    /// Opens or closes the quick switcher: Ctrl K, or a click on the top bar's search.
+    pub fn toggle_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_bell(false, cx);
+        self.left.update(cx, |drawer, cx| drawer.close(cx));
+        self.switcher
+            .update(cx, |switcher, cx| switcher.toggle(window, cx));
+    }
+
+    /// Opens Settings on the tab of that section of [`crate::settings::SECTIONS`].
+    pub fn open_settings_tab(&mut self, tab: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.open(Selection::Settings, window, cx);
+        self.settings.update(cx, |page, cx| page.choose(tab, cx));
     }
 
     /// What opens a folder in the user's editor, for the session pages opened from now on.
@@ -1467,6 +1502,8 @@ impl Shell {
             .retain(|id, _| snapshot.sessions.iter().any(|s| &s.id == id));
         let edited = snapshot.project_changes != self.snapshot.project_changes;
         self.snapshot = snapshot;
+        self.switcher
+            .update(cx, |switcher, cx| switcher.set_snapshot(&self.snapshot, cx));
         self.ring(cx);
 
         // What was open is shown as it is now; the first project opens when nothing is.
@@ -2001,6 +2038,11 @@ impl Render for Shell {
                 cx.listener(|this, _, window, cx| this.go(Way::Forward, window, cx)),
             )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "k" && event.keystroke.modifiers == Modifiers::control() {
+                    cx.stop_propagation();
+                    this.toggle_switcher(window, cx);
+                    return;
+                }
                 let way = match event.keystroke.key.as_str() {
                     "left" => Way::Back,
                     "right" => Way::Forward,
@@ -2023,6 +2065,7 @@ impl Render for Shell {
                 d.child(self.judge_notice_card(text, cx))
             })
             .child(self.add_project.clone())
+            .child(self.switcher.clone())
             .when(bell_drawn, |d| {
                 let scrim = div()
                     .id("bell-scrim")
@@ -2100,6 +2143,7 @@ impl Render for TopBar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let shell = self.shell.clone();
+        let search_shell = self.shell.clone();
         let menu_shell = self.shell.clone();
         let settings_shell = self.shell.clone();
         let mut bell =
@@ -2155,20 +2199,28 @@ impl Render for TopBar {
                         .child("reconnecting…"),
                 )
             })
-            .child(
+            .child(hoverable(
                 div()
+                    .id("top-search")
+                    .aria_label("Search")
                     .h(px(26.))
                     .px(space::MD)
                     .rounded(px(7.))
                     .flex()
                     .items_center()
                     .gap(space::SM)
-                    .text_color(p.faint)
+                    .cursor_pointer()
                     .text_size(px(12.5))
-                    .child(icon(Icon::Search).size(px(13.)).text_color(p.faint))
+                    .child(icon(Icon::Search).size(px(13.)))
                     .child("Search")
-                    .child(div().mono(11.).child("Ctrl K")),
-            )
+                    .child(div().mono(11.).child("Ctrl K"))
+                    .on_click(move |_, window, cx| {
+                        search_shell
+                            .update(cx, |shell, cx| shell.toggle_switcher(window, cx))
+                            .ok();
+                    }),
+                move |d, t| d.bg(p.hover.opacity(t)).text_color(mix(p.faint, p.text, t)),
+            ))
             .child(
                 Button::icon("settings", Icon::Settings, "Settings").on_click(
                     move |_, window, cx| {
