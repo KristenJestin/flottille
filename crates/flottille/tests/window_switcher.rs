@@ -8,7 +8,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::User;
+use flottille_ui::AgentState;
 use flottille_ui::omarchy::Environment;
+use flottille_ui::state::icon_id;
 use flottille_window::Shell;
 use flottille_window::link::Connect;
 use flottille_window::shell::Selection;
@@ -266,7 +268,10 @@ fn the_results_are_grouped_sessions_projects_actions(cx: &mut TestAppContext) {
     assert_eq!(titles(&said, "Sessions"), ["Fix the login bug"]);
     // The project and its workspace (found by its project's name) are in one group.
     assert_eq!(titles(&said, "Projects"), ["app", "login-fix"]);
-    assert_eq!(titles(&said, "Actions"), ["Settings: Appearance"]);
+    assert_eq!(
+        titles(&said, "Actions"),
+        ["Settings: Appearance", "Settings of app"]
+    );
     for heading in ["Sessions", "Projects", "Actions"] {
         assert!(
             cx.update(|window, _| window
@@ -468,4 +473,257 @@ fn the_top_bar_search_is_a_labelled_hoverable_field(cx: &mut TestAppContext) {
     assert!(pending_frames(cx) > 0, "the hover fades in");
     settle(cx);
     assert_eq!(pending_frames(cx), 0);
+}
+
+#[gpui_kit::test]
+fn closed_from_the_window_with_nothing_focused_the_window_gets_the_focus(cx: &mut TestAppContext) {
+    let world = world();
+    let (shell, cx) = ready(&world, cx);
+    // What had the focus is gone (a composer whose session left the tree): nothing has it.
+    cx.update(|window, cx| window.blur(cx));
+    let found = switcher(&shell, cx);
+    cx.update(|window, cx| found.update(cx, |switcher, cx| switcher.open(window, cx)));
+    settle(cx);
+    assert!(is_open(&shell, cx));
+    // Ctrl K or the top bar closes it, from inside the shell's own handling of it.
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.toggle_switcher(window, cx)));
+    settle(cx);
+    assert!(!is_open(&shell, cx));
+    let window_focus = shell.read_with(cx, |shell, _| shell.focus_handle());
+    assert!(
+        cx.update(|window, _| window_focus.is_focused(window)),
+        "nothing had it: the window has it"
+    );
+}
+
+#[gpui_kit::test]
+fn escape_gives_the_focus_back_to_the_composer_that_had_it(cx: &mut TestAppContext) {
+    let world = world();
+    let (shell, cx) = ready(&world, cx);
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.open(Selection::Project("app".into()), window, cx)
+        })
+    });
+    settle(cx);
+    let composer = shell
+        .read_with(cx, |shell, _| shell.composer_of("app").cloned())
+        .expect("the project's page has its composer");
+    let field = composer.read_with(cx, |composer, _| composer.field().clone());
+    let focus = cx.update(|_, cx| field.read(cx).focus_handle(cx));
+    cx.update(|window, cx| window.focus(&focus, cx));
+    settle(cx);
+    // Ctrl K reaches the window from a text field elsewhere.
+    open_with_keys(&shell, cx);
+    assert!(field_has_focus(&shell, cx));
+    cx.simulate_keystrokes("escape");
+    settle(cx);
+    assert!(
+        cx.update(|window, _| focus.is_focused(window)),
+        "the composer has the focus again"
+    );
+}
+
+#[gpui_kit::test]
+fn the_best_match_is_marked_whatever_its_group(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let one = start(
+        &user,
+        "app",
+        "Set up the staging tests, then investigate why the signup flow times out on slow links",
+    );
+    let two = start(
+        &user,
+        "app",
+        "Rewrite the session timeout handling so that idle tabs never sign the user out twice",
+    );
+    let world = World {
+        user,
+        login: one,
+        notes: two,
+    };
+    let (shell, cx) = ready(&world, cx);
+    open_with_keys(&shell, cx);
+    cx.simulate_input("settings");
+    settle(cx);
+    assert_eq!(
+        marked(&shell, cx),
+        Some(action_key("Settings")),
+        "{:?}",
+        said(&shell, cx)
+    );
+    assert!(
+        titles(&said(&shell, cx), "Sessions").is_empty(),
+        "letters scattered over a long title are no match"
+    );
+}
+
+#[gpui_kit::test]
+fn a_read_of_the_daemon_while_open_keeps_the_order_and_the_mark(cx: &mut TestAppContext) {
+    let world = world();
+    let (shell, cx) = ready(&world, cx);
+    open_with_keys(&shell, cx);
+    let order = titles(&said(&shell, cx), "Sessions");
+    assert_eq!(order, ["Write the release notes", "Fix the login bug"]);
+    cx.simulate_keystrokes("down");
+    settle(cx);
+    assert_eq!(marked(&shell, cx), Some(session_key(&world.login)));
+    // The older session becomes the most recent one.
+    let before = shell.read_with(cx, |shell, _| {
+        shell
+            .snapshot()
+            .sessions
+            .iter()
+            .find(|s| s.id == world.login)
+            .map(|s| s.active_at)
+            .unwrap()
+    });
+    world
+        .user
+        .call(
+            "agent.send",
+            json!({"agent": world.login, "message": "and the logout too"}),
+        )
+        .unwrap();
+    let login = world.login.clone();
+    until(&shell, cx, "the window reads the new activity", |cx| {
+        let shell = shell.clone();
+        cx.update(|_, cx| {
+            shell
+                .read(cx)
+                .snapshot()
+                .sessions
+                .iter()
+                .any(|s| s.id == login && s.active_at > before)
+        })
+    });
+    settle(cx);
+    assert!(is_open(&shell, cx));
+    assert_eq!(
+        titles(&said(&shell, cx), "Sessions"),
+        order,
+        "nothing moves under the pointer"
+    );
+    assert_eq!(marked(&shell, cx), Some(session_key(&world.login)));
+}
+
+#[gpui_kit::test]
+fn ctrl_k_does_nothing_while_a_dialog_is_open(cx: &mut TestAppContext) {
+    let world = world();
+    let (shell, cx) = ready(&world, cx);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.add_project(window, cx)));
+    settle(cx);
+    let form = shell.read_with(cx, |shell, _| shell.add_project_form().clone());
+    assert!(form.read_with(cx, |form, _| form.is_open()));
+    cx.simulate_keystrokes("ctrl-k");
+    settle(cx);
+    assert!(!is_open(&shell, cx), "the dialog keeps the keys");
+    assert!(form.read_with(cx, |form, _| form.is_open()));
+}
+
+#[gpui_kit::test]
+fn a_project_s_settings_and_the_bell_are_actions(cx: &mut TestAppContext) {
+    let world = world();
+    let (shell, cx) = ready(&world, cx);
+    open_with_keys(&shell, cx);
+    cx.simulate_input("harbor settings");
+    settle(cx);
+    assert_eq!(
+        marked(&shell, cx),
+        Some(action_key("Settings of harbor")),
+        "{:?}",
+        said(&shell, cx)
+    );
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    assert_eq!(
+        shell.read_with(cx, |shell, _| shell.selected().cloned()),
+        Some(Selection::ProjectSettings("harbor".into()))
+    );
+
+    open_with_keys(&shell, cx);
+    cx.simulate_input("notifications");
+    settle(cx);
+    assert_eq!(marked(&shell, cx), Some(action_key("Notifications")));
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    assert!(
+        shell.read_with(cx, |shell, _| shell.bell_open()),
+        "the bell's list is open"
+    );
+}
+
+#[test]
+fn a_workspace_s_key_is_its_own() {
+    assert_ne!(
+        workspace_key("app-b", "c"),
+        workspace_key("app", "b-c"),
+        "a dash in a name does not make two keys one"
+    );
+}
+
+#[gpui_kit::test]
+fn the_top_bar_search_moves_when_pressed(cx: &mut TestAppContext) {
+    let world = world();
+    let (_shell, cx) = ready(&world, cx);
+    let bounds = cx.update(|window, _| window.find("top-search").bounds());
+    let at = bounds.center();
+    cx.simulate_mouse_move(at, None, gpui_kit::Modifiers::default());
+    settle(cx);
+    cx.simulate_mouse_down(
+        at,
+        gpui_kit::MouseButton::Left,
+        gpui_kit::Modifiers::default(),
+    );
+    assert!(pending_frames(cx) > 0, "the press moves");
+    settle(cx);
+    cx.simulate_mouse_up(
+        at,
+        gpui_kit::MouseButton::Left,
+        gpui_kit::Modifiers::default(),
+    );
+    // The click opens the switcher, whose rows come in one after another.
+    settle(cx);
+    settle(cx);
+    assert_eq!(pending_frames(cx), 0);
+}
+
+#[gpui_kit::test]
+fn a_session_s_state_is_the_tree_s_icon_in_its_result(cx: &mut TestAppContext) {
+    let user = user();
+    user.fake_script(json!({"turns": [
+        {"when": "read the env", "do": [{"mcp": {"tool": "fs_read", "arguments": {"path": ".env"}}}]},
+    ]}));
+    project(&user, "app");
+    let id = start(&user, "app", "Fix the login bug");
+    let world = World {
+        user,
+        login: id.clone(),
+        notes: id.clone(),
+    };
+    let (shell, cx) = ready(&world, cx);
+    open_with_keys(&shell, cx);
+    let row = row_id(&session_key(&id));
+    let icon_in_row = |cx: &mut VisualTestContext| {
+        let row = row.clone();
+        cx.update(|window, _| {
+            window
+                .within(row)
+                .try_find(icon_id(AgentState::NeedsYou))
+                .is_some()
+        })
+    };
+    assert!(!icon_in_row(cx), "at rest: how long ago");
+    world
+        .user
+        .call(
+            "agent.send",
+            json!({"agent": id, "message": "read the env"}),
+        )
+        .unwrap();
+    until(&shell, cx, "the result shows the state icon", |cx| {
+        icon_in_row(cx)
+    });
+    assert!(is_open(&shell, cx));
 }

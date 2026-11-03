@@ -18,7 +18,7 @@ use gpui_kit::{
 
 use crate::color::mix;
 use crate::icons::{Icon, icon};
-use crate::interact::{dismiss_on_navigate, hoverable, open_overlay};
+use crate::interact::{dismiss_on_navigate, hoverable, open_holding_overlay};
 use crate::layer;
 use crate::motion::{ENTER, HOVER, Motion, RISE};
 use crate::theme::palette;
@@ -205,7 +205,7 @@ pub(crate) fn list_overlay(
     let viewport = window.viewport_size();
     let panel_dismiss = dismiss.clone();
     if let Some(dismiss) = dismiss.clone() {
-        open_overlay(
+        open_holding_overlay(
             ElementId::Name(format!("{}-menu", id_text(id)).into()),
             move |window, cx| dismiss(window, cx),
             cx,

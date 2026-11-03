@@ -10,8 +10,8 @@ use flottille_ui::color::mix;
 use flottille_ui::motion::{ENTER, HOVER, Motion, RISE};
 use flottille_ui::{
     AgentState, Badge, Button, Card, Drawer, Icon, Item, ListRow, Listing, Side, StateIcon, Status,
-    ToastStack, Type, dismiss_on_navigate, dismiss_top_overlay, enter, forget_overlays, hoverable,
-    icon, open_overlay, palette, presence, space,
+    ToastStack, Type, dismiss_on_navigate, dismiss_top_overlay, enter, forget_overlays, icon,
+    keys_held, open_overlay, palette, presence, pressable, space,
 };
 use futures::StreamExt as _;
 use futures::channel::mpsc::{UnboundedReceiver, unbounded};
@@ -237,9 +237,10 @@ impl Shell {
             let this = this.clone();
             cx.new(|cx| AddProject::new(this, window, cx))
         };
+        let focus = cx.focus_handle();
         let switcher = {
-            let this = this.clone();
-            cx.new(|cx| Switcher::new(this, window, cx))
+            let (this, focus) = (this.clone(), focus.clone());
+            cx.new(|cx| Switcher::new(this, focus, window, cx))
         };
         let _clock = cx.spawn(async move |this: WeakEntity<Shell>, cx| {
             loop {
@@ -257,7 +258,7 @@ impl Shell {
             layout: Layout::Wide,
             selected: None,
             history: History::default(),
-            focus: cx.focus_handle(),
+            focus,
             top,
             sidebar,
             main,
@@ -394,13 +395,17 @@ impl Shell {
         &self.switcher
     }
 
-    /// What the window's own focus is, which the switcher gives back when nothing had it.
+    /// The window's own focus: what has it when nothing else does.
     pub fn focus_handle(&self) -> FocusHandle {
         self.focus.clone()
     }
 
-    /// Opens or closes the quick switcher: Ctrl K, or a click on the top bar's search.
+    /// Opens or closes the quick switcher: Ctrl K, or a click on the top bar's search. An open
+    /// dialog or list (Add a project, a confirmation, a menu) keeps the keys: it is left first.
     pub fn toggle_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.switcher.read(cx).is_open() && keys_held(cx) {
+            return;
+        }
         self.set_bell(false, cx);
         self.left.update(cx, |drawer, cx| drawer.close(cx));
         self.switcher
@@ -2199,7 +2204,7 @@ impl Render for TopBar {
                         .child("reconnecting…"),
                 )
             })
-            .child(hoverable(
+            .child(pressable(
                 div()
                     .id("top-search")
                     .aria_label("Search")
@@ -2219,7 +2224,10 @@ impl Render for TopBar {
                             .update(cx, |shell, cx| shell.toggle_switcher(window, cx))
                             .ok();
                     }),
-                move |d, t| d.bg(p.hover.opacity(t)).text_color(mix(p.faint, p.text, t)),
+                move |d, hover, press| {
+                    d.bg(mix(p.hover.opacity(hover), p.sel, press))
+                        .text_color(mix(p.faint, p.text, hover))
+                },
             ))
             .child(
                 Button::icon("settings", Icon::Settings, "Settings").on_click(

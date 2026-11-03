@@ -21,7 +21,6 @@ pub mod modal;
 pub mod motion;
 pub mod omarchy;
 pub mod page;
-pub mod quick;
 pub mod radio;
 pub mod reveal;
 pub mod rows;
@@ -46,7 +45,7 @@ pub use field::Field;
 pub use icons::{Icon, Icons, icon};
 pub use interact::{
     Hoverable, dismiss_on_navigate, dismiss_top_overlay, fade, forget_overlays, hoverable,
-    open_overlay, selectable, text_region, tint,
+    keys_held, open_overlay, pressable, selectable, text_region, tint,
 };
 pub use lines::{
     CardHead, Chip, FlatRow, FooterAction, LINE_GAP, LabelledLine, StepRow, StepTone, caption,
@@ -57,7 +56,6 @@ pub use menu::Menu;
 pub use modal::Modal;
 pub use omarchy::Environment;
 pub use page::{EmptyLine, PageHeader, Section};
-pub use quick::{QuickPanel, QuickRow};
 pub use radio::RadioChoices;
 pub use reveal::{
     Fold, Presence, PresenceOf, PulsingLabel, enter, fold_frame, presence, presence_of,

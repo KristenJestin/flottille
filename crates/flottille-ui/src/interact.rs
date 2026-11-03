@@ -47,7 +47,14 @@ pub fn dismiss_on_navigate<E: InteractiveElement>(
 /// has no pointer to say which one it is meant for, and no focus inside the overlay: the window's
 /// root asks for the topmost.
 #[derive(Default)]
-struct Overlays(Vec<(ElementId, Dismiss)>);
+struct Overlays(Vec<Overlay>);
+
+struct Overlay {
+    id: ElementId,
+    dismiss: Dismiss,
+    /// A dialog or a list: the keys are its own while it is open.
+    holds_keys: bool,
+}
 
 type Dismiss = Rc<dyn Fn(&mut Window, &mut App)>;
 
@@ -65,15 +72,44 @@ pub fn open_overlay(
     dismiss: impl Fn(&mut Window, &mut App) + 'static,
     cx: &mut App,
 ) {
+    say_open(id, Rc::new(dismiss), false, cx);
+}
+
+/// [`open_overlay`] for a dialog or a list, which holds the keys while it is open.
+pub(crate) fn open_holding_overlay(
+    id: ElementId,
+    dismiss: impl Fn(&mut Window, &mut App) + 'static,
+    cx: &mut App,
+) {
+    say_open(id, Rc::new(dismiss), true, cx);
+}
+
+fn say_open(id: ElementId, dismiss: Dismiss, holds_keys: bool, cx: &mut App) {
     let open = &mut cx.default_global::<Overlays>().0;
-    open.retain(|(known, _)| known != &id);
-    open.push((id, Rc::new(dismiss)));
+    open.retain(|known| known.id != id);
+    open.push(Overlay {
+        id,
+        dismiss,
+        holds_keys,
+    });
+}
+
+/// Whether a dialog or a list (a menu, a select) was drawn open in the last frame: the window's
+/// own shortcuts leave the keys to it.
+pub fn keys_held(cx: &App) -> bool {
+    cx.try_global::<Overlays>()
+        .is_some_and(|open| open.0.iter().any(|overlay| overlay.holds_keys))
 }
 
 /// Dismisses the topmost open overlay, as the mouse's back and forward buttons do. Whether there
 /// was one.
 pub fn dismiss_top_overlay(window: &mut Window, cx: &mut App) -> bool {
-    let Some((_, dismiss)) = cx.default_global::<Overlays>().0.last().cloned() else {
+    let Some(dismiss) = cx
+        .default_global::<Overlays>()
+        .0
+        .last()
+        .map(|overlay| overlay.dismiss.clone())
+    else {
         return false;
     };
     dismiss(window, cx);
@@ -91,7 +127,23 @@ pub fn hoverable(
     Hoverable {
         element,
         chosen: None,
+        presses: false,
         paint: Box::new(move |element, hover, _| paint(element, hover)),
+    }
+}
+
+/// [`hoverable`] for an element that also answers a press, as a button does: `paint` also gets
+/// how far it is pressed (0 to 1), which moves over [`PRESS`] as the button goes down and up.
+/// A field that opens something (the top bar's search).
+pub fn pressable(
+    element: Stateful<Div>,
+    paint: impl FnOnce(Stateful<Div>, f32, f32) -> Stateful<Div> + 'static,
+) -> Hoverable {
+    Hoverable {
+        element,
+        chosen: None,
+        presses: true,
+        paint: Box::new(paint),
     }
 }
 
@@ -106,6 +158,7 @@ pub fn selectable(
     Hoverable {
         element,
         chosen: Some(chosen),
+        presses: false,
         paint: Box::new(paint),
     }
 }
@@ -114,6 +167,7 @@ pub fn selectable(
 pub struct Hoverable {
     element: Stateful<Div>,
     chosen: Option<bool>,
+    presses: bool,
     paint: Box<dyn FnOnce(Stateful<Div>, f32, f32) -> Stateful<Div>>,
 }
 
@@ -121,11 +175,16 @@ impl RenderOnce for Hoverable {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let id = Element::id(&self.element).expect("a hoverable element has an id");
         let (state, sample) = feel(&id, window, cx);
-        let chosen = self.chosen.map_or(0.0, |on| choose(&state, on, window, cx));
+        // The third value is the choice's, or the press's for a pressable element.
+        let third = match self.chosen {
+            Some(on) => choose(&state, on, window, cx),
+            None if self.presses => (1.0 - sample.scale) / (1.0 - PRESSED),
+            None => 0.0,
+        };
         wire(
-            (self.paint)(self.element, sample.hover, chosen),
+            (self.paint)(self.element, sample.hover, third),
             state,
-            false,
+            self.presses,
         )
         .test_support()
     }

@@ -11,18 +11,23 @@
 //! The owner draws it all the time and says whether it is [`open`](Modal::open): the scrim fades
 //! and the dialog fades and rises when it opens, and the other way when it closes. Once the close
 //! animation has ended nothing is drawn.
+//!
+//! A [`search`](Modal::search) is the same dialog for finding something (the window's quick
+//! switcher): near the top of the window, where the eye already is, its height following its
+//! results; its field above the results, which scroll; no title drawn and no Cancel.
 
 use std::rc::Rc;
 use std::sync::Arc;
 
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, BoxShadow, ElementId, FocusHandle, InteractiveElement, IntoElement,
-    MouseButton, ParentElement, RenderOnce, SharedString, StatefulInteractiveElement, Styled,
-    TestSupportExt, Window, anchored, deferred, div, point, px,
+    KeyDownEvent, MouseButton, ParentElement, RenderOnce, ScrollHandle, SharedString,
+    StatefulInteractiveElement, Styled, TestSupportExt, Window, anchored, deferred, div, point, px,
 };
 
 use crate::button::Button;
-use crate::interact::{dismiss_on_navigate, open_overlay};
+use crate::interact::{dismiss_on_navigate, open_holding_overlay};
 use crate::layer;
 use crate::motion::{MODAL, Motion, RISE};
 use crate::space;
@@ -37,6 +42,7 @@ struct Shown {
 }
 
 type Handler = Rc<dyn Fn(&mut Window, &mut App) + 'static>;
+type KeyHandler = Rc<dyn Fn(&KeyDownEvent, &mut Window, &mut App) + 'static>;
 
 #[derive(IntoElement)]
 pub struct Modal {
@@ -51,6 +57,10 @@ pub struct Modal {
     open: bool,
     cancel: SharedString,
     takes_focus: bool,
+    search: bool,
+    above: Vec<AnyElement>,
+    scroll: Option<ScrollHandle>,
+    on_key: Option<KeyHandler>,
 }
 
 impl Modal {
@@ -68,7 +78,37 @@ impl Modal {
             open: true,
             cancel: "Cancel".into(),
             takes_focus: false,
+            search: false,
+            above: Vec::new(),
+            scroll: None,
+            on_key: None,
         }
+    }
+
+    /// A search over the page rather than a form: near the top of the window, 640 px wide, its
+    /// title said as its label and not drawn, no Cancel (Escape and a click outside close it),
+    /// and its body (the results) drawn close together.
+    pub fn search(mut self) -> Self {
+        self.search = true;
+        self
+    }
+
+    /// What stays in sight above the body, whatever it has scrolled to: a search's field.
+    pub fn above(mut self, element: impl IntoElement) -> Self {
+        self.above.push(element.into_any_element());
+        self
+    }
+
+    /// The body's scroll, which the owner moves: the result the arrows mark stays in sight.
+    pub fn scroll(mut self, scroll: &ScrollHandle) -> Self {
+        self.scroll = Some(scroll.clone());
+        self
+    }
+
+    /// A key pressed in it, other than Escape: a search's arrows.
+    pub fn on_key(mut self, f: impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.on_key = Some(Rc::new(f));
+        self
     }
 
     /// One sentence under the title: what the thing is, or what the action does.
@@ -180,7 +220,7 @@ impl RenderOnce for Modal {
             }
         };
         if self.open {
-            open_overlay(self.id.clone(), close.clone(), cx);
+            open_holding_overlay(self.id.clone(), close.clone(), cx);
         }
         let (on_scrim, on_key, on_cancel) = (close.clone(), close.clone(), close.clone());
         let scrim = div()
@@ -192,46 +232,69 @@ impl RenderOnce for Modal {
             .on_mouse_down(MouseButton::Left, move |_, window, cx| on_scrim(window, cx))
             .test_support();
         let scrim = dismiss_on_navigate(scrim, close.clone());
-        let width = if self.wide {
+        let search = self.search;
+        let title = self.title.clone();
+        let width = if self.wide || search {
             space::DIALOG_WIDE
         } else {
             space::DIALOG
         };
-        let header = div()
-            .flex_none()
-            .pt(px(20.))
-            .px(px(24.))
-            .flex()
-            .flex_col()
-            .gap(px(4.))
-            .child(
-                div()
-                    .id(part(&self.id, "title"))
-                    .aria_label(self.title.clone())
-                    .text_size(px(15.))
-                    .line_height(px(22.))
-                    .semibold()
-                    .child(self.title)
-                    .test_support(),
-            )
-            .children(self.sentence.map(|sentence| {
-                div()
-                    .id(part(&self.id, "sentence"))
-                    .aria_label(sentence.clone())
-                    .text_size(px(13.))
-                    .line_height(px(20.))
-                    .text_color(p.mute)
-                    .child(sentence)
-                    .test_support()
-            }));
+        let header = (!search).then(|| {
+            div()
+                .flex_none()
+                .pt(px(20.))
+                .px(px(24.))
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(
+                    div()
+                        .id(part(&self.id, "title"))
+                        .aria_label(self.title.clone())
+                        .text_size(px(15.))
+                        .line_height(px(22.))
+                        .semibold()
+                        .child(self.title)
+                        .test_support(),
+                )
+                .children(self.sentence.map(|sentence| {
+                    div()
+                        .id(part(&self.id, "sentence"))
+                        .aria_label(sentence.clone())
+                        .text_size(px(13.))
+                        .line_height(px(20.))
+                        .text_color(p.mute)
+                        .child(sentence)
+                        .test_support()
+                }))
+        });
+        let above = (!self.above.is_empty()).then(|| {
+            div()
+                .flex_none()
+                .p(space::MD)
+                .border_b_1()
+                .border_color(p.line)
+                .children(self.above)
+        });
         // It scrolls inside a column of its own, so that the rows keep their heights while it
         // is shorter than they are; the title above and the buttons below stay where they are.
+        let scroll = self.scroll;
         let body = (!self.body.is_empty()).then(|| {
-            div()
+            let scrolled = div()
                 .id(part(&self.id, "body"))
                 .min_h_0()
                 .overflow_y_scroll()
-                .child(
+                .when_some(scroll, |d, scroll| d.track_scroll(&scroll));
+            if search {
+                // The results are the scrolled element's own children, so that the owner scrolls
+                // to one by its place; each keeps its height while the list is shorter.
+                scrolled.p(space::SM).flex().flex_col().children(
+                    self.body
+                        .into_iter()
+                        .map(|child| div().flex_none().child(child)),
+                )
+            } else {
+                scrolled.child(
                     div()
                         .py(px(20.))
                         .px(px(24.))
@@ -240,27 +303,31 @@ impl RenderOnce for Modal {
                         .gap(px(16.))
                         .children(self.body),
                 )
+            }
         });
         let kept = div()
             .flex_none()
-            .px(px(24.))
+            .when(!search, |d| d.px(px(24.)))
             .flex()
             .flex_col()
             .children(self.kept);
-        let footer = div()
-            .flex_none()
-            .pt(px(14.))
-            .pb(px(20.))
-            .px(px(24.))
-            .flex()
-            .justify_end()
-            .items_center()
-            .gap(px(8.))
-            .child(
-                Button::quiet(part(&self.id, "cancel"), self.cancel)
-                    .on_click(move |_, window, cx| on_cancel(window, cx)),
-            )
-            .children(self.actions);
+        let footer = (!search).then(|| {
+            div()
+                .flex_none()
+                .pt(px(14.))
+                .pb(px(20.))
+                .px(px(24.))
+                .flex()
+                .justify_end()
+                .items_center()
+                .gap(px(8.))
+                .child(
+                    Button::quiet(part(&self.id, "cancel"), self.cancel)
+                        .on_click(move |_, window, cx| on_cancel(window, cx)),
+                )
+                .children(self.actions)
+        });
+        let on_other_key = self.on_key;
         let mut panel = div()
             .id(self.id.clone())
             .occlude()
@@ -269,7 +336,12 @@ impl RenderOnce for Modal {
             .opacity(t)
             .w(width)
             .max_w(viewport.width - px(48.))
-            .max_h(viewport.height - px(48.))
+            .max_h(if search {
+                viewport.height - space::XXXL * 2.
+            } else {
+                viewport.height - px(48.)
+            })
+            .when(search, |d| d.aria_label(title))
             .rounded(px(14.))
             .bg(p.card)
             .border_1()
@@ -289,12 +361,15 @@ impl RenderOnce for Modal {
                 if event.keystroke.key == "escape" {
                     cx.stop_propagation();
                     on_key(window, cx);
+                } else if let Some(on_other_key) = &on_other_key {
+                    on_other_key(event, window, cx);
                 }
             })
-            .child(header)
+            .children(header)
+            .children(above)
             .children(body)
             .child(kept)
-            .child(footer);
+            .children(footer);
         if let Some(focus) = &focus {
             panel = panel.track_focus(focus);
         }
@@ -307,8 +382,14 @@ impl RenderOnce for Modal {
                     .h(viewport.height)
                     .relative()
                     .flex()
-                    .items_center()
                     .justify_center()
+                    .map(|d| {
+                        if search {
+                            d.items_start().pt(space::XXXL)
+                        } else {
+                            d.items_center()
+                        }
+                    })
                     .child(scrim)
                     .child(panel),
             ),
