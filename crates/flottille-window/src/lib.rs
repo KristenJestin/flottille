@@ -25,6 +25,7 @@ pub mod rules;
 pub mod runs;
 pub mod session;
 pub mod session_link;
+pub mod session_options;
 pub mod settings;
 pub mod setup;
 pub mod shell;

@@ -750,6 +750,12 @@ impl Shell {
                     mode.update(cx, |mode, cx| mode.answered(refused, cx));
                 }
             }
+            Outcome::OptionsSet { session, refused } => {
+                if let Some(reply) = self.replies.get(&session) {
+                    let options = reply.read(cx).options().clone();
+                    options.update(cx, |options, cx| options.answered(refused, cx));
+                }
+            }
             Outcome::RunAnswered { session, refused } => {
                 if let Some(page) = self.session_page.clone()
                     && page.read(cx).id() == session

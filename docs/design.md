@@ -739,7 +739,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   and no state; a rail with, from its top, the session's tree of agents (each row with the share
   of its context the agent used, a percentage beside a thin bar, on one line; the session's own
   agent says only what it runs on, the others their name over what they run on and do; the composer's bar does not say
-  it), its workspace (labelled lines: each repository with its changes, branch, commits ahead,
+  it; under the composer's field, the provider is named and not changeable, and the model and
+  effort pickers are the start composer's own: a change chosen while a turn runs waits for its end,
+  and a mark says it until the agent took it), its workspace (labelled lines: each repository with its changes, branch, commits ahead,
   files not committed and setup steps played, its pull request, its ticket; one sentence for the
   repositories with no forge; its actions in a "⋯" menu, the same as the workspace's card, with
   Link a ticket… and Unlink the ticket) and facts, its runs, then, pinned at the very bottom and

@@ -38,6 +38,10 @@ pub struct TreeAgent {
     pub state_reason: Option<String>,
     pub provider: String,
     pub model: Option<String>,
+    /// The effort it runs at, when it took or was asked one.
+    pub effort: Option<String>,
+    /// The model and the effort the user changed to, set before its next prompt.
+    pub pending: Pending,
     pub doing: String,
     /// `parent`, `user` or nothing.
     pub waiting_on: Option<String>,
@@ -57,6 +61,19 @@ pub struct TreeAgent {
     /// Its running session runs an older list of tools than its role has: a restart gives the
     /// new one.
     pub tools_outdated: bool,
+}
+
+/// A change of model and effort waiting for the end of the turn.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Pending {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+impl Pending {
+    pub fn is_empty(&self) -> bool {
+        self.model.is_none() && self.effort.is_none()
+    }
 }
 
 /// A message the user wrote to the root while it worked: the root reads it between its turns.
@@ -83,6 +100,11 @@ impl TreeAgent {
             state_reason: text(&agent["state_reason"]),
             provider: text(&agent["provider"]).unwrap_or_default(),
             model: text(&agent["model"]),
+            effort: text(&agent["effort"]),
+            pending: Pending {
+                model: text(&agent["pending"]["model"]),
+                effort: text(&agent["pending"]["effort"]),
+            },
             doing: text(&entry["doing"]).unwrap_or_default(),
             waiting_on: text(&entry["waiting_on"]),
             needs_user: entry["needs_user"] == true,
