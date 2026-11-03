@@ -516,11 +516,12 @@ impl ProjectSettingsPage {
         &self.setup
     }
 
-    /// The repositories as their checkouts stand: the Repositories section's rows.
+    /// The command lines its forges and tracker need, checked.
     pub fn programs(&self) -> &Entity<ProgramChecks> {
         &self.programs
     }
 
+    /// The repositories as their checkouts stand: the Repositories section's rows.
     pub fn repositories(&self) -> &Entity<ProjectRepositories> {
         &self.repositories
     }
@@ -1408,11 +1409,8 @@ impl ProjectSettingsPage {
         let repositories = self.repositories.downgrade();
         let checks = self.programs.downgrade();
         let checking = self.programs.read(cx).is_checking();
-        let forges = self
-            .programs
-            .read(cx)
-            .checked()
-            .is_some_and(|read| !read.repositories.is_empty());
+        // From what the project declares, not from a read: one that failed is asked again.
+        let forges = self.forms.iter().any(|form| form.declared.is_some());
         Section::new("repositories", "Repositories")
             .count(count.to_string())
             .sentence(
@@ -1476,7 +1474,7 @@ impl ProjectSettingsPage {
             }
         };
         let programs = self.programs.read(cx);
-        let (needed, checking) = (programs.tracker().is_some(), programs.is_checking());
+        let (needed, checking) = (self.tracker.is_some(), programs.is_checking());
         let block = program_block("tracker-program", programs.tracker(), &self.shell, cx);
         let row = ListRow::new("tracker-row", kind.label())
             .leading(icon(Icon::Ticket).size(px(15.)).text_color(p.faint))

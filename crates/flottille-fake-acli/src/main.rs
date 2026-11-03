@@ -27,6 +27,8 @@
 //!  "fail": {"ABC-9": "Error: the work item could not be fetched"}}
 //! ```
 //!
+//! `site` (`example.atlassian.net` by default) is the `Site:` line `acli jira auth status` prints, none
+//! with `site_line: false`; `delay_ms` makes that command slow, as one waiting on a network.
 //! `signed_in: false` makes `acli jira auth status` end with 1. `items` gives, by key, what
 //! `acli jira workitem view KEY --json` prints; a key with none ends with 1. `fail` makes the view
 //! of that key end with 1, saying its text. With `--fields a,b`, the view prints the work item's

@@ -5,13 +5,14 @@
 //! (`project.programs`, `docs/protocol.md`); the window reads when the page opens, after a change of
 //! forge or tracker and when the user asks (Check again), never in a loop.
 
+use flottille_ui::motion::PANEL;
 use flottille_ui::{
-    Button, Icon, Palette, Toast, Type, hoverable, palette, presence_of, space, toast,
+    Button, Icon, Palette, Toast, Type, hoverable, palette, presence_of, space, tint, toast,
 };
 use gpui_kit::{
     AnyElement, App, ClickEvent, Context, ElementId, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, TestSupportExt as _,
-    WeakEntity, Window, div, px,
+    ParentElement, Render, RenderOnce, SharedString, StatefulInteractiveElement, Styled,
+    TestSupportExt as _, WeakEntity, Window, div, px,
 };
 use serde_json::Value;
 
@@ -28,6 +29,8 @@ pub struct ProgramState {
     pub version: Option<String>,
     /// None while the program is not found, or could not say (`problem`).
     pub signed_in: Option<bool>,
+    /// The other site `acli` is signed in to, when it is not the tracker's.
+    pub signed_in_to: Option<String>,
     pub install_page: Option<String>,
     pub install_command: Option<String>,
     /// The commands that sign in, in order.
@@ -44,6 +47,7 @@ impl ProgramState {
             found: value["found"] == true,
             version: text(&value["version"]),
             signed_in: value["signed_in"].as_bool(),
+            signed_in_to: text(&value["signed_in_to"]),
             install_page: text(&value["install"]["page"]),
             install_command: text(&value["install"]["command"]),
             sign_in: value["sign_in"]["commands"]
@@ -61,6 +65,17 @@ impl ProgramState {
         self.found && self.signed_in == Some(true)
     }
 
+    /// Which of the state's sentences it is: a change of it is what moves in the window.
+    fn phase(&self) -> Phase {
+        match (self.found, self.signed_in) {
+            (false, _) => Phase::Missing,
+            (true, Some(true)) => Phase::Ready,
+            (true, Some(false)) if self.signed_in_to.is_some() => Phase::Elsewhere,
+            (true, Some(false)) => Phase::SignedOut,
+            (true, None) => Phase::Unknown,
+        }
+    }
+
     /// The state in one line: `gh 2.60.0 · signed in to github.com`.
     pub fn said(&self) -> String {
         if !self.found {
@@ -69,7 +84,10 @@ impl ProgramState {
         let version = self.version.as_deref().unwrap_or("version unknown");
         let signed = match (self.signed_in, &self.problem) {
             (Some(true), _) => format!("signed in to {}", self.host),
-            (Some(false), _) => format!("not signed in to {}", self.host),
+            (Some(false), _) => match &self.signed_in_to {
+                Some(other) => format!("signed in to {other}, not to {}", self.host),
+                None => format!("not signed in to {}", self.host),
+            },
             (None, Some(why)) => format!("could not tell if it is signed in: {why}"),
             (None, None) => "could not tell if it is signed in".to_owned(),
         };
@@ -77,10 +95,39 @@ impl ProgramState {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    Missing,
+    SignedOut,
+    Elsewhere,
+    Unknown,
+    Ready,
+}
+
+impl Phase {
+    const ALL: [Phase; 5] = [
+        Phase::Missing,
+        Phase::SignedOut,
+        Phase::Elsewhere,
+        Phase::Unknown,
+        Phase::Ready,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            Phase::Missing => "missing",
+            Phase::SignedOut => "signed-out",
+            Phase::Elsewhere => "elsewhere",
+            Phase::Unknown => "unknown",
+            Phase::Ready => "ready",
+        }
+    }
+}
+
 /// The programs of a project's forges and tracker, checked.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ProjectPrograms {
-    /// By the repository's path.
+    /// By the repository's path in the project.
     pub repositories: Vec<(String, ProgramState)>,
     pub tracker: Option<ProgramState>,
 }
@@ -94,7 +141,7 @@ impl ProjectPrograms {
                 .flatten()
                 .map(|state| {
                     (
-                        state["path"].as_str().unwrap_or_default().to_owned(),
+                        state["repository"].as_str().unwrap_or_default().to_owned(),
                         ProgramState::of(state),
                     )
                 })
@@ -114,6 +161,11 @@ pub struct ProgramChecks {
     requests: u64,
     /// The number of the read on its way, if one is.
     waiting: Option<u64>,
+}
+
+/// What the page shows of a failed read (a toast, as for the other reads that fail).
+pub fn refused_toast(why: &str) -> Toast {
+    Toast::failure("The programs were not checked").detail(why.to_owned())
 }
 
 impl ProgramChecks {
@@ -170,14 +222,16 @@ impl ProgramChecks {
         cx.notify();
     }
 
-    /// The daemon's answer to read `serial`. A refusal leaves what was known.
+    /// The daemon's answer to read `serial`. A refusal leaves what was known and is said; the
+    /// next read is free to be asked again.
     pub fn answered(&mut self, serial: u64, read: Result<Value, String>, cx: &mut Context<Self>) {
         if !self.is_latest(serial) {
             return;
         }
         self.waiting = None;
-        if let Ok(value) = read {
-            self.read = Some(ProjectPrograms::of(&value));
+        match read {
+            Ok(value) => self.read = Some(ProjectPrograms::of(&value)),
+            Err(why) => toast(refused_toast(&why), cx),
         }
         cx.notify();
     }
@@ -231,6 +285,48 @@ fn command_row(id: String, command: SharedString, p: Palette) -> AnyElement {
         .into_any_element()
 }
 
+/// The state line of a program: `✓ acli 1.3.2 · signed in to example.atlassian.net`. When the
+/// state changes from one sentence to another (not found, signed out, signed in elsewhere,
+/// ready), the old line folds away and fades out while the new one unfolds and fades in, and the
+/// ink moves from red to green with them (`tint`, as a step of a setup does).
+#[derive(IntoElement)]
+struct StateLine {
+    id: String,
+    state: Option<ProgramState>,
+}
+
+impl RenderOnce for StateLine {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let p = palette(cx);
+        let phase = self.state.as_ref().map(ProgramState::phase);
+        let said = self.state.as_ref().map(ProgramState::said);
+        let ready = phase == Some(Phase::Ready);
+        let target = if ready { p.ok } else { p.fail };
+        let ink = tint(self.id.clone(), target, PANEL, window, cx);
+        div().flex().flex_col().children(Phase::ALL.map(|at| {
+            let line_id = self.id.clone();
+            // Each line keeps its own mark while it folds away.
+            let mark = if at == Phase::Ready { "✓" } else { "✗" };
+            let shown = said.clone().filter(|_| phase == Some(at));
+            presence_of(
+                format!("{}-{}", self.id, at.name()),
+                shown.map(SharedString::from),
+                move |said| {
+                    div()
+                        .id(ElementId::Name(line_id.into()))
+                        .aria_label(said.clone())
+                        .text_size(px(12.))
+                        .text_color(ink)
+                        .child(SharedString::from(format!("{mark} {said}")))
+                        .test_support()
+                        .into_any_element()
+                },
+            )
+            .gap(space::XS)
+        }))
+    }
+}
+
 /// The state line of a program, and under it the advice it needs: how to install it, or how to
 /// sign in. `id` names the block (`<id>-state`, `<id>-install`, `<id>-install-command`,
 /// `<id>-sign-in-0`, `-1`, each command's button `<id>-…-copy`). Every line unfolds and fades in
@@ -242,25 +338,9 @@ pub fn program_block(
     cx: &App,
 ) -> impl IntoElement + use<> {
     let p = palette(cx);
-    let said = state.map(ProgramState::said);
-    let ready = state.is_some_and(ProgramState::is_ready);
-    let state_id = format!("{id}-state");
-    let state_line = {
-        let state_id = state_id.clone();
-        line_of(&state_id.clone(), said, move |said| {
-            let (mark, ink) = match ready {
-                true => ("✓", p.ok),
-                false => ("✗", p.fail),
-            };
-            div()
-                .id(ElementId::Name(state_id.into()))
-                .aria_label(said.clone())
-                .text_size(px(12.))
-                .text_color(ink)
-                .child(SharedString::from(format!("{mark} {said}")))
-                .test_support()
-                .into_any_element()
-        })
+    let state_line = StateLine {
+        id: format!("{id}-state"),
+        state: state.cloned(),
     };
     let install_page = {
         let shell = shell.clone();
@@ -277,6 +357,8 @@ pub fn program_block(
                     .cursor_pointer()
                     .child(SharedString::from(format!("Install it: {page}")))
                     .on_click(move |_: &ClickEvent, _, cx| {
+                        // The row under it opens its dialog on a click: not this one.
+                        cx.stop_propagation();
                         shell.update(cx, |shell, _| shell.open_link(&opened)).ok();
                     }),
                 move |link, t| link.bg(p.hover.opacity(t)),
@@ -307,4 +389,38 @@ pub fn program_block(
         .child(install_page)
         .child(install_command)
         .children(sign_in)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn state(found: bool, signed_in: Value, signed_in_to: Value) -> ProgramState {
+        ProgramState::of(&json!({
+            "program": "acli", "host": "a.example.net", "found": found,
+            "signed_in": signed_in, "signed_in_to": signed_in_to
+        }))
+    }
+
+    #[test]
+    fn each_sentence_a_state_can_change_to_is_its_own_phase_so_that_the_change_moves() {
+        let phases = [
+            state(false, Value::Null, Value::Null).phase(),
+            state(true, json!(false), Value::Null).phase(),
+            state(true, json!(false), json!("b.example.net")).phase(),
+            state(true, Value::Null, Value::Null).phase(),
+            state(true, json!(true), Value::Null).phase(),
+        ];
+        assert_eq!(phases, Phase::ALL);
+    }
+
+    #[test]
+    fn the_repository_is_read_by_its_own_key_and_not_by_the_program_s_path() {
+        let read = ProjectPrograms::of(&json!({
+            "repositories": [{"repository": "api", "path": "/usr/bin/gh", "program": "gh"}],
+            "tracker": null
+        }));
+        assert_eq!(read.repositories[0].0, "api");
+    }
 }

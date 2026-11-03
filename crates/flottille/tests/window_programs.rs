@@ -78,6 +78,8 @@ fn desk(user: &User, forge: Option<&str>, tracker: Option<&str>) {
     );
 }
 
+const BITBUCKET: &str = "{ kind = \"bitbucket-cloud\", repository = \"acme/api\" }";
+const BKT_PAGE: &str = "https://github.com/avivsinai/bitbucket-cli";
 const GITHUB: &str = "{ kind = \"github\", repository = \"acme/api\" }";
 const JIRA: &str =
     "[tracker]\nkind = \"jira\"\nsite = \"example.atlassian.net\"\nprojects = [\"ABC\"]\n";
@@ -221,6 +223,11 @@ fn a_tracker_whose_program_is_missing_says_how_to_install_it(cx: &mut TestAppCon
     );
     cx.update(|window, cx| window.click("tracker-program-install", cx));
     assert_eq!(*opened.lock().unwrap(), [ACLI_PAGE]);
+    // The row under the link opens its dialog on a click: not on this one.
+    assert!(
+        page.read_with(cx, |page, _| page.dialog().is_none()),
+        "the link opened the tracker's dialog"
+    );
     settle(cx);
     // No command fits most systems for `acli`: none is offered, and nothing to sign in to yet.
     assert!(!has("tracker-program-install-command", cx));
@@ -339,4 +346,230 @@ fn check_again_reads_the_program_s_state_anew(cx: &mut TestAppContext) {
     );
     assert!(!has("tracker-program-sign-in-0", cx));
     assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
+}
+
+#[gpui_kit::test]
+fn the_install_link_of_a_repository_opens_the_page_and_not_the_row_s_dialog(
+    cx: &mut TestAppContext,
+) {
+    // A Bitbucket forge, and no `bkt` on the PATH.
+    let user = user_with(&["gh"]);
+    desk(&user, Some(BITBUCKET), None);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), cx);
+    let opened = opened_by(&shell, cx);
+    let (page, _) = open_settings(&shell, "desk", cx);
+
+    assert_eq!(
+        label_of("repository-program-api-install", cx).as_deref(),
+        Some(BKT_PAGE)
+    );
+    cx.update(|window, cx| window.click("repository-program-api-install", cx));
+    settle(cx);
+
+    assert_eq!(*opened.lock().unwrap(), [BKT_PAGE]);
+    assert!(
+        page.read_with(cx, |page, _| page.dialog().is_none()),
+        "the link opened the repository's dialog"
+    );
+}
+
+#[gpui_kit::test]
+fn a_changed_state_line_moves_and_comes_to_rest(cx: &mut TestAppContext) {
+    // `acli` is missing, then installed and signed out, then signed in.
+    let user = user_with(&[]);
+    desk(&user, None, Some(JIRA));
+    let (shell, cx) = window(&user, Arc::new(user.connector()), cx);
+    let (page, checks) = open_settings(&shell, "desk", cx);
+    show_tracker(&page, cx);
+    assert_eq!(pending_frames(cx), 0, "at rest, nothing moves");
+
+    install(&user, "acli");
+    user.acli_script(json!({"signed_in": false}));
+    cx.update(|window, cx| window.click("check-tracker-program", cx));
+    until(&shell, cx, "the program is found", |cx| {
+        checks.read_with(cx, |checks, _| checks.tracker().is_some_and(|s| s.found))
+    });
+    // The red line of the missing program folds away while the signed-out one unfolds, and the
+    // ink moves with them: frames are asked for until they have.
+    assert!(pending_frames(cx) > 0, "the state line jumped");
+    settle(cx);
+    assert_eq!(pending_frames(cx), 0, "and it comes to rest");
+    assert_eq!(
+        label_of("tracker-program-state", cx).as_deref(),
+        Some("acli 1.3.2-stable · not signed in to example.atlassian.net")
+    );
+
+    user.acli_script(json!({}));
+    cx.update(|window, cx| window.click("check-tracker-program", cx));
+    until(&shell, cx, "the program is signed in", |cx| {
+        checks.read_with(cx, |checks, _| {
+            checks.tracker().is_some_and(|s| s.is_ready())
+        })
+    });
+    assert!(
+        pending_frames(cx) > 0,
+        "red to green jumped instead of moving"
+    );
+    settle(cx);
+    assert_eq!(pending_frames(cx), 0);
+    assert_eq!(
+        label_of("tracker-program-state", cx).as_deref(),
+        Some("acli 1.3.2-stable · signed in to example.atlassian.net")
+    );
+}
+
+#[gpui_kit::test]
+fn a_failed_read_of_the_programs_is_said_and_can_be_asked_again(cx: &mut TestAppContext) {
+    let user = user_with(&["gh"]);
+    desk(&user, Some(GITHUB), None);
+    let (shell, cx) = window(&user, Arc::new(user.connector()), cx);
+    let (_, checks) = open_settings(&shell, "desk", cx);
+    let first = checks.read_with(cx, |checks, _| checks.last_request());
+    let good = std::fs::read_to_string(user.project_file("desk")).unwrap();
+
+    // The project's file turns unreadable: the daemon refuses the read.
+    std::fs::write(user.project_file("desk"), "not [ toml").unwrap();
+    cx.update(|window, cx| window.click("check-forge-programs", cx));
+    until(
+        &shell,
+        cx,
+        "a toast says the programs were not checked",
+        |cx| {
+            shell.read_with(cx, |s, cx| {
+                s.toasts()
+                    .read(cx)
+                    .toasts()
+                    .any(|toast| toast.title().contains("not checked"))
+            })
+        },
+    );
+    settle(cx);
+    assert!(!checks.read_with(cx, |checks, _| checks.is_checking()));
+    // What was known stays, and the button asks again.
+    assert!(checks.read_with(cx, |checks, _| checks.repository("api").is_some()));
+    std::fs::write(user.project_file("desk"), good).unwrap();
+    cx.update(|window, cx| window.click("check-forge-programs", cx));
+    until(&shell, cx, "the programs are read again", |cx| {
+        checks.read_with(cx, |checks, _| {
+            checks.last_request() == first + 2 && !checks.is_checking()
+        })
+    });
+    assert!(checks.read_with(cx, |checks, _| checks.repository("api").is_some()));
+}
+
+#[gpui_kit::test]
+fn saving_the_tracker_reads_the_programs_again(cx: &mut TestAppContext) {
+    // Jira with `acli` there; the tracker is then changed to GitHub's issues, which need `gh`.
+    let user = user_with(&["acli"]);
+    desk(&user, None, Some(JIRA));
+    let (shell, cx) = window(&user, Arc::new(user.connector()), cx);
+    let (page, checks) = open_settings(&shell, "desk", cx);
+    show_tracker(&page, cx);
+    let first = checks.read_with(cx, |checks, _| checks.last_request());
+
+    page.update_in(cx, |page, window, cx| page.open_tracker(window, cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("save-settings-modal", cx));
+    until(&shell, cx, "the programs are read after the save", |cx| {
+        checks.read_with(cx, |checks, _| {
+            checks.last_request() > first && !checks.is_checking()
+        })
+    });
+}
+
+#[gpui_kit::test]
+fn the_copy_button_says_copied_in_a_toast(cx: &mut TestAppContext) {
+    let user = user_with(&["gh"]);
+    desk(&user, Some(GITHUB), None);
+    user.gh_script(json!({"signed_in": false}));
+    let (shell, cx) = window(&user, Arc::new(user.connector()), cx);
+    open_settings(&shell, "desk", cx);
+
+    cx.update(|window, cx| window.click("repository-program-api-sign-in-0-copy", cx));
+
+    until(&shell, cx, "a toast says Copied", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.toasts()
+                .read(cx)
+                .toasts()
+                .any(|toast| toast.title() == "Copied")
+        })
+    });
+    assert_eq!(copied(cx).as_deref(), Some("gh auth login"));
+}
+
+#[gpui_kit::test]
+fn check_programs_on_repositories_reads_the_forges_programs_anew(cx: &mut TestAppContext) {
+    // `gh` is signed out; it is signed in while the page stays open; the button reads it.
+    let user = user_with(&["gh"]);
+    desk(&user, Some(GITHUB), None);
+    user.gh_script(json!({"signed_in": false}));
+    let (shell, cx) = window(&user, Arc::new(user.connector()), cx);
+    let (_, checks) = open_settings(&shell, "desk", cx);
+    assert_eq!(
+        label_of("repository-program-api-state", cx).as_deref(),
+        Some("gh 2.60.0 · not signed in to github.com")
+    );
+
+    user.gh_script(json!({}));
+    cx.update(|window, cx| window.click("check-forge-programs", cx));
+    until(&shell, cx, "the program is signed in", |cx| {
+        checks.read_with(cx, |checks, _| {
+            checks.repository("api").is_some_and(|s| s.is_ready())
+        })
+    });
+    settle(cx);
+
+    assert_eq!(
+        label_of("repository-program-api-state", cx).as_deref(),
+        Some("gh 2.60.0 · signed in to github.com")
+    );
+    assert!(!has("repository-program-api-sign-in-0", cx));
+    assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
+}
+
+#[gpui_kit::test]
+fn bkt_signed_out_gives_both_sign_in_commands_with_a_copy_button_each(cx: &mut TestAppContext) {
+    let user = user_with(&["bkt"]);
+    desk(&user, Some(BITBUCKET), None);
+    user.bkt_script(json!({"contexts": []}));
+    let (shell, cx) = window(&user, Arc::new(user.connector()), cx);
+    open_settings(&shell, "desk", cx);
+
+    let first = "bkt auth login https://bitbucket.org --kind cloud --web";
+    let second = "bkt context create bitbucket-org-acme --host api.bitbucket.org --workspace acme";
+    assert_eq!(
+        label_of("repository-program-api-sign-in-0", cx).as_deref(),
+        Some(first)
+    );
+    assert_eq!(
+        label_of("repository-program-api-sign-in-1", cx).as_deref(),
+        Some(second)
+    );
+    for (at, command) in [(0, first), (1, second)] {
+        cx.update(|window, cx| {
+            window.click(format!("repository-program-api-sign-in-{at}-copy"), cx)
+        });
+        settle(cx);
+        assert_eq!(copied(cx).as_deref(), Some(command));
+    }
+}
+
+#[gpui_kit::test]
+fn acli_signed_in_to_another_site_says_so_with_the_switch_command(cx: &mut TestAppContext) {
+    let user = user_with(&["acli"]);
+    desk(&user, None, Some(JIRA));
+    user.acli_script(json!({"site": "other.atlassian.net"}));
+    let (shell, cx) = window(&user, Arc::new(user.connector()), cx);
+    let (page, _) = open_settings(&shell, "desk", cx);
+    show_tracker(&page, cx);
+
+    assert_eq!(
+        label_of("tracker-program-state", cx).as_deref(),
+        Some("acli 1.3.2-stable · signed in to other.atlassian.net, not to example.atlassian.net")
+    );
+    assert_eq!(
+        label_of("tracker-program-sign-in-0", cx).as_deref(),
+        Some("acli jira auth switch --site example.atlassian.net")
+    );
 }

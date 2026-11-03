@@ -221,7 +221,10 @@ The project's Settings put, under each repository that declares a forge, the sta
 it needs (`✓ gh 2.60.0 · signed in to github.com`, or `✗ bkt not found` with the installation
 page and its command, or `✗ gh 2.60.0 · not signed in to github.com` with the sign-in commands), and
 the Tracker row the same for `acli` or `gh`; "Check programs" (Repositories) and "Check again"
-(Tracker) read them anew. Each line unfolds and fades in as it comes and folds away as it goes.
+(Tracker) read them anew. Each line unfolds and fades in as it comes and folds away as it goes. When the state itself
+changes (not found, signed out, signed in to another site, ready), the old line folds away and
+fades out while the new one unfolds and fades in, and the ink moves from red to green with them. A
+read that fails is a toast and leaves what was known; the buttons stay enabled to ask again.
 
 ## Bitbucket
 
