@@ -822,6 +822,17 @@ pub async fn run_status(daemon: &Daemon, agent: &str, args: Value) -> Outcome {
         Ok(args) => args,
         Err(refusal) => return refusal,
     };
+    // A cut result's id is read the same way a run's output is, by lines.
+    if crate::results::is_id(&args.run) {
+        return crate::results::read_kept(
+            daemon,
+            agent,
+            &args.run,
+            args.action.as_deref(),
+            args.tail,
+            args.start,
+        );
+    }
     if let Err(refusal) = own(daemon, agent, &args.run) {
         return refusal;
     }

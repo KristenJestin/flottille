@@ -56,7 +56,8 @@ or `ask_parent`, `approval_answer`, and `session_send` and `session_read` for a 
   1024 keys are remembered.
 - **A result** is one text block, `isError` for a refusal or a failure. A normal result stays
   under 40,000 characters (`docs/reference/mcp.md` §4 rules 5 and 8: an agent in bare mode cannot
-  read a result Claude Code saved to a file), a refusal or a failure under 2,000. A failure reads
+  read a result Claude Code saved to a file) and is cut well before, at the user's limit ("Long
+  results" below), a refusal or a failure under 2,000. A failure reads
   `the call failed: …`. A result and a failure are masked of the daemon's and the place's secrets
   (a file read or a search hit shows `[masked]` for them). A call the gate held is answered with
   the waiting text, not as an error (below). Every result, refusal and failure is escaped as a
@@ -113,6 +114,46 @@ documentation, changelogs and published source, never by running one):
 | Claude Code (`claude`, checked at 2.1.295) | Yes: in `-p` mode it lists the tools again, its v2 runtime over its listen stream | Takes the new tools: the bridge's `--allowedTools` is the start's, but a tool it lacks asks permission of the bridge, which the daemon answers from the role's list as it is now |
 | Codex (`codex app-server`, checked at 0.162.0) | Not by default: its own issues say it keeps the list it first read; an opt-in feature, `mcp_tool_list_changed`, was proposed | Runs an older list until its next process: the server's `enabled_tools`, set when its thread starts, filter out every tool they do not name |
 | OpenCode (`opencode acp`, checked at 1.19.0) | Yes, since its pull request #5913 (December 2025) | Runs an older list until its next process: its permissions, written when its process starts, deny every tool they do not name |
+
+## Long results
+
+A tool result longer than the limit, **8,000 characters** until the user chooses another
+(Settings → Providers → Tool results, `docs/protocol.md`, "The tool results methods"), is cut at
+the source, by Flottille and without any model, whichever agent runs and whichever tool answered.
+It is the core's own, not an extension's: every agent gets it, and it needs nothing of the agent's
+program.
+
+- **What the agent gets**: the result's beginning and its end, whole lines (about half the limit
+  and an eighth of it), and between them one line: `[N characters left out (lines a-b of T): read
+  them with run_status {"run": "res_…", "start": a}]`. A line longer than 1,000 characters counts
+  as several, in the cut as in the pages below. The text is masked whole before it is cut
+  (`flottille_core::secrets`, as every result is), so that no secret is split by the cut.
+- **Read it whole with `run_status`**: no tool is added, so no agent's list of tools or its count
+  changes (a running session keeps the list it has, "When the tools change"). `run_status`
+  takes the id of a cut result where it takes a run's: `run_status {"run": "res_…", "start": a}`
+  answers the lines of the whole text from line `a` (the first by default), as many as fit under
+  the limit, or `tail` at most, then says where the earlier and the later lines are
+  (`(lines a-b of T; earlier lines: …; later lines: …)`, or `, the end of the result`). Each page
+  is under the limit and is never cut again. `action stop` is refused for it, `start` outside the
+  lines too.
+- **Where a tool already cuts or pages** (`fs_read`'s pages, `run_status`'s lines, `web`'s 30,000
+  characters, a search's limits), what it does stays, and the limit applies to what is still
+  longer: a `fs_read` page over the limit is cut, and a smaller `range.length` avoids it. A
+  refusal or a failure is never cut (2,000 characters at most). The pages of a cut result, and a
+  result under the limit, are returned as they were.
+- **What is kept**: the whole masked text, in the store, for the agent whose call it was, and
+  that agent alone (`refused: res_… is no cut result of this session`: another agent, another
+  session, or an id that never existed). It is kept for as long as the session: it goes when the
+  session's runs do (`docs/protocol.md`, `agent.image`: when its root failed or ended and cannot
+  be resumed, or 7 days after a root that can), and with its agent. It never reaches a delivery, a report, another agent's tool, the pilot door or an event.
+- **The limit** is `limit` in `tool-results.toml` of Flottille's configuration folder, 4,000 to
+  40,000 characters, or `"off"` (a result is then returned whole, up to the server's own limit
+  above). It is global, never a project's, and read at every call: a change applies to the next
+  result of every running session.
+- **A call is recorded** with what was cut: `agent.tool_served` carries `cut` (`docs/events.md`),
+  which the window reads to show the step as cut.
+- **Not cut**: a call the gate held, whose result comes later as a delivery, and what the pilot
+  door answers to an agent outside Flottille.
 
 ## The place and its paths
 
@@ -242,7 +283,7 @@ own while the judge thought), it is refused (`refused: X: the path changed since
 |---|---|---|
 | `tasks` | `action list \| show \| add \| edit \| remove`, `name?`, `line?`, `repository?`, `serve?`, `check?`, `read_only?`, `ask_before_running?` | The project's tasks (`docs/projects.md`, "Tasks"). `list` gives one line each: `name: line`, and where it runs, whether it keeps running, is a check, changes nothing, is judged each time it runs; `show` gives one. Every agent reads them; a root writes them ("The project"): `add` takes `name` and `line` and the flags, `edit` changes what it is given (`repository: null` puts the task back at the place's top), `remove` removes it, refused while a setup step runs it. A child's write is refused, pointing it to `ask_parent`. |
 | `run` | `task` or `line` (exactly one), `repository?`, `timeout? 1..600`, `why?` | Runs a task (`refused: the project has no task X: list them with tasks {"action": "list"}`) or one line, in the repository's folder (the task's, or the one named) or the place's top. Its description holds a call of each form: `{"task": "test"}`, `{"line": "cargo test -p core", "repository": "api", "timeout": 120}`. |
-| `run_status` | `run`, `action? output \| stop`, `tail? 1..1000`, `start?` | `action output` (the default): the run's state and lines of its output, the last `tail` (40 by default), or `tail` lines from line `start`. `action stop`: stops the run and everything in its process group, `SIGTERM`, then `SIGKILL` 5 s later, and answers once it ended; `tail` and `start` are refused with it. |
+| `run_status` | `run`, `action? output \| stop`, `tail? 1..1000`, `start?` | `action output` (the default): the run's state and lines of its output, the last `tail` (40 by default), or `tail` lines from line `start`. `run` may also be the id of a cut result ("Long results"), read by lines with `start`, never stopped. `action stop`: stops the run and everything in its process group, `SIGTERM`, then `SIGKILL` 5 s later, and answers once it ended; `tail` and `start` are refused with it. |
 
 Until #131 these were `commands_list`, `commands_run` (its `command` now `task`) and
 `commands_status`. For one release a call under an old name is the new tool's (`commands_list`

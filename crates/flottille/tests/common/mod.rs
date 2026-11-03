@@ -105,9 +105,19 @@ impl User {
         }
         User {
             dir,
-            env: Vec::new(),
+            // Long tool results are cut by default (`docs/tools.md`, "Long results"): only the
+            // tests of that opt in, so that no other test's result is cut under it.
+            env: vec![("FLOTTILLE_TEST_NO_CUT_RESULTS".to_owned(), "1".to_owned())],
             closed: Arc::new(Mutex::new(false)),
         }
+    }
+
+    /// This user's daemon cuts long tool results as it does for everyone: every other test's
+    /// daemon does not.
+    pub fn with_cut_results(mut self) -> User {
+        self.env
+            .retain(|(name, _)| name != "FLOTTILLE_TEST_NO_CUT_RESULTS");
+        self
     }
 
     /// A variable for every command of this user, and so for its daemon.
