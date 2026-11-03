@@ -403,6 +403,26 @@ fn marked(cx: &mut VisualTestContext) -> bool {
     has("session-model-pending", cx) || has("session-effort-pending", cx)
 }
 
+/// How opaque the model picker's mark is drawn in the last frame: the alpha of the accent quad
+/// painted where it is; `None` when it is not drawn.
+fn model_mark_opacity(cx: &mut VisualTestContext) -> Option<f32> {
+    cx.update(|window, cx| {
+        let acc = flottille_ui::palette(cx).acc;
+        let scale = window.scale_factor();
+        let bounds = window
+            .try_find("session-model-pending")?
+            .bounds()
+            .scale(scale);
+        window
+            .painted_quads()
+            .iter()
+            .filter(|quad| bounds.intersects(&quad.bounds))
+            .filter_map(|quad| quad.background.as_solid())
+            .find(|bg| (bg.h, bg.s, bg.l) == (acc.h, acc.s, acc.l))
+            .map(|bg| bg.a / acc.a)
+    })
+}
+
 /// The height of the session's composer.
 fn composer_height(cx: &mut VisualTestContext) -> gpui_kit::Pixels {
     cx.update(|window, _| window.find("reply").bounds().size.height)
@@ -450,6 +470,8 @@ fn a_pending_change_is_marked_on_its_picker(cx: &mut TestAppContext) {
     until(&shell, cx, "the model's picker is marked", |cx| {
         has("session-model-pending", cx)
     });
+    let fading = model_mark_opacity(cx).expect("the mark is painted");
+    assert!(0.0 < fading && fading < 1.0, "part way in: {fading}");
     assert!(
         !has("session-effort-pending", cx),
         "only the picker changed"
@@ -463,6 +485,7 @@ fn a_pending_change_is_marked_on_its_picker(cx: &mut TestAppContext) {
         has("session-model-pending", cx),
         "the mark stays while the change waits"
     );
+    assert_eq!(model_mark_opacity(cx), Some(1.0), "whole once settled");
 
     std::fs::write(user.path("fake/release"), "").unwrap();
     until(&shell, cx, "the mark leaves once the change is set", |cx| {
