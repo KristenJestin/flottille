@@ -1729,6 +1729,31 @@ async fn call(
     }
 }
 
+/// Whether a call reads the pages of a cut result: they are built to fit under the limit, so they
+/// are never cut again.
+fn reads_a_result(tool: &str, args: &Value) -> bool {
+    tool == "run_status" && args["run"].as_str().is_some_and(crate::results::is_id)
+}
+
+/// A result over the user's limit goes as its beginning and its end (`docs/tools.md`, "Long
+/// results"); the whole text is kept, masked, for this agent. A call held for approval is cut the
+/// same way when it is performed, since its result is delivered to the same agent.
+fn cut_long(
+    daemon: &Daemon,
+    grant: &Grant,
+    tool: &str,
+    reads_a_result: bool,
+    outcome: Outcome,
+) -> (Outcome, Option<crate::results::Cut>) {
+    match outcome {
+        Outcome::Done(text) if !reads_a_result => {
+            let (text, cut) = crate::results::cut_done(daemon, grant, tool, text);
+            (Outcome::Done(text), cut)
+        }
+        outcome => (outcome, None),
+    }
+}
+
 async fn played(
     daemon: &Arc<Daemon>,
     grant: &Arc<Grant>,
@@ -1739,9 +1764,7 @@ async fn played(
 ) -> (String, bool) {
     let started = Instant::now();
     let recorded = record_of(&args, &grant.place);
-    // The pages of a cut result are built to fit under the limit: they are never cut again.
-    let reads_a_result =
-        tool == "run_status" && args["run"].as_str().is_some_and(crate::results::is_id);
+    let reads_a_result = reads_a_result(tool, &args);
     let mut verdict = None;
     let mut judgement = None;
     // What the developer log says of the call, gathered only while it is on.
@@ -1842,15 +1865,7 @@ async fn played(
             grant.tools.join(", ")
         ))
     };
-    // A result over the user's limit goes as its beginning and its end (`docs/tools.md`, "Long
-    // results"); the whole text is kept, masked, for this agent.
-    let (outcome, cut) = match outcome {
-        Outcome::Done(text) if !reads_a_result => {
-            let (text, cut) = crate::results::cut_done(daemon, grant, tool, text);
-            (Outcome::Done(text), cut)
-        }
-        outcome => (outcome, None),
-    };
+    let (outcome, cut) = cut_long(daemon, grant, tool, reads_a_result, outcome);
     if logging {
         log_call(
             daemon, grant, tool, key, &recorded, verdict, held, judged_log, &outcome, request,
@@ -2146,11 +2161,13 @@ pub async fn performed(
 ) -> Outcome {
     let started = Instant::now();
     let recorded = record_of(&args, &grant.place);
+    let reads_a_result = reads_a_result(tool, &args);
     let cancelled = CancellationToken::new();
     let outcome = match discarding {
         Some(losses) => crate::actions::remove_discarding(daemon, grant, args, &losses).await,
         None => perform(daemon, grant, tool, args, cancelled, Some(class)).await,
     };
+    let (outcome, cut) = cut_long(daemon, grant, tool, reads_a_result, outcome);
     let verdict = Some("allow");
     record(
         daemon,
@@ -2163,7 +2180,7 @@ pub async fn performed(
         &outcome,
         started,
         Some(request),
-        None,
+        cut.as_ref(),
     );
     outcome
 }
