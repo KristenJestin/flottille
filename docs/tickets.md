@@ -187,6 +187,14 @@ events.
   holds what `workspace.ticket` answered under `ticket_read` (the reference itself is
   `ticket`, in `workspace list` too) (`docs/cli.md`).
 
+## The program it needs
+
+Choosing Jira says whether `acli` is found, its version and whether it is signed in (`acli jira
+auth status`'s exit code), and GitHub issues the same for `gh`, in the project's Settings and in
+`flottille doctor`; a missing `acli` shows its installation page
+(<https://developer.atlassian.com/cloud/acli/guides/install-acli/>), a signed-out one `acli jira
+auth login` with a button that copies it. See [`forges.md`](forges.md), "The programs it needs".
+
 ## The window
 
 The session page's `WORKSPACE` section shows the ticket under the repositories: its reference,

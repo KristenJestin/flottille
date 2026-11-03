@@ -265,6 +265,13 @@ pub async fn settings(daemon: Arc<Daemon>, params: Value) -> std::result::Result
     Ok(settings_of(&project).await)
 }
 
+/// `project.programs`: the command lines the project's forges and tracker need, checked.
+pub async fn programs(daemon: Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
+    let ProjectName { name } = serde_json::from_value(params)?;
+    let project = load_project(&daemon, &name)?;
+    Ok(crate::programs::of_project(&project).await)
+}
+
 /// Why `branch` cannot be the base of the repository at `path`, none when it can: it is a branch
 /// of its remote, read with `git ls-remote`; of the tracking refs last fetched when the remote
 /// cannot be read; of the repository itself when it has no such remote.

@@ -621,6 +621,11 @@ pub async fn read(repositories: &[Checkout], branch: &str, obsolete: bool) -> Re
     }
 }
 
+/// Whether `bkt` has a context for `host` (`programs`).
+pub(crate) async fn has_bitbucket_context(host: &str) -> Result<bool, String> {
+    bitbucket::has_context(host).await
+}
+
 /// Whether `gh` is there and signed in: its exit code, nothing it prints.
 pub(crate) async fn signed_in() -> Result<(), String> {
     match gh(&["auth", "status", "--hostname", "github.com"]).await {

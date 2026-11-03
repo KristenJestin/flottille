@@ -29,6 +29,43 @@ would send a read or a write to another host than the one the declaration was ch
   (`docs/tools.md`); an agent reads the forge only through `forge` below, never by running
   `gh` itself, and **never by running `bkt`, reads included** (see "Bitbucket").
 
+## The programs it needs
+
+Each program is checked where the forge is chosen, as the providers' are (`docs/agents.md`): the
+project's Settings and `flottille doctor` say, for the forge of each repository and for the tracker,
+whether `gh`, `bkt` or `acli` is **found** (on the daemon's PATH, with the version it prints for
+`--version`, given 5 s) and whether it is **signed in**, by the checks Flottille already uses and no
+other: `gh auth status --hostname github.com`'s exit code, `acli jira auth status`'s exit code, and
+for `bkt` a context for the host (never `bkt auth status`, below). A configuration folder is never
+read and nothing a program prints of the account is kept.
+
+When the program is missing, the advice is its **official installation page** and, where one command
+fits most systems, that command; when it is signed out, the commands that sign in. Flottille installs
+nothing and signs nobody in: the window offers a Copy button for each command, and the page opens
+with the system's default handler.
+
+| Program | Installation page | Command | Signs in with |
+|---|---|---|---|
+| `gh` | <https://cli.github.com/> | none (each system has its own) | `gh auth login` |
+| `bkt`, Bitbucket Cloud | <https://github.com/avivsinai/bitbucket-cli> | `brew install bitbucket-cli` (macOS and Linux with Homebrew) | `bkt auth login https://bitbucket.org --kind cloud --web`, then `bkt context create bitbucket-org-<workspace> --host api.bitbucket.org --workspace <workspace>` |
+| `bkt`, Data Center | the same | the same | `bkt auth login https://<host> --web-token`, then `bkt context create <host>-<project> --host <host> --project <PROJECT>` |
+| `acli` | <https://developer.atlassian.com/cloud/acli/guides/install-acli/> | none | `acli jira auth login`; signed in to another site: `acli jira auth switch --site <site>` |
+
+The `bkt` commands are the ones its README gives (Cloud by the browser, Data Center by a personal
+access token), with the workspace or the project of the repository that declares the forge, and the
+context named after the host and that workspace or project, its letters and digits and the rest a
+hyphen (`git-example-com-proj`), so that the commands can be run as they are. A Cloud context names
+`api.bitbucket.org`, the host `bkt`'s API needs: Flottille's own check accepts that name and
+`bitbucket.org`, and the advice never gives a command the API would refuse. `acli` keeps one active
+site: the check reads the `Site:` line of `acli jira auth status`, as the tickets do
+(`docs/tickets.md`), and says when it is signed in to another site than the tracker's, with the
+switch command. The programs are checked together, each with its own time (the version 5 s, a
+sign-in check 30 s): one that hangs costs its own time, not the sum of them. The state is read when the project's Settings open, again after a forge
+or the tracker is saved, and whenever the user asks (Check again); never in a loop. See
+`project.programs` (`docs/protocol.md`), the window below, and `flottille doctor`
+(`docs/cli.md`), which names the programs of the registered projects only, a missing one a warning
+and never a failure.
+
 ## The forge of a repository
 
 **Each repository declares its forge, and nothing is guessed.** The project's file says it, per
@@ -179,6 +216,15 @@ and state, and its checks as one mark drawn by shape as well as colour (`✓` pa
 `●` pending). The project page's place card shows the same for its workspace. A click opens the
 pull request with the system's default handler. The session page watches its workspace while it is
 open.
+
+The project's Settings put, under each repository that declares a forge, the state of the program
+it needs (`✓ gh 2.60.0 · signed in to github.com`, or `✗ bkt not found` with the installation
+page and its command, or `✗ gh 2.60.0 · not signed in to github.com` with the sign-in commands), and
+the Tracker row the same for `acli` or `gh`; "Check programs" (Repositories) and "Check again"
+(Tracker) read them anew. Each line unfolds and fades in as it comes and folds away as it goes. When the state itself
+changes (not found, signed out, signed in to another site, ready), the old line folds away and
+fades out while the new one unfolds and fades in, and the ink moves from red to green with them. A
+read that fails is a toast and leaves what was known; the buttons stay enabled to ask again.
 
 ## Bitbucket
 

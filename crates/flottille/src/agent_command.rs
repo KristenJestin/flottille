@@ -418,7 +418,20 @@ fn shown_agent(client: &mut Client, agent: &str) -> Result<Value> {
 }
 
 pub fn doctor(paths: &Paths, json: bool) -> Result<ExitCode> {
-    let report = providers::doctor(paths);
+    let mut report = providers::doctor(paths);
+    // A program a project's forge or tracker needs is a warning, never a failure: `ready` stays
+    // the providers'.
+    let programs = crate::programs::doctor(paths);
+    for warning in programs
+        .iter()
+        .filter_map(|state| state["warning"].as_str())
+    {
+        report["warnings"]
+            .as_array_mut()
+            .expect("a list of warnings")
+            .push(warning.into());
+    }
+    report["forges_and_trackers"] = programs.into();
     if json {
         println!("{report}");
     } else {
@@ -482,8 +495,16 @@ fn doctor_text(report: &Value) -> String {
             ),
         });
     }
+    let programs = report["forges_and_trackers"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice);
+    shown.push_str(&crate::programs::doctor_text(programs));
+    // The part says its own warnings.
     for warning in report["warnings"].as_array().into_iter().flatten() {
-        shown.push_str(&format!("warn {}\n", warning.as_str().unwrap_or_default()));
+        let said = warning.as_str().unwrap_or_default();
+        if !programs.iter().any(|state| state["warning"] == said) {
+            shown.push_str(&format!("warn {said}\n"));
+        }
     }
     shown
 }

@@ -29,6 +29,7 @@ use serde_json::{Value, json};
 
 use crate::actions::Command;
 use crate::commands::{CommandsSection, boxed, menu_of, problem_line};
+use crate::programs::{ProgramChecks, program_block};
 use crate::project::repository_label;
 use crate::repositories::{ProjectRepositories, RepositoryInfo};
 use crate::rules::RulesEditor;
@@ -371,6 +372,8 @@ pub struct ProjectSettingsPage {
     obsolete: Vec<String>,
     /// The repositories as their checkouts stand, added, removed and detected again.
     repositories: Entity<ProjectRepositories>,
+    /// The command lines its forges and tracker need, checked (`docs/protocol.md`).
+    programs: Entity<ProgramChecks>,
     repository_rows: Listing<RepositoryRow>,
     menus: HashMap<String, Entity<Menu>>,
     more: Entity<Menu>,
@@ -416,6 +419,7 @@ impl ProjectSettingsPage {
         let tasks = cx.new(|_| TasksSection::new(shell.clone(), name.clone()));
         let setup = cx.new(|_| SetupSection::new(shell.clone(), name.clone()));
         let repositories = cx.new(|_| ProjectRepositories::new(shell.clone(), name.clone()));
+        let programs = cx.new(|_| ProgramChecks::new(shell.clone(), name.clone()));
         // Asked once the shell, which is making this page, is no longer being updated.
         let (listing, skilling, tasking, setting, reading) = (
             commands.clone(),
@@ -424,7 +428,9 @@ impl ProjectSettingsPage {
             setup.clone(),
             repositories.clone(),
         );
+        let checking = programs.clone();
         cx.defer(move |cx| {
+            checking.update(cx, |checks, cx| checks.check(cx));
             listing.update(cx, |section, cx| section.read(cx));
             skilling.update(cx, |section, cx| section.read(cx));
             tasking.update(cx, |section, cx| section.read(cx));
@@ -443,6 +449,7 @@ impl ProjectSettingsPage {
         });
         // A count in the tabs follows its list.
         let observed = cx.observe(&repositories, |_, _, cx| cx.notify());
+        let checked = cx.observe(&programs, |_, _, cx| cx.notify());
         let counted = [
             cx.observe(&skills, |_, _, cx| cx.notify()),
             cx.observe(&commands, |_, _, cx| cx.notify()),
@@ -461,6 +468,7 @@ impl ProjectSettingsPage {
             tracker: None,
             obsolete: Vec::new(),
             repositories,
+            programs,
             repository_rows: Listing::default(),
             menus: HashMap::new(),
             more,
@@ -484,7 +492,7 @@ impl ProjectSettingsPage {
             commands,
             tasks,
             setup,
-            _subscriptions: [observed].into_iter().chain(counted).collect(),
+            _subscriptions: [observed, checked].into_iter().chain(counted).collect(),
         }
     }
 
@@ -506,6 +514,11 @@ impl ProjectSettingsPage {
 
     pub fn setup(&self) -> &Entity<SetupSection> {
         &self.setup
+    }
+
+    /// The command lines its forges and tracker need, checked.
+    pub fn programs(&self) -> &Entity<ProgramChecks> {
+        &self.programs
     }
 
     /// The repositories as their checkouts stand: the Repositories section's rows.
@@ -613,6 +626,10 @@ impl ProjectSettingsPage {
     ) {
         if saved {
             let saving = self.saving.take();
+            // A new forge or tracker may need another program: read them anew.
+            if saving.is_some() && read.is_ok() {
+                self.programs.update(cx, |checks, cx| checks.check(cx));
+            }
             match &read {
                 Ok(_) => {
                     if self.dialog.is_some() {
@@ -1261,13 +1278,26 @@ impl ProjectSettingsPage {
             )
             .into_any_element(),
         };
+        let programs = self.programs.read(cx);
+        let block = program_block(
+            &format!("repository-program-{path}"),
+            programs.repository(&path),
+            &self.shell,
+            cx,
+        );
         div()
             .mt(px(6.))
             .flex()
-            .gap(space::LG)
-            .child(value(id("base"), "Base branch", base_said(info), 0.22))
-            .child(value(id("remote"), "Remote, from git", remote, 0.37))
-            .child(forge)
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .gap(space::LG)
+                    .child(value(id("base"), "Base branch", base_said(info), 0.22))
+                    .child(value(id("remote"), "Remote, from git", remote, 0.37))
+                    .child(forge),
+            )
+            .child(block)
     }
 
     fn repository_row(&mut self, row: &RepositoryRow, cx: &mut Context<Self>) -> ListRow {
@@ -1377,10 +1407,22 @@ impl ProjectSettingsPage {
             .problem()
             .map(|why| SharedString::from(why.to_owned()));
         let repositories = self.repositories.downgrade();
+        let checks = self.programs.downgrade();
+        let checking = self.programs.read(cx).is_checking();
+        // From what the project declares, not from a read: one that failed is asked again.
+        let forges = self.forms.iter().any(|form| form.declared.is_some());
         Section::new("repositories", "Repositories")
             .count(count.to_string())
             .sentence(
                 "The git repositories of the project folder. A workspace takes a worktree of each.",
+            )
+            .action(
+                Button::quiet("check-forge-programs", "Check programs")
+                    .leading(Icon::Search)
+                    .disabled(!forges || checking)
+                    .on_click(move |_, _, cx| {
+                        checks.update(cx, |checks, cx| checks.check(cx)).ok();
+                    }),
             )
             .action(
                 Button::quiet("detect-repositories", "Detect again")
@@ -1431,12 +1473,25 @@ impl ProjectSettingsPage {
                 format!("{site} · {} · a ticket is {key}-123", projects.join(", "))
             }
         };
+        let programs = self.programs.read(cx);
+        let (needed, checking) = (self.tracker.is_some(), programs.is_checking());
+        let block = program_block("tracker-program", programs.tracker(), &self.shell, cx);
         let row = ListRow::new("tracker-row", kind.label())
             .leading(icon(Icon::Ticket).size(px(15.)).text_color(p.faint))
             .detail(SharedString::from(detail))
+            .below(div().mt(px(6.)).child(block))
             .on_click(cx.listener(|this, _, window, cx| this.open_tracker(window, cx)));
+        let checks = self.programs.downgrade();
         Section::new("tracker", "Tracker")
             .sentence("Where the project's tickets are. A workspace can be linked to one.")
+            .action(
+                Button::quiet("check-tracker-program", "Check again")
+                    .leading(Icon::Search)
+                    .disabled(!needed || checking)
+                    .on_click(move |_, _, cx| {
+                        checks.update(cx, |checks, cx| checks.check(cx)).ok();
+                    }),
+            )
             .child(ListCard::new("tracker-list").row(row))
     }
 

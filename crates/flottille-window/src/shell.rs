@@ -886,6 +886,16 @@ impl Shell {
                     section.update(cx, |section, cx| section.answered(serial, read, window, cx));
                 }
             }
+            Outcome::Programs {
+                project,
+                read,
+                serial,
+            } => {
+                if let Some(page) = self.settings_of_project(&project, cx) {
+                    let checks = page.read(cx).programs().clone();
+                    checks.update(cx, |checks, cx| checks.answered(serial, read, cx));
+                }
+            }
             // Detect again is the settings' own read of the repositories now.
             Outcome::ProjectChecked { .. } => {}
             Outcome::ProjectRemoved { project, refused } => match refused {

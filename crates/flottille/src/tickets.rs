@@ -306,7 +306,7 @@ fn newest(mut comments: Vec<Comment>) -> Vec<Comment> {
 
 /// The site `acli`'s active sign-in is on: the `Site:` line of `acli jira auth status`, nothing
 /// else of what it prints (an e-mail may be there: never kept).
-fn signed_in_site(status: &str) -> Option<String> {
+pub(crate) fn signed_in_site(status: &str) -> Option<String> {
     status.lines().find_map(|line| {
         let (label, site) = line.trim().split_once(':')?;
         let site = site
@@ -564,7 +564,7 @@ fn block(node: &Value, out: &mut String) {
 
 /// `acli <args>`, as `forge::gh` runs `gh`: spawned without a shell, with the user's own sign-in,
 /// nothing waiting for an answer: whether it succeeded, its output and its errors.
-async fn acli(args: &[&str]) -> Result<(bool, String, String), Gh> {
+pub(crate) async fn acli(args: &[&str]) -> Result<(bool, String, String), Gh> {
     let mut command = tokio::process::Command::new("acli");
     command
         .args(args)

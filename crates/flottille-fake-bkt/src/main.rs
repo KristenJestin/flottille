@@ -110,9 +110,20 @@ fn contexts(script: &Value) -> Vec<Value> {
     }
 }
 
+/// A script's `delay_ms` makes the sign-in check slow, as a program that hangs on the network.
+fn wait(script: &Value) {
+    if let Some(ms) = script["delay_ms"].as_u64() {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
 /// What `bkt` prints for `args`, and its exit code.
 fn answer(script: &Value, args: &[String]) -> i32 {
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    if words == ["--version"] {
+        println!("bkt version 0.37.0");
+        return 0;
+    }
     let option = |name: &str| {
         words
             .iter()
@@ -135,6 +146,7 @@ fn answer(script: &Value, args: &[String]) -> i32 {
         found
     };
     if positional[..positional.len().min(2)] == ["context", "list"] {
+        wait(script);
         println!("{}", json!({"contexts": contexts(script)}));
         return 0;
     }

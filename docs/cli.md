@@ -92,12 +92,25 @@ may be signed in where Flottille does not look (the macOS Keychain). `--json` pr
 "login": {"present", "path", "api_key"}, "override"}], "warnings", "ready"}` (`provider.list`,
 `docs/protocol.md`, gives the same with the models).
 
+A **Forges and trackers** part follows, for the programs the registered projects' forges and
+trackers use only (`gh`, `bkt`, `acli`; `docs/forges.md`, "The programs it needs"): each found or
+not, its version and whether it is signed in. A missing one or one signed out is a warning that
+says what to do (the installation page, and a command where one fits most systems; the sign-in
+command), never a failure, and `ready` stays the providers'. `--json` adds `"forges_and_trackers":
+[{"program", "host", "found", "path", "version", "signed_in", "install", "sign_in", "problem",
+"used_by", "warning"}]`, a state of `project.programs` (`docs/protocol.md`) with the repositories
+and trackers that use it (`"shop: api"`, `"shop: tracker"`) and its `warning` (`null` when
+nothing is wrong), the warnings also being in `"warnings"`.
+
 ```
 $ flottille doctor
 ok   claude: 2.1.300 (/usr/bin/claude)
 ok   Claude login: ~/.claude/.credentials.json
 Claude agents can run.
 OpenCode agents cannot run: opencode is not enabled (`enabled = true` under [opencode] in providers.toml enables it)
+Forges and trackers:
+ok   gh: 2.60.0 (/usr/bin/gh), signed in to github.com
+warn acli is not on PATH, and example.atlassian.net (shop: tracker) needs it: install it from https://developer.atlassian.com/cloud/acli/guides/install-acli/; the rest of Flottille works without it
 warn claude is 2.1.300, and this Flottille was checked against 2.1.295: its stream-json mode may have changed
 ```
 

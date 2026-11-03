@@ -159,9 +159,20 @@ fn updated_since(object: &Value, search: Option<&str>) -> bool {
         })
 }
 
+/// A script's `delay_ms` makes the sign-in check slow, as a program that hangs on the network.
+fn wait(script: &Value) {
+    if let Some(ms) = script["delay_ms"].as_u64() {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
 /// What `gh` prints for `args`, and its exit code.
 fn answer(script: &Value, args: &[String]) -> i32 {
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    if words == ["--version"] {
+        println!("gh version 2.60.0 (2026-01-01)\nhttps://github.com/cli/cli/releases/tag/v2.60.0");
+        return 0;
+    }
     let option = |name: &str| {
         words
             .iter()
@@ -266,6 +277,7 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             0
         }
         ["auth", "status", ..] => {
+            wait(script);
             if script["signed_in"] == false {
                 eprintln!(
                     "You are not logged into any GitHub hosts. To log in, run: gh auth login"

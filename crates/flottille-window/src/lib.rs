@@ -16,6 +16,7 @@ pub mod mode;
 pub mod model;
 pub mod open;
 pub mod page;
+pub mod programs;
 pub mod project;
 pub mod project_settings;
 pub mod providers;

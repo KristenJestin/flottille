@@ -27,6 +27,8 @@
 //!  "fail": {"ABC-9": "Error: the work item could not be fetched"}}
 //! ```
 //!
+//! `site` (`example.atlassian.net` by default) is the `Site:` line `acli jira auth status` prints, none
+//! with `site_line: false`; `delay_ms` makes that command slow, as one waiting on a network.
 //! `signed_in: false` makes `acli jira auth status` end with 1. `items` gives, by key, what
 //! `acli jira workitem view KEY --json` prints; a key with none ends with 1. `fail` makes the view
 //! of that key end with 1, saying its text. With `--fields a,b`, the view prints the work item's
@@ -91,16 +93,32 @@ fn main() {
     std::process::exit(answer(&dir, &script, &args));
 }
 
+/// A script's `delay_ms` makes the sign-in check slow, as a program that hangs on the network.
+fn wait(script: &Value) {
+    if let Some(ms) = script["delay_ms"].as_u64() {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
 /// What `acli` prints for `args`, and its exit code.
 fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     match words.as_slice() {
+        ["--version"] => {
+            println!("acli version 1.3.2-stable");
+            0
+        }
         ["jira", "auth", "status", ..] => {
+            wait(script);
             if script["signed_in"] == false {
                 eprintln!("✗ Not logged in. Run: acli jira auth login");
                 return 1;
             }
-            println!("✓ Authenticated\n  Site: example.atlassian.net");
+            let site = script["site"].as_str().unwrap_or("example.atlassian.net");
+            match script["site_line"] == false {
+                true => println!("✓ Authenticated"),
+                false => println!("✓ Authenticated\n  Site: {site}"),
+            }
             0
         }
         ["jira", "workitem", "view", key, rest @ ..] if rest.contains(&"--json") => {

@@ -701,7 +701,10 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   description in Markdown, its branches, its checks with their links, its reviews and comments,
   an agent's marked "posted by an agent", and Open in browser), and its tasks, each with Run, which runs it in
   the project folder, listed below with the rail's rows and output panel; its Settings: each
-  repository's forge, the tracker, its Skills (a path picked in the project folder, or a text;
+  repository's forge and the tracker, each saying whether the command line it needs (`gh`, `bkt`,
+  `acli`) is found, its version and whether it is signed in, and when it is not, how to install it
+  (the program's own page, and a command to copy where one fits most systems) or the command to
+  sign in, with a Check again (`forges.md`; Flottille installs nothing), its Skills (a path picked in the project folder, or a text;
   added, edited, removed), its Commands (added from a list of the templates and a blank one,
   edited, removed), its Tasks (a line, where it runs and its flags), its Setup (steps added,
   edited, removed and reordered, each with its kind, where it is done and its time limit), then

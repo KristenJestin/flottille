@@ -35,6 +35,7 @@ mod opencode;
 mod pilot;
 mod place;
 mod program;
+mod programs;
 mod project_command;
 mod projects;
 mod providers;
