@@ -79,6 +79,22 @@ const SIGN_INS: [&str; 7] = [
     "OPENAI_API_KEY",
 ];
 
+/// The file `User::new` writes in the daemon's configuration folder, which no test's own folder
+/// listing counts (`names_in`).
+const HARNESS_FILE: &str = "tool-results.toml";
+
+/// The names in a folder, without the file the harness itself wrote there: what a test asks is
+/// what the daemon left, not what `User::new` put.
+pub fn names_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name != HARNESS_FILE)
+        .collect();
+    names.sort();
+    names
+}
+
 /// A throwaway user: its own home and XDG folders, and the daemon it starts, stopped on drop.
 pub struct User {
     dir: TempDir,
@@ -116,14 +132,14 @@ impl User {
             .mode(0o700)
             .create(&file)
             .unwrap();
-        std::fs::write(file.join("tool-results.toml"), "limit = \"off\"\n").unwrap();
+        std::fs::write(file.join(HARNESS_FILE), "limit = \"off\"\n").unwrap();
         user
     }
 
     /// This user's daemon cuts long tool results as it does for everyone: every other test's
     /// daemon does not.
     pub fn with_cut_results(self) -> User {
-        std::fs::remove_file(self.dir.path().join("config/flottille/tool-results.toml")).unwrap();
+        std::fs::remove_file(self.dir.path().join("config/flottille").join(HARNESS_FILE)).unwrap();
         self
     }
 
