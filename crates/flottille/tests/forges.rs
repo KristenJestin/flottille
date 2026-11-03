@@ -2457,6 +2457,120 @@ fn bitbucket_forge_show_of_a_pull_request_by_its_number_answers_it() {
     );
 }
 
+/// A Bitbucket script with closed pull requests: Cloud's #20 declined with a reason, #21 merged
+/// by Bob after his comment, #22 merged by Bob who said nothing; Data Center's #30 merged by Bob
+/// (his comment before it, his thanks after) and #31 declined by Bob who said nothing.
+fn closed_bitbucket_pulls(user: &User) {
+    let cloud_comment = |name: &str, text: &str| json!({"content": {"raw": text}, "user": {"display_name": name}, "deleted": false});
+    let activity = |action: &str, name: &str, text: Option<&str>| match text {
+        Some(text) => json!({"action": action, "comment": {"text": text,
+            "author": {"displayName": name}, "comments": []}}),
+        None => json!({"action": action, "user": {"displayName": name}}),
+    };
+    user.bkt_script(json!({
+        "contexts": contexts(),
+        "pulls": {
+            "acme/api": [cloud_pull(20, "app/a", "DECLINED"), cloud_pull(21, "app/b", "MERGED"),
+                cloud_pull(22, "app/c", "MERGED")],
+            "APP/web": [dc_pull(30, "app/d", "MERGED"), dc_pull(31, "app/e", "DECLINED")]
+        },
+        "checks": {"acme/api": {}, "APP/web": {}},
+        "api": {
+            "/repositories/acme/api/pullrequests/20": {"participants": [],
+                "reason": "Superseded by the rewrite", "closed_by": {"display_name": "Carol"}},
+            "/repositories/acme/api/pullrequests/20/comments": {"values": [
+                cloud_comment("Alice", "Why?")]},
+            "/repositories/acme/api/pullrequests/21": {"participants": [],
+                "reason": "", "closed_by": {"display_name": "Bob"}},
+            "/repositories/acme/api/pullrequests/21/comments": {"values": [
+                cloud_comment("Alice", "Looks good"),
+                cloud_comment("Bob", "Merging after the freeze")]},
+            "/repositories/acme/api/pullrequests/22": {"participants": [],
+                "closed_by": {"display_name": "Bob"}},
+            "/repositories/acme/api/pullrequests/22/comments": {"values": [
+                cloud_comment("Alice", "Looks good")]},
+            "/rest/api/1.0/projects/APP/repos/web/pull-requests/30/activities": {"values": [
+                activity("COMMENTED", "Bob", Some("Thanks all")),
+                activity("MERGED", "Bob", None),
+                activity("COMMENTED", "Alice", Some("Ship it")),
+                activity("COMMENTED", "Bob", Some("Merging after the freeze"))]},
+            "/rest/api/1.0/projects/APP/repos/web/pull-requests/31/activities": {"values": [
+                activity("DECLINED", "Bob", None),
+                activity("COMMENTED", "Alice", Some("Why?"))]}
+        }
+    }));
+}
+
+#[test]
+fn show_of_a_closed_pull_request_has_its_closing_comment_on_bitbucket() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    bitbucket_fixture(&user);
+    closed_bitbucket_pulls(&user);
+    let (_, mcp) = agent_in(&user, None);
+    let show = |repository: &str, number: u64| {
+        let answer = mcp.call(
+            "forge",
+            json!({"action": "show", "repository": repository, "number": number,
+                "detail": "full"}),
+        );
+        assert!(!answer.error, "{}", answer.text);
+        answer.text
+    };
+
+    let declined = show("api", 20);
+    let merged = show("api", 21);
+    let silent = show("api", 22);
+    let data_center = show("web", 30);
+    let data_center_silent = show("web", 31);
+
+    // Cloud: the reason it was declined with, else the last comment of whoever closed it.
+    assert!(
+        declined.contains("closing comment (Carol): Superseded by the rewrite"),
+        "{declined}"
+    );
+    assert!(
+        merged.contains("closing comment (Bob): Merging after the freeze"),
+        "{merged}"
+    );
+    // Data Center: the comment of whoever closed it, before the activity that closed it.
+    assert!(
+        data_center.contains("closing comment (Bob): Merging after the freeze"),
+        "{data_center}"
+    );
+    assert!(!data_center.contains("Thanks all)"), "{data_center}");
+    for none in [&silent, &data_center_silent] {
+        assert!(!none.contains("closing comment"), "{none}");
+    }
+}
+
+#[test]
+fn show_of_a_closed_pull_request_has_its_comment_count_on_bitbucket() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    bitbucket_fixture(&user);
+    closed_bitbucket_pulls(&user);
+    let (_, mcp) = agent_in(&user, None);
+
+    let cloud = mcp.call(
+        "forge",
+        json!({"action": "show", "repository": "api", "number": 21}),
+    );
+    let data_center = mcp.call(
+        "forge",
+        json!({"action": "show", "repository": "web", "number": 30}),
+    );
+
+    assert!(
+        cloud.text.contains("comments: 2, read them with"),
+        "{}",
+        cloud.text
+    );
+    assert!(
+        data_center.text.contains("comments: 3, read them with"),
+        "{}",
+        data_center.text
+    );
+}
+
 #[test]
 fn bitbucket_forge_subscribe_to_a_pull_request_is_accepted() {
     let user = User::with_fake_agent().with_fake_bkt();

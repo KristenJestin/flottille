@@ -34,6 +34,7 @@ use crate::projects::{self, Failure};
 
 mod bitbucket;
 mod ci;
+mod closing;
 mod events;
 mod logs;
 
@@ -306,6 +307,9 @@ pub struct Pull {
     pub jobs: Vec<Job>,
     /// How long its repository's CI usually takes, when the forge says it (`ci::attach`).
     pub ci: Option<ci::Runs>,
+    /// The comment a merged or closed pull request was closed with, when the forge gives one
+    /// (`closing`); its author is whoever closed it.
+    pub closing: Option<Comment>,
 }
 
 /// A failing check of a pull request.
@@ -337,6 +341,8 @@ pub struct Comment {
     pub body: String,
     /// Written by a bot (an app), as far as the forge says it.
     pub bot: bool,
+    /// When it was written, as the forge says it (an RFC 3339 text), when it does.
+    pub at: Option<String>,
 }
 
 impl Comment {
@@ -411,6 +417,7 @@ impl Pull {
                         .as_str()
                         .map(|s| s.to_lowercase().replace('_', " ")),
                     body: text(&comment["body"]),
+                    at: comment["createdAt"].as_str().map(str::to_owned),
                 })
                 .collect()
         };
@@ -465,6 +472,7 @@ impl Pull {
                 })
                 .collect(),
             ci: None,
+            closing: None,
         })
     }
 }
@@ -1586,6 +1594,7 @@ async fn forge_show(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall, numbe
             drop(held);
             logs::attach(&forge, &mut pull).await;
             ci::attach(&forge, &mut pull).await;
+            closing::attach(&forge, &mut pull).await;
             let again = format!(
                 "{{\"action\": \"show\", \"repository\": {}, \"number\": {number}, \
                  \"detail\": \"full\"}}",
@@ -1902,6 +1911,7 @@ async fn forge_read(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall) -> Ou
         if let (Some(forge), Some(pull)) = (&repository.forge, &mut repository.pull) {
             logs::attach(forge, pull).await;
             ci::attach(forge, pull).await;
+            closing::attach(forge, pull).await;
         }
     }
     Outcome::Done(read_text(
@@ -2303,6 +2313,23 @@ fn pull_text(text: &mut String, named: &str, pull: &Pull, full: bool, again: &st
     text.push_str(&logs::text(&pull.jobs));
     if let Some(ci) = &pull.ci {
         text.push_str(&format!("  {}\n", ci.line()));
+    }
+    if let Some(closing) = &pull.closing {
+        let (body, agent) = closing.unmarked();
+        let body: String = body.chars().take(COMMENT_CHARS).collect();
+        if !agent {
+            crate::web::shown(&body, crate::web::Source::Link);
+        }
+        let agent = if agent {
+            format!(", {BY_AGENT}")
+        } else {
+            String::new()
+        };
+        text.push_str(&format!(
+            "  closing comment ({}{agent}): {}\n",
+            closing.author,
+            body.replace('\n', "\n    ")
+        ));
     }
     for (title, comments) in [("comments", &pull.comments), ("reviews", &pull.reviews)] {
         let said: Vec<&Comment> = comments.iter().filter(|c| !c.body.is_empty()).collect();

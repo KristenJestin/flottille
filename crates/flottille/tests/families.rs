@@ -455,6 +455,117 @@ fn updating_a_declined_bitbucket_pull_request_is_refused_before_bkt_is_called() 
     );
 }
 
+/// `pulls_to_close()` with the comments of a merged pull request (#7, merged by bob after his
+/// comment and before alice's thanks), of a closed one (#9, closed by carol with a comment) and
+/// of one closed by dave, who said nothing (#8).
+fn closed_pulls() -> Value {
+    let mut script = pulls_to_close();
+    let comment = |login: &str, body: &str, at: &str| json!({"author": {"login": login}, "body": body, "createdAt": at});
+    let held = &mut script["pulls"]["acme/app"];
+    held["app/old"]["comments"] = json!([
+        comment("alice", "Looks good", "2026-01-01T09:00:00Z"),
+        comment("bob", "Merging after the freeze", "2026-01-01T10:00:00Z"),
+        comment("alice", "Thanks", "2026-01-01T11:00:00Z")
+    ]);
+    held["app/closed"]["comments"] = json!([
+        comment("carol", "Superseded by #20", "2026-01-02T09:59:59Z"),
+        comment("alice", "Fine", "2026-01-02T12:00:00Z")
+    ]);
+    held["app/dropped"] = json!({"number": 8, "title": "Dropped too", "state": "CLOSED",
+        "isDraft": false, "baseRefName": "main", "headRefName": "app/dropped",
+        "url": "https://github.com/acme/app/pull/8",
+        "comments": [comment("alice", "Why?", "2026-01-03T09:00:00Z")]});
+    let event = |event: &str, login: &str, at: &str| json!({"event": event, "actor": {"login": login}, "created_at": at});
+    script["events"] = json!({"acme/app": {
+        "7": [event("labeled", "alice", "2026-01-01T08:00:00Z"),
+              event("merged", "bob", "2026-01-01T10:00:01Z")],
+        "9": [event("closed", "carol", "2026-01-02T10:00:00Z")],
+        "8": [event("closed", "dave", "2026-01-03T10:00:00Z")]}});
+    script
+}
+
+#[test]
+fn show_of_a_closed_pull_request_has_its_closing_comment() {
+    let user = user();
+    on_github(&user);
+    user.gh_script(closed_pulls());
+    let (_, mcp) = root_in(&user, None);
+
+    let show = |number: u64, detail: &str| {
+        read(
+            &user,
+            mcp.call(
+                "forge",
+                json!({"action": "show", "number": number, "detail": detail}),
+            ),
+        )
+    };
+    let merged = show(7, "full");
+    let closed = show(9, "short");
+    let silent = show(8, "full");
+
+    // The last comment of whoever merged it, before they did: not alice's thanks after it.
+    assert!(
+        merged.contains("closing comment (bob): Merging after the freeze"),
+        "{merged}"
+    );
+    assert!(!merged.contains("closing comment (alice)"), "{merged}");
+    assert!(
+        closed.contains("closing comment (carol): Superseded by #20"),
+        "{closed}"
+    );
+    // The forge gives none: nothing is said, not an empty line.
+    assert!(!silent.contains("closing comment"), "{silent}");
+    assert!(
+        words(user.gh_received())
+            .iter()
+            .any(|call| call.starts_with("api repos/acme/app/issues/7/events"))
+    );
+}
+
+#[test]
+fn show_of_an_open_pull_request_has_no_closing_comment_and_asks_no_event() {
+    let user = user();
+    on_github(&user);
+    user.gh_script(closed_pulls());
+    let (_, mcp) = root_in(&user, None);
+
+    let open = read(
+        &user,
+        mcp.call("forge", json!({"action": "show", "number": 12})),
+    );
+
+    assert!(!open.contains("closing comment"), "{open}");
+    assert!(
+        !words(user.gh_received())
+            .iter()
+            .any(|call| call.starts_with("api repos"))
+    );
+}
+
+#[test]
+fn show_of_a_closed_pull_request_has_its_comment_count() {
+    let user = user();
+    on_github(&user);
+    user.gh_script(closed_pulls());
+    let (_, mcp) = root_in(&user, None);
+
+    let short = read(
+        &user,
+        mcp.call("forge", json!({"action": "show", "number": 7})),
+    );
+    let full = read(
+        &user,
+        mcp.call(
+            "forge",
+            json!({"action": "show", "number": 7, "detail": "full"}),
+        ),
+    );
+
+    assert!(short.contains("comments: 3, read them with"), "{short}");
+    assert!(full.contains("comments (3):"), "{full}");
+}
+
 #[test]
 fn forge_close_closes_a_github_pull_request_with_a_comment_once_allowed() {
     let user = user();

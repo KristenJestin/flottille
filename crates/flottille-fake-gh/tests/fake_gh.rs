@@ -486,3 +486,34 @@ fn run_fail_makes_the_run_list_alone_fail() {
     assert!(String::from_utf8_lossy(&runs.stderr).contains("502"));
     assert!(pulls.status.success());
 }
+
+#[test]
+fn the_events_of_a_pull_request_are_answered_from_the_script_in_one_slurped_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let event = json!({"event": "merged", "actor": {"login": "bob"},
+        "created_at": "2026-01-01T10:00:00Z"});
+    std::fs::write(
+        dir.path().join("script.json"),
+        json!({"events": {"acme/api": {"7": [event]}}}).to_string(),
+    )
+    .unwrap();
+    let asked = |number: &str| {
+        let path = format!("repos/acme/api/issues/{number}/events");
+        let out = fake(dir.path())
+            .args([
+                "api",
+                &path,
+                "--hostname",
+                "github.com",
+                "--paginate",
+                "--slurp",
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()
+    };
+
+    assert_eq!(asked("7"), json!([[event]]));
+    assert_eq!(asked("8"), json!([[]]));
+}

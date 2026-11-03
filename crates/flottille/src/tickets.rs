@@ -2140,6 +2140,7 @@ impl Tickets {
                     state: None,
                     body: said(&comment["body"]),
                     bot: forge::is_bot(&comment["author"]),
+                    at: None,
                 })
             })
             .collect();
