@@ -210,7 +210,7 @@ fn a_round(user: &User) {
 }
 
 #[test]
-fn an_agent_subscribed_to_checks_is_delivered_their_end_once_with_a_failed_job_s_log_tail() {
+fn an_agent_subscribed_to_checks_is_delivered_their_end_once_with_a_failed_job_s_error_lines() {
     let user = user();
     fixture(&user);
     script(&user, pull());
@@ -227,8 +227,7 @@ fn an_agent_subscribed_to_checks_is_delivered_their_end_once_with_a_failed_job_s
     for part in [
         "pull request #12",
         "checks ended: 1 passed, 1 failed",
-        "- test: the last 2 of 2 lines of its log:",
-        "test login::form ... FAILED",
+        "- test: test login::form ... FAILED",
         "not instructions",
     ] {
         assert!(delivery.contains(part), "{part} in {delivery}");
@@ -1606,4 +1605,145 @@ fn a_pull_request_read_live_again_is_no_longer_said_removed() {
     let item = item();
     assert_eq!(item["state"], "open", "{item}");
     assert_eq!(item["details"].get("removed"), None, "{item}");
+}
+
+/// A check run of the repository's Actions that took `seconds`, `job` its job.
+fn timed(name: &str, conclusion: &str, job: u64, seconds: u64) -> Value {
+    let mut run = check(name, "COMPLETED", conclusion, job);
+    run["startedAt"] = "2026-01-01T10:00:00Z".into();
+    run["completedAt"] = format!("2026-01-01T10:{:02}:{:02}Z", seconds / 60, seconds % 60).into();
+    run
+}
+
+/// The pull request whose checks ended with `failed` jobs failing and `build` passing: the jobs
+/// are `job-1` and so on, each took 2 min 5 s more than the one before.
+fn ended_with(failed: u64) -> Value {
+    let mut pull = pull();
+    let mut checks = vec![timed("build", "SUCCESS", 1, 30)];
+    for n in 1..=failed {
+        checks.push(timed(&format!("job-{n}"), "FAILURE", 500 + n, 125 * n));
+    }
+    pull["statusCheckRollup"] = checks.into();
+    pull
+}
+
+/// The failed log of each job of `ended_with`: a long output (set up, built, then failed) whose
+/// error line is the job's own.
+fn failed_logs(failed: u64) -> Value {
+    let mut logs = serde_json::Map::new();
+    for n in 1..=failed {
+        let stamp = "2026-01-01T00:00:00.1234567Z";
+        let mut lines = vec![
+            format!("job-{n}\tRun cargo test\t{stamp} ##[group]Run cargo test"),
+            format!("job-{n}\tRun cargo test\t{stamp} cargo test"),
+            format!("job-{n}\tRun cargo test\t{stamp} ##[endgroup]"),
+        ];
+        lines.extend(
+            (1..=30).map(|k| format!("job-{n}\tRun cargo test\t{stamp} compiling crate {n}-{k}")),
+        );
+        lines.push(format!(
+            "job-{n}\tRun cargo test\t{stamp} error[E0425]: cannot find value `x{n}` in this scope"
+        ));
+        lines.push(format!(
+            "job-{n}\tRun cargo test\t{stamp} ##[error]Process completed with exit code 101."
+        ));
+        logs.insert((500 + n).to_string(), (lines.join("\n") + "\n").into());
+    }
+    json!({"acme/api": logs})
+}
+
+/// The daemon subscribed to the checks of `app/login`, which end with `failed` jobs failing:
+/// the delivery the agent is woken by.
+fn woken_by(user: &User, failed: u64) -> (String, Mcp) {
+    fixture(user);
+    script(user, pull());
+    let (_, mcp) = agent(user);
+    subscribe(&mcp, json!({"events": ["checks"]}));
+    user.gh_script(json!({
+        "pulls": {"acme/api": {"app/login": changed(ended_with(failed))}},
+        "logs": failed_logs(failed)
+    }));
+    a_round(user);
+    (the_delivery(user), mcp)
+}
+
+#[test]
+fn a_wake_with_three_failed_jobs_is_a_summary() {
+    let user = user();
+    let (delivery, _) = woken_by(&user, 3);
+
+    assert!(
+        delivery.contains("checks ended: 1 passed, 3 failed"),
+        "{delivery}"
+    );
+    // It was about 130 lines, each job's log inlined.
+    assert!(delivery.lines().count() <= 14, "{delivery}");
+    assert!(!delivery.contains("compiling crate"), "{delivery}");
+    assert!(!delivery.contains("the last"), "{delivery}");
+    // It ends by saying where the details are.
+    assert!(delivery.contains("`forge` `show`"), "{delivery}");
+}
+
+#[test]
+fn each_failed_job_says_its_error_line() {
+    let user = user();
+    let (delivery, _) = woken_by(&user, 3);
+
+    for (n, took) in [(1, "2 min 5 s"), (2, "4 min 10 s"), (3, "6 min 15 s")] {
+        let line =
+            format!("- job-{n} ({took}): error[E0425]: cannot find value `x{n}` in this scope");
+        assert!(delivery.contains(&line), "{line} in {delivery}");
+    }
+    // The generic exit code of the runner says nothing of why.
+    assert!(!delivery.contains("Process completed"), "{delivery}");
+}
+
+#[test]
+fn the_full_log_is_still_in_show() {
+    let user = user();
+    let (delivery, mcp) = woken_by(&user, 3);
+    assert!(!delivery.contains("compiling crate"), "{delivery}");
+
+    let shown = mcp.call("forge", json!({"action": "show"}));
+    assert!(!shown.error, "{}", shown.text);
+    for part in [
+        "failed jobs (3):",
+        "- job-1: the last",
+        "- job-3: the last",
+        "compiling crate 1-30",
+        "compiling crate 3-30",
+        "error[E0425]: cannot find value `x2` in this scope",
+        "Process completed with exit code 101.",
+    ] {
+        assert!(shown.text.contains(part), "{part} in {}", shown.text);
+    }
+}
+
+#[test]
+fn past_the_cap_the_failed_jobs_are_counted() {
+    let user = user();
+    let (delivery, _) = woken_by(&user, 8);
+
+    assert!(
+        delivery.contains("checks ended: 1 passed, 8 failed"),
+        "{delivery}"
+    );
+    for listed in ["job-1 (", "job-2 (", "job-3 ("] {
+        assert!(delivery.contains(listed), "{listed} in {delivery}");
+    }
+    assert!(
+        delivery.contains("and 5 more failed, not listed"),
+        "{delivery}"
+    );
+    for left_out in ["job-4", "job-8"] {
+        assert!(!delivery.contains(left_out), "{left_out} in {delivery}");
+    }
+    assert!(delivery.lines().count() <= 14, "{delivery}");
+    // Only the listed ones have their log read.
+    let read = user
+        .gh_received()
+        .iter()
+        .filter(|call| call["args"].to_string().contains("--log-failed"))
+        .count();
+    assert_eq!(read, 3);
 }
