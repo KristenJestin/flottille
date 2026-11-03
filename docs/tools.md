@@ -132,28 +132,40 @@ program.
   changes (a running session keeps the list it has, "When the tools change"). `run_status`
   takes the id of a cut result where it takes a run's: `run_status {"run": "res_…", "start": a}`
   answers the lines of the whole text from line `a` (the first by default), as many as fit under
-  the limit, or `tail` at most, then says where the earlier and the later lines are
+  the limit, `tail` at most; `tail` alone, as on a run, is the last lines (`tail 3` is the last
+  three), then says where the earlier and the later lines are
   (`(lines a-b of T; earlier lines: …; later lines: …)`, or `, the end of the result`). Each page
   is under the limit and is never cut again. `action stop` is refused for it, `start` outside the
   lines too.
-- **Where a tool already cuts or pages** (`fs_read`'s pages, `run_status`'s lines, `web`'s 30,000
-  characters, a search's limits), what it does stays, and the limit applies to what is still
-  longer: a `fs_read` page over the limit is cut, and a smaller `range.length` avoids it. A
-  refusal or a failure is never cut (2,000 characters at most). The pages of a cut result, and a
-  result under the limit, are returned as they were.
+- **Where a tool already cuts or pages** (`run_status`'s lines, `web`'s 30,000 characters, a
+  search's limits), what it does stays, and the limit applies to what is still longer. A refusal
+  or a failure is never cut (2,000 characters at most). The pages of a cut result, and a result
+  under the limit, are returned as they were.
+- **`fs_read` is never cut**: its page follows the limit (the limit less 400 characters for what
+  a page says of itself, 32,000 bytes at most), so that what it returns is what the agent saw.
+  The session knows a file's fingerprint once a page of it was read, and `fs_write` and `fs_edit`
+  rely on that: a page cut in its middle would let the agent replace text it never saw. A page is
+  shorter than before when the limit is the default (`range.length` is still at most 32 KiB, the
+  page ends on a line before the limit), and each page names the next offset.
 - **What is kept**: the whole masked text, in the store, for the agent whose call it was, and
   that agent alone (`refused: res_… is no cut result of this session`: another agent, another
   session, or an id that never existed). It is kept for as long as the session: it goes when the
   session's runs do (`docs/protocol.md`, `agent.image`: when its root failed or ended and cannot
-  be resumed, or 7 days after a root that can), and with its agent. It never reaches a delivery, a report, another agent's tool, the pilot door or an event.
+  be resumed, or 7 days after a root that can), and with its agent. It never reaches a delivery,
+  a report, another agent's tool, the pilot door or an event. **An agent keeps its last 20 cut
+  results** (each is at most 40,000 characters): the text of an older one is dropped as a newer
+  one is kept, and reading it answers `refused: res_… was dropped: only the last 20 results cut
+  for an agent are kept…`.
 - **The limit** is `limit` in `tool-results.toml` of Flottille's configuration folder, 4,000 to
   40,000 characters, or `"off"` (a result is then returned whole, up to the server's own limit
   above). It is global, never a project's, and read at every call: a change applies to the next
   result of every running session.
 - **A call is recorded** with what was cut: `agent.tool_served` carries `cut` (`docs/events.md`),
   which the window reads to show the step as cut.
-- **Not cut**: a call the gate held, whose result comes later as a delivery, and what the pilot
-  door answers to an agent outside Flottille.
+- **A call the gate held** is cut when the user approves it and it is performed: the delivery
+  carries the beginning, the end and the id, and the whole text is kept for the agent like any
+  other.
+- **Not cut**: what the pilot door answers to an agent outside Flottille.
 
 ## The place and its paths
 
