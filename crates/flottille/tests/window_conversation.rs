@@ -754,6 +754,83 @@ fn a_ticket_created_in_auto_says_allowed_by_the_judge(cx: &mut TestAppContext) {
     );
 }
 
+#[gpui_kit::test]
+fn a_step_whose_result_was_cut_says_so_with_the_characters_left_out(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent().with_cut_results();
+    user.fake_script(json!({"turns": [
+        {"when": "read the log", "do": [{"mcp": {"tool": "fs_read", "keyed": true,
+            "arguments": {"path": "big.txt"}}}]},
+        {"when": "read the note", "do": [{"mcp": {"tool": "fs_read", "keyed": true,
+            "arguments": {"path": "note.txt"}}}]}
+    ]}));
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let lead = lead(&user);
+    let folder = user
+        .call("workspace.show", json!({"project": "app", "name": "w"}))
+        .unwrap()["folder"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let log: String = (1..=600)
+        .map(|n| format!("line {n:04} of the log\n"))
+        .collect();
+    std::fs::write(PathBuf::from(&folder).join("big.txt"), &log).unwrap();
+    std::fs::write(PathBuf::from(&folder).join("note.txt"), "short\n").unwrap();
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": "read the log"}),
+    )
+    .unwrap();
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": "read the note"}),
+    )
+    .unwrap();
+    // Every `fs_read` step: its block, its place in it, how many characters were left out.
+    let reads = |cx: &mut VisualTestContext| {
+        let mut found = Vec::new();
+        for (at, block) in blocks(&page, cx).iter().enumerate() {
+            if let Block::Steps { calls } = block {
+                for (n, call) in calls.iter().enumerate() {
+                    if call.name == "fs_read" && call.until.is_some() {
+                        found.push((at, n, call.cut));
+                    }
+                }
+            }
+        }
+        found
+    };
+    until(&shell, cx, "both reads are done", |cx| reads(cx).len() == 2);
+    settle(cx);
+
+    let found = reads(cx);
+    let (at, n, cut) = found[0];
+    assert!(cut.is_some_and(|left_out| left_out > 8_000), "{found:?}");
+    let (short_at, short_n, short_cut) = found[1];
+    assert_eq!(short_cut, None, "the short note was not cut");
+    let mut opened = Vec::new();
+    for toggle in [at, short_at] {
+        if !opened.contains(&toggle) {
+            cx.update(|window, cx| window.click(format!("row-{toggle}-steps-toggle"), cx));
+            at_rest(cx);
+            opened.push(toggle);
+        }
+    }
+    let said = label(format!("step-{at}-{n}-cut"), cx).expect("the cut is said on its step");
+    assert!(said.starts_with("cut at the source · "), "{said}");
+    assert!(said.ends_with(" characters left out"), "{said}");
+    assert!(
+        said.contains(','),
+        "the count is grouped by thousands: {said}"
+    );
+    assert!(
+        label(format!("step-{short_at}-{short_n}-cut"), cx).is_none(),
+        "a result that was not cut says nothing"
+    );
+}
+
 /// The width of an element, or `None` while it is not drawn.
 fn width_of(id: impl Into<gpui_kit::ElementId>, cx: &mut VisualTestContext) -> Option<f32> {
     let id = id.into();

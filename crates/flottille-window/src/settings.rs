@@ -75,6 +75,11 @@ pub struct Developer {
     pub file: String,
 }
 
+/// The limits the Tool results select offers, in characters; Off comes after them. The daemon
+/// takes any number from 4,000 to 40,000 (`docs/protocol.md`): a file edited by hand keeps its
+/// own, shown as one more option.
+pub const LIMITS: [usize; 4] = [4_000, 8_000, 16_000, 32_000];
+
 /// What the developer mode's switch logs, under its label.
 pub const DEVELOPER_HINT: &str = "Each gate decision with its reasons, the judge's input and \
      answer, requests, deliveries and agent processes, one JSON object per line, every secret \
@@ -104,6 +109,10 @@ pub struct SettingsPage {
     developer: Option<Developer>,
     /// The developer mode's switch flipped, until the daemon answers: what it was asked to become.
     developer_pending: Option<bool>,
+    /// The limit above which a tool result is cut, once the daemon said it (`Some(None)` is Off).
+    tool_results: Option<Option<usize>>,
+    /// A limit chosen, until the daemon answers: what it was asked to become.
+    tool_results_pending: Option<Option<usize>>,
     /// The window's appearance, once the daemon said it.
     appearance: Option<Appearance>,
     /// Why the daemon could not read the appearance it keeps: the tab says so and stays usable,
@@ -158,6 +167,8 @@ impl SettingsPage {
             how: false,
             developer: None,
             developer_pending: None,
+            tool_results: None,
+            tool_results_pending: None,
             appearance: None,
             appearance_unread: None,
             tab: 0,
@@ -525,6 +536,93 @@ impl SettingsPage {
                  nothing more is written.",
             )
             .child(card)
+    }
+
+    /// Whether the daemon said the limit of tool results.
+    pub fn tool_results_known(&self) -> bool {
+        self.tool_results.is_some()
+    }
+
+    /// The limit as the daemon last said it (`Some(None)` is Off), whatever was asked since.
+    pub fn tool_results_said(&self) -> Option<Option<usize>> {
+        self.tool_results
+    }
+
+    /// The limit the select shows, in characters (`None` is Off): what it was asked to become
+    /// while the daemon has not answered.
+    pub fn tool_results_limit(&self) -> Option<usize> {
+        self.tool_results_pending
+            .or(self.tool_results)
+            .unwrap_or(Some(8_000))
+    }
+
+    fn choose_tool_results(&mut self, limit: Option<usize>, cx: &mut Context<Self>) {
+        if self.tool_results_pending.is_some() || self.tool_results.is_none() {
+            return;
+        }
+        self.tool_results_pending = Some(limit);
+        self.shell
+            .update(cx, |shell, _| {
+                shell.perform(Command::ToolResultsSet { limit })
+            })
+            .ok();
+        cx.notify();
+    }
+
+    /// The daemon's answer to a read or a choice: a choice refused goes back, and a toast says
+    /// why.
+    pub fn tool_results_answered(
+        &mut self,
+        shown: Result<Option<usize>, String>,
+        written: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if written {
+            self.tool_results_pending = None;
+        }
+        match shown {
+            Ok(limit) => self.tool_results = Some(limit),
+            Err(why) if written => toast(
+                Toast::failure("The limit of tool results was not kept").detail(why),
+                cx,
+            ),
+            Err(_) => {}
+        }
+        cx.notify();
+    }
+
+    fn tool_results_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let shown = self.tool_results_limit();
+        let mut limits: Vec<Option<usize>> = LIMITS.iter().map(|l| Some(*l)).collect();
+        if let Some(own) = shown
+            && !LIMITS.contains(&own)
+        {
+            limits.push(Some(own));
+            limits.sort();
+        }
+        limits.push(None);
+        let options = limits.iter().map(|limit| match limit {
+            Some(limit) => SelectOption::new(
+                SharedString::from(limit.to_string()),
+                SharedString::from(format!("{} characters", grouped(*limit))),
+            ),
+            None => SelectOption::new("off", "Off").line("Every result goes to the agent whole."),
+        });
+        let chosen = limits.iter().position(|l| *l == shown).unwrap_or(0);
+        let this = cx.entity().downgrade();
+        let picked = limits.clone();
+        let select = Select::new("tool-results-limit", options, chosen)
+            .disabled(self.tool_results.is_none() || self.tool_results_pending.is_some())
+            .on_choose(move |index, _, cx| {
+                let limit = picked[index];
+                this.update(cx, |this, cx| this.choose_tool_results(limit, cx))
+                    .ok();
+            });
+        Section::new("tool-results", "Tool results")
+            .sentence(
+                "A tool result longer than this reaches the agent as its beginning and its end,                  with the number of characters left out; the agent reads the rest by ranges,                  and only that session can. It saves the agent's context. For every project and                  every agent.",
+            )
+            .child(Field::new("tool-results-field", "Cut results longer than", select))
     }
 
     /// Whether the daemon answered about the window's appearance, with it or with why it cannot
@@ -969,7 +1067,13 @@ impl Render for SettingsPage {
             .collect();
         let mut sections: Vec<Vec<(&str, AnyElement)>> = vec![
             judge_tab,
-            vec![("providers", providers)],
+            vec![
+                ("providers", providers),
+                (
+                    "tool-results",
+                    self.tool_results_section(cx).into_any_element(),
+                ),
+            ],
             vec![("rules", self.rules.clone().into_any_element())],
             vec![("appearance", self.appearance_section(cx).into_any_element())],
             vec![("developer", self.developer_section(cx).into_any_element())],
@@ -1039,5 +1143,32 @@ impl Render for SettingsPage {
             .text_color(p.text)
             .child(top)
             .child(page)
+    }
+}
+
+/// A count of characters with its thousands set apart: `8,000`.
+pub(crate) fn grouped(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (at, digit) in digits.chars().enumerate() {
+        if at > 0 && (digits.len() - at).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::grouped;
+
+    #[test]
+    fn a_count_sets_its_thousands_apart() {
+        assert_eq!(grouped(0), "0");
+        assert_eq!(grouped(999), "999");
+        assert_eq!(grouped(1_000), "1,000");
+        assert_eq!(grouped(9_400), "9,400");
+        assert_eq!(grouped(1_234_567), "1,234,567");
     }
 }

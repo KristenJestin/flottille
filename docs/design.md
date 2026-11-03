@@ -720,10 +720,12 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   or Flottille, and for Flottille Light or Dark, each a segmented choice; off an Omarchy desktop
   the Omarchy choice is shown disabled with one line saying why), and last the Developer mode, a
   switch with the path of its log (`developer.md`: what the daemon decides and why, off by default); a judge
-  Flottille picked is said once in a notice, with Open Settings and Dismiss;
+  Flottille picked is said once in a notice, with Open Settings and Dismiss; the Providers tab ends with a **Tool results** section, global: the limit above which a tool result is cut at the source
+  (a select, 4,000 to 32,000 characters or Off, 8,000 by default; `tools.md`, "Long results"),
+  part of the core and not of an extension;
 - a session page: the root's conversation, live (messages, the user's own as selectable as the agent's, thoughts collapsed (their head says how long the thinking lasted, from the event before it
   to the one after it, and no time when it lasted less than a tenth of a second), tool calls with
-  their result, the children launched, a session started for the user as one line, "started session <title>" (it is no sub-agent), reports and an edit's diff, each folded to one line until a click unfolds it), one compact line for each command a
+  their result (a result cut at the source says so on its step, with the number of characters left out), the children launched, a session started for the user as one line, "started session <title>" (it is no sub-agent), reports and an edit's diff, each folded to one line until a click unfolds it), one compact line for each command a
   tool call ran (an icon, the line, how it ended, how long: a click opens the output panel the
   rail opens, and the output itself is only there; the rail's own row for a command of the root
   agent does not name it, the conversation being the page it is on), one line for each request that reached the
