@@ -1,14 +1,20 @@
 # Extensions
 
 **Status: a proposal, nothing built.** Written from a discussion with the maintainer
-(November 2026). The defaults it takes are marked as such; what is open is in "Open questions".
+(November 2026). The maintainer answered its open questions on 2026-11-03; the decisions are in
+"Decisions taken", and no question is left open.
 
 Some of Flottille's features add a capability of Flottille's own on top of what it is: the Auto
 judge, the compaction, and later specs, a cold read, a reviewer, a handbook. Each brings its
 settings, its agents, its pages and its triggers. Built one by one, each would add its own tab, its
 own way of picking a model, its own guidance file, its own hooks in the daemon, and the core would
 end up naming every one of them. This note makes them **extensions**: parts of Flottille that
-declare what they bring, which the core runs, and which the user turns on or off.
+declare what they bring, which the core runs, and which the user can turn on or off from their own
+settings.
+
+Extensions are **how Flottille is built, not something the user sees as such**. Each feature sits
+natively in the app, where it belongs, and its settings are drawn with the same components as the
+rest of Settings.
 
 It does not describe a framework to write ahead. The judge is extracted first, the compaction
 second, and the frame holds only what these two need; Specs comes third and is the proof that the
@@ -20,12 +26,13 @@ frame was right ("The order of the work").
 |---|---|
 | Core | What Flottille is without any extension: the daemon, the store, projects, workspaces, agents and their tree, deliveries, the gate and bare mode, the generic tools, the providers, the window's shell. |
 | Extension | A part of Flottille, compiled in, that adds a capability of its own and can be turned off with Flottille still working. |
-| Declaration | What an extension says it brings: settings, calls, roles, triggers, tools, data, screens. The core reads it and runs it. |
+| Declaration | What an extension says it brings: settings and where they appear, calls, roles, triggers, tools, data, screens. The core reads it and runs it. |
+| Place | Where an extension's settings appear in the window: its own tab of Settings (with a title and an order among the tabs), or a section of a screen that exists. |
 | Model slot | A setting that names a model: provider, model and effort, picked like the Auto judge. |
 | Guidance | An editable text an extension's model follows, set inside a fixed text it cannot move, with Reset to default. |
 | Call | One question to a model with no tool at all: input given by Flottille, output checked by the extension. |
 | Trigger | What makes an extension act: an event of the core, a time, a gesture of the user. |
-| Active | Turned on by the user, globally and, for an extension that touches a project, in that project. |
+| Active | Turned on by the user, globally and, for an extension that touches a project, not turned off in that project. |
 
 ## What an extension is, and what it is not
 
@@ -44,8 +51,12 @@ An extension is:
   models run on the user's own quota, through the user's own CLIs, in bare mode; what it does is
   recorded and emits events; its screens follow the rules of the window, motion included
   (`reference/gpui.md`).
+- **Native in the window.** It has no "extension" to show: its settings are in the place it
+  declares, drawn by the core with the components of the other tabs, and the word never appears in
+  the window.
 - **Off unless the user wants it** (see "Activation" for the defaults). An extension turned off
-  does not exist for the user: no tab, no tool given to any agent (the tool lists stay what they
+  does not exist for the user but for the switch at the top of its settings and one line saying
+  what it does: no screen of its own, no tool given to any agent (the tool lists stay what they
   were), no trigger, no quota spent.
 
 It is not:
@@ -76,16 +87,27 @@ pub struct Extension {
     /// Stable: its settings' keys, its events, its methods, its store tables.
     pub name: &'static str,        // "judge"
     pub title: &'static str,       // "Auto judge"
-    /// One sentence for the Extensions tab: what it does and what it costs.
+    /// One sentence: what it does and what it costs. It is the line the settings show alone
+    /// while the extension is off.
     pub sentence: &'static str,
     pub scope: Scope,              // Global; Project when Specs comes
     pub on_by_default: bool,
+    /// Where its settings appear: a tab of its own, or a section of a screen that exists.
+    pub place: Place,
     pub slots: &'static [Slot],
     pub guidance: Option<Guidance>,
     pub settings: &'static [Setting],
     pub calls: &'static [Call],
     pub triggers: &'static [Trigger],
     // Later, when Specs comes: roles, tools, data, screens beyond the settings.
+}
+
+pub enum Place {
+    /// Its own tab of Settings: the title, and the order among the tabs (the core's tabs
+    /// have theirs; the order is a number, so that no tab names another).
+    Tab { title: &'static str, order: u16 },
+    /// A section of a screen that exists (a tab, a project's settings), at its order.
+    Section { screen: Screen, order: u16 },
 }
 ```
 
@@ -104,13 +126,14 @@ The core provides:
   (`[compaction]`), holding `enabled` and its settings, editable by hand and refused key by key as
   `providers.toml` is (an unknown key, a value of the wrong kind, naming the key at fault). A
   project-scoped extension's per-project switch is in the project's own file, under
-  `[extensions]` (later). The judge keeps its files as they are (below, and "Open questions").
+  `[extensions]` (later). The judge keeps its files as they are (below, and "Decisions taken").
 - **Methods.** `extension.list` (every extension: name, title, sentence, scope, on or off, its
   slots and settings with their values, whether its guidance is the user's or the default, and
   why one cannot be used) and `extension.set {name, enabled?, slots?, settings?}`, checked against
   the schema, emitting `extension.changed {name}`. The user's door only: no tool of an agent
   reaches them, as for `judge.set`.
-- **One screen** that renders every schema ("In the window").
+- **One renderer** that draws every schema in the place the extension declares, with the
+  components of the other tabs ("In the window"). No extension draws its own settings.
 
 ### Model slots
 
@@ -124,7 +147,7 @@ The core provides what the judge does today, made general (`providers.rs`, `pick
   is known not to offer is refused, naming those it offers.
 - **Picking for a user who never chose:** the smallest model of the first provider that is enabled,
   installed and signed in, among those whose smallest model Flottille lists (`SMALLEST`, Claude's
-  Haiku). Written once, said once in a notice that opens the extension's settings, marked `picked`
+  Haiku). Written once, said once in a notice that opens the extension's tab, marked `picked`
   until the notice is seen. A slot the user set to none is never picked again.
 - **Using it:** a provider no longer enabled or ready makes each call of the slot fail, and a call
   that fails falls back as its extension says (the judge asks; the compaction changes nothing).
@@ -240,15 +263,15 @@ expired and whether its context is above the minimum size, which the composer re
 The window's shell offers places; an extension's window module fills them, built from
 `flottille-ui`'s components and under the rules of the window. The places needed first:
 
-- **Its entry in Settings' Extensions tab**, rendered from the declaration: every extension gets
-  it, and none needs code of its own there ("In the window").
+- **Its settings, in the place it declares** (its own tab, or a section of a screen that exists),
+  rendered from the declaration: none needs code of its own there ("In the window").
 - **An element of the composer**: the compaction's "Compact before sending".
 - **An action of a session**: Compact, in the root's "⋯" menu of the rail.
 - **A line of the conversation** for what the extension did: a compaction, folded to one line,
   unfolding to the summary.
 
 Later, when Specs comes: a project tab (Specs, Handbook), a page (a spec), an action on a ticket's
-row ("Write the spec").
+row ("Write the spec"), and a section of the project's settings for its per-project switch.
 
 ### One thing more the compaction needs
 
@@ -261,21 +284,24 @@ stays one until a second extension needs to shape how an agent starts.
 
 ## Activation
 
-- **Global**, for every extension: on or off, in the Extensions tab, `extension.set`, or
-  `flottille extension on|off <name>`.
-- **Per project**, for an extension that touches a project (Specs, Review, Handbook; later): its
-  switch in the project's settings, shown only while it is on globally. Off globally is off
-  everywhere; the projects' switches are kept for when it comes back.
+- **Global**, for every extension: on or off, by the switch at the top of its settings (its own
+  tab), `extension.set`, or `flottille extension on|off <name>`. The command and the methods are
+  the scripts' and the clients' door; the window never says "extension".
+- **Per project**, for an extension that touches a project (Specs, Review, Handbook; later): once
+  turned on globally, it is **on in every project**. The user turns it off in a project where they
+  do not want it, by its switch in that project's settings, shown only while it is on globally.
+  It is not off by default in each project. Off globally is off everywhere; the projects' switches
+  are kept for when it comes back.
 
 **Defaults.** The judge is on, as it is today: a user who never chose gets one picked, and "No
 judge" is the judge turned off (`judge = "none"`, kept as it is written now). Every other extension
-is off until the user turns it on, since each spends the user's quota by itself (a default to
-confirm, "Open questions").
+is off until the user turns it on, since each spends the user's quota by itself.
 
-**What off removes.** Its tab's content, its screens (the composer's element, its actions, its
-project tab), its tools from every role's list, its triggers, its notices. For the judge: Auto has
-no one to decide, and every call to judge comes to the user. Its settings, its guidance and its
-data stay where they are: turning it on again brings it back as it was.
+**What off removes.** Its tab's content but for the switch and its sentence, its screens (the
+composer's element, its actions, its project tab), its tools from every role's list, its triggers,
+its notices. For the judge: Auto has no one to decide, is shown unavailable, and every call to
+judge comes to the user. Its settings, its guidance and its data stay where they are: turning it
+on again brings it back as it was.
 
 **Turned off while it works.** The rule, the simplest that can be undone: **off stops what would
 start, never what runs, and a result that comes back after it is dropped the way a failure is.**
@@ -295,33 +321,47 @@ trigger.
 
 ## In the window
 
-Settings gets one tab, **Extensions**, in place of the Judge tab and of the Compaction tab #308
-and #309 planned. It is the first tab, the one Settings opens on, as the Judge tab is now; a link
-to an extension (the mode's warning, a notice that a model was picked) opens it with that
-extension's settings in view.
+Each feature is part of the app, and its settings sit where they belong: the Judge keeps its own
+tab of Settings, as today; the Compaction gets its own tab; a later extension declares its own tab
+or its section of a screen that exists (its `place`). The declaration says *where*, with a title
+and an order; the core draws what is in it, with the components every other tab is built from.
 
-- The tab is a list of the extensions, one pattern (rule 7 of `reference/gpui.md`): a row each,
-  with its icon, its title, a tag saying On or Off, and one line (its sentence, or the model its
-  slot runs on); a click opens its settings.
-- An extension's settings, in that order: its switch, On, with its sentence as hint; its model
-  slots (a select for the provider and the model, one for the effort, "None" among them where
-  none is a choice, as the judge's "No judge"); its settings, each a labelled control chosen by
-  rule 4 (a switch for a thing on or off, a field for a number, its unit in the label); its
-  guidance (the editor the Judge guidance has now, with Reset to default, Save and the line on
-  when a change applies); and the one line saying what it costs (a model on the user's own quota).
-  Off, everything under the switch folds away.
-- The judge's two lines on Auto, which the Judge tab holds today, become its sentence and its
-  hint; nothing of what they say is lost.
-- A project's settings get an **Extensions** tab when a project-scoped extension exists (later).
+- **A tab of an extension** is a page like the others (rule 8 of `reference/gpui.md`: a title, and
+  sections each with its title and one sentence). At its top, its **switch** (On), with its
+  sentence as hint. **Off, the tab shows the switch and that one line, nothing else.** On, under
+  the switch and in that order: its model slots (a select for the provider and the model, one for
+  the effort, a "None" among them only where none is a real choice); its settings, each a labelled
+  control chosen by rule 4 (a switch for a thing on or off, a field for a number, its unit in the
+  label); its guidance (the editor the Judge guidance has now, with Reset to default, Save and the
+  line on when a change applies); and the one line saying what it costs (a model on the user's own
+  quota). The sections fold away and unfold with the switch.
+- **A link to a tab** (the mode's "Auto unavailable" line, a notice that a model was picked) opens
+  that tab, with the setting in view.
+- **The judge's tab** keeps its place, the first, the one Settings opens on. Its two lines on Auto
+  become the sentence and the hint of its switch; nothing of what they say is lost. Its switch is
+  the choice "No judge" made visible: off writes `judge = "none"`, and on picks a judge as for a
+  user who never chose, since the file keeps no earlier choice once it says none; the "No judge"
+  entry of its select goes, the switch says it.
+- **The compaction's tab** holds Automatic, Threshold, Maximum size, Kept word for word, the two
+  cache options and their margin, Minimum size, its slot and its guidance, and says the cache
+  lifetime it uses for each provider, or that it knows none for one.
+- **Tool results** (#308, core): a section at the end of the Providers tab, since it is about what
+  every agent is given, whatever runs it.
+- **A project's settings** get, for each project-scoped extension that is on globally, a section
+  with its switch (on, unless the user turned it off in that project), at its order (later). It is
+  a section of the screen that exists.
+- **The composer, the rail and the conversation** carry the compaction's element, action and line
+  where they belong ("Screens"), with no mention of extensions.
 
-Everything in it follows the rules of the window and its motion: the rows enter one after the
-other, the On tag and the switch move over `HOVER`, the settings fold and unfold with the switch,
-the guidance's error appears and leaves animated, a dialog opens and closes as dialogs do, the
-composer's element unfolds and fades in. The pull request that builds it lists each and ticks the
-checklist of `reference/gpui.md`. This note designs no pixels: the components of `flottille-ui`
-hold them.
+Settings, in order: Judge, Compaction, Providers, Rules, Appearance, Developer mode. The order is
+the one the declarations give (the Judge's and the Compaction's come first, as the Judge's does
+today); a core tab has its own place, and none is moved by another's declaration.
 
-Settings, after it: **Extensions**, Providers, Rules, Appearance, Developer mode.
+Everything in it follows the rules of the window and its motion: the sections of a tab enter one
+after the other, the switch moves over `HOVER`, the settings fold and unfold with the switch, the
+guidance's error appears and leaves animated, the composer's element unfolds and fades in. The
+pull request that builds it lists each and ticks the checklist of `reference/gpui.md`. This note
+designs no pixels: the components of `flottille-ui` hold them.
 
 ## The extensions
 
@@ -333,15 +373,17 @@ three are listed so that the frame does not forbid them.
 As it is today (`design.md` §7.1), nothing of its behaviour changed.
 
 - **Slot**: the judge, provider and model, `[judge]` of `providers.toml`, `judge = "none"` for
-  off; picked for a user who never chose.
+  off; picked for a user who never chose. Its files stay as they are (decision 3).
+- **Place**: its own tab of Settings, the first, as today.
 - **Guidance**: `judge.md`, the fixed text `judge-base.md`, the default `judge.md` of Flottille,
   4,000 characters.
 - **Call**: the judgement. Input: the call masked, the reasons it was held, the place, the
   agent's `why`, the first message of a session an agent started, the user's last three messages.
   Output: `{"verdict": "allow" | "ask", "reason"}`. 30 seconds. Any failure asks.
 - **Trigger**: Decide, at the gate, for a call to judge in Auto. Base never reaches it.
-- **Data, roles, tools, screens of its own**: none. The mode's control (Ask | Auto | Full) is the
-  core's; it asks the registry whether an active extension decides.
+- **Data, roles, tools, screens of its own**: none but its tab. The mode's control (Ask | Auto |
+  Full) is the core's; it asks the registry whether an active extension decides. With none, Auto is
+  shown unavailable (decision 1).
 
 What moves out of the core is in "The first step".
 
@@ -351,9 +393,12 @@ From #308, #309 and #320, with the decisions already taken.
 
 - **Not in it: cutting long tool results at the source** (#308). It helps every agent, uses no
   model and cannot be "off" without Flottille being worse at what it does: it is core. Its limit
-  is a setting of the core ("Open questions" for where it sits).
+  is a setting of the core, a "Tool results" section at the end of the Providers tab (decision 5).
+- **Place**: its own tab of Settings, after the Judge's. Off, the tab shows the switch and one
+  line: what the compaction does and what it costs.
 - **Slot**: the compactor, picked like the judge (the smallest model of the first provider
-  ready). The extension off is #309's "None": each CLI compacts on its own, as today.
+  ready) once the user turns the extension on. The extension off is #309's "None": each CLI
+  compacts on its own, as today.
 - **Settings**: Automatic (on), Threshold (70 % of the model's context window), Maximum size (a
   ceiling in tokens, empty), Kept word for word (20k tokens); from #320, Compact before the cache
   expires (off) and its margin (5 minutes), Compact a session resumed after its cache expired (on),
@@ -375,9 +420,9 @@ From #308, #309 and #320, with the decisions already taken.
   which a change of provider will use too (`agents.md`, "The options").
 - **Data**: each agent's last summary.
 - **Screens**: the composer's "Compact before sending", the rail's Compact, the conversation's
-  line for a compaction (folded, unfolding to the summary), and its entry in the Extensions tab,
-  which says the cache lifetime it uses for each provider, or that it knows none for one (then
-  neither cache trigger runs for it).
+  line for a compaction (folded, unfolding to the summary), and its own tab, which says the cache
+  lifetime it uses for each provider, or that it knows none for one (then neither cache trigger
+  runs for it).
 - **The flag**: `takes_over_compaction`, so that each CLI compacts as late as it allows.
 
 ### Specs (later)
@@ -392,9 +437,10 @@ From the maintainer's proposal of specs. Project-scoped.
   spec back to Ready), its report (Review), its pull requests merged (Done).
 - **Data**: specs, their statuses and lock, decisions, amendments.
 - **Settings**: the project's spec mode and template; slots for its roles when they should not run
-  on the session's own model.
+  on the session's own model. Their place: a tab of their own in Settings for the global ones, a
+  section of the project's settings for the per-project switch.
 - **Screens**: the project's Specs tab, a spec's page, "Write the spec" on a ticket, "Launch
-  development" on a Ready spec.
+  development" on a Ready spec. On in every project once turned on globally (decision 6).
 
 ### Review (later)
 
@@ -442,8 +488,8 @@ the core no longer names the judge.
 New, and nothing else: `extensions/mod.rs` with the `Extension` type holding only what the judge
 uses (name, title, sentence, scope, on by default, a slot, a guidance, a call, a Decide trigger),
 and the registry `ALL` with the judge alone. `extension.list`, `extension.set`, `extensions.toml`,
-the Extensions tab and the other triggers come with the compaction, their first need beside the
-judge.
+the rendering of settings in a tab of their own (the Judge's tab is moved onto it) and the other
+triggers come with the compaction, their first need beside the judge.
 
 ### What proves nothing changed
 
@@ -474,7 +520,10 @@ judge.
 3. The compaction as an extension: #308 stays core (tool results cut at the source); #309 and #320
    are rewritten into this frame (the compactor's slot and call, the handoff in the core, the four
    triggers, its data and its screens); with it come `extensions.toml`, `extension.list` and
-   `extension.set`, the Extensions tab replacing the Judge tab, and the generic picked-model notice.
+   `extension.set`, the generic rendering of an extension's settings in the tab it declares (the
+   Judge's tab moves onto it, with its switch; the Compaction gets its own tab), Auto shown
+   unavailable when no extension decides, the "Tool results" section of the Providers tab for
+   #308, and the generic picked-model notice.
 4. Specs' base: the spec, its statuses and lock, the `spec` tool, the spec session's role, its
    window, launching the development. Project scope, roles and tools enter the frame here.
 5. The cold read and Review.
@@ -482,26 +531,29 @@ judge.
 7. Remote. An extension's settings travel in `extension.list` and its results in events, which a
    remote client reads as the window does; nothing more is asked of the frame by this note.
 
-## Open questions
+## Decisions taken
 
-1. **Auto with the judge off.** Today Auto without a judge behaves as Ask, with a warning icon on
-   the control. The maintainer said Auto is not available then. *Recommended:* after the
-   extraction (which changes nothing), the control shows Auto unavailable (`Segmented`'s
-   `.unavailable`, faded, with one line saying the judge is off and a link to its settings), and a
-   session already in Auto when the judge is turned off goes on asking as Ask until the user picks
-   another mode, its mode kept.
-2. **Default activation of the extensions other than the judge.** *Recommended:* off until the user
-   turns each on, since each spends the quota by itself; once on, its slot is picked as the judge's
-   is. #309 had the compactor picked with no gesture of the user: this asks for one click first.
-3. **Where the judge's settings are kept.** *Recommended:* where they are (`[judge]` in
-   `providers.toml`, `judge.md`); `judge.md` already fits the guidance's convention, and moving a
-   file users may have edited by hand buys nothing. The new extensions use `extensions.toml`.
-4. **An extension's settings in a dialog or in the tab.** *Recommended:* a dialog opened from its
-   row (rule 7), wide, since a guidance editor needs room; the alternative, every extension's
-   settings one under the other in the tab, is long from the third extension on.
-5. **Where #308's limit on tool results sits in Settings,** now that there is no Compaction tab.
-   *Recommended:* a section "Tool results" at the end of the Providers tab: it is about what every
-   agent is given, whatever runs it, and needs no tab of its own.
-6. **Per-project default of a project-scoped extension turned on globally.** *Recommended:* off in
-   each project until turned on there, so that a Specs tab does not appear in every project at
-   once (later, when Specs comes).
+The maintainer's answers of 2026-11-03 to what the first version of this note left open. **No
+question is still open.**
+
+1. **Auto with the judge off: shown unavailable.** After the extraction (which changes nothing),
+   the control shows Auto unavailable (`Segmented`'s `.unavailable`, faded, with one line saying
+   the judge is off and a link to the Judge's tab). A session already in Auto when the judge is
+   turned off goes on asking as Ask until the user picks another mode, its mode kept.
+2. **The extensions other than the judge are off by default.** Each spends the quota by itself;
+   once the user turns one on, its slot is picked as the judge's is. #309 had the compactor picked
+   with no gesture of the user: this asks for one click first.
+3. **The judge keeps its files:** `[judge]` in `providers.toml` and `judge.md`. `judge.md` already
+   fits the guidance's convention, and moving a file users may have edited by hand buys nothing.
+   The new extensions use `extensions.toml`.
+4. **No "Extensions" tab, no dialog, no list to open.** Extensions are how Flottille is built, not
+   something the user sees as such: each is included natively in the app. Each one's settings sit
+   where they belong: the Judge keeps its own tab, the Compaction gets its own, a later extension
+   declares its own tab or its section of a screen that exists. Its on/off is at the top of its
+   own tab; off, the tab shows the switch and one line saying what it does. ("In the window".)
+5. **#308's limit on tool results** is a "Tool results" section at the end of the Providers tab:
+   it is about what every agent is given, whatever runs it, and needs no tab of its own.
+6. **Per project: on everywhere, off where the user says so.** An extension that touches a project,
+   once turned on globally, is on in every project; the user turns it off in a project where they
+   do not want it, in that project's settings. It is not off by default in each project (later,
+   when Specs comes).
