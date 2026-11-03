@@ -7914,7 +7914,7 @@ fn a_line_break_in_read_it_when_is_saved_as_a_space(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
-    let section = skill_dialog_with_description("when a task\n  touches the style\n", cx, &shell);
+    let section = skill_dialog_with_description("when a task\ntouches the style\n", cx, &shell);
     cx.update(|window, cx| window.click("skill-name", cx));
     cx.simulate_input("style");
     cx.update(|window, cx| window.click("skill-kind-text", cx));
@@ -7932,28 +7932,71 @@ fn a_line_break_in_read_it_when_is_saved_as_a_space(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_read_it_when_that_is_not_edited_is_saved_byte_for_byte(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    // A double space and a non-breaking space are the author's, not line breaks.
+    let said = "when  a task\u{a0}touches\tthe style";
+    let section = skill_dialog_with_description(said, cx, &shell);
+    cx.update(|window, cx| window.click("skill-name", cx));
+    cx.simulate_input("style");
+    cx.update(|window, cx| window.click("skill-kind-text", cx));
+    settle(cx);
+    let text = section.read_with(cx, |s, _| s.text_field().unwrap().clone());
+    cx.update(|window, cx| text.update(cx, |f, cx| f.set_value("Short functions.", window, cx)));
+    cx.update(|window, cx| window.click("save-skill", cx));
+    until(&shell, cx, "the skill is listed", |cx| {
+        !skills_listed(&shell, cx).is_empty()
+    });
+    assert_eq!(
+        skills_listed(&shell, cx)[0].description,
+        "when  a task\u{a0}touches the style",
+        "only the tab, a control character, became a space"
+    );
+}
+
+#[gpui_kit::test]
 fn the_height_of_read_it_when_changes_over_the_panel_duration_not_at_once(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     let section = skill_dialog_with_description("writing code", cx, &shell);
-    let before = bounds_in_dialog("skill-description-grow", cx).size.height;
+    let height = |cx: &mut VisualTestContext| {
+        f32::from(bounds_in_dialog("skill-description-grow", cx).size.height)
+    };
+    // A few frames, enough to be on the way and not yet there.
+    let a_few_frames = |cx: &mut VisualTestContext| {
+        for _ in 0..3 {
+            cx.executor().advance_clock(Duration::from_millis(16));
+            cx.update(|window, cx| window.simulate_next_frame(cx));
+            cx.run_until_parked();
+        }
+    };
+    let before = height(cx);
     let description = section.read_with(cx, |s, _| s.description_field().unwrap().clone());
     let long = ["when a task touches the components of the window"; 4].join(" ");
     cx.update(|window, cx| description.update(cx, |f, cx| f.set_value(&long, window, cx)));
-    // A few frames in, it is on its way: taller than before, not yet at its height.
-    for _ in 0..3 {
-        cx.executor().advance_clock(Duration::from_millis(16));
-        cx.update(|window, cx| window.simulate_next_frame(cx));
-        cx.run_until_parked();
-    }
-    let midway = bounds_in_dialog("skill-description-grow", cx).size.height;
+    a_few_frames(cx);
+    let midway = height(cx);
     settle(cx);
-    let after = bounds_in_dialog("skill-description-grow", cx).size.height;
+    let after = height(cx);
     assert!(after > before, "{after:?} against {before:?}");
     assert!(
         midway > before && midway < after,
-        "{before:?} < {midway:?} < {after:?}"
+        "growing: {before:?} < {midway:?} < {after:?}"
+    );
+
+    // And back: it eases down as well.
+    cx.update(|window, cx| description.update(cx, |f, cx| f.set_value("writing code", window, cx)));
+    a_few_frames(cx);
+    let midway = height(cx);
+    settle(cx);
+    let back = height(cx);
+    assert_eq!(back, before, "it shrinks back with the text");
+    assert!(
+        midway < after && midway > back,
+        "shrinking: {back:?} < {midway:?} < {after:?}"
     );
     assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
 }

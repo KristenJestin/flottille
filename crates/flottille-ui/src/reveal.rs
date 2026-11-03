@@ -375,7 +375,8 @@ impl RenderOnce for PresenceOf {
 /// `content` whose height follows its own: when it grows or shrinks (a field that wraps its text
 /// onto a new line) the block eases to its new height over [`PANEL`] instead of jumping, and
 /// what is below it moves with it. Build it on every frame; it is its own state, and settles at
-/// the content's height the first time it is drawn.
+/// the content's height the first time it is drawn. A content with no height is not measured: it
+/// keeps the last height it had, so the block never eases down to 0 (use [`presence`] for that).
 pub fn growing(id: impl Into<ElementId>, content: impl IntoElement) -> Growing {
     Growing {
         id: id.into(),

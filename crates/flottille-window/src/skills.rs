@@ -92,6 +92,28 @@ pub fn entries(dir: &Path) -> Vec<Entry> {
     found
 }
 
+/// `text` as one line for the agent: a run of line breaks and other control characters (typed
+/// with Shift or pasted) is one space; everything else, spaces included, stays as written.
+fn one_line(text: &str) -> String {
+    let mut line = String::with_capacity(text.len());
+    let mut broken = false;
+    for c in text.chars() {
+        if c.is_control() {
+            broken = true;
+        } else {
+            if broken {
+                line.push(' ');
+                broken = false;
+            }
+            line.push(c);
+        }
+    }
+    if broken {
+        line.push(' ');
+    }
+    line.trim().to_owned()
+}
+
 struct Fields {
     name: Entity<InputState>,
     description: Entity<TextareaState>,
@@ -464,14 +486,7 @@ impl SkillsSection {
             Some(name) => name.clone(),
             None => fields.name.read(cx).value().trim().to_owned(),
         };
-        // One line for the agent: a line break typed with Shift or pasted is a space.
-        let description = fields
-            .description
-            .read(cx)
-            .value()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let description = one_line(&fields.description.read(cx).value());
         let (path, text) = if self.as_text {
             (None, Some(fields.text.read(cx).value().to_string()))
         } else {
@@ -785,19 +800,14 @@ impl SkillsSection {
         let description = growing(
             "skill-description-grow",
             div()
-                .id("skill-description-field")
-                .min_h(px(32.))
-                .px(space::MD)
-                .py(space::XS)
-                .rounded(px(8.))
-                .bg(p.field)
-                .border_1()
-                .border_color(p.line2)
-                .mono(12.5)
-                .child(fields.description.clone())
+                .w_full()
                 // The field passes Enter on to its parents, which would turn it into a line.
                 .on_action(cx.listener(|_, _: &Enter, _, _| {}))
-                .test_support(),
+                .child(boxed(
+                    "skill-description-field",
+                    fields.description.clone(),
+                    cx,
+                )),
         );
         modal
             .child(Field::new("skill-name-field", "Name", name))
