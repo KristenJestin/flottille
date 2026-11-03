@@ -87,15 +87,18 @@ agent. They change in two ways, and a session never keeps a list its role no lon
   for a client that keeps no stream (2025-11-25 with no protocol session), before that answer.
   A call or a listing is answered from the grant as it is when it is handled, not when its
   request came: a tool the role lost is refused to every call handled after the change (`has no
-  tool`), a call already running ends as it began. A change made through Flottille
+  tool`), a call already running ends as it began, and a request whose token was revoked on its
+  way (its process ended) is refused. A change made through Flottille
   (`project.set_settings`) is announced at once; a project file edited by hand is noticed at the
   next `project.*` request, which announces it, and a process that starts in between reads the
   file as it is.
 
 Bare mode is kept: only Flottille's tools, only the role's. A session that lists its tools again
-has the new list. One that calls a tool after it was told without listing them again **runs an
-older list** until it lists them, through later changes too; one whose agent cannot take new
-tools runs one while its list is not the one its process started with. Then `agent.show` and
+has the new list. One that calls a tool after it was told without listing them again, while the
+list it holds (the one it last listed, or started with) is not the one it is served, **runs an
+older list** until it lists them or its tools come back to that list, through later changes
+too; one whose agent cannot take new tools runs one while its list is not the one its process
+started with. Then `agent.show` and
 `agent.tree` say `tools_outdated: true`, `flottille agent show` says that the session runs an
 older list of tools than its role has now and that a restart (stop, then resume) gives the new
 one, the window says so above the composer, and `agent.tools_outdated` says when that starts and

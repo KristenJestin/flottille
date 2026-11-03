@@ -373,9 +373,10 @@ tracker, or its process starts on a version whose tools differ from those it was
 #### `agent.tools_outdated`
 
 The agent's running session runs an older list of tools than its role has (`outdated: true`):
-told the list changed, it called a tool without listing them again, or its agent cannot take new
-tools while it runs and its list is not the one its process started with. `outdated: false` once
-it listed them, once its list is back to that one, or once its process ended.
+told the list changed, it called a tool without listing them again while it held another list,
+or its agent cannot take new tools while it runs and its list is not the one its process started
+with. `outdated: false` once it listed them, once its list is back to the one it holds, or once
+its process ended.
 
 | Field | |
 |---|---|

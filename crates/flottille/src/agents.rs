@@ -923,11 +923,7 @@ async fn process(
     let launch = providers::launch(provider, &daemon.paths, agent)?;
     // A token of this process's own, which revokes the last one.
     let grant = mcp::grant_of(daemon, agent)?;
-    let token = daemon
-        .mcp
-        .mint(grant, provider.takes_new_tools)
-        .map_err(|e| format!("cannot make the agent's token: {e}"))?;
-    mcp::recheck(daemon, &agent.id);
+    let token = mcp::mint(daemon, grant, provider)?;
     let mut command = Command::new(&launch.program);
     // The daemon's environment, less what the agent has no business with; what Flottille sets
     // comes after, so that it is not among the removed.
@@ -947,10 +943,20 @@ async fn process(
         // children go together.
         .process_group(0)
         .kill_on_drop(true);
-    let mut child = command
+    let spawned = command
         .spawn()
-        .map_err(|e| format!("cannot start {}: {e}", launch.program.display()))?;
-    let pid = child.id().ok_or("the agent's process ended at once")?;
+        .map_err(|e| format!("cannot start {}: {e}", launch.program.display()))
+        .and_then(|child| match child.id() {
+            Some(pid) => Ok((child, pid)),
+            None => Err("the agent's process ended at once".to_owned()),
+        });
+    let (mut child, pid) = match spawned {
+        Ok(spawned) => spawned,
+        Err(reason) => {
+            mcp::revoke(daemon, &agent.id);
+            return Err(reason);
+        }
+    };
     if let Some(started) = start_time(pid) {
         daemon.agents.processes.lock().unwrap().insert(pid, started);
         let _ = daemon.read(|store| store.add_process(pid, started, &agent.id));
@@ -988,8 +994,8 @@ async fn process(
     )
     .await;
     recorder.said();
-    if !matches!(exit, Ok(Exit::Died(_) | Exit::Replace(_))) && daemon.mcp.revoke(&agent.id) {
-        mcp::say_outdated(daemon, &agent.id, false);
+    if !matches!(exit, Ok(Exit::Died(_) | Exit::Replace(_))) {
+        mcp::revoke(daemon, &agent.id);
     }
     daemon.waiting_provider.lock().unwrap().remove(&agent.id);
     let goes_on = match exit {
@@ -1012,16 +1018,12 @@ async fn process(
             // The agent is gone, not what it started: a `claude` left in the bridge's group would
             // run on as an orphan, with its tools.
             signal_group(pid, libc::SIGKILL);
-            if daemon.mcp.retire(&agent.id) {
-                mcp::say_outdated(daemon, &agent.id, false);
-            }
+            mcp::retire(daemon, &agent.id);
             Ok(died(daemon, &agent.id, status, turns))
         }
         Ok(Exit::Replace(reason)) => {
             stop(&mut child, pid).await;
-            if daemon.mcp.retire(&agent.id) {
-                mcp::say_outdated(daemon, &agent.id, false);
-            }
+            mcp::retire(daemon, &agent.id);
             turns.running = false;
             turns.queued.clear();
             Ok(replace(daemon, &agent.id, &reason, true, false))

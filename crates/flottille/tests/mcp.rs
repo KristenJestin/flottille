@@ -1499,13 +1499,18 @@ impl Noticing {
 /// The project declares its forge and a tracker, or neither: its sessions gain or lose `forge`
 /// and `tickets`.
 fn track(user: &User, tracked: bool) {
-    let (forge, tracker) = if tracked {
-        (
-            json!({"kind": "github", "repository": "acme/app"}),
-            json!({"kind": "github", "repository": "."}),
-        )
-    } else {
-        (Value::Null, Value::Null)
+    declare(user, tracked, tracked);
+}
+
+/// The project declares its forge, a tracker, both or neither.
+fn declare(user: &User, forge: bool, tracker: bool) {
+    let forge = match forge {
+        true => json!({"kind": "github", "repository": "acme/app"}),
+        false => Value::Null,
+    };
+    let tracker = match tracker {
+        true => json!({"kind": "github", "repository": "."}),
+        false => Value::Null,
     };
     // A forge is declared on a remote that is on it.
     user.git(
@@ -1754,15 +1759,35 @@ fn a_session_that_ignored_a_change_lists_after_the_next_and_is_no_longer_behind(
     ok(mcp.call("fs_list", json!({"path": "."})));
     ok(mcp.call("fs_list", json!({"path": "."})));
     assert_eq!(shown(&user, &id)["tools_outdated"], true);
-    // Change B comes: it is still behind.
-    track(&user, false);
+    // Change B comes, to a list it does not hold either (the forge alone): it is still behind.
+    declare(&user, true, false);
     ok(mcp.call("fs_list", json!({"path": "."})));
     assert_eq!(shown(&user, &id)["tools_outdated"], true);
 
     // It lists: it has the latest list, and that is said, so the window's line goes.
-    assert!(!mcp.names().contains(&"tickets".to_owned()));
+    let names = mcp.names();
+    assert!(names.contains(&"forge".to_owned()), "{names:?}");
+    assert!(!names.contains(&"tickets".to_owned()), "{names:?}");
     assert_eq!(shown(&user, &id)["tools_outdated"], false);
     assert_eq!(said_outdated(&user, &id), [true, false]);
+}
+
+#[test]
+fn a_session_told_of_a_change_and_of_its_undoing_holds_its_list_and_is_not_behind() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (id, url, authorization) = agent(&user, json!({}));
+    let mcp = Mcp::initialize(&url, &authorization);
+    mcp.names();
+
+    track(&user, true);
+    ok(mcp.call("fs_list", json!({"path": "."})));
+    track(&user, false);
+    ok(mcp.call("fs_list", json!({"path": "."})));
+    // Told twice, it calls without listing: what it holds is what it is served.
+    ok(mcp.call("fs_list", json!({"path": "."})));
+    assert_eq!(shown(&user, &id)["tools_outdated"], false);
+    assert_eq!(said_outdated(&user, &id), Vec::<bool>::new());
 }
 
 #[test]

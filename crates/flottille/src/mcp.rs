@@ -92,6 +92,9 @@ pub struct Definition {
 const GUIDE: &str = include_str!("../roles/guide.md");
 
 /// What a call of a session that was replaced is answered.
+/// What a call is answered when its process ended while it was on its way.
+const GONE: &str = "refused: this session's process has ended: its token no longer works; stop \
+    here";
 const REPLACED: &str = "refused: this session has been replaced: a new session of this agent goes \
     on with its work; stop here";
 
@@ -868,8 +871,9 @@ pub struct Server {
 /// Where a running session stands with the tools its grant serves (`docs/tools.md`, "When the
 /// tools change"): one for each token in use, made with it.
 struct Notice {
-    /// The tools its process was started with.
-    started: Vec<&'static str>,
+    /// The tools its client holds: those its process was started with, then, when its agent can
+    /// take new tools, those it was served at its last listing.
+    held: Vec<&'static str>,
     /// Its agent can take tools its role gained while it runs (`Provider::takes_new_tools`).
     takes: bool,
     /// The changes of its tools, counted; the last one it was told of; the last one it listed.
@@ -877,8 +881,31 @@ struct Notice {
     told: u64,
     listed: u64,
     /// It runs an older list than its grant serves: it called a tool after it was told without
-    /// listing them, or its agent cannot take new tools and they are not those it started with.
+    /// listing them, or its agent cannot take new tools; and what it holds is not the grant.
     outdated: bool,
+}
+
+impl Notice {
+    /// The grant now serves `tools`. Whether the session now runs an older list, when that
+    /// changed.
+    fn change(&mut self, grant: &mut Arc<Grant>, tools: Vec<&'static str>) -> Option<bool> {
+        if same(&grant.tools, &tools) {
+            return None;
+        }
+        let was = self.outdated;
+        if self.takes {
+            self.changed += 1;
+            // Back to the list it holds: it no longer runs an older one.
+            self.outdated &= !same(&tools, &self.held);
+        } else {
+            self.outdated = !same(&tools, &self.held);
+        }
+        *grant = Arc::new(Grant {
+            tools,
+            ..Grant::clone(grant)
+        });
+        (self.outdated != was).then_some(self.outdated)
+    }
 }
 
 #[derive(Default)]
@@ -934,23 +961,14 @@ impl Server {
         } = &mut *tokens;
         let grant = grants.get_mut(by_agent.get(agent)?)?;
         let notice = notices.get_mut(agent)?;
-        if same(&grant.tools, &tools) {
-            return None;
-        }
-        let was = notice.outdated;
-        if notice.takes {
-            notice.changed += 1;
-        } else {
-            notice.outdated = !same(&tools, &notice.started);
-        }
-        let now = notice.outdated;
-        *grant = Arc::new(Grant {
-            tools,
-            ..Grant::clone(grant)
-        });
+        let held = grant.tools.clone();
+        let outdated = notice.change(grant, tools);
+        let changed = !same(&held, &grant.tools);
         drop(tokens);
-        self.changes.send_modify(|n| *n += 1);
-        (now != was).then_some(now)
+        if changed {
+            self.changes.send_modify(|n| *n += 1);
+        }
+        outdated
     }
 
     /// Whether the agent's running session runs an older list of tools than its role has now.
@@ -979,6 +997,21 @@ impl Server {
         self.with_notice(digest, |grant, _| grant.clone())
     }
 
+    /// The grant of the token of `digest` as it is when a request is handled: the agent's in
+    /// use, or that of a replaced session, whose calls are refused with the reason. `None` once
+    /// the token is revoked.
+    fn grant_now(&self, digest: &str) -> Option<Arc<Grant>> {
+        let tokens = self.tokens.lock().unwrap();
+        tokens
+            .grants
+            .get(digest)
+            .or_else(|| {
+                let retired = tokens.retired.iter().find(|(old, _)| old == digest);
+                retired.map(|(_, grant)| grant)
+            })
+            .cloned()
+    }
+
     /// The change of its tools its session is to be told of, if any.
     fn due(&self, digest: &str) -> Option<u64> {
         self.with_notice(digest, |_, notice| {
@@ -992,11 +1025,14 @@ impl Server {
         self.with_notice(digest, |_, notice| notice.told = notice.told.max(changed));
     }
 
-    /// Its session calls a tool: told and not listed since, it ignored the notice. Whether it
-    /// just did.
+    /// Its session calls a tool: told and not listed since, holding another list than its grant,
+    /// it ignored the notice. Whether it just did.
     fn called(&self, digest: &str) -> bool {
-        self.with_notice(digest, |_, notice| {
-            let ignored = notice.told > notice.listed && !notice.outdated;
+        self.with_notice(digest, |grant, notice| {
+            let ignored = notice.takes
+                && notice.told > notice.listed
+                && !notice.outdated
+                && !same(&notice.held, &grant.tools);
             notice.outdated |= ignored;
             ignored
         })
@@ -1010,14 +1046,26 @@ impl Server {
         self.with_notice(digest, |grant, notice| {
             notice.told = notice.changed;
             notice.listed = notice.changed;
-            let caught_up = notice.takes && std::mem::take(&mut notice.outdated);
-            (grant.clone(), caught_up)
+            if !notice.takes {
+                // It lists them in vain.
+                return (grant.clone(), false);
+            }
+            notice.held = grant.tools.clone();
+            (grant.clone(), std::mem::take(&mut notice.outdated))
         })
     }
 
     /// A new token for the agent, revoking the one it had; `takes` says whether its agent can
-    /// take tools its role gains while it runs.
-    pub fn mint(&self, grant: Grant, takes: bool) -> std::io::Result<String> {
+    /// take tools its role gains while it runs. The grant holds the tools its process was started
+    /// with; it serves `stored`, those its agent has now: a change of its project announced
+    /// since its process read them found no token to give them to. The token, and whether its
+    /// session runs an older list, when it does from the start.
+    pub fn mint(
+        &self,
+        grant: Grant,
+        takes: bool,
+        stored: Vec<&'static str>,
+    ) -> std::io::Result<(String, Option<bool>)> {
         let mut bytes = [0u8; 32];
         std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
         let token = base64url(&bytes);
@@ -1027,17 +1075,19 @@ impl Server {
         if let Some(old) = tokens.by_agent.insert(agent.clone(), digest.clone()) {
             revoke_digest(&mut tokens, old, &agent);
         }
-        let notice = Notice {
-            started: grant.tools.clone(),
+        let mut notice = Notice {
+            held: grant.tools.clone(),
             takes,
             changed: 0,
             told: 0,
             listed: 0,
             outdated: false,
         };
+        let mut grant = Arc::new(grant);
+        let outdated = notice.change(&mut grant, stored);
         tokens.notices.insert(agent, notice);
-        tokens.grants.insert(digest, Arc::new(grant));
-        Ok(token)
+        tokens.grants.insert(digest, grant);
+        Ok((token, outdated))
     }
 
     /// The agent's session was replaced: its token is still known, and every call it makes is
@@ -1052,7 +1102,11 @@ impl Server {
                 tokens.retired.pop_front();
             }
         }
-        forget_notice(&mut tokens, agent)
+        let outdated = forget_notice(&mut tokens, agent);
+        drop(tokens);
+        // Its stream ends at once.
+        self.changes.send_modify(|n| *n += 1);
+        outdated
     }
 
     /// The agent's token no longer works: its process is gone. Whether it was said to run an
@@ -1062,18 +1116,19 @@ impl Server {
         if let Some(old) = tokens.by_agent.remove(agent) {
             revoke_digest(&mut tokens, old, agent);
         }
-        forget_notice(&mut tokens, agent)
+        let outdated = forget_notice(&mut tokens, agent);
+        drop(tokens);
+        // Its stream ends at once.
+        self.changes.send_modify(|n| *n += 1);
+        outdated
     }
 
     fn grant(&self, headers: &http::HeaderMap) -> Result<Arc<Grant>, Option<String>> {
         let digest = digest_of(headers).ok_or(None)?;
+        if let Some(grant) = self.grant_now(&digest) {
+            return Ok(grant);
+        }
         let tokens = self.tokens.lock().unwrap();
-        if let Some(grant) = tokens.grants.get(&digest) {
-            return Ok(grant.clone());
-        }
-        if let Some((_, grant)) = tokens.retired.iter().find(|(old, _)| *old == digest) {
-            return Ok(grant.clone());
-        }
         Err(tokens
             .revoked
             .iter()
@@ -1249,22 +1304,37 @@ pub fn refresh(daemon: &Daemon, agent: &Agent) -> Option<Agent> {
     with_tools_now(daemon, agent, &project)
 }
 
-/// The agent's process got its token: a change of its project announced since it read its tools
-/// found no token to give it to, and is given now. Under the projects' lock, so that no change
-/// comes between reading the stored tools and serving them.
-pub fn recheck(daemon: &Daemon, agent: &str) {
+/// A token of the agent's process, which revokes the last one (`Server::mint`). The tools it is
+/// served are read under the projects' lock, which a project's change is announced under: no
+/// change comes between reading them and serving them.
+pub fn mint(daemon: &Daemon, grant: Grant, provider: &Provider) -> Result<String, String> {
     let _projects = daemon.projects.lock().unwrap();
-    let Ok(Some(agent)) = daemon.read(|store| store.agent(agent)) else {
-        return;
+    let agent = grant.agent.clone();
+    let stored = match daemon.read(|store| store.agent(&agent)) {
+        Ok(Some(stored)) => served(provider, &stored.tools),
+        _ => grant.tools.clone(),
     };
-    let Ok(provider) = providers::of(&agent) else {
-        return;
-    };
-    if let Some(outdated) = daemon
+    let (token, outdated) = daemon
         .mcp
-        .change_tools(&agent.id, served(provider, &agent.tools))
-    {
-        say_outdated(daemon, &agent.id, outdated);
+        .mint(grant, provider.takes_new_tools, stored)
+        .map_err(|e| format!("cannot make the agent's token: {e}"))?;
+    if let Some(outdated) = outdated {
+        say_outdated(daemon, &agent, outdated);
+    }
+    Ok(token)
+}
+
+/// The agent's token no longer works: its process is gone (`Server::revoke`).
+pub fn revoke(daemon: &Daemon, agent: &str) {
+    if daemon.mcp.revoke(agent) {
+        say_outdated(daemon, agent, false);
+    }
+}
+
+/// The agent's session was replaced (`Server::retire`).
+pub fn retire(daemon: &Daemon, agent: &str) {
+    if daemon.mcp.retire(agent) {
+        say_outdated(daemon, agent, false);
     }
 }
 
@@ -1286,7 +1356,7 @@ pub fn project_changed(daemon: &Daemon, project: &Project) {
 }
 
 /// Says that the agent's session runs an older list of tools than its role has, or no longer.
-pub fn say_outdated(daemon: &Daemon, agent: &str, outdated: bool) {
+fn say_outdated(daemon: &Daemon, agent: &str, outdated: bool) {
     let data = json!({"agent": agent, "outdated": outdated});
     let said = daemon.write(|store| {
         let event = store.append_agent_event(agent, "agent.tools_outdated", data, false)?;
@@ -1354,7 +1424,7 @@ pub async fn serve(
 async fn respond(
     daemon: &Daemon,
     service: &StreamableHttpService<Handler, LocalSessionManager>,
-    mut request: Request<Incoming>,
+    request: Request<Incoming>,
 ) -> Response<Body> {
     // Against DNS rebinding, before anything else: only this machine's names, only this port.
     let port = daemon.mcp.port;
@@ -1373,11 +1443,9 @@ async fn respond(
     if header(http::header::ORIGIN).is_some_and(|origin| !local(origin, "http://")) {
         return answer(StatusCode::FORBIDDEN, json!({"error": "forbidden origin"}));
     }
+    // The handlers read the grant again, as it is when they answer.
     match daemon.mcp.grant(request.headers()) {
-        Ok(grant) => {
-            request.extensions_mut().insert(grant);
-            service.handle(request).await
-        }
+        Ok(_) => service.handle(request).await,
         Err(served) => {
             daemon.mcp.log_refusal(served);
             answer(StatusCode::UNAUTHORIZED, json!({"error": "unauthorized"}))
@@ -1406,13 +1474,14 @@ fn digest_in(context: &RequestContext<RoleServer>) -> Option<String> {
     digest_of(&parts.headers)
 }
 
-fn grant_in(context: &RequestContext<RoleServer>) -> Result<Arc<Grant>, ErrorData> {
-    context
-        .extensions
-        .get::<http::request::Parts>()
-        .and_then(|parts| parts.extensions.get::<Arc<Grant>>())
-        .cloned()
-        .ok_or_else(|| ErrorData::internal_error("the request has no grant", None))
+/// The digest of the request's token, which the HTTP layer checked.
+fn checked_digest(context: &RequestContext<RoleServer>) -> Result<String, ErrorData> {
+    digest_in(context).ok_or_else(|| ErrorData::internal_error("the request has no token", None))
+}
+
+/// A request whose token was revoked while it was on its way: its process is gone.
+fn revoked() -> ErrorData {
+    ErrorData::invalid_request("unauthorized: this session's process is gone", None)
 }
 
 impl ServerHandler for Handler {
@@ -1434,8 +1503,7 @@ impl ServerHandler for Handler {
 
     /// A 2026-07-28 client's stream: told as soon as its tools change, while its token is in use.
     async fn listen(&self, subscription: SubscriptionContext) -> Result<(), ErrorData> {
-        let digest = digest_in(subscription.request_context())
-            .ok_or_else(|| ErrorData::internal_error("the request has no token", None))?;
+        let digest = checked_digest(subscription.request_context())?;
         let mut changes = self.daemon.mcp.changes.subscribe();
         loop {
             if self.daemon.mcp.current(&digest).is_none() {
@@ -1468,10 +1536,13 @@ impl ServerHandler for Handler {
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
         // The grant as it is now: a change that came after the request did is served too.
-        let (grant, caught_up) = match digest_in(&context).and_then(|d| self.daemon.mcp.listed(&d))
-        {
+        let digest = checked_digest(&context)?;
+        let (grant, caught_up) = match self.daemon.mcp.listed(&digest) {
             Some(listed) => listed,
-            None => (grant_in(&context)?, false),
+            None => (
+                self.daemon.mcp.grant_now(&digest).ok_or_else(revoked)?,
+                false,
+            ),
         };
         if caught_up {
             say_outdated(&self.daemon, &grant.agent, false);
@@ -1492,11 +1563,11 @@ impl ServerHandler for Handler {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, ErrorData> {
-        let digest = digest_in(&context);
-        // The grant as it is now: a tool lost since the request came is refused.
-        let grant = match digest.as_deref().and_then(|d| self.daemon.mcp.current(d)) {
-            Some(grant) => grant,
-            None => grant_in(&context)?,
+        // The grant as it is now: a tool lost since the request came is refused, and so is every
+        // tool once the token is revoked.
+        let digest = checked_digest(&context)?;
+        let Some(grant) = self.daemon.mcp.grant_now(&digest) else {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(GONE)]).into());
         };
         let key = request
             .meta
@@ -1506,16 +1577,14 @@ impl ServerHandler for Handler {
             .and_then(Value::as_str)
             .map(str::to_owned);
         let args = request.arguments.map(Value::Object).unwrap_or(Value::Null);
-        if let Some(digest) = &digest {
-            if self.daemon.mcp.called(digest) {
-                say_outdated(&self.daemon, &grant.agent, true);
-            }
-            // A client with no stream of its own is told with this answer, before it.
-            if let Some(change) = self.daemon.mcp.due(digest)
-                && context.peer.notify_tool_list_changed().await.is_ok()
-            {
-                self.daemon.mcp.told(digest, change);
-            }
+        if self.daemon.mcp.called(&digest) {
+            say_outdated(&self.daemon, &grant.agent, true);
+        }
+        // A client with no stream of its own is told with this answer, before it.
+        if let Some(change) = self.daemon.mcp.due(&digest)
+            && context.peer.notify_tool_list_changed().await.is_ok()
+        {
+            self.daemon.mcp.told(&digest, change);
         }
         let (text, error) = call(
             &self.daemon,
@@ -2655,11 +2724,8 @@ mod tests {
     const STARTED: [&str; 2] = ["fs_read", "fs_list"];
     const GAINED: [&str; 3] = ["fs_read", "fs_list", "tickets"];
 
-    /// A server with a token for agent `a1`, its process started on `STARTED`, and the token's
-    /// digest.
-    fn minted(takes: bool) -> (Server, String) {
-        let server = Server::new(0);
-        let grant = Grant {
+    fn grant() -> Grant {
+        Grant {
             agent: "a1".into(),
             epoch: 0,
             tools: STARTED.to_vec(),
@@ -2673,57 +2739,117 @@ mod tests {
                 home: None,
             },
             launched: false,
-        };
-        let token = server.mint(grant, takes).unwrap();
+        }
+    }
+
+    /// A server with a token for agent `a1`, its process started on `STARTED` and its stored
+    /// tools the same, and the token's digest.
+    fn minted(takes: bool) -> (Server, String) {
+        let server = Server::new(0);
+        let (token, outdated) = server.mint(grant(), takes, STARTED.to_vec()).unwrap();
+        assert_eq!(outdated, None);
         (server, files::sha256(token.as_bytes()))
     }
 
-    #[test]
-    fn a_change_announced_before_the_token_is_given_to_the_new_process() {
-        // The process read its tools, its project changed and found no token: when its token is
-        // made, the stored list is given to it (`recheck`).
-        let (server, digest) = minted(false);
-        assert_eq!(server.change_tools("a1", GAINED.to_vec()), Some(true));
-        assert_eq!(server.current(&digest).unwrap().tools, GAINED);
-        assert!(
-            server.outdated("a1"),
-            "its config names the tools it started with"
-        );
-        let (server, digest) = minted(true);
-        assert_eq!(server.change_tools("a1", GAINED.to_vec()), None);
-        assert!(server.due(&digest).is_some(), "it is told");
-        // The same list again, in another order, is no change.
-        let reordered = vec!["tickets", "fs_list", "fs_read"];
-        assert_eq!(server.change_tools("a1", reordered), None);
+    /// The session is told the change it is due.
+    fn tell(server: &Server, digest: &str) {
+        let change = server.due(digest).expect("a change to tell");
+        server.told(digest, change);
     }
 
     #[test]
-    fn a_listing_is_served_the_grant_as_it_is_when_it_is_answered() {
+    fn a_change_announced_before_the_token_is_served_by_it_from_the_start() {
+        // The process read its tools, then its project changed and found no token: the token is
+        // made with the tools stored since.
+        let server = Server::new(0);
+        let (token, outdated) = server.mint(grant(), false, GAINED.to_vec()).unwrap();
+        let digest = files::sha256(token.as_bytes());
+        assert_eq!(
+            outdated,
+            Some(true),
+            "its config names the tools it started with"
+        );
+        assert_eq!(server.current(&digest).unwrap().tools, GAINED);
+        assert!(server.outdated("a1"));
+
+        let server = Server::new(0);
+        let (token, outdated) = server.mint(grant(), true, GAINED.to_vec()).unwrap();
+        let digest = files::sha256(token.as_bytes());
+        assert_eq!(outdated, None);
+        assert_eq!(server.current(&digest).unwrap().tools, GAINED);
+        assert!(server.due(&digest).is_some(), "it is told");
+    }
+
+    #[test]
+    fn the_same_tools_in_another_order_are_no_change() {
         let (server, digest) = minted(true);
-        let asked = server.current(&digest).unwrap();
+        assert_eq!(server.change_tools("a1", vec!["fs_list", "fs_read"]), None);
+        assert_eq!(server.due(&digest), None);
+    }
+
+    #[test]
+    fn a_request_is_served_the_grant_as_it_is_when_it_is_handled() {
+        let (server, digest) = minted(true);
+        let asked = server.grant_now(&digest).unwrap();
         server.change_tools("a1", GAINED.to_vec());
-        let (served, _) = server.listed(&digest).unwrap();
         assert_eq!(asked.tools, STARTED);
+        assert_eq!(server.grant_now(&digest).unwrap().tools, GAINED);
+        let (served, _) = server.listed(&digest).unwrap();
         assert_eq!(served.tools, GAINED);
         assert_eq!(server.due(&digest), None, "what it listed is the latest");
+    }
+
+    #[test]
+    fn a_revoked_token_is_served_nothing_and_a_retired_one_its_grant() {
+        let (server, digest) = minted(true);
+        server.revoke("a1");
+        assert!(server.grant_now(&digest).is_none());
+        assert!(server.listed(&digest).is_none());
+        let (server, digest) = minted(true);
+        server.retire("a1");
+        assert_eq!(server.grant_now(&digest).unwrap().agent, "a1");
+        assert!(server.current(&digest).is_none(), "no longer in use");
     }
 
     #[test]
     fn a_session_that_ignored_a_change_stays_behind_through_the_next_until_it_lists() {
         let (server, digest) = minted(true);
         server.change_tools("a1", GAINED.to_vec());
-        let change = server.due(&digest).unwrap();
-        server.told(&digest, change);
+        tell(&server, &digest);
         assert!(server.called(&digest));
         assert!(server.outdated("a1"));
-        // A second change: still behind, and told again.
-        assert_eq!(server.change_tools("a1", STARTED.to_vec()), None);
+        // A second change, to a list it does not hold either: still behind, and told again.
+        let other = vec!["fs_read"];
+        assert_eq!(server.change_tools("a1", other), None);
         assert!(server.outdated("a1"));
         assert!(server.due(&digest).is_some());
         assert!(!server.called(&digest), "said once");
         let (_, caught_up) = server.listed(&digest).unwrap();
         assert!(caught_up);
         assert!(!server.outdated("a1"));
+    }
+
+    #[test]
+    fn a_session_whose_tools_come_back_to_those_it_holds_is_not_behind() {
+        // Told of a change and of its undoing, it calls without listing: it holds the grant.
+        let (server, digest) = minted(true);
+        server.change_tools("a1", GAINED.to_vec());
+        tell(&server, &digest);
+        server.change_tools("a1", STARTED.to_vec());
+        tell(&server, &digest);
+        assert!(!server.called(&digest));
+        assert!(!server.outdated("a1"));
+        // Behind, then back to what it holds: no longer.
+        server.change_tools("a1", GAINED.to_vec());
+        tell(&server, &digest);
+        assert!(server.called(&digest));
+        assert_eq!(server.change_tools("a1", STARTED.to_vec()), Some(false));
+        // What it holds is what it listed last.
+        server.change_tools("a1", GAINED.to_vec());
+        server.listed(&digest);
+        server.change_tools("a1", STARTED.to_vec());
+        tell(&server, &digest);
+        assert!(server.called(&digest), "it holds the list it listed");
     }
 
     #[test]
@@ -2743,10 +2869,11 @@ mod tests {
     }
 
     #[test]
-    fn a_session_behind_is_no_longer_once_its_process_is_gone() {
+    fn a_session_behind_is_no_longer_once_its_process_is_gone_and_its_stream_hears_it() {
         for retired in [true, false] {
             let (server, digest) = minted(false);
             server.change_tools("a1", GAINED.to_vec());
+            let changes = server.changes.subscribe();
             let was = if retired {
                 server.retire("a1")
             } else {
@@ -2757,6 +2884,10 @@ mod tests {
             assert!(
                 server.current(&digest).is_none(),
                 "its token is no longer in use"
+            );
+            assert!(
+                changes.has_changed().unwrap(),
+                "a listen stream looks again"
             );
             // A next process's start finds no token to change: nothing is said of it.
             assert_eq!(server.change_tools("a1", STARTED.to_vec()), None);
