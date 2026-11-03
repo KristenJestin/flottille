@@ -710,11 +710,13 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   edited, removed and reordered, each with its kind, where it is done and its time limit), then
   its Rules (a text editor, Reset to default, and a line saying a change reaches the agents
   created from now on);
-- Settings, in tabs (one section shown at a time, as in a project's settings; the first, the Auto judge, is
-  the one it opens on, and a link to a section opens its tab): the Auto judge (two lines on Auto: the rules pass what is known to be harmless, a
+- Settings, in tabs (Judge, Providers, Rules, Appearance, Developer mode: one tab shown at a time, as in a project's settings; the first, the Judge, is
+  the one it opens on, and a link to a section opens its tab): the Judge tab holds the Auto judge (two lines on Auto: the rules pass what is known to be harmless, a
   small model on the user's own quota decides the rest, base calls always come to the user; "No
-  judge (Auto asks like Ask)" among its choices), the providers, then the Judge guidance and the
-  Rules for every project, both edited the same way, the Appearance (the window's colours: Omarchy
+  judge (Auto asks like Ask)" among its choices) and, under it with its own heading, the Judge
+  guidance (its editor, Reset to default, Save and its line on when a change applies; a link to the
+  guidance opens this tab with the guidance in view), then the providers, the
+  Rules for every project, edited the same way as the guidance, the Appearance (the window's colours: Omarchy
   or Flottille, and for Flottille Light or Dark, each a segmented choice; off an Omarchy desktop
   the Omarchy choice is shown disabled with one line saying why), and last the Developer mode, a
   switch with the path of its log (`developer.md`: what the daemon decides and why, off by default); a judge

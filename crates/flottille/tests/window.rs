@@ -2303,7 +2303,7 @@ fn the_mode_is_a_compact_ask_auto_control_with_a_warning_icon_when_auto_has_no_j
     settle(cx);
     assert_eq!(
         settings_shown(cx),
-        ["judge"],
+        ["judge", "guidance"],
         "the warning leads to the judge"
     );
     shell.update_in(cx, |shell, window, cx| {
@@ -2488,7 +2488,6 @@ fn the_judge_section_edits_the_judge_s_guidance_and_resets_it_to_the_default(
     // Tall enough to show the whole page: a click reaches only what is on screen.
     cx.simulate_resize(size(px(1280.), px(2400.)));
     let page = open_settings(&shell, cx);
-    choose_settings_tab("guidance", cx);
     let editor = page.read_with(cx, |page, _| page.judge_guidance().clone());
     until(&shell, cx, "the default guidance is shown", |cx| {
         editor.read_with(cx, |e, _| e.shown().is_some())
@@ -2552,7 +2551,6 @@ fn the_judge_section_shows_a_guidance_it_cannot_follow_and_follows_an_edit_made_
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     cx.simulate_resize(size(px(1280.), px(2400.)));
     let page = open_settings(&shell, cx);
-    choose_settings_tab("guidance", cx);
     let editor = page.read_with(cx, |page, _| page.judge_guidance().clone());
     let rules = page.read_with(cx, |page, _| page.rules().clone());
     until(&shell, cx, "the error is shown", |cx| {
@@ -2586,7 +2584,7 @@ fn the_judge_section_shows_a_guidance_it_cannot_follow_and_follows_an_edit_made_
             e.typed(cx).as_deref() == Some("Write tests first.")
         })
     });
-    choose_settings_tab("guidance", cx);
+    choose_settings_tab("judge", cx);
     editor.read_with(cx, |e, _| {
         assert_eq!(e.shown().unwrap().source, Source::Global);
         assert_eq!(e.shown().unwrap().error, None);
@@ -2708,7 +2706,7 @@ fn a_judge_flottille_picked_is_said_once_in_a_notice_that_opens_settings(cx: &mu
     settle(cx);
     assert_eq!(
         settings_shown(cx),
-        ["judge"],
+        ["judge", "guidance"],
         "the notice leads to the judge"
     );
     // Seen once, said no more: the daemon keeps the judge and drops the notice. The window hides
@@ -3482,11 +3480,13 @@ fn settings_keys() -> Vec<&'static str> {
         .collect()
 }
 
-/// The sections of Settings that are drawn.
+/// The sections of Settings that are drawn: the tabs' sections, and the guidance the Judge tab
+/// holds under the judge.
 fn settings_shown(cx: &mut VisualTestContext) -> Vec<&'static str> {
     cx.update(|window, _| {
         settings_keys()
             .into_iter()
+            .chain(["guidance"])
             .filter(|key| {
                 window
                     .try_find(format!("{key}-title"))
@@ -3504,7 +3504,7 @@ fn choose_settings_tab(key: &str, cx: &mut VisualTestContext) {
 }
 
 #[gpui_kit::test]
-fn opening_settings_shows_the_auto_judge_alone(cx: &mut TestAppContext) {
+fn opening_settings_shows_the_judge_and_its_guidance_alone(cx: &mut TestAppContext) {
     let user = providers_user();
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     let page = open_settings(&shell, cx);
@@ -3513,7 +3513,7 @@ fn opening_settings_shows_the_auto_judge_alone(cx: &mut TestAppContext) {
     });
     settle(cx);
     assert_eq!(page.read_with(cx, |p, _| p.tab()), 0);
-    assert_eq!(settings_shown(cx), ["judge"]);
+    assert_eq!(settings_shown(cx), ["judge", "guidance"]);
     cx.update(|window, _| {
         assert_eq!(
             window.find("settings-tabs-judge").selected(),
@@ -3525,6 +3525,142 @@ fn opening_settings_shows_the_auto_judge_alone(cx: &mut TestAppContext) {
             Some(false)
         );
     });
+}
+
+#[gpui_kit::test]
+fn settings_has_five_tabs_in_order(cx: &mut TestAppContext) {
+    assert_eq!(
+        flottille_window::settings::SECTIONS[..],
+        [
+            ("judge", "Judge"),
+            ("providers", "Providers"),
+            ("rules", "Rules"),
+            ("appearance", "Appearance"),
+            ("developer", "Developer mode"),
+        ]
+    );
+    let user = providers_user();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_settings(&shell, cx);
+    until(&shell, cx, "the providers are read", |cx| {
+        page.read_with(cx, |p, _| p.providers().known)
+    });
+    settle(cx);
+    cx.update(|window, _| {
+        let lefts: Vec<_> = settings_keys()
+            .iter()
+            .map(|key| window.find(format!("settings-tabs-{key}")).bounds().left())
+            .collect();
+        assert_eq!(lefts.len(), 5);
+        assert!(lefts.windows(2).all(|pair| pair[0] < pair[1]), "{lefts:?}");
+        assert!(
+            window.try_find("settings-tabs-guidance").is_none(),
+            "the guidance has no tab of its own"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn the_judge_tab_holds_the_auto_judge_and_its_guidance(cx: &mut TestAppContext) {
+    let user = providers_user();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_settings(&shell, cx);
+    let editor = page.read_with(cx, |page, _| page.judge_guidance().clone());
+    until(&shell, cx, "the judge and its guidance are read", |cx| {
+        page.read_with(cx, |p, _| p.providers().known)
+            && editor.read_with(cx, |e, _| e.shown().is_some())
+    });
+    settle(cx);
+    // Settings open on it, with both on it, each under its own heading.
+    assert_eq!(page.read_with(cx, |p, _| p.tab()), 0);
+    assert_eq!(text_of("judge-title", cx).as_deref(), Some("Auto judge"));
+    assert_eq!(
+        text_of("guidance-title", cx).as_deref(),
+        Some("Judge guidance")
+    );
+    cx.update(|window, _| {
+        for id in [
+            "judge-provider",
+            "judge-how",
+            "judge-guidance-text",
+            "judge-guidance-reach",
+            "judge-guidance-reset",
+            "judge-guidance-save",
+        ] {
+            assert!(window.find(id).visible(), "{id}");
+        }
+        // One after the other: the Auto judge first, then its guidance.
+        let judge = window.find("judge").bounds();
+        let guidance = window.find("guidance-title").bounds();
+        assert!(window.find("judge-title").bounds().top() < judge.top());
+        assert!(
+            judge.bottom() <= guidance.top(),
+            "the guidance comes after the judge"
+        );
+        assert!(guidance.bottom() <= window.find("judge-guidance-text").bounds().top());
+    });
+    assert_eq!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)),
+        0,
+        "nothing moves once both sections are there"
+    );
+}
+
+#[gpui_kit::test]
+fn a_link_to_the_guidance_opens_the_judge_tab(cx: &mut TestAppContext) {
+    use flottille_window::settings::Reveal as At;
+    let user = providers_user();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_settings(&shell, cx);
+    let editor = page.read_with(cx, |page, _| page.judge_guidance().clone());
+    until(&shell, cx, "the judge and its guidance are read", |cx| {
+        page.read_with(cx, |p, _| p.providers().known)
+            && editor.read_with(cx, |e, _| e.shown().is_some())
+    });
+    // A window too short for both: the guidance is below the fold unless something brings it in.
+    cx.simulate_resize(size(px(1280.), px(520.)));
+    let follow = |at: At, cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| shell.open_settings_at(at, window, cx))
+        });
+        settle(cx);
+    };
+    let in_sight = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| {
+            let text = window.find("judge-guidance-text").bounds();
+            text.top() >= px(0.) && text.bottom() <= window.viewport_size().height
+        })
+    };
+    let judge_in_sight = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| {
+            let picker = window.find("judge-provider").bounds();
+            picker.top() >= px(0.) && picker.bottom() <= window.viewport_size().height
+        })
+    };
+
+    // The judge's own link (the warning, the notice) shows the judge, from the top.
+    choose_settings_tab("developer", cx);
+    follow(At::Judge, cx);
+    assert_eq!(page.read_with(cx, |p, _| p.tab()), 0);
+    assert!(judge_in_sight(cx), "the judge is in sight");
+    assert!(!in_sight(cx), "the guidance is further down");
+
+    // A link to the guidance opens the same tab with the guidance in view.
+    choose_settings_tab("developer", cx);
+    follow(At::Guidance, cx);
+    assert_eq!(page.read_with(cx, |p, _| p.tab()), 0);
+    cx.update(|window, _| {
+        assert_eq!(window.find("settings-tabs-judge").selected(), Some(true));
+        assert!(window.find("guidance-title").visible());
+    });
+    assert!(in_sight(cx), "the guidance is in view");
+
+    // The judge's link after it, with the Judge tab already chosen (the guidance link, then the
+    // mode's warning): the page goes back up to the judge.
+    follow(At::Judge, cx);
+    assert_eq!(page.read_with(cx, |p, _| p.tab()), 0);
+    assert!(judge_in_sight(cx), "the judge is in sight again");
+    assert!(!in_sight(cx), "the guidance is further down again");
 }
 
 #[gpui_kit::test]
@@ -3546,7 +3682,13 @@ fn choosing_each_settings_tab_shows_its_section_alone(cx: &mut TestAppContext) {
     {
         choose_settings_tab(key, cx);
         assert_eq!(page.read_with(cx, |p, _| p.tab()), at, "{key}");
-        assert_eq!(settings_shown(cx), [*key], "{key} alone");
+        // The Judge tab holds the guidance too; no other holds more than its own section.
+        let wanted: &[&str] = if *key == "judge" {
+            &["judge", "guidance"]
+        } else {
+            &[*key]
+        };
+        assert_eq!(settings_shown(cx), wanted, "{key} alone");
         cx.update(|window, _| {
             assert_eq!(
                 window.find(format!("settings-tabs-{key}")).selected(),
@@ -3605,7 +3747,7 @@ fn the_providers_tab_says_how_many_providers_there_are(cx: &mut TestAppContext) 
         })
     };
     assert_eq!(count("providers", cx), Some(listed.to_string()));
-    for key in ["judge", "guidance", "rules", "developer"] {
+    for key in ["judge", "rules", "developer"] {
         assert_eq!(count(key, cx), None, "{key} has no count");
     }
 }
@@ -3629,7 +3771,7 @@ fn settings_keep_the_chosen_tab_while_open_and_open_afresh_on_the_first(cx: &mut
     cx.update(|window, cx| window.click("settings", cx));
     settle(cx);
     assert_eq!(page.read_with(cx, |p, _| p.tab()), 0);
-    assert_eq!(settings_shown(cx), ["judge"]);
+    assert_eq!(settings_shown(cx), ["judge", "guidance"]);
 }
 
 /// What the settings page says of a provider, line by line.
