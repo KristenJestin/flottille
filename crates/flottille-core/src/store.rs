@@ -533,6 +533,15 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE agents ADD COLUMN pending_model TEXT;
     ALTER TABLE agents ADD COLUMN pending_effort TEXT;
 ",
+    "
+    -- How many of each extension's own migrations were applied (`docs/extensions.md`, \"Data\"):
+    -- its tables, `ext_<name>_…`, are brought up to date as the store's are, and kept when it is
+    -- turned off.
+    CREATE TABLE extension_schemas (
+        name    TEXT PRIMARY KEY,
+        applied INTEGER NOT NULL
+    ) STRICT;
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -2330,6 +2339,68 @@ impl Store {
             .optional()?
             .flatten();
         Ok(seq.unwrap_or(0))
+    }
+
+    /// Brings the tables of the extension `name` up to date: `migrations` applied in order, those
+    /// already applied never twice, as the store's own are. A migration is never edited once
+    /// released.
+    pub fn migrate_extension(&mut self, name: &str, migrations: &[&str]) -> Result<()> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let applied: usize = transaction
+            .query_row(
+                "SELECT applied FROM extension_schemas WHERE name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        if applied > migrations.len() {
+            return Err(Error::Refused(format!(
+                "the store's tables of {name} are at schema {applied}, made by a newer Flottille \
+                 than this one (schema {})",
+                migrations.len()
+            )));
+        }
+        for migration in &migrations[applied..] {
+            transaction.execute_batch(migration)?;
+        }
+        transaction.execute(
+            "INSERT INTO extension_schemas (name, applied) VALUES (?1, ?2) \
+             ON CONFLICT (name) DO UPDATE SET applied = excluded.applied",
+            params![name, migrations.len()],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// The space of an extension: one transaction over its own tables, in which its events are
+    /// stored with the change they say. Nothing is kept unless it is committed.
+    pub fn space(&mut self) -> Result<Space<'_>> {
+        Ok(Space {
+            transaction: self.connection.transaction()?,
+        })
+    }
+}
+
+/// An extension's change to its own tables and its events, written together or not at all.
+pub struct Space<'a> {
+    transaction: rusqlite::Transaction<'a>,
+}
+
+impl Space<'_> {
+    /// Its tables, read and written by the extension alone.
+    pub fn tables(&self) -> &Connection {
+        &self.transaction
+    }
+
+    pub fn append_event(&self, name: &str, data: Value) -> Result<Event> {
+        append_event(&self.transaction, name, data)
+    }
+
+    pub fn commit(self) -> Result<()> {
+        Ok(self.transaction.commit()?)
     }
 }
 
@@ -4802,5 +4873,113 @@ mod tests {
         assert_eq!(keys(&store, Filter::default()), ["1", "3"]);
         assert!(store.items("other", &Filter::default()).unwrap().is_empty());
         assert!(store.cursors("app").unwrap().is_empty());
+    }
+
+    const TABLE: &str =
+        "CREATE TABLE ext_test_notes (id INTEGER PRIMARY KEY, text TEXT NOT NULL) STRICT;";
+    const COLUMN: &str = "ALTER TABLE ext_test_notes ADD COLUMN at INTEGER;";
+
+    fn notes(store: &mut Store) -> Vec<String> {
+        let space = store.space().unwrap();
+        let mut statement = space
+            .tables()
+            .prepare("SELECT text FROM ext_test_notes ORDER BY id")
+            .unwrap();
+        statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn an_extension_s_migrations_run_in_order_once_and_a_later_one_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let mut store = Store::open(&path).unwrap();
+        store.migrate_extension("test", &[TABLE]).unwrap();
+        let space = store.space().unwrap();
+        space
+            .tables()
+            .execute("INSERT INTO ext_test_notes (text) VALUES ('kept')", [])
+            .unwrap();
+        space.commit().unwrap();
+        drop(store);
+
+        let mut store = Store::open(&path).unwrap();
+        store.migrate_extension("test", &[TABLE]).unwrap();
+        store.migrate_extension("test", &[TABLE, COLUMN]).unwrap();
+
+        assert_eq!(notes(&mut store), ["kept"]);
+        let space = store.space().unwrap();
+        space
+            .tables()
+            .execute("UPDATE ext_test_notes SET at = 1", [])
+            .unwrap();
+    }
+
+    #[test]
+    fn an_extension_s_tables_from_a_newer_flottille_are_refused() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.migrate_extension("test", &[TABLE, COLUMN]).unwrap();
+
+        let error = store.migrate_extension("test", &[TABLE]).unwrap_err();
+
+        assert!(error.to_string().contains("newer Flottille"), "{error}");
+    }
+
+    #[test]
+    fn a_change_of_a_space_and_its_event_are_kept_together_or_not_at_all() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.migrate_extension("test", &[TABLE]).unwrap();
+        let space = store.space().unwrap();
+        space
+            .tables()
+            .execute("INSERT INTO ext_test_notes (text) VALUES ('lost')", [])
+            .unwrap();
+        space.append_event("test.noted", json!({})).unwrap();
+        drop(space);
+        assert!(notes(&mut store).is_empty());
+        assert_eq!(store.last_seq().unwrap(), 0);
+
+        let space = store.space().unwrap();
+        space
+            .tables()
+            .execute("INSERT INTO ext_test_notes (text) VALUES ('kept')", [])
+            .unwrap();
+        space.append_event("test.noted", json!({})).unwrap();
+        space.commit().unwrap();
+        assert_eq!(notes(&mut store), ["kept"]);
+        assert_eq!(store.last_seq().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_store_of_the_previous_schema_keeps_its_data_and_gains_the_extensions_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let old = Connection::open(&path).unwrap();
+        let previous = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("CREATE TABLE extension_schemas"))
+            .unwrap();
+        for migration in &MIGRATIONS[..previous] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.pragma_update(None, "user_version", previous).unwrap();
+        old.execute_batch(
+            "INSERT INTO workspaces (project, name, branch, folder, project_folder, created_at, \
+             variables, repositories) VALUES ('app', 'login', 'app/login', '/w', '/p', 100, '{}', '[]');",
+        )
+        .unwrap();
+        append_event(&old, "test.one", json!({})).unwrap();
+        drop(old);
+
+        let mut store = Store::open(&path).unwrap();
+        store.migrate_extension("test", &[TABLE]).unwrap();
+
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len());
+        assert!(store.workspace("app", "login").unwrap().is_some());
+        assert_eq!(store.last_seq().unwrap(), 1);
+        assert!(notes(&mut store).is_empty());
     }
 }
