@@ -71,7 +71,8 @@ beside its checks:
   computes the version, builds with `cargo build --release --locked -p flottille` and makes:
   - **The archive**: `flottille-<version>-x86_64-linux.tar.gz` (`tools/package.sh`), one folder
     `flottille-<version>/` holding `flottille` (the window included), `LICENSE` and
-    `LICENSE-fonts.txt` (the SIL Open Font License of the Geist fonts the window carries), and its
+    `LICENSE-fonts.txt` (the SIL Open Font License of the Geist fonts the window carries), and
+    `share/`: the desktop entry and the icon (`packaging/linux/`, see "The launcher entry"), and its
     SHA-256 sum beside it, `<archive>.sha256`, as `sha256sum --check` reads it. The same files
     give the same archive: no owner, no time of the build.
   - **The notes**: the version, the channel and the commit, how to install it with the
@@ -123,11 +124,54 @@ release from GitHub's API (stable: the latest release; beta: the highest version
 `alpha-<branch>`, the higher version when it holds two archives while it is replaced), downloads
 its archive and sum, checks the sum (a wrong one installs nothing),
 and puts `flottille` in `~/.local/bin`, written beside it then renamed over it, with `flot` a link
-to it. It refuses while Flottille's daemon runs, as `flottille update` does, and says to stop it
+to it, and the launcher entry and the icon in the data folder (below). It refuses while Flottille's daemon runs, as `flottille update` does, and says to stop it
 first: it tells by the lock the daemon holds beside its socket (with `flock`, or by the socket
 alone where `flock` is missing), without starting or speaking to one. A release that is not there and a network or GitHub failure are said apart. When the new
 binary does not answer `--version` (a system library missing), it is installed all the same and
 that is said. It says when `~/.local/bin` is not on `PATH`.
+
+## The launcher entry
+
+On Linux, Flottille is in the desktop's application launcher with its icon, without root, in the
+user's XDG data folder (`$XDG_DATA_HOME`, `~/.local/share` by default):
+
+- `applications/flottille.desktop`: it runs `flottille window` by the installed binary's full
+  path (so it works when the launcher's `PATH` lacks `~/.local/bin`; a path with a space is
+  quoted), with `Terminal=false`, the category `Development` and `StartupWMClass=flottille`, the
+  window's app id, which is how the desktop finds the entry's icon for the window.
+- `icons/hicolor/scalable/apps/flottille.svg`, and `48x48`, `128x128` and `256x256`
+  `apps/flottille.png`.
+
+The window also sets the 256 px PNG as its own icon, which GPUI uses on X11; Wayland takes the icon
+from the entry its app id names.
+
+The package holds them under `share/`, from `packaging/linux/`. **The PNGs are committed**, not
+rendered by CI: the archive then needs no renderer, and the same files give the same archive.
+`tools/icons.sh` renders them again from the SVG (`rsvg-convert`) when the SVG changes. The entry
+of the package says `Exec=flottille window`; `install.sh` and `flottille update` write it with the
+binary's real path (symbolic links resolved, so that the two write the same line whatever the way
+the home is reached). **Refusing some characters is Flottille's choice**: the format allows a
+`"`, a backtick, `$`, `\` or `%` in an `Exec` line, escaped, but Flottille writes none of them
+(nor a newline) rather than escape: a path that holds one gets no entry, and the install or the
+update goes on and says so. When the launcher's files cannot be written (a data folder that is
+read-only, a full disk), the install and the update still succeed, since the binary is in place,
+and say that the entry was not written. After writing an icon, the `icons/hicolor` folder is
+dated now, so that a desktop's cache of the icon theme, stale once the folder is newer than it, is
+read again.
+
+**The entry and the icons are Flottille's.** `flottille update` rewrites them from the package, so
+a local edit of the entry (a changed `Exec`, an added key) is lost at the next update that finds
+it different; to start Flottille another way, make your own entry under another name.
+
+`flottille update` writes both again when they differ from the new package's, and points the
+entry's `Exec` at the binary it runs from, so a binary that moved is followed; a build that has
+none yet gets them. Nothing is rewritten that is already right. A package older than the entry
+holds no `share/`: nothing is written, nothing is removed. When there is nothing to update, the
+entry's path is still fixed if it is wrong.
+
+Nothing removes Flottille's installed files today (there is no uninstall), so nothing removes the
+entry and the icons: to remove Flottille by hand, delete `flottille` and `flot` from
+`~/.local/bin`, `applications/flottille.desktop` and the `flottille.*` icons from the data folder.
 
 ## Updating
 

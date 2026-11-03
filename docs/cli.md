@@ -167,7 +167,9 @@ Replaces Flottille with the latest build of a channel (`docs/releases.md`): `--c
 `--channel alpha`, `--branch <name>` (by default the branch this build came from). The archive's
 SHA-256 sum is checked before anything is replaced. It refuses while the daemon runs: stop it
 first with `flottille daemon stop`. The same version is not installed again and an older one is
-refused, unless `--force`. `flottille --version` says the channel installed.
+refused, unless `--force`. `flottille --version` says the channel installed. It also writes the
+launcher entry and the icon again when they changed, and points the entry at the binary it ran from
+(`docs/releases.md`, "The launcher entry").
 
 ```
 $ flottille update --channel beta
@@ -808,6 +810,19 @@ Opens the window, one more client of the daemon (`docs/design.md` §10): your pr
 work happens (`main`, the project folder, and its workspaces), the sessions in each place, and a
 bell counting what waits for you. It starts the daemon like any command when nobody listens, and
 when the daemon goes away it connects again and catches up with the events it missed.
+
+There is **one window**: a second `flottille window` while one is open does not open another. The
+open window holds a lock in the runtime folder (`window.lock`, beside the daemon's) and listens on
+`window.sock` there; the second command says "raise" on that socket, prints that the window is
+already open and that it asked it to come to the front, and leaves. The open window then asks the
+desktop for the focus (`activate`), which a desktop may refuse: GPUI asks with its own activation
+token, and a Wayland compositor, Hyprland by default, then only marks the window as asking for
+attention; X11 desktops move it. (A later change could hand the launcher's `XDG_ACTIVATION_TOKEN`
+to the open window.) The place goes with the window's process: a window that was killed blocks
+nobody. Without `XDG_RUNTIME_DIR`, like every command, `flottille window` refuses; when the lock or
+the socket cannot be made in that folder (it cannot be written), the window says so and opens
+anyway. On Linux the launcher of the desktop runs this command
+(`docs/releases.md`, "The launcher entry").
 
 The bell counts and lists the requests you hold (`flottille approvals`) and the roots' questions
 you have not answered yet; choosing one opens its session. A session is marked `NEEDS YOU` when the

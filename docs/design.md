@@ -801,7 +801,9 @@ own view, the growing conversation as a list that does not rebuild what did not 
 Through the CLI only: `flottille status --json` (counts of agents running, waiting for the user,
 failed), `flottille watch` (events), `flottille open <agent>` (focus the window on it). A desktop
 shell shows a badge or a notification from these. Nothing of any desktop lives in this
-repository.
+repository, but the generic XDG entry that puts Flottille in an application launcher with its icon
+(`docs/releases.md`, "The launcher entry"), and the one window a second `flottille window` brings
+to the front.
 
 ## 12. Later: remote
 

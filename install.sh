@@ -4,7 +4,8 @@
 #   … | sh -s -- --channel beta
 #   … | sh -s -- --channel alpha --branch feat/46-packages
 # The archive's SHA-256 sum is checked before anything is installed; `flot` is a link to
-# `flottille`. `FLOTTILLE_RELEASES` names another place of the releases' API (for tests).
+# `flottille`. The launcher's entry and icon go to $XDG_DATA_HOME (docs/releases.md).
+# `FLOTTILLE_RELEASES` names another place of the releases' API (for tests).
 # Everything is in `main`, called on the last line: a download cut short runs nothing.
 set -eu
 
@@ -44,6 +45,54 @@ daemon_runs() {
   else
     [ -S "$XDG_RUNTIME_DIR/flottille/daemon.sock" ]
   fi
+}
+
+# The Exec of the desktop entry for the binary $1, on one line: the path as it is, or in double
+# quotes when it holds a character the format reserves (a space). Nothing when it holds one that
+# Flottille does not write into an entry (the format allows them escaped; `flottille update`
+# refuses the same ones, so that both write the same line).
+exec_of() {
+  newline='
+'
+  case "$1" in
+    *[\"\`\$\\%]* | *"$newline"*) return 1 ;;
+    *[!A-Za-z0-9/._+-]*) printf '"%s" window' "$1" ;;
+    *) printf '%s window' "$1" ;;
+  esac
+}
+
+# The desktop entry and the icon of the package unpacked at $1/share, written into the XDG data
+# folder, with the entry running the binary $2. A package without them (older) writes nothing.
+# Every step is checked: called as a condition, `set -e` does not stop it.
+desktop_files() {
+  share=$1/share
+  [ -f "$share/applications/flottille.desktop" ] || return 0
+  data=${XDG_DATA_HOME:-}
+  case "$data" in /*) ;; *) data=$HOME/.local/share ;; esac
+  # The path `flottille update` sees (the binary's real one), not the one reached through a
+  # linked home, or the two would write the entry in turn.
+  real=$(cd "$(dirname "$2")" && pwd -P) || return 1
+  if ! command=$(exec_of "$real/$(basename "$2")"); then
+    echo "install.sh: no desktop entry written: $2 holds a character an entry cannot name." >&2
+    return 0
+  fi
+  mkdir -p "$data/applications" || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      Exec=*) printf 'Exec=%s\n' "$command" ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done <"$share/applications/flottille.desktop" >"$data/applications/.flottille.desktop.new" || return 1
+  mv -f "$data/applications/.flottille.desktop.new" "$data/applications/flottille.desktop" || return 1
+  icons=$(cd "$share" && find icons -type f) || return 1
+  for icon in $icons; do
+    mkdir -p "$data/$(dirname "$icon")" || return 1
+    install -m 0644 "$share/$icon" "$data/$icon" || return 1
+  done
+  # A desktop's cache of the icon theme is stale when the folder is newer than it: touched, it is
+  # read again and finds the icon.
+  touch "$data/icons/hicolor" || return 1
+  echo "Added Flottille to the application launcher ($data)."
 }
 
 main() {
@@ -113,6 +162,10 @@ main() {
   install -m 0755 "$work/$folder/flottille" "$bin/.flottille.new"
   mv -f "$bin/.flottille.new" "$bin/flottille"
   ln -sfn flottille "$bin/flot"
+  # The binary is installed: the launcher's files failing (a folder that cannot be written) is
+  # said, not undone.
+  desktop_files "$work/$folder" "$bin/flottille" ||
+    echo "install.sh: the launcher entry was not written: see above." >&2
   echo "Installed ${folder#flottille-} in $bin."
   # Installed is installed: a binary that cannot run here (a system library missing) is said,
   # not undone.

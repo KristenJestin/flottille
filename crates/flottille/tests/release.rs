@@ -459,7 +459,7 @@ fn the_sum_of_a_file_does_not_hold_it_in_memory() {
 }
 
 #[test]
-fn the_archive_holds_the_binary_and_both_licences_with_its_sum_beside_it() {
+fn the_archive_holds_the_binary_both_licences_and_the_desktop_files_with_its_sum_beside_it() {
     let out = tempfile::tempdir().unwrap();
     let programs = tempfile::tempdir().unwrap();
     let binary = standing_for(programs.path(), "0.4.0-beta.2");
@@ -487,16 +487,21 @@ fn the_archive_holds_the_binary_and_both_licences_with_its_sum_beside_it() {
         .unwrap();
     let mut names: Vec<String> = String::from_utf8_lossy(&listed.stdout)
         .lines()
+        .filter(|name| !name.ends_with('/'))
         .map(str::to_owned)
         .collect();
     names.sort();
     assert_eq!(
         names,
         [
-            "flottille-0.4.0-beta.2/",
             "flottille-0.4.0-beta.2/LICENSE",
             "flottille-0.4.0-beta.2/LICENSE-fonts.txt",
             "flottille-0.4.0-beta.2/flottille",
+            "flottille-0.4.0-beta.2/share/applications/flottille.desktop",
+            "flottille-0.4.0-beta.2/share/icons/hicolor/128x128/apps/flottille.png",
+            "flottille-0.4.0-beta.2/share/icons/hicolor/256x256/apps/flottille.png",
+            "flottille-0.4.0-beta.2/share/icons/hicolor/48x48/apps/flottille.png",
+            "flottille-0.4.0-beta.2/share/icons/hicolor/scalable/apps/flottille.svg",
         ]
     );
 }

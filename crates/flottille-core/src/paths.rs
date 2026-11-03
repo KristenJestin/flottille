@@ -63,6 +63,16 @@ impl Paths {
         self.runtime.join("daemon.lock")
     }
 
+    /// Held by the open window for its whole life (`docs/cli.md`, `flottille window`).
+    pub fn window_lock(&self) -> PathBuf {
+        self.runtime.join("window.lock")
+    }
+
+    /// Where the open window listens for the command that asks it to come to the front.
+    pub fn window_socket(&self) -> PathBuf {
+        self.runtime.join("window.sock")
+    }
+
     /// Held by the daemon that works on the store, for its whole life.
     pub fn store_lock(&self) -> PathBuf {
         self.state.join("store.lock")
