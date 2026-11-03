@@ -1145,10 +1145,13 @@ program standing for the provider (`docs/agents.md`, "For tests and development"
 `null` until the daemon read them from the provider's agent (as soon as it is enabled and ready, with
 no prompt) or a session said them, and `efforts` of a model `null` until a
 session had that model; `name` is what the provider shows the model by; `default` is there, `true`,
-on the model a new session takes when none is asked, once one said it. A provider's own `default`
+on the model a new session takes when none is asked, once one said it: what the provider's
+`default` stands for, else its first model listed, the model Flottille sets (`docs/agents.md`,
+"The options"). A provider's own `default`
 value that names the model it stands for (`_meta.jetbrains.air.recommendedValue` of the `model`
 option) is an alias: it stays listed with `stands_for`, that model's id, and the model it stands
-for is the `default` one, with the alias's `efforts`. `default_effort` is the effort a model runs
+for is the `default` one, with the alias's `efforts`. A `default` whose `recommendedValue` is
+itself runs a model no other value does: it is no alias, and is the `default` one, by its name. `default_effort` is the effort a model runs
 with when none is asked, once a new session none was set on said it by its name (Claude says it
 as `default` only: never there for Claude). `models_outdated` is `true`
 when they were said by another version of the program or with other API keys set: they are listed

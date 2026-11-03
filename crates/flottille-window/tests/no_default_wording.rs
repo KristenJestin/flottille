@@ -1,6 +1,7 @@
-//! The window never says "default model" or "default effort" (issue #280): where the real default
-//! is known it is said by its name, otherwise that the provider chooses. The window scenarios hold
-//! what the pickers and the lines say; what can be held here is the way in, the window's sources.
+//! The window never says "default model" or "default effort" (issue #280), nor that a provider
+//! chooses (issue #329): the model and the effort are said by their names, the ones Flottille
+//! applies. The window scenarios hold what the pickers and the lines say; what can be held here is
+//! the way in, the window's sources.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,7 +14,9 @@ fn said(source: &str) -> Vec<(usize, String)> {
         .filter(|(_, line)| {
             let code = line.trim_start().to_lowercase();
             !code.starts_with("//")
-                && (code.contains("default model") || code.contains("default effort"))
+                && ["default model", "default effort", "chosen by"]
+                    .iter()
+                    .any(|words| code.contains(words))
         })
         .map(|(at, line)| (at + 1, line.trim().to_owned()))
         .collect()
@@ -35,6 +38,12 @@ fn a_string_that_says_default_model_is_found_and_a_comment_is_not() {
     assert_eq!(said("let a = \"default model\";").len(), 1);
     assert_eq!(said("\"Default effort\".into()").len(), 1);
     assert!(said("/// the default model's name\n// default effort").is_empty());
+}
+
+#[test]
+fn a_string_that_says_chosen_by_is_found() {
+    assert_eq!(said("format!(\"Chosen by {title}\")").len(), 1);
+    assert_eq!(said("let a = \"model chosen by Claude\";").len(), 1);
 }
 
 #[test]

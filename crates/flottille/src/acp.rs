@@ -25,6 +25,7 @@ use agent_client_protocol::schema::v1::{
 };
 use agent_client_protocol::{Agent as AcpAgent, Client, ConnectionTo, ErrorCode, Lines};
 use flottille_core::agent::{Agent, Choices};
+use flottille_core::provider;
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
@@ -305,8 +306,23 @@ async fn drive(
     if let Some(pending) = &replaced {
         held = apply_pending(&cx, &native_id, &mut options, events, pending).await;
     }
+    // A new session is never left on the provider's own choice: what it stands for is set by
+    // its name, unless a change waiting names it.
+    let waiting = events.pending().unwrap_or_default();
+    let mut set_any = false;
     for (category, word, value) in chosen {
-        let Some(value) = value else { continue };
+        let own = match (category, value) {
+            (_, Some(_)) => None,
+            ("model", None) if new && waiting.model.is_none() => own_choice(&options, category),
+            ("thought_level", None) if new && waiting.effort.is_none() => {
+                own_choice(&options, category)
+            }
+            _ => None,
+        };
+        let Some(value) = value.as_ref().or(own.as_ref()) else {
+            continue;
+        };
+        set_any = true;
         if let Some(pending) = &replaced {
             let offered = find_option(&options, category)
                 .is_some_and(|option| providers::values(&option).contains(value));
@@ -323,7 +339,7 @@ async fn drive(
             }
         };
     }
-    if chosen.iter().any(|(_, _, value)| value.is_some()) {
+    if set_any {
         // The effort a session keeps once a model is set may be the previous model's: no effort
         // is learned from it.
         events.offered(&options, false, false);
@@ -469,6 +485,25 @@ fn taken_of(options: &Value) -> Choices {
         effort: current("thought_level"),
         mode: current("mode"),
     }
+}
+
+/// What a session left on its provider's own choice (`default`) of a model or an effort runs
+/// with, by its name: what the agent says it stands for, else the first model it lists or the
+/// middle of the efforts it offers. `None` when the option already names a value.
+fn own_choice(options: &Value, category: &str) -> Option<String> {
+    let option = find_option(options, category)?;
+    if option["currentValue"].as_str()? != provider::OWN_CHOICE {
+        return None;
+    }
+    let offered = providers::values(&option);
+    let recommended = option["_meta"]["jetbrains"]["air"]["recommendedValue"].as_str();
+    let found = match category {
+        "model" => provider::default_model(offered.iter().map(String::as_str), recommended),
+        _ => recommended
+            .filter(|r| offered.iter().any(|o| o == r))
+            .or_else(|| provider::middle_effort(&offered).map(String::as_str)),
+    };
+    found.map(str::to_owned)
 }
 
 /// Why an option was not set: the agent refused the value, or could not answer (its process or
