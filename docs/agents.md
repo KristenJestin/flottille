@@ -113,7 +113,8 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
 - **Its model** is the one asked, else the project's (`model` in its file, for the project's own
   provider only), else the provider's default: the model a new session has before any is set,
   marked `"default": true` among the models once a session said it. Its effort is the one asked,
-  else the model's default.
+  else the model's default. A provider's own choice (a value `default`) is never left to it: a new
+  session set on nothing is set to what it stands for, by its name ("The options", below).
 - **The models**: what a session of the provider's agent offers in its config options (the
   `model` option's values and their names, and the `thought_level` option's for the model the
   session has), kept by the daemon per provider (`provider_models` in the store), read as soon as
@@ -195,6 +196,11 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   order, each set with `session/set_config_option` and checked: an option the agent does not
   have, a value it does not offer, or a value other than the one asked once set fails the agent,
   saying what it offers. A model is never replaced by another. What the agent took is kept.
+  A new session whose model or effort is not chosen (nor waiting, below) and that the agent left
+  on its own choice (`currentValue` `default`) is set to that choice by its name, checked the same
+  way: the model the agent says `default` stands for (`recommendedValue`; `default` itself when it
+  runs a model no other value does), else the first model it lists; the effort it says, else the middle of the levels the model offers (the upper of the two
+  middles). The window shows these same names, never that a provider chooses.
   **Changed between turns** (`agent.options`, `flottille agent options`, the session page's
   pickers, `agent_send`'s `model` and `effort`): the model and the effort of a running agent
   change in the same session of the same CLI, never its provider (a provider change needs a new
@@ -609,7 +615,12 @@ bridge runs one session.
 - **The model** is an option (`model`) whose values are the `models` of `claude`'s answer to
   `initialize` (their `value`, `default` first when it does not list it), with the model `default`
   stands for as its `recommendedValue`: the one whose `resolvedModel` (or `value`) is the
-  `resolvedModel` of `default`, else the one `displayName` its description gives (none when it gives two), else none.
+  `resolvedModel` of `default`; when no row resolves to it, `default` itself, named by the model
+  its description gives ("Use the default model (currently …)"), else by its `resolvedModel`:
+  `claude` 2.1.295 resolves a subscriber's `default` to `<model>[1m]` and its `opus` row to
+  `<model>`, a smaller context, never applied for it. Without a `resolvedModel`, the one
+  `displayName` its description gives (none when it gives two), else none: the session then
+  takes the first model listed ("How an agent runs", the options).
   It is set with a `set_model` control request; a value it did not list is refused with the
   list.
 - **The effort** is an option (`effort`, category `thought_level`) when the model set has effort
