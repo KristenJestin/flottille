@@ -317,7 +317,9 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 events.remove(0);
             }
             events.truncate(PAGE);
-            Ok(json!({"agent": agent.to_json(), "events": events, "more": more}))
+            let mut shown = agent.to_json();
+            shown["tools_outdated"] = daemon.mcp.outdated(&agent.id).into();
+            Ok(json!({"agent": shown, "events": events, "more": more}))
         }
         method => Err(Failure::new(
             "unknown-method",
@@ -585,13 +587,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
     let now = now_ms();
     let depth = new.parent.as_ref().map_or(0, |(_, depth)| depth + 1);
     let at_depth_limit = depth >= DEPTH_LIMIT;
-    let forge = project.repositories.iter().any(|r| r.forge.is_some());
-    let tools = provider.tools(
-        new.parent.is_none(),
-        at_depth_limit,
-        forge,
-        project.tracker.is_some(),
-    );
+    let tools = tools_of(provider, project, new.parent.is_none(), depth);
     let files = roles::project_files(&project.folder, &repositories);
     let skills: Vec<(String, String)> = project
         .skills
@@ -848,6 +844,17 @@ pub fn forget_kept_sessions(daemon: &Daemon) {
     }
 }
 
+/// The tools of an agent of `project`, a root or a child at `depth`, as its provider names them:
+/// what its role has in the project as it is now.
+pub fn tools_of(provider: &Provider, project: &Project, root: bool, depth: u32) -> Vec<String> {
+    provider.tools(
+        root,
+        depth >= DEPTH_LIMIT,
+        project.repositories.iter().any(|r| r.forge.is_some()),
+        project.tracker.is_some(),
+    )
+}
+
 /// The life of one agent: a process per stretch of work, until it stops or fails.
 async fn agent_life(daemon: Arc<Daemon>, id: String, mut orders: mpsc::UnboundedReceiver<Order>) {
     let mut turns = Turns {
@@ -908,13 +915,15 @@ async fn process(
     tokio::task::spawn_blocking(move || providers::startable(&paths, provider))
         .await
         .map_err(|e| e.to_string())??;
+    // A session made by an older version, or before its project gained a forge or a tracker,
+    // starts on the tools its role has now: a new process is a new connection, which lists
+    // them.
+    let refreshed = mcp::refresh(daemon, agent);
+    let agent = refreshed.as_ref().unwrap_or(agent);
     let launch = providers::launch(provider, &daemon.paths, agent)?;
     // A token of this process's own, which revokes the last one.
     let grant = mcp::grant_of(daemon, agent)?;
-    let token = daemon
-        .mcp
-        .mint(grant)
-        .map_err(|e| format!("cannot make the agent's token: {e}"))?;
+    let token = mcp::mint(daemon, grant, provider)?;
     let mut command = Command::new(&launch.program);
     // The daemon's environment, less what the agent has no business with; what Flottille sets
     // comes after, so that it is not among the removed.
@@ -934,10 +943,20 @@ async fn process(
         // children go together.
         .process_group(0)
         .kill_on_drop(true);
-    let mut child = command
+    let spawned = command
         .spawn()
-        .map_err(|e| format!("cannot start {}: {e}", launch.program.display()))?;
-    let pid = child.id().ok_or("the agent's process ended at once")?;
+        .map_err(|e| format!("cannot start {}: {e}", launch.program.display()))
+        .and_then(|child| match child.id() {
+            Some(pid) => Ok((child, pid)),
+            None => Err("the agent's process ended at once".to_owned()),
+        });
+    let (mut child, pid) = match spawned {
+        Ok(spawned) => spawned,
+        Err(reason) => {
+            mcp::revoke(daemon, &agent.id);
+            return Err(reason);
+        }
+    };
     if let Some(started) = start_time(pid) {
         daemon.agents.processes.lock().unwrap().insert(pid, started);
         let _ = daemon.read(|store| store.add_process(pid, started, &agent.id));
@@ -976,7 +995,7 @@ async fn process(
     .await;
     recorder.said();
     if !matches!(exit, Ok(Exit::Died(_) | Exit::Replace(_))) {
-        daemon.mcp.revoke(&agent.id);
+        mcp::revoke(daemon, &agent.id);
     }
     daemon.waiting_provider.lock().unwrap().remove(&agent.id);
     let goes_on = match exit {
@@ -999,12 +1018,12 @@ async fn process(
             // The agent is gone, not what it started: a `claude` left in the bridge's group would
             // run on as an orphan, with its tools.
             signal_group(pid, libc::SIGKILL);
-            daemon.mcp.retire(&agent.id);
+            mcp::retire(daemon, &agent.id);
             Ok(died(daemon, &agent.id, status, turns))
         }
         Ok(Exit::Replace(reason)) => {
             stop(&mut child, pid).await;
-            daemon.mcp.retire(&agent.id);
+            mcp::retire(daemon, &agent.id);
             turns.running = false;
             turns.queued.clear();
             Ok(replace(daemon, &agent.id, &reason, true, false))
@@ -1314,6 +1333,13 @@ impl Recorder {
 }
 
 impl acp::Events for Recorder {
+    fn tools(&self) -> Vec<String> {
+        match self.daemon.read(|store| store.agent(&self.agent)) {
+            Ok(Some(agent)) => agent.tools,
+            _ => Vec::new(),
+        }
+    }
+
     fn conversation(&self, name: &str, data: Value, activity: bool) {
         // The history a load replays is held already, as it happened: never recorded twice
         // (`docs/reference/hemera.md` §8.7).

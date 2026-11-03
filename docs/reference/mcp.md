@@ -102,8 +102,9 @@ and the 2026 practice around it:
    session: identity is the bearer token (agent door) or the process (pilot door), and state
    across calls lives in Flottille's own handles (run ids, request numbers, agent ids, event
    sequence numbers).
-2. **Fixed tool list, deterministic order**, no `listChanged`. The list is part of the prompt
-   cache.
+2. **A role's tool list, deterministic order.** The list is part of the prompt cache: it
+   changes only when the role's does, and the agent door then says `listChanged`
+   (`docs/tools.md`, "When the tools change"). The pilot door's list is fixed.
 3. **Use no deprecated feature**: no roots, sampling, logging or elicitation. A tool never asks
    for input mid-call; what needs the user is a delivery, later. **MCP tasks** (the
    `io.modelcontextprotocol/tasks` extension, which Claude Code is starting to support) are not
@@ -140,7 +141,8 @@ and the 2026 practice around it:
    above it. The reads whose full result can be long (`agent_status` for all the children,
    `forge` and `tickets` `show`) answer **short by default**, with the way to ask for the rest
    written in the short result.
-9. **The tool list depends on what the agent can do**, and stays fixed for its life:
+9. **The tool list depends on what the agent can do**, and changes only when that does (a forge
+   or a tracker declared or gone, a new version: `docs/tools.md`, "When the tools change"):
    - a child gets no `agent_*` tools, whatever its role;
    - only a root gets `approval_answer`;
    - a root gets `ask_user`, a child gets `ask_parent`.

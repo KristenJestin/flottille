@@ -46,6 +46,9 @@ pub static PROVIDER: Provider = Provider {
     command,
     env,
     session_meta,
+    // `--allowedTools` is fixed with its process, but the tools it lacks ask permission of the
+    // bridge, which the daemon answers from the role's list as it is now.
+    takes_new_tools: true,
     unready: providers::ready_here,
     forget_process: forget_bridge,
     forget_session: forget_history,

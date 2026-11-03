@@ -57,6 +57,9 @@ pub static PROVIDER: Provider = Provider {
     command,
     env,
     session_meta,
+    // The server's `enabled_tools`, set when its thread starts, filter out every tool they do not
+    // name.
+    takes_new_tools: false,
     unready,
     forget_process,
     forget_session,

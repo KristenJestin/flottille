@@ -700,7 +700,7 @@ fn not_found(name: &str) -> Failure {
     Failure::new("not-found", format!("no project named {name}"))
 }
 
-fn load(projects: &Projects, name: &str) -> std::result::Result<Project, Failure> {
+pub fn load(projects: &Projects, name: &str) -> std::result::Result<Project, Failure> {
     projects.registry.load(name)?.ok_or_else(|| not_found(name))
 }
 
@@ -1048,6 +1048,10 @@ fn announce_edits(
             event,
             json!({"name": project.name, "folder": project.folder}),
         )?;
+        if event == "project.changed" {
+            // Before the answer: the next call of a session is served the tools it has now.
+            crate::mcp::project_changed(daemon, project);
+        }
         projects.known.insert(project.name.clone(), project.clone());
     }
     let gone: Vec<String> = projects

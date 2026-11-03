@@ -270,6 +270,17 @@ pub struct Chose(pub String);
 
 impl EventEmitter<Chose> for SessionPage {}
 
+/// What the page says above the composer of a session that runs an older list of tools than its
+/// role has (`docs/tools.md`, "When the tools change").
+pub const OLDER_TOOLS: &str = "This session runs an older list of tools than its role has now: \
+    end it, then resume it, for the new one.";
+
+/// The line of an older list of tools, for the session's root: only while it has not ended.
+pub fn older_tools(root: Option<&TreeAgent>) -> Option<&'static str> {
+    root.filter(|root| root.tools_outdated && !matches!(root.state.as_str(), "ended" | "failed"))
+        .map(|_| OLDER_TOOLS)
+}
+
 impl SessionPage {
     pub fn new(
         shell: WeakEntity<Shell>,
@@ -1069,7 +1080,12 @@ impl SessionPage {
                 .map(|root| matches!(root.state.as_str(), "ended" | "failed"))
         };
         let (was_ended, now_ended) = (ended(&self.tree), ended(&tree));
+        let root = |tree: &[TreeAgent]| older_tools(tree.iter().find(|a| a.parent.is_none()));
+        let older_changed = root(&self.tree) != root(&tree);
         self.tree = tree;
+        if older_changed {
+            cx.notify();
+        }
         if let Some(now_ended) = now_ended.filter(|now| was_ended != Some(*now)) {
             if was_ended.is_some() {
                 // Ended or resumed: what was said before it is over.
@@ -1326,6 +1342,7 @@ impl Render for SessionPage {
             })
             .test_support();
         let root = self.shown == self.opened.id;
+        let older = older_tools(self.root().filter(|_| root)).map(SharedString::from);
         let dock = div()
             .flex_none()
             .w_full()
@@ -1333,6 +1350,23 @@ impl Render for SessionPage {
             .mx_auto()
             .px(if narrow { space::MD } else { space::XXL })
             .pb(if narrow { space::MD } else { space::XL })
+            // Built on every frame: the line unfolds when the session falls behind its role's
+            // tools and folds away once it lists them again or restarts.
+            .child(presence_of(
+                "session-older-tools-line",
+                older,
+                move |said| {
+                    div()
+                        .id("session-older-tools")
+                        .pb(space::SM)
+                        .text_size(px(12.5))
+                        .text_color(p.faint)
+                        .aria_label(said.clone())
+                        .child(said)
+                        .test_support()
+                        .into_any_element()
+                },
+            ))
             .map(|d| match (root, self.ended_line()) {
                 (true, None) => d.child(self.queued.clone()).child(self.reply.clone()),
                 (true, Some(ended)) => d.child(self.ended_bar(ended, cx)),
@@ -5711,7 +5745,21 @@ mod tests {
             gate_mode: Some("auto".into()),
             context: None,
             queued: Vec::new(),
+            tools_outdated: false,
         }
+    }
+
+    #[test]
+    fn the_older_list_of_tools_is_said_only_of_a_root_that_runs() {
+        let mut root = agent(None, "idle");
+        assert_eq!(older_tools(Some(&root)), None);
+        root.tools_outdated = true;
+        assert_eq!(older_tools(Some(&root)), Some(OLDER_TOOLS));
+        for ended in ["ended", "failed"] {
+            root.state = ended.into();
+            assert_eq!(older_tools(Some(&root)), None, "{ended}");
+        }
+        assert_eq!(older_tools(None), None);
     }
 
     #[test]

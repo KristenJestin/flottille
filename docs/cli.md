@@ -639,7 +639,9 @@ That is all for now; later, read on with `flottille agent read bd7ed8152969 --af
 The agent, and its conversation in full as events (`docs/events.md`): the agent's state and
 place, its provider and model, then what was said, thought and done, with the turns and the processes. `--json` prints
 `agent.show`: `{"agent", "events"}`, the agent with its instructions and tools, and its first
-1,000 events.
+1,000 events. A session that runs an older list of tools than its role has now
+(`tools_outdated: true`, `docs/tools.md`, "When the tools change") is said so under the model,
+with the way to the new list: restart the session (stop, then resume).
 
 ### `flottille agent stop <agent>`
 

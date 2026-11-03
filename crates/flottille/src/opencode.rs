@@ -59,6 +59,8 @@ pub static PROVIDER: Provider = Provider {
     command,
     env,
     session_meta,
+    // Its permissions, written when its process starts, deny every tool they do not name.
+    takes_new_tools: false,
     unready: providers::ready_here,
     forget_process,
     forget_session,

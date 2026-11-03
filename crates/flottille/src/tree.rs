@@ -1554,6 +1554,8 @@ pub fn summary(daemon: &Daemon, agent: &Agent) -> Value {
         "resumable": agent.state == AgentState::Ended && resume_refusal(daemon, agent).is_none(),
         "stopping": agent.state.is_final() && agents::stopping(daemon, &agent.id),
         "images": agent.images,
+        // Its session runs an older list of tools than its role has: a restart gives the new one.
+        "tools_outdated": daemon.mcp.outdated(&agent.id),
     })
 }
 
