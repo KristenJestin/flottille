@@ -175,6 +175,11 @@ fn open_with_keys(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     assert!(is_open(shell, cx), "Ctrl K opens the switcher");
 }
 
+/// A frame drawn with no time passing.
+fn draw(cx: &mut VisualTestContext) {
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+}
+
 fn titles(said: &[(String, Vec<String>)], group: &str) -> Vec<String> {
     said.iter()
         .find(|(heading, _)| heading == group)
@@ -551,6 +556,39 @@ fn escape_gives_the_focus_to_the_window_when_what_had_it_is_no_longer_drawn(
     cx.simulate_keystrokes("ctrl-k");
     settle(cx);
     assert!(is_open(&shell, cx), "keys reach the window");
+}
+
+#[gpui_kit::test]
+fn an_arrow_right_after_typing_scrolls_to_the_marked_row(cx: &mut TestAppContext) {
+    let world = world();
+    let (shell, cx) = ready(&world, cx);
+    cx.simulate_resize(size(px(1280.), px(420.)));
+    settle(cx);
+    open_with_keys(&shell, cx);
+    cx.simulate_input("settings");
+    // No time passes: the two sessions and their heading that left are still folding away, above
+    // the results, and still drawn.
+    assert!(titles(&said(&shell, cx), "Sessions").is_empty());
+    assert!(
+        cx.update(|window, _| window
+            .try_find(row_id(&session_key(&world.login)))
+            .is_some()),
+        "a result that left is still drawn"
+    );
+    // The frame that draws them is the one the arrow's scroll reads the rows' places from.
+    draw(cx);
+    cx.simulate_keystrokes(&"down ".repeat(40));
+    draw(cx);
+    draw(cx);
+    let last = marked(&shell, cx).expect("a result is marked");
+    // The row's place when laid out, and how far the results have scrolled since.
+    let row = cx.update(|window, _| window.find(row_id(&last)).bounds());
+    let scroll = switcher(&shell, cx).read_with(cx, |switcher, _| switcher.scroll().clone());
+    let (viewport, by) = (scroll.bounds(), scroll.offset().y);
+    assert!(
+        row.top() + by >= viewport.top() && row.bottom() + by <= viewport.bottom(),
+        "the marked row {row:?} scrolled by {by:?} is in sight in {viewport:?}"
+    );
 }
 
 #[gpui_kit::test]

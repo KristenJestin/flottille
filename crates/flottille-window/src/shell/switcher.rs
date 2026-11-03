@@ -289,6 +289,8 @@ pub struct Switcher {
     /// Lets the marks go once it has faded out: a running one ticks while it lives.
     forget: Option<Task<()>>,
     scroll: ScrollHandle,
+    /// The result to bring into sight, found among the drawn rows once the next frame has them.
+    scroll_to: Option<String>,
     /// What had the focus when it opened, which gets it back.
     before: Option<FocusHandle>,
     _subscription: Subscription,
@@ -330,6 +332,7 @@ impl Switcher {
             marks: HashMap::new(),
             forget: None,
             scroll: ScrollHandle::new(),
+            scroll_to: None,
             before: None,
             _subscription: subscription,
         }
@@ -362,6 +365,11 @@ impl Switcher {
             }
         }
         groups
+    }
+
+    /// The results' scroll.
+    pub fn scroll(&self) -> &ScrollHandle {
+        &self.scroll
     }
 
     /// The key of the marked result.
@@ -469,17 +477,25 @@ impl Switcher {
         cx.notify();
     }
 
-    fn scroll_to(&self, key: &str) {
-        let at = self.entries.iter().position(|entry| entry.key() == key);
-        if let Some(at) = at {
-            // The group's heading above the first result of it stays in sight too.
-            let heading = matches!(
-                at.checked_sub(1).map(|i| &self.entries[i]),
-                Some(Entry::Heading(_))
-            );
-            self.scroll
-                .scroll_to_item(if heading { at - 1 } else { at });
-        }
+    /// Asks for that result to be in sight: the rows drawn are not the results (the ones that
+    /// left still fold away among them), so the place is found in `render`.
+    fn scroll_to(&mut self, key: &str) {
+        self.scroll_to = Some(key.to_owned());
+    }
+
+    /// Scrolls to the result among the rows as they are drawn.
+    fn bring_into_sight(&self, key: &str) {
+        let rows: Vec<_> = self.list.rows().collect();
+        let Some(at) = rows.iter().position(|row| row.key == key) else {
+            return;
+        };
+        // The group's heading above the first result of it stays in sight too, past the results
+        // of the group that are folding away.
+        let above = rows[..at]
+            .iter()
+            .rposition(|row| !row.placement.is_gone())
+            .filter(|above| matches!(rows[*above].value, Entry::Heading(_)));
+        self.scroll.scroll_to_item(above.unwrap_or(at));
     }
 
     /// Enter: chooses the marked result.
@@ -741,6 +757,9 @@ impl Render for Switcher {
                 .iter()
                 .map(|entry| (entry.key(), entry.clone()));
             self.list.sync(items, at, reduce);
+            if let Some(key) = self.scroll_to.take() {
+                self.bring_into_sight(&key);
+            }
         }
         let this = cx.entity().downgrade();
         let marked = self.marked.clone();
