@@ -448,6 +448,71 @@ fn jira_asks_what_was_updated_and_a_status_change_emits_item_changed_with_the_st
 }
 
 #[test]
+fn the_items_round_of_a_jira_project_asks_only_allowed_fields() {
+    let user = user();
+    project(&user, "git@github.com:acme/api.git");
+    user.acli_script(json!({"search": [work_item("ABC-1", "Log in", "To Do")]}));
+    user.call(
+        "project.set_settings",
+        json!({"name": "app", "tracker": jira()}),
+    )
+    .unwrap();
+    refresh(&user);
+
+    let items = list(&user, json!({}));
+    assert_eq!(items.len(), 1, "{items:?}");
+    let sources = user.call("items.list", json!({"project": "app"})).unwrap()["sources"].clone();
+    assert!(
+        sources
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["problem"] == Value::Null),
+        "{sources}"
+    );
+    let fields: Vec<String> = user
+        .acli_received()
+        .iter()
+        .filter_map(|call| {
+            let args: Vec<&str> = call["args"]
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            let at = args.iter().position(|a| *a == "--fields")?;
+            (args[2] == "search").then(|| args[at + 1].to_owned())
+        })
+        .collect();
+    assert!(!fields.is_empty());
+    for asked in fields.iter().flat_map(|f| f.split(',')) {
+        assert!(
+            !matches!(asked, "updated" | "created"),
+            "asked {asked}: {fields:?}"
+        );
+    }
+}
+
+#[test]
+fn a_jira_item_without_dates_is_listed_without_them() {
+    let user = user();
+    project(&user, "git@github.com:acme/api.git");
+    let mut item = work_item("ABC-1", "Log in", "To Do");
+    item["fields"].as_object_mut().unwrap().remove("updated");
+    user.acli_script(json!({"search": [item]}));
+    user.call(
+        "project.set_settings",
+        json!({"name": "app", "tracker": jira()}),
+    )
+    .unwrap();
+    refresh(&user);
+
+    let items = list(&user, json!({}));
+    assert_eq!(items.len(), 1, "{items:?}");
+    assert_eq!(items[0]["key"], "ABC-1");
+    assert_eq!(items[0]["updated_at"], Value::Null);
+}
+
+#[test]
 fn a_project_with_no_forge_nor_tracker_set_is_never_read() {
     let user = user();
     project(&user, "git@github.com:acme/api.git");

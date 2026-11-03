@@ -84,6 +84,29 @@ fn a_search_answers_the_scripted_items_up_to_its_limit_and_needs_its_jql() {
 }
 
 #[test]
+fn the_fake_acli_refuses_a_field_search_does_not_allow() {
+    let dir = tempfile::tempdir().unwrap();
+    let search = |fields: &str| {
+        fake(dir.path())
+            .args(["jira", "workitem", "search", "--jql", "project = ABC"])
+            .args(["--fields", fields, "--json"])
+            .output()
+            .unwrap()
+    };
+
+    let refused = search("key,updated,summary,created");
+    let allowed = search("key,summary,status,assignee,reporter,labels,issuetype,priority");
+
+    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&refused.stderr).trim(),
+        "✗ Error: fields 'updated, created' are not allowed"
+    );
+    assert!(refused.stdout.is_empty());
+    assert_eq!(allowed.status.code(), Some(0));
+}
+
+#[test]
 fn the_writes_follow_the_script_and_change_nothing() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(

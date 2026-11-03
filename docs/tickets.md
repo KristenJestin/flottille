@@ -306,6 +306,20 @@ the tracker's, nor an Atlassian host, as above) is left out and counted; one wit
 projects. The maintainer checks it on their work machine
 (`tickets list` from an agent of a Jira project); a different shape shows as an empty list.
 
+**Which fields `--fields` allows is not documented**: the page above gives the default
+(`issuetype,key,assignee,priority,status,summary`) and the example `key,summary,assignee`, and
+nothing on the others; the page of `workitem view` takes any field name (`*all`, `-field`), which
+`search` is not known to do. What is known comes from a real site: `acli jira workitem search`
+answered `✗ Error: fields 'updated, created' are not allowed`, naming those two alone, so
+`key`, `summary`, `status`, `assignee`, `reporter`, `labels`, `issuetype` and `priority`, asked in
+the same line, passed. Those eight are what Flottille asks (`ITEM_JIRA_FIELDS` and the two other
+searches, which ask fewer), and the fake `acli` refuses any other with that message. `updated`
+and `created` are therefore not asked: the items read `fields.updated` and `fields.created` when
+the output holds them, and a work item without them is listed without a date (the search's own
+order, `ORDER BY updated DESC`, stays). `workitem view` is not run for the dates of a thousand
+work items; if the maintainer finds that `acli` prints them under another flag, that is a
+follow-up. The maintainer checks the Tickets tab of a Jira project on their machine.
+
 ## Tests
 
 Tests never call GitHub or Jira nor use anyone's sign-in: a fake `gh` (`crates/flottille-fake-gh`,
