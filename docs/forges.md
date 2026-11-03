@@ -336,6 +336,12 @@ agent's environment (`docs/tools.md`), which keeps them out of anything it runs.
 
 ## The agent's tool `forge`
 
+**Only an open pull request is edited.** `edit` of a merged, declined or closed one is refused
+before the forge is asked to write: the state is read first (`gh pr view`, `bkt pr list --state
+all`, as `close` does) and the refusal says the pull request is merged (`declined` on Bitbucket,
+`closed` on GitHub), that nothing was written, and what to do (comment on it, or open a new pull
+request). Bitbucket would answer `Can only update an open pull request`.
+
 `forge {action, …}` (`docs/tools.md`, "The forge"): `list` the pull requests of the place's
 repositories by state and branch, `show` a workspace's branch's or one by its number with its
 checks, reviews and comments; `create`, `merge`, `checks`, `comment` and `edit`, each to judge (a

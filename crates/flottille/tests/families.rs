@@ -371,6 +371,91 @@ fn allowed_then_refused(user: &User, answer: Answer) -> String {
 }
 
 #[test]
+fn updating_a_merged_pull_request_is_refused_before_the_forge_is_called() {
+    let user = user();
+    on_github(&user);
+    user.gh_script(pulls_to_close());
+    let (_, mcp) = root_in(&user, None);
+
+    let merged = allowed_then_refused(
+        &user,
+        mcp.call(
+            "forge",
+            json!({"action": "edit", "number": 7, "title": "feat: new title"}),
+        ),
+    );
+    let closed = allowed_then_refused(
+        &user,
+        mcp.call(
+            "forge",
+            json!({"action": "edit", "number": 9, "body": "A new description"}),
+        ),
+    );
+
+    assert!(
+        merged.contains("the pull request #7 of acme/app is merged, not open")
+            && merged.contains("nothing was written"),
+        "{merged}"
+    );
+    assert!(
+        closed.contains("the pull request #9 of acme/app is closed, not open")
+            && closed.contains("nothing was written"),
+        "{closed}"
+    );
+    // Its state was read, and nothing was written.
+    let calls = words(user.gh_received());
+    assert!(calls.iter().any(|call| call.starts_with("pr view 7 ")));
+    assert!(!calls.iter().any(|call| call.starts_with("pr edit")));
+}
+
+#[test]
+fn updating_a_declined_bitbucket_pull_request_is_refused_before_bkt_is_called() {
+    let user = user();
+    on_bitbucket(&user);
+    let pull = |id: u64, state: &str| {
+        json!({"id": id, "title": "Work", "state": state,
+            "source": {"branch": {"name": format!("app/b{id}")},
+                "repository": {"full_name": "acme/app"}},
+            "destination": {"branch": {"name": "main"}, "repository": {"full_name": "acme/app"}},
+            "links": {"html": {"href": format!("https://bitbucket.org/acme/app/pull-requests/{id}")}}})
+    };
+    user.bkt_script(json!({"pulls": {"acme/app": [
+        pull(2, "MERGED"), pull(3, "DECLINED"), pull(4, "OPEN")]}}));
+    let (_, mcp) = root_in(&user, None);
+
+    let merged = allowed_then_refused(
+        &user,
+        mcp.call(
+            "forge",
+            json!({"action": "edit", "number": 2, "title": "feat: new title"}),
+        ),
+    );
+    let declined = allowed_then_refused(
+        &user,
+        mcp.call(
+            "forge",
+            json!({"action": "edit", "number": 3, "body": "A new description"}),
+        ),
+    );
+
+    assert!(
+        merged.contains("the pull request #2 of acme/app is merged, not open")
+            && merged.contains("nothing was written"),
+        "{merged}"
+    );
+    assert!(
+        declined.contains("the pull request #3 of acme/app is declined, not open")
+            && declined.contains("nothing was written"),
+        "{declined}"
+    );
+    assert!(
+        !words(user.bkt_received())
+            .iter()
+            .any(|call| call.starts_with("pr edit"))
+    );
+}
+
+#[test]
 fn forge_close_closes_a_github_pull_request_with_a_comment_once_allowed() {
     let user = user();
     on_github(&user);

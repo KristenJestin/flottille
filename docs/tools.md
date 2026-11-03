@@ -357,7 +357,9 @@ pending requests.
 - **`comment {number, repository?, body}`** posts a comment on a pull request of a repository of
   the place; **`edit {number, repository?, title?, body?}`** changes its title or description, at
   least one of them (`gh pr comment`, `gh pr edit`; `bkt pr comment --text`, `bkt pr edit --title
-  --description`). A `title` on `comment` is refused before anything is asked (`refused: forge
+  --description`). `edit` of a pull request that is not open is refused once allowed, before
+  anything is written (`refused: the pull request #7 of acme/app is merged, not open; nothing was
+  written: …`). A `title` on `comment` is refused before anything is asked (`refused: forge
   comment takes no title: title is for edit and create`).
 - **`close {number, repository?, comment?, delete_branch?}`** closes a pull request of a
   repository of the place (GitHub: `gh pr close`; Bitbucket: `bkt pr decline`), posting `comment`

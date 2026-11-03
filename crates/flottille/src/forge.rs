@@ -1643,6 +1643,29 @@ async fn forge_note(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
         Err(Some(why)) => return Outcome::Refused(why),
     };
     let slug = forge.slug();
+    // Only an open pull request is changed, and Bitbucket's own refusal says too little: the state
+    // is read, which writes nothing, before anything is asked of the forge to write.
+    if action == "edit" {
+        if matches!(forge, Forge::GitHub { .. })
+            && let Err(problem) = signed_in().await
+        {
+            return Outcome::Failed(problem);
+        }
+        let seen = match seen_of(&forge, number).await {
+            Ok(seen) => seen,
+            Err(refusal) => return refusal,
+        };
+        if seen.state != "open" {
+            let state = match (seen.state, &forge) {
+                ("closed", Forge::Bitbucket { .. }) => "declined",
+                (state, _) => state,
+            };
+            return Outcome::Refused(format!(
+                "refused: the pull request #{number} of {slug} is {state}, not open; nothing was \
+                 written: comment on it, or open a new pull request for the change"
+            ));
+        }
+    }
     let number = number.to_string();
     let marked_body = body.map(marked);
     let body = marked_body.as_deref();
@@ -1680,6 +1703,39 @@ pub(crate) struct Seen {
     pub branch: String,
     /// From the repository itself, not from a fork of it.
     pub own: bool,
+}
+
+/// What `forge edit`, `close` and `reopen` read of the pull request `number` before they act: a
+/// refusal when the forge has none, a failure when it cannot be read. GitHub's `gh` must be
+/// signed in, which the caller checked.
+async fn seen_of(forge: &Forge, number: u64) -> Result<Seen, Outcome> {
+    if matches!(forge, Forge::Bitbucket { .. }) {
+        return match bitbucket::seen(forge, number).await {
+            Ok(Some(seen)) => Ok(seen),
+            Ok(None) => Err(Outcome::Refused(format!(
+                "refused: {} has no pull request #{number}: forge list lists them",
+                forge.slug()
+            ))),
+            Err(why) => Err(Outcome::Failed(why)),
+        };
+    }
+    let (repo, numbered) = (forge.gh_repository(), number.to_string());
+    let fields = "state,headRefName,isCrossRepository";
+    match gh_json(&["pr", "view", &numbered, "-R", &repo, "--json", fields]).await {
+        Ok(viewed) => Ok(Seen {
+            state: match viewed["state"].as_str() {
+                Some("MERGED") => "merged",
+                Some("CLOSED") => "closed",
+                _ => "open",
+            },
+            branch: viewed["headRefName"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            own: viewed["isCrossRepository"] != true,
+        }),
+        Err(why) => Err(Outcome::Failed(why)),
+    }
 }
 
 /// `forge close` and `reopen` of a pull request of a repository of the place, by its number: only
@@ -1727,33 +1783,9 @@ async fn forge_close(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
     if !bitbucket && let Err(problem) = signed_in().await {
         return Outcome::Failed(problem);
     }
-    let seen = if bitbucket {
-        match bitbucket::seen(&forge, number).await {
-            Ok(Some(seen)) => seen,
-            Ok(None) => {
-                return Outcome::Refused(format!(
-                    "refused: {slug} has no pull request #{number}: forge list lists them"
-                ));
-            }
-            Err(why) => return Outcome::Failed(why),
-        }
-    } else {
-        let fields = "state,headRefName,isCrossRepository";
-        match gh_json(&["pr", "view", &numbered, "-R", &repo, "--json", fields]).await {
-            Ok(viewed) => Seen {
-                state: match viewed["state"].as_str() {
-                    Some("MERGED") => "merged",
-                    Some("CLOSED") => "closed",
-                    _ => "open",
-                },
-                branch: viewed["headRefName"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_owned(),
-                own: viewed["isCrossRepository"] != true,
-            },
-            Err(why) => return Outcome::Failed(why),
-        }
+    let seen = match seen_of(&forge, number).await {
+        Ok(seen) => seen,
+        Err(refusal) => return refusal,
     };
     let (wanted, other) = match action {
         "close" => ("open", "closed"),
