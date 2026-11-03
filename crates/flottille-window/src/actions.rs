@@ -136,6 +136,12 @@ pub enum Command {
         /// The section's request number, given back with the answer.
         serial: u64,
     },
+    /// The command lines the project's forges and tracker need, checked (`project.programs`).
+    Programs {
+        project: String,
+        /// The section's request number, given back with the answer.
+        serial: u64,
+    },
     /// What the project's settings show: its declared forges and tracker, and what each
     /// repository's remote proposes.
     ReadProjectSettings(String),
@@ -535,6 +541,12 @@ pub enum Outcome {
     },
     /// The project's repositories, read, added to or removed from, or why not.
     Repositories {
+        project: String,
+        read: Result<Value, String>,
+        serial: u64,
+    },
+    /// The programs of the project's forges and tracker, checked, or why not.
+    Programs {
         project: String,
         read: Result<Value, String>,
         serial: u64,
@@ -1067,6 +1079,16 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             serial,
         } => Outcome::Repositories {
             read: answer(ask_alone(connect, method, params, bounds.quick)),
+            project,
+            serial,
+        },
+        Command::Programs { project, serial } => Outcome::Programs {
+            read: answer(ask_alone(
+                connect,
+                "project.programs",
+                json!({"name": project}),
+                bounds.quick,
+            )),
             project,
             serial,
         },
