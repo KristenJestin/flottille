@@ -179,7 +179,7 @@ again on its own (#257):
   verdict, `verdicts`), `item.commented` its `comment`, `item.merged` and `item.closed` its
   `merged` and `closed`. A ticket's `item.commented` is its `commented`, an `item.changed` of its
   `status` or of its `state` (a reopening) its `status`, one of its `assignees` its `assigned`,
-  `item.closed` its `closed`. The failed jobs' logs a `checks` delivery holds are read then, after
+  `item.closed` its `closed`. The failed jobs' logs a `checks` delivery summarises are read then (three at most), after
   the round, which does not wait for them; that delivery ends the subscription, so an event that
   comes while they are read (a comment) is not delivered before it, nor after.
 - **What changed with no event of its own is no event of a subscription**: an `item.changed` that

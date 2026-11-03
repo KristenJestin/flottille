@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 
 use super::{BY_AGENT, Forge, Job, Pull, logs};
 use crate::daemon::Daemon;
+use crate::session_read::form;
 use crate::subscriptions::{self, By, Event};
 
 /// The events a pull request has, as a subscription names them.
@@ -132,17 +133,78 @@ fn events_of(
     (found, ends)
 }
 
-/// The failing checks of `item` as jobs whose log can be read.
-fn jobs_of(item: &Item) -> Vec<Job> {
-    item.checks
+/// How many failed jobs a delivery lists: the others are counted, so that a wake weighs the same
+/// whatever the number of jobs that failed.
+const LISTED: usize = 3;
+
+/// The failing checks of `item` as jobs whose log can be read, `LISTED` at most, each with the
+/// seconds it took, and how many more failed.
+fn jobs_of(item: &Item) -> (Vec<(Job, Option<u64>)>, usize) {
+    let failing: Vec<_> = item
+        .checks
         .iter()
         .filter(|check| check.state == "failing")
-        .map(|check| Job {
-            name: check.name.clone(),
-            details: check.link.clone(),
-            log: None,
+        .collect();
+    let jobs = failing
+        .iter()
+        .take(LISTED)
+        .map(|check| {
+            let job = Job {
+                name: check.name.clone(),
+                details: check.link.clone(),
+                log: None,
+            };
+            let at = |time: &Option<String>| time.as_deref().and_then(form);
+            let took = at(&check.ended_at).zip(at(&check.started_at));
+            (
+                job,
+                took.and_then(|(end, start)| end.checked_sub(start))
+                    .map(|ms| ms / 1000),
+            )
         })
-        .collect()
+        .collect();
+    (jobs, failing.len().saturating_sub(LISTED))
+}
+
+/// A duration as a wake says it: `45 s`, `2 min 5 s`, `1 h 2 min`.
+fn lasted(seconds: u64) -> String {
+    match (seconds / 3600, seconds / 60 % 60, seconds % 60) {
+        (0, 0, s) => format!("{s} s"),
+        (0, m, 0) => format!("{m} min"),
+        (0, m, s) => format!("{m} min {s} s"),
+        (h, 0, _) => format!("{h} h"),
+        (h, m, _) => format!("{h} h {m} min"),
+    }
+}
+
+/// What a wake says of the checks that ended: `head`, then for each failed job its name, how long
+/// it took and the line or two that say why it failed, the others counted, and where the end of
+/// every log is. The wake weighs the agent's context at every turn; `forge show` holds the logs.
+fn summary(head: &str, jobs: &[(Job, Option<u64>)], more: usize) -> String {
+    let mut text = head.to_owned();
+    for (job, took) in jobs {
+        let took = took
+            .map(|s| format!(" ({})", lasted(s)))
+            .unwrap_or_default();
+        let why = match &job.log {
+            Some(Ok(log)) => logs::why(log),
+            Some(Err(why)) => vec![format!("no log: {}", logs::cut(why))],
+            None => Vec::new(),
+        };
+        text.push_str(&format!("\n- {}{took}", job.name));
+        for (n, line) in why.iter().enumerate() {
+            text.push_str(match n {
+                0 => ": ",
+                _ => "\n    ",
+            });
+            text.push_str(line);
+        }
+    }
+    if more > 0 {
+        text.push_str(&format!("\nand {more} more failed, not listed."));
+    }
+    text.push_str("\nThe end of each failed job's log is in `forge` `show` of the pull request.");
+    text
 }
 
 /// The forge the project declares for the repository.
@@ -199,7 +261,7 @@ pub(crate) fn offer(
     let named = pull_named(project, repository, key.parse().unwrap_or_default());
     let (found, ends) = events_of(&named, item, &mine);
     let named = target_named(target);
-    let jobs = item.map(jobs_of).unwrap_or_default();
+    let (jobs, more) = item.map(jobs_of).unwrap_or_default();
     let told_checks = subscription.events.iter().any(|e| e == "checks")
         && found.iter().any(|e| e.kind == "checks");
     let forge = forge_of(daemon, project, repository);
@@ -207,6 +269,7 @@ pub(crate) fn offer(
         subscriptions::offer(daemon, subscription, &named, &found, ends.as_ref());
         return;
     };
+    let (jobs, took): (Vec<Job>, Vec<Option<u64>>) = jobs.into_iter().unzip();
     let (daemon, subscription) = (daemon.clone(), subscription.clone());
     READING.lock().unwrap().insert(subscription.id.clone());
     tokio::spawn(async move {
@@ -230,12 +293,12 @@ pub(crate) fn offer(
             ci: None,
         };
         logs::attach(&forge, &mut pull).await;
-        let logs = logs::text(&pull.jobs);
+        let jobs: Vec<(Job, Option<u64>)> = pull.jobs.into_iter().zip(took).collect();
         let found: Vec<Event> = found
             .into_iter()
             .map(|mut event| {
                 if event.kind == "checks" {
-                    event.text = format!("{}\n{logs}", event.text).trim_end().to_owned();
+                    event.text = summary(&event.text, &jobs, more);
                 }
                 event
             })
@@ -328,5 +391,18 @@ mod tests {
         let (found, ends) = events_of("pull request #12 of api", None, &events);
         assert!(found.is_empty(), "{found:?}");
         assert!(ends.is_none());
+    }
+
+    #[test]
+    fn a_duration_is_said_in_its_two_largest_units() {
+        for (seconds, said) in [
+            (45, "45 s"),
+            (120, "2 min"),
+            (125, "2 min 5 s"),
+            (3600, "1 h"),
+            (3725, "1 h 2 min"),
+        ] {
+            assert_eq!(lasted(seconds), said);
+        }
     }
 }

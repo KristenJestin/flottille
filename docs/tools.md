@@ -338,7 +338,8 @@ pending requests.
   its recent runs, from 15 minutes to the longest, 60 when there is no run to measure by
   ([`forges.md`](forges.md), "How long CI takes"); the answer carries the line `show` gives about
   the runs, with `minutes` too. `checks` delivers how many passed and failed, with
-  the end of each failed job's log as `show` gives it; `review` and `comment` their author, their
+  for each failed job (three at most, the others counted) its name, its duration and the line or two
+  that say why it failed, the end of its log being in `show` ([`forges.md`](forges.md), "A wake about failed checks is a summary"); `review` and `comment` their author, their
   state and an excerpt (200 characters, on one line). The events are those of the daemon's rounds
   of the items, which the subscription filters, reading nothing of its own: it hears as often as
   the rounds come, every minute while a window is connected, every five otherwise. A merged or

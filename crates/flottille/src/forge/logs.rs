@@ -14,6 +14,8 @@ const JOB_BYTES: usize = 4000;
 const TOTAL_BYTES: usize = 12_000;
 /// The logs asked of the forge for a pull request.
 const JOBS: usize = 5;
+/// The characters of a line that says why a job failed, in a wake.
+const ERROR_CHARS: usize = 160;
 
 /// Reads the log of each failed job of `pull` that the forge gives, within the bounds above; a job
 /// whose log is not given says why. Only `forge show` asks for it: the state a window watches is
@@ -289,6 +291,42 @@ fn is_timestamp(word: &str) -> bool {
         && bytes[..4].iter().all(u8::is_ascii_digit)
 }
 
+/// The lines of `log` that say why its job failed, for a wake: the first and the last line that
+/// look like an error (`error`, `FAILED`, `panicked`), the same one once; the runner's exit code
+/// says nothing of why and is no candidate. The last line of the log when none looks like one.
+/// The log's text is already the failing part and masked.
+pub(super) fn why(log: &Log) -> Vec<String> {
+    let lines = log
+        .text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let looks_like_error = |line: &&str| {
+        let line = line.to_lowercase();
+        !line.starts_with("##[error]process completed")
+            && ["error", "failed", "panicked"]
+                .iter()
+                .any(|word| line.contains(word))
+    };
+    let found: Vec<&str> = lines.clone().filter(looks_like_error).collect();
+    let mut said: Vec<&str> = match (found.first(), found.last()) {
+        (Some(first), Some(last)) if first != last => vec![first, last],
+        (Some(only), _) => vec![only],
+        _ => lines.clone().next_back().into_iter().collect(),
+    };
+    said.dedup();
+    said.into_iter().map(cut).collect()
+}
+
+/// `line` without the runner's mark, at most `ERROR_CHARS` characters long.
+pub(super) fn cut(line: &str) -> String {
+    let line = line.strip_prefix("##[error]").unwrap_or(line);
+    match line.char_indices().nth(ERROR_CHARS - 1) {
+        Some((at, _)) if line[at..].chars().nth(1).is_some() => format!("{}…", &line[..at]),
+        _ => line.to_owned(),
+    }
+}
+
 /// The failed jobs of a pull request, as `forge show` says them: the end of each log, or why there
 /// is none. Nothing for a pull request with no failed job.
 pub(super) fn text(jobs: &[Job]) -> String {
@@ -509,5 +547,46 @@ mod tests {
             ]
         );
         assert!(log.part);
+    }
+
+    fn log_of(text: &str) -> Log {
+        Log {
+            text: text.to_owned(),
+            shown: text.lines().count(),
+            total: text.lines().count(),
+            part: true,
+        }
+    }
+
+    #[test]
+    fn the_error_lines_are_the_first_and_the_last_that_look_like_one() {
+        let log = log_of(&FAILURE.join("\n"));
+        assert_eq!(
+            why(&log),
+            [
+                "test login::form ... FAILED",
+                "error: test failed, to rerun pass `--lib`"
+            ]
+        );
+        // One alone is said once; the runner's exit code says nothing of why.
+        let log = log_of(
+            "compiling\nerror[E0425]: no value `x`\n##[error]Process completed with exit code 101.",
+        );
+        assert_eq!(why(&log), ["error[E0425]: no value `x`"]);
+    }
+
+    #[test]
+    fn a_log_with_no_error_line_says_its_last_line() {
+        assert_eq!(why(&log_of("one\ntwo\nthree")), ["three"]);
+        assert_eq!(why(&log_of("")), Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_error_line_is_cut_at_a_length_a_wake_can_afford() {
+        let line = why(&log_of(&format!("error: {}", "x".repeat(500))));
+
+        assert_eq!(line.len(), 1);
+        assert!(line[0].chars().count() <= ERROR_CHARS, "{}", line[0]);
+        assert!(line[0].ends_with('…'));
     }
 }

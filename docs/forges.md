@@ -460,8 +460,10 @@ what the store holds of it and says what changed as `item.*` events ([`items.md`
 events it names:
 
 - `checks` (`item.checks`): none runs now, and one was running or the head commit changed; the
-  delivery says how many passed, failed and were skipped, and the end of each failed job's log,
-  read then ("Why a check failed");
+  delivery is a summary, not the logs: how many passed, failed and were skipped, then for each
+  failed job (three at most, the others counted: `and 5 more failed, not listed`) its name, how
+  long it took and the line or two that say why it failed, and where the details are
+  ("A wake about failed checks is a summary" below);
 - `review` (`item.reviewed`): a review that was not there (GitHub: its state, not `pending`;
   Bitbucket: a reviewer's new verdict), with its author, state and an excerpt (200 characters, on
   one line);
@@ -478,6 +480,34 @@ this is assumed from `gh`'s output, and the maintainer checks it on a real pull 
 Bitbucket author is always taken for a person: what says a bot there is not read. **What
 Flottille posted** is marked (below), and `from: people` leaves it out, whichever agent posted it:
 the user's own comments, written under the same account, wake the subscription.
+
+### A wake about failed checks is a summary
+
+A wake weighs on the agent's context at every turn: with three failed jobs, each log inlined made
+about 130 lines. The `checks` delivery says instead:
+
+```
+The checks ended: 1 passed, 3 failed.
+- job-1 (2 min 5 s): error[E0425]: cannot find value `x1` in this scope
+- job-2 (4 min 10 s): test login::form ... FAILED
+    error: test failed, to rerun pass `--lib`
+- job-3 (6 min 15 s): no log: it is not a GitHub Actions job, see https://ci.example.com/builds/5
+and 5 more failed, not listed.
+The end of each failed job's log is in `forge` `show` of the pull request.
+```
+
+- **The failed jobs listed** are the first three (`events::LISTED`); the others are counted, not
+  named, and their logs are not read. Whatever the number of jobs, a delivery is about a dozen
+  lines.
+- **A job's duration** is its check's start to its end (`1 h 2 min`, `2 min 5 s`, `45 s`); none
+  when the forge gave no time.
+- **The lines that say why** come from the end of the job's log, as "Why a check failed" finds it
+  (the failing command's output): the first and the last line that look like an error (`error`,
+  `FAILED`, `panicked`, the same one once), else the last line. The runner's `##[error]Process
+  completed with exit code N` says nothing of why and is no candidate, but is the last line when
+  nothing else is. Each line is cut at 160 characters, and masked as every line of a log is. A job
+  whose log cannot be read says `no log:` and why.
+- **The details are `forge` `show`**, which gives the end of every failed job's log as before.
 
 ## What Flottille posts is marked
 
