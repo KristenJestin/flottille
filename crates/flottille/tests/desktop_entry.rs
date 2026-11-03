@@ -448,3 +448,138 @@ fn update_from_an_older_package_without_the_files_writes_nothing() {
     assert!(!user.path("data/applications").exists());
     assert!(!user.path("data/icons").exists());
 }
+
+/// The icon theme folder as a desktop left it, its size folders there (a file written in one
+/// does not date it) and its own date long ago, so that a later touch of it shows.
+fn long_ago(folder: &Path) {
+    for size in ["scalable", "48x48", "128x128", "256x256"] {
+        std::fs::create_dir_all(folder.join(size).join("apps")).unwrap();
+    }
+    std::fs::File::open(folder)
+        .unwrap()
+        .set_modified(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000))
+        .unwrap();
+}
+
+fn modified(path: &Path) -> std::time::SystemTime {
+    std::fs::metadata(path).unwrap().modified().unwrap()
+}
+
+fn is_root() -> bool {
+    // SAFETY: getuid has no precondition and cannot fail.
+    unsafe { libc::getuid() == 0 }
+}
+
+#[test]
+fn install_sh_still_succeeds_when_the_launcher_folder_cannot_be_written() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    if is_root() {
+        eprintln!("root writes anywhere: not checked");
+        return;
+    }
+    let releases = Releases::serve();
+    releases.stable("0.4.0");
+    let home = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(data.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+
+    let output = install(home.path(), Some(data.path()), &releases);
+
+    std::fs::set_permissions(data.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(home.path().join(".local/bin/flottille").is_file());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("the launcher entry was not written"),
+        "{output:?}"
+    );
+    assert!(!data.path().join("applications/flottille.desktop").exists());
+}
+
+#[test]
+fn install_sh_names_the_binary_by_its_real_path_as_update_does() {
+    // A home reached through a link: `update` sees the binary's real path, so `install.sh` writes
+    // that one, or the two would rewrite the entry in turn.
+    let releases = Releases::serve();
+    releases.stable("0.4.0");
+    let root = tempfile::tempdir().unwrap();
+    let real = root.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let linked = root.path().join("linked");
+    std::os::unix::fs::symlink(&real, &linked).unwrap();
+    let data = root.path().join("data");
+
+    let output = install(&linked, Some(&data), &releases);
+
+    assert!(output.status.success(), "{output:?}");
+    let binary = linked.join(".local/bin/flottille").canonicalize().unwrap();
+    assert!(binary.starts_with(root.path().canonicalize().unwrap().join("real")));
+    assert_eq!(
+        exec_of(&data.join("applications/flottille.desktop")),
+        format!("{} window", binary.display())
+    );
+}
+
+#[test]
+fn install_sh_writes_no_entry_for_a_path_with_a_newline() {
+    let releases = Releases::serve();
+    releases.stable("0.4.0");
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("two\nlines");
+    std::fs::create_dir(&home).unwrap();
+    let data = root.path().join("data");
+
+    let output = install(&home, Some(&data), &releases);
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(home.join(".local/bin/flottille").is_file());
+    assert!(!data.join("applications/flottille.desktop").exists());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("desktop entry"),
+        "{output:?}"
+    );
+}
+
+#[test]
+fn install_sh_dates_the_icon_folder_so_a_stale_cache_is_read_again() {
+    let releases = Releases::serve();
+    releases.stable("0.4.0");
+    let home = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let hicolor = data.path().join("icons/hicolor");
+    long_ago(&hicolor);
+    let before = modified(&hicolor);
+
+    let output = install(home.path(), Some(data.path()), &releases);
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(modified(&hicolor) > before);
+}
+
+#[test]
+fn update_dates_the_icon_folder_when_it_writes_an_icon_and_only_then() {
+    let releases = Releases::serve();
+    releases.stable("99.0.0");
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+    let hicolor = user.path("data/icons/hicolor");
+    long_ago(&hicolor);
+    let before = modified(&hicolor);
+    let (_folder, binary) = installed();
+    let update = || {
+        put_binary(&binary);
+        let output = user
+            .command_through(&binary, &["update", "--channel", "stable"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+    };
+
+    update();
+    let written = modified(&hicolor);
+    assert!(written > before);
+
+    // Nothing changed: the folder is left as it is.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    update();
+    assert_eq!(modified(&hicolor), written);
+}

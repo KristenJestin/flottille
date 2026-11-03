@@ -63,7 +63,10 @@ pub fn run(
         if *new == this {
             println!("Flottille is already {this}: nothing to update (--force installs it again).");
             // The binary may have moved since the entry was written.
-            if let Err(error) = desktop::follow(paths, &std::env::current_exe()?.canonicalize()?) {
+            let followed = std::env::current_exe()
+                .and_then(|binary| binary.canonicalize())
+                .and_then(|binary| desktop::follow(paths, &binary));
+            if let Err(error) = followed {
                 eprintln!("flottille: the launcher entry was not updated: {error}");
             }
             return Ok(ExitCode::SUCCESS);

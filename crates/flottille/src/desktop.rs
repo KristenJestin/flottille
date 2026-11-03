@@ -53,9 +53,9 @@ fn with_exec(entry: &str, exec: &str) -> String {
 
 /// Writes `bytes` to `path` unless it already holds them: a file that is right keeps its date.
 /// Written beside it then renamed over it, as the binary is.
-fn write_if_changed(path: &Path, bytes: &[u8]) -> io::Result<()> {
+fn write_if_changed(path: &Path, bytes: &[u8]) -> io::Result<bool> {
     if std::fs::read(path).is_ok_and(|now| now == bytes) {
-        return Ok(());
+        return Ok(false);
     }
     let folder = path.parent().ok_or_else(|| io::Error::other("no folder"))?;
     std::fs::create_dir_all(folder)?;
@@ -64,7 +64,8 @@ fn write_if_changed(path: &Path, bytes: &[u8]) -> io::Result<()> {
         path.file_name().unwrap_or_default().to_string_lossy()
     ));
     std::fs::write(&beside, bytes)?;
-    std::fs::rename(beside, path)
+    std::fs::rename(beside, path)?;
+    Ok(true)
 }
 
 /// The entry and the icon of the package unpacked at `share`, written for `binary`. A package
@@ -80,6 +81,7 @@ pub fn write(paths: &Paths, share: &Path, binary: &Path) -> io::Result<()> {
         )));
     };
     write_if_changed(&entry_path(paths), with_exec(&entry, &exec).as_bytes())?;
+    let mut written = false;
     let mut icons = vec![share.join("icons/hicolor")];
     while let Some(folder) = icons.pop() {
         for item in std::fs::read_dir(&folder)? {
@@ -87,9 +89,16 @@ pub fn write(paths: &Paths, share: &Path, binary: &Path) -> io::Result<()> {
             if item.is_dir() {
                 icons.push(item);
             } else if let Ok(inside) = item.strip_prefix(share) {
-                write_if_changed(&data_home(paths).join(inside), &std::fs::read(&item)?)?;
+                written |=
+                    write_if_changed(&data_home(paths).join(inside), &std::fs::read(&item)?)?;
             }
         }
+    }
+    if written {
+        // A desktop's cache of the icon theme is stale when the folder is newer than it: dated
+        // now, it is read again and finds the icon.
+        std::fs::File::open(data_home(paths).join("icons/hicolor"))?
+            .set_modified(std::time::SystemTime::now())?;
     }
     Ok(())
 }
@@ -107,7 +116,7 @@ pub fn follow(paths: &Paths, binary: &Path) -> io::Result<()> {
             binary.display()
         )));
     };
-    write_if_changed(&path, with_exec(&entry, &exec).as_bytes())
+    write_if_changed(&path, with_exec(&entry, &exec).as_bytes()).map(drop)
 }
 
 #[cfg(test)]
