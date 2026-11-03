@@ -143,10 +143,18 @@ fn a_missing_forge_program_is_a_doctor_warning_not_a_failure() {
         .map(|dir| user.path(dir).display().to_string())
         .join(":");
     let user = user.with_env("PATH", &path);
-    shop(&user);
+    // What `ready` says before any project is registered: the providers', as it was.
     let providers = user.run(&["doctor", "--json"]);
     let before = serde_json::from_slice::<Value>(&providers.stdout).unwrap()["ready"].clone();
+    let exit_before = providers.status.code();
+    shop(&user);
 
+    let after = user.run(&["doctor", "--json"]);
+    assert_eq!(
+        after.status.code(),
+        exit_before,
+        "a missing forge program changes no exit code"
+    );
     let (_, report, text) = doctor(&user);
 
     let bkt = entry(&report, "bkt", "bitbucket.org");
@@ -195,15 +203,22 @@ fn a_signed_out_program_gives_the_command_to_sign_in_in_the_doctor() {
     assert_eq!(
         entry(&report, "bkt", "git.example.com")["sign_in"]["commands"],
         json!([
-            "bkt auth login https://git.example.com",
-            "bkt context create git-example-com --host git.example.com"
+            "bkt auth login https://git.example.com --web-token",
+            "bkt context create git-example-com-proj --host git.example.com --project PROJ"
+        ])
+    );
+    assert_eq!(
+        entry(&report, "bkt", "bitbucket.org")["sign_in"]["commands"],
+        json!([
+            "bkt auth login https://bitbucket.org --kind cloud --web",
+            "bkt context create bitbucket-org-acme --host api.bitbucket.org --workspace acme"
         ])
     );
     assert_eq!(entry(&report, "gh", "github.com")["signed_in"], false);
     for command in [
         "gh auth login",
         "acli jira auth login",
-        "bkt auth login https://bitbucket.org",
+        "bkt auth login https://bitbucket.org --kind cloud --web",
     ] {
         assert!(text.contains(command), "{command}: {text}");
     }

@@ -91,6 +91,13 @@ fn main() {
     std::process::exit(answer(&dir, &script, &args));
 }
 
+/// A script's `delay_ms` makes the sign-in check slow, as a program that hangs on the network.
+fn wait(script: &Value) {
+    if let Some(ms) = script["delay_ms"].as_u64() {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
 /// What `acli` prints for `args`, and its exit code.
 fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -100,11 +107,16 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
             0
         }
         ["jira", "auth", "status", ..] => {
+            wait(script);
             if script["signed_in"] == false {
                 eprintln!("✗ Not logged in. Run: acli jira auth login");
                 return 1;
             }
-            println!("✓ Authenticated\n  Site: example.atlassian.net");
+            let site = script["site"].as_str().unwrap_or("example.atlassian.net");
+            match script["site_line"] == false {
+                true => println!("✓ Authenticated"),
+                false => println!("✓ Authenticated\n  Site: {site}"),
+            }
             0
         }
         ["jira", "workitem", "view", key, rest @ ..] if rest.contains(&"--json") => {

@@ -306,7 +306,7 @@ fn newest(mut comments: Vec<Comment>) -> Vec<Comment> {
 
 /// The site `acli`'s active sign-in is on: the `Site:` line of `acli jira auth status`, nothing
 /// else of what it prints (an e-mail may be there: never kept).
-fn signed_in_site(status: &str) -> Option<String> {
+pub(crate) fn signed_in_site(status: &str) -> Option<String> {
     status.lines().find_map(|line| {
         let (label, site) = line.trim().split_once(':')?;
         let site = site

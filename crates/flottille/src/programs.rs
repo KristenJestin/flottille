@@ -56,14 +56,31 @@ impl Program {
         }
     }
 
-    /// The commands that sign in, in order, to `host`.
-    fn sign_in(self, host: &str) -> Vec<String> {
+    /// The commands that sign in, in order, to `host`; for `bkt`, `scope` is the workspace (Cloud)
+    /// or the project (Data Center) of the repository, which its context names.
+    fn sign_in(self, host: &str, scope: &str) -> Vec<String> {
         match self {
             Program::Gh => vec!["gh auth login".into()],
             Program::Acli => vec!["acli jira auth login".into()],
+            // As `bkt`'s README gives them (<https://github.com/avivsinai/bitbucket-cli>): Cloud
+            // by the browser, its API host in the context; Data Center by a personal access
+            // token, a project in the context. Cloud's context names `api.bitbucket.org`, which
+            // Flottille's own check accepts and `bkt`'s API needs: never `bitbucket.org` there.
+            Program::Bkt if host == declared::BITBUCKET_CLOUD => vec![
+                format!("bkt auth login https://{host} --kind cloud --web"),
+                format!(
+                    "bkt context create {}-{} --host api.{host} --workspace {scope}",
+                    context_name(host),
+                    context_name(scope)
+                ),
+            ],
             Program::Bkt => vec![
-                format!("bkt auth login https://{host}"),
-                format!("bkt context create {} --host {host}", context_name(host)),
+                format!("bkt auth login https://{host} --web-token"),
+                format!(
+                    "bkt context create {}-{} --host {host} --project {scope}",
+                    context_name(host),
+                    context_name(scope)
+                ),
             ],
         }
     }
@@ -91,6 +108,9 @@ pub struct Need {
     pub program: Program,
     /// GitHub's, the Bitbucket server's, or the Jira site.
     pub host: String,
+    /// What of the host the sign-in advice names: the workspace or project of a Bitbucket
+    /// repository, empty for the others.
+    pub scope: String,
     pub used: Use,
 }
 
@@ -106,9 +126,14 @@ pub fn needs(project: &Project) -> Vec<Need> {
             RepositoryForge::Github { .. } => Program::Gh,
             _ => Program::Bkt,
         };
+        let scope = match program {
+            Program::Bkt => forge.owner_and_name().0.to_owned(),
+            _ => String::new(),
+        };
         needs.push(Need {
             program,
             host: forge.host().to_owned(),
+            scope,
             used: Use::Repository(repository.path.clone()),
         });
     }
@@ -116,11 +141,13 @@ pub fn needs(project: &Project) -> Vec<Need> {
         Some(ProjectTracker::Github { .. }) => needs.push(Need {
             program: Program::Gh,
             host: declared::GITHUB.to_owned(),
+            scope: String::new(),
             used: Use::Tracker,
         }),
         Some(ProjectTracker::Jira { site, .. }) => needs.push(Need {
             program: Program::Acli,
             host: site.clone(),
+            scope: String::new(),
             used: Use::Tracker,
         }),
         None => {}
@@ -174,25 +201,52 @@ fn first_version(text: &str) -> Option<String> {
     })
 }
 
+/// What a program says of its sign-in.
+enum SignIn {
+    Yes,
+    No,
+    /// Signed in, to another site than the one asked about (`acli` keeps one active site).
+    Elsewhere(String),
+}
+
 /// Whether the program is signed in to `host`; the sentence of why it could not be said otherwise.
-async fn signed_in(program: Program, host: &str) -> Result<bool, String> {
+async fn signed_in(program: Program, host: &str) -> Result<SignIn, String> {
     let ran = |result: Result<(bool, String, String), Gh>| match result {
-        Ok((ok, _, _)) => Ok(ok),
+        Ok((ok, stdout, _)) => Ok((ok, stdout)),
         Err(Gh::Missing) => Err(format!("{} went missing", program.name())),
         Err(Gh::Failed(why)) => Err(masked(&why)),
     };
+    let yes_or_no = |ok| if ok { SignIn::Yes } else { SignIn::No };
     match program {
-        Program::Gh => ran(forge::gh(&["auth", "status", "--hostname", host]).await),
-        Program::Acli => ran(crate::tickets::acli(&["jira", "auth", "status"]).await),
-        Program::Bkt => forge::has_bitbucket_context(host).await,
+        Program::Gh => ran(forge::gh(&["auth", "status", "--hostname", host]).await)
+            .map(|(ok, _)| yes_or_no(ok)),
+        Program::Bkt => forge::has_bitbucket_context(host).await.map(yes_or_no),
+        Program::Acli => {
+            let (ok, stdout) = ran(crate::tickets::acli(&["jira", "auth", "status"]).await)?;
+            if !ok {
+                return Ok(SignIn::No);
+            }
+            // The tickets' own reading of the `Site:` line, so that both say the same.
+            match crate::tickets::signed_in_site(&stdout) {
+                Some(active) if active.eq_ignore_ascii_case(host) => Ok(SignIn::Yes),
+                Some(active) => Ok(SignIn::Elsewhere(masked(&active))),
+                None => Err(
+                    "acli did not say which site it is signed in to (no Site: line in \
+                             `acli jira auth status`)"
+                        .into(),
+                ),
+            }
+        }
     }
 }
 
 /// One program's state for `host`, as the protocol says it:
-/// `{program, host, found, path, version, signed_in, install, sign_in, problem}`. `signed_in` is
-/// null when the program is not found or could not say (`problem` then says why); `install` is
-/// there when it is not found, `sign_in` when it is found and signed out.
-pub async fn check(program: Program, host: &str) -> Value {
+/// `{program, host, found, path, version, signed_in, signed_in_to, install, sign_in, problem}`.
+/// `signed_in` is null when the program is not found or could not say (`problem` then says why);
+/// `signed_in_to` is the other site `acli` is signed in to, when it is; `install` is there when it
+/// is not found, `sign_in` when it is found and signed out (or signed in elsewhere). The version
+/// and the sign-in are asked together, each with its own time.
+pub async fn check(program: Program, host: &str, scope: &str) -> Value {
     let mut state = json!({
         "program": program.name(),
         "host": host,
@@ -200,6 +254,7 @@ pub async fn check(program: Program, host: &str) -> Value {
         "path": null,
         "version": null,
         "signed_in": null,
+        "signed_in_to": null,
         "install": null,
         "sign_in": null,
         "problem": null,
@@ -213,33 +268,55 @@ pub async fn check(program: Program, host: &str) -> Value {
     };
     state["found"] = json!(true);
     state["path"] = json!(path.display().to_string());
-    state["version"] = json!(version_of(&path).await);
-    match signed_in(program, host).await {
-        Ok(true) => state["signed_in"] = json!(true),
-        Ok(false) => {
+    let (version, signed) = tokio::join!(version_of(&path), signed_in(program, host));
+    state["version"] = json!(version);
+    match signed {
+        Ok(SignIn::Yes) => state["signed_in"] = json!(true),
+        Ok(SignIn::No) => {
             state["signed_in"] = json!(false);
-            state["sign_in"] = json!({"commands": program.sign_in(host)});
+            state["sign_in"] = json!({"commands": program.sign_in(host, scope)});
+        }
+        Ok(SignIn::Elsewhere(site)) => {
+            state["signed_in"] = json!(false);
+            state["signed_in_to"] = json!(site);
+            state["sign_in"] =
+                json!({"commands": [format!("acli jira auth switch --site {host}")]});
         }
         Err(why) => state["problem"] = json!(why),
     }
     state
 }
 
-/// The checks of `needs`, each program and host asked once.
-async fn checks(needs: &[Need]) -> HashMap<(Program, String), Value> {
-    let mut known = HashMap::new();
-    for need in needs {
-        let key = (need.program, need.host.clone());
-        if known.contains_key(&key) {
-            continue;
-        }
-        let state = check(need.program, &need.host).await;
-        known.insert(key, state);
-    }
-    known
+/// What a check is known by: the program, its host and the scope the advice names.
+type Key = (Program, String, String);
+
+fn key_of(need: &Need) -> Key {
+    (need.program, need.host.clone(), need.scope.clone())
 }
 
-/// `project.programs`: `{"repositories": [{"path", …state}], "tracker": state | null}`, for the
+/// The checks of `needs`, each program, host and scope asked once, all together: every program
+/// has its own time, so one that hangs costs its own and not the sum of them.
+async fn checks(needs: &[Need]) -> HashMap<Key, Value> {
+    let mut distinct: Vec<&Need> = Vec::new();
+    for need in needs {
+        if !distinct.iter().any(|known| key_of(known) == key_of(need)) {
+            distinct.push(need);
+        }
+    }
+    let states = futures::future::join_all(
+        distinct
+            .iter()
+            .map(|need| check(need.program, &need.host, &need.scope)),
+    )
+    .await;
+    distinct
+        .iter()
+        .map(|need| key_of(need))
+        .zip(states)
+        .collect()
+}
+
+/// `project.programs`: `{"repositories": [{"repository", …state}], "tracker": state | null}`, for the
 /// repositories that declare a forge and the tracker the project declares.
 pub async fn of_project(project: &Project) -> Value {
     let needs = needs(project);
@@ -247,10 +324,10 @@ pub async fn of_project(project: &Project) -> Value {
     let mut repositories = Vec::new();
     let mut tracker = Value::Null;
     for need in &needs {
-        let mut state = known[&(need.program, need.host.clone())].clone();
+        let mut state = known[&key_of(need)].clone();
         match &need.used {
             Use::Repository(path) => {
-                state["path"] = json!(path);
+                state["repository"] = json!(path);
                 repositories.push(state);
             }
             Use::Tracker => tracker = state,
@@ -266,14 +343,14 @@ pub fn doctor(paths: &Paths) -> Vec<Value> {
         return Vec::new();
     };
     let mut needs = Vec::new();
-    let mut used: Vec<((Program, String), Vec<String>)> = Vec::new();
+    let mut used: Vec<(Key, Vec<String>)> = Vec::new();
     for project in &loaded.projects {
         for need in self::needs(project) {
             let what = match &need.used {
                 Use::Repository(path) => format!("{}: {path}", project.name),
                 Use::Tracker => format!("{}: tracker", project.name),
             };
-            let key = (need.program, need.host.clone());
+            let key = key_of(&need);
             match used.iter_mut().find(|(known, _)| *known == key) {
                 Some((_, by)) => by.push(what),
                 None => {
@@ -329,6 +406,10 @@ pub fn warning(state: &Value) -> Option<String> {
         ));
     }
     if state["signed_in"] == false {
+        let signed_in_to = state["signed_in_to"]
+            .as_str()
+            .map(|site| format!(" (it is signed in to {site})"))
+            .unwrap_or_default();
         let commands: Vec<String> = state["sign_in"]["commands"]
             .as_array()
             .into_iter()
@@ -337,7 +418,7 @@ pub fn warning(state: &Value) -> Option<String> {
             .map(|command| format!("`{command}`"))
             .collect();
         return Some(format!(
-            "{program} is not signed in to {host}{by}: run {}; the rest of Flottille works without it",
+            "{program} is not signed in to {host}{signed_in_to}{by}: run {}; the rest of Flottille works without it",
             commands.join(", then ")
         ));
     }
@@ -387,5 +468,16 @@ mod tests {
     #[test]
     fn a_context_is_named_after_its_host() {
         assert_eq!(context_name("git.example.com"), "git-example-com");
+    }
+
+    #[test]
+    fn bitbucket_cloud_signs_in_by_the_browser_and_its_context_names_the_api_host() {
+        assert_eq!(
+            Program::Bkt.sign_in("bitbucket.org", "acme"),
+            [
+                "bkt auth login https://bitbucket.org --kind cloud --web",
+                "bkt context create bitbucket-org-acme --host api.bitbucket.org --workspace acme"
+            ]
+        );
     }
 }

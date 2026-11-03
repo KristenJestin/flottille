@@ -47,11 +47,20 @@ with the system's default handler.
 | Program | Installation page | Command | Signs in with |
 |---|---|---|---|
 | `gh` | <https://cli.github.com/> | none (each system has its own) | `gh auth login` |
-| `bkt` | <https://github.com/avivsinai/bitbucket-cli> | `brew install bitbucket-cli` (macOS and Linux with Homebrew) | `bkt auth login https://<host>`, then `bkt context create <name> --host <host>` |
-| `acli` | <https://developer.atlassian.com/cloud/acli/guides/install-acli/> | none | `acli jira auth login` |
+| `bkt`, Bitbucket Cloud | <https://github.com/avivsinai/bitbucket-cli> | `brew install bitbucket-cli` (macOS and Linux with Homebrew) | `bkt auth login https://bitbucket.org --kind cloud --web`, then `bkt context create bitbucket-org-<workspace> --host api.bitbucket.org --workspace <workspace>` |
+| `bkt`, Data Center | the same | the same | `bkt auth login https://<host> --web-token`, then `bkt context create <host>-<project> --host <host> --project <PROJECT>` |
+| `acli` | <https://developer.atlassian.com/cloud/acli/guides/install-acli/> | none | `acli jira auth login`; signed in to another site: `acli jira auth switch --site <site>` |
 
-`<name>` is the host with its letters and digits, the rest a hyphen (`git-example-com`), so that the
-command can be run as it is. The state is read when the project's Settings open, again after a forge
+The `bkt` commands are the ones its README gives (Cloud by the browser, Data Center by a personal
+access token), with the workspace or the project of the repository that declares the forge, and the
+context named after the host and that workspace or project, its letters and digits and the rest a
+hyphen (`git-example-com-proj`), so that the commands can be run as they are. A Cloud context names
+`api.bitbucket.org`, the host `bkt`'s API needs: Flottille's own check accepts that name and
+`bitbucket.org`, and the advice never gives a command the API would refuse. `acli` keeps one active
+site: the check reads the `Site:` line of `acli jira auth status`, as the tickets do
+(`docs/tickets.md`), and says when it is signed in to another site than the tracker's, with the
+switch command. The programs are checked together, each with its own time (the version 5 s, a
+sign-in check 30 s): one that hangs costs its own time, not the sum of them. The state is read when the project's Settings open, again after a forge
 or the tracker is saved, and whenever the user asks (Check again); never in a loop. See
 `project.programs` (`docs/protocol.md`), the window below, and `flottille doctor`
 (`docs/cli.md`), which names the programs of the registered projects only, a missing one a warning
