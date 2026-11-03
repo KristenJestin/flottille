@@ -85,6 +85,12 @@ fn limit(paths: &Paths) -> Option<usize> {
     read(paths).unwrap_or(Some(DEFAULT_LIMIT))
 }
 
+/// How many bytes of text a result may hold now and still go to the agent whole: a tool that
+/// pages its own output sizes its page to it. The limit less what a page says of itself.
+pub fn page_room(paths: &Paths) -> usize {
+    limit(paths).map_or(usize::MAX, |limit| limit.saturating_sub(ABOUT_CHARS))
+}
+
 /// Answers a `tool_results.*` request of the user: `tool_results.show`, `tool_results.set`. No
 /// tool of an agent reaches them.
 pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failure> {

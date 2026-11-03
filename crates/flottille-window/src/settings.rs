@@ -624,10 +624,12 @@ impl SettingsPage {
                     .ok();
             });
         Section::new("tool-results", "Tool results")
-            .sentence(
-                TOOL_RESULTS_SENTENCE,
-            )
-            .child(Field::new("tool-results-field", "Cut results longer than", select))
+            .sentence(TOOL_RESULTS_SENTENCE)
+            .child(Field::new(
+                "tool-results-field",
+                "Cut results longer than",
+                select,
+            ))
     }
 
     /// Whether the daemon answered about the window's appearance, with it or with why it cannot

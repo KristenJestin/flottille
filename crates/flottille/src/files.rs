@@ -28,7 +28,7 @@ use crate::place::{Place, Resolved, Unfollowed};
 pub const READ_PAGE_BYTES: u64 = 32 * 1024;
 /// What a result's body may hold, in bytes, so that the result stays under 40,000 characters with
 /// its last lines.
-const BODY_BUDGET: usize = 32_000;
+pub const BODY_BUDGET: usize = 32_000;
 const LIST_DEPTH_MAX: u8 = 5;
 const LIST_ENTRIES_MAX: usize = 1000;
 const SEARCH_MATCH_LIMIT: usize = 100;
@@ -339,19 +339,25 @@ pub fn fs_read(cx: &Context, args: Value) -> Outcome {
         Ok(path) => path,
         Err(refusal) => return refusal,
     };
-    match read_page(Some(cx), &path, offset, length) {
+    // A page is sized so that its result is not cut (`docs/tools.md`, "Long results"): the
+    // session knows the file's fingerprint once it read a page, and a page it was shown only in
+    // part would let it write over text it never saw.
+    let budget = crate::results::page_room(&cx.daemon.paths).min(BODY_BUDGET);
+    match read_page(Some(cx), &path, offset, length, budget) {
         Ok(outcome) => outcome,
         Err(error) => failed(&path, error),
     }
 }
 
-/// A page of a file. `cx` is the session that read it, which then knows its fingerprint (what
-/// lets it write the file); `None` for a read that grants nothing, such as a reference's.
+/// A page of a file, its text at most `budget` bytes. `cx` is the session that read it, which
+/// then knows its fingerprint (what lets it write the file); `None` for a read that grants
+/// nothing, such as a reference's.
 pub fn read_page(
     cx: Option<&Context>,
     path: &Resolved,
     offset: u64,
     length: u64,
+    budget: usize,
 ) -> std::io::Result<Outcome> {
     let mut file = match open_regular(&path.path) {
         Err(error) if error.kind() == ErrorKind::IsADirectory => {
@@ -411,10 +417,10 @@ pub fn read_page(
     for (n, line) in window.split_inclusive(|b| *b == b'\n').enumerate() {
         let text = String::from_utf8_lossy(line);
         let rendered = format!("{:6}\t{}", first_line + n as u64, text);
-        if body.len() + rendered.len() > BODY_BUDGET {
+        if body.len() + rendered.len() > budget {
             if taken == 0 {
                 // One line longer than a page: its start, cut on a character.
-                let mut cut = BODY_BUDGET.min(line.len());
+                let mut cut = budget.min(line.len());
                 while cut > 1 && continuation(line[cut]) {
                     cut -= 1;
                 }
@@ -1268,7 +1274,7 @@ mod tests {
             assert_eq!(path.inside, inside);
             scene.swap(&scene.sub(inside));
             changed_refusal(
-                read_page(None, &path, 0, 100).unwrap_or_else(|e| failed(&path, e)),
+                read_page(None, &path, 0, 100, BODY_BUDGET).unwrap_or_else(|e| failed(&path, e)),
                 &format!("fs_read {side}"),
             );
 
@@ -1393,7 +1399,7 @@ mod tests {
         );
         assert!(never_opened(&path).is_none());
         let Outcome::Refused(refusal) =
-            read_page(None, &path, 0, 100).unwrap_or_else(|e| failed(&path, e))
+            read_page(None, &path, 0, 100, BODY_BUDGET).unwrap_or_else(|e| failed(&path, e))
         else {
             panic!("a path of 41 links must not be read");
         };
@@ -1410,7 +1416,8 @@ mod tests {
             return;
         }
         let path = scene.resolve(&locked.join("f.txt"));
-        let outcome = read_page(None, &path, 0, 100).unwrap_or_else(|e| failed(&path, e));
+        let outcome =
+            read_page(None, &path, 0, 100, BODY_BUDGET).unwrap_or_else(|e| failed(&path, e));
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(
             matches!(path.unfollowed, Some(Unfollowed::Failed(_))),
@@ -1435,7 +1442,7 @@ mod tests {
         assert!(unsafe { libc::inotify_add_watch(watch, name.as_ptr(), libc::IN_OPEN) } >= 0);
         let path = scene.resolve(Path::new("sub/pipe"));
 
-        let read = read_page(None, &path, 0, 100).unwrap_or_else(|e| failed(&path, e));
+        let read = read_page(None, &path, 0, 100, BODY_BUDGET).unwrap_or_else(|e| failed(&path, e));
         let fresh = fresh_against(&scene.place, &path, Some("sha".into()), None).unwrap_err();
         let text = text_of(&path).unwrap_err();
         let root = nofollow::open(&scene.root, nofollow::LOOK).unwrap();
@@ -1471,7 +1478,7 @@ mod tests {
         };
         let path = place.resolve(&place.root, "newdir/f.txt");
         let written = put(&path, b"x");
-        let read = read_page(None, &path, 0, 10).map_err(|e| failed(&path, e));
+        let read = read_page(None, &path, 0, 10, BODY_BUDGET).map_err(|e| failed(&path, e));
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(written.is_ok(), "{}", said(&written.unwrap_err()));
         assert!(read.is_ok());
@@ -1486,7 +1493,8 @@ mod tests {
         let scene = Scene::new();
         for named in ["/proc/mounts", "/proc/net/dev"] {
             let path = scene.place.resolve(&scene.root, named);
-            let outcome = read_page(None, &path, 0, 100).unwrap_or_else(|e| failed(&path, e));
+            let outcome =
+                read_page(None, &path, 0, 100, BODY_BUDGET).unwrap_or_else(|e| failed(&path, e));
             let Outcome::Refused(refusal) = outcome else {
                 panic!("{named}: {}", said(&outcome));
             };

@@ -65,6 +65,22 @@ fn read(mcp: &Mcp, path: &str) -> String {
     ok(mcp.call("fs_read", json!({"path": path})))
 }
 
+/// A run whose output is every line of `big.txt`, by the id the run gave.
+fn long_run(mcp: &Mcp) -> String {
+    let answer = ok(mcp.call("run", json!({"line": "cat big.txt"})));
+    answer
+        .strip_prefix("run ")
+        .and_then(|rest| rest.split(':').next())
+        .unwrap_or_else(|| panic!("no run in {answer}"))
+        .to_owned()
+}
+
+/// A result that is long whatever the page of the tool: the output of `long_run`. `fs_read` pages
+/// its own text under the limit, so it is no way to a cut.
+fn long(mcp: &Mcp) -> String {
+    ok(mcp.call("run_status", json!({"run": long_run(mcp), "tail": 1000})))
+}
+
 fn limit(user: &User, limit: Value) {
     user.call("tool_results.set", json!({"limit": limit}))
         .unwrap();
@@ -99,7 +115,7 @@ fn a_long_tool_result_is_cut_with_its_beginning_and_its_end() {
     let user = User::with_fake_agent().with_cut_results();
     let (_, mcp, _) = session(&user);
 
-    let text = read(&mcp, "big.txt");
+    let text = long(&mcp);
 
     assert!(text.chars().count() < LIMIT, "{} characters", text.len());
     assert!(text.contains("line 0001 of the log"), "{text}");
@@ -113,7 +129,7 @@ fn a_cut_result_says_how_to_read_it_whole() {
     let user = User::with_fake_agent().with_cut_results();
     let (_, mcp, _) = session(&user);
 
-    let text = read(&mcp, "big.txt");
+    let text = long(&mcp);
 
     let id = id_of(&text);
     assert!(id.starts_with("res_"), "{id}");
@@ -126,10 +142,12 @@ fn a_cut_result_says_how_to_read_it_whole() {
 fn the_whole_result_is_read_by_ranges_each_under_the_limit() {
     let user = User::with_fake_agent().with_cut_results();
     let (_, mcp, _) = session(&user);
+    let run = long_run(&mcp);
+    let output = json!({"run": run, "tail": 1000});
     limit(&user, json!("off"));
-    let whole = read(&mcp, "big.txt");
+    let whole = ok(mcp.call("run_status", output.clone()));
     limit(&user, json!(LIMIT));
-    let id = id_of(&read(&mcp, "big.txt"));
+    let id = id_of(&ok(mcp.call("run_status", output)));
 
     let mut lines: Vec<String> = Vec::new();
     let mut start = 1;
@@ -174,7 +192,7 @@ fn tool_results_off_returns_them_whole() {
     let (_, mcp, _) = session(&user);
     limit(&user, json!("off"));
 
-    let text = read(&mcp, "big.txt");
+    let text = long(&mcp);
 
     assert!(text.chars().count() > LIMIT, "{} characters", text.len());
     assert!(text.contains("line 0250 of the log"), "{text}");
@@ -186,7 +204,7 @@ fn a_cut_result_is_masked_like_any_output() {
     let user = User::with_fake_agent().with_cut_results();
     let (_, mcp, _) = session(&user);
 
-    let text = read(&mcp, "big.txt");
+    let text = long(&mcp);
     let id = id_of(&text);
     let mut seen = text;
     let mut start = 1;
@@ -223,12 +241,16 @@ fn a_cut_result_is_recorded_with_how_much_was_left_out() {
     let watch = user.watch(&["--after", "0"]);
     let (_, mcp, _) = session(&user);
 
-    let text = ok(mcp.call_keyed("fs_read", json!({"path": "big.txt"}), "toolu_1"));
+    let text = ok(mcp.call_keyed(
+        "run_status",
+        json!({"run": long_run(&mcp), "tail": 1000}),
+        "toolu_1",
+    ));
 
     let events = watch.until(|e| e["name"] == "agent.tool_served" && e["data"]["cut"].is_object());
     let cut = &events.last().unwrap()["data"]["cut"];
     assert_eq!(cut["result"].as_str(), Some(id_of(&text).as_str()));
-    assert!(cut["left_out"].as_u64().unwrap() > 8_000, "{cut}");
+    assert!(cut["left_out"].as_u64().unwrap() > 7_000, "{cut}");
 }
 
 #[test]
@@ -303,4 +325,59 @@ fn a_file_naming_another_word_than_off_is_an_invalid_config() {
 
     assert_eq!(code, "invalid-config");
     assert!(message.contains("tool-results.toml"), "{message}");
+}
+
+/// The pages of `big.txt` as `fs_read` gives them from the start, each under the limit: the line
+/// numbers of their lines, and how many pages there were.
+fn pages_of_big(mcp: &Mcp) -> (Vec<usize>, usize) {
+    let (mut numbers, mut pages, mut offset) = (Vec::new(), 0, 0);
+    loop {
+        let text = ok(mcp.call(
+            "fs_read",
+            json!({"path": "big.txt", "range": {"offset": offset}}),
+        ));
+        pages += 1;
+        assert!(!text.contains("left out"), "{text}");
+        assert!(!text.contains("res_"), "{text}");
+        numbers.extend(text.lines().filter_map(|line| {
+            let (number, rest) = line.split_once('\t')?;
+            rest.starts_with("line ")
+                .then(|| number.trim().parse::<usize>().unwrap())
+        }));
+        let range: Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+        match range["next"].as_u64() {
+            Some(next) => offset = next,
+            None => return (numbers, pages),
+        }
+        assert!(pages < 100, "it never ends");
+    }
+}
+
+#[test]
+fn a_page_of_fs_read_is_sized_so_that_its_result_is_not_cut() {
+    let user = User::with_fake_agent().with_cut_results();
+    let (_, mcp, _) = session(&user);
+
+    let (numbers, pages) = pages_of_big(&mcp);
+
+    // Every line of the file was shown whole, once, so that reading it means having seen it.
+    assert_eq!(numbers, (1..=600).collect::<Vec<_>>());
+    assert!(pages > 1, "the file fits one page");
+}
+
+#[test]
+fn a_page_of_fs_read_follows_the_limit_the_user_chose() {
+    let user = User::with_fake_agent().with_cut_results();
+    let (_, mcp, _) = session(&user);
+    let (_, at_default) = pages_of_big(&mcp);
+    limit(&user, json!(4_000));
+    let first = read(&mcp, "big.txt");
+    let (numbers, at_small) = pages_of_big(&mcp);
+    limit(&user, json!("off"));
+    let (_, whole) = pages_of_big(&mcp);
+
+    assert!(first.chars().count() < 4_000, "{} characters", first.len());
+    assert_eq!(numbers, (1..=600).collect::<Vec<_>>());
+    assert!(at_small > at_default, "{at_small} pages, then {at_default}");
+    assert_eq!(whole, 1);
 }

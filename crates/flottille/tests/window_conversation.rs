@@ -758,10 +758,10 @@ fn a_ticket_created_in_auto_says_allowed_by_the_judge(cx: &mut TestAppContext) {
 fn a_step_whose_result_was_cut_says_so_with_the_characters_left_out(cx: &mut TestAppContext) {
     let user = User::with_fake_agent().with_cut_results();
     user.fake_script(json!({"turns": [
-        {"when": "read the log", "do": [{"mcp": {"tool": "fs_read", "keyed": true,
-            "arguments": {"path": "big.txt"}}}]},
-        {"when": "read the note", "do": [{"mcp": {"tool": "fs_read", "keyed": true,
-            "arguments": {"path": "note.txt"}}}]}
+        {"when": "read the log", "do": [{"mcp": {"tool": "search", "keyed": true,
+            "arguments": {"pattern": "line", "glob": "big.txt"}}}]},
+        {"when": "read the note", "do": [{"mcp": {"tool": "search", "keyed": true,
+            "arguments": {"pattern": "short", "glob": "note.txt"}}}]}
     ]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     let lead = lead(&user);
@@ -771,8 +771,10 @@ fn a_step_whose_result_was_cut_says_so_with_the_characters_left_out(cx: &mut Tes
         .as_str()
         .unwrap()
         .to_owned();
-    let log: String = (1..=600)
-        .map(|n| format!("line {n:04} of the log\n"))
+    // Long lines: a search shows a hundred of them, and that is more than the limit. (`fs_read`
+    // pages its text under the limit, so it is never cut.)
+    let log: String = (1..=120)
+        .map(|n| format!("line {n:04} {}\n", "of the log ".repeat(13)))
         .collect();
     std::fs::write(PathBuf::from(&folder).join("big.txt"), &log).unwrap();
     std::fs::write(PathBuf::from(&folder).join("note.txt"), "short\n").unwrap();
@@ -788,13 +790,13 @@ fn a_step_whose_result_was_cut_says_so_with_the_characters_left_out(cx: &mut Tes
         json!({"agent": lead, "message": "read the note"}),
     )
     .unwrap();
-    // Every `fs_read` step: its block, its place in it, how many characters were left out.
+    // Every `search` step: its block, its place in it, how many characters were left out.
     let reads = |cx: &mut VisualTestContext| {
         let mut found = Vec::new();
         for (at, block) in blocks(&page, cx).iter().enumerate() {
             if let Block::Steps { calls } = block {
                 for (n, call) in calls.iter().enumerate() {
-                    if call.name == "fs_read" && call.until.is_some() {
+                    if call.name == "search" && call.until.is_some() {
                         found.push((at, n, call.cut));
                     }
                 }
