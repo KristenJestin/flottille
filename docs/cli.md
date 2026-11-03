@@ -811,6 +811,16 @@ work happens (`main`, the project folder, and its workspaces), the sessions in e
 bell counting what waits for you. It starts the daemon like any command when nobody listens, and
 when the daemon goes away it connects again and catches up with the events it missed.
 
+There is **one window**: a second `flottille window` while one is open does not open another. The
+open window holds a lock in the runtime folder (`window.lock`, beside the daemon's) and listens on
+`window.sock` there; the second command says "raise" on that socket, prints that the window is
+already open and leaves, and the open window asks the desktop for the focus (`activate`). Where a
+desktop does not let a program take the focus, as a Wayland compositor often does not, the window
+is only marked as asking for attention. The place goes with the window's process: a window that
+was killed blocks nobody. Where the window cannot tell whether another is open (no runtime
+folder), it opens anyway. On Linux the launcher of the desktop runs this command
+(`docs/releases.md`, "The launcher entry").
+
 The bell counts and lists the requests you hold (`flottille approvals`) and the roots' questions
 you have not answered yet; choosing one opens its session. A session is marked `NEEDS YOU` when the
 daemon says its root needs you, as `flottille status` does: the window decides none of this, it

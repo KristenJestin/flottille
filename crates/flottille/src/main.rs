@@ -371,12 +371,29 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         } => return codex_bridge::run(&paths),
         Command::ReadPage { .. } => unreachable!("the page's reader returns before the paths"),
         Command::Window => {
+            // One window: a second command brings the open one to the front and leaves. When
+            // that cannot be told (no runtime folder to hold the place), another window is
+            // better than none.
+            let instance = match flottille_window::instance::acquire(&paths) {
+                Ok(flottille_window::instance::Start::First(instance)) => Some(instance),
+                Ok(flottille_window::instance::Start::Raised) => {
+                    println!("Flottille's window is already open: brought it to the front.");
+                    return Ok(ExitCode::SUCCESS);
+                }
+                Err(error) => {
+                    eprintln!("flottille: cannot tell whether a window is open: {error}");
+                    None
+                }
+            };
             let paths = paths.clone();
-            flottille_window::run(std::sync::Arc::new(move || {
-                Client::connect_or_start(&paths)
-                    .map(Client::into_stream)
-                    .map_err(|error| std::io::Error::other(error.to_string()))
-            }));
+            flottille_window::run(
+                std::sync::Arc::new(move || {
+                    Client::connect_or_start(&paths)
+                        .map(Client::into_stream)
+                        .map_err(|error| std::io::Error::other(error.to_string()))
+                }),
+                instance,
+            );
         }
         Command::Watch { after, forge } => {
             let mut client = Client::connect_or_start(&paths)?;
