@@ -594,6 +594,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                 "project.add_repository",
                 "project.remove_repository",
                 "project.settings",
+                "project.programs",
                 "project.set_settings",
                 "project.ticket",
                 "task.run",
@@ -624,6 +625,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     projects::remove_repository(daemon, request.params).await
                 } else if request.method == "project.settings" {
                     projects::settings(daemon, request.params).await
+                } else if request.method == "project.programs" {
+                    projects::programs(daemon, request.params).await
                 } else if request.method == "project.set_settings" {
                     projects::set_settings(daemon, request.params).await
                 } else if request.method == "project.ticket" {

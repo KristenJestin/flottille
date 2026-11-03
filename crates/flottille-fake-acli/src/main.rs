@@ -95,6 +95,10 @@ fn main() {
 fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     match words.as_slice() {
+        ["--version"] => {
+            println!("acli version 1.3.2-stable");
+            0
+        }
         ["jira", "auth", "status", ..] => {
             if script["signed_in"] == false {
                 eprintln!("✗ Not logged in. Run: acli jira auth login");

@@ -113,6 +113,10 @@ fn contexts(script: &Value) -> Vec<Value> {
 /// What `bkt` prints for `args`, and its exit code.
 fn answer(script: &Value, args: &[String]) -> i32 {
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    if words == ["--version"] {
+        println!("bkt version 0.37.0");
+        return 0;
+    }
     let option = |name: &str| {
         words
             .iter()

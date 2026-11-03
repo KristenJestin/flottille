@@ -98,10 +98,7 @@ impl Contexts {
         let Forge::Bitbucket { host, .. } = forge else {
             return Err("not a Bitbucket repository".into());
         };
-        let on_host = |context: &&Context| {
-            let named = hostname(&context.host);
-            named == *host || (host == "bitbucket.org" && named == "api.bitbucket.org")
-        };
+        let on_host = |context: &&Context| on_host(context, host);
         let found = all
             .iter()
             .filter(on_host)
@@ -115,6 +112,18 @@ impl Contexts {
             )
         })
     }
+}
+
+/// Whether the context is on `host`: Cloud's contexts name `api.bitbucket.org`.
+fn on_host(context: &Context, host: &str) -> bool {
+    let named = hostname(&context.host);
+    named == host || (host == "bitbucket.org" && named == "api.bitbucket.org")
+}
+
+/// Whether `bkt` has a context for `host`, which is what signed in means for it; the sentence of
+/// why it could not be said when `bkt` could not list them.
+pub(crate) async fn has_context(host: &str) -> Result<bool, String> {
+    Ok(list().await?.iter().any(|context| on_host(context, host)))
 }
 
 /// A host key without its port, lowercase.

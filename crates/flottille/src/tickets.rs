@@ -564,7 +564,7 @@ fn block(node: &Value, out: &mut String) {
 
 /// `acli <args>`, as `forge::gh` runs `gh`: spawned without a shell, with the user's own sign-in,
 /// nothing waiting for an answer: whether it succeeded, its output and its errors.
-async fn acli(args: &[&str]) -> Result<(bool, String, String), Gh> {
+pub(crate) async fn acli(args: &[&str]) -> Result<(bool, String, String), Gh> {
     let mut command = tokio::process::Command::new("acli");
     command
         .args(args)

@@ -162,6 +162,10 @@ fn updated_since(object: &Value, search: Option<&str>) -> bool {
 /// What `gh` prints for `args`, and its exit code.
 fn answer(script: &Value, args: &[String]) -> i32 {
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    if words == ["--version"] {
+        println!("gh version 2.60.0 (2026-01-01)\nhttps://github.com/cli/cli/releases/tag/v2.60.0");
+        return 0;
+    }
     let option = |name: &str| {
         words
             .iter()

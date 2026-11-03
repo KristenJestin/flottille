@@ -29,6 +29,34 @@ would send a read or a write to another host than the one the declaration was ch
   (`docs/tools.md`); an agent reads the forge only through `forge` below, never by running
   `gh` itself, and **never by running `bkt`, reads included** (see "Bitbucket").
 
+## The programs it needs
+
+Each program is checked where the forge is chosen, as the providers' are (`docs/agents.md`): the
+project's Settings and `flottille doctor` say, for the forge of each repository and for the tracker,
+whether `gh`, `bkt` or `acli` is **found** (on the daemon's PATH, with the version it prints for
+`--version`, given 5 s) and whether it is **signed in**, by the checks Flottille already uses and no
+other: `gh auth status --hostname github.com`'s exit code, `acli jira auth status`'s exit code, and
+for `bkt` a context for the host (never `bkt auth status`, below). A configuration folder is never
+read and nothing a program prints of the account is kept.
+
+When the program is missing, the advice is its **official installation page** and, where one command
+fits most systems, that command; when it is signed out, the commands that sign in. Flottille installs
+nothing and signs nobody in: the window offers a Copy button for each command, and the page opens
+with the system's default handler.
+
+| Program | Installation page | Command | Signs in with |
+|---|---|---|---|
+| `gh` | <https://cli.github.com/> | none (each system has its own) | `gh auth login` |
+| `bkt` | <https://github.com/avivsinai/bitbucket-cli> | `brew install bitbucket-cli` (macOS and Linux with Homebrew) | `bkt auth login https://<host>`, then `bkt context create <name> --host <host>` |
+| `acli` | <https://developer.atlassian.com/cloud/acli/guides/install-acli/> | none | `acli jira auth login` |
+
+`<name>` is the host with its letters and digits, the rest a hyphen (`git-example-com`), so that the
+command can be run as it is. The state is read when the project's Settings open, again after a forge
+or the tracker is saved, and whenever the user asks (Check again); never in a loop. See
+`project.programs` (`docs/protocol.md`), the window below, and `flottille doctor`
+(`docs/cli.md`), which names the programs of the registered projects only, a missing one a warning
+and never a failure.
+
 ## The forge of a repository
 
 **Each repository declares its forge, and nothing is guessed.** The project's file says it, per
@@ -179,6 +207,12 @@ and state, and its checks as one mark drawn by shape as well as colour (`✓` pa
 `●` pending). The project page's place card shows the same for its workspace. A click opens the
 pull request with the system's default handler. The session page watches its workspace while it is
 open.
+
+The project's Settings put, under each repository that declares a forge, the state of the program
+it needs (`✓ gh 2.60.0 · signed in to github.com`, or `✗ bkt not found` with the installation
+page and its command, or `✗ gh 2.60.0 · not signed in to github.com` with the sign-in commands), and
+the Tracker row the same for `acli` or `gh`; "Check programs" (Repositories) and "Check again"
+(Tracker) read them anew. Each line unfolds and fades in as it comes and folds away as it goes.
 
 ## Bitbucket
 

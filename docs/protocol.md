@@ -240,6 +240,25 @@ remote leads (`null` when it is). `obsolete` lists the keys of the file that are
 (the old `[forges]`, `[agent_actions]`, a command's former `grants` and `children`), each with what
 replaces it. Nothing is asked of a forge.
 
+#### `project.programs`
+
+`{"name"}`. The command lines the project's forges and tracker need, checked (`docs/forges.md`,
+"The programs it needs"): `{"repositories": [state…], "tracker": state | null}`, one state for each
+repository that declares a forge (with its `path`), and the tracker's when the project declares
+one. A program is asked once for a host however many repositories use it. A state is:
+
+```json
+{"program": "gh", "host": "github.com", "found": true, "path": "/usr/bin/gh", "version": "2.60.0",
+ "signed_in": false, "install": null, "sign_in": {"commands": ["gh auth login"]}, "problem": null}
+```
+
+`program` is `gh`, `bkt` or `acli`; `host` is GitHub's, the Bitbucket server's or the Jira site.
+`signed_in` is `null` when the program is not found or could not say (`problem` then says why,
+masked). `install` is there when the program is not found: `{"page", "command"}`, the program's
+installation page and a command (`null` where none fits most systems); `sign_in` is there when it
+is found and signed out: `{"commands": [...]}`, in order. A program is run for `--version` and for
+its sign-in check only, never for anything else, and nothing it prints of the account is kept.
+
 #### `project.set_settings`
 
 `{"name", "repositories": [{"path", "forge", "base", "depends_on"}], "tracker"}`. Writes each listed
