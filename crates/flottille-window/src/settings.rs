@@ -81,6 +81,11 @@ pub struct Developer {
 pub const LIMITS: [usize; 4] = [4_000, 8_000, 16_000, 32_000];
 
 /// What the developer mode's switch logs, under its label.
+/// What the Tool results section says under its title.
+const TOOL_RESULTS_SENTENCE: &str = "A tool result longer than this reaches the agent as its beginning and its end, \
+     with the number of characters left out; the agent reads the rest by ranges, and only that \
+     session can. It saves the agent's context. For every project and every agent.";
+
 pub const DEVELOPER_HINT: &str = "Each gate decision with its reasons, the judge's input and \
      answer, requests, deliveries and agent processes, one JSON object per line, every secret \
      masked.";
@@ -620,7 +625,7 @@ impl SettingsPage {
             });
         Section::new("tool-results", "Tool results")
             .sentence(
-                "A tool result longer than this reaches the agent as its beginning and its end,                  with the number of characters left out; the agent reads the rest by ranges,                  and only that session can. It saves the agent's context. For every project and                  every agent.",
+                TOOL_RESULTS_SENTENCE,
             )
             .child(Field::new("tool-results-field", "Cut results longer than", select))
     }
@@ -1161,7 +1166,15 @@ pub(crate) fn grouped(n: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::grouped;
+    use super::{TOOL_RESULTS_SENTENCE, grouped};
+
+    #[test]
+    fn the_sentence_of_the_tool_results_section_has_no_run_of_spaces() {
+        assert!(
+            !TOOL_RESULTS_SENTENCE.contains("  "),
+            "{TOOL_RESULTS_SENTENCE}"
+        );
+    }
 
     #[test]
     fn a_count_sets_its_thousands_apart() {
