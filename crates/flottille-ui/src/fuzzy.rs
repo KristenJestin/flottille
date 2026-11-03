@@ -3,10 +3,14 @@
 //!
 //! Every word typed must be found, in the title or in its context (the project a session is in).
 //! A word is found as a piece of the title, best at the start of a word of it; failing that, as
-//! its letters in order, the closer together the better. It is a plain scorer: a row is shown if
+//! its letters in order, the closer together the better and never spread over more than twice
+//! its length. In the context a word is found only as a piece of it. It is a plain scorer: a row is shown if
 //! it matches, and the better matches come first.
 
 use std::ops::Range;
+
+use unicode_normalization::UnicodeNormalization as _;
+use unicode_normalization::char::is_combining_mark;
 
 /// What `query` found in a title.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,52 +45,74 @@ impl Match {
     }
 }
 
-/// A letter without its case and its accent: the one a search compares. One character for one
-/// character, so that a position in the folded text is a position in the text.
-pub fn fold(c: char) -> char {
-    let lower = c.to_lowercase().next().unwrap_or(c);
-    match lower {
-        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => 'a',
-        'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' => 'c',
-        'ď' | 'đ' => 'd',
-        'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => 'e',
-        'ĝ' | 'ğ' | 'ġ' | 'ģ' => 'g',
-        'ì' | 'í' | 'î' | 'ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' | 'ı' => 'i',
-        'ñ' | 'ń' | 'ņ' | 'ň' => 'n',
-        'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' | 'ŏ' | 'ő' => 'o',
-        'ŕ' | 'ŗ' | 'ř' => 'r',
-        'ś' | 'ŝ' | 'ş' | 'š' => 's',
-        'ţ' | 'ť' => 't',
-        'ù' | 'ú' | 'û' | 'ü' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => 'u',
-        'ý' | 'ÿ' | 'ŷ' => 'y',
-        'ź' | 'ż' | 'ž' => 'z',
-        other => other,
+/// The text a search compares: without case, accents or ligatures (`É` is `e`, `œ` is `oe`), each
+/// letter with the position, in characters, of the one of the text it comes from. An accent
+/// written as a mark of its own folds into nothing.
+fn folded(text: &str) -> Vec<(char, usize)> {
+    let mut found = Vec::with_capacity(text.len());
+    for (at, c) in text.chars().enumerate() {
+        for c in c.to_lowercase().nfd() {
+            if is_combining_mark(c) {
+                continue;
+            }
+            // The letters that are no letter and an accent, so that no decomposition reaches them.
+            let spelled: &[char] = match c {
+                'œ' => &['o', 'e'],
+                'æ' => &['a', 'e'],
+                'ß' => &['s', 's'],
+                'ø' => &['o'],
+                'đ' => &['d'],
+                'ł' => &['l'],
+                'ı' => &['i'],
+                _ => {
+                    found.push((c, at));
+                    continue;
+                }
+            };
+            found.extend(spelled.iter().map(|&c| (c, at)));
+        }
     }
-}
-
-fn folded(text: &str) -> Vec<char> {
-    text.chars().map(fold).collect()
+    found
 }
 
 /// What `query` makes of `title`, with `context` (more words that may hold some of the query's)
 /// beside it. `None` when a word typed is in neither. A query with no word matches everything
 /// with nothing marked.
 pub fn find(query: &str, title: &str, context: &str) -> Option<Match> {
-    let words: Vec<Vec<char>> = query.split_whitespace().map(folded).collect();
-    let (title_chars, context_chars) = (folded(title), folded(context));
+    let words: Vec<Vec<char>> = query
+        .split_whitespace()
+        .map(|word| folded(word).into_iter().map(|(c, _)| c).collect())
+        .collect();
+    let title_folded = folded(title);
+    let title_chars: Vec<char> = title_folded.iter().map(|(c, _)| *c).collect();
+    let context_chars: Vec<char> = folded(context).into_iter().map(|(c, _)| c).collect();
+    let length = title.chars().count();
     let mut score = 0;
-    let mut marked = vec![false; title_chars.len()];
+    let mut marked = vec![false; length];
     for word in &words {
-        if let Some((worth, at)) = locate(word, &title_chars) {
+        if let Some((worth, at)) = locate(word, &title_chars, true) {
             score += worth;
             for position in at {
-                marked[position] = true;
+                marked[title_folded[position].1] = true;
             }
-        } else if let Some((worth, _)) = locate(word, &context_chars) {
+        } else if let Some((worth, _)) = locate(word, &context_chars, false) {
             // What is said around the title counts for less and is not marked.
             score += worth / 3;
         } else {
             return None;
+        }
+    }
+    // An accent written after its letter goes with it.
+    let kept: Vec<bool> = {
+        let mut kept = vec![false; length];
+        for (_, at) in &title_folded {
+            kept[*at] = true;
+        }
+        kept
+    };
+    for at in 1..length {
+        if !kept[at] && marked[at - 1] {
+            marked[at] = true;
         }
     }
     let mut marks: Vec<Range<usize>> = Vec::new();
@@ -102,8 +128,11 @@ pub fn find(query: &str, title: &str, context: &str) -> Option<Match> {
     Some(Match { score, marks })
 }
 
-/// How well `word` is found in `text`, and the positions of its letters there.
-fn locate(word: &[char], text: &[char]) -> Option<(u32, Vec<usize>)> {
+/// How well `word` is found in `text`, and the positions of its letters there. `scattered`
+/// also takes its letters in order when it is not a piece of the text, the nearer together the
+/// better, and never spread over more than twice its length: a long title holds the letters of
+/// any short word somewhere.
+fn locate(word: &[char], text: &[char], scattered: bool) -> Option<(u32, Vec<usize>)> {
     if word.is_empty() {
         return Some((0, Vec::new()));
     }
@@ -128,17 +157,36 @@ fn locate(word: &[char], text: &[char]) -> Option<(u32, Vec<usize>)> {
         };
         return Some((worth, (at..at + word.len()).collect()));
     }
-    // Or its letters in order, each as soon as it can be: the nearer together, the better.
-    let mut at = 0;
-    let mut positions = Vec::with_capacity(word.len());
-    for letter in word {
-        let found = text[at..].iter().position(|c| c == letter)? + at;
-        positions.push(found);
-        at = found + 1;
+    if !scattered {
+        return None;
     }
-    let span = positions.last()? - positions.first()? + 1;
+    // Each letter as soon as it can be, from each place the first one is: the nearest run wins.
+    let mut best: Option<Vec<usize>> = None;
+    for first in (0..text.len()).filter(|&at| text[at] == word[0]) {
+        let mut positions = vec![first];
+        let mut at = first + 1;
+        for letter in &word[1..] {
+            let Some(found) = text[at..].iter().position(|c| c == letter) else {
+                break;
+            };
+            positions.push(found + at);
+            at = found + at + 1;
+        }
+        if positions.len() < word.len() {
+            break;
+        }
+        let span = |p: &[usize]| p[p.len() - 1] - p[0] + 1;
+        if best.as_ref().is_none_or(|b| span(&positions) < span(b)) {
+            best = Some(positions);
+        }
+    }
+    let positions = best?;
+    let span = positions[positions.len() - 1] - positions[0] + 1;
+    if span > word.len() * 2 {
+        return None;
+    }
     let slack = (span - word.len()) as u32;
-    Some((100u32.saturating_sub(slack.min(90)), positions))
+    Some((100u32.saturating_sub(slack * 10), positions))
 }
 
 #[cfg(test)]
@@ -185,9 +233,32 @@ mod tests {
 
     #[test]
     fn letters_in_order_match_and_the_nearer_the_better() {
-        assert!(found("lgn", "login").score > found("lgn", "lots of garbage names").score);
+        assert!(found("lgn", "login").score > found("lgn", "logging in").score);
         assert_eq!(marked("lgn", "login"), ["l", "g", "n"]);
         assert!(find("xyz", "login", "").is_none());
+    }
+
+    #[test]
+    fn letters_scattered_over_a_long_title_are_no_match() {
+        let title = "Set up the staging tests, then investigate why the signup flow times out";
+        assert!(find("settings", title, "").is_none());
+        assert!(find("lgn", "lots of garbage names", "").is_none());
+    }
+
+    #[test]
+    fn a_word_of_the_context_is_found_whole_not_as_scattered_letters() {
+        assert!(find("hbr", "Fix the login", "harbor main").is_none());
+        assert!(find("harb", "Fix the login", "harbor main").is_some());
+    }
+
+    #[test]
+    fn combining_marks_and_ligatures_fold_too() {
+        // `e` then a combining acute accent.
+        assert_eq!(marked("cafe", "cafe\u{301} noir"), ["cafe\u{301}"]);
+        assert_eq!(marked("oeuvre", "Chef-d'œuvre"), ["œuvre"]);
+        assert_eq!(marked("aesir", "Æsir"), ["Æsir"]);
+        assert_eq!(marked("strasse", "Hauptstraße"), ["straße"]);
+        assert_eq!(marked("ss", "Straße"), ["ß"]);
     }
 
     #[test]
