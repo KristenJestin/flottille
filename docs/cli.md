@@ -814,11 +814,14 @@ when the daemon goes away it connects again and catches up with the events it mi
 There is **one window**: a second `flottille window` while one is open does not open another. The
 open window holds a lock in the runtime folder (`window.lock`, beside the daemon's) and listens on
 `window.sock` there; the second command says "raise" on that socket, prints that the window is
-already open and leaves, and the open window asks the desktop for the focus (`activate`). Where a
-desktop does not let a program take the focus, as a Wayland compositor often does not, the window
-is only marked as asking for attention. The place goes with the window's process: a window that
-was killed blocks nobody. Where the window cannot tell whether another is open (no runtime
-folder), it opens anyway. On Linux the launcher of the desktop runs this command
+already open and that it asked it to come to the front, and leaves. The open window then asks the
+desktop for the focus (`activate`), which a desktop may refuse: GPUI asks with its own activation
+token, and a Wayland compositor, Hyprland by default, then only marks the window as asking for
+attention; X11 desktops move it. (A later change could hand the launcher's `XDG_ACTIVATION_TOKEN`
+to the open window.) The place goes with the window's process: a window that was killed blocks
+nobody. Without `XDG_RUNTIME_DIR`, like every command, `flottille window` refuses; when the lock or
+the socket cannot be made in that folder (it cannot be written), the window says so and opens
+anyway. On Linux the launcher of the desktop runs this command
 (`docs/releases.md`, "The launcher entry").
 
 The bell counts and lists the requests you hold (`flottille approvals`) and the roots' questions

@@ -142,12 +142,26 @@ user's XDG data folder (`$XDG_DATA_HOME`, `~/.local/share` by default):
 - `icons/hicolor/scalable/apps/flottille.svg`, and `48x48`, `128x128` and `256x256`
   `apps/flottille.png`.
 
+The window also sets the 256 px PNG as its own icon, which GPUI uses on X11; Wayland takes the icon
+from the entry its app id names.
+
 The package holds them under `share/`, from `packaging/linux/`. **The PNGs are committed**, not
 rendered by CI: the archive then needs no renderer, and the same files give the same archive.
 `tools/icons.sh` renders them again from the SVG (`rsvg-convert`) when the SVG changes. The entry
 of the package says `Exec=flottille window`; `install.sh` and `flottille update` write it with the
-binary's path. A path that holds a character an `Exec` line cannot say (`"`, `` ` ``, `$`, `\`,
-`%`) gets no entry: the install goes on and says so.
+binary's real path (symbolic links resolved, so that the two write the same line whatever the way
+the home is reached). **Refusing some characters is Flottille's choice**: the format allows a
+`"`, a backtick, `$`, `\` or `%` in an `Exec` line, escaped, but Flottille writes none of them
+(nor a newline) rather than escape: a path that holds one gets no entry, and the install or the
+update goes on and says so. When the launcher's files cannot be written (a data folder that is
+read-only, a full disk), the install and the update still succeed, since the binary is in place,
+and say that the entry was not written. After writing an icon, the `icons/hicolor` folder is
+dated now, so that a desktop's cache of the icon theme, stale once the folder is newer than it, is
+read again.
+
+**The entry and the icons are Flottille's.** `flottille update` rewrites them from the package, so
+a local edit of the entry (a changed `Exec`, an added key) is lost at the next update that finds
+it different; to start Flottille another way, make your own entry under another name.
 
 `flottille update` writes both again when they differ from the new package's, and points the
 entry's `Exec` at the binary it runs from, so a binary that moved is followed; a build that has
