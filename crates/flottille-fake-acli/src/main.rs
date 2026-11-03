@@ -85,7 +85,10 @@ fn main() {
         .append(true)
         .open(dir.join("received.jsonl"))
         .expect("the record");
-    writeln!(record, "{}", json!({"args": args, "env": env})).expect("the record");
+    // One `write` of the whole line: `writeln!` on a `File` writes the JSON piece by piece, and
+    // the pieces of two processes appending together would mix (#325).
+    let line = format!("{}\n", json!({"args": args, "env": env}));
+    record.write_all(line.as_bytes()).expect("the record");
     let script: Value = std::fs::read_to_string(dir.join("script.json"))
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
