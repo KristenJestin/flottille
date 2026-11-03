@@ -1438,10 +1438,12 @@ fn a_subscription_during_a_slow_round_answers_at_once_and_is_delivered_the_round
     };
     let before = listings(&user);
     // A round reads the checks ended, its list slowly, as the first round of a big project does.
+    // Slower than the 6 s a subscription is given, so one that waited for the round fails; yet
+    // well within the 10 s the client waits for `items.refresh`, which answers after the round.
     user.gh_script(json!({
         "pulls": {"acme/api": {"app/login": changed(ended(pull()))}},
         "logs": {"acme/api": {"456": "test\tRun cargo test\t2026-01-01T00:00:00.0000000Z failed\n"}},
-        "listing_delay_ms": 10_000
+        "listing_delay_ms": 8_000
     }));
     std::thread::scope(|scope| {
         let round = scope.spawn(|| a_round(&user));

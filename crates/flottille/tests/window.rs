@@ -2387,9 +2387,13 @@ fn the_auto_judge_is_chosen_in_settings_which_say_it_uses_the_quota(cx: &mut Tes
     project(&user, "atlas");
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     let page = open_settings(&shell, cx);
+    // "No judge" is said before the daemon is asked; the judge's card is drawn once it answered.
     until(&shell, cx, "the judge's picker shows none", |cx| {
-        page.read_with(cx, |page, _| page.judge_shown().0 == "No judge")
+        page.read_with(cx, |page, _| {
+            page.providers().known && page.judge_shown().0 == "No judge"
+        })
     });
+    settle(cx);
     cx.update(|window, _| assert!(window.find("judge-provider").visible()));
     // What Auto does, and that it uses the quota, is one click away: "How Auto works".
     cx.update(|window, cx| window.click("judge-how", cx));
@@ -2601,9 +2605,13 @@ fn the_judge_s_model_picker_names_the_provider_s_default_model_once_it_is_known(
     learn_models(&user, "atlas", "opencode", "open/small");
     let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
     let page = open_settings(&shell, cx);
+    // "No judge" is said before the daemon is asked; the judge's card is drawn once it answered.
     until(&shell, cx, "the judge's picker shows none", |cx| {
-        page.read_with(cx, |page, _| page.judge_shown().0 == "No judge")
+        page.read_with(cx, |page, _| {
+            page.providers().known && page.judge_shown().0 == "No judge"
+        })
     });
+    settle(cx);
     cx.update(|window, cx| window.click("judge-provider", cx));
     settle(cx);
     cx.update(|window, cx| window.click("judge-provider-choice-opencode", cx));
