@@ -54,6 +54,9 @@ pub struct TreeAgent {
     pub context: Option<u64>,
     /// What the user wrote to it while it worked, not sent to it yet, the oldest first.
     pub queued: Vec<Queued>,
+    /// Its running session runs an older list of tools than its role has: a restart gives the
+    /// new one.
+    pub tools_outdated: bool,
 }
 
 /// A message the user wrote to the root while it worked: the root reads it between its turns.
@@ -99,6 +102,7 @@ impl TreeAgent {
                     at: queued["at"].as_u64().unwrap_or(0),
                 })
                 .collect(),
+            tools_outdated: agent["tools_outdated"] == true,
         }
     }
 }
@@ -447,6 +451,8 @@ const TREE_EVENTS: &[&str] = &[
     "agent.asked",
     // The rail's gauge of each agent's context.
     "agent.usage",
+    // The line that says the session runs an older list of tools.
+    "agent.tools_outdated",
     "delivery.queued",
     // A waiting message taken back leaves the queue under the conversation.
     "delivery.withdrawn",
