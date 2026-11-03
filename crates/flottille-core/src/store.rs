@@ -533,6 +533,19 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE agents ADD COLUMN pending_model TEXT;
     ALTER TABLE agents ADD COLUMN pending_effort TEXT;
 ",
+    "
+    -- The whole text of a tool result that was cut at the source (`docs/tools.md`, \"Long
+    -- results\"), masked, for the agent whose session it is and nobody else: it goes with the
+    -- session, as its runs do.
+    CREATE TABLE tool_results (
+        id         TEXT PRIMARY KEY,
+        agent      TEXT NOT NULL REFERENCES agents (id) ON DELETE CASCADE,
+        tool       TEXT NOT NULL,
+        text       TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX tool_results_agent ON tool_results (agent);
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -1313,26 +1326,50 @@ impl Store {
         rows.map(|row| row?).collect()
     }
 
-    /// The agents that have runs, ended or not.
+    /// The agents that have runs, ended or not, or a cut tool result kept.
     pub fn agents_with_runs(&self) -> Result<Vec<String>> {
-        let mut statement = self
-            .connection
-            .prepare_cached("SELECT DISTINCT agent FROM runs WHERE agent IS NOT NULL")?;
+        let mut statement = self.connection.prepare_cached(
+            "SELECT agent FROM runs WHERE agent IS NOT NULL UNION SELECT agent FROM tool_results",
+        )?;
         let rows = statement.query_map([], |row| row.get(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// The runs of these agents that ended go, their session being over for good. A run still
-    /// running is left to end.
+    /// The runs of these agents that ended go, and the cut tool results kept for them, their
+    /// session being over for good. A run still running is left to end.
     pub fn forget_runs_of(&self, agents: &[String]) -> Result<usize> {
         let mut statement = self
             .connection
             .prepare_cached("DELETE FROM runs WHERE agent = ?1 AND state != 'running'")?;
+        let mut results = self
+            .connection
+            .prepare_cached("DELETE FROM tool_results WHERE agent = ?1")?;
         let mut forgotten = 0;
         for agent in agents {
             forgotten += statement.execute(params![agent])?;
+            forgotten += results.execute(params![agent])?;
         }
         Ok(forgotten)
+    }
+
+    /// Keeps the whole text of a tool result of `agent` that was cut, under its id.
+    pub fn keep_result(&self, id: &str, agent: &str, tool: &str, text: &str) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO tool_results (id, agent, tool, text, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, agent, tool, text, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// The text kept under `id`, for the agent it was kept for alone.
+    pub fn kept_result(&self, id: &str, agent: &str) -> Result<Option<String>> {
+        let mut statement = self
+            .connection
+            .prepare_cached("SELECT text FROM tool_results WHERE id = ?1 AND agent = ?2")?;
+        Ok(statement
+            .query_row(params![id, agent], |row| row.get(0))
+            .optional()?)
     }
 
     /// Dismisses a run that ended, with its event, in one transaction; `None` when it is still
@@ -4615,6 +4652,31 @@ mod tests {
 
         assert!(store.run("done").unwrap().is_none());
         assert!(store.run("live").unwrap().is_some());
+    }
+
+    #[test]
+    fn a_kept_tool_result_is_read_by_its_agent_alone_and_goes_with_its_session() {
+        let mut store = Store::open_in_memory().unwrap();
+        let agent = runs_of_an_agent(&mut store, &[]);
+        store
+            .keep_result("res_1", &agent, "fs_read", "the whole text")
+            .unwrap();
+
+        assert_eq!(
+            store.kept_result("res_1", &agent).unwrap().as_deref(),
+            Some("the whole text")
+        );
+        assert_eq!(store.kept_result("res_1", "another").unwrap(), None);
+        assert_eq!(store.kept_result("res_2", &agent).unwrap(), None);
+        assert_eq!(
+            store.agents_with_runs().unwrap(),
+            std::slice::from_ref(&agent)
+        );
+
+        store.forget_runs_of(std::slice::from_ref(&agent)).unwrap();
+
+        assert_eq!(store.kept_result("res_1", &agent).unwrap(), None);
+        assert!(store.agents_with_runs().unwrap().is_empty());
     }
 
     #[test]
