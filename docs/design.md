@@ -865,6 +865,10 @@ The plan is cut into GitHub milestones; each ends on something the user can use.
    daemon, in [`items.md`](items.md).
 5. **Remote**: network transport, phone, other machines.
 
+Flottille's own features beyond its core (the Auto judge, the compaction, later specs, review and a
+handbook) are proposed to become extensions, declared and turned on by the user: a proposal,
+nothing built, in [`extensions.md`](extensions.md).
+
 ## 14. Defaults taken, to confirm
 
 - Data in XDG folders; workspaces under the data folder unless the project says otherwise.
