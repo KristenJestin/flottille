@@ -5,16 +5,20 @@
 //! a window that died blocks nobody, and its socket file is replaced by the next.
 
 use std::fs::{File, OpenOptions, TryLockError};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use flottille_core::paths::{Paths, ensure_private_dir};
 
 /// What a command that asks to raise says.
 const RAISE: &str = "raise";
+/// What is read of a peer: a word and its end of line, and a little more.
+const LONGEST: usize = 16;
+/// How long a peer has, from its connection to its end of line.
+const DEADLINE: Duration = Duration::from_secs(1);
 
 pub enum Start {
     /// Nobody else has a window open: this one is the window, and serves the raises.
@@ -83,13 +87,33 @@ impl Instance {
             let _lock = self._lock;
             for stream in self.listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                // A client that connects and says nothing must not hold the others back.
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
-                let mut line = String::new();
-                if BufReader::new(stream).read_line(&mut line).is_ok() && line.trim() == RAISE {
+                if says_raise(stream) {
                     raise();
                 }
             }
         });
     }
+}
+
+/// Whether the peer says "raise" and ends its line. It is read for a short while and a few
+/// bytes only: a local peer that says nothing, trickles bytes or never ends its line cannot hold
+/// the others back, nor make the window keep what it sends.
+fn says_raise(mut stream: UnixStream) -> bool {
+    let deadline = Instant::now() + DEADLINE;
+    let mut said = [0u8; LONGEST];
+    let mut length = 0;
+    while length < LONGEST && !said[..length].contains(&b'\n') {
+        // The time that is left of the whole line, not a new one at each read.
+        let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+            return false;
+        };
+        if stream.set_read_timeout(Some(left)).is_err() {
+            return false;
+        }
+        match stream.read(&mut said[length..]) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => length += read,
+        }
+    }
+    said[..length].trim_ascii() == RAISE.as_bytes()
 }
