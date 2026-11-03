@@ -157,7 +157,8 @@ impl SessionOptions {
         })
     }
 
-    /// The menu's rows: when a change waits, a line that says when it applies first.
+    /// The menu's rows: when a change of what it picks waits, a line that says when it applies
+    /// first.
     pub fn entries(&self, menu: Menu) -> Vec<Entry> {
         let pick = self.pick();
         let rows = Pickers {
@@ -166,7 +167,8 @@ impl SessionOptions {
             project: (None, None),
         }
         .entries(menu);
-        let applies = self.waiting().map(|when| Entry {
+        let when = self.waiting().filter(|_| self.waits(menu));
+        let applies = when.map(|when| Entry {
             id: "session-options-applies".into(),
             label: when.into(),
             note: None,

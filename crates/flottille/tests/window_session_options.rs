@@ -517,3 +517,42 @@ fn the_picker_s_menu_says_when_a_change_applies(cx: &mut TestAppContext) {
         .clone();
     assert!(entry.pick.is_none(), "the line picks nothing");
 }
+
+#[gpui_kit::test]
+fn only_the_picker_whose_change_waits_says_when_it_applies(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let id = start(&user, "hello", true);
+    let (shell, cx) = open_session(&user, &id, cx);
+    let o = options(&shell, &id, cx);
+    // An effort change waits, the model's does not.
+    o.update(cx, |o, cx| {
+        o.set_runs(
+            flottille_window::session_options::Runs {
+                provider: "claude".into(),
+                model: Some("fake-small".into()),
+                effort: Some("low".into()),
+                pending: flottille_window::session_link::Pending {
+                    model: None,
+                    effort: Some("high".into()),
+                },
+                working: false,
+            },
+            cx,
+        )
+    });
+    let first = |menu, cx: &mut VisualTestContext| {
+        o.read_with(cx, |o, _| o.entries(menu))
+            .first()
+            .map(|e| e.label.clone())
+    };
+    let with_next = Some(flottille_window::session_options::WITH_NEXT.to_owned());
+    assert_ne!(
+        first(flottille_window::composer::Menu::Model, cx),
+        with_next
+    );
+    assert_eq!(
+        first(flottille_window::composer::Menu::Effort, cx),
+        with_next
+    );
+}
