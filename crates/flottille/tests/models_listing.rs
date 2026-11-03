@@ -272,3 +272,52 @@ fn the_listing_leaves_nothing_of_its_process() {
     assert_eq!(left("runtime/flottille/bridge"), Vec::<String>::new());
     assert_eq!(left("state/flottille/bridge/claude"), Vec::<String>::new());
 }
+
+#[test]
+fn the_models_of_a_program_replaced_while_it_lists_are_not_kept_as_current() {
+    let user = User::with_fake_claude().with_env(ASKS.0, ASKS.1);
+    // The first program: slow to start, with models of its own in a folder of its own.
+    let old = user.path("claude-old");
+    std::fs::create_dir(&old).unwrap();
+    std::fs::write(
+        old.join("script.json"),
+        json!({"models": [
+            {"value": "default", "displayName": "Default", "description": "Opus"},
+            {"value": "old", "displayName": "Old", "description": "Old one"}]})
+        .to_string(),
+    )
+    .unwrap();
+    let started = user.path("claude-old-started");
+    let bin = user.path("bin/claude");
+    std::fs::remove_file(&bin).unwrap();
+    std::fs::write(
+        &bin,
+        format!(
+            "#!/bin/sh\ncase \"$1\" in --version) exec '{fake}' \"$@\";; esac\n: > '{started}'\n\
+             sleep 2\nFLOTTILLE_FAKE_CLAUDE_DIR='{old}' exec '{fake}' \"$@\"\n",
+            fake = common::fake_claude().display(),
+            started = started.display(),
+            old = old.display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    user.claude_script(json!({"models": [
+        {"value": "default", "displayName": "Default", "description": "Opus"},
+        {"value": "new", "displayName": "New", "description": "New one"}]}));
+
+    assert_eq!(listed(&user, "claude")["ready"], true);
+    eventually("the first listing starts", || started.exists());
+    // Replaced while it lists.
+    std::fs::remove_file(&bin).unwrap();
+    std::fs::copy(common::fake_claude(), &bin).unwrap();
+
+    eventually("the models of the new program", || {
+        let claude = listed(&user, "claude");
+        assert!(
+            !(ids(&claude).contains(&"old".to_owned()) && claude["models_outdated"] == false),
+            "the old program's models are taken for the new one's: {claude}"
+        );
+        ids(&claude).contains(&"new".to_owned()) && claude["models_outdated"] == false
+    });
+}

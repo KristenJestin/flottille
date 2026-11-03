@@ -123,8 +123,11 @@ fn report(daemon: &Daemon, provider: &'static Provider, outcome: Result<usize, S
     }
 }
 
-/// The models the provider offers, kept as a session's are; how many.
+/// The models the provider offers, kept as a session's are; how many. Not kept when its program
+/// or its keys changed meanwhile: they would be taken for those of the new state, which the
+/// next check reads instead.
 async fn read(daemon: &Arc<Daemon>, provider: &'static Provider) -> Result<usize, String> {
+    let before = state_of(daemon, provider);
     let paths = daemon.paths.clone();
     tokio::task::spawn_blocking(move || providers::startable(&paths, provider))
         .await
@@ -145,6 +148,9 @@ async fn read(daemon: &Arc<Daemon>, provider: &'static Provider) -> Result<usize
     } else {
         through_a_session(daemon, provider).await?
     };
+    if state_of(daemon, provider) != before {
+        return Err("its program or its API keys changed while it listed".into());
+    }
     let count = options
         .as_array()
         .into_iter()
@@ -155,6 +161,12 @@ async fn read(daemon: &Arc<Daemon>, provider: &'static Provider) -> Result<usize
         .ok_or("it offers no model")?;
     providers::learn(daemon, provider, &options, true, true);
     Ok(count)
+}
+
+/// What the stored models are read against: the provider's program and the names of its keys.
+fn state_of(daemon: &Daemon, provider: &'static Provider) -> Option<String> {
+    let settings = Settings::load(&daemon.paths).ok()?;
+    providers::models_version(&Check::of(provider, &settings, Version::Skip))
 }
 
 /// The options the provider's ACP agent offers to a session that is given nothing to do. What
