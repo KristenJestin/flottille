@@ -29,6 +29,7 @@ mod inbox_command;
 mod items;
 mod judge;
 mod mcp;
+mod models;
 mod nofollow;
 mod opencode;
 mod pilot;
