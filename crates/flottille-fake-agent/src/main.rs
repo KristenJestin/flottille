@@ -48,6 +48,8 @@
 //!   it opens.
 //! - `models`, `efforts`: the values of the `model` and `thought_level` options, the first one
 //!   current; no effort option without `efforts`.
+//! - `refuse`: values the options list but `session/set_config_option` refuses, as an agent whose
+//!   catalogue lists a model its account cannot take.
 //! - `turns`: a prompt plays the first turn whose `when` is in its text; a prompt matching none is
 //!   answered `ok`. `stop` is the stop reason (`end_turn` by default). A turn with `"times": n`
 //!   is played n times at most, by every process of the folder together: after that it is skipped,
@@ -299,7 +301,11 @@ impl Agent {
                     "effort" => &self.script["efforts"],
                     _ => return Err(format!("no option {option}")),
                 };
-                if !self.values(offered, option).iter().any(|v| v == value) {
+                if !self.values(offered, option).iter().any(|v| v == value)
+                    || self.script["refuse"]
+                        .as_array()
+                        .is_some_and(|refused| refused.iter().any(|v| v == value))
+                {
                     return Err(format!("{value} is not a value of {option}"));
                 }
                 self.options

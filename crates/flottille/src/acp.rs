@@ -83,6 +83,11 @@ pub trait Events: Send + Sync + 'static {
         reopens: bool,
         images: bool,
     );
+    /// The model and the effort the user changed to, to set before the next prompt.
+    fn pending(&self) -> Option<Choices>;
+    /// What setting them came to: `applied` is what the agent took of them, `taken` what it has
+    /// now, `options` its config options, `refused` why it did not take the rest.
+    fn options_set(&self, applied: Choices, taken: Choices, options: &Value, refused: Vec<String>);
     /// The next prompt, taken from what was delivered, when there is one.
     fn pump(&self) -> Option<Prompt>;
     /// An image a prompt carries, as its MIME type and its bytes in base64.
@@ -286,75 +291,31 @@ async fn drive(
     ];
     for (category, word, value) in chosen {
         let Some(value) = value else { continue };
-        let option = find_option(&options, category)
-            .ok_or_else(|| format!("the agent has no {word} option: it cannot take {value}"))?;
-        let offered = providers::values(&option);
-        // A model may be asked without its date suffix: the session's own id is what is set.
-        let listed = match category {
-            "model" => {
-                flottille_core::provider::listed_model(offered.iter().map(String::as_str), value)
-            }
-            _ => offered
-                .iter()
-                .map(String::as_str)
-                .find(|v| *v == value.as_str()),
-        };
-        let Some(value) = listed.map(str::to_owned) else {
-            return Err(format!(
-                "the agent does not offer the {word} {value}: it offers {}",
-                offered.join(", ")
-            ));
-        };
-        let value = &value;
-        let id = option["id"].as_str().unwrap_or_default().to_owned();
-        let answer = cx
-            .send_request(SetSessionConfigOptionRequest::new(
-                native_id.clone(),
-                id,
-                SessionConfigOptionValue::value_id(value.clone()),
-            ))
-            .block_task()
-            .await
-            .map_err(|e| format!("the agent refused the {word} {value}: {e}"))?;
-        options = serde_json::to_value(&answer).unwrap_or_default()["configOptions"].clone();
-        let taken = find_option(&options, category).map(|o| o["currentValue"].clone());
-        if taken.as_ref().and_then(Value::as_str) != Some(value) {
-            return Err(format!(
-                "the agent took the {word} {} when {value} was asked",
-                taken.unwrap_or_default()
-            ));
-        }
+        options = set_option(&cx, &native_id, &options, category, word, value).await?;
     }
     if chosen.iter().any(|(_, _, value)| value.is_some()) {
         // The effort a session keeps once a model is set may be the previous model's: no effort
         // is learned from it.
         events.offered(&options, false, false);
     }
-    // A value named `default` stands for the agent's recommended one, when it names it.
-    let current = |category| {
-        let option = find_option(&options, category)?;
-        let value = option["currentValue"].as_str()?;
-        let recommended = option["_meta"]["jetbrains"]["air"]["recommendedValue"].as_str();
-        Some(match recommended {
-            Some(recommended) if value == "default" => recommended.to_owned(),
-            _ => value.to_owned(),
-        })
-    };
+    // A change the user made since the process last ran waits for it, and is not a failure.
+    apply_pending(&cx, &native_id, &mut options, events).await;
     events.opened(
         opened,
         &native_id,
         &agent_version,
-        Choices {
-            model: current("model"),
-            effort: current("thought_level"),
-            mode: current("mode"),
-        },
+        taken_of(&options),
         loads || resumes,
         takes_images,
     );
 
     let mut turn: Option<Turn> = None;
     loop {
+        // Between turns only: what was chosen during one is set once it ended, before the next
+        // prompt goes.
+        if turn.is_none() {
+            apply_pending(&cx, &native_id, &mut options, events).await;
+        }
         if turn.is_none()
             && turns.queued.is_empty()
             && let Some(prompt) = events.pump()
@@ -449,6 +410,109 @@ fn mcp_server(server: &Server) -> McpServer {
         format!("Bearer {}", server.token),
     )];
     McpServer::Http(http)
+}
+
+/// What the agent has now, a value named `default` standing for the agent's recommended one when
+/// it names it.
+fn taken_of(options: &Value) -> Choices {
+    let current = |category| {
+        let option = find_option(options, category)?;
+        let value = option["currentValue"].as_str()?;
+        let recommended = option["_meta"]["jetbrains"]["air"]["recommendedValue"].as_str();
+        Some(match recommended {
+            Some(recommended) if value == "default" => recommended.to_owned(),
+            _ => value.to_owned(),
+        })
+    };
+    Choices {
+        model: current("model"),
+        effort: current("thought_level"),
+        mode: current("mode"),
+    }
+}
+
+/// Sets one option as the user chose it and checks it: the agent's options as they are then, or
+/// why it could not. A model is never replaced by another.
+async fn set_option(
+    cx: &ConnectionTo<AcpAgent>,
+    native_id: &str,
+    options: &Value,
+    category: &str,
+    word: &str,
+    value: &str,
+) -> Result<Value, String> {
+    let option = find_option(options, category)
+        .ok_or_else(|| format!("the agent has no {word} option: it cannot take {value}"))?;
+    let offered = providers::values(&option);
+    // A model may be asked without its date suffix: the session's own id is what is set.
+    let listed = match category {
+        "model" => {
+            flottille_core::provider::listed_model(offered.iter().map(String::as_str), value)
+        }
+        _ => offered
+            .iter()
+            .map(String::as_str)
+            .find(|offered| *offered == value),
+    };
+    let Some(value) = listed.map(str::to_owned) else {
+        return Err(format!(
+            "the agent does not offer the {word} {value}: it offers {}",
+            offered.join(", ")
+        ));
+    };
+    let id = option["id"].as_str().unwrap_or_default().to_owned();
+    let answer = cx
+        .send_request(SetSessionConfigOptionRequest::new(
+            native_id.to_owned(),
+            id,
+            SessionConfigOptionValue::value_id(value.clone()),
+        ))
+        .block_task()
+        .await
+        .map_err(|e| format!("the agent refused the {word} {value}: {e}"))?;
+    let options = serde_json::to_value(&answer).unwrap_or_default()["configOptions"].clone();
+    let taken = find_option(&options, category).map(|o| o["currentValue"].clone());
+    if taken.as_ref().and_then(Value::as_str) != Some(value.as_str()) {
+        return Err(format!(
+            "the agent took the {word} {} when {value} was asked",
+            taken.unwrap_or_default()
+        ));
+    }
+    Ok(options)
+}
+
+/// Sets the model and the effort the user changed to, the model first, each checked. A value the
+/// agent refuses never fails it: it goes on with its previous options, and the refusal is said.
+async fn apply_pending(
+    cx: &ConnectionTo<AcpAgent>,
+    native_id: &str,
+    options: &mut Value,
+    events: &Arc<dyn Events>,
+) {
+    let Some(pending) = events.pending() else {
+        return;
+    };
+    let mut applied = Choices::default();
+    let mut refused = Vec::new();
+    for (category, word, value, kept) in [
+        ("model", "model", &pending.model, &mut applied.model),
+        (
+            "thought_level",
+            "effort",
+            &pending.effort,
+            &mut applied.effort,
+        ),
+    ] {
+        let Some(value) = value else { continue };
+        match set_option(cx, native_id, options, category, word, value).await {
+            Ok(set) => {
+                *options = set;
+                *kept = Some(value.clone());
+            }
+            Err(reason) => refused.push(reason),
+        }
+    }
+    events.options_set(applied, taken_of(options), options, refused);
 }
 
 fn find_option(options: &Value, category: &str) -> Option<Value> {

@@ -437,6 +437,12 @@ async fn brief_once_ready(daemon: Arc<Daemon>, child: Agent) {
 struct Send {
     agent_id: String,
     message: String,
+    /// The child's provider never changes: these are its model and effort, set between its
+    /// turns, as `agent.options` does for the user.
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
 }
 
 fn send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
@@ -460,6 +466,12 @@ fn send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
         &asked.message,
     )
     .map_err(|failure| refused(format!("refused: {}", failure.message)))?;
+    // Checked before anything is sent: a refused change sends no message.
+    let changed = asked.model.is_some() || asked.effort.is_some();
+    if changed {
+        crate::agents::change_options(daemon, &child, asked.model, asked.effort)
+            .map_err(|failure| refused(format!("refused: {}", failure.message)))?;
+    }
     deliveries::deliver(
         daemon,
         &child.id,
@@ -468,8 +480,13 @@ fn send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
         &message,
         approval::URGENT,
     );
+    let options = if changed {
+        " Its model and effort change between its turns, before its next prompt."
+    } else {
+        ""
+    };
     Ok(Outcome::Done(format!(
-        "Sent to {}: it reaches it on its next tool result, or as a new turn.",
+        "Sent to {}: it reaches it on its next tool result, or as a new turn.{options}",
         named(&child)
     )))
 }
@@ -1536,6 +1553,10 @@ pub fn summary(daemon: &Daemon, agent: &Agent) -> Value {
         "provider": agent.provider,
         // What it runs on: what it took at its last start, else what was asked.
         "model": agent.taken.model.as_ref().or(agent.chosen.model.as_ref()),
+        "effort": agent.taken.effort.as_ref().or(agent.chosen.effort.as_ref()),
+        // What the user changed to, set before the next prompt: `null` when nothing waits.
+        "pending": (agent.pending.model.is_some() || agent.pending.effort.is_some())
+            .then(|| json!({"model": agent.pending.model, "effort": agent.pending.effort})),
         "role": agent.role,
         "title": agent.title,
         "project": agent.project,

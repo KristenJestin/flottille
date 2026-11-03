@@ -670,6 +670,22 @@ $ flottille agent resume bd7ed8152969
 Resumed agent bd7ed8152969 on its own session; it is idle now. Its next message starts it.
 ```
 
+### `flottille agent options <agent> [--model M] [--effort E]`
+
+Changes a session's model and effort between turns (`agent.options`, `docs/protocol.md`; the
+window's session page has the same pickers). The agent keeps its provider and its conversation: the
+change is checked against what the provider is known to offer (a refusal names what it offers),
+then set on its session before its next prompt: at once when it is between turns, once its turn
+ends otherwise. A value its session refuses never fails the agent: it goes on with its previous
+options and `agent show` says the change was refused. `agent show` names the model, the effort
+and, while a change waits, the pending ones. `--json` prints `{"agent", "after"}`. Refused for an
+agent that has ended, and when neither `--model` nor `--effort` is given.
+
+```
+$ flottille agent options bd7ed8152969 --model claude-haiku-4-5 --effort low
+Agent bd7ed8152969 will run on model claude-haiku-4-5 and effort low before its next prompt.
+```
+
 ### `flottille agent mode <agent> ask|auto|full`
 
 Sets the mode of a session (`docs/design.md` §7): in `ask`, every call to judge comes to you as a

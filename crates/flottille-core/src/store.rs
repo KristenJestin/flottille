@@ -527,6 +527,12 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (project, kind, target)
     ) STRICT;
 ",
+    "
+    -- A model and an effort changed on a running session, set before its next prompt
+    -- (`docs/agents.md`, \"The options\").
+    ALTER TABLE agents ADD COLUMN pending_model TEXT;
+    ALTER TABLE agents ADD COLUMN pending_effort TEXT;
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -539,7 +545,7 @@ const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, sta
     created_at, updated_at, active_at, ended_at, chosen_model, chosen_effort, chosen_mode, \
     taken_model, taken_effort, taken_mode, native_id, agent_version, instructions, tools, parent, \
     depth, epoch, title, brief, reported_at, quiet_turns, waiting_on_answer, reopens, images, gate_mode, \
-    launched_by";
+    launched_by, pending_model, pending_effort";
 
 const DELIVERY_COLUMNS: &str = "id, agent, kind, body, urgency, state, created_at, sent_at, images";
 
@@ -556,6 +562,10 @@ pub struct AgentChange {
     /// Only the user changes it (`agent.mode`).
     pub gate_mode: Option<GateMode>,
     pub taken: Option<Choices>,
+    /// The model and the effort a later process opens with (the mode is left as it is).
+    pub chosen: Option<Choices>,
+    /// The model and the effort to set before the next prompt; `Some` of none forgets them.
+    pub pending: Option<Choices>,
     /// `Some(None)` forgets it.
     pub reported_at: Option<Option<u64>>,
     pub quiet_turns: Option<u32>,
@@ -880,7 +890,7 @@ impl Store {
             &format!(
                 "INSERT INTO agents ({AGENT_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, \
                  ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, \
-                 ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34)"
+                 ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36)"
             ),
             params![
                 agent.id,
@@ -917,6 +927,8 @@ impl Store {
                 agent.images,
                 agent.gate_mode.as_str(),
                 agent.launched_by,
+                agent.pending.model,
+                agent.pending.effort,
             ],
         )?;
         let event = append_agent_event(&transaction, &agent.id, event.0, event.1)?;
@@ -1021,6 +1033,18 @@ impl Store {
                 "UPDATE agents SET taken_model = ?2, taken_effort = ?3, taken_mode = ?4 \
                  WHERE id = ?1",
                 params![id, taken.model, taken.effort, taken.mode],
+            )?;
+        }
+        if let Some(chosen) = change.chosen {
+            transaction.execute(
+                "UPDATE agents SET chosen_model = ?2, chosen_effort = ?3 WHERE id = ?1",
+                params![id, chosen.model, chosen.effort],
+            )?;
+        }
+        if let Some(pending) = change.pending {
+            transaction.execute(
+                "UPDATE agents SET pending_model = ?2, pending_effort = ?3 WHERE id = ?1",
+                params![id, pending.model, pending.effort],
             )?;
         }
         transaction.execute(
@@ -2558,6 +2582,11 @@ fn agent_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Agent>> {
         // A mode the store does not know is the safer one.
         gate_mode: GateMode::parse(&row.get::<_, String>(32)?).unwrap_or(GateMode::Ask),
         launched_by: text(33)?,
+        pending: Choices {
+            model: text(34)?,
+            effort: text(35)?,
+            mode: None,
+        },
     }))
 }
 
@@ -3156,6 +3185,7 @@ mod tests {
                 ..Choices::default()
             },
             taken: Choices::default(),
+            pending: Choices::default(),
             native_id: None,
             agent_version: None,
             instructions: "shared\n\n__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__\n\nsession".into(),
@@ -3227,6 +3257,49 @@ mod tests {
             store.agent(&failed.id).unwrap().unwrap().state,
             AgentState::Failed
         );
+    }
+
+    #[test]
+    fn a_pending_change_of_options_is_kept_then_chosen_and_forgotten() {
+        let mut store = Store::open_in_memory().unwrap();
+        let agent = an_agent();
+        store
+            .create_agent(&agent, ("agent.created", json!({})))
+            .unwrap();
+        let pending = Choices {
+            model: Some("opus".into()),
+            effort: Some("high".into()),
+            mode: None,
+        };
+
+        let (waiting, event) = store
+            .change_agent(
+                &agent.id,
+                AgentChange {
+                    pending: Some(pending.clone()),
+                    ..AgentChange::default()
+                },
+                Some(("agent.options_pending", json!({}))),
+            )
+            .unwrap();
+
+        assert_eq!(waiting.pending, pending);
+        assert_eq!(waiting.chosen.model.as_deref(), Some("haiku"));
+        assert_eq!(event.unwrap().name, "agent.options_pending");
+        let (taken, _) = store
+            .change_agent(
+                &agent.id,
+                AgentChange {
+                    chosen: Some(pending.clone()),
+                    pending: Some(Choices::default()),
+                    ..AgentChange::default()
+                },
+                None,
+            )
+            .unwrap();
+        assert_eq!(taken.pending, Choices::default());
+        assert_eq!(taken.chosen.model.as_deref(), Some("opus"));
+        assert_eq!(taken.chosen.effort.as_deref(), Some("high"));
     }
 
     #[test]

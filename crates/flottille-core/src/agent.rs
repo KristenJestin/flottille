@@ -50,6 +50,11 @@ pub struct Agent {
     pub chosen: Choices,
     /// What the agent reported it took, at the last start of its process.
     pub taken: Choices,
+    /// A model and an effort the user changed to, set on the agent's session before its next
+    /// prompt (`docs/agents.md`, "The options"); `chosen` follows once the agent took them. Its
+    /// `mode` is never set.
+    #[serde(default)]
+    pub pending: Choices,
     /// The ACP session id, once a session is open: what a restarted process resumes or loads.
     pub native_id: Option<String>,
     /// The adapter's name and version, from its `initialize` answer.

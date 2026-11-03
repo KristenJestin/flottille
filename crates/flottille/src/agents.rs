@@ -243,6 +243,20 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let agent = find(daemon, &agent.id)?;
             Ok(json!({"agent": agent.to_json()}))
         }
+        "agent.options" => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Options {
+                agent: String,
+                #[serde(default)]
+                model: Option<String>,
+                #[serde(default)]
+                effort: Option<String>,
+            }
+            let asked: Options = serde_json::from_value(params)?;
+            let agent = find(daemon, &asked.agent)?;
+            change_options(daemon, &agent, asked.model, asked.effort)
+        }
         "agent.tree" => {
             let asked: AgentName = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
@@ -624,6 +638,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         ended_at: None,
         chosen,
         taken: Choices::default(),
+        pending: Choices::default(),
         native_id: None,
         agent_version: None,
         tools,
@@ -654,6 +669,50 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         Ok(((), event))
     })?;
     Ok(agent)
+}
+
+/// Changes the model and the effort of a running agent (`docs/agents.md`, "The options"): checked
+/// against what its provider is known to offer, then held as pending and set on its session
+/// between turns, before its next prompt. The provider never changes. `after` is the event
+/// number to follow the change from.
+pub fn change_options(
+    daemon: &Arc<Daemon>,
+    agent: &Agent,
+    model: Option<String>,
+    effort: Option<String>,
+) -> Answer {
+    if model.is_none() && effort.is_none() {
+        return Err(Failure::new(
+            "invalid-params",
+            "name a model or an effort to change to",
+        ));
+    }
+    refuse_final(agent)?;
+    let model = providers::check_change(daemon, agent, model, effort.clone())?;
+    let after = daemon.read(Store::last_seq)?;
+    let pending = Choices {
+        model: model.or(agent.pending.model.clone()),
+        effort: effort.or(agent.pending.effort.clone()),
+        mode: None,
+    };
+    daemon.write(|store| {
+        let (_, event) = store.change_agent(
+            &agent.id,
+            AgentChange {
+                pending: Some(pending.clone()),
+                ..AgentChange::default()
+            },
+            Some((
+                "agent.options_pending",
+                json!({"agent": agent.id, "model": pending.model, "effort": pending.effort}),
+            )),
+        )?;
+        Ok(((), event))
+    })?;
+    // An agent between turns takes them now; one in a turn, once it ended.
+    tell(daemon, &agent.id, Order::Ring);
+    let agent = find(daemon, &agent.id)?;
+    Ok(json!({"agent": agent.to_json(), "after": after}))
 }
 
 /// Asks the agent's turn to stop, when one runs.
@@ -1376,6 +1435,69 @@ impl acp::Events for Recorder {
         self.record(name, data, activity);
         if name == "agent.compacted" {
             tree::compacted(&self.daemon, &self.agent);
+        }
+    }
+
+    fn pending(&self) -> Option<Choices> {
+        let agent = self.daemon.read(|store| store.agent(&self.agent)).ok()??;
+        (agent.pending.model.is_some() || agent.pending.effort.is_some()).then_some(agent.pending)
+    }
+
+    fn options_set(&self, applied: Choices, taken: Choices, options: &Value, refused: Vec<String>) {
+        // The efforts the model has now are the provider's to learn again.
+        providers::learn(&self.daemon, self.provider, options, false, false);
+        let offered = options
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|option| option["category"] == "thought_level")
+            .map(providers::values);
+        let changed = applied.model.is_some() || applied.effort.is_some();
+        let result = self.daemon.write(|store| {
+            let Some(agent) = store.agent(&self.agent)? else {
+                return Ok(((), None));
+            };
+            // What a later process opens with. An effort chosen earlier that the new model does
+            // not offer goes: the process would fail on it.
+            let effort = applied.effort.clone().or_else(|| {
+                agent
+                    .chosen
+                    .effort
+                    .filter(|chosen| offered.as_ref().is_none_or(|o| o.contains(chosen)))
+            });
+            let event = changed.then(|| {
+                (
+                    "agent.options_changed",
+                    json!({"agent": self.agent, "model": taken.model, "effort": taken.effort}),
+                )
+            });
+            let (_, event) = store.change_agent(
+                &self.agent,
+                AgentChange {
+                    chosen: Some(Choices {
+                        model: applied.model.clone().or(agent.chosen.model),
+                        effort,
+                        mode: None,
+                    }),
+                    taken: changed.then_some(taken),
+                    pending: Some(Choices::default()),
+                    ..AgentChange::default()
+                },
+                event,
+            )?;
+            Ok(((), event))
+        });
+        if let Err(error) = result {
+            eprintln!("flottille daemon: agent {}: {error}", self.agent);
+        }
+        for reason in refused {
+            record(
+                &self.daemon,
+                &self.agent,
+                "agent.options_refused",
+                json!({"reason": reason}),
+                false,
+            );
         }
     }
 

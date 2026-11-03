@@ -329,6 +329,7 @@ fn as_agent(provider: &Provider, folder: &Path) -> Agent {
         ended_at: None,
         chosen: Choices::default(),
         taken: Choices::default(),
+        pending: Choices::default(),
         native_id: None,
         agent_version: None,
         reopens: false,
