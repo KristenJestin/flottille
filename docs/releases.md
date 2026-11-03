@@ -23,6 +23,25 @@ holds none of `dev`'s commits, so CI keeps the link itself:
 - **The stable version is the one dev already had**: the version of the beta of that head of
   `dev`, without its pre-release (`0.3.0-beta.12` releases `0.3.0`).
 - **Its changelog** lists the commits of `dev` between the previous mark and the new one.
+- **The release is recorded in `dev`'s history.** A squash on `main` never reaches `dev`: left
+  so, the two share only the repository's first commit, and the next release pull request
+  conflicts on every file. Once `vX.Y.Z` is published, CI makes a merge of the squash on the
+  head of `dev`, with the message `chore(repo): record the X.Y.Z release in dev's history`, that
+  keeps `dev`'s files (what `git merge -s ours` makes) and changes none, and pushes it to `dev`.
+  It is the one commit on `dev` no pull request made: CI writes it through GitHub's API with the
+  publish job's token, which starts no run, and `tools/branch-guard.sh`, which refuses a commit
+  on `dev`, is for people's clones. A `dev` that moved meanwhile gets the merge on its new head,
+  still right since `dev`'s files are kept. A run run again finds the squash already in `dev`'s
+  history and records nothing.
+- **If the record fails** (a push refused three times), the run fails, saying so; the release
+  stays published. Record it by hand, the squash being the commit the run was for:
+
+  ```
+  git fetch origin
+  git switch dev && git merge --ff-only origin/dev
+  git merge -s ours -m "chore(repo): record the X.Y.Z release in dev's history" <squash>
+  git push origin dev
+  ```
 - A push to `main` that is not the squash of a pull request from `dev` (none should happen)
   publishes nothing and fails its run, saying why. Should GitHub's API not list the pull request
   of a real release yet, run the run again once it does (`gh run rerun <run id>`, or "Re-run
@@ -44,8 +63,12 @@ for HEAD by default):
   they follow), merges left out: `feat` bumps the minor, `fix` and `perf` the patch, a `!` after
   the type or a `BREAKING CHANGE:` footer the major. Before 1.0, a breaking change bumps the
   minor. Nothing that bumps is the next patch.
+- **Only the build's own line is read**: the commits counted, the types that bump and the
+  changelog follow first parents only, so the release squash a record reaches through its
+  second parent is neither counted nor listed, and a merge is one commit of that line.
 - **The beta and alpha numbers** count those commits (first parents only, so a merge counts
-  once): each squash into `dev` makes the next beta, numbered after the previous one.
+  once): each squash into `dev` makes the next beta, numbered after the previous one. The record
+  of a release counts too, as one: the first beta after a release is `-beta.2`.
 - **An alpha names its branch**: each byte of the name but ASCII letters, digits and dashes is a
   dash, `feat/46-packages` giving `alpha.feat-46-packages.<n>` and the tag
   `alpha-feat-46-packages`. CI, its cleanup, `install.sh` and `flottille update` follow that one
@@ -206,4 +229,5 @@ workflows themselves. A push to a feature branch proves the alpha's: `build` on 
 `publish` with the job's token, the alpha replaced in place, GitHub's API answering as the
 scripts read it. Deleting the branch proves its cleanup. The first merge into `dev` proves the
 beta's, and the first release pull request into `main` the pull request found from the squash,
-the mark, the stable tag and the release marked latest.
+the mark, the stable tag and the release marked latest, and the release recorded in `dev`'s
+history, through the API, with the job's token.
