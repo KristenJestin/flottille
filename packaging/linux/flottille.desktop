@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Flottille
+GenericName=Coding agents
+Comment=Run coding agents on your projects
+Exec=flottille window
+Icon=flottille
+Terminal=false
+Categories=Development;
+StartupWMClass=flottille
