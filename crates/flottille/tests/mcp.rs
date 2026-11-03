@@ -1728,3 +1728,99 @@ fn a_session_whose_agent_cannot_take_new_tools_is_said_to_run_an_older_list_at_o
     track(&user, true);
     assert_eq!(shown(&user, &id)["tools_outdated"], true);
 }
+
+/// The `outdated` of each `agent.tools_outdated` of the agent, in order.
+fn said_outdated(user: &User, id: &str) -> Vec<bool> {
+    let shown = user.call("agent.show", json!({"agent": id})).unwrap();
+    shown["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["name"] == "agent.tools_outdated")
+        .map(|e| e["data"]["outdated"].as_bool().unwrap())
+        .collect()
+}
+
+#[test]
+fn a_session_that_ignored_a_change_lists_after_the_next_and_is_no_longer_behind() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (id, url, authorization) = agent(&user, json!({}));
+    let mcp = Mcp::initialize(&url, &authorization);
+    mcp.names();
+
+    // It ignores change A: told with an answer, it calls again without listing.
+    track(&user, true);
+    ok(mcp.call("fs_list", json!({"path": "."})));
+    ok(mcp.call("fs_list", json!({"path": "."})));
+    assert_eq!(shown(&user, &id)["tools_outdated"], true);
+    // Change B comes: it is still behind.
+    track(&user, false);
+    ok(mcp.call("fs_list", json!({"path": "."})));
+    assert_eq!(shown(&user, &id)["tools_outdated"], true);
+
+    // It lists: it has the latest list, and that is said, so the window's line goes.
+    assert!(!mcp.names().contains(&"tickets".to_owned()));
+    assert_eq!(shown(&user, &id)["tools_outdated"], false);
+    assert_eq!(said_outdated(&user, &id), [true, false]);
+}
+
+#[test]
+fn a_codex_session_is_behind_while_its_list_is_not_the_one_it_started_with() {
+    let user = User::with_fake_providers();
+    user.write_providers("[codex]\nenabled = true\n");
+    project(&user);
+    let answer = user
+        .call(
+            "agent.run",
+            json!({"project": "app", "message": "hello", "provider": "codex"}),
+        )
+        .unwrap();
+    let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+    eventually("its process runs", || shown(&user, &id)["state"] == "idle");
+    assert_eq!(shown(&user, &id)["tools_outdated"], false);
+
+    // Its `enabled_tools`, set when its thread started, leave out the tools it gains.
+    track(&user, true);
+    assert_eq!(shown(&user, &id)["tools_outdated"], true);
+    // Back to the list it started with: it is no longer behind.
+    track(&user, false);
+    assert_eq!(shown(&user, &id)["tools_outdated"], false);
+    assert_eq!(said_outdated(&user, &id), [true, false]);
+}
+
+#[test]
+fn a_permission_asked_after_a_change_is_answered_from_the_current_list() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [{"when": "ask", "do": [
+        {"permission": {"tool": "mcp__flottille__tickets", "title": "tickets"}}
+    ]}]}));
+    project(&user);
+    let (id, _, _) = agent(&user, json!({}));
+    eventually("the first turn ends", || {
+        shown(&user, &id)["state"] == "idle"
+    });
+
+    // Its process runs on: the tool it gains is allowed by the answer to its permission request.
+    track(&user, true);
+    user.call("agent.send", json!({"agent": id, "message": "ask"}))
+        .unwrap();
+    let answered = || {
+        let shown = user.call("agent.show", json!({"agent": id})).unwrap();
+        shown["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == "agent.permission_answered")
+            .map(|e| e["data"].clone())
+    };
+    eventually("the permission is answered", || answered().is_some());
+    let answered = answered().unwrap();
+    assert_eq!(answered["tool"], "mcp__flottille__tickets");
+    assert_eq!(answered["allowed"], true, "{answered}");
+    assert_eq!(
+        user.received_requests("session/new").len(),
+        1,
+        "one process"
+    );
+}

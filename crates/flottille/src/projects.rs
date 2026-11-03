@@ -700,7 +700,7 @@ fn not_found(name: &str) -> Failure {
     Failure::new("not-found", format!("no project named {name}"))
 }
 
-fn load(projects: &Projects, name: &str) -> std::result::Result<Project, Failure> {
+pub fn load(projects: &Projects, name: &str) -> std::result::Result<Project, Failure> {
     projects.registry.load(name)?.ok_or_else(|| not_found(name))
 }
 

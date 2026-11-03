@@ -918,17 +918,16 @@ async fn process(
     // A session made by an older version, or before its project gained a forge or a tracker,
     // starts on the tools its role has now: a new process is a new connection, which lists
     // them.
-    let refreshed = projects::load_project(daemon, &agent.project)
-        .ok()
-        .and_then(|project| mcp::with_tools_now(daemon, agent, &project));
+    let refreshed = mcp::refresh(daemon, agent);
     let agent = refreshed.as_ref().unwrap_or(agent);
     let launch = providers::launch(provider, &daemon.paths, agent)?;
     // A token of this process's own, which revokes the last one.
     let grant = mcp::grant_of(daemon, agent)?;
     let token = daemon
         .mcp
-        .mint(grant)
+        .mint(grant, provider.takes_new_tools)
         .map_err(|e| format!("cannot make the agent's token: {e}"))?;
+    mcp::recheck(daemon, &agent.id);
     let mut command = Command::new(&launch.program);
     // The daemon's environment, less what the agent has no business with; what Flottille sets
     // comes after, so that it is not among the removed.
@@ -989,8 +988,8 @@ async fn process(
     )
     .await;
     recorder.said();
-    if !matches!(exit, Ok(Exit::Died(_) | Exit::Replace(_))) {
-        daemon.mcp.revoke(&agent.id);
+    if !matches!(exit, Ok(Exit::Died(_) | Exit::Replace(_))) && daemon.mcp.revoke(&agent.id) {
+        mcp::say_outdated(daemon, &agent.id, false);
     }
     daemon.waiting_provider.lock().unwrap().remove(&agent.id);
     let goes_on = match exit {
@@ -1013,12 +1012,16 @@ async fn process(
             // The agent is gone, not what it started: a `claude` left in the bridge's group would
             // run on as an orphan, with its tools.
             signal_group(pid, libc::SIGKILL);
-            daemon.mcp.retire(&agent.id);
+            if daemon.mcp.retire(&agent.id) {
+                mcp::say_outdated(daemon, &agent.id, false);
+            }
             Ok(died(daemon, &agent.id, status, turns))
         }
         Ok(Exit::Replace(reason)) => {
             stop(&mut child, pid).await;
-            daemon.mcp.retire(&agent.id);
+            if daemon.mcp.retire(&agent.id) {
+                mcp::say_outdated(daemon, &agent.id, false);
+            }
             turns.running = false;
             turns.queued.clear();
             Ok(replace(daemon, &agent.id, &reason, true, false))

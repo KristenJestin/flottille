@@ -85,15 +85,22 @@ agent. They change in two ways, and a session never keeps a list its role no lon
   told `notifications/tools/list_changed`: on its `subscriptions/listen` stream for a
   2026-07-28 client that opened one, which hears it at once; with the answer to its next request
   for a client that keeps no stream (2025-11-25 with no protocol session), before that answer.
-  A tool the role lost is refused from then on (`has no tool`).
+  A call or a listing is answered from the grant as it is when it is handled, not when its
+  request came: a tool the role lost is refused to every call handled after the change (`has no
+  tool`), a call already running ends as it began. A change made through Flottille
+  (`project.set_settings`) is announced at once; a project file edited by hand is noticed at the
+  next `project.*` request, which announces it, and a process that starts in between reads the
+  file as it is.
 
 Bare mode is kept: only Flottille's tools, only the role's. A session that lists its tools again
-has the new list. One that calls a tool after it was told without listing them again, or whose
-agent cannot take new tools while it runs, **runs an older list**: `agent.show` and
+has the new list. One that calls a tool after it was told without listing them again **runs an
+older list** until it lists them, through later changes too; one whose agent cannot take new
+tools runs one while its list is not the one its process started with. Then `agent.show` and
 `agent.tree` say `tools_outdated: true`, `flottille agent show` says that the session runs an
 older list of tools than its role has now and that a restart (stop, then resume) gives the new
 one, the window says so above the composer, and `agent.tools_outdated` says when that starts and
-ends (`docs/events.md`). The next process of the agent starts on the new list.
+when it ends, its process's end included (`docs/events.md`). The next process of the agent
+starts on the new list.
 
 What the agents Flottille runs do with the notice (checked in November 2026, from their
 documentation, changelogs and published source, never by running one):
