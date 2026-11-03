@@ -246,7 +246,7 @@ fn a_change_chosen_during_a_turn_is_said_pending_and_the_mark_goes_when_it_is_se
         has("model-choice-fake-large", cx)
     });
     cx.update(|window, cx| window.click("model-choice-fake-large", cx));
-    until(&shell, cx, "the pending mark shows", |cx| marked(cx));
+    until(&shell, cx, "the pending mark shows", marked);
 
     // The mark may come from the window's own echo: the daemon's record is what is waited for,
     // while the turn is still held.
