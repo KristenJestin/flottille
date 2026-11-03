@@ -167,7 +167,9 @@ Replaces Flottille with the latest build of a channel (`docs/releases.md`): `--c
 `--channel alpha`, `--branch <name>` (by default the branch this build came from). The archive's
 SHA-256 sum is checked before anything is replaced. It refuses while the daemon runs: stop it
 first with `flottille daemon stop`. The same version is not installed again and an older one is
-refused, unless `--force`. `flottille --version` says the channel installed.
+refused, unless `--force`. `flottille --version` says the channel installed. It also writes the
+launcher entry and the icon again when they changed, and points the entry at the binary it ran from
+(`docs/releases.md`, "The launcher entry").
 
 ```
 $ flottille update --channel beta

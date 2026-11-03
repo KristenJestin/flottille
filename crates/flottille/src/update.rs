@@ -14,6 +14,7 @@ use semver::Version;
 use serde_json::Value;
 
 use crate::client::Client;
+use crate::desktop;
 use crate::files::sha256;
 use crate::program;
 
@@ -61,6 +62,10 @@ pub fn run(
     {
         if *new == this {
             println!("Flottille is already {this}: nothing to update (--force installs it again).");
+            // The binary may have moved since the entry was written.
+            if let Err(error) = desktop::follow(paths, &std::env::current_exe()?.canonicalize()?) {
+                eprintln!("flottille: the launcher entry was not updated: {error}");
+            }
             return Ok(ExitCode::SUCCESS);
         }
         if *new < this {
@@ -79,7 +84,7 @@ pub fn run(
         .into());
     }
     let binary = std::env::current_exe()?.canonicalize()?;
-    let version = replace(&binary, &name, &archive)?;
+    let version = replace(paths, &binary, &name, &archive)?;
     println!("{} is now {version}.", binary.display());
     Ok(ExitCode::SUCCESS)
 }
@@ -193,9 +198,9 @@ fn curl(url: &str, options: &[&str]) -> Result<Vec<u8>> {
 }
 
 /// Unpacks the archive beside the binary and renames its `flottille` over it: the binary is
-/// the old one or the new one, never half of one, and nothing is left beside it. The version
-/// the archive is of.
-fn replace(binary: &Path, name: &str, archive: &[u8]) -> Result<String> {
+/// the old one or the new one, never half of one, and nothing is left beside it. The launcher's
+/// files of the archive are written too. The version the archive is of.
+fn replace(paths: &Paths, binary: &Path, name: &str, archive: &[u8]) -> Result<String> {
     let dir = binary.parent().ok_or("the binary has no folder")?;
     let work = tempfile_dir(dir)?;
     let unpacked = (|| -> Result<String> {
@@ -213,6 +218,10 @@ fn replace(binary: &Path, name: &str, archive: &[u8]) -> Result<String> {
         }
         let folder = name.trim_end_matches("-x86_64-linux.tar.gz");
         std::fs::rename(work.join(folder).join("flottille"), binary)?;
+        // The binary is replaced: failing to write the launcher's files is said, not undone.
+        if let Err(error) = desktop::write(paths, &work.join(folder).join("share"), binary) {
+            eprintln!("flottille: the launcher entry was not updated: {error}");
+        }
         Ok(folder.trim_start_matches("flottille-").to_owned())
     })();
     let _ = std::fs::remove_dir_all(&work);

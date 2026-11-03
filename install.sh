@@ -4,7 +4,8 @@
 #   … | sh -s -- --channel beta
 #   … | sh -s -- --channel alpha --branch feat/46-packages
 # The archive's SHA-256 sum is checked before anything is installed; `flot` is a link to
-# `flottille`. `FLOTTILLE_RELEASES` names another place of the releases' API (for tests).
+# `flottille`. The launcher's entry and icon go to $XDG_DATA_HOME (docs/releases.md).
+# `FLOTTILLE_RELEASES` names another place of the releases' API (for tests).
 # Everything is in `main`, called on the last line: a download cut short runs nothing.
 set -eu
 
@@ -44,6 +45,43 @@ daemon_runs() {
   else
     [ -S "$XDG_RUNTIME_DIR/flottille/daemon.sock" ]
   fi
+}
+
+# The Exec of the desktop entry for the binary $1, on one line: the path as it is, or in double
+# quotes when it holds a character the format reserves (a space). Nothing when it holds one that
+# no quoting can say.
+exec_of() {
+  case "$1" in
+    *[\"\`\$\\%]*) return 1 ;;
+    *[!A-Za-z0-9/._+-]*) printf '"%s" window' "$1" ;;
+    *) printf '%s window' "$1" ;;
+  esac
+}
+
+# The desktop entry and the icon of the package unpacked at $1/share, written into the XDG data
+# folder, with the entry running the binary $2. A package without them (older) writes nothing.
+desktop_files() {
+  share=$1/share
+  [ -f "$share/applications/flottille.desktop" ] || return 0
+  data=${XDG_DATA_HOME:-}
+  case "$data" in /*) ;; *) data=$HOME/.local/share ;; esac
+  if ! command=$(exec_of "$2"); then
+    echo "install.sh: no desktop entry written: $2 holds a character an entry cannot name." >&2
+    return 0
+  fi
+  mkdir -p "$data/applications"
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      Exec=*) printf 'Exec=%s\n' "$command" ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done <"$share/applications/flottille.desktop" >"$data/applications/.flottille.desktop.new"
+  mv -f "$data/applications/.flottille.desktop.new" "$data/applications/flottille.desktop"
+  (cd "$share" && find icons -type f) | while read -r icon; do
+    mkdir -p "$data/$(dirname "$icon")"
+    install -m 0644 "$share/$icon" "$data/$icon"
+  done
+  echo "Added Flottille to the application launcher ($data)."
 }
 
 main() {
@@ -113,6 +151,7 @@ main() {
   install -m 0755 "$work/$folder/flottille" "$bin/.flottille.new"
   mv -f "$bin/.flottille.new" "$bin/flottille"
   ln -sfn flottille "$bin/flot"
+  desktop_files "$work/$folder" "$bin/flottille"
   echo "Installed ${folder#flottille-} in $bin."
   # Installed is installed: a binary that cannot run here (a system library missing) is said,
   # not undone.

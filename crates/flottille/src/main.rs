@@ -16,6 +16,7 @@ mod command_command;
 mod commands;
 mod daemon;
 mod deliveries;
+mod desktop;
 mod developer;
 mod files;
 mod follow;
