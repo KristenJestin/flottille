@@ -306,6 +306,10 @@ pub struct Project {
     /// (`docs/projects.md`, "Rules").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rules: Option<String>,
+    /// Each extension's switch and its own values for the project, by the extension's name, as
+    /// written: the extension checks them against its schema (`docs/extensions.md`).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub extensions: BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
     /// Keys of the file that are no longer read, each with what replaces it: said, never
     /// followed nor refused.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -367,6 +371,8 @@ struct File {
     /// Obsolete: read as nothing, and said (`OBSOLETE_AGENT_ACTIONS`).
     agent_actions: Option<toml::Value>,
     rules: Option<String>,
+    #[serde(default)]
+    extensions: BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
     /// Obsolete: read as nothing, and said (`OBSOLETE_FORGES`).
     forges: Option<toml::Value>,
 }
@@ -417,6 +423,7 @@ impl Project {
             pull_requests: PullRequests::default(),
             tracker: None,
             rules: None,
+            extensions: BTreeMap::new(),
             obsolete: Vec::new(),
         }
     }
@@ -718,6 +725,7 @@ fn check(name: &str, mut file: File, data: &Path) -> Result<Project, String> {
         pull_requests: file.pull_requests,
         tracker,
         rules: file.rules,
+        extensions: file.extensions,
         obsolete,
     })
 }

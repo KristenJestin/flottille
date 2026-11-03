@@ -2164,6 +2164,7 @@ dependencies = [
  "libc",
  "pdf_oxide",
  "rmcp",
+ "rusqlite",
  "rustix",
  "rustls",
  "rustls-native-certs",

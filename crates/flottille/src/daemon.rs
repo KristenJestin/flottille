@@ -24,6 +24,7 @@ use crate::approvals;
 use crate::commands;
 use crate::deliveries;
 use crate::developer;
+use crate::extensions;
 use crate::forge;
 use crate::inbox;
 use crate::items;
@@ -71,7 +72,8 @@ pub fn run(paths: &Paths) -> Result<()> {
     ensure_private_dir(&paths.state)?;
     let _lock = take_lock(paths)?;
     let _store_lock = hold_store(paths)?;
-    let store = Store::open(&paths.database())?;
+    let mut store = Store::open(&paths.database())?;
+    extensions::migrate(&mut store)?;
     // Before anything starts an agent: what a daemon that died left running is its own to kill.
     agents::kill_orphans(&store);
     crate::claude::forget_bridges(paths);
@@ -773,6 +775,13 @@ fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) 
         ),
         method if method.starts_with("setup.") => (
             match setup::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+            },
+            None,
+        ),
+        method if extensions::answers(method) => (
+            match extensions::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => Message::error(Some(id), failure.code, failure.message),
             },
