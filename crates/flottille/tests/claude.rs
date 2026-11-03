@@ -466,14 +466,17 @@ fn through_the_bridge_claude_s_default_alias_is_listed_as_the_model_it_stands_fo
         .clone();
     let models = claude["models"].as_array().unwrap();
     // The alias stays listed, `--model default` is still offered, but it is not the default:
-    // the model it stands for is, and, as none of its own efforts was recorded yet, it takes
-    // the alias's.
+    // the model it stands for is, and, the session being set on it by its name, with its own
+    // efforts.
     assert_eq!(models[0]["id"], "default");
     assert_eq!(models[0]["stands_for"], "fable");
     assert_eq!(models[0].get("default"), None);
     assert_eq!(models[1]["id"], "fable");
     assert_eq!(models[1]["default"], true);
-    assert_eq!(models[1]["efforts"], models[0]["efforts"]);
+    assert_eq!(
+        models[1]["efforts"],
+        json!(["default", "low", "medium", "high", "xhigh", "max"])
+    );
     // Claude does not say which effort it runs with when none is asked.
     assert!(
         models.iter().all(|m| m.get("default_effort").is_none()),
@@ -481,6 +484,110 @@ fn through_the_bridge_claude_s_default_alias_is_listed_as_the_model_it_stands_fo
     );
     // The agent is said to run on the model, not on the alias.
     assert_eq!(show(&user, &id)["agent"]["taken"]["model"], "fable");
+}
+
+/// The control requests the bridge sent `claude` after `initialize`.
+fn asked(user: &User) -> Vec<Value> {
+    user.claude_received()
+        .into_iter()
+        .filter_map(|e| e.get("received").cloned())
+        .filter(|m| m["type"] == "control_request")
+        .map(|m| m["request"].clone())
+        .filter(|r| r["subtype"] != "initialize")
+        .collect()
+}
+
+/// The provider `claude` as `provider.list` gives it.
+fn listed_claude(user: &User) -> Value {
+    let listed = user.call("provider.list", Value::Null).unwrap();
+    listed["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "claude")
+        .unwrap()
+        .clone()
+}
+
+/// The models of `claude` 2.1.295's answer to `initialize` for a subscriber whose default is the
+/// 1M-context model, as its source builds them (`Ore`): each row's `resolvedModel` is the row's
+/// value resolved (`Dt`), the `default` row's the default setting resolved (`Dt(B_())`), and for a
+/// subscriber that setting is the model with its `[1m]` suffix (`Pv`: `YB(cg())`), while the `opus`
+/// row resolves to the model alone. The description names the model with its context (`Mi`:
+/// "Use the default model (currently …)"); the rows are named as the model catalogue names them.
+fn subscriber_models() -> Value {
+    let efforts = json!(["low", "medium", "high", "xhigh", "max"]);
+    json!([
+        {"value": "default", "resolvedModel": "claude-opus-5-5[1m]",
+            "displayName": "Default (recommended)",
+            "description": "Use the default model (currently Opus 5.5 (1M context))",
+            "supportsEffort": true, "supportedEffortLevels": efforts},
+        {"value": "fable", "resolvedModel": "claude-fable-5", "displayName": "Claude Fable 5",
+            "description": "Most capable for your hardest and longest-running tasks",
+            "supportsEffort": true, "supportedEffortLevels": efforts},
+        {"value": "opus", "resolvedModel": "claude-opus-5-5", "displayName": "Claude Opus 5.5",
+            "description": "Best for everyday, complex tasks",
+            "supportsEffort": true, "supportedEffortLevels": efforts},
+        {"value": "haiku", "resolvedModel": "claude-haiku-5-5", "displayName": "Claude Haiku 5.5",
+            "description": "Fastest for quick answers"}
+    ])
+}
+
+#[test]
+fn claudes_default_alias_is_shown_and_applied_as_its_model() {
+    let user = User::with_fake_claude();
+    user.claude_script(json!({ "models": subscriber_models() }));
+    project(&user);
+    let (id, after) = run(&user, "hello");
+    events_until(&user, &id, after, "agent.turn_ended");
+
+    let claude = listed_claude(&user);
+    let models = claude["models"].as_array().unwrap();
+    let alias = models.iter().find(|m| m["id"] == "default").unwrap();
+    assert_eq!(alias["stands_for"], "opus", "{models:?}");
+    let defaults: Vec<&Value> = models.iter().filter(|m| m["default"] == true).collect();
+    assert_eq!(defaults.len(), 1, "{models:?}");
+    assert_eq!(defaults[0]["id"], "opus");
+    // The session is started with the model named, and the effort it runs with: Claude does not
+    // say one, so the middle of the levels the model offers.
+    assert_eq!(
+        asked(&user),
+        [
+            json!({"subtype": "set_model", "model": "opus"}),
+            json!({"subtype": "apply_flag_settings", "settings": {"effortLevel": "high"}})
+        ]
+    );
+    let taken = &show(&user, &id)["agent"]["taken"];
+    assert_eq!(taken["model"], "opus");
+    assert_eq!(taken["effort"], "high");
+}
+
+#[test]
+fn a_provider_with_no_usable_default_gets_its_first_model_applied() {
+    let user = User::with_fake_claude();
+    // Its `default` resolves to nothing listed, and its description names no model.
+    user.claude_script(json!({ "models": [
+        {"value": "default", "displayName": "Default (recommended)",
+            "description": "The model Claude Code picks"},
+        {"value": "haiku", "resolvedModel": "claude-haiku-5", "displayName": "Haiku",
+            "description": "h"},
+        {"value": "fable", "resolvedModel": "claude-fable-5", "displayName": "Fable",
+            "description": "f"}
+    ]}));
+    project(&user);
+    let (id, after) = run(&user, "hello");
+    events_until(&user, &id, after, "agent.turn_ended");
+
+    let claude = listed_claude(&user);
+    let models = claude["models"].as_array().unwrap();
+    let defaults: Vec<&Value> = models.iter().filter(|m| m["default"] == true).collect();
+    assert_eq!(defaults.len(), 1, "{models:?}");
+    assert_eq!(defaults[0]["id"], "haiku");
+    assert_eq!(
+        asked(&user),
+        [json!({"subtype": "set_model", "model": "haiku"})]
+    );
+    assert_eq!(show(&user, &id)["agent"]["taken"]["model"], "haiku");
 }
 
 #[test]

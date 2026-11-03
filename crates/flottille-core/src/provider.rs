@@ -37,6 +37,29 @@ pub fn listed_model<'a>(
     dated.next().is_none().then_some(found)
 }
 
+/// The value a provider gives for "its own choice" of a model or an effort. Flottille never leaves
+/// a session on it: it applies what it stands for, by its name.
+pub const OWN_CHOICE: &str = "default";
+
+/// The model a provider's session takes when none is asked, among the ids it lists: the one its
+/// `default` stands for (`stands_for`) when listed, else the first one that is not `default`.
+pub fn default_model<'a>(
+    offered: impl IntoIterator<Item = &'a str>,
+    stands_for: Option<&str>,
+) -> Option<&'a str> {
+    let concrete: Vec<&str> = offered.into_iter().filter(|v| *v != OWN_CHOICE).collect();
+    stands_for
+        .and_then(|s| concrete.iter().copied().find(|v| *v == s))
+        .or_else(|| concrete.first().copied())
+}
+
+/// The effort a model runs with when its provider does not say one: the middle of the levels it
+/// offers (the upper one of the two middles), `default` aside.
+pub fn middle_effort<S: AsRef<str>>(levels: &[S]) -> Option<&S> {
+    let offered: Vec<&S> = levels.iter().filter(|l| l.as_ref() != OWN_CHOICE).collect();
+    offered.get(offered.len() / 2).copied()
+}
+
 /// Which providers the user enabled: each known name, with its choice.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
@@ -312,5 +335,29 @@ mod tests {
             kind.starts_with("providers.toml: claude.enabled: "),
             "{kind}"
         );
+    }
+
+    #[test]
+    fn the_default_model_is_what_default_stands_for_else_the_first_concrete_one() {
+        let offered = ["default", "haiku", "fable"];
+        assert_eq!(default_model(offered, Some("fable")), Some("fable"));
+        assert_eq!(default_model(offered, Some("gone")), Some("haiku"));
+        assert_eq!(default_model(offered, None), Some("haiku"));
+        assert_eq!(default_model(["default"], None), None);
+    }
+
+    #[test]
+    fn the_middle_effort_is_the_upper_middle_of_the_levels_offered() {
+        assert_eq!(middle_effort(&["low", "high"]), Some(&"high"));
+        assert_eq!(
+            middle_effort(&["default", "low", "medium", "high", "xhigh"]),
+            Some(&"high")
+        );
+        assert_eq!(
+            middle_effort(&["low", "medium", "high", "xhigh", "max"]),
+            Some(&"high")
+        );
+        assert_eq!(middle_effort(&["low"]), Some(&"low"));
+        assert_eq!(middle_effort::<&str>(&[]), None);
     }
 }

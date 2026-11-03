@@ -1116,17 +1116,30 @@ fn config_options(claude: &Claude) -> Value {
     Value::Array(options)
 }
 
-/// The model `claude`'s `default` stands for: the one it resolves to as well, else the one name
-/// its description gives (a version that does not say what it resolves to); `None` when neither
-/// says, or when the description names more than one model.
+/// The model `claude`'s `default` stands for: the one it resolves to as well, else the one that
+/// resolves to the same model without its context window (`claude` 2.1.295 resolves a
+/// subscriber's `default` to `<model>[1m]` and its `opus` to `<model>`: `Ore`, `Pv`, `Dt` in its
+/// source), else the one name its description gives (a version that does not say what it resolves
+/// to); `None` when none says, or when the description names more than one model.
 fn stands_for(models: &[Value]) -> Option<&str> {
     let alias = models.iter().find(|m| m["value"] == "default")?;
     let others = || models.iter().filter(|m| m["value"] != "default");
     let resolved = alias["resolvedModel"].as_str();
-    let by_resolution = others().find(|m| {
-        resolved.is_some()
-            && (m["resolvedModel"].as_str() == resolved || m["value"].as_str() == resolved)
-    });
+    let resolves = |m: &Value, same: &dyn Fn(&str, &str) -> bool| {
+        resolved.is_some_and(|resolved| {
+            [&m["resolvedModel"], &m["value"]]
+                .iter()
+                .filter_map(|v| v.as_str())
+                .any(|v| same(v, resolved))
+        })
+    };
+    let bare = |id: &str| {
+        let id = id.trim().to_lowercase();
+        id.strip_suffix("[1m]").map(str::to_owned).unwrap_or(id)
+    };
+    let by_resolution = others()
+        .find(|m| resolves(m, &|a, b| a == b))
+        .or_else(|| others().find(|m| resolves(m, &|a, b| bare(a) == bare(b))));
     let description = alias["description"].as_str().unwrap_or_default();
     let by_description = || {
         let mut named = others().filter(|m| {

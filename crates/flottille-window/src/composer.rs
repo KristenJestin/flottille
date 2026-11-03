@@ -778,11 +778,11 @@ impl Pickers<'_> {
     }
 
     /// What the model picker shows: the model's name, the project's model marked so. Without a
-    /// model, the provider's default by its name; when it is not known, that the provider
-    /// chooses, never a "default" it cannot name.
+    /// model, the one Flottille applies, by its name; before a session said the models, that they
+    /// are not known yet, never a "default" it cannot name.
     pub fn model_shown(&self) -> String {
         let provider = self.provider();
-        let chosen = || format!("model chosen by {}", self.title());
+        let chosen = || crate::providers::MODEL_UNKNOWN.to_owned();
         let label = |id: &str| match provider.and_then(|p| p.model(id)) {
             Some(model) => named(provider, model).unwrap_or_else(chosen),
             None if id == DEFAULT => chosen(),
@@ -801,26 +801,30 @@ impl Pickers<'_> {
     }
 
     /// What the effort picker shows: the effort picked, else the one the model runs with, else
-    /// that the provider chooses.
+    /// that its efforts are not known yet.
     pub fn effort_shown(&self) -> String {
         self.pick
             .effort
             .clone()
             .or_else(|| self.own_effort().cloned())
-            .unwrap_or_else(|| format!("effort chosen by {}", self.title()))
+            .unwrap_or_else(|| "effort not known yet".to_owned())
     }
 
     /// The effort the model picked (the provider's default one when none) runs with when none
-    /// is asked, once a session said it.
+    /// is asked: the one a session said, else the middle of its levels, the one Flottille
+    /// applies; `None` until a session said its efforts.
     pub fn own_effort(&self) -> Option<&String> {
         let provider = self.provider()?;
         let model = match self.pick.model.as_deref() {
             Some(model) => provider.model(model)?,
             None => provider.default_model()?,
         };
-        let own = model.default_effort.as_ref()?;
         let efforts = efforts_of(provider, self.pick.model.as_deref())?;
-        levels(efforts).any(|e| e == own).then_some(own)
+        let said = model
+            .default_effort
+            .as_ref()
+            .filter(|own| levels(efforts).any(|e| e == *own));
+        said.or_else(|| flottille_core::provider::middle_effort(efforts))
     }
 
     /// The provider picked's title, "the provider" before the daemon listed it.
@@ -861,31 +865,38 @@ impl Pickers<'_> {
             }
             (Menu::Model, Some(provider)) => match &provider.models {
                 Some(models) => {
-                    // An alias picked is the model it stands for.
-                    let picked = self.pick.model.as_deref().map(|picked| {
-                        provider
-                            .model(picked)
-                            .and_then(|m| m.stands_for.as_deref())
-                            .unwrap_or(picked)
+                    let default = provider.default_model().map(|m| m.id.as_str());
+                    // An alias picked is the model it stands for; the provider's own `default`,
+                    // the model Flottille applies for it.
+                    let picked = self.pick.model.as_deref().map(|picked| match picked {
+                        DEFAULT => default,
+                        _ => Some(
+                            provider
+                                .model(picked)
+                                .and_then(|m| m.stands_for.as_deref())
+                                .unwrap_or(picked),
+                        ),
                     });
-                    // The aliases a model stands for are that model's row.
-                    for model in models.iter().filter(|m| m.stands_for.is_none()) {
+                    for model in models
+                        .iter()
+                        .filter(|m| m.stands_for.is_none() && m.id != DEFAULT)
+                    {
+                        let is_default = default == Some(model.id.as_str());
                         let on = match picked {
-                            Some(picked) => picked == model.id,
-                            None => model.default,
+                            Some(picked) => picked == Some(model.id.as_str()),
+                            None => is_default,
                         };
                         let note = if projects == Some(model.id.as_str()) {
                             Some("the project's".to_owned())
                         } else {
-                            (model.default && model.id != DEFAULT).then(|| "default".to_owned())
+                            is_default.then(|| "default".to_owned())
                         };
-                        // The default's row names no model, so that the provider's default is
-                        // followed, unless the project's model would then be taken instead.
-                        let asked = (!model.default || projects.is_some()).then_some(&model.id);
+                        // The default's row names no model: the daemon applies the default by
+                        // its name. Unless the project's model would then be taken instead.
+                        let asked = (!is_default || projects.is_some()).then_some(&model.id);
                         items.push(item(
                             format!("model-choice-{}", model.id),
-                            named(Some(provider), model)
-                                .unwrap_or_else(|| format!("Chosen by {}", provider.title)),
+                            model.label(),
                             note,
                             on,
                             Some(pick(None, asked.map(String::as_str), None)),
@@ -894,16 +905,6 @@ impl Pickers<'_> {
                 }
                 // No agent is run just to list them: the first session of the provider says them.
                 None => {
-                    // Without a model, the daemon gives the project's: no other default to pick.
-                    if projects.is_none() {
-                        items.push(item(
-                            "model-choice-provider".into(),
-                            format!("Chosen by {}", provider.title),
-                            None,
-                            self.pick.model.is_none(),
-                            Some(pick(None, None, None)),
-                        ));
-                    }
                     if let Some(model) = &self.pick.model {
                         items.push(item(
                             format!("model-choice-{model}"),
@@ -927,15 +928,6 @@ impl Pickers<'_> {
             },
             (Menu::Effort, Some(provider)) => {
                 let own = self.own_effort();
-                if own.is_none() {
-                    items.push(item(
-                        "effort-choice-provider".into(),
-                        format!("Chosen by {}", provider.title),
-                        None,
-                        self.pick.effort.is_none(),
-                        Some(pick(None, None, None)),
-                    ));
-                }
                 for effort in efforts_of(provider, self.pick.model.as_deref())
                     .into_iter()
                     .flat_map(|efforts| levels(efforts))
@@ -969,8 +961,7 @@ impl Pickers<'_> {
 /// or that the provider chooses.
 pub const DEFAULT: &str = "default";
 
-/// A model's name, its provider's `default` named by the model it stands for; `None` for a
-/// `default` that does not say which.
+/// A model's name, its provider's `default` named by the model Flottille applies for it.
 pub(crate) fn named(
     provider: Option<&Provider>,
     model: &crate::providers::Model,
@@ -978,8 +969,7 @@ pub(crate) fn named(
     if model.id != DEFAULT {
         return Some(model.label());
     }
-    let stands_for = provider?.model(model.stands_for.as_deref()?)?;
-    Some(stands_for.label())
+    Some(provider?.default_model()?.label())
 }
 
 /// A model's effort levels, less the provider's own `default`: the picker's row that asks none
