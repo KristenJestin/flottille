@@ -185,3 +185,90 @@ fn a_test_daemon_lists_nothing_unless_its_test_asks() {
         std::fs::read_to_string(&marker)
     );
 }
+
+#[test]
+fn codex_s_models_are_listed_without_a_thread() {
+    let user = User::with_fake_codex().with_env(ASKS.0, ASKS.1);
+    user.write_providers("[claude]\nenabled = false\n[codex]\nenabled = true\n");
+    assert_eq!(listed(&user, "codex")["ready"], true);
+    eventually("the models of Codex", || {
+        !ids(&listed(&user, "codex")).is_empty()
+    });
+
+    let codex = listed(&user, "codex");
+    assert_eq!(ids(&codex), ["gpt-fake", "gpt-fake-mini"], "{codex}");
+    assert_eq!(codex["models"][0]["default"], true, "{codex}");
+    std::thread::sleep(Duration::from_millis(300));
+    let methods: Vec<String> = user
+        .codex_received()
+        .iter()
+        .filter_map(|entry| entry["received"]["method"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        methods,
+        ["initialize", "initialized", "account/read", "model/list"],
+        "no thread, no turn: {methods:?}"
+    );
+    assert!(
+        std::fs::read_dir(user.path("codex/threads"))
+            .map(|threads| threads.count() == 0)
+            .unwrap_or(true),
+        "a thread was made"
+    );
+}
+
+#[test]
+fn opencode_s_models_are_listed_and_its_empty_session_deleted() {
+    let user = User::with_fake_providers().with_env(ASKS.0, ASKS.1);
+    user.write_providers("[claude]\nenabled = false\n[opencode]\nenabled = true\n");
+    user.provider_script(
+        "opencode",
+        json!({"models": ["fake-small", "fake-large"], "delete": true}),
+    );
+    assert_eq!(listed(&user, "opencode")["ready"], true);
+    eventually("the models of OpenCode", || {
+        !ids(&listed(&user, "opencode")).is_empty()
+    });
+    std::thread::sleep(Duration::from_millis(300));
+
+    assert_eq!(
+        ids(&listed(&user, "opencode")),
+        ["fake-small", "fake-large"]
+    );
+    let methods: Vec<String> = user
+        .provider_received("opencode")
+        .iter()
+        .filter_map(|entry| entry["received"]["method"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        methods,
+        ["initialize", "session/new", "session/delete"],
+        "no prompt: {methods:?}"
+    );
+    let sessions = std::fs::read_dir(user.path("fake-opencode/sessions"))
+        .map(|sessions| sessions.count())
+        .unwrap_or(0);
+    assert_eq!(sessions, 0, "the empty session stays");
+}
+
+#[test]
+fn the_listing_leaves_nothing_of_its_process() {
+    let user = User::with_fake_claude().with_env(ASKS.0, ASKS.1);
+    eventually("the models of Claude", || {
+        !ids(&listed(&user, "claude")).is_empty()
+    });
+    std::thread::sleep(Duration::from_millis(300));
+
+    let left = |sub: &str| -> Vec<String> {
+        std::fs::read_dir(user.path(sub))
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    assert_eq!(left("runtime/flottille/bridge"), Vec::<String>::new());
+    assert_eq!(left("state/flottille/bridge/claude"), Vec::<String>::new());
+}

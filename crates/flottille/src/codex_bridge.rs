@@ -851,6 +851,49 @@ pub fn delete_thread(program: &std::path::Path, paths: &Paths, thread: &str) -> 
     deleted.map(|_| ())
 }
 
+/// The options a session of Flottille's Codex would offer, its models and the efforts of its
+/// default one, read with `model/list` from a `codex app-server` started bare for that alone:
+/// its account read as a session's is, and no thread, no turn (`docs/agents.md`, "The models").
+pub fn list_models(
+    program: &std::path::Path,
+    paths: &Paths,
+    limit: Duration,
+) -> Result<Value, String> {
+    let mut server = Server::start(program, paths, limit)?;
+    let listed = (|| {
+        server.request(1, "initialize", initialize_params())?;
+        server.write(json!({"method": "initialized"}))?;
+        let read = server.request(2, "account/read", json!({}))?;
+        if read["account"].is_null() && read["requiresOpenaiAuth"] == true {
+            return Err(format!(
+                "Codex is not signed in: {}",
+                codex::PROVIDER.sign_in
+            ));
+        }
+        if let Some(why) = codex::refused_account(&read["account"]) {
+            return Err(why);
+        }
+        server.request(3, "model/list", json!({}))
+    })();
+    server.end();
+    let models: Vec<Value> = listed?["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["hidden"] != true && m["model"].is_string())
+        .cloned()
+        .collect();
+    let model = models
+        .iter()
+        .find(|m| m["isDefault"] == true)
+        .or(models.first())
+        .and_then(|m| m["model"].as_str())
+        .unwrap_or_default()
+        .to_owned();
+    let effort = default_effort(&models, &model);
+    Ok(options(&models, &model, &effort))
+}
+
 /// A `codex app-server` started bare for a few requests of the daemon's, with a time limit.
 struct Server {
     child: std::process::Child,

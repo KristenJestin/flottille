@@ -1,9 +1,10 @@
-//! Reading a provider's models as soon as it is ready (`docs/agents.md`, "The models"): its ACP
-//! agent started bare as the judge's is, in an empty folder, a new session with no MCP server, the
-//! options it offers kept, and no prompt: each program lists its models before any request to a
-//! model, and the session is not asked for anything else. It runs in the background, once for
-//! each state of the provider (its program, its API keys, its sign-in file), with a time limit,
-//! and what goes wrong is said in the developer log and changes nothing.
+//! Reading a provider's models as soon as it is ready (`docs/agents.md`, "The models"): Codex's
+//! `model/list` on a bare `codex app-server`, with no thread; for the others, their ACP agent
+//! started bare as the judge's is, in an empty folder, a new session with no MCP server, the
+//! options it offers kept, the session deleted where the agent can, and no prompt. It runs in the
+//! background, once for each state of the provider (its program, its API keys, its sign-in
+//! file), with a time limit, and what goes wrong is said in the developer log and changes
+//! nothing.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -13,8 +14,8 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    Implementation, InitializeRequest, NewSessionRequest, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse,
+    DeleteSessionRequest, Implementation, InitializeRequest, NewSessionRequest,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
 };
 use agent_client_protocol::{Agent as AcpAgent, Client, ConnectionTo, Lines};
 use flottille_core::agent::{Agent, AgentState, Choices, GateMode};
@@ -97,9 +98,7 @@ pub fn check(daemon: &Arc<Daemon>) {
         }
         let daemon = daemon.clone();
         tokio::spawn(async move {
-            let outcome = tokio::time::timeout(LIMIT, read(&daemon, provider))
-                .await
-                .unwrap_or_else(|_| Err(format!("it listed nothing in {} s", LIMIT.as_secs())));
+            let outcome = read(&daemon, provider).await;
             if let Some(running) = RUNNING.lock().unwrap().as_mut() {
                 running.remove(provider.name);
             }
@@ -124,13 +123,46 @@ fn report(daemon: &Daemon, provider: &'static Provider, outcome: Result<usize, S
     }
 }
 
-/// The models the provider's agent offers to a session that is given nothing to do, kept as a
-/// session's are; how many.
+/// The models the provider offers, kept as a session's are; how many.
 async fn read(daemon: &Arc<Daemon>, provider: &'static Provider) -> Result<usize, String> {
     let paths = daemon.paths.clone();
     tokio::task::spawn_blocking(move || providers::startable(&paths, provider))
         .await
         .map_err(|e| e.to_string())??;
+    let options = if provider.name == crate::codex::PROVIDER.name
+        && providers::overridden(provider).is_none()
+    {
+        let paths = daemon.paths.clone();
+        let agent = as_agent(provider, &paths.state.join("models"));
+        // Codex's own folders, and the user's login linked in them, as for a session.
+        (provider.env)(&paths, &agent)?;
+        let program = providers::find_program("codex").ok_or("`codex` is not on PATH")?;
+        tokio::task::spawn_blocking(move || {
+            crate::codex_bridge::list_models(&program, &paths, LIMIT)
+        })
+        .await
+        .map_err(|e| e.to_string())??
+    } else {
+        through_a_session(daemon, provider).await?
+    };
+    let count = options
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|option| option["category"] == "model")
+        .map(|model| providers::values(model).len())
+        .filter(|&count| count > 0)
+        .ok_or("it offers no model")?;
+    providers::learn(daemon, provider, &options, true, true);
+    Ok(count)
+}
+
+/// The options the provider's ACP agent offers to a session that is given nothing to do. What
+/// Flottille kept for its process and its session goes once it is over, whatever the outcome.
+async fn through_a_session(
+    daemon: &Arc<Daemon>,
+    provider: &'static Provider,
+) -> Result<Value, String> {
     let folder = daemon.paths.state.join("models");
     std::fs::create_dir_all(&folder).map_err(|e| format!("cannot make its folder: {e}"))?;
     let agent = as_agent(provider, &folder);
@@ -152,7 +184,8 @@ async fn read(daemon: &Arc<Daemon>, provider: &'static Provider) -> Result<usize
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("cannot start {}: {e}", launch.program.display()))?;
-    let _group = child.id().map(Group);
+    let pid = child.id();
+    let group = pid.map(Group);
     let stdin = child.stdin.take().ok_or("it has no stdin")?;
     let stdout = child.stdout.take().ok_or("it has no stdout")?;
     let incoming = futures::stream::unfold(BufReader::new(stdout).lines(), |mut lines| async {
@@ -170,7 +203,9 @@ async fn read(daemon: &Arc<Daemon>, provider: &'static Provider) -> Result<usize
     });
     let transport = Lines::new(Box::pin(outgoing), Box::pin(incoming));
     let meta = (provider.session_meta)("", &[]).as_object().cloned();
-    let opened = Client
+    let opened = Arc::new(Mutex::new(None));
+    let session_id = opened.clone();
+    let connected = Client
         .builder()
         .name("flottille-models")
         .on_receive_request(
@@ -183,43 +218,47 @@ async fn read(daemon: &Arc<Daemon>, provider: &'static Provider) -> Result<usize
             agent_client_protocol::on_receive_request!(),
         )
         .connect_with(transport, async |cx: ConnectionTo<AcpAgent>| {
-            Ok(session(cx, &folder, meta).await)
-        })
-        .await;
-    let _ = child.start_kill();
-    let (session, options) = match opened {
-        Ok(Ok(opened)) => opened,
-        Ok(Err(why)) => return Err(why),
-        Err(error) => return Err(format!("the connection failed: {error}")),
+            Ok(session(cx, &folder, meta, &session_id).await)
+        });
+    let outcome = match tokio::time::timeout(LIMIT, connected).await {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(error)) => Err(format!("the connection failed: {error}")),
+        Err(_) => Err(format!("it listed nothing in {} s", LIMIT.as_secs())),
     };
-    (provider.forget_session)(&daemon.paths, &session);
+    drop(group);
+    let _ = child.kill().await;
+    if let Some(pid) = pid {
+        (provider.forget_process)(&daemon.paths, pid);
+    }
+    if let Some(session) = opened.lock().unwrap().take() {
+        (provider.forget_session)(&daemon.paths, &session);
+    }
     (provider.forget_agent)(&daemon.paths, &agent.id);
-    let count = options
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|option| option["category"] == "model")
-        .map(|model| providers::values(model).len())
-        .filter(|&count| count > 0)
-        .ok_or("it offers no model")?;
-    providers::learn(daemon, provider, &options, true, true);
-    Ok(count)
+    outcome
 }
 
-/// One session, no prompt: its id and the options it offers.
+/// One session, no prompt: the options it offers. Its id is kept in `opened` as soon as it is
+/// said, and the session deleted where the agent offers it, so that nothing of it stays.
 async fn session(
     cx: ConnectionTo<AcpAgent>,
     folder: &Path,
     meta: Option<serde_json::Map<String, Value>>,
-) -> Result<(String, Value), String> {
-    cx.send_request(
-        InitializeRequest::new(ProtocolVersion::V1)
-            .client_info(Implementation::new("Flottille", VERSION)),
-    )
-    .block_task()
-    .await
-    .map_err(|e| format!("it refused to start: {e}"))?;
-    let opened = cx
+    opened: &Mutex<Option<String>>,
+) -> Result<Value, String> {
+    let initialized = cx
+        .send_request(
+            InitializeRequest::new(ProtocolVersion::V1)
+                .client_info(Implementation::new("Flottille", VERSION)),
+        )
+        .block_task()
+        .await
+        .map_err(|e| format!("it refused to start: {e}"))?;
+    let deletes = initialized
+        .agent_capabilities
+        .session_capabilities
+        .delete
+        .is_some();
+    let answer = cx
         .send_request(
             NewSessionRequest::new(folder)
                 .mcp_servers(Vec::new())
@@ -228,12 +267,20 @@ async fn session(
         .block_task()
         .await
         .map_err(|e| format!("it could not open a session: {e}"))?;
-    let opened = serde_json::to_value(&opened).unwrap_or_default();
-    let session = opened["sessionId"]
+    let answer = serde_json::to_value(&answer).unwrap_or_default();
+    let session = answer["sessionId"]
         .as_str()
         .ok_or("it opened a session without an id")?
         .to_owned();
-    Ok((session, opened["configOptions"].clone()))
+    *opened.lock().unwrap() = Some(session.clone());
+    if deletes {
+        // Its options are read already: a session it keeps is only left behind.
+        let _ = cx
+            .send_request(DeleteSessionRequest::new(session))
+            .block_task()
+            .await;
+    }
+    Ok(answer["configOptions"].clone())
 }
 
 /// The process group, killed whole once the options are read or the time is up.

@@ -37,6 +37,8 @@
 //!
 //! - `load`, `resume`: whether `initialize` offers `session/load` and `session/resume` (both by
 //!   default). A loaded session replays its history first; a resumed one does not.
+//! - `delete`: whether `initialize` offers `session/delete`, which removes the session's history
+//!   (false by default).
 //! - `images`: whether `initialize` says the agent takes images in a prompt (false by default).
 //! - `init_wait`: milliseconds `initialize` waits before it answers, for an agent whose capabilities
 //!   the daemon does not know yet (none by default).
@@ -241,6 +243,9 @@ impl Agent {
                 if self.script["resume"] != false {
                     capabilities["sessionCapabilities"]["resume"] = json!({});
                 }
+                if self.script["delete"] == true {
+                    capabilities["sessionCapabilities"]["delete"] = json!({});
+                }
                 Ok(json!({
                     "protocolVersion": 1,
                     "agentCapabilities": capabilities,
@@ -274,6 +279,10 @@ impl Agent {
                     );
                 }
                 Ok(json!({"configOptions": self.config_options(&session)}))
+            }
+            "session/delete" if self.script["delete"] == true => {
+                let _ = std::fs::remove_file(self.history_file(&session));
+                Ok(json!({}))
             }
             "session/resume" => {
                 if !self.history_file(&session).exists() {
