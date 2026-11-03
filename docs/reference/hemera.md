@@ -698,7 +698,7 @@ Wire format:
 
 **hurry** applies when a delivery arrives during a turn:
 
-- `redirect`: cancel the turn. Its end pumps the delivery.
+- `redirect`: cancel the turn. Its end pumps the delivery, alone (Flottille: the other queued deliveries wait for the prompt after it, but those that start a session).
 - `urgent`, and the agent `obeysNotes`: pin a note to the next Hemera tool result. If it is not taken within 30 s, unpin it, cancel the turn and send it as a prompt.
 - `urgent`, and the agent does not obey notes: treat it as a redirect.
 

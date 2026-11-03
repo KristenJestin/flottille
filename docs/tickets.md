@@ -1,0 +1,340 @@
+# Tickets
+
+The ticket a workspace is about: its title, state, description and comments, read on the tracker
+and shown beside the workspace. The second step of the milestone "Forges and tickets"
+(`docs/design.md` §13), after [`forges.md`](forges.md). What a workspace shows is read only. The
+agents' `tickets` (below) lists, searches, reads and writes the tracker's tickets, the writes
+under the gate, on GitHub as on Jira. Locks (a project or a tracker kept read only) are planned,
+as their own feature.
+
+Two trackers are read: the issues of GitHub, through the user's own `gh`, and Jira (Cloud),
+through Atlassian's own command line, `acli`.
+
+## Linking a workspace to a ticket
+
+A workspace has at most one ticket, kept with it in the store. **The project's tracker says which
+tickets it takes**, and nothing is guessed: `[tracker]` in the project's file, set in the project's
+Settings in the window (`docs/projects.md`):
+
+| Tracker | Written | Reads |
+|---|---|---|
+| `kind = "github"`, `repository = "api"` | `#123` (or `123`) | issue 123 of that repository, on its declared GitHub forge |
+| `kind = "jira"`, `site`, `projects = ["ABC"]` | `ABC-123` (any case, kept in upper case), its project one of `projects` | the work item `ABC-123` on that site |
+
+`123` is accepted because a shell takes a word starting with `#` for a comment. A ticket is
+accepted only in its tracker's form: `ABC-1 is a Jira key, and this project's tracker is GitHub
+issues of api: write an issue number, #123`, `#4 is a GitHub issue, and this project's tracker is
+Jira on acme.atlassian.net (ABC)`, `XYZ-1 is not in a Jira project of this project's tracker …`.
+A project with no tracker takes no ticket: `no tracker set for this project: choose it in the
+project's Settings (the window), or write its [tracker] in the project's file; Flottille never
+guesses it`. Anything that is neither form is refused when it is typed (`refused: x is not a
+ticket …`), so that what reaches a command line is always a number or a key and never an option.
+Linking checks the writing of the reference and its tracker, not that the ticket exists: reading
+says that.
+
+A GitHub tracker's repository must be one of the project's whose forge is declared on GitHub
+(`forges.md`, "The forge of a repository"); its issues are read with `-R` its declared
+`owner/name`, once the forge agrees with the repository's remote.
+
+It is linked:
+
+- **at its creation**: `flottille workspace create <project> <name> --ticket ABC-123`
+  (`workspace.create {ticket}`), or the optional ticket field of the window's new-workspace
+  form;
+- **later**: `flottille workspace ticket <project> <name> <ticket>` (`workspace.link_ticket`),
+  or the ticket row of the session page's `WORKSPACE` section;
+- and **unlinked** with `flottille workspace ticket <project> <name> --clear`, or the row's
+  unlink button.
+
+Each change is an event, `workspace.ticket {project, workspace, ticket}` (`docs/events.md`), the
+ticket being none when unlinked.
+
+## The user's own command lines
+
+Both are spawned without a shell, as `git` and `gh` are, with the daemon's environment (the
+user's), so that the user's own sign-in works; a call is cut after 30 s.
+
+- **Flottille never reads, keeps nor prints a token.** It never runs `gh auth token` nor
+  `--show-token`, never reads `gh`'s or `acli`'s configuration folder. Of `gh auth status --hostname
+  github.com` it reads the exit code alone: 0 is signed in. Of `acli jira auth status` it reads
+  the exit code and the `Site:` line, nothing else (an e-mail there is never kept).
+- **What a tracker says is masked** before it is shown or stored (titles, descriptions, comments,
+  errors), as every output is (`flottille_core::secrets`).
+- **The reads and the writes Flottille runs are known.** Of `acli`, the reads are `acli jira auth
+  status`, `acli jira workitem view <KEY> --json --fields summary,status,description,comment`
+  (`--fields status` or `--fields comment` alone for the status of a write and the rounds'
+  comments), and `acli jira workitem search --jql <JQL> --fields key,summary,status,assignee,labels --json
+  --limit 200`; its writes (`workitem create`, `comment create`, `edit`, `transition`, below) run
+  only for a `tickets` call the gate let through, and the tests look at every call the fake
+  received. Of `gh`, the reads are `gh issue view <n> -R github.com/owner/name --json
+  number,title,state,body,comments,url` and `gh issue list` (`docs/tools.md`, "The tickets"); its
+  writes (`issue create`, `comment`, `edit`, `close`, `reopen`, and for a status `project list`,
+  `field-list` and `item-edit`) run only for a `tickets` call the gate let through. A key is parsed first, so it is a number or `ABC-123`, and a JQL filter is
+  quoted, never spliced. A text written is passed as one argument, never through a shell.
+- **Agents never get that sign-in.** An agent's own command runs have the forge tokens emptied and
+  `GH_CONFIG_DIR` pointed at an empty folder (`docs/tools.md`), so `gh` has no login there.
+  `acli`'s sign-in lives in the user's home, which no variable of ours moves, so **the gate refuses
+  every `acli` line an agent runs, reads included**; an agent reads the tickets with `tickets`.
+
+## The Jira site
+
+**A Jira read is refused when `acli`'s active sign-in is not on the tracker's site**, since `acli`
+reads from the site it is signed in to and a key such as `ABC-1` may exist on several: `acli is
+signed in to other.atlassian.net, and this project's tracker is Jira on acme.atlassian.net:
+nothing was read; switch acli to it (`acli jira auth switch --site acme.atlassian.net`) or correct
+the project's tracker`. A status with no `Site:` line is refused the same way. Nothing is asked of
+Jira then.
+
+**That check is the guarantee**, and every read and every write goes through it first:
+`workspace.ticket`, `project.ticket`, and the agents' `tickets` `show`, `list`, `search` and each
+write, which then says `nothing was written`. The work item itself
+cannot give it: its `self` link is on the site's own host when `acli` is signed in with an API
+token, but on an Atlassian host that names no site when it is signed in with OAuth
+(`https://<…>.prod.atl-paas.net/rest/api/3/issue/…`, or
+`https://api.atlassian.com/ex/jira/<cloud id>/…`). So a `self` on the tracker's site or on such a
+host is taken, and **only a `self` that names another site is refused**, in case the sign-in
+changed between the check and the read: `acli answered ABC-123 from other.atlassian.net, and
+this project's tracker is Jira on acme.atlassian.net: nothing of it is shown; check the site acli
+is signed in to (`acli jira auth status`)`. A work item with no `self` is not shown either.
+
+## What is read
+
+| | GitHub issue | Jira work item |
+|---|---|---|
+| title | `title` | `fields.summary` |
+| state | `open` or `closed` | the status's name (`In Progress`), and its category (`statusCategory.key`) |
+| link | `url` | `https://<site>/browse/<KEY>`, the tracker's configured site |
+| description | `body` | `fields.description` |
+| comments | `comments[]`: `author.login`, `createdAt`, `body` | `fields.comment.comments[]`: `author.displayName`, `created`, `body` |
+
+A description or a comment longer than 20,000 and 4,000 characters is cut, saying so; only the
+newest 30 comments are kept, the number of older ones is said.
+
+What an agent writes is marked ([`forges.md`](forges.md), "What Flottille posts is marked"): a
+comment that ends with the marker (GitHub) or the visible footer (Jira) is shown as `<author>
+(posted by an agent)`, its text without the mark; a description loses the mark too.
+
+### Jira's text
+
+Jira Cloud's descriptions and comments are Atlassian Document Format (ADF), a JSON tree. They are
+turned into plain text simply: the text of paragraphs, headings and code blocks, one block per
+line (an empty line between blocks), list items as `- ` or `1. ` lines, table rows as `a | b`, a
+mention as its text, a link card as its address, a hard break as a line break. Anything else
+(images, attachments, status lozenges) is left out. **Nothing is ever rendered as HTML**; a
+description that is already a string is taken as it is.
+
+### What `acli` prints is assumed, and the maintainer checks it
+
+No real `acli` is installed where this was written, none may be run there, and Atlassian's
+documentation of `acli jira workitem view`
+(<https://developer.atlassian.com/cloud/acli/reference/commands/jira-workitem-view/>) gives its
+flags (`--json`, `--fields`, default fields `key,issuetype,summary,status,assignee,description`)
+and **no example of its output**. The shape read here is therefore an assumption: Jira's REST work
+item as `acli … --json` is expected to print it,
+
+```json
+{"key": "ABC-123", "self": "https://acme.atlassian.net/rest/api/3/issue/10001",
+ "fields": {"summary": "…", "status": {"name": "In Progress"},
+            "description": {"type": "doc", "version": 1, "content": ["…"]},
+            "comment": {"comments": [{"author": {"displayName": "…"}, "created": "…", "body": {"type": "doc", "…": "…"}}]}}}
+```
+
+Also assumed: `acli jira auth status` prints the active site on a line `Site: <host>` (the
+site check above reads it, and refuses when it is missing), `--fields summary,status,description,comment` returns the comments (the
+documentation's own example is `--fields summary,comment`), and `acli jira auth status` ends with 0
+when signed in and non-zero when not (its page does not document its exit codes). The reading
+tolerates a description that is a string and `fields.comment` being the array itself. **The
+maintainer checks Jira on their work machine** (`flottille workspace ticket <project> <name>
+ABC-123`, then `workspace show`); a different shape shows as an empty title or description, and
+the fix is in `crates/flottille/src/tickets.rs` (`work_item`).
+
+## What a failure says
+
+**`gh` or `acli` missing, or not signed in**, is said in the ticket's `problem`, with what to do
+(`gh auth login`; `acli jira auth login`), and `workspace show` prints it under the ticket's
+reference. A ticket the tracker does not know, a call that fails or is cut, an answer that is not
+JSON: the same, with the tracker's own first line, masked. The rest of Flottille works as before.
+
+## When it is read
+
+**On demand**: `workspace.ticket {project, name}` (and so `flottille workspace show` and the
+window's `WORKSPACE` section, when a page opens or the ticket is linked or unlinked) and
+`tickets` `show` read it now, one call; a workspace keeps only the reference, and what it shows
+is as fresh as the call.
+
+**And continuously**: every ticket of a declared tracker is read by the daemon on its own,
+incrementally, its title, state, assignee, labels and status kept in the store and its changes
+said as `item.*` events ([`items.md`](items.md)); its description is not kept, nor its comments,
+except those of a Jira work item a subscription follows (below).
+`tickets` `list` and `search` answer from that store once a round of the tracker worked, saying
+its age; `show` reads live and stores what it read; a subscription to a ticket hears those
+events.
+
+## The protocol and the command line
+
+- `workspace.ticket {project, name}` answers `{project, workspace, ticket, tracker, repository,
+  title, state, url, description, comments: [{author, at, body}], older_comments, read_at,
+  problem}`; with no ticket linked, `ticket` is null and the rest is absent; when it cannot be
+  read, `problem` says why (`docs/protocol.md`).
+- `workspace.link_ticket {project, name, ticket}` links, or unlinks when `ticket` is null, and
+  answers as `workspace.ticket` does.
+- `workspace.create {…, ticket?}` links at creation.
+- `project.ticket {project, ticket}` reads a ticket before any workspace has it, for the
+  new-workspace form's preview: `{project, ticket, tracker, tracker_said, problem, …}` with the
+  fields of `workspace.ticket`; `problem` says why it cannot be taken or read (no tracker, another
+  tracker's form, another Jira site, a read that fails).
+- `flottille workspace show <project> <name>` prints the ticket after the steps, and `--json`
+  holds what `workspace.ticket` answered under `ticket_read` (the reference itself is
+  `ticket`, in `workspace list` too) (`docs/cli.md`).
+
+## The program it needs
+
+Choosing Jira says whether `acli` is found, its version and whether it is signed in (`acli jira
+auth status`'s exit code), and GitHub issues the same for `gh`, in the project's Settings and in
+`flottille doctor`; a missing `acli` shows its installation page
+(<https://developer.atlassian.com/cloud/acli/guides/install-acli/>), a signed-out one `acli jira
+auth login` with a button that copies it. See [`forges.md`](forges.md), "The programs it needs".
+
+## The window
+
+The session page's `WORKSPACE` section shows the ticket under the repositories: its reference,
+its state and its title, which open the ticket on its tracker with the system's default handler
+on a click, or what stops it from being read. Beside it, a field links another ticket (Enter),
+and a button unlinks it. The form that makes a workspace has an optional ticket field, and **previews the ticket as it is
+typed**: once typing rests (300 ms) it asks `project.ticket` and shows the tracker and the title,
+or why the ticket is not taken, before anything is created.
+
+## The agent's tool `tickets`
+
+`tickets {action, …}` (`docs/tools.md`, "The tickets"): `list` every ticket of a state in one call
+(by label and assignee), `search` with words, `show` the workspace's ticket or another of the
+project's tracker by its key; `create`, `comment`, `edit` (on GitHub also labels and assignees), `close` (on
+GitHub, completed or not planned), `reopen` and `status` (on GitHub, the Status of the issue on its
+Projects board, `docs/tools.md`), each to judge, held in Ask and allowed in Full as the other writes are. A key the
+tracker does not take, or a creation in a Jira project that is not one of the tracker's, is
+refused, and nothing is asked of any tracker. A GitHub search stays in the tracker's repository:
+a query holding `repo:`, `org:`, `user:`, `is:pr` or `type:pr` is refused, and only the issues
+whose link is the tracker repository's are kept, the others counted. Every agent of a project that declares a tracker has
+the tool, in `main` as in a workspace, whether a ticket is linked or not (a session running
+when the tracker is declared is told, `docs/tools.md`, "When the tools change"). Until #141 `show` was `ticket_read`.
+
+`list` and `search` answer from what the daemon's rounds keep ([`items.md`](items.md), "What
+reads this stream"), with its age (`… : 2 (as of 3 min ago)`); a `search` finds the words in the
+titles, all of them, whatever their case, since no description is kept, and its answer says
+so. Before the first round
+of the tracker worked, they ask the tracker as they did.
+
+### Subscribing to a ticket
+
+**`subscribe {ticket?, workspace?, events, from?, minutes?}`**: the next of `events` of the
+ticket (the one named, or the workspace's) wakes the agent once, as a `subscription` delivery
+(`docs/design.md` §5.6), with the same shape as `forge` `subscribe`: `commented` (a new comment,
+its author and an excerpt), `status` (Jira's status moved, or the ticket was reopened), `assigned`
+(its assignees changed) and `closed`, which ends any subscription to it. `from: people` leaves out
+a bot (a GitHub login `app/<name>` or `<name>[bot]`, as for a pull request) and a comment marked
+as posted by an agent; `minutes` is 60 by default, 6000 at most. The
+ticket is read once and stored first: what is so now is no event. The answer says when the rounds
+do not see it yet, and so miss what happens before their next one: the tracker had no complete
+round (it never worked), or the item is not stored (a Jira work item whose status Jira gives no
+category for). **A Jira work item's comments are read by the rounds only while a subscription
+to its `commented` follows it** (`acli jira workitem view <KEY> --json --fields comment`, one
+call per work item that changed), since a tracker's every work item would cost one call each;
+a comment is then an `item.commented` as on GitHub, and an agent's own, ending with the footer,
+is said `posted by an agent` and left out of `from: people`. Subscribing again to the same
+ticket replaces the agent's subscription; **`unsubscribe {ticket?}`** cancels those to the ticket
+named, every one when it names none. The events are the rounds' (`item.commented`,
+`item.changed`, `item.closed`): a subscription hears as often as the rounds come. It is listed,
+cancelled and ends as a pull request's (`docs/protocol.md`, "The subscription methods"); the
+window's rail names it `Ticket #5 of api` or `Ticket ABC-1`.
+
+### Jira's writes
+
+Through the user's own `acli`, each once the site is checked (above), the texts passed as they
+are written (a text holding what looks like a secret is base for the gate, as on GitHub):
+
+| Write | `acli` |
+|---|---|
+| `create` | `jira workitem create --project <P> --summary <title> [--description <body>] [--type <type>] [--label a,b] --json`, `P` one of the tracker's projects (the only one when it has one); with no type, the project's default |
+| `comment` | `jira workitem comment create --key <K> --body <body>` |
+| `edit` | `jira workitem edit --key <K> [--summary <title>] [--description <body>] --yes` |
+| `close`, `reopen`, `status` | `jira workitem transition --key <K> --status <name> --yes` |
+
+**`acli` lists no work item's transitions** (its commands,
+<https://developer.atlassian.com/cloud/acli/reference/commands/jira-workitem/>, have no listing
+and no way to call Jira's REST API, and `view` has no transitions field), and Flottille provides
+no login of its own to call Jira's REST API with. What `acli jira workitem transition --status`
+does is ask Jira for the work item's transitions and take the one that leads to the status named,
+so **that is the judge**: a status is never refused because no work item is in it. Each of the
+three first reads the work item's own status, `acli jira workitem view <K> --json --fields status`
+(its name and `statusCategory.key`: `new`, `indeterminate`, `done`). **One status is attempted,
+never several in turn**:
+
+- `status` hands `acli` the name asked, as it was written. A work item already in it (any case)
+  answers `ABC-1 is already in To Do; nothing was written.`;
+- `close` on a work item already in a `done` category answers `ABC-3 is already closed: it is in
+  Done; nothing was written.`. Otherwise the status is chosen among the `done` ones seen on the
+  project's work items (`acli jira workitem search --jql 'project = "<P>" ORDER BY updated DESC'
+  --fields key,status --json --limit 200`): the only one seen; else, of several, the one named
+  `Done` (any case); else, none seen, `Done`. Several and none named `Done` are refused, nothing
+  written, saying them and asking for `status` with one of them (a project may have `Won't do`
+  beside `Done`, and which one is meant is not for Flottille to try);
+- `reopen` on a work item that is not in a `done` category answers `ABC-1 is already open: it is in
+  To Do; nothing was written.`. Otherwise the same rule with the `new` category and `To Do`. A
+  started (`indeterminate`) status is never taken for it.
+
+**What is said is what the status read back says.** `transition` is a bulk command (it has
+`--ignore-errors`), so it may end with 0 on a transition it did not take, and it may be cut or
+killed on one it did. After it, the work item's status is read again, once, and compared (any case)
+with the one attempted: if it is that one, the work item `was closed`, `reopened` or `moved to` it,
+named as Jira spells it and not as the agent wrote it; if it is not, the answer is `ABC-1 was not
+moved to Done: it is in To Do`; and if it cannot be read, `the result is unknown`, asking to look at
+the work item before asking again. `nothing was written` is said only when `acli` refused (it ended
+with an error of its own, with its first line) or when the status read back is the old one. When
+`acli` refuses, the statuses seen on the project's work items are said as seen, which does not say
+where the work item can move: `acli could not move ABC-1 from To Do to Blocked: …; nothing was
+written; move it with status, naming a status; seen on ABC's work items: To Do and Done (that does
+not say where ABC-1 can move)`.
+
+This is a known limit: `Done` and `To Do` are Jira's names for its default workflow, attempted only
+when no work item shows the project's, and a workflow whose `Done` is not of the `done` category
+would be moved to it. The list of the statuses a work item can move to now waits for `acli` to give
+it. **Assumed**, from the same pages, which give flags and no output: `--status` is matched by Jira
+or `acli` without regard to case; `create --json` prints the created work item with its `key`; a
+create with no `--type` takes the project's default type; a refused transition ends with a non-zero
+code.
+
+### What `acli jira workitem search` prints is assumed too
+
+Its page (<https://developer.atlassian.com/cloud/acli/reference/commands/jira-workitem-search/>)
+gives its flags (`--jql`, `--fields`, `--json`, `--limit`, `--paginate`) and no output. The
+reading takes an array of work items in the shape `view` prints, or Jira's REST search object
+(`{"issues": [...]}`), and reads `key`, `self`, `fields.summary`, `fields.status.name`,
+`fields.assignee.displayName` and `fields.labels`. An item whose `self` names another site (not
+the tracker's, nor an Atlassian host, as above) is left out and counted; one with no `self` is kept, since the search was of the signed-in site's
+projects. The maintainer checks it on their work machine
+(`tickets list` from an agent of a Jira project); a different shape shows as an empty list.
+
+**Which fields `--fields` allows is not documented**: the page above gives the default
+(`issuetype,key,assignee,priority,status,summary`) and the example `key,summary,assignee`, and
+nothing on the others; the page of `workitem view` takes any field name (`*all`, `-field`), which
+`search` is not known to do. What is known comes from a real site: `acli jira workitem search`
+answered `✗ Error: fields 'updated, created' are not allowed`, naming those two alone, so
+`key`, `summary`, `status`, `assignee`, `reporter`, `labels`, `issuetype` and `priority`, asked in
+the same line, passed. Those eight are what Flottille asks (`ITEM_JIRA_FIELDS` and the two other
+searches, which ask fewer), and the fake `acli` refuses any other with that message. `updated`
+and `created` are therefore not asked: the items read `fields.updated` and `fields.created` when
+the output holds them, and a work item without them is listed without a date (the search's own
+order, `ORDER BY updated DESC`, stays). `workitem view` is not run for the dates of a thousand
+work items; if the maintainer finds that `acli` prints them under another flag, that is a
+follow-up. The maintainer checks the Tickets tab of a Jira project on their machine.
+
+## Tests
+
+Tests never call GitHub or Jira nor use anyone's sign-in: a fake `gh` (`crates/flottille-fake-gh`,
+which answers `issue view`, `issue list`, the issue writes, the `gh project` calls of a status and the
+missing `project` scope too) and a fake `acli`
+(`crates/flottille-fake-acli`, `workitem view`, `workitem search` and the writes), first on the
+`PATH` of the test's daemon, answer from a script and record every call; the repositories are
+throwaway ones whose `origin` is set to a GitHub URL after their workspace is made, and whose
+forge and tracker are declared with `project.set_settings`
+(`crates/flottille/tests/tickets.rs`).

@@ -10,8 +10,10 @@ This document is the reference for what Flottille is and how it is built. It sta
 mechanisms it reuses from an earlier, larger project are written out in full in
 [`reference/hemera.md`](reference/hemera.md), the real multi-repository case it must handle is in
 [`reference/multi-repo-case.md`](reference/multi-repo-case.md), the way of handing work between
-agents that it must build in is in [`reference/orchestration.md`](reference/orchestration.md), and
-what is known about the window toolkit is in [`reference/gpui.md`](reference/gpui.md).
+agents that it must build in is in [`reference/orchestration.md`](reference/orchestration.md),
+what the MCP protocol and its main client do today, and the rules Flottille's two MCP doors follow
+because of it, are in [`reference/mcp.md`](reference/mcp.md), and what is known about the window
+toolkit is in [`reference/gpui.md`](reference/gpui.md).
 
 ## 1. What Flottille is, and what it is not
 
@@ -24,16 +26,23 @@ what is known about the window toolkit is in [`reference/gpui.md`](reference/gpu
   script) integrate Flottille through these, never by reading its database.
 - A **local MCP server** with two doors: the tools of the agents Flottille runs, and a *pilot*
   door through which an agent running outside Flottille (for example a coding agent in a
-  terminal) drives it: list projects, launch agents, talk to them, read their state.
-- A **window** (GPUI) that is one more client of the daemon: projects, workspaces, the tree of
-  agents, a live conversation, a reply box, the approvals waiting.
+  terminal) drives it: list projects, start root agents and talk to them, read every agent's
+  state and conversation.
+- A **window** (GPUI) that is one more client of the daemon: projects, the places where their
+  work happens, sessions with their tree of agents, a live conversation with the root agent, the
+  approvals that reach the user.
 
 **It is not (yet):** a planning tool. There is no specification workflow, no phases, no proof
-system, no remote judge. Those may come later; the first tranches must give something to use and
+system, no remote judge. Those may come later; the first milestones must give something to use and
 try quickly. When in doubt, the smaller thing wins.
 
 **It is generic.** Nothing is tied to one machine, one desktop, one forge or one agent. Links open
-with the system's default handler, colours follow the system, paths come from XDG.
+with the system's default handler, colours are Flottille's own unless the desktop provides a
+theme to follow (§10), paths come from XDG.
+
+**The user talks to root agents only.** A child belongs to its parent: the parent reads it,
+writes to it and is written to by it. The user can read any agent of a tree, never write to a
+child, and a child never asks the user anything: what it needs goes to its parent (§5.1, §7).
 
 ## 2. Vocabulary
 
@@ -41,22 +50,27 @@ with the system's default handler, colours follow the system, paths come from XD
 |---|---|
 | Project | A folder. Either a git repository itself, or a folder holding several independent repositories (and possibly being one itself). |
 | Repository | One git repository of a project, with its path relative to the project folder, its base branch rule and its remote. |
-| Workspace | The place one piece of work happens: one git worktree per repository it takes, on one branch name, in one folder, prepared by the project's recipe. |
-| Recipe | The project's ordered preparation steps for a new workspace: copy, link, run, plus the workspace's variables. |
-| Command catalogue | The project's named commands (`api:dev`, `test`, `lint`…), runnable by the user and by agents. |
+| Workspace | The place one piece of work happens: one git worktree per repository it takes, on one branch name, in one folder, prepared by the project's setup. |
+| Setup | The project's ordered preparation steps for a new workspace: copy, link, run, plus the workspace's variables. |
+| Tasks | The project's named command lines (`api:dev`, `test`, `lint`…), runnable by the user and by agents. |
+| Skill | A text of the project an agent reads with a tool when its task needs it: a path of the project folder, or a text Flottille keeps. |
+| Command | A project's named instructions, sent to a session as `/name`. |
 | Agent | One agent session: a provider (Claude Code first), a model, a role, a place, a conversation, a state. Survives process restarts; can be replaced. |
-| Lead | An agent that has children. Any agent can be one, within the limits. A user-started agent is a root. |
-| Child | An agent launched by another agent through Flottille's tools. Tied to its parent for life. |
-| Delivery | A message Flottille hands to an agent (a child's report, an approval result, a user message), stored before it is sent. |
+| Root | An agent the user started. The only kind of agent the user writes to and the only one that can need the user. |
+| Lead | An agent that has children. Any agent can be one, within the limits. |
+| Child | An agent launched by another agent through Flottille's tools. Tied to its parent for life and belongs to it: only its parent writes to it; the user can read it. |
+| Place | Where an agent works: the project folder itself (`main`) or one of its workspaces. |
+| Session | A root agent and every agent it launched, shown as one conversation; it works in one place. |
+| Delivery | A message Flottille hands to an agent (a child's report, a child's question, an approval request or result, a user message to a root), stored before it is sent. |
 | Report | What a child returns to its parent when it is done, through the `report` tool. |
-| Approval request | A tool call the gate held for the user. The agent is answered at once; the result comes later as a delivery. |
+| Approval request | A tool call the gate held. A root's request is the user's; a child's request is held by its parent, which denies it or forwards it up (§7). The agent is answered at once; the result comes later as a delivery. |
 
 ## 3. Architecture
 
 ```
             ┌───────────── window (GPUI) ─────────────┐
-            │  projects · workspaces · agent tree ·   │
-            │  live conversation · reply · approvals  │
+            │  projects · places · sessions · agents  │
+            │  conversation · reply · approvals       │
             └───────────────────┬─────────────────────┘
                                 │ socket protocol (JSON lines)
  shell / bar / scripts ── flottille CLI (--json, watch) ──┐
@@ -67,7 +81,7 @@ with the system's default handler, colours follow the system, paths come from XD
  │ store (SQLite) · projects · workspaces/git · gate · deliveries    │
  │ sessions tree · sweeps · command runs · event bus                 │
  │ MCP server (HTTP, 127.0.0.1, per-session bearer token) ◄──────┐   │
- │ ACP client ──► adapter process ──► agent CLI (claude, …) ─────┘   │
+ │ ACP client ──► Claude bridge (ACP) ──► claude ────────────────┘   │
  └───────────────────────────────────────────────────────────────────┘
 ```
 
@@ -80,7 +94,8 @@ with the system's default handler, colours follow the system, paths come from XD
   every request is self-contained, identifiers are opaque strings, nothing depends on sharing a
   file system with the client except paths the user typed.
 - **Store**: SQLite (bundled), one file. Agents' conversations (the ACP events), tool calls,
-  approvals, deliveries, sessions, projects, workspaces, steps, command runs.
+  approvals, deliveries, sessions, projects, workspaces, steps, command runs, and every pull
+  request and ticket of the projects (`items.md`).
 - **Events**: everything that changes emits an event on the bus; `flottille watch` prints them,
   the window renders them. The event names and fields are a documented contract (`docs/events.md`,
   written with the code). Every event has a sequence number and is stored: a client that drops
@@ -95,14 +110,30 @@ with the system's default handler, colours follow the system, paths come from XD
 
 ### 4.1 Running them over ACP
 
-Flottille is an ACP client. Each agent session is one adapter process speaking ACP on stdio:
+Flottille is an ACP client. Each agent session is one process speaking ACP on stdio:
 
-- **Claude Code** (tranche 1): the official adapter `@agentclientprotocol/claude-agent-acp`
-  (Node), pointed at the user's own `claude` binary with `CLAUDE_CODE_EXECUTABLE`. Flottille
-  installs a pinned version of the adapter into its own data folder (`npm install --prefix`) and
-  never uses `npx`. Node and the user's `claude`, signed in, are prerequisites.
-- **Codex** and **OpenCode** come later (`codex-acp` with the patch described in
-  `reference/hemera.md` §2, and `opencode acp`). Gemini CLI speaks ACP natively too.
+- **Claude Code** (first): Flottille's own bridge, `flottille bridge claude`, written in Rust
+  inside Flottille's binary. It speaks ACP to the daemon and drives the user's own `claude` in its
+  stream-json mode, at the version of `claude` Flottille was checked against (`flottille doctor`
+  warns on another). Nothing else is installed: the user's `claude`, signed in (or given
+  `ANTHROPIC_API_KEY`), is the only prerequisite. How the bridge maps ACP to `claude` is
+  in `docs/agents.md`.
+- **OpenCode**: the user's own `opencode acp`, its configuration moved into Flottille's data
+  folder and its bare agent given in its environment (`docs/agents.md`, "Bare mode for
+  OpenCode").
+- **Codex**: Flottille's own bridge, `flottille bridge codex`, in front of the user's
+  `codex app-server`, which it starts with Codex's configuration moved into Flottille's data
+  folder, every tool of its own switched off and no environment (`docs/agents.md`, "Bare mode for
+  Codex"). Gemini CLI speaks ACP natively too.
+
+Each is a provider, an entry of its own in the daemon; which are enabled is the user's
+(`providers.toml`), and each agent runs on one for life (`docs/agents.md`, "Providers"). The
+daemon reads the models of each enabled provider whose program is there, in the background and
+without a prompt (Codex's `model/list` with no thread; Claude's and OpenCode's agent started as
+for a session, with no user message): at the daemon's start, when the provider is enabled, and
+when its program (path or modification time), the names of its API keys set or the presence of
+its sign-in file change. The first session can be given a model (`docs/agents.md`, "The
+models").
 
 Handshake, session open order (resume, else load, else new), model/effort/mode options, event
 mapping, cancel, idle release of processes and death handling follow `reference/hemera.md` §1.
@@ -113,43 +144,104 @@ own and never reads or copies credentials.
 ### 4.2 Bare mode: the agent has only Flottille's tools
 
 Every agent runs in bare mode (`reference/hemera.md` §2): no built-in tools, no user or project
-settings, no skills, no plugins, no user MCP servers, only Flottille's MCP server. For Claude:
-`tools: []`, `settingSources: []`, `strictMcpConfig: true`, `allowedTools` = the exact names of
-the session's Flottille tools, a custom system prompt, and the two MCP timeouts raised.
+settings, no skills, no plugins, no user MCP servers, only Flottille's MCP server. For Claude,
+set by the bridge on `claude` itself: `tools: []`, `settingSources: []`, `strictMcpConfig: true`, `allowedTools` = the exact names of
+the session's Flottille tools, a custom system prompt, and the two MCP timeouts raised. For
+OpenCode, set in its environment: every tool denied but Flottille's, its own agents disabled,
+its prompt the agent's instructions, and no configuration of the user's or the project's. For
+Codex, set by the bridge on `codex app-server`: its own folder, a list of switches that turn its
+tools off, no environment in any thread, the agent's instructions in place of Codex's, and
+Flottille's server alone; Codex has no allowlist, so the bridge also fails a turn in which a tool
+of Codex's own starts.
+
+Nor does it reach the web but through Flottille: no fetch or search tool of its provider's, only
+`web`, which the daemon performs under the gate, never to this machine nor a private network,
+and which judges a URL the agent built (`tools.md`, "The web").
 
 This is what makes the rest hold: with no shell and no native sub-agent tool, an agent **cannot**
 start another agent (no `Task`, no `claude --bg`, no background shell) except through
-`agent_launch`, and it cannot do anything the gate did not see. The agent's own permission
+`agent_launch`, and it cannot do anything the gate did not see. Nor can it drive the daemon from
+a command it runs: the daemon refuses a client that descends from it (`docs/protocol.md`,
+"Transport"). The agent's own permission
 prompts answer themselves: Flottille's tools are allowed, anything else is rejected.
 
-### 4.3 The tools an agent gets (tranche 1)
+### 4.3 The tools an agent gets (first milestones)
 
-Generic tools, as specified in `reference/hemera.md` §3 (arguments, limits, exact refusal texts):
+Generic tools, as specified in `reference/hemera.md` §3 (arguments, limits, exact refusal texts),
+with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
 
 - files: `fs_read`, `fs_list`, `search`, `fs_write`, `fs_edit` (read-before-write fingerprints,
   temp file + rename, all-or-nothing edits);
-- commands: `commands_list`, `commands_run` (catalogue command or one line, **never a shell**),
-  `commands_output`, `commands_stop`;
+- tasks and runs: `tasks` (the project's tasks, written by a root only), `run` (a task or one
+  line, **never a shell**), `run_status` (a run's output, or its stop);
+- forges (every agent of a project whose repositories declare a forge, in `main` as in a
+  workspace): `forge`, which lists and reads the pull requests of the place's repositories and
+  their checks (`forges.md`), and opens, comments, edits or merges them or re-runs a failed
+  pipeline, each write a call to judge (§7); in `main` it names the workspace;
+- the workspace (every agent): `workspace`, which lists and reads the workspaces, and, for a root,
+  creates and prepares them, and removes one it does not work in, always held for the user, its
+  card saying what would be lost;
+- skills: `skill_read`, one of the project's skills, texts read when relevant (`skills.md`);
+- the web (every agent): `web`, which reads a page (its main content as Markdown, a PDF's text)
+  or searches through DuckDuckGo, never this machine nor a private network; a URL the agent was
+  shown passes, one it built is judged, since a GET sends out what the URL holds (`tools.md`,
+  "The web");
+- tickets (every agent of a project that declares a tracker, in `main` as in a workspace):
+  `tickets`, which lists, searches, reads and writes the tracker's tickets, GitHub issues or Jira
+  work items, each write a call to judge (`tickets.md`);
+- the project (a root): `skills` and `commands` (list, show, add, edit, remove), `setup` (its
+  steps, numbered) and `project` (its settings, its forges and tracker, its rules), and the writes
+  of `tasks`, what the window does, each change a call to judge, a change of the tracker or of the
+  rules base, a line it sets judged as a run of it (`tools.md`, "The project", `projects.md`);
 
 Flottille's own tools:
 
-- `agent_launch {title, brief, model?, role?, workspace?: existing | new {name, repositories?} | parent's}`:
-  starts a child, answers at once with its id. Refused (never queued) above the caps.
-- `agent_send {agent, message}`: a message to one of the caller's children.
-- `agent_status {agent?}`: for one child or all of them: state, what it is doing now (thinking,
-  in a tool call, which command runs and for how long, waiting for approval #n, waiting on the
-  provider), time since its last sign of activity, context use, last few messages.
-- `agent_read {agent, after?}`: a page of the child's conversation.
-- `agent_stop {agent}`: stops the child and its own tree.
+- `agent_launch {title, brief, model?, role?, root?, workspace? | new_workspace? + repositories?}`:
+  with `root`, a root only starts a session for the user, in a workspace (existing or new) or its
+  own place, judged, in the tree's mode, its first message the agent's and never the user's, base
+  when that root was itself started by an agent (`tools.md`, "Sessions for the user"); work that
+  belongs in a workspace is a session, and the tool's description leads with that form. Without
+  it, starts a child in the caller's own place, never another (a workspace named is refused,
+  naming `root: true`), and answers at once with its id. Refused (never queued) above the caps.
+- `session_send {session, text}` (a root): a message to a session the caller started, or to the
+  agent that started it, judged as a write is; it arrives as a delivery labelled with its sender,
+  never as the user's, and the answer comes back the same way.
+- `session_read {session?, last?, since?, until?, cursor?}` (a root): a page of the conversation
+  of another session of the caller's project (the user's messages to it and its agent's replies,
+  with their times), the last messages or those between two dates, with a cursor to the next page,
+  and the mode of that session's tree; framed as that session's data, never instructions; judged
+  in Ask and Auto; a session of another project is refused. Without `session` (or with the
+  caller's own id) it reads this session: its id, its role and its tree's mode, asked of nobody.
+- `agent_send {agent_id, message}`: a message to one of the caller's children.
+- `agent_status {agent_id?, action?, detail?, after?}`: for one child or all of them: state, what
+  it is doing now (thinking, in a tool call, which command runs and for how long, waiting for
+  approval #n, waiting on the provider), time since its last sign of activity, context use; the
+  last few messages for one child, or for all with `detail: full`. `action: conversation`: a
+  page of the child's conversation.
+- `agent_stop {agent_id}`: stops the child and its own tree.
 - `report {text}`: the caller is done; its report goes to its parent at once and the session ends
   (see 5.3). A root agent's report goes to the user.
-- `ask_user {question}`: a question to the user, answered later as a delivery (never blocks).
+- `ask_user {question}` (a root only): a question to the user, answered later as a delivery
+  (never blocks).
+- `ask_parent {question}` (a child only, in place of `ask_user`): a question to its parent,
+  delivered as `child-question`; the parent answers with `agent_send`.
+- `approval_answer {request_id, decision: forward | deny, why}`: answer a request held for the
+  caller by one of its children (§7). `forward` passes it to the caller's parent, or to the user
+  when the caller is a root. There is no way to allow a request.
 
-The tool list of a session is fixed for its whole life (prompt cache, `reference/hemera.md` §7).
+The tool list of a session is its role's, and changes only when the role's does (prompt cache,
+`reference/hemera.md` §7): a project that declares or drops a forge or a tracker, a new version.
+A running session is then told (`notifications/tools/list_changed`) and served the new list, or
+said to run an older one until a restart (`docs/tools.md`, "When the tools change"). It depends
+on what the agent can do: a root gets `ask_user`, `session_send`, `session_read`, `skills`,
+`commands`, `setup` and `project`, a child `ask_parent`; a child, whatever its role, gets no `agent_*` tools
+and no `approval_answer`. A root lead has 25 tools, a child 14; one more each when the
+project's repositories declare a forge (`forge`), one more when it declares a tracker
+(`tickets`), whatever the place (`reference/mcp.md` §4).
 
 ### 4.4 Roles
 
-Two roles in tranche 1, both with the same tools:
+Two roles at first, with the tool lists of 4.3:
 
 - **lead**: the role of an agent the user starts. Its instructions carry the orchestration
   standard (`reference/orchestration.md`): when to launch a child, which model, one precise task
@@ -157,7 +249,7 @@ Two roles in tranche 1, both with the same tools:
 - **worker**: the role of a child. Its instructions say: do the brief and only it, keep going
   without waiting for answers, end with `report`.
 
-A worker may launch its own children (depth limit, 5.1). Roles are data (a template and a few
+A worker launches no children of its own (no depth, 5.1). Roles are data (a template and a few
 flags), so more can be added without code changes.
 
 ## 5. Parenting and waking (the core of Flottille)
@@ -171,13 +263,19 @@ something happens or when nothing does.
 
 - Every agent launched through `agent_launch` has a parent (its lineage, stable across
   replacements) and a depth. Root agents are started by the user (window, CLI, pilot door).
-- **Caps**: children running at once per project (default 3, configurable 1 to 6), and depth
-  (default 2: a lead's worker may have workers, theirs may not). Above a cap, `agent_launch` is
-  refused with a sentence the agent can act on; it never queues silently.
+- **Caps**: children running at once per project (default 12, configurable 1 to 12), and no
+  depth: only an agent the user started (a root) has the `agent_launch` tool, a child never has
+  it, whatever its role. Above the cap, `agent_launch` is refused with a sentence the agent can
+  act on; it never queues silently.
 - **Stopping a parent stops its tree**, deepest first. Closing or archiving an agent closes its
   children. Deleting a workspace that an agent uses is refused while it runs.
-- The user can open and talk to **any** agent in the tree; a user message is a delivery like any
-  other.
+- **A child belongs to its parent.** The parent reads it (`agent_status`), writes to
+  it (`agent_send`) and is written to by it (its report, its questions, its approval requests).
+  The user can open and read **any** agent in the tree, but writes to the root only: a user
+  message to a child is refused, from every client, and the user stops a child only by stopping
+  its root. A user message to a root is a delivery like any other.
+- A child never needs the user. When it waits on its parent (a question, a request held), it shows
+  as waiting on its parent; only a root shows as needing the user.
 
 ### 5.2 Deliveries
 
@@ -187,6 +285,11 @@ between turns, pinned as a note on the next tool result when it is mid-turn (wit
 fallback that cancels the turn and sends it as a prompt), given back when a turn fails, escaped so
 data can never forge a marker. No timers wake an agent: waking is always a delivery.
 
+The same path wakes an agent about its own command: a command that outlived its call (it keeps
+running, or ran past the call's wait) delivers `command-ended` to the agent that started it when it
+ends: the line, the exit code, the duration and the last lines of the output, masked
+(`docs/tools.md`, "Commands").
+
 ### 5.3 What the parent is told
 
 | Event of a child | Delivery to the parent |
@@ -195,7 +298,8 @@ data can never forge a marker. No timers wake an agent: waking is always a deliv
 | ends a turn without reporting | Flottille first sends the child one reminder ("end with `report`…"); a second turn without a report tells the parent `child-idle`, with the child's last message. |
 | fails (agent error, provider limit, replacement limit) | `child-failed`, with the reason and the last output lines. Urgent. |
 | is stuck (no sign of activity for 5 min in a turn, not waiting on the provider, no command of its own running) | `child-stuck`; Flottille replaces it once, and says so. |
-| has a call held for the user | `child-waiting`, with the request number and what it asks; the parent knows the child is not broken. |
+| has a call held by the gate (an "ask") | `child-asks`, with the request number, the call and the reasons. Urgent. The parent answers with `approval_answer` (forward or deny, §7). |
+| calls `ask_parent` | `child-question`, with the question. The parent answers with `agent_send`. |
 | sits idle with nothing queued while another launch waits for a slot | ended, and `child-ended` tells the parent. |
 
 ### 5.4 When nothing happens
@@ -210,8 +314,47 @@ while nothing changes, up to a ceiling, so a quiet tree costs few wakes.
 ### 5.5 Replacement and restarts
 
 Replacement on death, stuck, or a full context, the epoch that makes a replaced agent's late
-calls fail, the replacement limit (2 in 30 min, then the user is asked), and the rebuild at daemon
-start follow `reference/hemera.md` §5.
+calls fail, the replacement limit (2 in 30 min; then a child fails and its parent gets
+`child-failed`, and a root asks the user), and the rebuild at daemon start follow
+`reference/hemera.md` §5.
+
+### 5.6 Subscriptions: waking on what happens outside
+
+An agent that waits for something outside Flottille (the end of a pull request's checks, a
+review) subscribes to it instead of reading again and again. Four parts, each its own:
+
+- **A source** turns what happens to a target into **events**; a state already there when it
+  subscribed is no event. The sources are the daemon's rounds of the items ([`items.md`](items.md),
+  "What reads this stream"), which compare each read with what the store holds and say it as
+  `item.*` events: a subscription to a pull request filters those of its pull request, as
+  `checks` (all ended), `review`, `comment`, `merged` and `closed` (`docs/forges.md`,
+  "Subscriptions"), one to a ticket those of its ticket, as `commented`, `status`, `assigned` and
+  `closed` (`docs/tickets.md`). No subscription reads anything of its own; it hears as often as
+  the rounds come. The **timer** of a wake is a source too: its target is the agent's reason, its
+  one event the time it asked for (`wake`, `docs/tools.md`, "Waking later").
+- **A subscription** is (agent, source, target, the events chosen, whose events count, an
+  expiry), stored, so that it survives a restart of the daemon; nothing that happened meanwhile
+  is lost, since the next round compares with what the store kept
+  (`crates/flottille/src/subscriptions.rs`). The agent subscribes itself (`forge` `subscribe`,
+  `tickets` `subscribe`, `wake`, `docs/tools.md`); nothing subscribes it.
+- **One shot.** The first read that holds an event the subscription waits for is delivered, every
+  such event of that read in one delivery, and the subscription is over. It also ends when the
+  target ends (a pull request merged or closed, a ticket closed, said when that was not what it
+  waited for), when
+  its time is up (an hour by default, 100 hours at most, said), when the agent ends, or when the agent unsubscribes.
+  Nothing is delivered of what does not change: each delivery costs the agent a turn.
+- **Delivering** is the existing path (§5.2): a `subscription` delivery, masked, its forge texts
+  framed as data and not instructions, wakes the agent as a child's report does.
+
+Left for later: relaunching an agent that has ended when an event comes; a rhythm faster than
+the rounds' for a subscription that needs it.
+
+The window shows them: the session page's rail lists the session's open subscriptions (the pull
+request or the ticket, the events, since when and until when; a wake, `Wake: <why>` and when it is due), each with a Cancel that ends it through the daemon
+(`subscription.cancel`), an agent between turns that waits on one is drawn waiting, not idle, in the
+left tree and in the rail (`Waiting: wake at 10:42` for a wake), and the delivery that wakes the
+agent is a folded step saying what woke it (`woken by the timer: <why>`).
+Opening and ending are events (`subscription.opened`, `subscription.ended`, `docs/events.md`).
 
 ## 6. Projects and workspaces
 
@@ -227,7 +370,7 @@ start follow `reference/hemera.md` §5.
 - Per project: branch prefix, workspaces root (default
   `$XDG_DATA_HOME/flottille/workspaces/<project>`, or beside the project:
   `<parent>/<project>-work/`), which repositories a workspace takes by default (**all**, or a
-  chosen set), variables, command catalogue, recipe, "never" list, children cap.
+  chosen set), variables, tasks, setup, skills, commands, "never" list, children cap.
 - The project configuration is a TOML file Flottille owns (in its config folder), editable by
   hand and from the window. Nothing is written into the user's repositories.
 
@@ -240,9 +383,11 @@ by `reference/multi-repo-case.md`:
 
 - **Repository set**: all of the project's repositories by default; the project can say so
   ("environment scope is not change scope").
+- **No fetch imposed**: a repository with no remote, or whose fetch fails, starts from its own
+  base branch, and the creation says so in one line (`docs/workspaces.md`).
 - **Root entries**: when the project folder is not itself a repository, its other top-level
   entries (instruction files, shared folders) can be linked into the workspace folder by one
-  recipe step, never `.git` nor `.gitignore`.
+  setup step, never `.git` nor `.gitignore`.
 - **Ordered per repository**: `run` steps can be declared once "for each repository, in
   dependency order" (leaves first), with `{repository}` in the template.
 - **Variables replace shell hooks**: workspace variables (templated, for example
@@ -254,36 +399,233 @@ by `reference/multi-repo-case.md`:
 - **Removal** refuses a worktree with uncommitted files **or commits not on any remote**
   (`git log HEAD --not --remotes`), names them, and never forces.
 
-Agents are placed in a workspace (writable) or in the main checkout (read-only by default).
+Agents are placed in a workspace or in the main checkout; what each may do there is the gate's
+(§7).
 
 ## 7. The gate
 
-Every tool call goes through one gate, as in `reference/hemera.md` §4, minus the remote judge:
-grant checks, tool admitted for the role, arguments decoded, place rules, then the verdict:
-deny (the project's never list; deleting `.git`; for agents by default: `git push`, history
-rewrites, branch deletion, forge writes, publishing), ask (sensitive places such as `.env`
-files and credential folders, commands marked "ask before running", anything outside the place),
-or allow (reads, catalogue commands, writes in the place).
+Every tool call goes through one gate, as in `reference/hemera.md` §4: tool admitted for the
+role, arguments decoded, place rules, then the call's **class**. The gate grants no right: it
+says what kind of call it is, and the session's **mode** says who answers it.
 
-An "ask" is answered to the agent at once ("request #n is waiting for the user…") and appears in
-the window, in `flottille approvals`, and in the event stream; the user's answer comes back as an
-`approval` delivery after the action was re-checked and performed. A tool call never waits for a
-human.
+- **Harmless** calls pass, in every mode: reading in the project, writing in a workspace, the
+  commands the rules know to only read, a task in a workspace. A known program is
+  the system's only: named bare and found through the run's `PATH` outside the project, its
+  workspaces, the place and the user's `~/.local/bin` and `~/bin`; an option that runs a program or reads past ignored files toward a secret takes it
+  out of this class.
+- **To judge** is everything else: writing in `main`, reading outside the project, a line the
+  rules do not know or whose program is the agent's own file, an option of a reading program
+  that runs one, a commit, a push, a forge write, a change of the project an agent asks for.
+- **Base** calls always come to the user in Ask and Auto, with a strong warning, and pass only in
+  Full, the mode the user chose for that: a push forced
+  (with a lease or not), rewriting history that is on a remote, discarding work in `main` or
+  moving the branch it has checked out, removing git's reflog or unreachable objects, `.git`
+  folders, git settings that run programs or lead pushes (`core`, `alias`, `remote`, `url`,
+  `push`, `credential`, `include`, and every key whose value git runs, set by `-c` or `git
+  config`, or through the environment), a push naming the program that receives it, running as
+  another user (`sudo`, `doas`, `pkexec`), sensitive places (`.env` files, credential folders,
+  Flottille's own folders, another process's `/proc`), publishing, a merge whose checks are
+  waived, a change of the project's tracker or of its rules, and the project's `never` list.
+  They are looked for in every line a wrapper, an option or `git rebase --exec` runs, and in
+  every end of a line whose program the gate does not know, so that no wrapper turns them into
+  calls to judge.
 
-Agent-run commands get an environment without forge tokens and with `git push` neutralised
-(`reference/hemera.md` §3).
+Only a push the gate read and let through goes out: every run's environment rewrites push URLs
+to nowhere, but a run that is itself a `git push` the user, the judge or Full mode allowed (`docs/tools.md`,
+"Tasks and runs").
+
+What stays **refused** is not a permission but a call that cannot be made as it is: shell syntax,
+a malformed call, a login printed, the daemon driven from a command.
+
+### 7.1 The mode and the judge
+
+Each session is in **Ask**, **Auto** or **Full**, a small three-choice control in the composer's
+bar. A session the user starts starts in Auto, never in Full. A tree has one mode, its
+root's, stored with the root and read at each call: a switch reaches every agent of the tree at
+once, children included. Only the user changes it, in the window or with
+`flottille agent mode <agent> ask|auto|full` (`agent.mode`, which switches the tree's root
+whatever agent of it is named); no tool of an agent does, and a session an agent starts for the
+user (`agent_launch` with `root`) takes the mode of the tree that started it, Full included, never
+above it: an agent in Full can already do what the session would do, the session caps still apply,
+and the rules refused in every mode stay refused in it. Each tree keeps its own mode afterwards: a
+switch of the launcher's tree does not reach it. It is kept when the session resumes. An agent
+reads its mode, never sets it: `session_read` with no `session` (its own id is not told to it)
+answers with its id, its role and its tree's mode, and the text Flottille starts every session
+with says so. Reading another session says the mode of that session's tree too.
+
+- In **Ask**, a call to judge is a card for the user.
+- In **Auto**, it goes to the **judge**, which allows it or asks the user: it cannot refuse, and
+  base calls never reach it.
+- In **Full**, nothing is asked: the agent acts as the user. Every call the gate would hold
+  passes at once, base calls included (a forced push, a workspace removed with what it would
+  lose, inline interpreter code, a script the agent wrote), with no request and no judge. Bare mode
+  stays: the agent has only Flottille's tools, and every refusal below stays a refusal, those that
+  keep the user's logins and Flottille itself included. Each call it let through is recorded as
+  allowed by Full mode (`gate` `full` in its `agent.tool_served` event and in the developer log),
+  and its step in the session says "allowed by Full mode". The control draws Full in the alarm
+  colour, so that it is never on by mistake. A request made before the switch stays the user's to
+  answer. **Its limit:** code the agent runs (an interpreter's inline code, a script it wrote) acts
+  with the user's rights, and the gate does not see what that code touches; only a sandbox would
+  close that. The refusals below protect the user from an agent's direct or accidental use of
+  what must never be touched; they are **not a sandbox**: a program the agent runs may still do
+  any of it on its own.
+
+What becomes of a call, by what the gate says of it and the tree's mode:
+
+| The gate says | Ask | Auto | Full |
+|---|---|---|---|
+| Harmless | passes | passes | passes |
+| To judge | a card for the user | the judge allows it, else a card | passes, recorded as allowed by Full mode |
+| Base (a forced push, a `.env`, a read of Flottille's own folders…) | a card, with a strong warning | a card, with a strong warning | passes, recorded as allowed by Full mode |
+| Refused (a login's place, a write of Flottille's own folders or of a startup file, a launcher out of the tree, a git setting that runs later…) | refused | refused | refused |
+
+**Refused**, in every mode, is a call that cannot be made as it is, or that bare mode does not
+have: shell syntax (in a line, a task's or a setup step's line, a `git rebase --exec`), a
+malformed call or an unknown action, a tool the agent does not have (a child's
+`agent_launch` with `root`, a child's `workspace`, a tool of its provider), a login printed (`gh
+auth token`, `aws configure get`, `kubectl config view --raw`, `gcloud auth print-access-token`,
+`git credential fill`, a password manager or a keyring: `pass`, `gopass`, `op`, `bw`, `rbw`,
+`secret-tool`, `docker-credential-*`),
+the daemon driven from a command (`flottille`), a brief, a title or a body longer than the judge
+is given whole, a path that goes up out of a folder that is not there, a text the call does not take, a project write that cannot be done
+as asked, the removal of the agent's own workspace or of one another agent works in, and a call
+of an agent that was replaced. It is also what would let an agent reach the user's logins, or
+drive Flottille later or from outside its tree of processes, through a file tool or any path a
+line names, every program a wrapper or a runner runs included:
+
+- **a login's place**, read or written: `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`,
+  `~/.config/gcloud`, `~/.kube`, `~/.docker/config.json`, `~/.config/gh`, `~/.netrc`, `~/.npmrc`,
+  `~/.pypirc`, `~/.git-credentials`, `~/.local/share/keyrings`, `~/Library/Keychains`, the agents'
+  own (`~/.claude`, `~/.claude.json`, `~/.codex`, `~/.local/share/opencode`), wherever they are
+  along a path, and `/etc/shadow`, `/etc/sudoers`, `/etc/sudoers.d`;
+- **a write in or above Flottille's own folders** (its configuration, data, state and runtime:
+  the store, `providers.toml`, `developer.toml`, the socket), or of Flottille's own program.
+  Reading them stays base: a card in Ask and Auto, allowed in Full, since what they hold has its
+  secrets masked and the user may want an agent to read a log;
+- **any write through a process's folder in `/proc`** that leads elsewhere (`/proc/<pid>/cwd`,
+  `root`, `fd`, `exe`, `map_files`, `/dev/fd/3`): the daemon runs in `/`, so through it any path
+  of the disk. Reading there stays base;
+- **a write of a startup file**, or of a folder above one: `~/.bashrc`, `~/.bash_profile`,
+  `~/.bash_login`, `~/.profile`, `~/.zshrc`, `~/.zshenv`, `~/.zprofile`, `~/.zlogin`,
+  `~/.config/fish`, `~/.gitconfig`, `~/.config/git`, `~/.config/autostart`,
+  `~/.config/systemd/user`, `~/.config/environment.d`, the desktop's `~/.config/hypr`,
+  `~/.config/sway`, `~/.config/niri` (and the same under `XDG_CONFIG_HOME`),
+  `~/.local/share/systemd/user` (and under `XDG_DATA_HOME`), and the user's programs,
+  `~/.local/bin` and `~/bin`;
+- **a git setting that runs a program later**, as the user: `git config --global` or `--system`
+  (the user's and the system's own configuration), and in the repository's a key that runs a
+  program or brings in a file (`core.hooksPath`, `core.fsmonitor`, `core.sshCommand`,
+  `core.editor`, `core.pager`, any `alias.*`, `include.path`, `includeIf.*`, `credential.*`, a
+  diff or merge driver, a filter, `protocol.allow`…). Removing such a key is not refused; where
+  pushes go (`remote.*`, `url.*`, `push.*`) stays base. A program named to run for a remote,
+  which may be this machine, is refused too: `--upload-pack`, `--receive-pack`, `--exec`,
+  `git clone -u`, `git -c core.sshCommand`;
+- **a launcher** that starts what it runs outside the daemon's tree, later or on a host:
+  `systemd-run`, `tmux`, `screen`, `zellij`, `dtach`, `abduco`, `setsid`, `at`, `batch`,
+  `crontab`, `dbus-send`, `gdbus`, `busctl`, `loginctl`, `systemctl` but for its reads (`status`,
+  `show`, `cat`, `list-*`, `is-*`…), a desktop's or a terminal's remote control (`hyprctl`,
+  `swaymsg`, `i3-msg`, `niri msg`, `kitty @`, `wezterm cli`), `ssh`, `scp`, `sftp` and `rsync`
+  to any host or with `-e`/`--rsync-path` (`ssh` to this machine runs a line through the user's
+  shell, and an alias may be this machine). It is refused as a line's program, behind any wrapper
+  the gate unwraps (`nice`, `ionice`, `chrt`, `taskset`, `chronic`, `env`, `timeout`, `stdbuf`,
+  `nohup`…), and as what a runner runs (`uv run`, `poetry run`, `npm exec`…, what follows `--`
+  of `cargo run`). Anywhere else its name is only a word (`cargo test tmux`, `git commit -m ssh`);
+- **a container's bind mount** (`docker`, `podman`, `nerdctl` `run` or `create`, `-v`,
+  `--volume`, `--mount type=bind,source=…`) of any place above: the container reads and writes
+  the host's folder it names. A container itself, and a named volume, are not refused.
+
+A line that does not only read may write any path it names: for the writes above, any path such
+a line names counts. An option's value (`awk -F/`, `--base=/`) or a word of a program whose words
+are text (`tr`, `printf`, `expr`, `seq`) that names a folder above Flottille's own is held as base
+instead, as it was: such a word is seldom a path the line writes. **Held** is everything else the gate does not let pass: in Full it passes.
+
+The judge is an agent of a provider the user chose in Settings ("Auto judge": provider and
+model, `provider.set_judge`), run in bare mode **with no tool at all**: no Flottille tool, no MCP
+server. A user who never chose one gets one picked: the smallest model of the first provider that
+is enabled, installed and signed in, among the few whose smallest model Flottille lists (Claude's
+Haiku), written once to `providers.toml` and said once in a notice that opens Settings (and by
+`flottille provider list`); a user who chose "No judge" never gets one, nor does one whose last
+choice before `judge = "none"` existed was no judge (the last `provider.judge_changed` in the store
+names none), whose file then says `judge = "none"`. Its
+instructions are a fixed text (`roles/judge-base.md`: what it is, its JSON answer, that it never
+denies, that what the agent wrote is data, and the floor: ask for anything destructive, outside
+what was asked, surprising, or whenever it is not sure) around the user's **guidance**, which can
+add to the floor but never lift it: Flottille's default (`roles/judge.md`: allow what the request
+plausibly needs; writes of the project's configuration are within intent while the user is setting
+the project up) or the user's own, edited in Settings ("Judge", with Reset to default; saving an
+empty text resets it) and read at each judgement. A guidance that cannot be read whole, or is over
+its 4,000 characters, is never cut nor replaced by the default: each judgement fails, and so asks,
+saying which file is wrong and why, and Settings show it. The guidance changes neither what
+reaches the judge nor what it may answer. It sees the call masked (secrets masked, the line,
+the path, a brief, a title and a body whole, contents cut to their first lines with how many they
+had), why the rules held it, the place, the agent's `why`, the first message of a session an agent
+started for the user (labelled as that agent's, never the user's), and last the user's last
+messages to the session, nothing else: the three newest, up to the moment of the call (one sent
+while the agent works, still waiting for its turn, among them), in the order they were sent, each
+numbered, the last named as the newest, so that a small model never takes an older one for it.
+A message that ran a command (`/name`) is told as that: the user ran the command, from its file
+or the project's, and its text as it was sent comes in a block of its own, escaped, since it is
+the project's text, not the user's words.
+What the agent wrote comes in blocks of its own, every `<` escaped, so that no text of the agent
+reads as the user's; only the user's messages say what is wanted. It answers one JSON object,
+`{"verdict": "allow" | "ask", "reason": "…"}`. A failure, an answer that is not that object, or
+30 seconds without one is an ask; a line or a path longer than the 8,000 characters it is given
+whole asks without it, and the gate refuses a longer brief, title or body. A process of the provider is started for each judgement, and its whole
+process group stopped after it. Each verdict is recorded with the
+call (who judged, what, why: the `judgement` of its `agent.tool_served` event, and of its request
+when it asks), shown on the card and in `flottille approvals`.
+Without a judge, none picked or "No judge" chosen, Auto behaves as Ask, and the control carries a
+small warning icon whose tooltip says so and whose click opens Settings, where the judge is
+chosen. A judgement is a turn of the judge's model: it uses the user's quota on that provider,
+which Settings say.
+
+### 7.2 Requests
+
+An "ask" writes a numbered request (the frozen call, its class, the reasons, the judge's verdict
+when one was asked, the agent that asked) and is answered to the agent at once ("request #n is
+waiting…"). A tool call never waits for a human or an agent. Who holds the request depends on
+who asked:
+
+- **A root's request is the user's.** It appears in the window, in `flottille approvals`, and in
+  the event stream. The user allows it once or denies it: there is no lasting grant.
+- **A child's request is held by its parent**, as a `child-asks` delivery. The parent denies it or
+  forwards it with one sentence of why (`approval_answer`); forwarding passes it to the parent's
+  own parent, one level at a time, and from the root to the user, with every reason given on the
+  way. **No agent can allow a request**: the gate's "ask" always ends with the judge or with the
+  user, or with a refusal. A request held by an agent is not in `flottille approvals` and the user
+  cannot answer it until it is forwarded.
+
+An allowed request is re-checked and performed, and its result comes back to the agent that asked
+as an `approval` delivery; a denied one comes back as a refusal with the why.
+
+Agent-run commands get an environment without forge tokens, and without the repository's git
+hooks (`reference/hemera.md` §3), and with every push walled but the run that is itself a
+`git push` the gate let through: a push goes through the gate like any other call, and only so.
+
+**Commands** are named instructions of the project (`commands.md`), sent to a session as `/name`:
+a command grants nothing, each call the session makes goes through its mode like any other.
 
 ## 8. Instructions
 
 Built as in `reference/hemera.md` §7: a shared base, the role template, a cache boundary, the
-per-session part, then the project layer, frozen per session. The project layer holds, per
+per-session part, then the project layer, frozen per session. The base has two parts. **What
+Flottille enforces** is fixed text that states what the gate does, so that an agent does not take
+it for its own discipline. **How to work** is the user's: a default text, the user's own for all
+projects, or a project's own (`projects.md`, "Rules"). The global rules sit in the base, before the
+boundary, where every project shares them; a project's own sit just after the per-session part,
+since they would otherwise make the shared part differ from one project to the next. Alongside, the
+MCP server's `instructions` explain Flottille itself to the agent (`tools.md`, "The server"). The project layer holds, per
 repository and for the project folder: `CLAUDE.md` or `AGENTS.md` (the agent's own name first),
 **and the local files `CLAUDE.local.md` / `AGENTS.local.md` when present** (they hold rules the
 user keeps out of the repository).
 
-Later (not tranche 1), a project gains **references** (documents an agent reads with a tool:
-what skills hold today) and **procedures** (named multi-step actions with their own scoped
-authorizations: what slash commands hold today), see `reference/multi-repo-case.md`.
+After the per-session part, before the project layer, comes the list of the project's **skills** (texts an agent reads
+with the tool `skill_read`: what knowledge skills hold in other tools): a name and one line each,
+never the content (`skills.md`).
+
+A project's **commands** (`commands.md`) are what slash commands hold in other tools, see
+`reference/multi-repo-case.md`: `/name` sends a command's instructions, after a header that says
+the workspace, its repositories by dependency level and the project's pull requests.
 
 ## 9. The built-in orchestration standard
 
@@ -296,14 +638,192 @@ becomes the child's record, the report is a tool, waiting is deliveries, closing
 
 ## 10. The window
 
-GPUI Fast with gpui-kit. Tranche 1 screens:
+GPUI Fast with gpui-kit, English only (no translation layer). Screens of the milestone "The window":
 
-- left: projects, their workspaces, and the tree of agents (state badge, model, time since last
-  activity, a mark when an agent waits for the user);
-- centre: the selected agent's conversation, live (messages, thoughts collapsed, tool calls with
-  their result, plans), and a reply box;
-- a panel of approvals waiting, with allow once / allow for this agent's tree / deny;
-- starting an agent: project, workspace (new or existing), model, first message.
+- a top bar with a search field and a bell counting what waits for the user (each request, each
+  question) and what a session did to a ticket or a pull request (opened, merged, edited or
+  commented a pull request; created, edited, commented, closed or reopened a ticket, as
+  `agent.tool_served` says a write of `forge` or `tickets` was done), until that session is
+  opened; each item says why it is there (`Request #3 waits for you`, `Asks you a question`,
+  `Opened a pull request`), a short excerpt (what is asked, the question, the title or the start
+  of the text posted) and its session, each on one line cut with an ellipsis. What a session
+  changes while its page is open is in sight, and rings nothing; what is changed lives as long
+  as the window;
+  the search field, "Search  Ctrl K", is a **quick switcher**: Ctrl K anywhere in the window or a
+  click on the field opens it over the page (the modal layer, near the top), its own text field
+  focused; Escape, a click outside, the mouse's back button or choosing a result closes it, and
+  the focus goes back to what had it. It finds, in groups with their headings, **Sessions** (by
+  title; each with its project and place and its state as the tree shows it, `NEEDS YOU` or
+  running, else how long ago), **Projects** (a project and each of its workspaces, which open
+  the project's page) and **Actions** (New session, Add a project, Notifications, Settings
+  and each tab of it, each project's settings: one list in code, `actions()` of the switcher,
+  where a new screen adds its entry). It
+  matches each word typed, ignoring case, accents and ligatures, in the title (its letters in
+  order, close together, are enough) or as a whole in the words around it (the project and
+  the place a session is in), the best match first and the most recently active among equal
+  ones, and draws what matched in the accent; the best match of all groups is the marked one.
+  With nothing typed it lists the recent sessions and the actions. While it is open, a read of
+  the daemon changes what the results say (a state, how long ago) but not their order: nothing
+  moves under the pointer until something is typed. The arrows move the marked result, Enter
+  chooses it, and the pointer marks the row it is on and a click chooses it. Ctrl K waits while
+  a dialog or a list is open. It searches what the window already holds from the daemon (the
+  tree, the projects), never the content of conversations (that needs an index);
+- left: the tree project › place › session. `main` and the workspaces sit at the same level
+  under their project; a session is titled by the first line of its first message that says what the
+  work is (a greeting or a single word does not: the session is `agent <id>` until a later message
+  of the user does); sessions sit under their place (a session an agent started says it in its
+  page's header, "started by <agent>", not in the tree), with **one mark** at the right of its row,
+  chosen in this order: its state (running, needs the user, waiting) when it has one, else a small
+  dot when something new was written in it since it was last opened (an agent's message, a report,
+  a delivery that woke it, a ticket or a pull request an agent changed), else how long ago it was
+  active; and no text badge. The mark says its words under the pointer (`Needs you: a permission`,
+  `Waiting: checks of #1`, `Running`, `New since you looked: opened a pull request`); the dot is
+  cleared when the session is opened and lives as long as the window. The mark is where the work is, once: on the session's own row while that row
+  is in sight, and on a folded place or project, which shows the strongest mark of what it holds,
+  only while it is folded (never on a row and on its parents together); a session whose agent
+  ended shows no mark. A click on a project's name opens its page and leaves its places as they
+  were, only its chevron folds and unfolds them. A place's row offers, under the pointer, a "+"
+  that opens its project's composer set to start there, with the field focused; a session's row
+  offers a "⋯" menu with End session (the confirmation of the session page, counting the agents
+  that end) and, on an ended session whose agent can resume, Resume, with no need to open the
+  session first;
+- a project page: its repositories (each with its branch, its remote or "local only" and its
+  forge; added, removed, which only forgets one, and detected again), its places with their
+  sessions, each workspace's card saying where each of its repositories stands (branch, commits
+  ahead, files not committed, setup steps played), creating and removing a
+  workspace (with the preparation's progress and failure output), the composer that starts
+  a session (place, agent, model, first message), its pull requests and tickets (`items.md`: two
+  tabs, Pull requests and Tickets, each counting what it lists, filtered open, closed or all, the
+  user's own, and a repository for the pull requests; each row its number, title, state, CI mark,
+  author, assignee and when it changed, coming, going and changing live with the `item.*` events
+  and going with `items.forgotten`; a project with no forge or no tracker says so with a link to
+  its Settings, a source that fails says why; a click opens the item's detail in a dialog: its
+  description in Markdown, its branches, its checks with their links, its reviews and comments,
+  an agent's marked "posted by an agent", and Open in browser), and its tasks, each with Run, which runs it in
+  the project folder, listed below with the rail's rows and output panel; its Settings: each
+  repository's forge and the tracker, each saying whether the command line it needs (`gh`, `bkt`,
+  `acli`) is found, its version and whether it is signed in, and when it is not, how to install it
+  (the program's own page, and a command to copy where one fits most systems) or the command to
+  sign in, with a Check again (`forges.md`; Flottille installs nothing), its Skills (a path picked in the project folder, or a text;
+  added, edited, removed), its Commands (added from a list of the templates and a blank one,
+  edited, removed), its Tasks (a line, where it runs and its flags), its Setup (steps added,
+  edited, removed and reordered, each with its kind, where it is done and its time limit), then
+  its Rules (a text editor, Reset to default, and a line saying a change reaches the agents
+  created from now on);
+- Settings, in tabs (Judge, Providers, Rules, Appearance, Developer mode: one tab shown at a time, as in a project's settings; the first, the Judge, is
+  the one it opens on, and a link to a section opens its tab): the Judge tab holds the Auto judge (two lines on Auto: the rules pass what is known to be harmless, a
+  small model on the user's own quota decides the rest, base calls always come to the user; "No
+  judge (Auto asks like Ask)" among its choices) and, under it with its own heading, the Judge
+  guidance (its editor, Reset to default, Save and its line on when a change applies; a link to the
+  guidance opens this tab with the guidance in view), then the providers, the
+  Rules for every project, edited the same way as the guidance, the Appearance (the window's colours: Omarchy
+  or Flottille, and for Flottille Light or Dark, each a segmented choice; off an Omarchy desktop
+  the Omarchy choice is shown disabled with one line saying why), and last the Developer mode, a
+  switch with the path of its log (`developer.md`: what the daemon decides and why, off by default); a judge
+  Flottille picked is said once in a notice, with Open Settings and Dismiss;
+- a session page: the root's conversation, live (messages, the user's own as selectable as the agent's, thoughts collapsed (their head says how long the thinking lasted, from the event before it
+  to the one after it, and no time when it lasted less than a tenth of a second), tool calls with
+  their result, the children launched, a session started for the user as one line, "started session <title>" (it is no sub-agent), reports and an edit's diff, each folded to one line until a click unfolds it), one compact line for each command a
+  tool call ran (an icon, the line, how it ended, how long: a click opens the output panel the
+  rail opens, and the output itself is only there; the rail's own row for a command of the root
+  agent does not name it, the conversation being the page it is on), one line for each request that reached the
+  user, neutral ("Request #1 · Run pnpm test", which lights its card in the rail, then, once
+  answered, the outcome), each picture sent inside the bubble of its message, above its words, a
+  message another session sent with `session_send` marked with its sender ("from <session>") and
+  folded to its first line until a click unfolds it (the card keeps one width while it folds and
+  unfolds), and
+  the same message in the sender's conversation marked with whom it went to, never as the user's;
+  in both, the session's name is a link that opens it (an ended session too; a session that no
+  longer exists is named with no link);
+  a hover on a message (the user's, the agent's, another session's) shows, under it, its date and
+  time and a Copy icon button (a toast says it is copied); each step the Auto judge let through
+  says "allowed by the judge" (a ticket or a pull request created included), and the folded line
+  of its steps says it too; a message the user sent while the root works stays under the
+  conversation, above the composer, drawn as waiting (quieter, "Sent when the agent finishes its
+  step"), until the root reads it between its turns and it is a message like the others (the
+  queued deliveries of `agent.tree`), with three buttons while it waits: Send now (stops the
+  root's turn and hands it this message next), Edit (takes it back into the composer, text and
+  pictures, after what is typed) and Cancel (takes it back); the daemon checks that the root has
+  not read it in one transaction, and says "already read by the agent" in a toast if it has; and a composer that writes to the root, with the session's mode
+  (an Ask | Auto | Full control, with a warning icon when Auto has no judge, its highlight in the
+  alarm colour on Full, each step Full let through saying "allowed by Full mode") in its bar, whose Stop
+  button, in Send's place while a turn runs and Send has nothing to send (the two cross-fade), and
+  `Escape` interrupt the turn that runs (the agent stays), which grows with its lines up to
+  about ten and then scrolls, and takes pictures (pasted from the clipboard, dropped from a file or
+  picked with Attach: thumbnails with a remove button, sent with the message as ACP image blocks,
+  stored in Flottille's data folder so the conversation shows them again; said in one sentence and
+  left out when the session's agent takes none); what the root does while a turn runs (`Thinking…`,
+  `Writing…`, `Running <tool>…`) is said in the same bar, where the words cross-fade as they change,
+  and goes with the turn. A running agent is
+  drawn by its icon alone, in the tree and in the rail: no text badge, nothing in the header. In the
+  composer, `/` at the start
+  of a message lists the project's commands, filtered as the user types: picking one puts `/name `
+  in the field, and sending it sends the command's instructions with what follows the name (a
+  `/word` that names none is sent as text); the header says the session's title and its place,
+  and no state; a rail with, from its top, the session's tree of agents (each row with the share
+  of its context the agent used, a percentage beside a thin bar, on one line; the session's own
+  agent says only what it runs on, the others their name over what they run on and do; the composer's bar does not say
+  it; under the composer's field, the provider is named and not changeable, and the model and
+  effort pickers are the start composer's own: a change chosen while a turn runs waits for its end,
+  and a mark says it until the agent took it), its workspace (labelled lines: each repository with its changes, branch, commits ahead,
+  files not committed and setup steps played, its pull request, its ticket; one sentence for the
+  repositories with no forge; its actions in a "⋯" menu, the same as the workspace's card, with
+  Link a ticket… and Unlink the ticket) and facts, its runs, then, pinned at the very bottom and
+  folding away when nothing waits, "Waiting for you", the one place of the page that says the user
+  is needed (each request that reached the user is a compact card: the whole call, wrapping over
+  as many lines as it takes, its class
+  and the judge's reason, or the first reason it was held, on one line, "Details" unfolding the
+  rest (why it was held, one sentence for each reason, and for a base card the sentence that says
+  why it always comes back), and Deny and Allow; a base card stands apart, in the alarm colour;
+  an answered card leaves). The
+  root's row menu ("⋯") holds End session, the only way the window ends an agent: it ends the root
+  and its tree, after a confirmation that counts the agents that end. An ended session leaves its
+  place in the left tree for the "Ended" group, folded, pinned at the bottom of the sidebar
+  whatever the tree's length and unfolding upward over it (its rows say their project), and its
+  page shows,
+  in place of the composer, why it ended and Resume when its agent can resume or load its session
+  (`agent.resume`), enabled once its process is gone, which brings the composer back; that bar is
+  where it says it ended, not its header, and its conversation says it ended, then resumed. Selecting a child shows its
+  conversation read-only;
+- the runs of the agents (`docs/tools.md`, "Tasks and runs"): the rail's **Runs** section lists
+  those of the session's tree (it is not called "Commands", which are the project's `/name`
+  instructions), running first, each with its line, who started it (the agent, and the task when
+  it is one), how long, its last output line and Stop, then the last five that ended, greyed, with
+  how they ended; a click opens the run's drawer (the same on the project page): its command, its
+  task, where it runs, who started it (a link to the agent in its session), since when or how it
+  ended, its output, live and following its end, Copy, and Stop while it runs; `Escape` closes it,
+  and the conversation's line for that run opens the same drawer. A
+  project, and a session, with a command running show a small icon in the left tree, so that no
+  server is forgotten. The conversation draws a run as one line, its ANSI colours turned into the
+  palette's in the panel (the stored output keeps the program's bytes, masked); a call that came
+  back through an approval is the same line with "allowed by you", never the daemon's raw text;
+- narrow and portrait windows: the rail, then the left tree, become drawers.
+- a history of the pages shown (project pages, sessions with the agent shown in them, settings),
+  as a browser keeps one: it lives as long as the window and is not stored. The mouse's back and
+  forward buttons and `Alt+Left` / `Alt+Right` move in it; an open list, modal or drawer takes
+  the button first and closes; a page that no longer exists is skipped.
+
+Motion: **everything that moves is animated**, with the grammar of `reference/gpui.md` (ease-out
+cubic, the durations of `crates/flottille-ui/src/motion.rs`: hover 140 ms, press 90 ms, an entrance
+240 ms, a fold or a state 280 ms; reduced motion honoured). Hover and press on every interactive
+element; a state that changes (selected, chosen, focused, open); an element or a block that
+appears or leaves, with the gap around it; a row inserted into, removed from or moved in a list; a
+fold; a panel or a menu that opens or closes; a page and its sections, one after the other (at most
+eight waits, whatever the length). At rest nothing moves and nothing is redrawn. An issue about
+the window without its animations is incomplete.
+
+Colours: the user chooses them in Settings, Appearance, and the daemon keeps the choice
+(`appearance.toml`, `docs/protocol.md`) for every window and a restart: **Omarchy**, the current
+Omarchy theme's colours followed live, or **Flottille**, Flottille's own palette, **Light** or
+**Dark**, even on an Omarchy desktop. Until the user chooses, Omarchy when an Omarchy theme is
+found, Flottille Dark otherwise; Omarchy chosen and no theme that can be used, Flottille in its
+shade. A change applies at once: the colours cross-fade, as when the Omarchy theme changes. The
+light palette has the dark one's roles, its surfaces a step toward the ink from a near-white page
+(never white cards), every text at WCAG AA on each surface it is drawn on. Only the keys of a theme file that name a colour are read: another string (`mode = "light"`, a name) is ignored, a colour key with a value that is not a colour refuses the theme. A light theme
+gets a light palette: the body and the bars are shaded toward the foreground (below the background in lightness), and
+the cards toward it too, never to white.
+Shapes, type and motion do not change with the theme. A state is drawn the same
+everywhere, by shape as well as colour.
 
 Rules from `reference/gpui.md` apply from day one: a view per moving part, the reply field in its
 own view, the growing conversation as a list that does not rebuild what did not change.
@@ -313,33 +833,51 @@ own view, the growing conversation as a list that does not rebuild what did not 
 Through the CLI only: `flottille status --json` (counts of agents running, waiting for the user,
 failed), `flottille watch` (events), `flottille open <agent>` (focus the window on it). A desktop
 shell shows a badge or a notification from these. Nothing of any desktop lives in this
-repository.
+repository, but the generic XDG entry that puts Flottille in an application launcher with its icon
+(`docs/releases.md`, "The launcher entry"), and the one window a second `flottille window` brings
+to the front.
 
 ## 12. Later: remote
 
-Designed for, not built in tranche 1: the daemon's protocol over an authenticated network
+Designed for, not built before the milestone "Remote": the daemon's protocol over an authenticated network
 transport (for example on a private network such as Tailscale), a light client on a phone, and
 sending work to another machine running Flottille (its daemon owns the agents there; the tree
 spans machines through deliveries).
 
-## 13. Tranches
+## 13. Milestones
 
-1. **A usable core**: projects, multi-repository workspaces with recipes, Claude agents in bare
-   mode over ACP, the generic tools, the gate with approvals, the tree with deliveries, reports
-   and waking, the pilot door, the CLI and events, the window. Accepted when the user runs a
-   real piece of work on a multi-repository project: a lead launches two workers in their own
-   workspaces, one hits an approval, one gets stuck or fails, the lead is told each time without
-   anyone polling, and the user follows and answers everything in the window.
-2. **More agents**: Codex and OpenCode in bare mode.
-3. **Forges, tickets, pipelines**: GitHub and Bitbucket (pull requests, checks, pipelines),
-   issue trackers (GitHub issues, Jira read-only), linked to workspaces; procedures with scoped
-   authorizations (open the pull requests of a workspace, merge a stack in dependency order,
-   close a workspace).
-4. **Remote**: network transport, phone, other machines.
+The plan is cut into GitHub milestones; each ends on something the user can use.
+
+1. **Usable from the CLI**: projects, multi-repository workspaces with their setup, Claude agents in
+   bare mode over ACP, the generic tools, the gate with approvals, the tree with deliveries,
+   reports and waking, the pilot door, the CLI and events. Accepted when the user runs a real
+   piece of work on a multi-repository project from a terminal: a lead launches two workers in
+   their own workspaces, one hits an approval, one gets stuck or fails, the lead is told each
+   time without anyone polling, and the user follows every agent and answers what reaches them
+   (the root's messages and the requests forwarded up to it) from the CLI.
+2. **The window**: the same piece of work followed and answered in the window.
+3. **More agents**: Codex and OpenCode in bare mode.
+4. **Forges and tickets**: GitHub and Bitbucket (pull requests, checks, pipelines),
+   issue trackers (GitHub issues, Jira), linked to workspaces; commands (open the pull
+   requests of a workspace, merge a stack in dependency order, close a workspace). Reading a workspace's GitHub pull requests and checks is in
+   [`forges.md`](forges.md), and its ticket (a GitHub issue or a Jira work item) in
+   [`tickets.md`](tickets.md); every pull request and ticket of a project, kept up to date by the
+   daemon, in [`items.md`](items.md).
+5. **Remote**: network transport, phone, other machines.
 
 ## 14. Defaults taken, to confirm
 
 - Data in XDG folders; workspaces under the data folder unless the project says otherwise.
-- Children cap 3 per project, depth 2, quiet interval 20 min.
-- Claude adapter installed by Flottille at a pinned version; Node required.
-- No commit rights for agents unless the project grants them; push always refused for agents.
+- Children cap 12 per project, no depth, quiet interval 20 min.
+- Claude reached through Flottille's own bridge; `claude` checked at a pinned version, another one
+  only warned about.
+- A session the user starts starts in Auto, and a tree has one mode, its root's, read at each call; Auto
+  without a judge asks the user as Ask does. Full is chosen by the user for a session already
+  started, never at its start; a session an agent starts takes its launcher's mode, Full included. A user who never chose a judge gets the smallest model
+  of the first provider installed and signed in, among those listed (Claude's `haiku`); one that is
+  not listed gets nothing picked.
+- One judge process per judgement, stopped after it, rather than one kept warm: nothing of a
+  judgement is kept for the next, and no process waits idle on the user's quota.
+- A judge silent for 30 seconds, or whose answer is not the JSON verdict, asks the user.
+- Commits and pushes are calls to judge; a forced push, even with a lease, and a rewrite of
+  history on a remote are base.

@@ -1,0 +1,937 @@
+//! The open session page's own way to the daemon, on its own thread and connection: it subscribes
+//! to the events first, reads the session's tree, the requests of the tree that reached the user,
+//! the last pages of the shown agent's stored conversation and the place's facts, then follows
+//! the events: each event of the shown agent goes to the page as it comes, and what changes the
+//! tree, the requests or the place is read again once the events pause (or a short while after
+//! the first, when they do not). A broken connection resumes the events after the last one seen:
+//! the conversation is read once per link. Nothing here waits on the UI, and the UI never waits
+//! on it.
+//!
+//! Each link has a token: the page applies only what its current link sends, so that what a
+//! closed page's link sent late is dropped.
+
+use std::collections::HashSet;
+use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use flottille_core::protocol::Event;
+use futures::channel::mpsc::UnboundedSender;
+use serde_json::{Value, json};
+
+use crate::actions::{Changes, RepositoryStatus};
+use crate::conversation::one_line;
+use crate::link::{Conn, Connect, Update, quiet_wait};
+use crate::runs::{CommandOutput, CommandRow};
+use crate::subscriptions::SubscriptionRow;
+
+/// One agent of the session's tree, as `agent.tree` gives it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TreeAgent {
+    pub id: String,
+    pub parent: Option<String>,
+    pub depth: u64,
+    pub role: String,
+    pub title: Option<String>,
+    pub state: String,
+    pub state_reason: Option<String>,
+    pub provider: String,
+    pub model: Option<String>,
+    /// The effort it runs at, when it took or was asked one.
+    pub effort: Option<String>,
+    /// The model and the effort the user changed to, set before its next prompt.
+    pub pending: Pending,
+    pub doing: String,
+    /// `parent`, `user` or nothing.
+    pub waiting_on: Option<String>,
+    pub needs_user: bool,
+    /// An ended root the daemon can start again on its own session (`agent.resume`).
+    pub resumable: bool,
+    /// An agent that ended whose process is still stopping: it cannot be resumed yet.
+    pub stopping: bool,
+    /// Whether its agent takes images in a prompt; `None` until its process first started.
+    pub images: Option<bool>,
+    /// `ask` or `auto`: how the gate answers the calls to judge of the agent.
+    pub gate_mode: Option<String>,
+    /// How much of its context it used at its last report, in percent.
+    pub context: Option<u64>,
+    /// What the user wrote to it while it worked, not sent to it yet, the oldest first.
+    pub queued: Vec<Queued>,
+    /// Its running session runs an older list of tools than its role has: a restart gives the
+    /// new one.
+    pub tools_outdated: bool,
+}
+
+/// A change of model and effort waiting for the end of the turn.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Pending {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+impl Pending {
+    pub fn is_empty(&self) -> bool {
+        self.model.is_none() && self.effort.is_none()
+    }
+}
+
+/// A message the user wrote to the root while it worked: the root reads it between its turns.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Queued {
+    pub delivery: String,
+    pub text: String,
+    /// How many pictures go with it.
+    pub images: usize,
+    pub at: u64,
+}
+
+impl TreeAgent {
+    fn of(entry: &Value) -> TreeAgent {
+        let agent = &entry["agent"];
+        let text = |value: &Value| value.as_str().map(str::to_owned);
+        TreeAgent {
+            id: text(&agent["id"]).unwrap_or_default(),
+            parent: text(&agent["parent"]),
+            depth: agent["depth"].as_u64().unwrap_or(0),
+            role: text(&agent["role"]).unwrap_or_default(),
+            title: text(&agent["title"]),
+            state: text(&agent["state"]).unwrap_or_default(),
+            state_reason: text(&agent["state_reason"]),
+            provider: text(&agent["provider"]).unwrap_or_default(),
+            model: text(&agent["model"]),
+            effort: text(&agent["effort"]),
+            pending: Pending {
+                model: text(&agent["pending"]["model"]),
+                effort: text(&agent["pending"]["effort"]),
+            },
+            doing: text(&entry["doing"]).unwrap_or_default(),
+            waiting_on: text(&entry["waiting_on"]),
+            needs_user: entry["needs_user"] == true,
+            resumable: agent["resumable"] == true,
+            stopping: agent["stopping"] == true,
+            images: agent["images"].as_bool(),
+            gate_mode: text(&agent["gate_mode"]),
+            context: entry["context"].as_u64(),
+            queued: entry["queued"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|queued| Queued {
+                    delivery: text(&queued["delivery"]).unwrap_or_default(),
+                    text: text(&queued["text"]).unwrap_or_default(),
+                    images: queued["images"].as_u64().unwrap_or(0) as usize,
+                    at: queued["at"].as_u64().unwrap_or(0),
+                })
+                .collect(),
+            tools_outdated: agent["tools_outdated"] == true,
+        }
+    }
+}
+
+/// A request the user holds, asked by an agent of the session.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Request {
+    pub number: u64,
+    /// The agent that asked.
+    pub agent: String,
+    pub tool: String,
+    /// Its arguments, as the daemon cut and masked them.
+    pub call: Value,
+    pub reasons: Vec<String>,
+    /// The agents that passed it up, each with its sentence.
+    pub forwards: Vec<(String, String)>,
+    /// In the base: it always comes back to the user, whatever the mode.
+    pub base: bool,
+    /// What the Auto judge said of it, when it was judged: `(by, verdict, reason)`.
+    pub judgement: Option<(String, String, String)>,
+    /// `call`, or `action` (a change of the project the agent asks for).
+    pub kind: String,
+    /// What it changes, in words, one sentence each.
+    pub says: Vec<String>,
+    /// When it was asked.
+    pub created_at: u64,
+    /// `deny`, `once` once decided, `cancelled` when nobody answered it.
+    pub decision: Option<String>,
+}
+
+impl Request {
+    pub(crate) fn of(request: &Value) -> Request {
+        let text = |value: &Value| value.as_str().unwrap_or_default().to_owned();
+        Request {
+            number: request["number"].as_u64().unwrap_or(0),
+            agent: text(&request["agent"]),
+            tool: text(&request["tool"]),
+            call: request["call"].clone(),
+            reasons: request["reasons"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(text)
+                .collect(),
+            forwards: request["forwards"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|f| (text(&f["by"]), text(&f["why"])))
+                .collect(),
+            base: request["class"] == "base",
+            judgement: request["judgement"].is_object().then(|| {
+                let judgement = &request["judgement"];
+                (
+                    text(&judgement["by"]),
+                    text(&judgement["verdict"]),
+                    text(&judgement["reason"]),
+                )
+            }),
+            kind: request["kind"].as_str().unwrap_or("call").to_owned(),
+            says: request["says"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(text)
+                .collect(),
+            created_at: request["created_at"].as_u64().unwrap_or(0),
+            decision: match request["state"].as_str() {
+                Some("cancelled") => Some("cancelled".into()),
+                _ => request["decision"].as_str().map(str::to_owned),
+            },
+        }
+    }
+
+    /// The call on one line, as the agent made it: a command's line, else the tool and its
+    /// arguments (`fs_read {"path":".env"}`).
+    pub fn call_line(&self) -> String {
+        match (self.tool.as_str(), self.call["line"].as_str()) {
+            ("run", Some(line)) => line.to_owned(),
+            (tool, _) => format!("{tool} {}", one_line(&self.call)),
+        }
+    }
+
+    /// What is asked, in a few words: `Run npm test`, `Read .env`.
+    pub fn asked(&self) -> String {
+        let field = |name: &str| self.call[name].as_str().map(str::to_owned);
+        match (self.tool.as_str(), field("line"), field("path")) {
+            ("run", Some(line), _) => format!("Run {line}"),
+            ("run", None, _) => match field("task") {
+                Some(name) => format!("Run {name}"),
+                None => format!("run {}", one_line(&self.call)),
+            },
+            ("fs_read" | "fs_list" | "search", _, Some(path)) => format!("Read {path}"),
+            ("fs_write" | "fs_edit", _, Some(path)) => format!("Write {path}"),
+            ("tasks" | "skills" | "commands" | "setup" | "project", _, _) => {
+                let name = field("name").unwrap_or_default();
+                let what = match self.tool.as_str() {
+                    "skills" => "skill",
+                    "tasks" => "task",
+                    _ => "command",
+                };
+                let number = self.call["number"].as_u64().unwrap_or_default();
+                match field("action").as_deref() {
+                    Some("set_settings") => "Change the project's settings".into(),
+                    Some("add") if self.tool == "setup" => "Add a setup step".into(),
+                    Some("edit") if self.tool == "setup" => format!("Edit setup step {number}"),
+                    Some("remove") if self.tool == "setup" => {
+                        format!("Remove setup step {number}")
+                    }
+                    Some("move") => format!("Move setup step {number}"),
+                    Some("add") => format!("Add the {what} {name}"),
+                    Some("edit") => format!("Edit the {what} {name}"),
+                    Some("remove") => format!("Remove the {what} {name}"),
+                    _ => format!("{} {}", self.tool, one_line(&self.call)),
+                }
+            }
+            ("workspace", _, _) => {
+                let name = field("name").unwrap_or_else(|| "its own workspace".into());
+                match field("action").as_deref() {
+                    Some("create") => format!("Create the workspace {name}"),
+                    Some("prepare") => format!("Resume the preparation of {name}"),
+                    Some("link_ticket") => format!("Link {name} to a ticket"),
+                    _ => format!("workspace {}", one_line(&self.call)),
+                }
+            }
+            ("web", _, _) => match (field("url"), field("query")) {
+                (Some(url), _) => format!("Read {url}"),
+                (None, Some(query)) => format!("Search the web for {query}"),
+                _ => format!("web {}", one_line(&self.call)),
+            },
+            ("agent_launch", _, _) if field("new_workspace").is_some() => format!(
+                "Launch a child in a new workspace {}",
+                field("new_workspace").unwrap_or_default()
+            ),
+            (tool, _, _) => format!("{tool} {}", one_line(&self.call)),
+        }
+    }
+}
+
+/// A repository's pull request, as `workspace.forge` gives it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PullRequest {
+    /// The repository's path in the project.
+    pub repository: String,
+    pub number: u64,
+    /// `open`, `draft`, `merged` or `closed`.
+    pub state: String,
+    /// Its checks as one mark: `passing`, `failing` or `pending`; none without checks.
+    pub mark: Option<String>,
+    pub url: String,
+}
+
+impl PullRequest {
+    /// `#12 open`.
+    pub fn label(&self) -> String {
+        format!("#{} {}", self.number, self.state)
+    }
+}
+
+/// The pull requests of a `workspace.forge` answer, and what stops the daemon from reading them.
+pub fn pull_requests(forge: &Value) -> (Vec<PullRequest>, Option<String>) {
+    let pulls = forge["repositories"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|repository| {
+            let pull = &repository["pull_request"];
+            Some(PullRequest {
+                repository: repository["path"].as_str()?.to_owned(),
+                number: pull["number"].as_u64()?,
+                state: pull["state"].as_str().unwrap_or_default().to_owned(),
+                mark: pull["mark"].as_str().map(str::to_owned),
+                url: pull["url"].as_str().unwrap_or_default().to_owned(),
+            })
+        })
+        .collect();
+    (pulls, forge["problem"].as_str().map(str::to_owned))
+}
+
+/// What each repository of a `workspace.forge` answer says of its forge, in a line: the forge and
+/// its repository (`github · acme/api`), else why there is none, else why it could not be read.
+pub fn forge_lines(forge: &Value) -> Vec<(String, String)> {
+    forge["repositories"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|repository| {
+            let text = |key: &str| repository[key].as_str();
+            let line = match (
+                text("forge"),
+                text("repository"),
+                text("error"),
+                text("note"),
+            ) {
+                (_, _, Some(error), _) => error.to_owned(),
+                (Some(forge), Some(name), _, _) => format!("{forge} · {name}"),
+                (Some(forge), None, _, _) => forge.to_owned(),
+                (None, _, _, Some(note)) => note.to_owned(),
+                (None, _, _, None) => return None,
+            };
+            Some((text("path")?.to_owned(), line))
+        })
+        .collect()
+}
+
+/// A workspace's ticket, as `workspace.ticket` gives it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TicketFacts {
+    /// `#123` or `ABC-123`.
+    pub reference: String,
+    pub state: Option<String>,
+    pub title: Option<String>,
+    pub url: Option<String>,
+    /// Why the tracker could not be read (`gh` or `acli` missing, not signed in, no such ticket).
+    pub problem: Option<String>,
+}
+
+/// The ticket of a `workspace.ticket` answer; none when the workspace has none.
+pub fn ticket_facts(read: &Value) -> Option<TicketFacts> {
+    let text = |key: &str| read[key].as_str().map(str::to_owned);
+    Some(TicketFacts {
+        reference: text("ticket")?,
+        state: text("state"),
+        title: text("title"),
+        url: text("url"),
+        problem: text("problem"),
+    })
+}
+
+/// How long a ticket read stays as it is: a ticket is read when the page opens, when it is linked
+/// or unlinked, and again after this, never at every turn.
+pub(crate) const TICKET_FRESH: Duration = Duration::from_secs(300);
+
+/// What a place shows in the rail: each repository and its lines changed, and its facts.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PlaceFacts {
+    /// Each repository's path, and its lines changed (a workspace), or the branch its checkout
+    /// is on (the project folder).
+    pub repositories: Vec<(String, RepositoryFacts)>,
+    pub branch: Option<String>,
+    pub bases: Vec<String>,
+    /// How long its preparation took, once it is ready.
+    pub prepared_ms: Option<u64>,
+    /// Each repository's pull request (a workspace).
+    pub pulls: Vec<PullRequest>,
+    /// Each repository's forge in a line, as the daemon says it.
+    pub forges: Vec<(String, String)>,
+    /// Why the forges cannot be read (`gh` missing, not signed in), with what to do.
+    pub forge_problem: Option<String>,
+    /// The ticket it is linked to (a workspace).
+    pub ticket: Option<TicketFacts>,
+    /// Where each of its repositories stands (a workspace).
+    pub statuses: Vec<RepositoryStatus>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum RepositoryFacts {
+    Changes(Option<Changes>),
+    Branch(Option<String>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum SessionUpdate {
+    Tree(Vec<TreeAgent>),
+    /// The last pages of the shown agent's stored conversation, oldest first, once per link;
+    /// `earlier` when older events were left out.
+    History {
+        events: Vec<Event>,
+        earlier: bool,
+    },
+    /// An event of the shown agent, as it comes.
+    Live(Event),
+    /// The requests an agent of the session asked that reached the user, pending or decided,
+    /// oldest first.
+    Requests(Vec<Request>),
+    /// A request of the session was decided (`deny`, `once`, `tree`) or cancelled (`cancelled`).
+    Decided {
+        number: u64,
+        decision: String,
+    },
+    /// The place's facts; `None` when the daemon has none (the workspace was removed).
+    Place(Option<Box<PlaceFacts>>),
+    /// The commands of the session's tree: those running, then those that ended and were not
+    /// dismissed.
+    Commands(Vec<CommandRow>),
+    /// The output of the command whose panel is open.
+    CommandOutput(Box<CommandOutput>),
+    /// What the agents of the session's tree wait for (`subscription.list`).
+    Subscriptions(Vec<SubscriptionRow>),
+    /// The root's session refused a model or an effort the user changed to, with why.
+    OptionsRefused(String),
+}
+
+/// Where the session works.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Where {
+    pub project: String,
+    pub workspace: Option<String>,
+}
+
+/// The link's handle: dropping it stops the link.
+pub struct SessionLink {
+    token: u64,
+    stop: Arc<AtomicBool>,
+    stream: Arc<Mutex<Option<UnixStream>>>,
+    /// The command whose output the link reads, about once a second.
+    watched: Arc<Mutex<Option<String>>>,
+}
+
+impl SessionLink {
+    pub fn token(&self) -> u64 {
+        self.token
+    }
+
+    /// Reads this command's output from now on (none to stop): the link sends what the daemon
+    /// says of it at its next turn, within a second.
+    pub fn watch(&self, run: Option<String>) {
+        *self.watched.lock().unwrap() = run;
+    }
+}
+
+impl Drop for SessionLink {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        // Wakes the thread from its read, at once.
+        if let Some(stream) = self.stream.lock().unwrap().take() {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+    }
+}
+
+static TOKENS: AtomicU64 = AtomicU64::new(1);
+
+/// The events after which the tree is read again: those that move a state, a launch, a request.
+const TREE_EVENTS: &[&str] = &[
+    "agent.created",
+    "agent.started",
+    "agent.prompted",
+    "agent.turn_ended",
+    "agent.released",
+    "agent.died",
+    "agent.replaced",
+    "agent.failed",
+    "agent.ended",
+    "agent.resumed",
+    "agent.gate_mode_changed",
+    // The model and the effort the composer's pickers say, and the mark of a change waiting.
+    "agent.options_pending",
+    "agent.options_taken",
+    "agent.options_refused",
+    "agent.reported",
+    "agent.asked",
+    // The rail's gauge of each agent's context.
+    "agent.usage",
+    // The line that says the session runs an older list of tools.
+    "agent.tools_outdated",
+    "delivery.queued",
+    // A waiting message taken back leaves the queue under the conversation.
+    "delivery.withdrawn",
+];
+
+const FIRST_RETRY: Duration = Duration::from_millis(100);
+const LAST_RETRY: Duration = Duration::from_secs(5);
+/// How often the commands of the session, and the output of the one watched, are read while a
+/// command runs or an output is open: a command's output is no event.
+const COMMANDS_EVERY: Duration = Duration::from_secs(1);
+/// A connection that lasted this long was healthy: the next one is tried at once again. One that
+/// breaks sooner (a request that keeps failing) waits longer each time.
+const HEALTHY: Duration = Duration::from_secs(10);
+
+/// Starts the link of the session of `root`, showing the last `pages` pages of `shown`'s
+/// conversation.
+pub fn spawn(
+    connect: Connect,
+    updates: UnboundedSender<Update>,
+    root: String,
+    shown: String,
+    place: Where,
+    pages: usize,
+) -> SessionLink {
+    let token = TOKENS.fetch_add(1, Ordering::Relaxed);
+    let stop = Arc::new(AtomicBool::new(false));
+    let stream = Arc::new(Mutex::new(None));
+    let watched = Arc::new(Mutex::new(None));
+    let link = Link {
+        connect,
+        updates,
+        token,
+        root,
+        shown,
+        place,
+        pages: pages.max(1),
+        stop: stop.clone(),
+        stream: stream.clone(),
+        watched: watched.clone(),
+    };
+    std::thread::Builder::new()
+        .name("flottille-session".into())
+        .spawn(move || link.run())
+        .expect("a thread for the session page");
+    SessionLink {
+        token,
+        stop,
+        stream,
+        watched,
+    }
+}
+
+struct Link {
+    connect: Connect,
+    updates: UnboundedSender<Update>,
+    token: u64,
+    root: String,
+    shown: String,
+    place: Where,
+    pages: usize,
+    stop: Arc<AtomicBool>,
+    stream: Arc<Mutex<Option<UnixStream>>>,
+    watched: Arc<Mutex<Option<String>>>,
+}
+
+/// What outlives a connection: the last event seen, to resume after it, and whether the
+/// conversation was read.
+#[derive(Default)]
+struct Resume {
+    last: Option<u64>,
+    read: bool,
+}
+
+#[derive(Default)]
+struct Stale {
+    tree: bool,
+    requests: bool,
+    place: bool,
+    commands: bool,
+    subscriptions: bool,
+    /// When the first of them was marked.
+    since: Option<Instant>,
+}
+
+impl Stale {
+    fn mark(&mut self, tree: bool, requests: bool, place: bool, commands: bool) {
+        self.tree |= tree;
+        self.requests |= requests;
+        self.place |= place;
+        self.commands |= commands;
+        if (tree || requests || place || commands) && self.since.is_none() {
+            self.since = Some(Instant::now());
+        }
+    }
+}
+
+impl Link {
+    fn stopped(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
+    }
+
+    fn send(&self, update: SessionUpdate) -> bool {
+        !self.stopped()
+            && self
+                .updates
+                .unbounded_send(Update::Session {
+                    token: self.token,
+                    update,
+                })
+                .is_ok()
+    }
+
+    fn run(self) {
+        let mut retry = FIRST_RETRY;
+        let mut resume = Resume::default();
+        while !self.stopped() {
+            let began = Instant::now();
+            if let Ok(stream) = (self.connect)()
+                && let Ok(clone) = stream.try_clone()
+            {
+                *self.stream.lock().unwrap() = Some(clone);
+                if self.stopped() {
+                    return;
+                }
+                if self.follow(stream, &mut resume).is_ok() {
+                    return;
+                }
+            }
+            if began.elapsed() >= HEALTHY {
+                retry = FIRST_RETRY;
+            }
+            std::thread::sleep(retry);
+            retry = (retry * 2).min(LAST_RETRY);
+        }
+    }
+
+    /// Follows one connection until it breaks (an error) or the link is stopped (`Ok`).
+    fn follow(&self, stream: UnixStream, resume: &mut Resume) -> Result<(), String> {
+        let mut conn = Conn::new(stream).map_err(|e| e.to_string())?;
+        let started = conn.request("events.watch", json!({"after": resume.last}))?;
+        let after = *resume
+            .last
+            .get_or_insert(started["after"].as_u64().unwrap_or(0));
+        let mut tree = self.read_tree(&mut conn)?;
+        self.read_requests(&mut conn)?;
+        if !resume.read {
+            let (events, earlier) = self.read_history(&mut conn, after)?;
+            if !self.send(SessionUpdate::History { events, earlier }) {
+                return Ok(());
+            }
+            resume.read = true;
+        }
+        let mut ticket = None;
+        self.read_place(&mut conn, &mut ticket)?;
+        self.read_subscriptions(&mut conn)?;
+        let mut running = self.read_commands(&mut conn)?;
+        let mut next_commands = Instant::now() + COMMANDS_EVERY;
+        // The command whose output was last read.
+        let mut read_output: Option<String> = None;
+        let mut stale = Stale::default();
+        loop {
+            if self.stopped() {
+                return Ok(());
+            }
+            // While a command runs the link wakes each second, events or not: what a program
+            // writes is no event. Otherwise it wakes as often to see a panel opened.
+            let wait = match quiet_wait(stale.since) {
+                Some(wait) => Some(wait),
+                None if running => Some(next_commands.saturating_duration_since(Instant::now())),
+                None => Some(COMMANDS_EVERY),
+            };
+            let Some(event) = conn.next_event(wait)? else {
+                if stale.tree {
+                    tree = self.read_tree(&mut conn)?;
+                }
+                if stale.requests {
+                    self.read_requests(&mut conn)?;
+                }
+                if stale.place {
+                    self.read_place(&mut conn, &mut ticket)?;
+                }
+                if stale.subscriptions {
+                    self.read_subscriptions(&mut conn)?;
+                }
+                let due = running && Instant::now() >= next_commands;
+                if stale.commands || due {
+                    running = self.read_commands(&mut conn)?;
+                    next_commands = Instant::now() + COMMANDS_EVERY;
+                }
+                // An output is read when its panel opens, then as long as the command runs.
+                let watched = self.watched.lock().unwrap().clone();
+                if watched != read_output || ((stale.commands || due) && watched.is_some()) {
+                    if let Some(run) = &watched {
+                        self.read_output(&mut conn, run)?;
+                    }
+                    read_output = watched;
+                }
+                stale = Stale::default();
+                continue;
+            };
+            resume.last = Some(event.seq);
+            let data = &event.data;
+            let agent = data["agent"].as_str().unwrap_or_default();
+            let name = event.name.as_str();
+            if name.starts_with("workspace.")
+                && self.place.workspace.as_deref() == data["workspace"].as_str()
+                && data["project"] == self.place.project.as_str()
+            {
+                stale.mark(false, false, true, false);
+            }
+            let ours = tree.contains(agent)
+                || (name == "agent.created"
+                    && data["parent"].as_str().is_some_and(|p| tree.contains(p)));
+            if !ours {
+                continue;
+            }
+            if name == "agent.created" {
+                tree.insert(agent.to_owned());
+            }
+            let approval = name.starts_with("approval.");
+            // A subscription opened or ended changes the list, and whether the agent waits.
+            let subscription = name.starts_with("subscription.");
+            stale.subscriptions |= subscription;
+            stale.mark(
+                TREE_EVENTS.contains(&name) || approval || subscription,
+                approval,
+                name == "agent.turn_ended",
+                name.starts_with("run."),
+            );
+            let decided = match name {
+                "approval.decided" => data["decision"].as_str(),
+                "approval.cancelled" => Some("cancelled"),
+                _ => None,
+            };
+            if name == "agent.options_refused" && agent == self.root {
+                let reason = data["reason"].as_str().unwrap_or_default().to_owned();
+                if !self.send(SessionUpdate::OptionsRefused(reason)) {
+                    return Ok(());
+                }
+            }
+            if let Some(decision) = decided {
+                let number = data["number"].as_u64().unwrap_or(0);
+                let decision = decision.to_owned();
+                if !self.send(SessionUpdate::Decided { number, decision }) {
+                    return Ok(());
+                }
+            }
+            if agent == self.shown && !self.send(SessionUpdate::Live(event.clone())) {
+                return Ok(());
+            }
+        }
+    }
+
+    /// The last pages of the shown agent's events up to `after`, oldest first, as the daemon
+    /// pages them; whether older ones remain.
+    fn read_history(&self, conn: &mut Conn, after: u64) -> Result<(Vec<Event>, bool), String> {
+        let mut events: Vec<Event> = Vec::new();
+        let mut before = after.saturating_add(1);
+        let mut earlier = false;
+        for _ in 0..self.pages {
+            let shown =
+                conn.request("agent.show", json!({"agent": self.shown, "before": before}))?;
+            let page: Vec<Event> = shown["events"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|e| serde_json::from_value(e.clone()).ok())
+                .collect();
+            earlier = shown["more"] == true;
+            before = page.first().map_or(before, |e| e.seq);
+            events.splice(0..0, page);
+            if !earlier {
+                break;
+            }
+        }
+        Ok((events, earlier))
+    }
+
+    /// The tree, sent; the ids of its agents.
+    fn read_tree(&self, conn: &mut Conn) -> Result<HashSet<String>, String> {
+        let answer = conn.request("agent.tree", json!({"agent": self.root}))?;
+        let agents: Vec<TreeAgent> = answer["agents"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(TreeAgent::of)
+            .collect();
+        let ids = agents.iter().map(|a| a.id.clone()).collect();
+        self.send(SessionUpdate::Tree(agents));
+        Ok(ids)
+    }
+
+    fn read_requests(&self, conn: &mut Conn) -> Result<(), String> {
+        let answer = conn.request("approval.list", json!({"tree": self.root}))?;
+        let requests = answer["requests"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(Request::of)
+            .collect();
+        self.send(SessionUpdate::Requests(requests));
+        Ok(())
+    }
+
+    /// The commands of the session's tree, sent; whether one runs.
+    fn read_commands(&self, conn: &mut Conn) -> Result<bool, String> {
+        let answer = conn.request("run.list", json!({"tree": self.root, "ended": true}))?;
+        let rows: Vec<CommandRow> = answer["commands"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(CommandRow::of)
+            .collect();
+        let running = rows.iter().any(CommandRow::running);
+        self.send(SessionUpdate::Commands(rows));
+        Ok(running)
+    }
+
+    /// The subscriptions of the session's tree, sent.
+    fn read_subscriptions(&self, conn: &mut Conn) -> Result<(), String> {
+        let answer = conn.request("subscription.list", json!({"tree": self.root}))?;
+        let rows = answer["subscriptions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(SubscriptionRow::of)
+            .collect();
+        self.send(SessionUpdate::Subscriptions(rows));
+        Ok(())
+    }
+
+    /// The output of the command watched, sent. A command the daemon no longer knows is not an
+    /// error of the connection.
+    fn read_output(&self, conn: &mut Conn, run: &str) -> Result<(), String> {
+        if let Ok(output) = conn.ask("run.output", json!({"run": run}))? {
+            self.send(SessionUpdate::CommandOutput(Box::new(CommandOutput::of(
+                &output,
+            ))));
+        }
+        Ok(())
+    }
+
+    /// The place's facts; `ticket` is the last ticket read, kept for [`TICKET_FRESH`].
+    fn read_place(
+        &self,
+        conn: &mut Conn,
+        ticket: &mut Option<(TicketFacts, Instant)>,
+    ) -> Result<(), String> {
+        let facts = match &self.place.workspace {
+            Some(name) => {
+                let shown = conn.ask(
+                    "workspace.show",
+                    json!({"project": self.place.project, "name": name}),
+                )?;
+                // A workspace removed under the session: it has no facts, the link goes on.
+                let Ok(shown) = shown else {
+                    self.send(SessionUpdate::Place(None));
+                    return Ok(());
+                };
+                let mut bases: Vec<String> = Vec::new();
+                let mut repositories = Vec::new();
+                for repository in shown["repositories"].as_array().into_iter().flatten() {
+                    let base = repository["base"]["branch"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned();
+                    if !bases.contains(&base) {
+                        bases.push(base);
+                    }
+                    let changes = &repository["changes"];
+                    let changes = (!changes.is_null()).then(|| Changes {
+                        added: changes["added"].as_u64().unwrap_or(0),
+                        removed: changes["removed"].as_u64().unwrap_or(0),
+                        capped: changes["capped"] == true,
+                    });
+                    repositories.push((
+                        repository["path"].as_str().unwrap_or_default().to_owned(),
+                        RepositoryFacts::Changes(changes),
+                    ));
+                }
+                // Watched for as long as this connection lasts: the daemon reads the forges again
+                // about once a minute, and says when they changed.
+                let forge = conn.ask(
+                    "workspace.forge",
+                    json!({"project": self.place.project, "name": name, "watch": true}),
+                )?;
+                let (pulls, forge_problem) =
+                    forge.as_ref().map_or((Vec::new(), None), pull_requests);
+                let linked = shown["ticket"].as_str();
+                if ticket.as_ref().is_none_or(|(kept, at)| {
+                    Some(kept.reference.as_str()) != linked || at.elapsed() > TICKET_FRESH
+                }) {
+                    *ticket = match linked {
+                        None => None,
+                        Some(reference) => conn
+                            .ask(
+                                "workspace.ticket",
+                                json!({"project": self.place.project, "name": name}),
+                            )?
+                            .ok()
+                            .and_then(|read| ticket_facts(&read))
+                            .or_else(|| {
+                                Some(TicketFacts {
+                                    reference: reference.to_owned(),
+                                    state: None,
+                                    title: None,
+                                    url: None,
+                                    problem: Some("the ticket could not be read".into()),
+                                })
+                            })
+                            .map(|facts| (facts, Instant::now())),
+                    };
+                }
+                let forges = forge.as_ref().map_or(Vec::new(), forge_lines);
+                PlaceFacts {
+                    forges,
+                    ticket: ticket.as_ref().map(|(facts, _)| facts.clone()),
+                    statuses: RepositoryStatus::of_workspace(&shown),
+                    repositories,
+                    branch: shown["branch"].as_str().map(str::to_owned),
+                    bases,
+                    prepared_ms: shown["ready_at"].as_u64().map(|ready| {
+                        ready.saturating_sub(shown["created_at"].as_u64().unwrap_or(0))
+                    }),
+                    pulls,
+                    forge_problem,
+                }
+            }
+            None => {
+                let Ok(shown) = conn.ask("project.show", json!({"name": self.place.project}))?
+                else {
+                    self.send(SessionUpdate::Place(None));
+                    return Ok(());
+                };
+                PlaceFacts {
+                    repositories: shown["repositories"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(|r| {
+                            (
+                                r["path"].as_str().unwrap_or_default().to_owned(),
+                                RepositoryFacts::Branch(r["branch"].as_str().map(str::to_owned)),
+                            )
+                        })
+                        .collect(),
+                    ..PlaceFacts::default()
+                }
+            }
+        };
+        self.send(SessionUpdate::Place(Some(Box::new(facts))));
+        Ok(())
+    }
+}

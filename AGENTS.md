@@ -16,8 +16,9 @@ the part you touch (`docs/reference/`). Those files are the specification; this 
 work.
 
 Flottille is generic: nothing in it is specific to one machine, one desktop, one forge or one
-agent. Paths come from XDG, links open with the system's default handler, colours follow the
-system.
+agent. Paths come from XDG, links open with the system's default handler, colours are
+Flottille's own unless the desktop provides a theme to follow (`docs/design.md` §10). The window
+is English only.
 
 ## Commands
 
@@ -77,6 +78,33 @@ git config core.hooksPath .githooks     # once per clone: the commit-msg and pre
   weight is said in the pull request.
 - A comment says why, not what.
 
+## Motion in the window (non-negotiable)
+
+**Everything that moves in the window is animated.** The maintainer said it once, and a window
+pull request is not asked to be told again. The same durations and easing as everywhere
+(`crates/flottille-ui/src/motion.rs`, `docs/design.md` §10), through the helpers of
+`flottille-ui`, never a second system:
+
+- hover and press of every interactive element (a button, a row, a link, a chip, a toggle): its
+  colours fade over `HOVER`. GPUI's own `.hover(..)` switches at once and is never used (a test
+  refuses it);
+- a state that changes (selected, chosen, focused, open): the fill, the ink, the ring, the
+  chevron move over `PANEL` or `HOVER`;
+- an element that appears or leaves, a message, an error, a block that is shown or hidden:
+  it unfolds and fades in, folds away and fades out, with the gap around it;
+- a row inserted into, removed from or moved in a list: it unfolds, folds away or slides;
+- a fold or an unfold, a panel or a menu that opens and closes, a page and each of its
+  sections that show up (staggered).
+
+A window pull request, and a window issue, without its animations is incomplete: the review
+sends it back. The pull request lists each element it animated; the checklist in
+`docs/reference/gpui.md` is ticked in it.
+
+Motion is the tenth of the **rules of the window** (`docs/reference/gpui.md`, "Rules of the
+window"): four kinds of button, one confirmation dialog, results as toasts, a visible label on
+every control, a state said once, one list pattern, the spacing scale. A screen builds them from
+the components of `flottille-ui` that hold them, never its own.
+
 ## Agents and safety (non-negotiable)
 
 - **Bare mode is the product.** An agent Flottille runs has no built-in tool, no user setting,
@@ -108,7 +136,7 @@ git config core.hooksPath .githooks     # once per clone: the commit-msg and pre
 
 | Who | What |
 |---|---|
-| The maintainer | decides what is built, tries each tranche on their machine, and merges what they have not delegated |
+| The maintainer | decides what is built, tries each milestone on their machine, and merges what they have not delegated |
 | The lead agent | turns the maintainer's decisions into issues, launches the developing agents, reviews their work, keeps the tracker honest, and never hides a failure |
 | Developing agents | implement one issue each: the failing test first, then the code, the verification and a pull request; they never merge |
 | CI | `verify`, `commit-messages` and `shape` on every pull request |
@@ -118,8 +146,8 @@ git config core.hooksPath .githooks     # once per clone: the commit-msg and pre
 - **Issues are the tickets, and a ticket stands alone.** It holds the what, the where, the "how
   to verify" and the base branch, with no local path. If it lacks one of them, ask rather than
   guess.
-- The plan is cut into **tranches**, labels `tranche:1`, `tranche:2`…, beside `type:*` and
-  `area:*`. A tranche ends on something the maintainer can use, and they accept it on their
+- The plan is cut into **milestones** (GitHub milestones), beside the labels `type:*` and
+  `area:*`. A milestone ends on something the maintainer can use, and they accept it on their
   machine.
 - **`dev` is the integration branch** and the default branch: a branch starts from
   `origin/dev` and its pull request targets it. `main` holds released versions.

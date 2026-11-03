@@ -1,0 +1,316 @@
+//! The providers an agent runs on (`docs/agents.md`, "Providers"): their names, and the user's
+//! choice of those enabled, `providers.toml` in Flottille's configuration folder.
+
+use std::collections::BTreeMap;
+
+use serde::Deserialize;
+
+use crate::paths::Paths;
+
+/// Every provider Flottille knows, in the order they are listed and chosen by default.
+pub const NAMES: [&str; 3] = ["claude", "opencode", "codex"];
+
+/// Enabled when the file says nothing of them: the provider Flottille always had.
+const ENABLED_BY_DEFAULT: [&str; 1] = ["claude"];
+
+/// The providers whose bare mode holds only on the version it was qualified on: another one is
+/// refused unless the user allows it (`allow_unqualified_version`).
+pub const QUALIFIED_ONLY: [&str; 2] = ["opencode", "codex"];
+
+/// The model a provider lists that `asked` names: the listed id itself, else the one listed id that
+/// is `asked` followed by a date (`-YYYYMMDD`), as a provider's CLI takes `claude-haiku-4-5` for
+/// `claude-haiku-4-5-20251001`. None when no listed model, or more than one, answers to it.
+pub fn listed_model<'a>(
+    offered: impl IntoIterator<Item = &'a str>,
+    asked: &str,
+) -> Option<&'a str> {
+    let offered: Vec<&str> = offered.into_iter().collect();
+    if let Some(id) = offered.iter().find(|id| **id == asked) {
+        return Some(id);
+    }
+    let mut dated = offered.into_iter().filter(|id| {
+        id.strip_prefix(asked)
+            .and_then(|rest| rest.strip_prefix('-'))
+            .is_some_and(|date| date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()))
+    });
+    let found = dated.next()?;
+    dated.next().is_none().then_some(found)
+}
+
+/// Which providers the user enabled: each known name, with its choice.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Settings {
+    enabled: BTreeMap<&'static str, bool>,
+    unqualified: Vec<&'static str>,
+    /// The Auto judge (`[judge]`): the one the user chose, or the one Flottille picked for them
+    /// (`picked`); none while neither, or when the user chose none.
+    pub judge: Option<Judge>,
+    /// Whether the file says anything of the judge, a judge or `judge = "none"`: Flottille picks
+    /// one only while it does not, so that a user who chose none never gets one.
+    pub judge_set: bool,
+}
+
+/// What `judge = "none"` says: the user chose no judge, and Auto asks like Ask.
+pub const NO_JUDGE: &str = "none";
+
+/// The model that judges the calls to judge in Auto (`docs/design.md` §7), as `[judge]` holds it.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Judge {
+    pub provider: String,
+    /// The provider's default model when none is named.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Flottille picked it, and the user has not yet seen the notice that says so.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub picked: bool,
+}
+
+impl Judge {
+    /// Who judged, as a verdict records it: `claude haiku`.
+    pub fn who(&self) -> String {
+        match &self.model {
+            Some(model) => format!("{} {model}", self.provider),
+            None => self.provider.clone(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Entry {
+    enabled: Option<bool>,
+    allow_unqualified_version: Option<bool>,
+}
+
+impl Default for Settings {
+    fn default() -> Settings {
+        Settings {
+            enabled: NAMES
+                .iter()
+                .map(|name| (*name, ENABLED_BY_DEFAULT.contains(name)))
+                .collect(),
+            unqualified: Vec::new(),
+            judge: None,
+            judge_set: false,
+        }
+    }
+}
+
+impl Settings {
+    pub fn enabled(&self, name: &str) -> bool {
+        self.enabled.get(name).copied().unwrap_or(false)
+    }
+
+    /// Whether the user allows the provider's agents on a version other than the qualified one.
+    pub fn allows_unqualified_version(&self, name: &str) -> bool {
+        self.unqualified.contains(&name)
+    }
+
+    /// Reads `providers.toml`: the defaults when there is none. The error names the file and
+    /// the key at fault.
+    pub fn load(paths: &Paths) -> Result<Settings, String> {
+        match std::fs::read_to_string(file(paths)) {
+            Ok(text) => Settings::parse(&text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
+            Err(error) => Err(format!("providers.toml: {error}")),
+        }
+    }
+
+    /// The text of `providers.toml`, checked: a provider Flottille does not know is refused, so
+    /// that a typo is never silently ignored.
+    pub fn parse(text: &str) -> Result<Settings, String> {
+        let refuse = |message: String| format!("providers.toml: {message}");
+        let mut table: toml::Table = text
+            .parse()
+            .map_err(|e: toml::de::Error| refuse(e.message().into()))?;
+        let judge = table.remove("judge");
+        let entries: BTreeMap<String, Entry> = serde_path_to_error::deserialize(table)
+            .map_err(|error| refuse(format!("{}: {}", error.path(), error.inner().message())))?;
+        let mut settings = Settings {
+            judge_set: judge.is_some(),
+            ..Settings::default()
+        };
+        if let Some(judge) = judge.filter(|judge| judge.as_str() != Some(NO_JUDGE)) {
+            let judge: Judge = serde_path_to_error::deserialize(judge).map_err(|error| {
+                refuse(format!(
+                    "judge.{}: {}",
+                    error.path(),
+                    error.inner().message()
+                ))
+            })?;
+            if !known(&judge.provider) {
+                return Err(refuse(format!(
+                    "judge.provider: unknown provider {}: the providers are {}",
+                    judge.provider,
+                    NAMES.join(", ")
+                )));
+            }
+            settings.judge = Some(judge);
+        }
+        for (name, entry) in entries {
+            let known = NAMES.iter().find(|known| **known == name).ok_or_else(|| {
+                refuse(format!(
+                    "{name}: unknown provider: the providers are {}",
+                    NAMES.join(", ")
+                ))
+            })?;
+            if let Some(enabled) = entry.enabled {
+                settings.enabled.insert(known, enabled);
+            }
+            if let Some(allow) = entry.allow_unqualified_version {
+                if !QUALIFIED_ONLY.contains(known) {
+                    let whose: Vec<String> = QUALIFIED_ONLY
+                        .iter()
+                        .map(|name| format!("{name}'s"))
+                        .collect();
+                    return Err(refuse(format!(
+                        "{name}.allow_unqualified_version: only {} versions are checked before \
+                         their agents start",
+                        whose.join(" and ")
+                    )));
+                }
+                if allow {
+                    settings.unqualified.push(known);
+                }
+            }
+        }
+        Ok(settings)
+    }
+}
+
+/// `$XDG_CONFIG_HOME/flottille/providers.toml`.
+pub fn file(paths: &Paths) -> std::path::PathBuf {
+    paths.config.join("providers.toml")
+}
+
+/// A provider Flottille knows, by its name.
+pub fn known(name: &str) -> bool {
+    NAMES.contains(&name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_model_id_without_its_date_suffix_is_the_listed_model() {
+        let listed = [
+            "haiku",
+            "claude-haiku-4-5-20251001",
+            "claude-sonnet-4-5-20250929",
+        ];
+        // The listed id itself, and the id without its date.
+        assert_eq!(
+            listed_model(listed, "claude-haiku-4-5-20251001"),
+            Some("claude-haiku-4-5-20251001")
+        );
+        assert_eq!(
+            listed_model(listed, "claude-haiku-4-5"),
+            Some("claude-haiku-4-5-20251001")
+        );
+        assert_eq!(listed_model(listed, "haiku"), Some("haiku"));
+        // Not a date, a wrong date, a prefix of the name, or a model that is not listed.
+        assert_eq!(listed_model(listed, "claude-haiku-4"), None);
+        assert_eq!(listed_model(listed, "claude-haiku-4-5-2025"), None);
+        assert_eq!(listed_model(listed, "claude-opus-4-5"), None);
+        assert_eq!(
+            listed_model(["claude-haiku-4-5-2025101x"], "claude-haiku-4-5"),
+            None
+        );
+        // Two listed models that answer to it: none is guessed.
+        assert_eq!(listed_model(["m-1-20250101", "m-1-20260101"], "m-1"), None);
+        // An exact id wins over a dated one.
+        assert_eq!(listed_model(["m-1", "m-1-20250101"], "m-1"), Some("m-1"));
+    }
+
+    #[test]
+    fn the_auto_judge_is_read_from_its_table_and_none_is_chosen_by_default() {
+        assert_eq!(Settings::default().judge, None);
+        let settings = Settings::parse(
+            "[claude]\nenabled = true\n[judge]\nprovider = \"claude\"\nmodel = \"haiku\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            settings.judge,
+            Some(Judge {
+                provider: "claude".into(),
+                model: Some("haiku".into()),
+                picked: false,
+            })
+        );
+        assert!(settings.judge_set);
+        assert!(!Settings::default().judge_set);
+        assert!(settings.enabled("claude"));
+        let unknown = Settings::parse("[judge]\nprovider = \"gemini\"\n").unwrap_err();
+        assert!(
+            unknown.starts_with("providers.toml: judge.provider"),
+            "{unknown}"
+        );
+        let key = Settings::parse("[judge]\nprovider = \"claude\"\nwho = 1\n").unwrap_err();
+        assert!(key.contains("judge"), "{key}");
+    }
+
+    #[test]
+    fn a_judge_chosen_none_is_told_apart_from_a_judge_never_chosen() {
+        let none = Settings::parse("judge = \"none\"\n").unwrap();
+        assert_eq!(none.judge, None);
+        assert!(none.judge_set);
+        let picked =
+            Settings::parse("[judge]\nprovider = \"claude\"\nmodel = \"haiku\"\npicked = true\n")
+                .unwrap();
+        assert!(picked.judge.unwrap().picked);
+        assert!(Settings::parse("judge = \"some\"\n").is_err());
+    }
+
+    #[test]
+    fn without_a_file_claude_is_enabled_and_opencode_is_not() {
+        let settings = Settings::default();
+        assert!(settings.enabled("claude"));
+        assert!(!settings.enabled("opencode"));
+        assert!(!settings.enabled("codex"));
+    }
+
+    #[test]
+    fn the_file_enables_and_disables_each_provider() {
+        let settings =
+            Settings::parse("[claude]\nenabled = false\n[opencode]\nenabled = true\n").unwrap();
+        assert!(!settings.enabled("claude"));
+        assert!(settings.enabled("opencode"));
+        assert_eq!(
+            Settings::parse("[opencode]\n").unwrap(),
+            Settings::default()
+        );
+    }
+
+    #[test]
+    fn opencode_s_unqualified_versions_are_allowed_only_when_the_file_says_so() {
+        assert!(!Settings::default().allows_unqualified_version("opencode"));
+        let settings =
+            Settings::parse("[opencode]\nenabled = true\nallow_unqualified_version = true\n")
+                .unwrap();
+        assert!(settings.allows_unqualified_version("opencode"));
+        let claude = Settings::parse("[claude]\nallow_unqualified_version = true\n").unwrap_err();
+        assert_eq!(
+            claude,
+            "providers.toml: claude.allow_unqualified_version: only opencode's and codex's \
+             versions are checked before their agents start"
+        );
+    }
+
+    #[test]
+    fn an_unknown_provider_or_key_is_refused_with_its_key() {
+        let unknown = Settings::parse("[gemini]\nenabled = true\n").unwrap_err();
+        assert_eq!(
+            unknown,
+            "providers.toml: gemini: unknown provider: the providers are claude, opencode, codex"
+        );
+        let key = Settings::parse("[claude]\nenable = true\n").unwrap_err();
+        assert!(key.starts_with("providers.toml: claude.enable: "), "{key}");
+        let kind = Settings::parse("[claude]\nenabled = \"yes\"\n").unwrap_err();
+        assert!(
+            kind.starts_with("providers.toml: claude.enabled: "),
+            "{kind}"
+        );
+    }
+}
