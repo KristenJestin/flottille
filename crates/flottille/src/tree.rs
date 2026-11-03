@@ -468,9 +468,13 @@ fn send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     .map_err(|failure| refused(format!("refused: {}", failure.message)))?;
     // Checked before anything is sent: a refused change sends no message.
     let changed = asked.model.is_some() || asked.effort.is_some();
+    let mut dropped = String::new();
     if changed {
-        crate::agents::change_options(daemon, &child, asked.model, asked.effort)
+        let answer = crate::agents::change_options(daemon, &child, asked.model, asked.effort)
             .map_err(|failure| refused(format!("refused: {}", failure.message)))?;
+        if let Some(why) = answer["dropped"].as_str() {
+            dropped = format!(" {why}.");
+        }
     }
     deliveries::deliver(
         daemon,
@@ -481,9 +485,9 @@ fn send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
         approval::URGENT,
     );
     let options = if changed {
-        " Its model and effort change between its turns, before its next prompt."
+        format!(" Its model and effort change between its turns, before its next prompt.{dropped}")
     } else {
-        ""
+        String::new()
     };
     Ok(Outcome::Done(format!(
         "Sent to {}: it reaches it on its next tool result, or as a new turn.{options}",

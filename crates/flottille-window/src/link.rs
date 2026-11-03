@@ -229,7 +229,7 @@ fn items_of(event: &Event) -> Option<(String, Option<crate::items::ItemKey>)> {
 fn about_providers(event: &Event) -> bool {
     event.name.starts_with("provider.")
         || event.name == "agent.started"
-        || event.name == "agent.options_changed"
+        || event.name == "agent.options_taken"
 }
 
 /// What an event says of an edited text an editor shows (`Update::TextChanged`).
@@ -706,7 +706,7 @@ mod tests {
         assert!(about_providers(&event("provider.models_read", json!({}))));
         assert!(about_providers(&event("agent.started", json!({}))));
         assert!(
-            about_providers(&event("agent.options_changed", json!({}))),
+            about_providers(&event("agent.options_taken", json!({}))),
             "a model set says its efforts"
         );
         assert!(!about_providers(&event("agent.turn_ended", json!({}))));

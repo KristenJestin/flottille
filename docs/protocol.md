@@ -922,9 +922,11 @@ alone reaches it: no tool of an agent changes a mode.
 running agent between turns (`docs/agents.md`, "The options"); its provider never changes. The
 change is checked as an agent's start is, against the models its provider is known to offer, then
 held as the agent's `pending` options and set on its session before its next prompt: at once when
-it is between turns, once its turn ends otherwise. Answers `{"agent", "after"}`, the agent with
-its `pending` options and the event number to follow the change from; the events are
-`agent.options_pending`, then `agent.options_changed` or `agent.options_refused` (`docs/events.md`).
+it is between turns, once its turn ends otherwise. Answers `{"agent", "after", "dropped"?}`, the
+agent with its `pending` options, the event number to follow the change from, and, when a model
+change made a pending effort the new model does not offer go, a sentence that says so; the events
+are `agent.options_pending`, then `agent.options_taken` or `agent.options_refused`
+(`docs/events.md`).
 `refused` for an agent that has ended or failed, a model its provider is known not to offer, and an
 effort its model is known not to offer, each naming what is offered; `invalid-params` when neither
 is named; `not-found` for an agent that does not exist. A child can be changed as well: its parent

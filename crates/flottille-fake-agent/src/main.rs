@@ -50,6 +50,14 @@
 //!   current; no effort option without `efforts`.
 //! - `refuse`: values the options list but `session/set_config_option` refuses, as an agent whose
 //!   catalogue lists a model its account cannot take.
+//! - `broken`: values `session/set_config_option` answers with an internal error, as an agent
+//!   that could not reach its service.
+//! - `takes`: values `session/set_config_option` sets another one for (`{"fake-large":
+//!   "fake-small"}`), as an agent that falls back to another model.
+//! - `model_efforts`: the efforts of each model that has its own (`{"fake-large": ["low"]}`), the
+//!   others having `efforts`; a model set keeps the effort when it has it, else its first.
+//! - `set_wait`: milliseconds `session/set_config_option` waits before it answers (none by
+//!   default).
 //! - `turns`: a prompt plays the first turn whose `when` is in its text; a prompt matching none is
 //!   answered `ok`. `stop` is the stop reason (`end_turn` by default). A turn with `"times": n`
 //!   is played n times at most, by every process of the folder together: after that it is skipped,
@@ -164,8 +172,17 @@ fn main() {
     });
     let mut agent = agent;
     for request in incoming {
-        let answer = agent.handle(&request, &answered, &cancelled);
         let id = request["id"].clone();
+        if request["method"] == "session/set_config_option"
+            && agent.script["broken"]
+                .as_array()
+                .is_some_and(|broken| broken.contains(&request["params"]["value"]))
+        {
+            agent.send(json!({"jsonrpc": "2.0", "id": id,
+                "error": {"code": -32603, "message": "the service could not be reached"}}));
+            continue;
+        }
+        let answer = agent.handle(&request, &answered, &cancelled);
         match answer {
             Ok(result) => agent.send(json!({"jsonrpc": "2.0", "id": id, "result": result})),
             Err(message) => agent.send(
@@ -296,22 +313,38 @@ impl Agent {
             "session/set_config_option" => {
                 let option = params["configId"].as_str().unwrap_or_default();
                 let value = params["value"].as_str().unwrap_or_default();
+                if let Some(ms) = self.script["set_wait"].as_u64() {
+                    std::thread::sleep(Duration::from_millis(ms));
+                }
                 let offered = match option {
-                    "model" => &self.script["models"],
-                    "effort" => &self.script["efforts"],
+                    "model" => self.values(&self.script["models"], option),
+                    "effort" => self.efforts(&session),
                     _ => return Err(format!("no option {option}")),
                 };
-                if !self.values(offered, option).iter().any(|v| v == value)
+                if !offered.iter().any(|v| v == value)
                     || self.script["refuse"]
                         .as_array()
                         .is_some_and(|refused| refused.iter().any(|v| v == value))
                 {
                     return Err(format!("{value} is not a value of {option}"));
                 }
+                let value = self.script["takes"][value].as_str().unwrap_or(value);
                 self.options
                     .entry(session.clone())
                     .or_default()
                     .insert(option.to_owned(), value.into());
+                // An effort the new model does not have goes back to its first.
+                let efforts = self.efforts(&session);
+                let options = self.options.entry(session.clone()).or_default();
+                if option == "model"
+                    && let Some(first) = efforts.first()
+                    && !options
+                        .get("effort")
+                        .and_then(Value::as_str)
+                        .is_some_and(|effort| efforts.iter().any(|e| e == effort))
+                {
+                    options.insert("effort".into(), first.as_str().into());
+                }
                 Ok(json!({"configOptions": self.config_options(&session)}))
             }
             "session/prompt" => {
@@ -677,10 +710,30 @@ impl Agent {
                 "effort",
                 "Effort",
                 "thought_level",
-                self.values(&self.script["efforts"], "effort"),
+                self.efforts(session),
             ));
         }
         Value::Array(options)
+    }
+
+    /// The efforts of the model the session has.
+    fn efforts(&self, session: &str) -> Vec<String> {
+        let model = self
+            .options
+            .get(session)
+            .and_then(|options| options.get("model"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| {
+                self.values(&self.script["models"], "model")
+                    .first()
+                    .cloned()
+            })
+            .unwrap_or_default();
+        match &self.script["model_efforts"][model.as_str()] {
+            Value::Array(_) => self.values(&self.script["model_efforts"][model.as_str()], "effort"),
+            _ => self.values(&self.script["efforts"], "effort"),
+        }
     }
 }
 

@@ -775,20 +775,30 @@ fn check_known(
     Ok(())
 }
 
+/// A change of a running agent's model and effort, as checked.
+pub struct Checked {
+    /// The model as the provider lists it.
+    pub model: Option<String>,
+    /// Why the effort waiting goes: the new model does not offer it.
+    pub dropped: Option<String>,
+}
+
 /// A change of a running agent's model and effort, checked against what its provider is known to
-/// offer, as at its start: the model as the provider lists it. Nothing is refused while the
-/// models are not known; the agent's session then refuses what it does not offer, and goes on.
+/// offer, as at its start: the model as the provider lists it. An effort waiting that the new
+/// model does not offer goes, said. Nothing is refused while the models are not known; the
+/// agent's session then refuses what it does not offer, and goes on.
 pub fn check_change(
     daemon: &Daemon,
     agent: &Agent,
     model: Option<String>,
     effort: Option<String>,
-) -> Result<Option<String>, Failure> {
+) -> Result<Checked, Failure> {
     let provider = of(agent).map_err(Failure::refused)?;
     let settings =
         Settings::load(&daemon.paths).map_err(|error| Failure::new("invalid-config", error))?;
     let check = Check::of(provider, &settings, Version::Skip);
     let mut model = model;
+    let mut dropped = None;
     if let Some(models) = known_models(daemon, &check) {
         // The model the agent runs on, or will once the change a model asked before is set.
         let current = agent
@@ -798,8 +808,20 @@ pub fn check_change(
             .or(agent.taken.model.as_deref())
             .or(agent.chosen.model.as_deref());
         check_known(provider, &models, &mut model, effort.as_deref(), current)?;
+        if effort.is_none()
+            && let (Some(new), Some(waiting)) = (&model, &agent.pending.effort)
+            && let Some(efforts) = models
+                .iter()
+                .find(|m| m["id"] == new.as_str())
+                .and_then(|m| m["efforts"].as_array())
+            && !efforts.iter().any(|e| e == waiting.as_str())
+        {
+            dropped = Some(format!(
+                "The effort {waiting} no longer waits: the model {new} does not offer it"
+            ));
+        }
     }
-    Ok(model)
+    Ok(Checked { model, dropped })
 }
 
 /// The provider and the choices of a new agent, checked against the providers enabled and ready

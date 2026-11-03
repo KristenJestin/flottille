@@ -352,6 +352,9 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                     text(&set["agent"], "id"),
                     pending_text(&set["agent"]),
                 );
+                if let Some(dropped) = set["dropped"].as_str() {
+                    println!("{dropped}.");
+                }
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -717,7 +720,7 @@ fn show_text(shown: &Value) -> String {
             "agent.failed" => format!("[failed: {}]", text(data, "reason")),
             "agent.ended" => format!("[ended: {}]", text(data, "reason")),
             "agent.resumed" => "[resumed by the user]".into(),
-            "agent.options_changed" if data["model"].is_string() => format!(
+            "agent.options_taken" => format!(
                 "[now on model {}, effort {}]",
                 text(data, "model"),
                 data["effort"].as_str().unwrap_or("the model's default")

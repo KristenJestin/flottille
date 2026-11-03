@@ -688,14 +688,23 @@ pub fn change_options(
         ));
     }
     refuse_final(agent)?;
-    let model = providers::check_change(daemon, agent, model, effort.clone())?;
+    let checked = providers::check_change(daemon, agent, model, effort.clone())?;
     let after = daemon.read(Store::last_seq)?;
-    let pending = Choices {
-        model: model.or(agent.pending.model.clone()),
-        effort: effort.or(agent.pending.effort.clone()),
-        mode: None,
-    };
+    // Merged with what waits under the store's lock: a change asked at the same time, or while
+    // the session sets the previous one, is kept.
     daemon.write(|store| {
+        let waiting = store
+            .agent(&agent.id)?
+            .map(|agent| agent.pending)
+            .unwrap_or_default();
+        let pending = Choices {
+            model: checked.model.clone().or(waiting.model),
+            effort: effort
+                .clone()
+                .or(waiting.effort)
+                .filter(|_| checked.dropped.is_none()),
+            mode: None,
+        };
         let (_, event) = store.change_agent(
             &agent.id,
             AgentChange {
@@ -712,7 +721,11 @@ pub fn change_options(
     // An agent between turns takes them now; one in a turn, once it ended.
     tell(daemon, &agent.id, Order::Ring);
     let agent = find(daemon, &agent.id)?;
-    Ok(json!({"agent": agent.to_json(), "after": after}))
+    let mut answer = json!({"agent": agent.to_json(), "after": after});
+    if let Some(dropped) = checked.dropped {
+        answer["dropped"] = dropped.into();
+    }
+    Ok(answer)
 }
 
 /// Asks the agent's turn to stop, when one runs.
@@ -1443,7 +1456,14 @@ impl acp::Events for Recorder {
         (agent.pending.model.is_some() || agent.pending.effort.is_some()).then_some(agent.pending)
     }
 
-    fn options_set(&self, applied: Choices, taken: Choices, options: &Value, refused: Vec<String>) {
+    fn options_set(
+        &self,
+        settled: Choices,
+        changed: Choices,
+        taken: Choices,
+        options: &Value,
+        refused: Vec<String>,
+    ) {
         // The efforts the model has now are the provider's to learn again.
         providers::learn(&self.daemon, self.provider, options, false, false);
         let offered = options
@@ -1452,22 +1472,32 @@ impl acp::Events for Recorder {
             .flatten()
             .find(|option| option["category"] == "thought_level")
             .map(providers::values);
-        let changed = applied.model.is_some() || applied.effort.is_some();
+        let any = changed.model.is_some() || changed.effort.is_some();
         let result = self.daemon.write(|store| {
             let Some(agent) = store.agent(&self.agent)? else {
                 return Ok(((), None));
             };
             // What a later process opens with. An effort chosen earlier that the new model does
             // not offer goes: the process would fail on it.
-            let effort = applied.effort.clone().or_else(|| {
+            let effort = changed.effort.clone().or_else(|| {
                 agent
                     .chosen
                     .effort
                     .filter(|chosen| offered.as_ref().is_none_or(|o| o.contains(chosen)))
             });
-            let event = changed.then(|| {
+            // Only what was set goes from the change: a value asked since stays for the next
+            // time.
+            let left = |waiting: Option<String>, settled: &Option<String>| {
+                waiting.filter(|waiting| settled.as_ref() != Some(waiting))
+            };
+            let pending = Choices {
+                model: left(agent.pending.model, &settled.model),
+                effort: left(agent.pending.effort, &settled.effort),
+                mode: None,
+            };
+            let event = any.then(|| {
                 (
-                    "agent.options_changed",
+                    "agent.options_taken",
                     json!({"agent": self.agent, "model": taken.model, "effort": taken.effort}),
                 )
             });
@@ -1475,12 +1505,12 @@ impl acp::Events for Recorder {
                 &self.agent,
                 AgentChange {
                     chosen: Some(Choices {
-                        model: applied.model.clone().or(agent.chosen.model),
+                        model: changed.model.clone().or(agent.chosen.model),
                         effort,
                         mode: None,
                     }),
-                    taken: changed.then_some(taken),
-                    pending: Some(Choices::default()),
+                    taken: any.then_some(taken),
+                    pending: Some(pending),
                     ..AgentChange::default()
                 },
                 event,

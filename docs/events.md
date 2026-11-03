@@ -335,9 +335,8 @@ The agent compacted its context.
 #### `agent.plan`, `agent.usage`, `agent.mode_changed`, `agent.options_changed`
 
 The agent's plan (`entries`), its context use (`used` and `size` in tokens, `cost`), its mode
-(`mode`), its options (`options`, as ACP gives them: this `agent.options_changed` is the agent's
-own announcement; the one a change of model or effort emits has `model` and `effort`, above). Each
-with `agent` and `replay`.
+(`mode`), its options (`options`, as ACP gives them: the agent's own announcement; a change of
+model or effort the user asked is `agent.options_taken`). Each with `agent` and `replay`.
 
 #### `agent.provider_wait`, `agent.provider_limit`, `agent.provider_error`
 
@@ -532,12 +531,11 @@ The user (or a parent, for its child) changed the agent's model or effort (`agen
 | `agent` | |
 | `model`, `effort` | What is waiting, each `null` when it is not changed. |
 
-#### `agent.options_changed`
+#### `agent.options_taken`
 
-The agent's session took the change: from now it runs on `model` and `effort` (what it reports it
-has, a provider's `default` named by the model it stands for), and the agent's stored options
-follow (`docs/agents.md`, "The options"). The agent's own `config_option_update` is recorded under
-the same name with an `options` field (below); a client tells them apart by the fields.
+The agent's session set the change, or what it took instead: from now it runs on `model` and
+`effort` (what it reports it has, a provider's `default` named by the model it stands for), and
+the agent's stored options follow (`docs/agents.md`, "The options").
 
 | Field | |
 |---|---|
@@ -547,7 +545,8 @@ the same name with an `options` field (below); a client tells them apart by the 
 #### `agent.options_refused`
 
 The agent's session refused the model or the effort of a change: it goes on with its previous
-options, the change goes, and the agent is not failed.
+options, the value refused leaves the change, and the agent is not failed. An error that is not a
+refusal is none: the change stays pending.
 
 | Field | |
 |---|---|

@@ -678,7 +678,8 @@ change is checked against what the provider is known to offer (a refusal names w
 then set on its session before its next prompt: at once when it is between turns, once its turn
 ends otherwise. A value its session refuses never fails the agent: it goes on with its previous
 options and `agent show` says the change was refused. `agent show` names the model, the effort
-and, while a change waits, the pending ones. `--json` prints `{"agent", "after"}`. Refused for an
+and, while a change waits, the pending ones. A pending effort the new model does not offer goes,
+and a line says so. `--json` prints `{"agent", "after", "dropped"?}`. Refused for an
 agent that has ended, and when neither `--model` nor `--effort` is given.
 
 ```
