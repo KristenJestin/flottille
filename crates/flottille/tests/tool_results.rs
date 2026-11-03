@@ -426,3 +426,43 @@ fn a_child_and_another_agent_cannot_read_the_cut_result_of_a_session() {
         assert!(!answer.text.contains("line 0001"), "{who}: {}", answer.text);
     }
 }
+
+#[test]
+fn tail_on_a_cut_result_counts_from_its_end_like_on_a_run() {
+    let user = User::with_fake_agent().with_cut_results();
+    let (_, mcp, _) = session(&user);
+    let id = id_of(&long(&mcp));
+
+    let end = ok(mcp.call("run_status", json!({"run": id, "tail": 3})));
+    let (about, lines) = end.split_once('\n').unwrap();
+    let from_start = ok(mcp.call("run_status", json!({"run": id, "start": 10, "tail": 3})));
+
+    assert_eq!(
+        lines, "line 0598 of the log\nline 0599 of the log\nline 0600 of the log",
+        "{end}"
+    );
+    assert!(about.contains("the end of the result"), "{about}");
+    assert!(about.contains("earlier lines: "), "{about}");
+    // With a start, tail is how many lines follow it.
+    assert_eq!(from_start.lines().count(), 1 + 3, "{from_start}");
+}
+
+#[test]
+fn only_the_latest_cut_results_of_an_agent_are_kept_and_a_dropped_one_says_so() {
+    let user = User::with_fake_agent().with_cut_results();
+    let (_, mcp, _) = session(&user);
+    let kept = flottille_core::store::KEPT_RESULTS_PER_AGENT;
+    let ids: Vec<String> = (0..kept + 1).map(|_| id_of(&long(&mcp))).collect();
+
+    let dropped = mcp.call("run_status", json!({"run": ids[0]}));
+    assert!(dropped.error, "{}", dropped.text);
+    assert!(dropped.text.contains("was dropped"), "{}", dropped.text);
+    assert!(dropped.text.contains(&kept.to_string()), "{}", dropped.text);
+    let latest = ok(mcp.call("run_status", json!({"run": ids[kept]})));
+    assert!(latest.contains("line 0001 of the log"), "{latest}");
+    let oldest_kept = ok(mcp.call("run_status", json!({"run": ids[1]})));
+    assert!(
+        oldest_kept.contains("line 0001 of the log"),
+        "{oldest_kept}"
+    );
+}

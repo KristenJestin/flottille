@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use flottille_core::agent::new_id;
 use flottille_core::paths::Paths;
+use flottille_core::store::{KEPT_RESULTS_PER_AGENT, Kept};
 use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
@@ -266,7 +267,8 @@ fn shorten(whole: &str, limit: usize, id: &str) -> Option<(String, Cut)> {
 }
 
 /// `run_status` on the id of a cut result: lines of its whole text from `start` (the first by
-/// default), as many as fit under the limit, or `tail` at most, with how to read the others.
+/// default), as many as fit under the limit, `tail` at most, or the last `tail` without a start,
+/// with how to read the others.
 pub fn read_kept(
     daemon: &Daemon,
     agent: &str,
@@ -282,7 +284,13 @@ pub fn read_kept(
         ));
     }
     let kept = match daemon.read(|store| store.kept_result(id, agent)) {
-        Ok(Some(text)) => text,
+        Ok(Some(Kept::Text(text))) => text,
+        Ok(Some(Kept::Dropped)) => {
+            return Outcome::Refused(format!(
+                "refused: {id} was dropped: only the last {KEPT_RESULTS_PER_AGENT} results cut \
+                 for an agent are kept, and this one is older: run the call again"
+            ));
+        }
         Ok(None) => {
             return Outcome::Refused(format!(
                 "refused: {id} is no cut result of this session: only a result Flottille cut \
@@ -292,8 +300,7 @@ pub fn read_kept(
         Err(error) => return Outcome::Failed(error.to_string()),
     };
     let lines = lines_of(&kept);
-    let start = start.unwrap_or(1);
-    if start == 0 || start > lines.len() {
+    if start.is_some_and(|start| start == 0 || start > lines.len()) {
         return Outcome::Refused(format!(
             "refused: start is a line from 1 to {}, the lines of {id}",
             lines.len()
@@ -302,16 +309,33 @@ pub fn read_kept(
     let room = limit(&daemon.paths)
         .unwrap_or(DEFAULT_LIMIT)
         .saturating_sub(ABOUT_CHARS);
-    let from = start - 1;
-    let most = tail.unwrap_or(usize::MAX).max(1);
-    let (mut to, mut size) = (from, 0);
-    while to < lines.len()
-        && to - from < most
-        && (to == from || size + lines[to].chars().count() < room)
-    {
-        size += lines[to].chars().count() + 1;
-        to += 1;
-    }
+    // As on a run: `tail` alone is the last lines, with `start` it is how many follow it.
+    let (from, to) = match (tail, start) {
+        (Some(tail), None) => {
+            let (mut from, mut size) = (lines.len(), 0);
+            while from > 0
+                && lines.len() - from < tail
+                && (from == lines.len() || size + lines[from - 1].chars().count() < room)
+            {
+                size += lines[from - 1].chars().count() + 1;
+                from -= 1;
+            }
+            (from, lines.len())
+        }
+        _ => {
+            let from = start.unwrap_or(1) - 1;
+            let most = tail.unwrap_or(usize::MAX).max(1);
+            let (mut to, mut size) = (from, 0);
+            while to < lines.len()
+                && to - from < most
+                && (to == from || size + lines[to].chars().count() < room)
+            {
+                size += lines[to].chars().count() + 1;
+                to += 1;
+            }
+            (from, to)
+        }
+    };
     let mut about = format!("(lines {}-{to} of {}", from + 1, lines.len());
     if from > 0 {
         about.push_str(&format!(
