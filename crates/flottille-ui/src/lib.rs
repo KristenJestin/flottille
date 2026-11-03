@@ -10,6 +10,7 @@ pub mod confirm;
 pub mod drawer;
 pub mod dropdown;
 pub mod field;
+pub mod fuzzy;
 pub mod icons;
 mod interact;
 pub mod layer;
@@ -44,7 +45,7 @@ pub use field::Field;
 pub use icons::{Icon, Icons, icon};
 pub use interact::{
     Hoverable, dismiss_on_navigate, dismiss_top_overlay, fade, forget_overlays, hoverable,
-    open_overlay, selectable, text_region, tint,
+    keys_held, open_overlay, pressable, selectable, text_region, tint,
 };
 pub use lines::{
     CardHead, Chip, FlatRow, FooterAction, LINE_GAP, LabelledLine, StepRow, StepTone, caption,

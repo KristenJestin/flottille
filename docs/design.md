@@ -640,7 +640,7 @@ becomes the child's record, the report is a tool, waiting is deliveries, closing
 
 GPUI Fast with gpui-kit, English only (no translation layer). Screens of the milestone "The window":
 
-- a top bar with search and a bell counting what waits for the user (each request, each
+- a top bar with a search field and a bell counting what waits for the user (each request, each
   question) and what a session did to a ticket or a pull request (opened, merged, edited or
   commented a pull request; created, edited, commented, closed or reopened a ticket, as
   `agent.tool_served` says a write of `forge` or `tickets` was done), until that session is
@@ -649,6 +649,25 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   of the text posted) and its session, each on one line cut with an ellipsis. What a session
   changes while its page is open is in sight, and rings nothing; what is changed lives as long
   as the window;
+  the search field, "Search  Ctrl K", is a **quick switcher**: Ctrl K anywhere in the window or a
+  click on the field opens it over the page (the modal layer, near the top), its own text field
+  focused; Escape, a click outside, the mouse's back button or choosing a result closes it, and
+  the focus goes back to what had it. It finds, in groups with their headings, **Sessions** (by
+  title; each with its project and place and its state as the tree shows it, `NEEDS YOU` or
+  running, else how long ago), **Projects** (a project and each of its workspaces, which open
+  the project's page) and **Actions** (New session, Add a project, Notifications, Settings
+  and each tab of it, each project's settings: one list in code, `actions()` of the switcher,
+  where a new screen adds its entry). It
+  matches each word typed, ignoring case, accents and ligatures, in the title (its letters in
+  order, close together, are enough) or as a whole in the words around it (the project and
+  the place a session is in), the best match first and the most recently active among equal
+  ones, and draws what matched in the accent; the best match of all groups is the marked one.
+  With nothing typed it lists the recent sessions and the actions. While it is open, a read of
+  the daemon changes what the results say (a state, how long ago) but not their order: nothing
+  moves under the pointer until something is typed. The arrows move the marked result, Enter
+  chooses it, and the pointer marks the row it is on and a click chooses it. Ctrl K waits while
+  a dialog or a list is open. It searches what the window already holds from the daemon (the
+  tree, the projects), never the content of conversations (that needs an index);
 - left: the tree project › place › session. `main` and the workspaces sit at the same level
   under their project; a session is titled by the first line of its first message that says what the
   work is (a greeting or a single word does not: the session is `agent <id>` until a later message

@@ -1,5 +1,5 @@
 //! Rows: [`TreeRow`] for the left tree (project › place › session) and [`ListRow`] for a session
-//! in a card, a sub-agent, a running agent.
+//! in a card, a sub-agent, a running agent, a result of a search.
 //!
 //! A row's state mark is a [`StateIcon`](crate::StateIcon) or [`Pill`](crate::Pill) view handed in
 //! by the screen, so a state change or a spinner tick redraws that mark and not the row.
@@ -8,22 +8,24 @@ use std::f32::consts::{FRAC_PI_2, PI};
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, ClickEvent, Div, ElementId, Entity, FontWeight, InteractiveElement,
-    IntoElement, ParentElement, RenderOnce, SharedString, Stateful, StatefulInteractiveElement,
-    Styled, TestSupportExt, Transformation, Window, div, px, radians,
+    AnyElement, App, ClickEvent, Div, ElementId, Entity, FontWeight, HighlightStyle,
+    InteractiveElement, IntoElement, ParentElement, RenderOnce, SharedString, Stateful,
+    StatefulInteractiveElement, Styled, StyledText, TestSupportExt, Transformation, Window, div,
+    px, radians,
 };
 
 use crate::color::mix;
 use crate::icons::{Icon, icon};
-use crate::interact::{choose, feel, wire};
+use crate::interact::{choose, fade, feel, wire, wire_with};
 use crate::listing::{Item, Placement};
 use crate::menu::Menu;
-use crate::motion::{Motion, PANEL};
+use crate::motion::{HOVER, Motion, PANEL};
 use crate::theme::{palette, radius};
 use crate::typography::Type;
 
 type OnClick = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 type Decorate = Box<dyn FnOnce(Stateful<Div>) -> Stateful<Div> + 'static>;
+type OnEnter = Box<dyn Fn(&mut App) + 'static>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TreeLevel {
@@ -301,6 +303,9 @@ pub struct ListRow {
     /// Rounded at the top, at the bottom: the first and the last row of a card.
     corners: (bool, bool),
     selected: bool,
+    marked: bool,
+    pieces: Option<Vec<(String, bool)>>,
+    on_enter: Option<OnEnter>,
     on_click: Option<OnClick>,
 }
 
@@ -324,8 +329,32 @@ impl ListRow {
             in_card: false,
             corners: (false, false),
             selected: false,
+            marked: false,
+            pieces: None,
+            on_enter: None,
             on_click: None,
         }
+    }
+
+    /// The title in pieces, each with whether it matched what was typed
+    /// ([`Match::pieces`](crate::fuzzy::Match::pieces)): those that did are drawn in the accent.
+    /// The row's label stays its whole title.
+    pub fn pieces(mut self, pieces: Vec<(String, bool)>) -> Self {
+        self.pieces = Some(pieces);
+        self
+    }
+
+    /// The row the keys move to in a list they move in (a search's results): filled as a
+    /// selected row, the fill moving over [`HOVER`] as the mark goes from row to row.
+    pub fn marked(mut self, marked: bool) -> Self {
+        self.marked = marked;
+        self
+    }
+
+    /// The pointer entered the row: a list the keys move in marks it.
+    pub fn on_enter(mut self, f: impl Fn(&mut App) + 'static) -> Self {
+        self.on_enter = Some(Box::new(f));
+        self
     }
 
     /// The title in the mono face: a name that is an identifier (`style`, `open-prs`).
@@ -425,11 +454,15 @@ impl RenderOnce for ListRow {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let p = palette(cx);
         let (state, now) = feel(&self.id, window, cx);
-        let background = mix(
-            p.hover.opacity(now.hover),
-            p.card2,
-            choose(&state, self.selected, window, cx),
+        let marked = fade(
+            ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "marked".into()),
+            self.marked,
+            HOVER,
+            window,
+            cx,
         );
+        let chosen = choose(&state, self.selected, window, cx).max(marked);
+        let background = mix(p.hover.opacity(now.hover), p.card2, chosen);
         let menu_open = self
             .more
             .as_ref()
@@ -498,7 +531,31 @@ impl RenderOnce for ListRow {
                     .text_ellipsis()
                     .overflow_hidden()
                     .when(mono, |d| d.mono(13.).font_weight(FontWeight::MEDIUM))
-                    .child(self.title.clone());
+                    .child(match self.pieces {
+                        Some(pieces) => {
+                            let mut at = 0;
+                            let marks: Vec<_> = pieces
+                                .iter()
+                                .filter_map(|(piece, hit)| {
+                                    let range = at..at + piece.len();
+                                    at = range.end;
+                                    hit.then_some((
+                                        range,
+                                        HighlightStyle {
+                                            color: Some(p.acc),
+                                            font_weight: Some(FontWeight::SEMIBOLD),
+                                            ..Default::default()
+                                        },
+                                    ))
+                                })
+                                .collect();
+                            let text: String = pieces.into_iter().map(|(piece, _)| piece).collect();
+                            StyledText::new(text)
+                                .with_highlights(marks)
+                                .into_any_element()
+                        }
+                        None => self.title.clone().into_any_element(),
+                    });
                 let title = div()
                     .flex()
                     .items_baseline()
@@ -554,7 +611,15 @@ impl RenderOnce for ListRow {
         if let Some(decorate) = self.decorate {
             row = decorate(row);
         }
-        wire(row, state, false).test_support()
+        match self.on_enter {
+            Some(on_enter) => wire_with(row, state, false, move |hovered, cx| {
+                if hovered {
+                    on_enter(cx);
+                }
+            }),
+            None => wire(row, state, false),
+        }
+        .test_support()
     }
 }
 

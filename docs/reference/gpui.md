@@ -56,7 +56,7 @@ durations and the easing of `crates/flottille-ui/src/motion.rs` (`HOVER` 140 ms,
 | What moves | The helper |
 |---|---|
 | a button, a list row, a tree row, a menu item | the component itself (`Button`, `ListRow`, `TreeRow`, `MenuItem`): hover, press, selection fade |
-| any other element that is clicked (a link, a card, a chip, a toggle) | `hoverable(element, paint)`: `paint(element, t)` gets the hover `t`, 0 to 1; it sets a background with `p.hover.opacity(t)`, an ink with `mix(from, to, t)` |
+| any other element that is clicked (a link, a card, a chip, a toggle) | `hoverable(element, paint)`: `paint(element, t)` gets the hover `t`, 0 to 1; it sets a background with `p.hover.opacity(t)`, an ink with `mix(from, to, t)`; `pressable(element, paint)` also gives how far it is pressed, over `PRESS` (a field that opens something) |
 | the same element when it can also be the chosen one (a selected row, a taken chip) | `selectable(element, chosen, paint)`: `paint` also gets how far it is the chosen one; a choice among buttons is `Button::choice` |
 | a state with no pointer: a focus ring, a highlight, a button enabled or not | `fade(id, on, duration, window, cx)` (`Button` fades its own enabled state) |
 | a choice among a few words (Ask \| Auto) | `Segmented`: its highlight slides to the one clicked, the inks fade along it |
@@ -159,7 +159,7 @@ The components that hold them:
 | `Section::new(id, title)` | `.count(c)`, `.sentence(s)`, `.action(Button)`, then its children |
 | `Menu::new(..).entry(..).danger(id, label, f)` | a "⋯" menu; danger entries come last, after a line |
 | `Confirm::new(id, question)` | `.sentence(s)`, `.action(label)`, `.refused(Option<why>)`, `.open(bool)`, `.on_confirm(f)`, `.on_cancel(f)`; ids `<id>-action`, `<id>-cancel`, `<id>-scrim` |
-| `Modal::new(id, title)` | a form dialog: `.sentence(s)`, `.wide()`, `.action(Button)`, `.on_close(f)`; its body scrolls between the title and the buttons when the window is too small, and `.kept(el)` stays in sight under it (a refusal) |
+| `Modal::new(id, title)` | a form dialog: `.sentence(s)`, `.wide()`, `.action(Button)`, `.on_close(f)`; its body scrolls between the title and the buttons when the window is too small, and `.kept(el)` stays in sight under it (a refusal). `.search()` makes it a search over the page (the quick switcher): near the top, 640 px, no title drawn (it is its label) and no Cancel, `.above(field)` over the results, `.scroll(&handle)` for the body, `.on_key(f)` for the arrows. While a dialog or a list is open, `keys_held(cx)` says so and the window's shortcuts wait |
 | `toast(Toast::success(t).detail(d), cx)` / `Toast::failure` | rule 3; the shell owns the `ToastStack` |
 | `Field::new(id, label, control)` | `.optional()`, `.hint(h)`, `.hint_mono()`, `.error(Option<e>)` |
 | `Switch::new(id, on, label)` | `.hint(h)`, `.on_click(f)`; the whole row toggles |
@@ -168,9 +168,10 @@ The components that hold them:
 | `Select::new(id, options, chosen)` | `SelectOption::new(key, title).line(l)`, `.fit()`, `.disabled(b)`, `.on_choose(f)` |
 | `Drawer::detail(id, view, cx)` | a run's detail: 520 px from the right, no scrim, Escape closes; `.show(window, cx)` |
 | `Card::new().id(id).block(Block)` | a card whose separators are drawn only between blocks with content |
-| `ListCard::new(id).row(ListRow)` | rule 7's list; `ListRow` has `.mono()`, `.tag(t)`, `.line(l)`, `.more(Entity<Menu>)` (its clicks stay its own), `.below(el)` (labelled values, a reason under the title); `.item(id, placement, row)` draws a row of a `Listing` in its `Item` |
+| `ListCard::new(id).row(ListRow)` | rule 7's list; `ListRow` has `.mono()`, `.tag(t)`, `.line(l)`, `.more(Entity<Menu>)` (its clicks stay its own), `.below(el)` (labelled values, a reason under the title); `.item(id, placement, row)` draws a row of a `Listing` in its `Item`; a search's result has `.pieces(..)` (what matched, in the accent), `.marked(bool)` (the row the keys move to, its fill moving over `HOVER`) and `.on_enter(f)` (the pointer entered it) |
 | `Tabs::new(id, label, chosen).tab(key, words)`, `.counted(key, words, count)`, `.on_choose(f)` | a page of sections shown one at a time (the project's settings, Settings): as many tabs as sections, a count after the name of a list, the marker slides to the tab chosen over `PANEL`; the page draws the chosen section alone, inside an `enter` that plays again as it is chosen again |
 | `EmptyLine::new(id, Icon, text)` | an empty list; `.action(Button)` |
+| `fuzzy::find(query, title, context)` | a search's matching (the window's quick switcher): each word typed in the title, else as a whole in the context, ignoring case, accents and ligatures; a score and the marks, `Match::pieces(title)` for a `ListRow` |
 | `space::{XS, SM, MD, LG, XL, XXL, XXXL}`, `COLUMN`, `DIALOG`, `DIALOG_WIDE` | rule 9 |
 
 `cargo run -p flottille-ui --example components` shows them on one page (`--dialog`, `--confirm`,
