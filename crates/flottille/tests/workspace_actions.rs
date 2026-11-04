@@ -668,3 +668,29 @@ fn a_child_still_removes_no_workspace() {
     assert!(body.contains(&child_id), "{body}");
     assert!(folder.exists());
 }
+
+#[test]
+fn a_command_ending_before_the_answer_does_not_refuse_the_removal() {
+    let user = user();
+    project(&user);
+    let folder = login(&user);
+    let (id, mcp) = root_in_login(&user);
+    let number = held(mcp.call("run", json!({"line": "sleep 2", "timeout": 1})));
+    answer(&user, "approve", number);
+    let running = || {
+        store(&user)
+            .running_runs()
+            .unwrap()
+            .into_iter()
+            .any(|run| run.agent.as_deref() == Some(id.as_str()))
+    };
+    eventually("the run", running);
+    let removal = held(mcp.call("workspace", json!({"action": "remove"})));
+    let says = request(&user, removal)["says"].to_string();
+    assert!(says.contains("sleep 2"), "{says}");
+    eventually("the run's end", || !running());
+
+    let body = answer(&user, "approve", removal).body;
+    assert!(body.contains("has now done it"), "{body}");
+    assert!(!folder.exists());
+}

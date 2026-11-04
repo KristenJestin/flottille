@@ -306,7 +306,7 @@ async fn performed(
                     .iter()
                     .map(|said| mcp::masked(said, &grant.place))
                     .collect();
-                if says != request.says {
+                if actions::compared(&says) != actions::compared(&request.says) {
                     return not_executed(format!(
                         "what it does changed since the user allowed it; it would now: {}",
                         says.join("; ")

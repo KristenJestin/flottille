@@ -390,6 +390,18 @@ async fn removal_says(
     Ok(removal_words(removal_losses(daemon, grant, call).await?))
 }
 
+/// The line of a removal's card naming the session's commands it stops.
+const STOPPED: &str = "Stop the commands of this session running in it: ";
+
+/// What of a card the user's answer holds to: all of it but the commands a removal of the
+/// agent's own workspace stops, which may end or start between the card and the answer, and
+/// lose nothing either way.
+pub fn compared(says: &[String]) -> Vec<&String> {
+    says.iter()
+        .filter(|said| !said.starts_with(STOPPED))
+        .collect()
+}
+
 fn removal_words(removal: Removal) -> Vec<String> {
     let Removal { name, losses, own } = removal;
     let mut says = vec![format!(
@@ -399,10 +411,7 @@ fn removal_words(removal: Removal) -> Vec<String> {
     if let Some(lines) = &own
         && !lines.is_empty()
     {
-        says.push(format!(
-            "Stop the commands of this session running in it: {}",
-            lines.join(", ")
-        ));
+        says.push(format!("{STOPPED}{}", lines.join(", ")));
     }
     if losses.is_empty() {
         says.push("Nothing would be lost".into());
@@ -436,7 +445,7 @@ pub async fn approved_losses(
         .iter()
         .map(|said| crate::mcp::masked(said, &grant.place))
         .collect();
-    match says == card {
+    match compared(&says) == compared(card) {
         true => Ok(losses),
         false => Err(Outcome::Refused(format!(
             "what it does changed since the user allowed it; it would now: {}",
