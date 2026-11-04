@@ -96,12 +96,14 @@ fn through_the_bridge_a_session_is_opened_and_a_prompt_gets_its_reply() {
         .collect();
     let names = names(&events);
     assert_eq!(
-        names[..5],
+        names[..6],
         [
             "agent.created",
             "agent.started",
             "agent.prompted",
             "agent.thought",
+            // The thought is a message of the model: the context in use is said after it.
+            "agent.usage",
             "agent.message",
         ]
     );
@@ -109,7 +111,7 @@ fn through_the_bridge_a_session_is_opened_and_a_prompt_gets_its_reply() {
     assert!(names.contains(&"agent.usage"), "{names:?}");
     assert_eq!(events[1]["data"]["opened"], "new");
     // Its two pieces, short enough to be held back whole until the message ends.
-    assert_eq!(events[4]["data"]["text"], "Hello there!");
+    assert_eq!(events[5]["data"]["text"], "Hello there!");
     assert_eq!(events.last().unwrap()["data"]["stop_reason"], "end_turn");
     // The session the daemon knows is the one `claude` was started on, in the project's folder.
     let start = &user.claude_starts()[0];
@@ -899,4 +901,174 @@ fn through_the_bridge_a_reply_split_by_a_tool_served_reads_as_one_line() {
         ["I will look at the files now, the token is [masked], keep it quiet"],
         "{text}"
     );
+}
+
+#[test]
+fn the_context_use_shows_during_the_first_turn() {
+    let user = User::with_fake_claude();
+    user.claude_script(json!({"turns": [{"when": "long", "do": [
+        {"context": 45000}, {"say": "First."}, {"tool": {"id": "t1", "name": "mcp__flottille__fs_list", "input": {}, "result": "x"}}, {"wait": 1300},
+        {"context": 60000}, {"say": "Second."}, {"tool": {"id": "t1", "name": "mcp__flottille__fs_list", "input": {}, "result": "x"}}, {"wait": 2500}
+    ]}]}));
+    project(&user);
+    let (id, after) = run(&user, "long");
+
+    // Before the turn ends, the first answer says what the context holds.
+    let first = events_until(&user, &id, after, "agent.usage");
+    let seen_names = names(&first);
+    assert!(!seen_names.contains(&"agent.turn_ended"), "{seen_names:?}");
+    let usage = first.last().unwrap();
+    assert_eq!(usage["data"]["used"], 46070);
+    // And it follows the turn: the next message, a second later, moves it.
+    let seen = usage["seq"].as_u64().unwrap();
+    let second = events_until(&user, &id, seen, "agent.usage");
+    let seen_names = names(&second);
+    assert!(!seen_names.contains(&"agent.turn_ended"), "{seen_names:?}");
+    assert_eq!(second.last().unwrap()["data"]["used"], 61070);
+}
+
+#[test]
+fn before_the_window_is_known_the_usage_carries_the_tokens_used_alone() {
+    let user = User::with_fake_claude();
+    user.claude_script(json!({"turns": [{"when": "long", "do": [
+        {"context": 45000}, {"say": "First."}, {"tool": {"id": "t1", "name": "mcp__flottille__fs_list", "input": {}, "result": "x"}}, {"wait": 2500}
+    ]}]}));
+    project(&user);
+    let (id, after) = run(&user, "long");
+
+    let first = events_until(&user, &id, after, "agent.usage");
+
+    let data = &first.last().unwrap()["data"];
+    assert_eq!(data["used"], 46070);
+    assert!(
+        data["size"].is_null(),
+        "no result gave the window yet: {data}"
+    );
+}
+
+#[test]
+fn the_usage_updates_of_a_turn_are_at_most_one_a_second() {
+    let user = User::with_fake_claude();
+    user.claude_script(json!({"turns": [{"when": "chatty", "do": [
+        {"say": "a"}, {"say": "b"}, {"say": "c"}, {"say": "d"}, {"tool": {"id": "t1", "name": "mcp__flottille__fs_list", "input": {}, "result": "x"}}, {"wait": 300}
+    ]}]}));
+    project(&user);
+    let started = std::time::Instant::now();
+    let (id, after) = run(&user, "chatty");
+
+    let events = events_until(&user, &id, after, "agent.turn_ended");
+
+    // The first message's, one a second at most while the turn plays, and the turn's end (which
+    // has the window): what the wall time allows, so a loaded machine does not break it.
+    let count = events.iter().filter(|e| e["name"] == "agent.usage").count();
+    let most = started.elapsed().as_secs() as usize + 2;
+    assert!(
+        (2..=most).contains(&count),
+        "{count} of at most {most}: {:?}",
+        names(&events)
+    );
+}
+
+#[test]
+fn a_restarted_process_keeps_the_window_size() {
+    let user = User::with_fake_claude().with_env("FLOTTILLE_IDLE_RELEASE_MS", "300");
+    user.claude_script(json!({"turns": [
+        {"when": "hello", "do": [{"say": "Hi."}]},
+        {"when": "long", "do": [{"context": 45000}, {"say": "Working."}, {"tool": {"id": "t1", "name": "mcp__flottille__fs_list", "input": {}, "result": "x"}}, {"hang": true}]}
+    ]}));
+    project(&user);
+    let (id, after) = run(&user, "hello");
+    let released = events_until(&user, &id, after, "agent.released");
+    assert!(released.iter().any(|e| e["data"]["size"] == 200000));
+
+    let resent = user
+        .call("agent.send", json!({"agent": id, "message": "long"}))
+        .unwrap();
+    // The turn hangs until it is cancelled: a usage seen is one said during it, not at its end.
+    let second = events_until(&user, &id, resent["after"].as_u64().unwrap(), "agent.usage");
+
+    // The new process knows no window yet; the agent knows it.
+    assert!(!names(&second).contains(&"agent.turn_ended"));
+    assert_eq!(user.claude_starts().len(), 2);
+    let usage = second.last().unwrap();
+    assert_eq!(usage["data"]["used"], 46070);
+    assert_eq!(usage["data"]["size"], 200000);
+}
+
+#[test]
+fn a_model_change_does_not_keep_the_old_window_size() {
+    let user = User::with_fake_claude();
+    user.claude_script(json!({"turns": [
+        {"when": "hello", "do": [{"say": "Hi."}]},
+        {"when": "long", "do": [{"context": 45000}, {"say": "Working."}, {"tool": {"id": "t1", "name": "mcp__flottille__fs_list", "input": {}, "result": "x"}}, {"hang": true}]}
+    ]}));
+    project(&user);
+    let (id, after) = run(&user, "hello");
+    events_until(&user, &id, after, "agent.turn_ended");
+    let changed = user
+        .call("agent.options", json!({"agent": id, "model": "haiku"}))
+        .unwrap();
+    events_until(
+        &user,
+        &id,
+        changed["after"].as_u64().unwrap(),
+        "agent.options_taken",
+    );
+
+    let resent = user
+        .call("agent.send", json!({"agent": id, "message": "long"}))
+        .unwrap();
+    let second = events_until(&user, &id, resent["after"].as_u64().unwrap(), "agent.usage");
+
+    // The window of the old model is not the new one's: the tokens alone, until a result says it.
+    let usage = second.last().unwrap();
+    assert_eq!(usage["data"]["used"], 46070);
+    assert!(
+        usage["data"]["size"].is_null(),
+        "the old model's window: {usage}"
+    );
+}
+
+#[test]
+fn a_model_change_while_released_does_not_keep_the_old_window_size() {
+    let user = User::with_fake_claude().with_env("FLOTTILLE_IDLE_RELEASE_MS", "300");
+    user.claude_script(json!({"turns": [
+        {"when": "hello", "do": [{"say": "Hi."}]},
+        {"when": "long", "do": [{"context": 45000}, {"say": "Working."}, {"tool": {"id": "t1", "name": "mcp__flottille__fs_list", "input": {}, "result": "x"}}, {"hang": true}]}
+    ]}));
+    project(&user);
+    let (id, after) = run(&user, "hello");
+    events_until(&user, &id, after, "agent.released");
+    user.call("agent.options", json!({"agent": id, "model": "haiku"}))
+        .unwrap();
+
+    let resent = user
+        .call("agent.send", json!({"agent": id, "message": "long"}))
+        .unwrap();
+    let second = events_until(&user, &id, resent["after"].as_u64().unwrap(), "agent.usage");
+
+    let usage = second.last().unwrap();
+    assert!(
+        usage["data"]["size"].is_null(),
+        "the old model's window: {usage}"
+    );
+}
+
+#[test]
+fn the_last_usage_of_a_turn_is_said_at_its_end_even_with_no_window() {
+    let user = User::with_fake_claude();
+    // The second message comes within the second of the first: its usage is held back.
+    user.claude_script(
+        json!({"turns": [{"when": "chatty", "no_window": true, "do": [
+            {"context": 45000}, {"say": "a"}, {"context": 60000}, {"say": "b"}
+        ]}]}),
+    );
+    project(&user);
+    let (id, after) = run(&user, "chatty");
+
+    let events = events_until(&user, &id, after, "agent.turn_ended");
+
+    let last = events.iter().rfind(|e| e["name"] == "agent.usage").unwrap();
+    assert_eq!(last["data"]["used"], 61070, "{:?}", names(&events));
+    assert!(last["data"]["size"].is_null(), "{last}");
 }

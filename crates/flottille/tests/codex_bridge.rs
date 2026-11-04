@@ -810,3 +810,38 @@ fn a_question_codex_asks_without_waiting_reaches_the_conversation_and_holds_noth
     );
     assert!(sent(&user, "turn/interrupt").is_empty());
 }
+
+#[test]
+fn a_prompt_says_the_context_in_use_while_the_turn_runs_at_most_once_a_second() {
+    let user = User::with_fake_codex();
+    user.codex_script(json!({"turns": [{"when": "hello", "do": [
+        {"context": 45000}, {"say": "First."}, {"context": 47000}, {"say": "Second."},
+    ]}]}));
+    let mut bridge = Bridge::start(&user);
+    let (session, _) = bridge.open(&user, &[]);
+
+    let (answer, seen) = bridge.prompt(&session, "hello there");
+
+    answer.unwrap();
+    let updates = updates(&seen);
+    let kinds: Vec<&str> = updates
+        .iter()
+        .map(|u| u["sessionUpdate"].as_str().unwrap())
+        .collect();
+    // The first report comes before the first answer; the second, a moment later, is held back
+    // for the turn's end, which says the last.
+    assert_eq!(
+        kinds,
+        [
+            "usage_update",
+            "agent_message_chunk",
+            "agent_message_chunk",
+            "usage_update"
+        ]
+    );
+    assert_eq!(
+        updates[0],
+        json!({"sessionUpdate": "usage_update", "used": 45000, "size": 272000})
+    );
+    assert_eq!(updates[3]["used"], 1300);
+}
