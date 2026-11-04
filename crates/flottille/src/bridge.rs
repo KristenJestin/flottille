@@ -14,7 +14,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, ExitStatus, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use flottille_core::paths::{Paths, ensure_private_dir};
 use flottille_core::secrets;
@@ -41,6 +41,8 @@ const OPTIONS: [&str; 6] = [
 /// A history past this size keeps its later half: a load replays what fits.
 const HISTORY_CAP: u64 = 4 << 20;
 
+/// The least time between two usage updates of a turn.
+const USAGE_EVERY: Duration = Duration::from_secs(1);
 const NOT_FOUND: i64 = -32601;
 const INVALID: i64 = -32602;
 const INTERNAL: i64 = -32603;
@@ -142,6 +144,8 @@ struct Turn {
     message: Option<String>,
     /// The context in use, as the last message or compaction said.
     used: Option<u64>,
+    /// When, and what, the context in use was last said during the turn.
+    usage_sent: Option<(Instant, u64)>,
     /// The provider refused the turn for a limit: a rate limit rejected, an error or a message
     /// of Claude Code's saying so.
     limited: bool,
@@ -477,6 +481,7 @@ impl Bridge {
             streamed: false,
             message: None,
             used: None,
+            usage_sent: None,
             limited: false,
             error: None,
         });
@@ -617,6 +622,8 @@ impl Bridge {
                     return;
                 };
                 claude.model = model;
+                // The window is the old model's: a result of the new one says its own.
+                claude.window = None;
                 // A level the new model does not have goes back to Claude Code's own.
                 let kept = effort_levels(&claude.models, &claude.model)
                     .is_some_and(|levels| levels.contains(&claude.effort));
@@ -809,6 +816,25 @@ impl Bridge {
                 );
             }
         }
+        self.usage_during_turn().await;
+    }
+
+    /// The context in use, said while the turn runs, at most once a second: the window's size
+    /// comes with it once a `result` of the session gave it. Before, `size` is 0, which ACP
+    /// requires a number for: the daemon reads it as unknown.
+    async fn usage_during_turn(&mut self) {
+        let Some(turn) = &mut self.turn else { return };
+        let Some(used) = turn.used else { return };
+        if turn
+            .usage_sent
+            .is_some_and(|(at, _)| at.elapsed() < USAGE_EVERY)
+        {
+            return;
+        }
+        turn.usage_sent = Some((Instant::now(), used));
+        let size = self.claude.as_ref().and_then(|c| c.window).unwrap_or(0);
+        self.update(json!({"sessionUpdate": "usage_update", "used": used, "size": size}))
+            .await;
     }
 
     async fn tool_results(&mut self, message: &Value) {
@@ -842,6 +868,7 @@ impl Bridge {
                 {
                     turn.used = Some(used);
                 }
+                self.usage_during_turn().await;
             }
             Some("api_retry") => {
                 let text = format!(
@@ -873,7 +900,10 @@ impl Bridge {
             claude.window = window.or(claude.window);
         }
         let window = self.claude.as_ref().and_then(|c| c.window);
-        if let (Some(used), Some(size)) = (turn.used, window) {
+        // Without a window the update is the last state the throttle held back, if it is one.
+        let unsaid = |used| turn.usage_sent.is_none_or(|(_, sent)| sent != used);
+        if let Some(used) = turn.used.filter(|used| window.is_some() || unsaid(*used)) {
+            let size = window.unwrap_or(0);
             let mut update = json!({"sessionUpdate": "usage_update", "used": used, "size": size});
             if let Some(cost) = message["total_cost_usd"].as_f64() {
                 update["cost"] = json!({"amount": cost, "currency": "USD"});

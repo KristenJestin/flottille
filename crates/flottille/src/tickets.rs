@@ -11,10 +11,11 @@
 //! `search` answer from and whose events a subscription to a ticket filters (`events`). Every
 //! text kept from a tracker is masked before it is shown or stored.
 
+use std::collections::HashMap;
 use std::os::unix::process::ExitStatusExt;
 use std::process::Stdio;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use flottille_core::declared::ProjectTracker;
 use flottille_core::project::Project;
@@ -730,7 +731,10 @@ struct TicketsCall {
     query: Option<String>,
     state: Option<String>,
     label: Option<String>,
-    assignee: Option<String>,
+    /// `list`, `search`: whose tickets. `create`, `edit` on Jira: whom to assign; an explicit
+    /// `null` on `edit` takes the assignee away, which is why it is told from a call with none.
+    #[serde(default, deserialize_with = "present")]
+    assignee: Option<Option<String>>,
     detail: Option<String>,
     title: Option<String>,
     body: Option<String>,
@@ -751,6 +755,29 @@ struct TicketsCall {
     from: Option<String>,
     /// subscribe: how long it waits at most.
     minutes: Option<u64>,
+}
+
+/// A field that is there even when it is `null`: `Some(None)` for `null`, `None` when left out.
+fn present<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
+impl TicketsCall {
+    /// What was said of the assignee: none when left out or blank, `Some(None)` for `null` (take
+    /// it away), else the name, trimmed.
+    fn assignment(&self) -> Option<Option<&str>> {
+        match self.assignee.as_ref()? {
+            None => Some(None),
+            Some(name) => Some(name.trim()).filter(|n| !n.is_empty()).map(Some),
+        }
+    }
+
+    /// The assignee named, none for `null`.
+    fn assigned_to(&self) -> Option<&str> {
+        self.assignment().flatten()
+    }
 }
 
 /// The writes of `tickets`.
@@ -779,7 +806,15 @@ pub fn unwritable(project: &Project, args: &Value) -> Option<String> {
         _ if action == "status" && !named => {
             Some("refused: tickets status needs status, the name of the status to move to".into())
         }
-        // What `acli` is never given: a label, an assignee and a close reason are GitHub's.
+        ProjectTracker::Github { .. }
+            if ["create", "edit"].contains(&action) && !args["assignee"].is_null() =>
+        {
+            Some(format!(
+                "refused: tickets {action} on GitHub takes assignees, a list of logins, not \
+                 assignee"
+            ))
+        }
+        // What `acli` is never given: labels, assignees and a close reason are GitHub's.
         ProjectTracker::Jira { .. } => [
             "reason",
             "labels",
@@ -791,6 +826,112 @@ pub fn unwritable(project: &Project, args: &Value) -> Option<String> {
         .find(|key| action != "create" && !args[key].is_null())
         .map(|key| format!("refused: tickets {action} on Jira takes no {key}: it is GitHub's")),
         _ => None,
+    }
+}
+
+/// A work item type of a Jira project.
+#[derive(Clone)]
+struct WorkItemType {
+    name: String,
+    /// Made under another work item (`--parent`), not alone.
+    subtask: bool,
+}
+
+/// How long the types of a project are kept: an administrator rarely changes them, and an agent
+/// that reads them is about to create.
+const TYPES_KEPT: Duration = Duration::from_secs(300);
+
+/// The types read of a project, and when.
+type KeptTypes = (Instant, Vec<WorkItemType>);
+
+/// The types read, by site and project.
+static TYPES: LazyLock<Mutex<HashMap<(String, String), KeptTypes>>> = LazyLock::new(Mutex::default);
+
+/// The work item types of a Jira project, as `acli jira project view --key <P> --json` lists them
+/// (`issueTypes[]`, Jira's REST project; **assumed**, `docs/tickets.md`), kept a few minutes.
+async fn work_item_types(site: &str, project: &str) -> Result<Vec<WorkItemType>, String> {
+    let kept = (site.to_owned(), project.to_owned());
+    if let Some((at, types)) = TYPES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&kept)
+        && at.elapsed() < TYPES_KEPT
+    {
+        return Ok(types.clone());
+    }
+    let said = acli_run(&["jira", "project", "view", "--key", project, "--json"]).await?;
+    let listed = serde_json::from_str::<Value>(&said)
+        .ok()
+        .and_then(|view| view["issueTypes"].as_array().cloned())
+        .ok_or_else(|| {
+            format!("acli did not list the work item types of {project} (no issueTypes)")
+        })?;
+    let types: Vec<WorkItemType> = listed
+        .iter()
+        .filter_map(|kind| {
+            Some(WorkItemType {
+                name: masked(kind["name"].as_str()?),
+                subtask: kind["subtask"] == true,
+            })
+        })
+        .collect();
+    TYPES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(kept, (Instant::now(), types.clone()));
+    Ok(types)
+}
+
+/// The types as a sentence part: `Task, Bug and Sub-task (a sub-task)`.
+fn types_said(types: &[WorkItemType]) -> String {
+    let names: Vec<String> = types
+        .iter()
+        .map(|kind| match kind.subtask {
+            true => format!("{} (a sub-task)", kind.name),
+            false => kind.name.clone(),
+        })
+        .collect();
+    and_listed(&names.iter().map(String::as_str).collect::<Vec<_>>())
+}
+
+/// Why a creation `acli` refused is, when the type named is not one of the project's, that type:
+/// Jira's own words say little of it, so the project's types are read and said.
+async fn refused_for_its_type(site: &str, project: &str, kind: &str, refusal: String) -> String {
+    match work_item_types(site, project).await {
+        Ok(types) if !types.iter().any(|t| t.name.eq_ignore_ascii_case(kind)) => format!(
+            "\"{}\" is not a work item type of {project}: its types are {}; nothing was written; \
+             create it again with one of them as type (acli said: {refusal})",
+            masked(kind),
+            types_said(&types)
+        ),
+        _ => refusal,
+    }
+}
+
+/// `tickets types`: the work item types of a Jira project, or that GitHub's issues have none.
+async fn types(project: &Project, asked: &TicketsCall) -> Outcome {
+    match &project.tracker {
+        None => Outcome::Refused(format!("refused: {NO_TRACKER}")),
+        Some(ProjectTracker::Github { .. }) => Outcome::Done(
+            "GitHub issues have no type: use labels (create, edit) to classify one".into(),
+        ),
+        Some(tracker @ ProjectTracker::Jira { site, projects }) => {
+            let in_project = match created_in(tracker, projects, asked.project.as_deref()) {
+                Ok(project) => project,
+                Err(why) => return Outcome::Refused(format!("refused: {why}")),
+            };
+            if let Err(problem) = jira_site(site, "read").await {
+                return Outcome::Failed(problem);
+            }
+            match work_item_types(site, in_project).await {
+                Ok(types) => Outcome::Done(format!(
+                    "The work item types of {in_project} on {site} are {}. Give one of them, \
+                     spelled so, as type to create.",
+                    types_said(&types)
+                )),
+                Err(why) => Outcome::Failed(why),
+            }
+        }
     }
 }
 
@@ -813,7 +954,7 @@ fn created_in<'a>(
             }),
         None if projects.len() == 1 => Ok(&projects[0]),
         None => Err(format!(
-            "tickets create on Jira needs project, one of the tracker's: {}",
+            "tickets create and types on Jira need project, one of the tracker's: {}",
             projects.join(", ")
         )),
     }
@@ -836,6 +977,7 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
     match asked.action.as_str() {
         "list" | "search" => listed(daemon, &project, &asked).await,
         "show" => show(daemon, place, &project, &asked).await,
+        "types" => types(&project, &asked).await,
         "subscribe" => events::subscribe(daemon, agent, place, &project, &asked).await,
         "unsubscribe" => events::unsubscribe(daemon, agent, &project, &asked),
         "create" => create(daemon, &project, &asked).await,
@@ -901,8 +1043,11 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
         }
         // The flags are joined into GitHub's search query by `gh`: a value with a quote or a
         // colon could carry a qualifier of its own.
-        for (flag, value) in [("label", &asked.label), ("assignee", &asked.assignee)] {
-            if value.as_deref().is_some_and(|v| v.contains(['"', ':'])) {
+        for (flag, value) in [
+            ("label", asked.label.as_deref()),
+            ("assignee", asked.assigned_to()),
+        ] {
+            if value.is_some_and(|v| v.contains(['"', ':'])) {
                 return Outcome::Refused(format!(
                     "refused: tickets search takes a {flag} without a quote or a colon: they \
                      could add a qualifier that leaves the tracker's repository"
@@ -913,7 +1058,7 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
     let filters = Filters {
         state,
         label: asked.label.as_deref(),
-        assignee: asked.assignee.as_deref(),
+        assignee: asked.assigned_to(),
         query,
     };
     // What the items' rounds keep, once one read the tracker; the tracker itself before.
@@ -1393,7 +1538,11 @@ async fn write(daemon: &Daemon, project: &Project, asked: &TicketsCall, key: &Ke
         ("comment", None, _) => {
             return Outcome::Refused("refused: tickets comment needs body, the comment".into());
         }
-        ("edit", None, None) if flagged.iter().all(|(_, names)| names.is_empty()) => {
+        ("edit", None, None)
+            if flagged.iter().all(|(_, names)| names.is_empty())
+                // `null` takes a Jira assignee away; GitHub's are `assignees`.
+                && !(matches!(key, Key::Jira(_)) && asked.assignment().is_some()) =>
+        {
             return Outcome::Refused(
                 "refused: tickets edit needs title, body, labels or assignees: what changes".into(),
             );
@@ -1494,6 +1643,29 @@ async fn acli_run(args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// The flags that set a Jira work item's own fields, for `create` and `edit` alike, so that
+/// what is written into them is built in one place: its summary, its description and whom it is
+/// assigned to (`Some(None)` takes the assignee away, which only `edit` does).
+fn work_item_fields<'a>(
+    title: Option<&'a str>,
+    body: Option<&'a str>,
+    assignee: Option<Option<&'a str>>,
+) -> Vec<&'a str> {
+    let mut args = Vec::new();
+    if let Some(title) = title {
+        args.extend(["--summary", title]);
+    }
+    if let Some(body) = body {
+        args.extend(["--description", body]);
+    }
+    match assignee {
+        Some(Some(name)) => args.extend(["--assignee", name]),
+        Some(None) => args.push("--remove-assignee"),
+        None => {}
+    }
+    args
+}
+
 /// `tickets create` on Jira: a work item of one of the tracker's projects, of the type named or
 /// the project's default one.
 async fn create_work_item(
@@ -1511,20 +1683,15 @@ async fn create_work_item(
         return Outcome::Failed(problem);
     }
     let labels = asked.labels.as_deref().unwrap_or_default().join(",");
-    let mut args = vec![
-        "jira",
-        "workitem",
-        "create",
-        "--project",
-        project,
-        "--summary",
-        title,
-    ];
+    let mut args = vec!["jira", "workitem", "create", "--project", project];
     let body = asked.body.as_deref().filter(|b| !b.trim().is_empty());
-    if let Some(body) = body {
-        args.extend(["--description", body]);
-    }
-    if let Some(kind) = asked.kind.as_deref().filter(|k| !k.trim().is_empty()) {
+    args.extend(work_item_fields(
+        Some(title),
+        body,
+        asked.assigned_to().map(Some),
+    ));
+    let kind = asked.kind.as_deref().filter(|k| !k.trim().is_empty());
+    if let Some(kind) = kind {
         args.extend(["--type", kind]);
     }
     if !labels.is_empty() {
@@ -1533,7 +1700,12 @@ async fn create_work_item(
     args.push("--json");
     let said = match acli_run(&args).await {
         Ok(said) => said,
-        Err(why) => return Outcome::Failed(why),
+        Err(why) => {
+            return Outcome::Failed(match kind {
+                Some(kind) => refused_for_its_type(site, project, kind, why).await,
+                None => why,
+            });
+        }
     };
     // Assumed: the created work item as Jira's REST answers it, `{"key": …}`.
     let created = serde_json::from_str::<Value>(&said).ok();
@@ -1574,12 +1746,9 @@ async fn write_work_item(
         "edit" => args.extend(["edit", "--key", key]),
         _ => return transition(site, key, asked).await,
     }
-    if let Some(title) = title.filter(|_| action == "edit") {
-        args.extend(["--summary", title]);
-    }
     match (action, body) {
         ("comment", Some(body)) => args.extend(["--body", body]),
-        ("edit", Some(body)) => args.extend(["--description", body]),
+        ("edit", body) => args.extend(work_item_fields(title, body, asked.assignment())),
         _ => {}
     }
     if action == "edit" {

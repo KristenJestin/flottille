@@ -27,7 +27,8 @@
 //!
 //! A prompt plays the first turn whose `when` is in its text; a prompt matching none is answered
 //! `ok`. A turn ends with a `result` message: `"stop_reason"` (`end_turn` by default), `"subtype"`
-//! (`success` by default) and `"error"` (a text: the result is an error) shape it.
+//! (`success` by default) and `"error"` (a text: the result is an error) shape it. `"no_window":
+//! true` leaves the model's context window out of the result, as a result that does not say it.
 //!
 //! | Step | What the fake does |
 //! |---|---|
@@ -42,6 +43,7 @@
 //! | `{"retry": true}` | an `api_retry` message: the provider is overloaded |
 //! | `{"limit": "five_hour"}` | a `rate_limit_event` rejected for that limit, then the synthetic message Claude Code writes, with its `error`; the result is an error with its text |
 //! | `{"garbage": true}` | a line on its output that is not UTF-8 |
+//! | `{"context": 45000}` | the input tokens the following messages count, so the context in use: 100 by default |
 //! | `{"wait": 500}` | waits that many milliseconds; an interrupt ends the turn |
 //! | `{"hang": true}` | goes silent until an interrupt |
 //! | `{"die": 3}` | exits at once with that code |
@@ -144,6 +146,7 @@ fn main() {
         mcp: mcp_config.map(|config| config["mcpServers"]["flottille"].clone()),
         next_message: 0,
         started: None,
+        input_tokens: 100,
     };
     for prompt in incoming {
         fake.play(&prompt, &answered);
@@ -250,6 +253,8 @@ struct Fake {
     next_message: u64,
     /// The message of the API whose `message_start` was sent last.
     started: Option<String>,
+    /// The input tokens the next messages of the API count, as the context in use.
+    input_tokens: u64,
 }
 
 impl Fake {
@@ -289,7 +294,7 @@ impl Fake {
         self.send(
             json!({"type": "assistant", "parent_tool_use_id": null, "session_id": self.session,
             "message": {"id": id, "model": MODEL, "role": "assistant", "content": [block],
-                "usage": {"input_tokens": 100, "output_tokens": 20,
+                "usage": {"input_tokens": self.input_tokens, "output_tokens": 20,
                     "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 50}}}),
         );
     }
@@ -408,6 +413,8 @@ impl Fake {
                     "message": {"model": "<synthetic>", "role": "assistant",
                         "content": [{"type": "text", "text": text}]}}));
                 limited = Some(text);
+            } else if let Some(tokens) = step["context"].as_u64() {
+                self.input_tokens = tokens;
             } else if step["garbage"] == true {
                 let mut out = self.out.lock().unwrap();
                 out.write_all(b"\xff\xfe not text\n").unwrap();
@@ -443,6 +450,9 @@ impl Fake {
                 "webSearchRequests": 0, "costUSD": 0.0125, "contextWindow": 200000,
                 "maxOutputTokens": 32000}},
             "permission_denials": []});
+        if turn["no_window"] == true {
+            result["modelUsage"] = json!({});
+        }
         if let Some(error) = error {
             result["errors"] = json!([error]);
         }

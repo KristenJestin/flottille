@@ -2681,6 +2681,8 @@ mod tests {
             last_line: tail.last().copied().unwrap_or_default().into(),
             tail: tail.iter().map(|l| (*l).to_owned()).collect(),
             step: false,
+            ready: None,
+            url: None,
         }
     }
 

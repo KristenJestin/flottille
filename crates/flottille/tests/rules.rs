@@ -162,8 +162,15 @@ fn the_edited_global_rules_reach_a_new_session() {
     );
 }
 
+/// Sets the user's rules for all projects and the project `app`'s own, as the user would.
+fn both(user: &User, global: &str, own: &str) {
+    user.call("rules.set", json!({"text": global})).unwrap();
+    user.call("rules.set", json!({"project": "app", "text": own}))
+        .unwrap();
+}
+
 #[test]
-fn project_rules_override_the_global_ones() {
+fn a_project_s_rules_come_after_the_global_ones() {
     let user = User::with_fake_agent();
     project(&user);
     user.call("rules.set", json!({"text": "Answer in French."}))
@@ -171,24 +178,202 @@ fn project_rules_override_the_global_ones() {
     let shown = user
         .call(
             "rules.set",
-            json!({"project": "app", "text": "Answer in Spanish."}),
+            json!({"project": "app", "text": "Name branches feat/<n>-<topic>."}),
         )
         .unwrap();
+    // The editor of the project holds the project's own text, not the global one.
     assert_eq!(shown["source"], "project");
+    assert_eq!(shown["text"], "Name branches feat/<n>-<topic>.");
+    assert_eq!(shown["global"], "Answer in French.");
+    assert_eq!(shown["alone"], false);
+
+    let (agent, _) = root(&user, None);
+    let (before, after) = instructions(&user, &agent);
+
+    // The global rules first, shared by every project; the project's own after, under their
+    // own heading, so that a project's rule can narrow a global one.
+    assert!(
+        before.contains("# How to work\n\nAnswer in French."),
+        "{before}"
+    );
+    assert!(!before.contains("feat/"), "{before}");
+    assert!(
+        after.contains("# This project's rules\n\nName branches feat/<n>-<topic>."),
+        "{after}"
+    );
+    assert!(!after.contains("French"), "{after}");
+    let file = std::fs::read_to_string(user.project_file("app")).unwrap();
+    assert!(file.starts_with("# The user's own words.\n"), "{file}");
+    assert!(file.contains("rules ="), "{file}");
+    assert!(!file.contains("rules_alone"), "{file}");
+}
+
+#[test]
+fn a_project_with_rules_alone_gets_only_its_own() {
+    let user = User::with_fake_agent();
+    project(&user);
+    both(&user, "Answer in French.", "Answer in Spanish.");
+    let shown = user
+        .call("rules.set", json!({"project": "app", "alone": true}))
+        .unwrap();
+    assert_eq!(shown["alone"], true, "{shown}");
+    // Only the switch changed: the text is kept.
     assert_eq!(shown["text"], "Answer in Spanish.");
+    let file = std::fs::read_to_string(user.project_file("app")).unwrap();
+    assert!(file.contains("rules_alone = true"), "{file}");
+
+    let (agent, mcp) = root(&user, None);
+    let (before, after) = instructions(&user, &agent);
+
+    assert!(
+        !before.contains("How to work") && !before.contains("French"),
+        "{before}"
+    );
+    assert!(
+        after.contains("# This project's rules\n\nAnswer in Spanish."),
+        "{after}"
+    );
+    assert!(!after.contains("French"), "{after}");
+    // The agent is told what the next ones get: the project's alone.
+    let read = done(mcp.call("project", json!({"action": "rules"})));
+    assert!(read.contains("only this project's own rules"), "{read}");
+    assert!(!read.contains("French"), "{read}");
+}
+
+#[test]
+fn a_project_without_rules_gets_the_global_ones() {
+    let user = User::with_fake_agent();
+    project(&user);
+    user.call("rules.set", json!({"text": "Answer in French."}))
+        .unwrap();
+    let shown = user.call("rules.show", json!({"project": "app"})).unwrap();
+    assert_eq!(shown["source"], "global");
+    assert_eq!(shown["text"], "");
     assert_eq!(shown["global"], "Answer in French.");
 
     let (agent, _) = root(&user, None);
     let (before, after) = instructions(&user, &agent);
 
-    // Its own rules differ from one project to the next: after the boundary, so that the shared
-    // part stays the same for every project.
-    assert!(after.contains("# How to work, in this project\n\nAnswer in Spanish."));
-    assert!(!before.contains("How to work") && !before.contains("French"));
-    assert!(!after.contains("French"));
+    assert!(
+        before.contains("# How to work\n\nAnswer in French."),
+        "{before}"
+    );
+    assert!(!after.contains("This project's rules"), "{after}");
+}
+
+#[test]
+fn a_project_repeating_the_global_rules_gets_them_once() {
+    let user = User::with_fake_agent();
+    project(&user);
+    // As the doc once advised: the global text copied by hand, then the project's own.
+    let shown = user
+        .call("rules.set", json!({"text": "Answer in French."}))
+        .unwrap();
+    assert_eq!(shown["repeats"], false);
+    let shown = user
+        .call(
+            "rules.set",
+            json!({"project": "app", "text": "Answer in French.\n\nName branches feat/<n>."}),
+        )
+        .unwrap();
+    assert_eq!(shown["repeats"], true, "{shown}");
+
+    let (agent, _) = root(&user, None);
+    let (before, after) = instructions(&user, &agent);
+
+    let all = format!("{before}{after}");
+    assert_eq!(all.matches("Answer in French.").count(), 1, "{all}");
+    assert!(
+        before.contains("# How to work\n\nAnswer in French."),
+        "{before}"
+    );
+    assert!(
+        after.contains("# This project's rules\n\nName branches feat/<n>."),
+        "{after}"
+    );
+    // No file is rewritten: the project keeps what the user wrote.
     let file = std::fs::read_to_string(user.project_file("app")).unwrap();
-    assert!(file.starts_with("# The user's own words.\n"), "{file}");
-    assert!(file.contains("rules ="), "{file}");
+    assert!(file.contains("Answer in French."), "{file}");
+
+    // A project that is only the copy has nothing of its own to add.
+    user.call(
+        "rules.set",
+        json!({"project": "app", "text": "Answer in French.\n"}),
+    )
+    .unwrap();
+    let (agent, mcp) = root(&user, None);
+    let (before, after) = instructions(&user, &agent);
+    assert_eq!(
+        format!("{before}{after}")
+            .matches("Answer in French.")
+            .count(),
+        1
+    );
+    assert!(!after.contains("This project's rules"), "{after}");
+    let read = done(mcp.call("project", json!({"action": "rules"})));
+    assert!(read.contains("repeat"), "{read}");
+
+    // Alone, nothing is left out: the project's text is all it gets.
+    user.call("rules.set", json!({"project": "app", "alone": true}))
+        .unwrap();
+    let (agent, _) = root(&user, None);
+    let (before, after) = instructions(&user, &agent);
+    assert!(!before.contains("French"), "{before}");
+    assert!(
+        after.contains("# This project's rules\n\nAnswer in French."),
+        "{after}"
+    );
+}
+
+#[test]
+fn set_rules_takes_rules_alone() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (_, mcp) = root(&user, None);
+
+    // The switch alone, or with the text; at least one of them.
+    let nothing = mcp.call("project", json!({"action": "set_rules"}));
+    assert!(
+        nothing.error && nothing.text.contains("rules_alone"),
+        "{}",
+        nothing.text
+    );
+    let asked = request(
+        &user,
+        mcp.call(
+            "project",
+            json!({"action": "set_rules", "text": "Answer in Spanish.", "rules_alone": true}),
+        ),
+    );
+    let number = asked["number"].as_u64().unwrap();
+    let says = asked["says"].to_string();
+    assert!(
+        says.contains("only its own rules") && says.contains("Answer in Spanish."),
+        "{says}"
+    );
+    // Nothing is written while it waits.
+    assert!(
+        !std::fs::read_to_string(user.project_file("app"))
+            .unwrap()
+            .contains("rules_alone")
+    );
+    cli(&user, &["approve", &number.to_string()]);
+    let body = settled(&user, number).body;
+    assert!(body.contains("Saved."), "{body}");
+    let file = std::fs::read_to_string(user.project_file("app")).unwrap();
+    assert!(file.contains("rules_alone = true"), "{file}");
+    assert!(file.contains("Answer in Spanish."), "{file}");
+
+    // The switch back, alone: the text is kept and the key is gone.
+    let number = held(mcp.call(
+        "project",
+        json!({"action": "set_rules", "rules_alone": false}),
+    ));
+    cli(&user, &["approve", &number.to_string()]);
+    settled(&user, number);
+    let file = std::fs::read_to_string(user.project_file("app")).unwrap();
+    assert!(!file.contains("rules_alone"), "{file}");
+    assert!(file.contains("Answer in Spanish."), "{file}");
 }
 
 #[test]
@@ -200,7 +385,7 @@ fn reset_to_default_restores_the_text() {
         .unwrap();
     user.call(
         "rules.set",
-        json!({"project": "app", "text": "Answer in Spanish."}),
+        json!({"project": "app", "text": "Answer in Spanish.", "alone": true}),
     )
     .unwrap();
 
@@ -208,8 +393,9 @@ fn reset_to_default_restores_the_text() {
     let shown = user.call("rules.reset", json!({"project": "app"})).unwrap();
     assert_eq!(
         (shown["source"].as_str(), shown["text"].as_str()),
-        (Some("global"), Some("Answer in French."))
+        (Some("global"), Some(""))
     );
+    assert_eq!(shown["global"], "Answer in French.");
     let file = std::fs::read_to_string(user.project_file("app")).unwrap();
     assert!(!file.contains("rules"), "{file}");
     assert!(file.starts_with("# The user's own words.\n"), "{file}");
@@ -246,7 +432,7 @@ fn rules_longer_than_the_limit_are_refused() {
     );
     let nothing = mcp.call("project", json!({"action": "set_rules"}));
     assert!(
-        nothing.error && nothing.text.contains("needs text"),
+        nothing.error && nothing.text.contains("needs text or rules_alone"),
         "{}",
         nothing.text
     );
@@ -341,7 +527,7 @@ fn an_agent_reads_the_rules_and_its_set_rules_is_held_and_applied_on_approval() 
     assert_eq!(
         asked["says"],
         json!([
-            "Replace the rules it follows for project app by:",
+            "Set the rules of project app, which agents get after the global ones, to:",
             "Answer in French.\nCommit when asked."
         ])
     );
@@ -363,11 +549,13 @@ fn an_agent_reads_the_rules_and_its_set_rules_is_held_and_applied_on_approval() 
     let read = done(mcp.call("project", json!({"action": "rules"})));
     assert!(read.contains("this project's own rules"), "{read}");
     assert!(read.contains("Commit when asked."), "{read}");
+    assert!(read.contains(default.trim()), "{read}");
     // Frozen per session: the one that asked keeps its rules, the next one gets the new ones.
     let (kept, _) = instructions(&user, &running);
     assert!(kept.contains(default.trim()));
     let (next, _) = root(&user, None);
-    let (_, after) = instructions(&user, &next);
+    let (next_before, after) = instructions(&user, &next);
+    assert!(next_before.contains(default.trim()));
     assert!(
         after.contains("Answer in French.\nCommit when asked."),
         "{after}"

@@ -40,6 +40,7 @@ mod programs;
 mod project_command;
 mod projects;
 mod providers;
+mod ready;
 mod results;
 mod roles;
 mod rules;

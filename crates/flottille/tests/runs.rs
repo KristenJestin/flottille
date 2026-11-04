@@ -756,3 +756,463 @@ fn a_restarted_command_that_ends_at_once_tells_its_agent_its_end() {
     );
     assert!(!prompt.contains("restarted by the user"), "{prompt}");
 }
+
+// Tasks that say when they are ready and where they answer (`docs/projects.md`, "Tasks").
+
+/// Adds `tasks` (TOML) to the project `app`, and each script to the workspace's folder.
+fn with_tasks(user: &User, workspace: &std::path::Path, tasks: &str, scripts: &[(&str, &str)]) {
+    use std::os::unix::fs::PermissionsExt;
+    let file = user.project_file("app");
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    text.push_str(tasks);
+    std::fs::write(&file, text).unwrap();
+    for (name, script) in scripts {
+        let path = workspace.join(name);
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+/// The run as `run.list` gives it for the session of `agent`.
+fn listed_run(user: &User, agent: &str, run: &str) -> Value {
+    listed(user, agent)
+        .into_iter()
+        .find(|c| c["run"] == run)
+        .unwrap_or_else(|| panic!("{run} is not listed"))
+}
+
+/// A port nothing listens on, for the fake server to take.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// A server that prints a line, then a second one a second later, and keeps running.
+const BOOTING: (&str, &str) = (
+    "booting.sh",
+    "#!/bin/sh\necho booting\nsleep 1\necho 'ready in 12 ms'\nexec sleep 300\n",
+);
+
+#[test]
+fn a_task_is_ready_on_its_line() {
+    let user = User::with_fake_agent();
+    let (agent, mcp, workspace) = session(&user);
+    with_tasks(
+        &user,
+        &workspace,
+        "\n[tasks.web]\nline = \"./booting.sh\"\nserve = true\nready = { line = \"ready in\" }\n",
+        &[BOOTING],
+    );
+
+    let answer = ok(mcp.call("run", json!({"task": "web"})));
+
+    let run = run_id(&answer);
+    assert!(answer.contains("starting"), "{answer}");
+    assert_eq!(listed_run(&user, &agent, &run)["ready"], "starting");
+    eventually("ready", || {
+        listed_run(&user, &agent, &run)["ready"] == "ready"
+    });
+    let status = ok(mcp.call("run_status", json!({"run": run})));
+    assert!(status.contains("ready"), "{status}");
+    assert!(!status.contains("starting"), "{status}");
+}
+
+#[test]
+fn a_task_is_ready_when_its_url_answers() {
+    let user = User::with_fake_agent();
+    let (agent, mcp, workspace) = session(&user);
+    let port = free_port();
+    let server = common::fake_server();
+    with_tasks(
+        &user,
+        &workspace,
+        &format!(
+            "\n[tasks.api]\nline = \"./api.sh\"\nserve = true\n\
+             ready = {{ url = \"http://127.0.0.1:{port}/health\" }}\n"
+        ),
+        &[(
+            "api.sh",
+            &format!(
+                "#!/bin/sh\nexec {} --print booting --wait 1500 --listen {port}\n",
+                server.display()
+            ),
+        )],
+    );
+
+    let run = run_id(&ok(mcp.call("run", json!({"task": "api"}))));
+
+    assert_eq!(listed_run(&user, &agent, &run)["ready"], "starting");
+    eventually("ready", || {
+        listed_run(&user, &agent, &run)["ready"] == "ready"
+    });
+}
+
+#[test]
+fn a_task_is_ready_when_its_command_exits_0() {
+    let user = User::with_fake_agent();
+    let (agent, mcp, workspace) = session(&user);
+    with_tasks(
+        &user,
+        &workspace,
+        "\n[tasks.db]\nline = \"./db.sh\"\nserve = true\nready = { command = \"./ping.sh {workspace}\" }\n",
+        &[
+            (
+                "db.sh",
+                "#!/bin/sh\nrm -f up\nsleep 1\ntouch up\nexec sleep 300\n",
+            ),
+            // Fails until the server is up, and says for which workspace it was asked.
+            ("ping.sh", "#!/bin/sh\necho \"$1\" > pinged\ntest -f up\n"),
+        ],
+    );
+
+    let run = run_id(&ok(mcp.call("run", json!({"task": "db"}))));
+
+    assert_eq!(listed_run(&user, &agent, &run)["ready"], "starting");
+    eventually("ready", || {
+        listed_run(&user, &agent, &run)["ready"] == "ready"
+    });
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("pinged")).unwrap(),
+        "w\n"
+    );
+}
+
+#[test]
+fn a_task_without_ready_has_no_ready_state() {
+    let user = User::with_fake_agent();
+    let (agent, mcp, _) = session(&user);
+
+    let answer = ok(mcp.call("run", json!({"task": "server"})));
+
+    let run = run_id(&answer);
+    let listed = listed_run(&user, &agent, &run);
+    assert_eq!(listed["ready"], Value::Null);
+    assert_eq!(listed["url"], Value::Null);
+    assert!(answer.contains("is running"), "{answer}");
+    assert!(!answer.contains("starting"), "{answer}");
+    assert!(!answer.contains("ready"), "{answer}");
+}
+
+#[test]
+fn a_run_ending_before_ready_says_so() {
+    let user = User::with_fake_agent();
+    let (agent, mcp, workspace) = session(&user);
+    with_tasks(
+        &user,
+        &workspace,
+        "\n[tasks.web]\nline = \"./crash.sh\"\nserve = true\nready = { line = \"ready in\" }\n",
+        &[(
+            "crash.sh",
+            "#!/bin/sh\necho booting\nsleep 1\necho 'port taken'\nexit 2\n",
+        )],
+    );
+
+    let run = run_id(&ok(mcp.call("run", json!({"task": "web"}))));
+
+    let prompt = prompted(&user, &["[flottille:command-ended]", &run]);
+    assert!(prompt.contains("ended before it was ready"), "{prompt}");
+    assert!(prompt.contains("exited with code 2"), "{prompt}");
+    assert_eq!(listed_run(&user, &agent, &run)["ready"], "missed");
+    let status = ok(mcp.call("run_status", json!({"run": run})));
+    assert!(status.contains("ended before it was ready"), "{status}");
+}
+
+#[test]
+fn a_templated_url_names_the_workspace() {
+    let user = User::with_fake_agent();
+    let (agent, mcp, workspace) = session(&user);
+    with_tasks(
+        &user,
+        &workspace,
+        "\n[tasks.web]\nline = \"./booting.sh\"\nserve = true\n\
+         url = \"https://{workspace}.{project}.localhost\"\n",
+        &[BOOTING],
+    );
+
+    let answer = ok(mcp.call("run", json!({"task": "web"})));
+
+    let run = run_id(&answer);
+    assert!(answer.contains("https://w.app.localhost"), "{answer}");
+    let listed = listed_run(&user, &agent, &run);
+    assert_eq!(listed["url"], "https://w.app.localhost");
+    assert_eq!(
+        listed["ready"],
+        Value::Null,
+        "no ready said, no ready state"
+    );
+}
+
+#[test]
+fn a_url_command_gives_the_address() {
+    let user = User::with_fake_agent();
+    let (agent, mcp, workspace) = session(&user);
+    with_tasks(
+        &user,
+        &workspace,
+        "\n[tasks.web]\nline = \"./booting.sh\"\nserve = true\n\
+         url = { command = \"./where.sh {workspace}\" }\nready = { line = \"ready in\" }\n",
+        &[
+            BOOTING,
+            (
+                "where.sh",
+                "#!/bin/sh\necho\necho \"https://$1.web.localhost\"\necho more\n",
+            ),
+        ],
+    );
+
+    let answer = ok(mcp.call("run", json!({"task": "web", "notify": "ready"})));
+
+    let run = run_id(&answer);
+    assert_eq!(
+        listed_run(&user, &agent, &run)["url"],
+        "https://w.web.localhost"
+    );
+    let prompt = prompted(&user, &["[flottille:command-ready]", &run]);
+    assert!(
+        prompt.contains("is ready at https://w.web.localhost"),
+        "{prompt}"
+    );
+}
+
+#[test]
+fn a_failing_url_command_says_why() {
+    let user = User::with_fake_agent();
+    let (agent, mcp, workspace) = session(&user);
+    with_tasks(
+        &user,
+        &workspace,
+        "\n[tasks.web]\nline = \"./booting.sh\"\nserve = true\nurl = { command = \"./where.sh\" }\n\
+         [tasks.odd]\nline = \"./booting.sh\"\nserve = true\nurl = { command = \"./odd.sh\" }\n",
+        &[
+            BOOTING,
+            (
+                "where.sh",
+                "#!/bin/sh\necho 'no route for this worktree' >&2\nexit 1\n",
+            ),
+            ("odd.sh", "#!/bin/sh\necho 'localhost:3000'\n"),
+        ],
+    );
+
+    let answer = ok(mcp.call("run", json!({"task": "web"})));
+    let odd = run_id(&ok(mcp.call("run", json!({"task": "odd"}))));
+
+    let run = run_id(&answer);
+    let listed = listed_run(&user, &agent, &run);
+    assert_eq!(listed["url"], Value::Null);
+    let why = listed["url_error"].as_str().unwrap();
+    assert!(why.contains("exited with code 1"), "{why}");
+    assert!(why.contains("no route for this worktree"), "{why}");
+    assert!(answer.contains(why), "{answer}");
+    assert_eq!(listed_run(&user, &agent, &run)["state"], "running");
+    let odd = listed_run(&user, &agent, &odd);
+    assert!(
+        odd["url_error"]
+            .as_str()
+            .unwrap()
+            .contains("not an http:// or https:// address"),
+        "{odd}"
+    );
+}
+
+#[test]
+fn notify_ready_tells_the_agent_when_ready() {
+    let user = User::with_fake_agent();
+    let (_, mcp, workspace) = session(&user);
+    with_tasks(
+        &user,
+        &workspace,
+        "\n[tasks.web]\nline = \"./booting.sh\"\nserve = true\nready = { line = \"ready in\" }\n\
+         url = \"http://{workspace}.localhost:5173\"\n",
+        &[BOOTING],
+    );
+
+    let answer = ok(mcp.call("run", json!({"task": "web", "notify": "ready"})));
+
+    let run = run_id(&answer);
+    assert!(answer.contains("starting"), "{answer}");
+    let prompt = prompted(&user, &["[flottille:command-ready]", &run]);
+    assert!(
+        prompt.contains(&format!(
+            "run {run}: web is ready at http://w.localhost:5173"
+        )),
+        "{prompt}"
+    );
+    never_prompted(&user, "[flottille:command-ended]");
+}
+
+#[test]
+fn notify_on_a_task_without_ready_is_refused() {
+    let user = User::with_fake_agent();
+    let (_, mcp, _) = session(&user);
+
+    let refused = mcp.call("run", json!({"task": "server", "notify": "ready"}));
+    let line = mcp.call("run", json!({"line": "./quick.sh", "notify": "ready"}));
+    let run = start(&mcp, "server");
+    let later = mcp.call(
+        "run_status",
+        json!({"run": run, "action": "notify", "when": "ready"}),
+    );
+
+    for answer in [refused, line, later] {
+        assert!(answer.error, "{}", answer.text);
+        assert!(answer.text.contains("says no ready"), "{}", answer.text);
+    }
+}
+
+#[test]
+fn run_status_notify_on_a_started_run() {
+    let user = User::with_fake_agent();
+    let (_, mcp, workspace) = session(&user);
+    with_tasks(
+        &user,
+        &workspace,
+        "\n[tasks.web]\nline = \"./booting.sh\"\nserve = true\nready = { line = \"ready in\" }\n",
+        &[BOOTING],
+    );
+    let run = run_id(&ok(mcp.call("run", json!({"task": "web"}))));
+
+    let answer = ok(mcp.call(
+        "run_status",
+        json!({"run": run, "action": "notify", "when": "ready"}),
+    ));
+
+    assert!(answer.contains("starting"), "{answer}");
+    let prompt = prompted(&user, &["[flottille:command-ready]", &run]);
+    assert!(
+        prompt.contains(&format!("run {run}: web is ready")),
+        "{prompt}"
+    );
+    let again = ok(mcp.call(
+        "run_status",
+        json!({"run": run, "action": "notify", "when": "ready"}),
+    ));
+    assert!(again.contains("is ready"), "{again}");
+}
+
+#[test]
+fn a_failed_address_stops_a_ready_url_that_uses_it() {
+    let user = User::with_fake_agent();
+    let (agent, mcp, workspace) = session(&user);
+    with_tasks(
+        &user,
+        &workspace,
+        "\n[tasks.api]\nline = \"./booting.sh\"\nserve = true\nurl = { command = \"./where.sh\" }\n\
+         ready = { url = \"{url}/health\" }\n",
+        &[
+            BOOTING,
+            (
+                "where.sh",
+                "#!/bin/sh\necho 'no route for TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789' >&2\nexit 1\n",
+            ),
+        ],
+    );
+
+    let answer = ok(mcp.call("run", json!({"task": "api"})));
+
+    let run = run_id(&answer);
+    let listed = listed_run(&user, &agent, &run);
+    assert_eq!(listed["ready"], Value::Null, "{listed}");
+    assert_eq!(listed["state"], "running");
+    let why = listed["url_error"].as_str().unwrap();
+    assert!(why.contains("cannot tell when it is ready"), "{why}");
+    assert!(why.contains("no route"), "{why}");
+    assert!(!why.contains("ghp_abcdef"), "{why}");
+    assert!(answer.contains("cannot tell when it is ready"), "{answer}");
+    assert!(!answer.contains("starting"), "{answer}");
+}
+
+#[test]
+fn the_address_is_masked() {
+    let user = User::with_fake_agent();
+    let (agent, mcp, workspace) = session(&user);
+    with_tasks(
+        &user,
+        &workspace,
+        "\n[tasks.web]\nline = \"./booting.sh\"\nserve = true\nurl = { command = \"./where.sh\" }\n",
+        &[
+            BOOTING,
+            (
+                "where.sh",
+                "#!/bin/sh\necho 'https://dev:hunter2pass@w.localhost/?t=ghp_abcdefghijklmnopqrstuvwxyz0123456789'\n",
+            ),
+        ],
+    );
+
+    let answer = ok(mcp.call("run", json!({"task": "web"})));
+
+    let run = run_id(&answer);
+    let url = listed_run(&user, &agent, &run)["url"].to_string();
+    for shown in [&url, &answer] {
+        assert!(shown.contains("w.localhost"), "{shown}");
+        assert!(!shown.contains("hunter2pass"), "{shown}");
+        assert!(!shown.contains("ghp_abcdef"), "{shown}");
+    }
+}
+
+#[test]
+fn a_restarted_server_still_tells_its_agent_when_ready() {
+    let user = User::with_fake_agent().with_fake_escalation();
+    let (_, mcp, workspace) = session(&user);
+    with_tasks(
+        &user,
+        &workspace,
+        "\n[tasks.web]\nline = \"./booting.sh\"\nserve = true\nready = { line = \"ready in\" }\n",
+        &[BOOTING],
+    );
+    let first = run_id(&ok(
+        mcp.call("run", json!({"task": "web", "notify": "ready"}))
+    ));
+
+    let new = restarted(&user, &first);
+
+    let second = new["run"].as_str().unwrap().to_owned();
+    let prompt = prompted(&user, &["[flottille:command-ready]", &second]);
+    assert!(
+        prompt.contains(&format!("run {second}: web is ready")),
+        "{prompt}"
+    );
+}
+
+#[test]
+fn a_probe_s_children_are_killed_when_the_run_ends() {
+    let user = User::with_fake_agent();
+    let (_, mcp, workspace) = session(&user);
+    with_tasks(
+        &user,
+        &workspace,
+        "\n[tasks.db]\nline = \"./db.sh\"\nserve = true\nready = { command = \"./ping.sh\" }\n",
+        &[
+            ("db.sh", "#!/bin/sh\nexec sleep 300\n"),
+            // A probe that leaves a child of its own behind and waits for it.
+            (
+                "ping.sh",
+                "#!/bin/sh\nsh -c 'echo $$ > child.pid; exec sleep 300' &\nwait\n",
+            ),
+        ],
+    );
+    let run = run_id(&ok(mcp.call("run", json!({"task": "db"}))));
+    let pid = workspace.join("child.pid");
+    eventually("the probe's child", || {
+        std::fs::read_to_string(&pid).is_ok_and(|pid| pid.trim().parse().is_ok_and(alive))
+    });
+    let child: u64 = std::fs::read_to_string(&pid)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
+
+    // Well before the probe's own limit (5 s) would have killed it.
+    let deadline = Instant::now() + Duration::from_millis(2500);
+    while alive(child) {
+        assert!(
+            Instant::now() < deadline,
+            "the probe's child {child} still runs"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
