@@ -223,7 +223,14 @@ const SERVED: [Definition; 28] = [
                 "serve": {"type": "boolean", "description": "It keeps running."},
                 "check": {"type": "boolean", "description": "Tests, lint."},
                 "read_only": {"type": "boolean", "description": "It changes nothing."},
-                "ask_before_running": {"type": "boolean", "description": "Judged each time it runs."}
+                "ask_before_running": {"type": "boolean", "description": "Judged each time it runs."},
+                "ready": {"type": ["object", "null"], "description": "add, edit: when a run of it is ready, one of {\"line\": text its output prints}, {\"url\": an address that answers}, {\"command\": a line that exits 0}; templated ({workspace}, {url}…); null removes it.", "properties": {
+                    "line": {"type": "string"}, "url": {"type": "string"}, "command": {"type": "string"}
+                }, "minProperties": 1, "maxProperties": 1, "additionalProperties": false},
+                "url": {"description": "add, edit: where a run of it answers: an address (templated, \"https://{workspace}.app.localhost\") or {\"command\": a line that prints it}; null removes it.", "anyOf": [
+                    {"type": "string"}, {"type": "null"},
+                    {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"], "additionalProperties": false}
+                ]}
             }, "required": ["action"], "additionalProperties": false})
         },
     },

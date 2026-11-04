@@ -11,7 +11,9 @@ use std::sync::Arc;
 
 use flottille_core::commands::{self, Command};
 use flottille_core::declared::{ProjectTracker, RepositoryForge};
-use flottille_core::project::{Project, SetupStep, Skill, StepKind, Task, check_skill, check_task};
+use flottille_core::project::{
+    Project, Ready, SetupStep, Skill, StepKind, Task, TaskUrl, check_skill, check_task,
+};
 use flottille_core::protocol;
 use flottille_core::workspace::{Action, State, Step, StepState, Workspace};
 use serde::{Deserialize, Deserializer};
@@ -58,6 +60,11 @@ struct TasksCall {
     check: Option<bool>,
     read_only: Option<bool>,
     ask_before_running: Option<bool>,
+    /// Left out: unchanged; `null`: removed.
+    #[serde(default, deserialize_with = "present")]
+    ready: Option<Option<Ready>>,
+    #[serde(default, deserialize_with = "present")]
+    url: Option<Option<TaskUrl>>,
 }
 
 #[derive(Deserialize)]
@@ -498,6 +505,12 @@ fn task_said(task: &Task) -> String {
             notes.push(note.to_owned());
         }
     }
+    if let Some(ready) = &task.ready {
+        notes.push(ready.said());
+    }
+    if let Some(url) = &task.url {
+        notes.push(url.said());
+    }
     match notes.is_empty() {
         true => format!("`{}`", task.line),
         false => format!("`{}` ({})", task.line, notes.join(", ")),
@@ -518,7 +531,9 @@ fn tasks_says(project: &Project, call: &TasksCall) -> Result<Vec<String>, Outcom
     let check = |task: &Task| {
         check_task(name, task, &known)
             .map_err(|error| Outcome::Refused(format!("refused: tasks.{name}{error}")))?;
-        flottille_core::command::split_line(&task.line).map_err(Outcome::Refused)?;
+        for line in std::iter::once(task.line.as_str()).chain(task.other_lines()) {
+            flottille_core::command::split_line(line).map_err(Outcome::Refused)?;
+        }
         Ok::<(), Outcome>(())
     };
     if action == "add" {
@@ -581,7 +596,7 @@ fn tasks_says(project: &Project, call: &TasksCall) -> Result<Vec<String>, Outcom
             if changed == *task {
                 return Err(Outcome::Refused(format!(
                     "refused: this edit changes nothing of the task {name}: give line, \
-                     repository or a flag"
+                     repository, a flag, ready or url"
                 )));
             }
             // What it was is part of what the user allows: edited meanwhile, nothing is done.
@@ -612,7 +627,25 @@ fn edited(task: &Task, call: &TasksCall) -> Task {
             *field = value;
         }
     }
+    if let Some(ready) = &call.ready {
+        task.ready = ready.clone();
+    }
+    if let Some(url) = &call.url {
+        task.url = url.clone();
+    }
     task
+}
+
+/// The lines besides the task's own a call of `tasks` sets, which run later without the gate:
+/// its ready's and its address's commands. For the gate, which judges each as a run of it.
+pub fn other_lines(tool: &str, args: &Value) -> Vec<String> {
+    match (tool, args["action"].as_str()) {
+        ("tasks", Some("add" | "edit")) => [&args["ready"]["command"], &args["url"]["command"]]
+            .into_iter()
+            .filter_map(|line| line.as_str().map(str::to_owned))
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 const SETUP_ACTIONS: &str = "list, add, edit, remove and move";
@@ -1142,6 +1175,12 @@ async fn performed(
                         if let Some(value) = value {
                             params[key] = value.into();
                         }
+                    }
+                    if let Some(ready) = &call.ready {
+                        params["ready"] = json!(ready);
+                    }
+                    if let Some(url) = &call.url {
+                        params["url"] = json!(url);
                     }
                     answer(&format!("task.{action}"), params)?;
                     Ok(match action {

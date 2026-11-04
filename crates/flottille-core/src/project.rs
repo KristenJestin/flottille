@@ -155,12 +155,61 @@ pub enum Ready {
     Command(String),
 }
 
+impl Ready {
+    /// In words, after the task's line: `ready once …`.
+    pub fn said(&self) -> String {
+        match self {
+            Ready::Line(text) => format!("ready once a line says “{text}”"),
+            Ready::Url(url) => format!("ready once {url} answers"),
+            Ready::Command(line) => format!("ready once `{line}` passes"),
+        }
+    }
+
+    /// The line it runs, for `command`.
+    pub fn command(&self) -> Option<&str> {
+        match self {
+            Ready::Command(line) => Some(line),
+            _ => None,
+        }
+    }
+}
+
 /// Where a run of a task answers: an address, a template, or a line that prints it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum TaskUrl {
     Address(String),
     Command { command: String },
+}
+
+impl TaskUrl {
+    /// In words, after the task's line.
+    pub fn said(&self) -> String {
+        match self {
+            TaskUrl::Address(url) => format!("at {url}"),
+            TaskUrl::Command { command } => format!("its address from `{command}`"),
+        }
+    }
+
+    /// The line it runs, for `command`.
+    pub fn command(&self) -> Option<&str> {
+        match self {
+            TaskUrl::Command { command } => Some(command),
+            TaskUrl::Address(_) => None,
+        }
+    }
+}
+
+impl Task {
+    /// The lines besides its own that a run of it runs: its ready's and its address's commands.
+    pub fn other_lines(&self) -> Vec<&str> {
+        self.ready
+            .as_ref()
+            .and_then(Ready::command)
+            .into_iter()
+            .chain(self.url.as_ref().and_then(TaskUrl::command))
+            .collect()
+    }
 }
 
 /// One step of the setup that prepares a new workspace, as written: exactly one of `copy`,

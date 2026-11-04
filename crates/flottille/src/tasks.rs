@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use flottille_core::project::{Project, Task};
+use flottille_core::project::{Project, Ready, Task, TaskUrl};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
@@ -41,6 +41,8 @@ struct Add {
     read_only: bool,
     #[serde(default)]
     ask_before_running: bool,
+    ready: Option<Ready>,
+    url: Option<TaskUrl>,
 }
 
 #[derive(Deserialize)]
@@ -56,6 +58,11 @@ struct Edit {
     check: Option<bool>,
     read_only: Option<bool>,
     ask_before_running: Option<bool>,
+    /// Left out: unchanged; `null`: removed.
+    #[serde(default, deserialize_with = "present")]
+    ready: Option<Option<Ready>>,
+    #[serde(default, deserialize_with = "present")]
+    url: Option<Option<TaskUrl>>,
 }
 
 /// A field given, `null` included.
@@ -84,6 +91,12 @@ impl Edit {
             if let Some(value) = value {
                 *field = value;
             }
+        }
+        if let Some(ready) = &self.ready {
+            edited.ready = ready.clone();
+        }
+        if let Some(url) = &self.url {
+            edited.url = url.clone();
         }
         edited
     }
@@ -117,8 +130,8 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Answer {
                 read_only: asked.read_only,
                 ask_before_running: asked.ask_before_running,
                 added_by: None,
-                ready: None,
-                url: None,
+                ready: asked.ready,
+                url: asked.url,
             };
             let project = projects::rewrite(daemon, &asked.project, |project, document| {
                 if project.tasks.contains_key(&name) {
@@ -204,14 +217,16 @@ fn not_a_table(project: &str) -> Failure {
 
 /// Writes the task under `[tasks.<name>]`, in place of what was there: a flag that is off is
 /// left out, as the user would write it. A line no run could split is refused, as a run of it
-/// would be.
+/// would be, and so are its ready's and its address's commands.
 fn write(
     document: &mut toml_edit::DocumentMut,
     project: &str,
     name: &str,
     task: &Task,
 ) -> Result<(), Failure> {
-    flottille_core::command::split_line(&task.line).map_err(Failure::refused)?;
+    for line in std::iter::once(task.line.as_str()).chain(task.other_lines()) {
+        flottille_core::command::split_line(line).map_err(Failure::refused)?;
+    }
     let tasks = document.entry("tasks").or_insert_with(|| {
         let mut tasks = toml_edit::Table::new();
         // `[tasks.<name>]` alone, without an empty `[tasks]` above it.
@@ -255,7 +270,39 @@ fn write(
             entry.remove(key);
         }
     }
+    // Inline tables, as the user writes them: `ready = { line = "ready in" }`.
+    match &task.ready {
+        Some(ready) => {
+            let (key, text) = match ready {
+                Ready::Line(text) => ("line", text),
+                Ready::Url(url) => ("url", url),
+                Ready::Command(line) => ("command", line),
+            };
+            entry.insert("ready", inline(key, text));
+        }
+        None => {
+            entry.remove("ready");
+        }
+    }
+    match &task.url {
+        Some(TaskUrl::Address(url)) => {
+            entry.insert("url", toml_edit::value(url));
+        }
+        Some(TaskUrl::Command { command }) => {
+            entry.insert("url", inline("command", command));
+        }
+        None => {
+            entry.remove("url");
+        }
+    }
     Ok(())
+}
+
+/// `{ <key> = "<text>" }`.
+fn inline(key: &str, text: &str) -> toml_edit::Item {
+    let mut table = toml_edit::InlineTable::new();
+    table.insert(key, text.into());
+    toml_edit::value(table)
 }
 
 /// A task as the protocol shows it.
@@ -268,5 +315,7 @@ pub fn to_json(name: &str, task: &Task) -> Value {
         "check": task.check,
         "read_only": task.read_only,
         "ask_before_running": task.ask_before_running,
+        "ready": task.ready,
+        "url": task.url,
     })
 }
