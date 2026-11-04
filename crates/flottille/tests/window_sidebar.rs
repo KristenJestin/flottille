@@ -1,6 +1,7 @@
 //! The scenarios of #136: one spinner where the work is, nothing left spinning once an agent
 //! ended, "Ended" at the bottom of the sidebar, a session ended or resumed and a session started
-//! from a row, Stop in Send's place, the user's own messages selectable. On GPUI's test platform
+//! from a row, Stop in Send's place, the user's own messages selectable; and of #375, a session
+//! that removed its own workspace going on under main. On GPUI's test platform
 //! in front of a real daemon whose agents are the fake ACP agent, with a throwaway user. No window
 //! opens on a screen.
 
@@ -10,6 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::User;
+use common::mcp::{Mcp, server_of};
 use flottille_ui::AgentState;
 use flottille_ui::omarchy::Environment;
 use flottille_ui::state::icon_id;
@@ -675,5 +677,74 @@ fn a_plus_on_a_place_row_starts_a_session_there_with_the_field_focused(cx: &mut 
     assert_eq!(
         composer.read_with(cx, |c, _| c.choice().clone()),
         Choice::Main
+    );
+}
+
+#[gpui_kit::test]
+fn the_rail_moves_the_session_under_main(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    workspace(&user, "app", "login");
+    let opened = user.received_requests("session/new").len();
+    let started = user
+        .call(
+            "agent.start",
+            json!({"project": "app", "workspace": "login", "message": "hello"}),
+        )
+        .unwrap();
+    let id = started["agent"]["id"].as_str().unwrap().to_owned();
+    eventually("the first turn ends", || state_of(&user, &id) == "idle");
+    let (url, authorization) = server_of(&user, opened);
+    let agent = Mcp::initialize(&url, &authorization);
+    let (shell, cx) = tree_of(&user, &[&id], cx);
+    let login = Some("login".to_owned());
+    let listed_in_login = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
+        shell.read_with(cx, |s, cx| {
+            s.place("app", &login).map(|node| {
+                node.read(cx)
+                    .sessions(cx)
+                    .iter()
+                    .map(|row| row.read(cx).id().to_owned())
+                    .collect::<Vec<_>>()
+            })
+        })
+    };
+    assert_eq!(listed_in_login(&shell, cx), Some(vec![id.clone()]));
+    assert!(listed_in_main(&shell, cx).is_empty());
+
+    let held = agent.call("workspace", json!({"action": "remove"}));
+    let number: u64 = held
+        .text
+        .strip_prefix("Waiting for the user's approval, request #")
+        .and_then(|rest| rest.split('.').next())
+        .and_then(|number| number.parse().ok())
+        .unwrap_or_else(|| panic!("not held: {}", held.text));
+    user.call("approval.approve", json!({"number": number}))
+        .unwrap();
+    until(&shell, cx, "the session is under main", |cx| {
+        listed_in_main(&shell, cx) == [id.clone()]
+    });
+
+    // The workspace's group folds away, drawn while it goes; the session's row is main's.
+    assert_eq!(listed_in_login(&shell, cx), None);
+    moving(cx);
+    assert!(
+        has_id(place_id("app", &login), cx),
+        "the group is gone at once instead of folding away"
+    );
+    settle(cx);
+    assert!(!has_id(place_id("app", &login), cx));
+    assert!(in_tree(session_id(&id), cx));
+    cx.update(|window, _| {
+        assert!(
+            window.find(session_id(&id)).bounds().origin.y
+                > window.find(place_id("app", &None)).bounds().origin.y,
+            "under main"
+        );
+    });
+    assert_eq!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)),
+        0,
+        "nothing moves at rest"
     );
 }

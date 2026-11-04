@@ -1160,7 +1160,8 @@ fn merge_a_stack_refuses_while_a_check_is_failing_and_merges_the_levels_in_order
 }
 
 #[test]
-fn close_leaves_the_removal_to_main_which_stops_on_unpushed_work_and_deletes_empty_branches() {
+fn close_asks_to_remove_its_own_workspace_and_main_s_removal_stops_on_unpushed_work_and_deletes_empty_branches()
+ {
     let user = User::with_fake_agent();
     let workspace = stack(&user, false, "");
     let main = user.path("work/app");
@@ -1168,14 +1169,21 @@ fn close_leaves_the_removal_to_main_which_stops_on_unpushed_work_and_deletes_emp
     adopt(&user, "close");
     let (closer, close) = run(&user, "close");
     let brief = brief_of(&user, "The command close of project app");
-    assert!(brief.contains("you cannot remove it"), "{brief}");
-    // It works in the workspace: it cannot remove it.
-    let refused = close.call("workspace", json!({"action": "remove"}));
     assert!(
-        refused.error && refused.text.contains("works in the workspace login"),
-        "{}",
-        refused.text
+        brief.contains("remove it (`workspace` `remove`)"),
+        "{brief}"
     );
+    // It works in the workspace: its removal is held for the user.
+    let held = close.call("workspace", json!({"action": "remove"}));
+    assert!(
+        !held.error && held.text.starts_with("Waiting for the user's approval"),
+        "{}",
+        held.text
+    );
+    for request in waiting(&user) {
+        user.call("approval.deny", json!({"number": request["number"]}))
+            .unwrap();
+    }
     let reported = close.call("report", json!({"text": "Ready to be removed."}));
     assert!(!reported.error, "{}", reported.text);
     user.call("agent.stop", json!({"agent": closer})).unwrap();

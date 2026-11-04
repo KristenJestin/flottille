@@ -297,6 +297,19 @@ An agent was written, before its process starts.
 | `depth` | 0 for a root, its parent's plus one for a child. |
 | `title` | Its task's title, `null` for a root. |
 
+#### `agent.moved`
+
+The agent removed its own workspace and works in the project folder (`main`) now: the same
+session, written with `workspace.removed` in one transaction, just after it
+([`tools.md`](tools.md), "The workspace").
+
+| Field | |
+|---|---|
+| `agent`, `project` | |
+| `from` | The workspace it worked in. |
+| `to` | `null`: the project folder. |
+| `folder` | Where it works now. |
+
 #### `agent.started`
 
 Its process runs and its session is open, its options set.
@@ -449,15 +462,16 @@ The agent that held the request passed it up, with one sentence of why.
 
 #### `approval.cancelled`
 
-The request was never answered: the agent that asked, or the one that held it, ended. It is no
-longer pending, so the user never sees it.
+The request was never answered: the agent that asked, or the one that held it, ended, or the
+agent that asked removed its own workspace and works in `main` now (written with
+`agent.moved`). It is no longer pending, so the user never sees it.
 
 | Field | |
 |---|---|
 | `number` | |
 | `agent` | The agent that asked. |
 | `held_by` | Who held it: `user`, or an agent's id. |
-| `why` | Which agent ended, and how. |
+| `why` | Which agent ended, and how; or which agent moved, from which workspace. |
 
 #### `approval.decided`
 

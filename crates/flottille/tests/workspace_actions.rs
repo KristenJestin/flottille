@@ -435,3 +435,456 @@ fn an_agent_s_create_in_a_repository_with_no_remote_starts_from_the_local_branch
     });
     assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
 }
+
+// An agent removes its own workspace (#375): always held for the user; once allowed, the tree's
+// commands in it are stopped, the removal checks as the user's does, and the session goes on in
+// `main`.
+
+/// The ready workspace `login` of the project.
+fn login(user: &User) -> PathBuf {
+    let made = user
+        .call(
+            "workspace.create",
+            json!({"project": "app", "name": "login"}),
+        )
+        .unwrap();
+    eventually("the setup's end", || {
+        workspace(user, "login").unwrap()["state"] == "ready"
+    });
+    PathBuf::from(made["folder"].as_str().unwrap())
+}
+
+/// A root agent the user started in the workspace `login`: its id and MCP session.
+fn root_in_login(user: &User) -> (String, Mcp) {
+    let opened = user.received_requests("session/new").len();
+    let answer = user
+        .call(
+            "agent.run",
+            json!({"project": "app", "workspace": "login", "message": "hello"}),
+        )
+        .unwrap();
+    let (url, authorization) = server_of(user, opened);
+    (
+        answer["agent"]["id"].as_str().unwrap().to_owned(),
+        Mcp::initialize(&url, &authorization),
+    )
+}
+
+fn agent(user: &User, id: &str) -> Value {
+    user.call("agent.show", json!({"agent": id})).unwrap()["agent"].clone()
+}
+
+fn store(user: &User) -> Store {
+    Store::open(&user.path("state/flottille/flottille.db")).unwrap()
+}
+
+#[test]
+fn an_agent_removes_its_own_workspace_once_the_user_allows_it() {
+    let user = user();
+    project(&user);
+    let folder = login(&user);
+    let (id, mcp) = root_in_login(&user);
+    // Held whatever the mode: Full performs what it holds, but not this.
+    user.call("agent.mode", json!({"agent": id, "mode": "full"}))
+        .unwrap();
+
+    let number = held(mcp.call("workspace", json!({"action": "remove"})));
+
+    let says = request(&user, number)["says"].to_string();
+    assert!(says.contains("Remove the workspace login"), "{says}");
+    assert!(says.contains("Nothing would be lost"), "{says}");
+    assert!(
+        says.contains("This session then goes on in the project's folder (main)"),
+        "{says}"
+    );
+    assert!(folder.exists(), "removed before the answer");
+    let body = answer(&user, "approve", number).body;
+    assert!(body.contains("has now done it"), "{body}");
+    assert!(
+        body.contains(
+            "The workspace login is removed; you now work in the project's folder (main)"
+        ),
+        "{body}"
+    );
+    assert!(!folder.exists());
+    assert_eq!(workspace(&user, "login").unwrap_err().0, "not-found");
+    assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
+}
+
+#[test]
+fn its_running_commands_are_stopped_first_and_the_card_names_them() {
+    let user = user();
+    project(&user);
+    let folder = login(&user);
+    let (id, mcp) = root_in_login(&user);
+    let number = held(mcp.call("run", json!({"line": "sleep 300", "timeout": 1})));
+    answer(&user, "approve", number);
+    let running = || {
+        store(&user)
+            .running_runs()
+            .unwrap()
+            .into_iter()
+            .filter(|run| run.agent.as_deref() == Some(id.as_str()))
+            .collect::<Vec<_>>()
+    };
+    eventually("the run", || running().len() == 1);
+    let run = running()[0].id.clone();
+
+    let number = held(mcp.call("workspace", json!({"action": "remove"})));
+
+    let says = request(&user, number)["says"].to_string();
+    assert!(
+        says.contains("Stop the commands of this session running in it: sleep 300"),
+        "{says}"
+    );
+    let body = answer(&user, "approve", number).body;
+    assert!(body.contains("has now done it"), "{body}");
+    assert!(running().is_empty());
+    assert_eq!(
+        store(&user).run(&run).unwrap().unwrap().state,
+        flottille_core::run::RunState::Stopped
+    );
+    assert!(!folder.exists());
+}
+
+#[test]
+fn the_session_goes_on_in_main_after_the_removal() {
+    let user = user();
+    let main = project(&user);
+    login(&user);
+    let (id, mcp) = root_in_login(&user);
+    let number = held(mcp.call("workspace", json!({"action": "remove"})));
+    answer(&user, "approve", number);
+
+    // The same session, its place now the project's folder.
+    let moved = agent(&user, &id);
+    assert_eq!(moved["workspace"], Value::Null, "{moved}");
+    assert_eq!(moved["folder"], main.to_str().unwrap(), "{moved}");
+    let events = store(&user).events_after(0, 100_000).unwrap();
+    let event = events
+        .iter()
+        .find(|e| e.name == "agent.moved")
+        .expect("agent.moved");
+    assert_eq!(event.data["agent"], id.as_str());
+    assert_eq!(event.data["from"], "login");
+    assert_eq!(event.data["to"], Value::Null);
+    let instructions = store(&user).agent(&id).unwrap().unwrap().instructions;
+    assert!(
+        instructions.contains(&format!(", in main: the folder {}.", main.display())),
+        "{instructions}"
+    );
+    // Its grant works in main: the project folder's own files, at the top.
+    let listed = done(mcp.call("fs_list", json!({"path": "."})));
+    assert!(listed.contains("flaky.sh"), "{listed}");
+    let shown = done(mcp.call("workspace", json!({"action": "list"})));
+    assert!(shown.contains("no workspace"), "{shown}");
+    // Its next process opens the session in the project's folder.
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+    user.resume(&id);
+    user.call("agent.send", json!({"agent": id, "message": "go on"}))
+        .unwrap();
+    eventually("the session reopened", || {
+        ["session/resume", "session/load"]
+            .iter()
+            .any(|method| !user.received_requests(method).is_empty())
+    });
+    let reopened: Vec<Value> = ["session/resume", "session/load"]
+        .iter()
+        .flat_map(|method| user.received_requests(method))
+        .collect();
+    assert_eq!(reopened[0]["params"]["cwd"], main.to_str().unwrap());
+}
+
+#[test]
+fn nothing_is_removed_when_work_would_be_lost_unless_discarded() {
+    let user = user();
+    project(&user);
+    let folder = login(&user);
+    std::fs::write(folder.join("notes.txt"), "notes\n").unwrap();
+    let (id, mcp) = root_in_login(&user);
+
+    let number = held(mcp.call("workspace", json!({"action": "remove"})));
+    let says = request(&user, number)["says"].to_string();
+    assert!(
+        says.contains("notes.txt holds work that is not committed"),
+        "{says}"
+    );
+    let body = answer(&user, "approve", number).body;
+    assert!(
+        body.contains("notes.txt holds work that is not committed"),
+        "{body}"
+    );
+    assert!(folder.join("notes.txt").exists());
+    assert_eq!(agent(&user, &id)["workspace"], "login");
+    let listed = done(mcp.call("fs_list", json!({"path": "."})));
+    assert!(listed.contains("notes.txt"), "{listed}");
+
+    let number = held(mcp.call("workspace", json!({"action": "remove"})));
+    let output = user.run(&["approve", &number.to_string(), "--discard"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let id_of = format!("approval-{number}");
+    eventually("the answer", || {
+        store(&user).delivery(&id_of).unwrap().is_some()
+    });
+    let body = store(&user).delivery(&id_of).unwrap().unwrap().body;
+    assert!(body.contains("it was discarded"), "{body}");
+    assert!(!folder.exists());
+    assert_eq!(agent(&user, &id)["workspace"], Value::Null);
+}
+
+#[test]
+fn a_child_still_removes_no_workspace() {
+    let user = user();
+    project(&user);
+    let folder = login(&user);
+    let (_, lead) = root_in_login(&user);
+    let opened = user.received_requests("session/new").len();
+    let launched = lead.call(
+        "agent_launch",
+        json!({"title": "worker", "brief": "Write the tests."}),
+    );
+    assert!(!launched.error, "{}", launched.text);
+    let (url, authorization) = server_of(&user, opened);
+    let child = Mcp::initialize(&url, &authorization);
+    let child_id = launched
+        .text
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find(|w| w.len() == 12 && w.chars().all(|c| c.is_ascii_hexdigit()))
+        .unwrap_or_else(|| panic!("no agent id in {}", launched.text))
+        .to_owned();
+
+    let text = refused(child.call("workspace", json!({"action": "remove"})));
+    assert!(text.contains("ask_parent"), "{text}");
+    assert!(no_request(&user));
+
+    // Its root's removal waits for it: nothing is touched while it works there.
+    let number = held(lead.call("workspace", json!({"action": "remove"})));
+    let body = answer(&user, "approve", number).body;
+    assert!(body.contains("of this agent's tree, works in it"), "{body}");
+    assert!(body.contains(&child_id), "{body}");
+    assert!(folder.exists());
+}
+
+/// The agent's delivery answering request `number`, once there is one.
+fn answer_of(user: &User, number: u64) -> Delivery {
+    let id = format!("approval-{number}");
+    eventually("the answer", || {
+        store(user).delivery(&id).unwrap().is_some()
+    });
+    store(user).delivery(&id).unwrap().unwrap()
+}
+
+/// The request `number` as the store holds it, whatever its state.
+fn stored_request(user: &User, number: u64) -> flottille_core::approval::Request {
+    store(user).request(number).unwrap().unwrap()
+}
+
+#[test]
+fn a_request_held_before_the_move_is_not_run_in_main() {
+    let user = user();
+    let main = project(&user);
+    login(&user);
+    let (_, mcp) = root_in_login(&user);
+    // Work of main's own, not committed: a reset run there would discard it.
+    std::fs::write(main.join("flaky.sh"), "changed in main\n").unwrap();
+    let reset = held(mcp.call("run", json!({"line": "git reset --hard"})));
+    let removal = held(mcp.call("workspace", json!({"action": "remove"})));
+
+    let body = answer(&user, "approve", removal).body;
+    assert!(body.contains("has now done it"), "{body}");
+
+    // Never performed after the move: answered to the agent, and the user has nothing to allow.
+    let body = answer_of(&user, reset).body;
+    assert!(
+        body.contains(
+            "not run: you moved from the workspace login to the project's folder (main); ask \
+             again if it is still needed"
+        ),
+        "{body}"
+    );
+    assert_eq!(
+        stored_request(&user, reset).state,
+        flottille_core::approval::RequestState::Cancelled
+    );
+    let output = user.run(&["approve", &reset.to_string()]);
+    assert!(!output.status.success(), "allowed after the move");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        std::fs::read_to_string(main.join("flaky.sh")).unwrap(),
+        "changed in main\n"
+    );
+    assert!(
+        store(&user)
+            .events_after(0, 100_000)
+            .unwrap()
+            .iter()
+            .any(|e| e.name == "approval.cancelled" && e.data["number"] == reset),
+        "no approval.cancelled for the window"
+    );
+}
+
+#[test]
+fn a_held_write_with_a_relative_path_is_not_run_after_the_move() {
+    let user = user();
+    let main = project(&user);
+    let folder = login(&user);
+    let (_, mcp) = root_in_login(&user);
+    let write = held(mcp.call("fs_write", json!({"path": "../y", "content": "y"})));
+    let removal = held(mcp.call("workspace", json!({"action": "remove"})));
+
+    answer(&user, "approve", removal);
+
+    let body = answer_of(&user, write).body;
+    assert!(body.contains("not run: you moved"), "{body}");
+    let output = user.run(&["approve", &write.to_string()]);
+    assert!(!output.status.success(), "allowed after the move");
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        !main.parent().unwrap().join("y").exists(),
+        "written by main"
+    );
+    assert!(!folder.parent().unwrap().join("y").exists());
+}
+
+#[test]
+fn a_run_started_while_the_workspace_is_removed_is_refused() {
+    let user = user();
+    let main = project(&user);
+    // A command that does not stop at once: the removal waits for it, and meanwhile the
+    // session tries to start another.
+    let stubborn = main.join("stubborn.sh");
+    std::fs::write(
+        &stubborn,
+        "#!/bin/sh\ntrap '' TERM\nwhile true; do sleep 0.1; done\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        &stubborn,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    user.git(&main, &["add", "stubborn.sh"]);
+    user.git(&main, &["commit", "--quiet", "-m", "stubborn"]);
+    // A workspace starts from the remote's branch.
+    user.git(&main, &["push", "--quiet", "origin", "main"]);
+    let folder = login(&user);
+    let (_, mcp) = root_in_login(&user);
+    let number = held(mcp.call("run", json!({"line": "./stubborn.sh", "timeout": 1})));
+    answer(&user, "approve", number);
+    let removal = held(mcp.call("workspace", json!({"action": "remove"})));
+
+    let output = user.run(&["approve", &removal.to_string()]);
+    assert!(output.status.success());
+    // The removal stops it first, which takes its whole grace (5 s).
+    std::thread::sleep(Duration::from_secs(1));
+
+    let text = refused(mcp.call("run", json!({"line": "true"})));
+    assert!(
+        text.contains("the workspace login is being removed"),
+        "{text}"
+    );
+    let text = refused(mcp.call("fs_write", json!({"path": "x", "content": "x"})));
+    assert!(
+        text.contains("the workspace login is being removed"),
+        "{text}"
+    );
+    let body = answer_of(&user, removal).body;
+    assert!(body.contains("has now done it"), "{body}");
+    assert!(!folder.exists(), "recreated by a write");
+}
+
+#[test]
+fn a_command_ending_before_the_answer_does_not_refuse_the_removal() {
+    let user = user();
+    project(&user);
+    let folder = login(&user);
+    let (id, mcp) = root_in_login(&user);
+    let number = held(mcp.call("run", json!({"line": "sleep 2", "timeout": 1})));
+    answer(&user, "approve", number);
+    let running = || {
+        store(&user)
+            .running_runs()
+            .unwrap()
+            .into_iter()
+            .any(|run| run.agent.as_deref() == Some(id.as_str()))
+    };
+    eventually("the run", running);
+    let removal = held(mcp.call("workspace", json!({"action": "remove"})));
+    let says = request(&user, removal)["says"].to_string();
+    assert!(says.contains("sleep 2"), "{says}");
+    eventually("the run's end", || !running());
+
+    let body = answer(&user, "approve", removal).body;
+    assert!(body.contains("has now done it"), "{body}");
+    assert!(!folder.exists());
+}
+
+#[test]
+fn the_own_workspace_removal_is_held_in_ask_and_auto() {
+    for user in [user(), judged_user()] {
+        project(&user);
+        let folder = login(&user);
+        let (_, mcp) = root_in_login(&user);
+        held(mcp.call("workspace", json!({"action": "remove"})));
+        assert!(folder.exists(), "removed without the user");
+    }
+}
+
+#[test]
+fn a_request_asked_while_its_agent_leaves_is_not_run_in_main() {
+    // A judge that answers "ask" only once the file `go` of its folder exists: the call it judges
+    // is decided after its agent moved.
+    let user = User::with_fake_agent()
+        .with_fake_escalation()
+        .with_judge(json!([
+            {"hold": "go"},
+            {"say": "{\"verdict\": \"ask\", \"reason\": \"The user decides.\"}"}
+        ]));
+    let main = project(&user);
+    let folder = login(&user);
+    let opened = user.received_requests("session/new").len();
+    user.call(
+        "agent.run",
+        json!({"project": "app", "workspace": "login", "message": "hello"}),
+    )
+    .unwrap();
+    let (url, authorization) = server_of(&user, opened);
+    let mcp = Mcp::initialize(&url, &authorization);
+    let removal = held(mcp.call("workspace", json!({"action": "remove"})));
+    let writing = std::thread::spawn(move || {
+        let other = Mcp::initialize(&url, &authorization);
+        other.call("run", json!({"line": "touch made.txt"}))
+    });
+    eventually("the judgement", || !judge_prompts(&user).is_empty());
+
+    let body = answer(&user, "approve", removal).body;
+    assert!(body.contains("has now done it"), "{body}");
+    std::fs::write(user.path("fake-judge/go"), "").unwrap();
+    let written = writing.join().unwrap();
+
+    // Refused when it is asked, or not run when it is allowed: never written from main.
+    if written.text.starts_with("Waiting for") {
+        let number = held(written);
+        let output = user.run(&["approve", &number.to_string()]);
+        if output.status.success() {
+            let body = answer_of(&user, number).body;
+            assert!(
+                body.contains("asked in the workspace login, which you have left"),
+                "{body}"
+            );
+        }
+    } else {
+        let text = refused(written);
+        assert!(
+            text.contains("asked in the workspace login, which you have left"),
+            "{text}"
+        );
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!main.join("made.txt").exists(), "run in main");
+    assert!(!folder.exists());
+}

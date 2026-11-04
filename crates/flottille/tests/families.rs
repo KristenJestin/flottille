@@ -3327,7 +3327,7 @@ fn the_discard_answer_is_refused_for_a_request_that_removes_no_workspace() {
 }
 
 #[test]
-fn workspace_remove_called_from_inside_the_workspace_is_refused() {
+fn workspace_remove_called_from_inside_the_workspace_is_held() {
     let user = user();
     on_github(&user);
     let (_, mcp) = root_in(&user, Some("login"));
@@ -3336,18 +3336,12 @@ fn workspace_remove_called_from_inside_the_workspace_is_refused() {
         json!({"action": "remove"}),
         json!({"action": "remove", "name": "login"}),
     ] {
-        let refused = mcp.call("workspace", args);
-        assert!(refused.error, "{}", refused.text);
-        assert!(
-            refused
-                .text
-                .starts_with("refused: this agent works in the workspace login"),
-            "{}",
-            refused.text
-        );
+        let asked = held(&mcp.call("workspace", args));
+        assert_eq!(the_request(&user)["state"], "pending");
+        assert!(workspace_exists(&user, "login"));
+        user.call("approval.deny", json!({"number": asked}))
+            .unwrap();
     }
-    assert!(no_request(&user));
-    assert!(workspace_exists(&user, "login"));
 }
 
 /// The folder of the workspace `login`.
