@@ -825,11 +825,11 @@ impl Shell {
                     options.update(cx, |options, cx| options.answered(refused, cx));
                 }
             }
-            Outcome::RunAnswered { session, refused } => {
+            Outcome::RunAnswered { session, answer } => {
                 if let Some(page) = self.session_page.clone()
                     && page.read(cx).id() == session
                 {
-                    page.update(cx, |page, cx| page.command_answered(refused, cx));
+                    page.update(cx, |page, cx| page.command_answered(answer, cx));
                 }
             }
             Outcome::SubscriptionCancelled { session, refused } => {
@@ -1205,9 +1205,9 @@ impl Shell {
                     });
                 }
             }
-            Outcome::ProjectRunAnswered { project, refused } => {
+            Outcome::ProjectRunAnswered { project, answer } => {
                 if let Some(tasks) = self.project_tasks_of(&project, cx) {
-                    tasks.update(cx, |tasks, cx| tasks.run_answered(refused, cx));
+                    tasks.update(cx, |tasks, cx| tasks.run_answered(answer, cx));
                 }
             }
             Outcome::Setup { project, listed } => {

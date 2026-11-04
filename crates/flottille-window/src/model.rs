@@ -276,6 +276,7 @@ impl Forged {
         let (said, excerpt) = match (tool, field("action")) {
             ("forge", "create") => ("Opened a pull request", field("title").to_owned()),
             ("forge", "merge") => ("Merged a pull request", field("repository").to_owned()),
+            ("forge", "run") => ("Ran a pipeline", field("pipeline").to_owned()),
             ("forge", "comment") => ("Commented on a pull request", on(&number, &[field("body")])),
             ("forge", "edit") => (
                 "Edited a pull request",
@@ -840,6 +841,17 @@ mod tests {
             Some((
                 "Commented on a pull request".into(),
                 "#12: Fixed the test".into(),
+                false
+            ))
+        );
+        assert_eq!(
+            said(
+                "forge",
+                json!({"action": "run", "pipeline": "custom: deploy-preview"})
+            ),
+            Some((
+                "Ran a pipeline".into(),
+                "custom: deploy-preview".into(),
                 false
             ))
         );

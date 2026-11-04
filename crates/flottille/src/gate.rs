@@ -531,7 +531,8 @@ fn forge(call: &Call) -> Verdict {
     };
     let merged = format!("it merges a pull request on the forge, by {by}");
     let said = match action {
-        "list" | "show" | "subscribe" | "unsubscribe" => return Verdict::Allow,
+        "list" | "show" | "subscribe" | "unsubscribe" | "pipelines" | "runs" | "run_view"
+        | "run_logs" => return Verdict::Allow,
         "create" => "it opens a pull request on the forge",
         "comment" => "it comments on a pull request on the forge",
         "edit" => "it changes the title or the description of a pull request on the forge",
@@ -539,6 +540,9 @@ fn forge(call: &Call) -> Verdict {
         "checks" => "it re-runs the failed jobs of a pipeline on the forge",
         "close" => "it closes a pull request on the forge",
         "reopen" => "it reopens a pull request on the forge",
+        "run" => "it runs a pipeline on the forge",
+        "stop" => "it stops a pipeline's run on the forge",
+        "step" => "it starts a step of a pipeline's run on the forge, or runs it again",
         _ => {
             return Verdict::Deny(format!(
                 "refused: forge has no action {action:?}: its actions are {FORGE_ACTIONS}"
@@ -547,7 +551,7 @@ fn forge(call: &Call) -> Verdict {
     };
     let none: &[&str] = match action {
         "comment" => &["title", "comment"],
-        "merge" | "checks" => &["title", "body", "comment"],
+        "merge" | "checks" | "run" | "stop" | "step" => &["title", "body", "comment"],
         "close" | "reopen" => &["title", "body"],
         _ => &["comment"],
     };
@@ -597,8 +601,8 @@ fn forge(call: &Call) -> Verdict {
 }
 
 /// The actions of `forge`, as a refusal names them.
-pub const FORGE_ACTIONS: &str =
-    "list, show, subscribe, unsubscribe, create, comment, edit, merge, checks, close and reopen";
+pub const FORGE_ACTIONS: &str = "list, show, subscribe, unsubscribe, create, comment, edit, merge, checks, close, reopen, \
+     pipelines, runs, run_view, run_logs, run, stop and step";
 /// The actions of `tickets`, as a refusal names them.
 pub const TICKET_ACTIONS: &str =
     "list, search, show, subscribe, unsubscribe, create, comment, edit, close, reopen and status";
@@ -3848,6 +3852,10 @@ mod tests {
                 ("forge", "show"),
                 ("forge", "subscribe"),
                 ("forge", "unsubscribe"),
+                ("forge", "pipelines"),
+                ("forge", "runs"),
+                ("forge", "run_view"),
+                ("forge", "run_logs"),
                 ("tickets", "list"),
                 ("tickets", "search"),
                 ("tickets", "show"),
@@ -3986,7 +3994,8 @@ mod tests {
     fn to_judge_forge_writes_are_judged() {
         let fixture = Fixture::workspace();
         for action in [
-            "create", "comment", "edit", "merge", "checks", "close", "reopen",
+            "create", "comment", "edit", "merge", "checks", "close", "reopen", "run", "stop",
+            "step",
         ] {
             let verdict = fixture.judge(
                 "forge",
