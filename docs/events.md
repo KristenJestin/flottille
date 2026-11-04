@@ -380,6 +380,12 @@ The agent's plan (`entries`), its context use (`used` and `size` in tokens, `cos
 (`mode`), its options (`options`, as ACP gives them: the agent's own announcement; a change of
 model or effort the user asked is `agent.options_taken`). Each with `agent` and `replay`.
 
+`agent.usage` comes during a turn, after an answer of the agent and at most once a second, and at
+its end. Its `used` is always a number; `size` is `null` while no one knows the context window yet
+(Claude Code gives it with the end of a turn only: before the session's first `result` the update
+carries `used` alone; the bridge's `usage_update` says a `size` of 0, which the event turns into `null`). The daemon fills in the last `size` the agent reported when its process
+says none, so a process started again after a release keeps the window.
+
 #### `agent.provider_wait`, `agent.provider_limit`, `agent.provider_error`
 
 The provider makes the agent wait, refuses it for a limit, or fails its turn for another reason

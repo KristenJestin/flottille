@@ -389,7 +389,10 @@ after.
 - **Permission prompts** name the tool in the title only (`opencode/src/acp/permission.ts`): they
   are all rejected.
 - **Usage**: OpenCode sends `usage_update` with the context used, its size and the cost
-  (`opencode/src/acp/usage.ts:210`); a provider error ends the prompt with an ACP error
+  (`opencode/src/acp/usage.ts:210`), always with the size (ACP requires it). Flottille does
+  nothing for it: the daemon records each update as it comes, so the row follows whenever OpenCode
+  sends one, within or at the end of a turn (what OpenCode's own schedule is was not checked: its
+  sources are not in this repository); a provider error ends the prompt with an ACP error
   (`opencode/src/acp/service.ts:839-890`), not with the `sessionFailure` extension.
 - **Models**: the `model` option's values are `<provider>/<model>`; the effort option lists the
   variants of the current model only (`opencode/src/acp/config-option.ts`).
@@ -594,7 +597,11 @@ bridge runs one session.
   says `image: true`; each goes to `claude` as a base64 `image` block of the same user message); any
   other block is refused, as `initialize` says (`embeddedContext: false`).
 - **A line of `claude`'s output** that is not JSON, or not UTF-8, is skipped.
-- **A turn** is one `user` message written to `claude`; its `result` ends it: first a
+- **A turn** is one `user` message written to `claude`. After each `assistant` message (and
+  each compaction) the bridge says the context in use as a `usage_update` with a `size` of 0
+  (ACP wants a number; it means unknown) until a `result` of this process gave the window, at most once a
+  second per turn: the daemon fills in the window the agent had at its last report when the
+  process knows none yet (a process started again after a release). Its `result` ends it: first a
   `usage_update` (the context in use, as the last message or compaction said, the model's
   context window, and the cost in USD of this `claude` process so far: it counts from zero again
   in each process, after a release or a replacement, and is not the session's), then the prompt's answer with its usage and its stop reason:
@@ -667,11 +674,13 @@ servers are Flottille's HTTP one alone). One bridge runs one session.
   error); a `contextCompaction` a completed `tool_call` with `_meta.contextCompaction`; an `error`
   Codex retries a `session_info_update` with a `jetbrains.air` `sessionFailure` of severity
   `warning`. Any other item is a breach of bare mode (above).
+- **Usage during a turn**: each `thread/tokenUsage/updated` is a `usage_update` at once, at most
+  one a second; Codex gives the window's size with every one.
 - **A prompt** is its text blocks, parted by a blank line, sent as one `turn/start` with the model,
   the effort (left out when the model has none) and `environments: []`; any other block is
   refused. `turn/completed` ends it: first a
   `usage_update` (the context of the last request and the model's context window, as
-  `thread/tokenUsage/updated` said), then the answer with the turn's tokens and its stop reason:
+  `thread/tokenUsage/updated` said; unless the last one sent during the turn said the same), then the answer with the turn's tokens and its stop reason:
   `cancelled` for an interrupted turn, `end_turn` otherwise. A failed turn ends `end_turn` too,
   after a `sessionFailure` of severity `error` with its message, category `limit` for
   `usageLimitExceeded` and `rateLimitExceeded`, `service` otherwise; only a signed-out Codex

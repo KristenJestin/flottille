@@ -1397,6 +1397,17 @@ impl Recorder {
         record(&self.daemon, &self.agent, name, data, activity);
     }
 
+    /// The context window of the agent's last usage report that had one.
+    fn known_window(&self) -> Option<u64> {
+        self.daemon
+            .read(|store| store.last_agent_events(&self.agent, "agent.usage", 1))
+            .ok()?
+            .into_iter()
+            .next()?
+            .data["size"]
+            .as_u64()
+    }
+
     /// The text the agent was streaming is over: what was held back is recorded.
     fn said(&self) {
         self.speech
@@ -1434,6 +1445,11 @@ impl acp::Events for Recorder {
             return;
         }
         let mut data = mask(data, &self.env);
+        // A process that knows no context window yet (a new one, after a release) says the tokens
+        // used alone: the window the agent had at its last report is still its own.
+        if name == "agent.usage" && data["size"].as_u64().is_none() {
+            data["size"] = self.known_window().map_or(Value::Null, Value::from);
+        }
         // Bookkeeping between two pieces of a message does not end it: it is kept after the
         // message, which stays one. Anything else the agent does (a tool call, a compaction…)
         // ends it.

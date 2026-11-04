@@ -296,6 +296,7 @@ fn a_prompt_streams_text_thoughts_and_tool_calls_then_the_usage_and_its_stop_rea
         kinds,
         [
             "agent_thought_chunk",
+            "usage_update",
             "agent_message_chunk",
             "agent_message_chunk",
             "tool_call",
@@ -308,23 +309,28 @@ fn a_prompt_streams_text_thoughts_and_tool_calls_then_the_usage_and_its_stop_rea
         updates[0]["content"],
         json!({"type": "text", "text": "a greeting"})
     );
-    assert_eq!(updates[1]["content"]["text"], "Hello");
-    assert_eq!(updates[2]["content"]["text"], " there!");
+    // The first message of the turn already says the context in use, the window still unknown.
+    assert_eq!(
+        updates[1],
+        json!({"sessionUpdate": "usage_update", "used": 1170, "size": 0})
+    );
+    assert_eq!(updates[2]["content"]["text"], "Hello");
+    assert_eq!(updates[3]["content"]["text"], " there!");
     // The call's id is the tool use's, which Claude Code gives Flottille's MCP server as
     // `claudecode/toolUseId`.
-    assert_eq!(updates[3]["toolCallId"], "toolu_01");
-    assert_eq!(updates[3]["title"], "mcp__flottille__fs_list");
-    assert_eq!(updates[3]["status"], "in_progress");
-    assert_eq!(updates[3]["rawInput"], json!({"path": "."}));
+    assert_eq!(updates[4]["toolCallId"], "toolu_01");
+    assert_eq!(updates[4]["title"], "mcp__flottille__fs_list");
+    assert_eq!(updates[4]["status"], "in_progress");
+    assert_eq!(updates[4]["rawInput"], json!({"path": "."}));
     assert_eq!(
-        updates[3]["_meta"]["claudeCode"]["toolName"],
+        updates[4]["_meta"]["claudeCode"]["toolName"],
         "mcp__flottille__fs_list"
     );
-    assert_eq!(updates[4]["toolCallId"], "toolu_01");
-    assert_eq!(updates[4]["status"], "completed");
-    assert_eq!(updates[4]["rawOutput"], "README.md");
+    assert_eq!(updates[5]["toolCallId"], "toolu_01");
+    assert_eq!(updates[5]["status"], "completed");
+    assert_eq!(updates[5]["rawOutput"], "README.md");
     assert_eq!(
-        updates[5],
+        updates[6],
         json!({"sessionUpdate": "usage_update", "used": 1170, "size": 200000,
             "cost": {"amount": 0.0125, "currency": "USD"}})
     );
