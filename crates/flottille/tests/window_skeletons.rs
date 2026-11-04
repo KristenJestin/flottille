@@ -16,6 +16,7 @@ use common::mcp::{Mcp, server_of};
 use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::session::SessionPage;
+use flottille_window::shell::Selection;
 use flottille_window::tree::session_id;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
@@ -350,5 +351,98 @@ fn a_failed_part_says_why_in_place_of_its_skeleton(cx: &mut TestAppContext) {
     assert!(
         !present(cx, "rail-pull-skeleton-api"),
         "the pull request's skeleton is gone with nothing in its place"
+    );
+}
+
+/// The page of the project `app`, open on its cards, the forge slow.
+fn open_project<'a>(
+    user: &User,
+    slow: (u64, Option<&str>),
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    user.gh_script(forge(Some(slow)));
+    let (shell, cx) = window(user, cx);
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::Project("app".into()), window, cx)
+    });
+    (shell, cx)
+}
+
+/// What the workspace `login`'s card knows: its lines changed and its pull requests.
+fn card_knows(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<(bool, usize)> {
+    shell.read_with(cx, |s, cx| {
+        let page = s.main().read(cx).project_page()?.clone();
+        let card = page
+            .read(cx)
+            .cards()
+            .iter()
+            .find(|card| card.read(cx).data().place.as_deref() == Some("login"))?
+            .clone();
+        let card = card.read(cx);
+        Some((card.changes().is_some(), card.pulls().len()))
+    })
+}
+
+#[gpui_kit::test]
+fn the_project_page_s_card_shows_what_git_knows_before_the_forge_answers(cx: &mut TestAppContext) {
+    let user = user();
+    lead(&user);
+    let (shell, cx) = open_project(&user, (SLOW_MS, None), cx);
+
+    until(&shell, cx, "the card's lines changed", |cx| {
+        card_knows(&shell, cx).is_some_and(|(changes, _)| changes)
+    });
+    let (_, pulls) = card_knows(&shell, cx).unwrap();
+    assert_eq!(
+        pulls, 0,
+        "the card knew its changes while the forge was still being read"
+    );
+    until(&shell, cx, "the pull request, at last", |cx| {
+        present(cx, "pull-login-api")
+    });
+}
+
+#[gpui_kit::test]
+fn the_card_waits_with_skeletons_for_its_ticket_and_pull_request_then_shows_them(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    lead(&user);
+    let (shell, cx) = open_project(&user, (SLOW_MS, None), cx);
+
+    until(&shell, cx, "the card's skeletons", |cx| {
+        present(cx, "ticket-skeleton-login")
+    });
+    assert!(present(cx, "pull-skeleton-login-api"));
+    assert!(!present(cx, "ticket-login") && !present(cx, "pull-login-api"));
+    until(&shell, cx, "the ticket and the pull request", |cx| {
+        present(cx, "ticket-login") && present(cx, "pull-login-api")
+    });
+    settle(cx);
+    assert!(!present(cx, "ticket-skeleton-login") && !present(cx, "pull-skeleton-login-api"));
+}
+
+#[gpui_kit::test]
+fn a_card_whose_repository_has_no_pull_request_loses_its_skeleton(cx: &mut TestAppContext) {
+    let user = user();
+    lead(&user);
+    let mut script = forge(Some((1500, None)));
+    script["pulls"] = json!({});
+    let (shell, cx) = {
+        user.gh_script(script);
+        let (shell, cx) = window(&user, cx);
+        shell.update_in(cx, |s, window, cx| {
+            s.open(Selection::Project("app".into()), window, cx)
+        });
+        (shell, cx)
+    };
+    until(&shell, cx, "the skeleton", |cx| {
+        present(cx, "pull-skeleton-login-api")
+    });
+    until(&shell, cx, "the ticket", |cx| present(cx, "ticket-login"));
+    settle(cx);
+    assert!(
+        !present(cx, "pull-skeleton-login-api") && !present(cx, "pull-login-api"),
+        "nothing is left where the pull request was waited for"
     );
 }
