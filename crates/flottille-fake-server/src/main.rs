@@ -39,6 +39,8 @@ fn main() {
         }
     };
     let listener = TcpListener::bind(format!("127.0.0.1:{port}")).unwrap();
+    // The port it took: port 0 asks the system for a free one, which no other test can take first.
+    let port = listener.local_addr().unwrap().port();
     println!("listening on http://127.0.0.1:{port}");
     std::io::stdout().flush().unwrap();
     for stream in listener.incoming() {
