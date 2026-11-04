@@ -387,7 +387,40 @@ fn bubble(text: SharedString, p: Palette) -> gpui_kit::Div {
         .ui_text()
         .text_size(px(12.))
         .whitespace_nowrap()
-        .child(text)
+        .child(SharedString::from(broken(&text)))
+}
+
+/// The longest line of a tooltip before it is broken.
+const TIP_LINE: usize = 48;
+
+/// A tooltip is one line, which a whole path would stretch past the window: a text with no space
+/// in it is broken after a `/` (else every `TIP_LINE` characters) so that it keeps to lines of
+/// about `TIP_LINE`.
+fn broken(text: &str) -> String {
+    if text.chars().count() <= TIP_LINE || text.contains(char::is_whitespace) {
+        return text.to_owned();
+    }
+    let mut out = String::new();
+    let mut line = 0;
+    for piece in text.split_inclusive('/') {
+        let mut piece = piece;
+        if line > 0 && line + piece.chars().count() > TIP_LINE {
+            out.push('\n');
+            line = 0;
+        }
+        while piece.chars().count() > TIP_LINE {
+            let cut = piece
+                .char_indices()
+                .nth(TIP_LINE)
+                .map_or(piece.len(), |(at, _)| at);
+            out.push_str(&piece[..cut]);
+            out.push('\n');
+            piece = &piece[cut..];
+        }
+        out.push_str(piece);
+        line += piece.chars().count();
+    }
+    out
 }
 
 /// Whether the pointer rests on a button, and how far its tooltip is shown (0 to 1).

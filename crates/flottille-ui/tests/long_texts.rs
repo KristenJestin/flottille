@@ -131,6 +131,8 @@ fn a_path_with_no_folder_is_its_name(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn the_whole_path_is_in_the_tooltip(cx: &mut TestAppContext) {
     let cx = open(DEEP, cx);
+    // Narrower than the path set on one line.
+    cx.simulate_resize(size(px(500.), px(400.)));
     cx.update(|window, cx| window.hover("path", cx));
     advance(cx, TOOLTIP + HOVER * 2);
     cx.update(|window, cx| {
@@ -140,6 +142,11 @@ fn the_whole_path_is_in_the_tooltip(cx: &mut TestAppContext) {
             window.find("path").label(),
             Some(DEEP),
             "and it is what is read"
+        );
+        let tip = window.find("path-tooltip").bounds();
+        assert!(
+            tip.left() >= px(-1.) && tip.right() <= px(500.),
+            "the tooltip stays inside the window: {tip:?}"
         );
     });
     assert_eq!(pending_frames(cx), 0);
