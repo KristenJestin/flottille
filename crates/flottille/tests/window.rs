@@ -5786,9 +5786,14 @@ fn the_workspace_section_shows_the_ticket_opens_it_on_a_click_and_links_and_unli
     cx.update(|window, cx| window.click("workspace-menu", cx));
     settle(cx);
     cx.update(|window, cx| window.click("workspace-unlink-ticket", cx));
-    until(&shell, cx, "the ticket gone from the rail", |cx| {
-        cx.update(|window, _| window.try_find("rail-ticket").is_none())
+    until(&shell, cx, "the ticket forgotten by the rail", |cx| {
+        session_page(&shell, cx).read_with(cx, |p, cx| {
+            p.rail().read(cx).place().unwrap().ticket.is_none()
+        })
     });
+    // The row folds away, then it is gone.
+    settle(cx);
+    assert!(cx.update(|window, _| window.try_find("rail-ticket").is_none()));
     let shown = user
         .call("workspace.show", json!({"project": "app", "name": "w"}))
         .unwrap();
