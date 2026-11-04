@@ -135,9 +135,8 @@ const GIT_READS: [&str; 17] = [
     "name-rev",
     "help",
 ];
-/// Sensitive wherever they are along a path (`docs/reference/hemera.md` §4), with the agents'
-/// own logins.
-const SENSITIVE: [&str; 18] = [
+/// Sensitive wherever they are along a path (`docs/reference/hemera.md` §4).
+const SENSITIVE: [&str; 15] = [
     ".ssh",
     ".gnupg",
     ".aws",
@@ -152,11 +151,13 @@ const SENSITIVE: [&str; 18] = [
     ".git-credentials",
     ".local/share/keyrings",
     "Library/Keychains",
-    ".claude",
-    ".claude.json",
-    ".codex",
     ".local/share/opencode",
 ];
+/// The agents' own folders. The home's hold their logins and the user's own agent settings; one
+/// anywhere else is a repository's configuration, which an agent reads but never writes.
+const AGENT_FOLDERS: [&str; 3] = [".claude", ".claude.json", ".codex"];
+/// A login moved into an agent's folder outside the home.
+const AGENT_LOGINS: [&str; 2] = [".credentials.json", "auth.json"];
 /// Sensitive from the top of the file system only.
 const SYSTEM_SENSITIVE: [&str; 3] = ["/etc/shadow", "/etc/sudoers", "/etc/sudoers.d"];
 /// What runs at the user's next login or command, or starts a process later, from the home
@@ -396,7 +397,7 @@ fn files(call: &Call) -> Verdict {
         }
         if let Some(why) = process(call.groups, path) {
             found.base(why);
-        } else if let Some(place) = sensitive(call.own, path) {
+        } else if let Some(place) = sensitive(call.own, home, path) {
             found.base(format!("{} is a sensitive place ({place})", path.shown));
         } else if !path.inside {
             found.judge(format!("{} is outside this agent's place", path.shown));
@@ -764,10 +765,10 @@ fn sensitive_glob(glob: &str) -> Option<String> {
         if let Some(key) = KEY_NAMES.iter().find(|key| matches(part, key)) {
             return Some((*key).into());
         }
-        for place in SENSITIVE {
+        for place in SENSITIVE.iter().chain(&AGENT_FOLDERS) {
             let names: Vec<&str> = place.split('/').collect();
             if names.iter().zip(&parts[at..]).all(|(n, p)| matches(p, n)) {
-                return Some(place.into());
+                return Some((*place).into());
             }
         }
     }
@@ -816,6 +817,7 @@ fn run(call: &Call) -> Verdict {
             return Verdict::Deny(why);
         }
     }
+    let home = call.grant.place.home.as_deref();
     let main = call.grant.place.workspace.is_none();
     let mut found = Found::default();
     match call.never {
@@ -892,7 +894,7 @@ fn run(call: &Call) -> Verdict {
                 }
             ));
         }
-        if let Some(why) = credential(path) {
+        if let Some(why) = credential(home, path) {
             return Verdict::Deny(why);
         }
         if in_git(path) {
@@ -903,7 +905,7 @@ fn run(call: &Call) -> Verdict {
         }
         if let Some(why) = process(call.groups, path) {
             found.base(why);
-        } else if let Some(place) = sensitive(call.own, path) {
+        } else if let Some(place) = sensitive(call.own, home, path) {
             found.base(format!("{} is a sensitive place ({place})", path.shown));
         } else if !path.inside && !unmade {
             found.judge(format!("{} is outside this agent's place", path.shown));
@@ -916,6 +918,7 @@ fn run(call: &Call) -> Verdict {
         found.base(why);
     }
     let mut reads = layers.len() == 1;
+    let mut files = false;
     for layer in &layers {
         for (at, suffix) in suffixes(layer) {
             let line = program(call, suffix);
@@ -929,11 +932,14 @@ fn run(call: &Call) -> Verdict {
             }
             match line {
                 Line::Reads => {}
-                Line::Files if main => found.judge(format!(
-                    "{} writes a file in the project folder (main), the user's own checkout",
-                    shown_words(layer)
-                )),
-                Line::Files => {}
+                Line::Files if main => {
+                    files = true;
+                    found.judge(format!(
+                        "{} writes a file in the project folder (main), the user's own checkout",
+                        shown_words(layer)
+                    ));
+                }
+                Line::Files => files = true,
                 Line::Writes => reads = false,
                 Line::Judge(why) => {
                     reads = false;
@@ -983,7 +989,7 @@ fn run(call: &Call) -> Verdict {
             // An option's value or a text's word (`awk -F/`, `tr / _`) is seldom a path the line
             // writes: naming a folder above Flottille's there is held, as any base call.
             if *soft
-                && credential(path).is_none()
+                && credential(home, path).is_none()
                 && let Some(why) = above_own(call.own, path)
             {
                 found.base(why);
@@ -993,6 +999,17 @@ fn run(call: &Call) -> Verdict {
                 return Verdict::Deny(why);
             }
         }
+    }
+    // A line that writes, even only the files of the place, never writes a repository's agent
+    // folder: neither a path it names nor the folder it runs in.
+    if (!reads || files)
+        && let Some(why) = named
+            .iter()
+            .map(|(_, path, _)| path)
+            .chain(call.paths.first())
+            .find_map(|path| agent_settings(home, path))
+    {
+        return Verdict::Deny(why);
     }
     // What deletes untracked files names none: the folder it runs in, or its whole worktree, is
     // what it takes away.
@@ -1880,7 +1897,8 @@ fn walks_secrets(call: &Call, layer: &[String]) -> Option<String> {
     }
     let real_root = std::fs::canonicalize(&place.root).unwrap_or_else(|_| place.root.clone());
     for folder in folders {
-        if let Some(what) = holds_secret(call.own, &real_root, &folder.path) {
+        if let Some(what) = holds_secret(call.own, place.home.as_deref(), &real_root, &folder.path)
+        {
             return Some(format!(
                 "{} reads hidden, ignored or every file below {}, {what}",
                 shown_words(layer),
@@ -1901,7 +1919,12 @@ const WALKED_MAX: usize = 20_000;
 /// Whether a folder of the place holds a sensitive file, said as a reason: the first found, or
 /// that it holds more files than the gate looks through. Links are not followed; `.git` folders
 /// are not entered.
-fn holds_secret(own: &[PathBuf], root: &Path, folder: &Path) -> Option<String> {
+fn holds_secret(
+    own: &[PathBuf],
+    home: Option<&Path>,
+    root: &Path,
+    folder: &Path,
+) -> Option<String> {
     let mut walked = 0;
     let mut pending = vec![folder.to_path_buf()];
     while let Some(dir) = pending.pop() {
@@ -1922,7 +1945,7 @@ fn holds_secret(own: &[PathBuf], root: &Path, folder: &Path) -> Option<String> {
             };
             let resolved =
                 Resolved::real_inside(relative.to_string_lossy().into_owned(), path.clone());
-            if let Some(place) = sensitive(own, &resolved) {
+            if let Some(place) = sensitive(own, home, &resolved) {
                 return Some(format!(
                     "which holds a sensitive file: {} ({place})",
                     resolved.shown
@@ -3273,22 +3296,30 @@ fn checks_out_paths(call: &Call, rest: &[String]) -> bool {
 
 /// The sensitive place a path is in, if it is in one: inside the place, only what sits below it
 /// counts.
-pub fn sensitive(own: &[PathBuf], path: &Resolved) -> Option<String> {
-    if path.inside {
-        return sensitive_names(Path::new(&path.shown));
-    }
-    // A path outside is taken as written and where it leads (`path.path`, every link and `..`
-    // followed): a link anyone made, `/proc/self/root`, a configuration folder that is a link.
-    let own = own_folders(own);
-    for path in [&path.written, &path.path] {
-        if own.iter().any(|own| path.starts_with(own)) {
-            return Some("Flottille's own folder".into());
+/// `home` is the user's: an agent's folder there is a login's place, one anywhere else is read.
+pub fn sensitive(own: &[PathBuf], home: Option<&Path>, path: &Resolved) -> Option<String> {
+    let place = || {
+        if path.inside {
+            return sensitive_names(Path::new(&path.shown));
         }
-        if let Some(system) = SYSTEM_SENSITIVE.iter().find(|s| path.starts_with(s)) {
-            return Some((*system).into());
+        // A path outside is taken as written and where it leads (`path.path`, every link and
+        // `..` followed): a link anyone made, `/proc/self/root`, a configuration folder that is
+        // a link.
+        let own = own_folders(own);
+        for path in [&path.written, &path.path] {
+            if own.iter().any(|own| path.starts_with(own)) {
+                return Some("Flottille's own folder".into());
+            }
+            if let Some(system) = SYSTEM_SENSITIVE.iter().find(|s| path.starts_with(s)) {
+                return Some((*system).into());
+            }
         }
-    }
-    sensitive_names(&path.written).or_else(|| sensitive_names(&path.path))
+        sensitive_names(&path.written).or_else(|| sensitive_names(&path.path))
+    };
+    place().or_else(|| match agent_folder(home, path)? {
+        AgentFolder::Login(place) => Some(place),
+        AgentFolder::Repository(_) => None,
+    })
 }
 
 /// Why a call that reaches a path is refused in every mode, Full included (`docs/design.md`
@@ -3300,11 +3331,14 @@ pub fn forbidden(
     path: &Resolved,
     write: bool,
 ) -> Option<String> {
-    if let Some(why) = credential(path) {
+    if let Some(why) = credential(home, path) {
         return Some(why);
     }
     if !write {
         return None;
+    }
+    if let Some(why) = agent_settings(home, path) {
+        return Some(why);
     }
     // Where a process's folder in `/proc` leads is anywhere on the disk: the daemon's own runs in
     // `/`.
@@ -3387,7 +3421,7 @@ fn seen(path: &Resolved) -> Vec<PathBuf> {
 }
 
 /// The refusal of a path in a login's place: an agent's, the user's, the system's secrets.
-fn credential(path: &Resolved) -> Option<String> {
+fn credential(home: Option<&Path>, path: &Resolved) -> Option<String> {
     let place = if path.inside {
         credential_names(Path::new(&path.shown))
     } else {
@@ -3396,12 +3430,89 @@ fn credential(path: &Resolved) -> Option<String> {
             .find_map(|path| SYSTEM_SENSITIVE.iter().find(|s| path.starts_with(s)))
             .map(|system| (*system).to_owned())
             .or_else(|| seen.iter().find_map(|path| credential_names(path)))
-    }?;
+    }
+    .or_else(|| match agent_folder(home, path)? {
+        AgentFolder::Login(place) => Some(place),
+        AgentFolder::Repository(_) => None,
+    })?;
     Some(format!(
         "refused: {} is in a login's place ({place}): an agent never reads nor writes a login, \
          in any mode; nothing was done",
         path.shown
     ))
+}
+
+/// Where an agent's folder that a path is in lies.
+enum AgentFolder {
+    /// The home's, or a login file in one elsewhere: the place named.
+    Login(String),
+    /// One anywhere else, a repository's: its name.
+    Repository(String),
+}
+
+/// The agent's folder a path is in, if any. The home's is found where the path leads too (every
+/// link and `..` followed), the place's own folder being the home included, and where a link it
+/// is leads (dotfiles); any other is found by its name. When the home is not known, or the path
+/// goes through a process's folder in `/proc`, which leads anywhere, every one is the home's.
+fn agent_folder(home: Option<&Path>, path: &Resolved) -> Option<AgentFolder> {
+    let seen = seen(path);
+    for entry in AGENT_FOLDERS {
+        let homes: Vec<PathBuf> = home
+            .into_iter()
+            .flat_map(|home| [Some(home.to_owned()), place::real_path(home).ok()])
+            .flatten()
+            .flat_map(|home| {
+                let folder = home.join(entry);
+                [place::real_path(&folder).ok(), Some(folder)]
+            })
+            .flatten()
+            .collect();
+        if seen
+            .iter()
+            .any(|path| homes.iter().any(|folder| path.starts_with(folder)))
+        {
+            return Some(AgentFolder::Login(format!("~/{entry}")));
+        }
+    }
+    let anywhere = matches!(path.unfollowed, Some(Unfollowed::Through(_)));
+    let named = if path.inside {
+        vec![PathBuf::from(&path.shown)]
+    } else {
+        seen
+    };
+    named.iter().find_map(|path| {
+        let parts = parts_of(path);
+        let at = parts
+            .iter()
+            .position(|part| AGENT_FOLDERS.contains(&part.as_str()))?;
+        let entry = &parts[at];
+        if home.is_none() || anywhere {
+            return Some(AgentFolder::Login(format!("~/{entry}")));
+        }
+        Some(
+            match parts[at + 1..]
+                .iter()
+                .find(|part| AGENT_LOGINS.contains(&part.as_str()))
+            {
+                Some(login) => AgentFolder::Login(format!("{login} in {entry}")),
+                None => AgentFolder::Repository(entry.clone()),
+            },
+        )
+    })
+}
+
+/// The refusal of a write in a repository's agent folder: what it holds runs outside the gate.
+fn agent_settings(home: Option<&Path>, path: &Resolved) -> Option<String> {
+    match agent_folder(home, path)? {
+        AgentFolder::Repository(entry) => Some(format!(
+            "refused: {} is in a repository's agent folder ({entry}): its settings and hooks run \
+             programs the next time the user opens that repository with the agent's own command \
+             line, outside the gate: an agent reads it but never writes there, in any mode; ask \
+             the user to make the change; nothing was done",
+            path.shown
+        )),
+        AgentFolder::Login(_) => None,
+    }
 }
 
 /// The startup file a path is, is in or holds, if any: from the home folder, and from the user's
@@ -4300,6 +4411,236 @@ mod tests {
         ] {
             assert!(denied(&verdict), "{verdict:?}");
         }
+    }
+
+    /// A file of the fixture, made with its folders.
+    fn made(path: &Path) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "x\n").unwrap();
+    }
+
+    #[test]
+    fn a_repository_s_claude_commands_are_readable() {
+        let fixture = Fixture::workspace();
+        made(&fixture.root.join(".claude/commands/deploy-preview.md"));
+        made(&fixture.root.join(".codex/prompts/review.md"));
+        made(&fixture.root.join(".claude.json"));
+        for verdict in [
+            fixture.file("fs_read", ".claude/commands/deploy-preview.md"),
+            fixture.file("fs_list", ".claude/commands"),
+            fixture.file("fs_list", ".claude"),
+            fixture.file("search", ".claude"),
+            fixture.file("fs_read", ".codex/prompts/review.md"),
+            fixture.file("fs_read", ".claude.json"),
+        ] {
+            assert_eq!(verdict, Verdict::Allow);
+        }
+        // A copy outside the place, not the home's own: outside, so to judge, never refused.
+        let home = fixture.grant.place.home.clone().unwrap();
+        made(&home.join("Downloads/.claude/commands/deploy-preview.md"));
+        let verdict = fixture.file(
+            "fs_read",
+            "../../home/Downloads/.claude/commands/deploy-preview.md",
+        );
+        assert!(to_judge(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn the_home_s_claude_folder_stays_refused() {
+        let fixture = Fixture::workspace();
+        for path in [
+            ".claude/settings.json",
+            ".claude/commands/deploy-preview.md",
+            ".claude.json",
+            ".codex/config.toml",
+            ".local/share/opencode/auth.json",
+        ] {
+            let home = fixture.grant.place.home.clone().unwrap();
+            made(&home.join(path));
+            for verdict in [
+                fixture.file("fs_read", &format!("../../home/{path}")),
+                fixture.file("fs_list", "../../home/.claude"),
+                fixture.run(&format!("cat ../../home/{path}")),
+            ] {
+                assert!(
+                    matches!(&verdict, Verdict::Deny(why) if why.contains("login")),
+                    "{path}: {verdict:?}"
+                );
+            }
+        }
+        // The other sensitive places stay refused wherever they are.
+        made(&fixture.root.join(".ssh/id_ed25519"));
+        assert!(denied(&fixture.file("fs_read", ".ssh/id_ed25519")));
+        assert!(denied(&fixture.run("cat .ssh/id_ed25519")));
+    }
+
+    #[test]
+    fn a_link_to_the_home_s_claude_folder_is_refused() {
+        let fixture = Fixture::workspace();
+        let home = fixture.grant.place.home.clone().unwrap();
+        made(&home.join(".claude/settings.json"));
+        std::os::unix::fs::symlink(home.join(".claude"), fixture.root.join("notes")).unwrap();
+        std::os::unix::fs::symlink(home.join(".claude"), fixture.root.join("src/.claude")).unwrap();
+        for verdict in [
+            fixture.file("fs_read", "notes/settings.json"),
+            fixture.file("fs_read", "src/.claude/settings.json"),
+            fixture.file("fs_list", "notes"),
+            fixture.run("cat notes/settings.json"),
+            fixture.run("cat src/.claude/settings.json"),
+        ] {
+            assert!(denied(&verdict), "{verdict:?}");
+        }
+    }
+
+    #[test]
+    fn a_proc_cwd_path_to_the_home_s_claude_json_is_refused() {
+        let fixture = Fixture::workspace();
+        let process = std::process::id();
+        for verdict in [
+            fixture.run(&format!("cat /proc/{process}/cwd/.claude.json")),
+            fixture.run("cat /proc/self/cwd/.claude.json"),
+            fixture.file("fs_read", &format!("/proc/{process}/cwd/.claude.json")),
+        ] {
+            assert!(
+                matches!(&verdict, Verdict::Deny(why) if why.contains("login")),
+                "{verdict:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_proc_cwd_path_to_the_home_s_claude_folder_is_refused() {
+        let fixture = Fixture::workspace();
+        let process = std::process::id();
+        for verdict in [
+            fixture.run(&format!("cat /proc/{process}/cwd/.claude/settings.json")),
+            fixture.run(&format!("cat /proc/{process}/root/.codex/config.toml")),
+            fixture.file(
+                "fs_read",
+                &format!("/proc/{process}/cwd/.claude/settings.json"),
+            ),
+        ] {
+            assert!(
+                matches!(&verdict, Verdict::Deny(why) if why.contains("login")),
+                "{verdict:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_target_of_a_linked_home_claude_folder_is_refused() {
+        let fixture = Fixture::workspace();
+        let home = fixture.grant.place.home.clone().unwrap();
+        made(&home.join("dotfiles/.claude/settings.json"));
+        made(&home.join("dotfiles/codex/config.toml"));
+        made(&home.join("dotfiles/claude.json"));
+        std::os::unix::fs::symlink(home.join("dotfiles/.claude"), home.join(".claude")).unwrap();
+        std::os::unix::fs::symlink(home.join("dotfiles/codex"), home.join(".codex")).unwrap();
+        std::os::unix::fs::symlink(home.join("dotfiles/claude.json"), home.join(".claude.json"))
+            .unwrap();
+        for path in [
+            "dotfiles/.claude/settings.json",
+            "dotfiles/codex/config.toml",
+            "dotfiles/claude.json",
+        ] {
+            for verdict in [
+                fixture.file("fs_read", &format!("../../home/{path}")),
+                fixture.run(&format!("cat ../../home/{path}")),
+            ] {
+                assert!(
+                    matches!(&verdict, Verdict::Deny(why) if why.contains("login")),
+                    "{path}: {verdict:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_repository_at_the_home_still_protects_its_claude_folder() {
+        let mut fixture = Fixture::workspace();
+        fixture.grant.place.home = Some(fixture.root.clone());
+        made(&fixture.root.join(".claude/commands/deploy-preview.md"));
+        made(&fixture.root.join(".codex/config.toml"));
+        for verdict in [
+            fixture.file("fs_read", ".claude/commands/deploy-preview.md"),
+            fixture.file("fs_list", ".claude"),
+            fixture.file("fs_read", ".codex/config.toml"),
+            fixture.file("fs_read", ".claude.json"),
+            fixture.run("cat .claude/commands/deploy-preview.md"),
+        ] {
+            assert!(
+                matches!(&verdict, Verdict::Deny(why) if why.contains("login")),
+                "{verdict:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_credentials_file_in_a_repository_s_claude_folder_is_refused() {
+        let fixture = Fixture::workspace();
+        for path in [
+            ".claude/.credentials.json",
+            ".codex/auth.json",
+            ".claude/backup/auth.json",
+        ] {
+            made(&fixture.root.join(path));
+            for verdict in [
+                fixture.file("fs_read", path),
+                fixture.run(&format!("cat {path}")),
+            ] {
+                assert!(
+                    matches!(&verdict, Verdict::Deny(why) if why.contains("login")),
+                    "{path}: {verdict:?}"
+                );
+            }
+        }
+        // A walk over the folder that would read it is held.
+        assert!(!matches!(
+            fixture.run("grep -r token .claude"),
+            Verdict::Allow
+        ));
+    }
+
+    #[test]
+    fn writing_a_repository_s_claude_settings_is_refused_naming_why() {
+        for fixture in [Fixture::workspace(), Fixture::main()] {
+            made(&fixture.root.join(".claude/settings.json"));
+            made(&fixture.root.join("settings.json"));
+            for verdict in [
+                fixture.file("fs_write", ".claude/settings.json"),
+                fixture.file("fs_edit", ".claude/settings.json"),
+                fixture.file("fs_write", ".claude/hooks/start.sh"),
+                fixture.file("fs_write", ".codex/config.toml"),
+                fixture.file("fs_write", ".claude.json"),
+                fixture.run("cp settings.json .claude/settings.json"),
+                fixture.run("rm -r .claude"),
+                fixture.run("git rm .claude/settings.json"),
+                fixture.run("git add .claude/settings.json"),
+                fixture.run("git diff --output=.claude/settings.json"),
+            ] {
+                assert!(
+                    matches!(&verdict, Verdict::Deny(why)
+                        if why.contains("hooks") && why.contains("ask the user")),
+                    "{verdict:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_run_that_reads_a_repository_s_claude_folder_is_judged_as_a_read() {
+        let fixture = Fixture::workspace();
+        made(&fixture.root.join(".claude/commands/deploy-preview.md"));
+        for line in [
+            "cat .claude/commands/deploy-preview.md",
+            "ls .claude/commands",
+            "grep -r preview .claude",
+            "head -n 5 .codex/prompts/review.md",
+        ] {
+            assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
+        }
+        // A line that does not only read is not allowed there through a read's rule.
+        assert!(denied(&fixture.run("touch .claude/commands/new.md")));
     }
 
     #[test]
