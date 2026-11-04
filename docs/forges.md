@@ -696,19 +696,35 @@ A comment read back is known as an agent's by its record:
 
 - with the id the forge gave it, when the record has one (GitHub): the same words under another
   id are a person's;
-- else by the hash of its text: whitespace is one space and only the first 500 characters count,
-  so that a text the forge reflowed or the tracker rendered (Jira's document format) is still
-  found. When the forge gives the comment's time (GitHub), a comment older than the record by
-  more than five minutes is not it.
+- else by the hash of its text, and a hash record is **one comment's**: the first comment of those
+  words that was not written before the post (the comments are taken oldest first, by the time the
+  forge gives: GitHub's `createdAt`, Bitbucket Cloud's `created_on`, Data Center's `createdDate`).
+  A person's same words, before it or after it, stay a person's. A comment older than the record
+  by more than five minutes (the clocks differ) is not it. Where a read gives no time the first of the
+  words is taken: Jira's `created` (`2026-10-01T12:00:00.000+0000`) is not read as a time, so for
+  Jira the post claims the first comment of its words.
 
-The limit of the second way: the user's own comment, written under the same account, that says
-exactly what an agent posted (and written after it) is taken for the agent's. A person's comment
-that ends with the old marker below is taken for an agent's too. Both are accepted. A comment read
-back in the instant between the forge taking it and the daemon recording it (milliseconds) is a
-person's for that read.
+The hash is of the text as a read gives it: masked (the secrets of a text are masked on every
+read, the record hashes the masked text too), whitespace one space, only the first 500 characters
+counting, and the markdown a tracker rewrites gone: code fences, `*` and `` ` `` marks, heading
+marks, list bullets and numbers. Jira's document format keeps the words of what `acli` was given,
+not that markup (`tickets.md`, "Jira's text"), so the same words found again are still found.
+What the hash does not see: a link written `[text](url)`, which Jira may keep as its text alone,
+and any other rewriting of the words themselves; such a comment is shown as a person's.
 
-An item's own text is known by the item: a ticket whose description an agent created or edited
-is `description_by_agent`; a person editing it afterwards does not change that.
+Bitbucket's closing comment is the same record: Cloud's reason a pull request was declined with
+and Data Center's comment of the closer are matched as any comment, the reason by its hash, the
+comment by the id it shares with the one among the comments.
+
+The limit of the hash: the user's own comment, written under the same account, that says exactly
+what an agent posted, and was written after it and before the agent's own is read, can be taken
+for the agent's, the agent's then being the person's. A comment read back in the instant between
+the forge taking it and the daemon recording it (milliseconds) is a person's for that read. A
+person's comment that ends with the old marker below is taken for an agent's. Both are accepted.
+
+An item's own text is known by the item and by its words: a ticket whose description an agent
+created or edited is `description_by_agent` while it still reads as the agent left it; a person
+editing it afterwards makes it the person's.
 
 It is how a text read back is told from a person's:
 
