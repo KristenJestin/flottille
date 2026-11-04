@@ -26,6 +26,7 @@ use crate::deliveries;
 use crate::developer;
 use crate::forge;
 use crate::inbox;
+use crate::instructions;
 use crate::items;
 use crate::judge;
 use crate::mcp;
@@ -749,6 +750,13 @@ fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) 
         ),
         method if method.starts_with("judge.") => (
             match judge::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+            },
+            None,
+        ),
+        method if method.starts_with("instructions.") => (
+            match instructions::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => Message::error(Some(id), failure.code, failure.message),
             },

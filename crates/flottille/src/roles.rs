@@ -24,6 +24,9 @@ pub struct Role {
 pub const LEAD: &str = "lead";
 pub const WORKER: &str = "worker";
 
+/// The heading of the user's own instructions, which hold in every project.
+const USER_HEADING: &str = "# The user's instructions, for every project";
+
 const BASE: &str = include_str!("../roles/base.md");
 
 pub const ROLES: [Role; 2] = [
@@ -57,6 +60,9 @@ pub struct Session<'a> {
     pub skills: &'a [(String, String)],
     /// How the user wants it to work.
     pub rules: &'a Rules,
+    /// The user's own instructions for every project (`instructions.md`), as they are to be
+    /// said; empty for none.
+    pub user_instructions: &'a str,
 }
 
 /// What the instructions say of the agent's place: `place` is `main`, or `workspace <name>`.
@@ -125,6 +131,11 @@ pub fn instructions(role: &Role, session: &Session, files: &[File]) -> String {
         );
     }
     let mut text = format!("{shared}\n\n{BOUNDARY}\n\n{}", part.join(" "));
+    // Before everything the project says, so that a project's own rule can narrow it.
+    let user_instructions = secrets::mask(session.user_instructions.trim(), &env);
+    if !user_instructions.is_empty() {
+        text.push_str(&format!("\n\n{USER_HEADING}\n\n{user_instructions}"));
+    }
     if own && !rules.is_empty() {
         text.push_str(&format!("\n\n# How to work, in this project\n\n{rules}"));
     }
@@ -212,6 +223,7 @@ mod tests {
             at_depth_limit: false,
             skills: &[],
             rules: &DEFAULT_RULES,
+            user_instructions: "",
         }
     }
 
@@ -448,6 +460,30 @@ mod tests {
         assert!(after.contains("# The project's own instructions\n\n## AGENTS.md\n\nroot rules"));
         assert!(after.contains("## api/CLAUDE.md\n\napi for claude"));
         assert!(!text.contains("api for any agent"));
+    }
+
+    #[test]
+    fn the_user_s_instructions_go_after_the_boundary_and_a_token_in_them_is_masked() {
+        let folder = Path::new("/work/zebra");
+        let files = [File {
+            heading: "AGENTS.md".into(),
+            text: "project rules".into(),
+        }];
+        let text = instructions(
+            role(WORKER).unwrap(),
+            &Session {
+                user_instructions: "Name branches after the issue. token=ghp_abcdefghijklmnopqrstuvwxyz0123\n",
+                ..session(folder)
+            },
+            &files,
+        );
+
+        let (before, after) = text.split_once(BOUNDARY).unwrap();
+        assert!(!before.contains("Name branches"));
+        assert!(after.contains(
+            "# The user's instructions, for every project\n\nName branches after the issue. token=[masked]"
+        ));
+        assert!(after.find("Name branches").unwrap() < after.find("project rules").unwrap());
     }
 
     #[test]

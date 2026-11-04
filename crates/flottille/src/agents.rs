@@ -609,6 +609,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         .map(|(name, skill)| (name.clone(), skill.description.clone()))
         .collect();
     let rules = crate::rules::effective(&daemon.paths, project);
+    let user_instructions = crate::instructions::effective(&daemon.paths);
     let instructions = roles::instructions(
         new.role,
         &roles::Session {
@@ -619,6 +620,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
             at_depth_limit,
             skills: &skills,
             rules: &rules,
+            user_instructions: &user_instructions.text,
         },
         &files,
     );

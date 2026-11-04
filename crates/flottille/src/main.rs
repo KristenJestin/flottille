@@ -26,6 +26,7 @@ mod git;
 mod import_command;
 mod inbox;
 mod inbox_command;
+mod instructions;
 mod items;
 mod judge;
 mod mcp;
