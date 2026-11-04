@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use flottille_core::secrets;
 
 use crate::claude::BOUNDARY;
-use crate::rules::{Rules, Source};
+use crate::rules::Rules;
 
 pub struct Role {
     pub name: &'static str,
@@ -90,17 +90,16 @@ pub struct File {
 }
 
 /// The agent's instructions, frozen in it. Everything before the boundary names no project nor
-/// session, so that the provider's cache serves it to the next agent of the same role. The rules
-/// are the same for every project until a project has its own: they stay before the boundary,
-/// and a project's own go after it, since they would otherwise make the shared part differ
-/// from one project to the next.
+/// session, so that the provider's cache serves it to the next agent of the same role. The global
+/// rules are the same for every project: they stay before the boundary, and a project's own go
+/// after it, since they would otherwise make the shared part differ from one project to the next.
 pub fn instructions(role: &Role, session: &Session, files: &[File]) -> String {
     let env = std::env::vars_os().collect();
-    let rules = secrets::mask(session.rules.text.trim(), &env);
-    let own = session.rules.source == Source::Project;
+    let global = secrets::mask(session.rules.shared.trim(), &env);
+    let own = secrets::mask(session.rules.own.trim(), &env);
     let mut shared = BASE.trim_end().replace("{role}", role.name);
-    if !own && !rules.is_empty() {
-        shared.push_str(&format!("\n\n---\n\n# How to work\n\n{rules}"));
+    if !global.is_empty() {
+        shared.push_str(&format!("\n\n---\n\n# How to work\n\n{global}"));
     }
     let shared = format!("{shared}\n\n---\n\n{}", role.template.trim_end());
     let mut part = vec![place_sentence(
@@ -125,8 +124,8 @@ pub fn instructions(role: &Role, session: &Session, files: &[File]) -> String {
         );
     }
     let mut text = format!("{shared}\n\n{BOUNDARY}\n\n{}", part.join(" "));
-    if own && !rules.is_empty() {
-        text.push_str(&format!("\n\n# How to work, in this project\n\n{rules}"));
+    if !own.is_empty() {
+        text.push_str(&format!("\n\n# This project's rules\n\n{own}"));
     }
     if !session.skills.is_empty() {
         text.push_str(
@@ -216,8 +215,8 @@ mod tests {
     }
 
     static DEFAULT_RULES: std::sync::LazyLock<Rules> = std::sync::LazyLock::new(|| Rules {
-        text: crate::rules::DEFAULT.to_owned(),
-        source: Source::Default,
+        shared: crate::rules::DEFAULT.to_owned(),
+        ..Rules::default()
     });
 
     #[test]
@@ -247,8 +246,8 @@ mod tests {
     #[test]
     fn the_user_s_global_rules_replace_the_default_before_the_boundary() {
         let rules = Rules {
-            text: "Answer in French.\n".into(),
-            source: Source::Global,
+            shared: "Answer in French.\n".into(),
+            ..Rules::default()
         };
         let folder = Path::new("/work/zebra");
         let text = instructions(
@@ -266,14 +265,19 @@ mod tests {
     }
 
     #[test]
-    fn a_project_s_rules_replace_the_global_ones_and_go_after_the_boundary() {
+    fn a_project_s_rules_come_after_the_global_ones_and_after_the_boundary() {
         let global = Rules {
-            text: "Answer in French.".into(),
-            source: Source::Global,
+            shared: "Answer in French.".into(),
+            ..Rules::default()
         };
-        let own = Rules {
-            text: "Answer in Spanish.".into(),
-            source: Source::Project,
+        let both = Rules {
+            own: "Answer in Spanish.".into(),
+            ..global.clone()
+        };
+        let alone = Rules {
+            shared: String::new(),
+            alone: true,
+            ..both.clone()
         };
         let folder = Path::new("/work/zebra");
         let with = |rules: &Rules, project: &str| {
@@ -288,44 +292,45 @@ mod tests {
             )
         };
 
-        let text = with(&own, "zebra");
+        let text = with(&both, "zebra");
         let (before, after) = text.split_once(BOUNDARY).unwrap();
-        assert!(!before.contains("How to work") && !before.contains("Spanish"));
-        assert!(after.contains("# How to work, in this project\n\nAnswer in Spanish."));
-        assert!(!text.contains("French") && !text.contains("Commit only when"));
-        // The shared part is the same for every project that has its own rules, and so is the
-        // one of those that follow the global rules.
+        assert!(before.contains("# How to work\n\nAnswer in French."));
+        assert!(!before.contains("Spanish"));
+        assert!(after.contains("# This project's rules\n\nAnswer in Spanish."));
+        assert!(!after.contains("French"));
+        // The shared part is the same for every project, whatever its own rules.
         assert_eq!(
-            text.split_once(BOUNDARY).unwrap().0,
-            with(&own, "other").split_once(BOUNDARY).unwrap().0
-        );
-        assert_eq!(
-            with(&global, "zebra").split_once(BOUNDARY).unwrap().0,
+            before,
             with(&global, "other").split_once(BOUNDARY).unwrap().0
         );
+        assert_eq!(before, with(&both, "other").split_once(BOUNDARY).unwrap().0);
+        // Alone, the global rules are not told.
+        let text = with(&alone, "zebra");
+        assert!(!text.contains("French") && !text.contains("How to work"));
+        assert!(text.contains("# This project's rules\n\nAnswer in Spanish."));
     }
 
     #[test]
     fn rules_left_empty_leave_no_section_and_a_token_in_them_is_masked() {
         let folder = Path::new("/work/zebra");
-        for source in [Source::Global, Source::Project] {
-            let rules = Rules {
-                text: " \n".into(),
-                source,
-            };
-            let text = instructions(
-                role(WORKER).unwrap(),
-                &Session {
-                    rules: &rules,
-                    ..session(folder)
-                },
-                &[],
-            );
-            assert!(!text.contains("How to work"), "{source:?}");
-        }
+        let blanks = Rules {
+            shared: " \n".into(),
+            own: "\n ".into(),
+            ..Rules::default()
+        };
+        let text = instructions(
+            role(WORKER).unwrap(),
+            &Session {
+                rules: &blanks,
+                ..session(folder)
+            },
+            &[],
+        );
+        assert!(!text.contains("How to work") && !text.contains("This project's rules"));
         let rules = Rules {
-            text: "Deploy with token=ghp_abcdefghijklmnopqrstuvwxyz0123".into(),
-            source: Source::Global,
+            shared: "Deploy with token=ghp_abcdefghijklmnopqrstuvwxyz0123".into(),
+            own: "Or with token=ghp_zyxwvutsrqponmlkjihgfedcba9876".into(),
+            ..Rules::default()
         };
         let text = instructions(
             role(WORKER).unwrap(),
@@ -336,6 +341,7 @@ mod tests {
             &[],
         );
         assert!(text.contains("Deploy with token=[masked]"));
+        assert!(text.contains("Or with token=[masked]"));
     }
 
     #[test]

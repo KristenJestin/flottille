@@ -317,10 +317,12 @@ pub fn decide(call: &Call) -> Verdict {
                 "it changes the project's tracker, which nothing checks against the project".into(),
             );
         } else if family == "rules" {
-            found.base(
-                "it replaces the project's rules, the instructions of every agent created after it"
-                    .into(),
-            );
+            let what = if call.args.get("text").is_some() {
+                "it sets the project's rules, the instructions of every agent created after it"
+            } else {
+                "it only switches whether the project's agents also get the global rules"
+            };
+            found.base(what.into());
         } else {
             found.judge(crate::actions::asked(family));
         }

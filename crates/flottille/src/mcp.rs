@@ -469,8 +469,9 @@ const SERVED: [Definition; 28] = [
         description: "This project's settings. settings reads each repository's forge and the \
             tracker; set_settings declares them (null removes one; a tracker left out is kept), \
             and a repository's base branches and dependencies; what is left out is kept, a \
-            refused change saves nothing. rules reads how agents are told to work; set_rules \
-            replaces them, for the agents created after. A change is done once the judge or the \
+            refused change saves nothing. rules reads how agents are told to work (the global \
+            rules, then the project's); set_rules replaces the project's text and sets \
+            rules_alone, for the agents created after. A change is done once the judge or the \
             user allows it, of the tracker or of the rules only once the user does: you are \
             answered at once, the result may come later. {\"action\": \"set_settings\", \
             \"repositories\": [{\"path\": \"api\", \"base\": [\"develop\", \"main\"], \
@@ -488,7 +489,8 @@ const SERVED: [Definition; 28] = [
                     "depends_on": {"type": "array", "items": {"type": "string"}, "description": "Repository paths, [] for none; no cycle."}
                 }, "required": ["path"], "additionalProperties": false}},
                 "tracker": {"type": ["object", "null"], "description": "{kind: github, repository: <path>} or {kind: jira, site, projects}."},
-                "text": {"type": "string", "description": "set_rules: the rules, whole, at most 8000 characters; they replace the project's current ones."}
+                "text": {"type": "string", "description": "set_rules: the project's rules, whole, at most 8000 characters; they replace its current ones and come after the global ones."},
+                "rules_alone": {"type": "boolean", "description": "set_rules: true to give the project's agents its rules alone, without the global ones; false for both. Text or rules_alone, at least one."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },

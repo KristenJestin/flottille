@@ -9130,7 +9130,7 @@ fn the_rules_page_edits_the_rules_of_every_project_saves_them_and_resets_them_to
 }
 
 #[gpui_kit::test]
-fn a_project_s_settings_have_a_rules_section_that_replaces_the_global_rules_and_resets(
+fn a_project_s_settings_have_a_rules_section_that_adds_to_the_global_rules_and_resets(
     cx: &mut TestAppContext,
 ) {
     use flottille_window::rules::Source;
@@ -9148,7 +9148,8 @@ fn a_project_s_settings_have_a_rules_section_that_replaces_the_global_rules_and_
     });
     settle(cx);
 
-    // Without rules of its own the project follows the global ones, and shows them.
+    // Without rules of its own the project follows the global ones: its editor is empty, to
+    // be filled with what is particular to the project.
     editor.read_with(cx, |e, _| {
         assert_eq!(e.project(), Some("atlas"));
         assert_eq!(e.shown().unwrap().source, Source::Global);
@@ -9156,20 +9157,21 @@ fn a_project_s_settings_have_a_rules_section_that_replaces_the_global_rules_and_
     });
     assert_eq!(
         editor.read_with(cx, |e, cx| e.typed(cx)),
-        Some("Answer in French.".to_owned())
+        Some(String::new())
     );
+    assert!(!editor.read_with(cx, |e, cx| e.savable(cx)));
     cx.update(|window, _| {
         assert!(window.find("rules-text-atlas").visible());
         assert!(window.find("rules-reach-atlas").visible());
     });
 
-    type_rules(&editor, "Answer in Spanish.", cx);
+    type_rules(&editor, "Name branches feat/<n>.", cx);
     cx.update(|window, cx| window.click("rules-save-atlas", cx));
     until(&shell, cx, "the project's rules are saved", |cx| {
         editor.read_with(cx, |e, _| e.is_own())
     });
     let file = std::fs::read_to_string(user.project_file("atlas")).unwrap();
-    assert!(file.contains("Answer in Spanish."), "{file}");
+    assert!(file.contains("Name branches feat/<n>."), "{file}");
     // The user's own are untouched.
     assert_eq!(
         user.call("rules.show", json!({})).unwrap()["text"],
@@ -9180,22 +9182,22 @@ fn a_project_s_settings_have_a_rules_section_that_replaces_the_global_rules_and_
     until(
         &shell,
         cx,
-        "the project follows the global rules again",
+        "the project follows the global rules alone again",
         |cx| editor.read_with(cx, |e, _| !e.is_own()),
     );
     assert_eq!(
         editor.read_with(cx, |e, cx| e.typed(cx)),
-        Some("Answer in French.".to_owned())
+        Some(String::new())
     );
     assert!(
         !std::fs::read_to_string(user.project_file("atlas"))
             .unwrap()
-            .contains("Spanish")
+            .contains("feat/")
     );
 }
 
 #[gpui_kit::test]
-fn a_project_s_rules_can_be_saved_identical_to_the_global_text(cx: &mut TestAppContext) {
+fn a_project_s_settings_show_the_global_rules_folded_above_its_editor(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");
     user.call("rules.set", json!({"text": "Answer in French."}))
@@ -9210,20 +9212,182 @@ fn a_project_s_rules_can_be_saved_identical_to_the_global_text(cx: &mut TestAppC
     });
     settle(cx);
 
-    // What is shown is the user's text; what the project stores is nothing. Saving it unchanged
-    // gives the project the same text as its own, so a later change of the global rules leaves it.
-    assert!(editor.read_with(cx, |e, cx| e.savable(cx)));
-    cx.update(|window, cx| window.click("rules-save-atlas", cx));
-    until(&shell, cx, "the project's rules are saved", |cx| {
-        editor.read_with(cx, |e, _| e.is_own())
+    // Folded by default: the header is there, the text is not.
+    cx.update(|window, _| {
+        assert!(window.find("rules-global-toggle-atlas").visible());
+        assert!(window.try_find("rules-global-text-atlas").is_none());
     });
-    let shown = user
-        .call("rules.show", json!({"project": "atlas"}))
+
+    // It unfolds, read only: the user's text, and a way to edit it where it lives.
+    cx.update(|window, cx| window.click("rules-global-toggle-atlas", cx));
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(window.find("rules-global-text-atlas").visible());
+        assert!(window.find("rules-global-edit-atlas").visible());
+    });
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.typed(cx)),
+        Some(String::new())
+    );
+
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+    cx.update(|window, cx| window.click("rules-global-edit-atlas", cx));
+    settle(cx);
+    assert_eq!(settings_shown(cx), ["rules"]);
+    cx.update(|window, _| assert!(window.find("rules-text-").visible()));
+}
+
+#[gpui_kit::test]
+fn a_project_s_settings_switch_to_use_only_its_rules(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    user.call("rules.set", json!({"text": "Answer in French."}))
         .unwrap();
-    assert_eq!(shown["source"], "project", "{shown}");
-    assert_eq!(shown["text"], "Answer in French.");
-    // Its own now, unchanged: nothing more to save.
-    assert!(!editor.read_with(cx, |e, cx| e.savable(cx)));
+    user.call(
+        "rules.set",
+        json!({"project": "atlas", "text": "Answer in Spanish."}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    let page = open_project_settings(&shell, "atlas", cx);
+    choose_tab("rules", cx);
+    let editor = page.read_with(cx, |page, _| page.rules().clone());
+    until(&shell, cx, "the rules are shown", |cx| {
+        editor.read_with(cx, |e, _| e.shown().is_some())
+    });
+    settle(cx);
+
+    cx.update(|window, _| {
+        let switch = window.find("rules-alone-atlas");
+        assert!(switch.visible());
+        assert!(window.find("rules-alone-atlas-label").visible());
+    });
+    assert!(
+        !user
+            .call("rules.show", json!({"project": "atlas"}))
+            .unwrap()["alone"]
+            .as_bool()
+            .unwrap()
+    );
+
+    cx.update(|window, cx| window.click("rules-alone-atlas", cx));
+    until(&shell, cx, "the switch is saved", |cx| {
+        editor.read_with(cx, |e, _| e.is_alone())
+    });
+    settle(cx);
+    let file = std::fs::read_to_string(user.project_file("atlas")).unwrap();
+    assert!(file.contains("rules_alone = true"), "{file}");
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+    // The text is kept, and the editor still shows it.
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.typed(cx)),
+        Some("Answer in Spanish.".to_owned())
+    );
+    cx.update(|window, cx| window.click("rules-alone-atlas", cx));
+    until(&shell, cx, "the switch is saved again", |cx| {
+        editor.read_with(cx, |e, _| !e.is_alone())
+    });
+    let file = std::fs::read_to_string(user.project_file("atlas")).unwrap();
+    assert!(!file.contains("rules_alone"), "{file}");
+
+    // Alone again: the agent started now is not told the global rules.
+    cx.update(|window, cx| window.click("rules-alone-atlas", cx));
+    until(&shell, cx, "the switch is saved once more", |cx| {
+        editor.read_with(cx, |e, _| e.is_alone())
+    });
+    let agent = start(&user, "atlas", None, "hello");
+    let text = user.call("agent.show", json!({"agent": agent})).unwrap()["agent"]["instructions"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        !text.contains("French") && text.contains("Answer in Spanish."),
+        "{text}"
+    );
+}
+
+#[gpui_kit::test]
+fn the_switch_keeps_the_rules_being_typed(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    user.call("rules.set", json!({"text": "Answer in French."}))
+        .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    let page = open_project_settings(&shell, "atlas", cx);
+    choose_tab("rules", cx);
+    let editor = page.read_with(cx, |page, _| page.rules().clone());
+    until(&shell, cx, "the rules are shown", |cx| {
+        editor.read_with(cx, |e, _| e.shown().is_some())
+    });
+    settle(cx);
+
+    // Typing is not saved, and the switch does not throw it away.
+    type_rules(&editor, "Name branches feat/<n>.", cx);
+    cx.update(|window, cx| window.click("rules-alone-atlas", cx));
+    until(&shell, cx, "the switch is saved", |cx| {
+        editor.read_with(cx, |e, _| e.is_alone())
+    });
+    settle(cx);
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.typed(cx)),
+        Some("Name branches feat/<n>.".to_owned())
+    );
+    let file = std::fs::read_to_string(user.project_file("atlas")).unwrap_or_default();
+    assert!(!file.contains("feat/"), "{file}");
+    toast_said(&shell, "Only this project's rules are used", cx);
+    assert!(
+        !toasts(&shell, cx)
+            .iter()
+            .any(|title| title.contains("Rules saved")),
+        "{:?}",
+        toasts(&shell, cx)
+    );
+}
+
+#[gpui_kit::test]
+fn a_project_s_settings_say_when_its_rules_repeat_the_global_ones(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    user.call("rules.set", json!({"text": "Answer in French."}))
+        .unwrap();
+    user.call(
+        "rules.set",
+        json!({"project": "atlas", "text": "Answer in French.\n\nName branches feat/<n>."}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    let page = open_project_settings(&shell, "atlas", cx);
+    choose_tab("rules", cx);
+    let editor = page.read_with(cx, |page, _| page.rules().clone());
+    until(&shell, cx, "the rules are shown", |cx| {
+        editor.read_with(cx, |e, _| e.shown().is_some())
+    });
+    settle(cx);
+
+    cx.update(|window, _| {
+        let note = window.find("rules-repeats-atlas");
+        assert!(note.visible());
+        assert_eq!(
+            note.label(),
+            Some("These rules repeat the global ones; you can remove that part.")
+        );
+    });
+
+    // Removing the copy ends the note.
+    type_rules(&editor, "Name branches feat/<n>.", cx);
+    cx.update(|window, cx| window.click("rules-save-atlas", cx));
+    until(&shell, cx, "the note goes", |cx| {
+        let repeats = user
+            .call("rules.show", json!({"project": "atlas"}))
+            .unwrap()["repeats"]
+            == true;
+        !repeats && editor.read_with(cx, |e, cx| !e.is_edited(cx))
+    });
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find("rules-repeats-atlas").is_none()));
 }
 
 #[gpui_kit::test]

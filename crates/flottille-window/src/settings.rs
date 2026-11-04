@@ -52,6 +52,8 @@ pub enum Reveal {
     Providers,
     /// The Auto judge's guidance: the Judge tab, scrolled to the guidance under the judge.
     Guidance,
+    /// The rules for every project (the link above a project's rules).
+    Rules,
 }
 
 impl Reveal {
@@ -60,6 +62,7 @@ impl Reveal {
         let key = match self {
             Reveal::Judge | Reveal::Guidance => "judge",
             Reveal::Providers => "providers",
+            Reveal::Rules => "rules",
         };
         SECTIONS
             .iter()
@@ -215,7 +218,7 @@ impl SettingsPage {
                 self.scroll.scroll_to_top_of_item(at);
             }
             Reveal::Judge => self.scroll.set_offset(Point::default()),
-            Reveal::Providers => {}
+            Reveal::Providers | Reveal::Rules => {}
         }
         cx.notify();
     }
