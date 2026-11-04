@@ -9,6 +9,7 @@ mod common;
 use common::User;
 use common::mcp::Mcp;
 use serde_json::{Value, json};
+use std::os::unix::fs::DirBuilderExt;
 
 /// A project `name` over a throwaway repository, its tracker Jira's ABC project.
 fn project(user: &User, name: &str) {
@@ -797,4 +798,83 @@ fn an_array_of_tables_in_extensions_toml_is_refused() {
         "{error}"
     );
     assert_eq!(specs(&listed)["enabled"], false);
+}
+
+#[test]
+fn a_daemon_refuses_to_start_on_a_newer_extension_schema() {
+    let user = User::new();
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(user.path("state/flottille"))
+        .unwrap();
+    // The tables of Specs as a later Flottille leaves them: more migrations than this one has.
+    flottille_core::store::Store::open(&user.path("state/flottille/flottille.db"))
+        .unwrap()
+        .migrate_extension("specs", &["SELECT 1;"; 99])
+        .unwrap();
+
+    let output = user.run(&["daemon"]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("tables of specs are at schema 99, made by a newer Flottille"),
+        "unexpected refusal: {stderr}"
+    );
+}
+
+#[test]
+fn an_unknown_extension_in_a_project_file_is_reported_in_extension_list() {
+    let user = User::new();
+    project(&user, "app");
+    let file = user.project_file("app");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(
+        &file,
+        format!("{text}\n[extensions.notes]\nenabled = true\n"),
+    )
+    .unwrap();
+
+    let listed = user.call("extension.list", json!({})).unwrap();
+
+    let errors: Vec<&str> = listed["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|error| error.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        errors,
+        ["projects/app.toml: extensions.notes: unknown extension: the extensions are specs"]
+    );
+    assert_eq!(in_project(specs(&listed), "app")["error"], Value::Null);
+}
+
+/// The issue does not say: an internal spec keeps one ticket at least, as it is made with one; to
+/// have none it is made alone.
+#[test]
+fn unlinking_the_last_ticket_of_an_internal_spec() {
+    let user = with_specs();
+    let spec = new_spec(
+        &user,
+        json!({"project": "app", "title": "Login", "tickets": ["ABC-1"]}),
+    );
+    assert_eq!(spec["mode"], "internal");
+
+    let (code, message) = user
+        .call(
+            "spec.unlink",
+            json!({"spec": spec["spec"], "ticket": "ABC-1"}),
+        )
+        .unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert!(
+        message.contains("ticket ABC-1 is the last of spec"),
+        "{message}"
+    );
+    let shown = user
+        .call("spec.show", json!({"spec": spec["spec"]}))
+        .unwrap();
+    assert_eq!(shown["tickets"], json!(["ABC-1"]));
 }
