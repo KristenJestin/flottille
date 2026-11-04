@@ -28,7 +28,7 @@ use flottille_window::project_settings::{
 use flottille_window::session::{RailRow, Reply, SessionPage};
 use flottille_window::settings::SettingsPage;
 use flottille_window::shell::{Layout, Selection};
-use flottille_window::tree::{place_id, project_id, session_id};
+use flottille_window::tree::{project_id, session_id};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, Focusable as _, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
@@ -212,9 +212,7 @@ fn the_title_of_a_session_that_began_with_a_greeting_follows_the_first_message_t
 }
 
 #[gpui_kit::test]
-fn two_projects_main_and_a_workspace_with_sessions_under_each_appear_in_the_tree(
-    cx: &mut TestAppContext,
-) {
+fn two_projects_with_their_sessions_in_one_list_each_appear_in_the_tree(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");
     project(&user, "notes");
@@ -232,29 +230,22 @@ fn two_projects_main_and_a_workspace_with_sessions_under_each_appear_in_the_tree
         })
     });
     cx.update(|window, _| {
-        for id in [
-            project_id("atlas"),
-            project_id("notes"),
-            place_id("atlas", &None),
-            place_id("atlas", &Some("export-csv".into())),
-            place_id("notes", &None),
-        ] {
+        for id in [project_id("atlas"), project_id("notes")] {
             assert!(window.try_find(id.clone()).is_some(), "{id:?} is not shown");
         }
-        // One level below the other, each on its own guide line.
+        // One level below the project, each session on the project's guide line.
         let x = |id| window.find(id).bounds().origin.x;
-        assert!(x(place_id("atlas", &None)) > x(project_id("atlas")));
+        assert!(x(session_id(&in_main)) > x(project_id("atlas")));
         assert_eq!(
-            x(place_id("atlas", &None)),
-            x(place_id("atlas", &Some("export-csv".into()))),
-            "main and the workspaces sit at the same level"
+            x(session_id(&in_main)),
+            x(session_id(&in_workspace)),
+            "main's sessions and a workspace's sit at the same level"
         );
-        assert!(x(session_id(&in_main)) > x(place_id("atlas", &None)));
     });
-    let sessions_of = |project: &str, place: Option<&str>, cx: &mut VisualTestContext| {
+    let sessions_of = |project: &str, cx: &mut VisualTestContext| {
         shell.read_with(cx, |shell, cx| {
             shell
-                .place(project, &place.map(str::to_owned))
+                .project(project)
                 .unwrap()
                 .read(cx)
                 .sessions(cx)
@@ -263,16 +254,16 @@ fn two_projects_main_and_a_workspace_with_sessions_under_each_appear_in_the_tree
                 .collect::<Vec<_>>()
         })
     };
-    assert_eq!(sessions_of("atlas", None, cx), ["Release notes for 2.4"]);
+    // The one that moved last first: the workspace's, started after main's.
     assert_eq!(
-        sessions_of("atlas", Some("export-csv"), cx),
-        ["CSV export by tenant"]
+        sessions_of("atlas", cx),
+        ["CSV export by tenant", "Release notes for 2.4"]
     );
-    assert_eq!(sessions_of("notes", None, cx), ["Offline sync spike"]);
+    assert_eq!(sessions_of("notes", cx), ["Offline sync spike"]);
 }
 
 #[gpui_kit::test]
-fn a_session_that_starts_waiting_marks_its_row_its_folded_place_and_its_folded_project_and_the_bell_count_goes_up(
+fn a_session_that_starts_waiting_marks_its_row_and_its_folded_project_and_the_bell_count_goes_up(
     cx: &mut TestAppContext,
 ) {
     let user = user();
@@ -284,26 +275,15 @@ fn a_session_that_starts_waiting_marks_its_row_its_folded_place_and_its_folded_p
     });
     assert_eq!(shell.read_with(cx, |s, cx| s.top().read(cx).count()), 0);
 
-    // Fold the place, then the project (its chevron: its name opens its page and folds nothing).
-    cx.update(|window, cx| window.click(place_id("atlas", &None), cx));
+    // Fold the project (its chevron: its name opens its page and folds nothing).
     cx.update(|window, cx| window.click(flottille_ui::toggle_id(project_id("atlas")), cx));
-    let (place, project) = shell.read_with(cx, |shell, _| {
-        (
-            shell.place("atlas", &None).unwrap().clone(),
-            shell.project("atlas").unwrap().clone(),
-        )
-    });
-    assert!(!place.read_with(cx, |p, _| p.is_open()));
+    let project = shell.read_with(cx, |shell, _| shell.project("atlas").unwrap().clone());
     assert!(!project.read_with(cx, |p, _| p.is_open()));
 
     send(&user, &id, "read the env");
     until(&shell, cx, "the session waits for the user", |cx| {
         mark_of(&shell, &id, cx) == Some(AgentState::NeedsYou)
     });
-    assert_eq!(
-        place.read_with(cx, |p, _| p.mark()),
-        Some(AgentState::NeedsYou)
-    );
     assert_eq!(
         project.read_with(cx, |p, _| p.mark()),
         Some(AgentState::NeedsYou),
@@ -313,9 +293,8 @@ fn a_session_that_starts_waiting_marks_its_row_its_folded_place_and_its_folded_p
     cx.update(|window, cx| window.render_frame(cx));
     let shown = cx.update(|window, _| window.find_all(icon_id(AgentState::NeedsYou)).len());
     assert_eq!(
-        shown, 4,
-        "the row, the place and the project show the mark, and the session's row on the project \
-         page"
+        shown, 3,
+        "the row and the project show the mark, and the session's row on the project page"
     );
 }
 
@@ -2160,7 +2139,7 @@ fn the_card_of_a_command_an_agent_adds_says_what_it_writes_and_is_confirmed_once
 }
 
 #[gpui_kit::test]
-fn a_workspace_an_agent_creates_shows_its_setup_on_the_card_then_appears_in_the_tree(
+fn a_workspace_an_agent_creates_shows_its_setup_on_the_card_then_is_created(
     cx: &mut TestAppContext,
 ) {
     let user = team_user();
@@ -2179,12 +2158,12 @@ fn a_workspace_an_agent_creates_shows_its_setup_on_the_card_then_appears_in_the_
     );
     // The setup's own copy of a secret is what the user configured: to judge, not base.
     assert!(!card.base);
-    let login = place_id("app", &Some("login".into()));
-    cx.update(|window, _| assert!(window.try_find(login.clone()).is_none()));
+    let created = |cx: &mut VisualTestContext| {
+        shell.read_with(cx, |s, _| s.snapshot().workspace("app", "login").is_some())
+    };
+    assert!(!created(cx));
     cx.update(|window, cx| window.click(format!("allow-{number}"), cx));
-    until(&shell, cx, "the workspace is in the tree", |cx| {
-        cx.update(|window, _| window.try_find(login.clone()).is_some())
-    });
+    until(&shell, cx, "the workspace is created", |cx| created(cx));
 }
 
 #[gpui_kit::test]
@@ -6627,11 +6606,12 @@ fn lead_with_two_workers<'a>(
 /// The sessions a place of the left tree lists.
 fn listed_in(shell: &Entity<Shell>, place: Place, cx: &mut VisualTestContext) -> Vec<String> {
     shell.read_with(cx, |s, cx| {
-        s.place("app", &place)
+        s.project("app")
             .map(|node| {
                 node.read(cx)
                     .sessions(cx)
                     .iter()
+                    .filter(|row| row.read(cx).place() == &place)
                     .map(|row| row.read(cx).id().to_owned())
                     .collect()
             })

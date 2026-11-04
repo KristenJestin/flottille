@@ -23,7 +23,7 @@ use gpui_kit::{
     Subscription, Task, TestSupportExt as _, WeakEntity, Window, canvas, div, point, px,
 };
 
-use crate::actions::{Actions, Command, Outcome, Pick};
+use crate::actions::{Actions, Command, Details, Outcome, Pick};
 use crate::add_project::AddProject;
 use crate::composer::{Choice, Composer, PlaceChoice};
 use crate::history::{History, Way};
@@ -36,8 +36,9 @@ use crate::project_settings::ProjectSettingsPage;
 use crate::providers::Providers;
 use crate::rules::RulesEditor;
 use crate::session::{Chose, Follow, Opened, Reply, SessionPage};
+use crate::session_link::PullRequest;
 use crate::settings::{Reveal, SettingsPage};
-use crate::tree::{PlaceNode, ProjectNode, SessionRow, Sidebar};
+use crate::tree::{EndedNode, ProjectNode, SessionRow, Sidebar};
 use crate::workspaces_folder::WorkspacesFolder;
 
 pub mod switcher;
@@ -105,10 +106,12 @@ pub struct Shell {
     /// How far the bell's list is in view: it rises in and fades out, and stays drawn until then.
     bell_shown: Motion,
     projects: HashMap<String, Entity<ProjectNode>>,
-    places: HashMap<(String, Place), Entity<PlaceNode>>,
     /// The "Ended" group at the bottom of the tree, made when a session first ends.
-    ended: Option<Entity<PlaceNode>>,
+    ended: Option<Entity<EndedNode>>,
     sessions: HashMap<String, Entity<SessionRow>>,
+    /// The pull request of each workspace (its project and name) as a project page last read it:
+    /// a session's row says it on its second line. The sidebar asks the forge for none of them.
+    pulls: HashMap<(String, String), PullRequest>,
     /// The tickets and pull requests the sessions' agents created or changed, oldest first: each
     /// marks its session's row and rings the bell until the session is opened. They live as long
     /// as the window.
@@ -276,9 +279,9 @@ impl Shell {
             bell_open: false,
             bell_shown: Motion::settled(0.0),
             projects: HashMap::new(),
-            places: HashMap::new(),
             ended: None,
             sessions: HashMap::new(),
+            pulls: HashMap::new(),
             forged: Vec::new(),
             news: HashMap::new(),
             forms: HashMap::new(),
@@ -547,24 +550,6 @@ impl Shell {
         }
     }
 
-    /// The "+" of a place's row: the composer of its project, set to start there, with the field
-    /// focused.
-    pub fn start_in(
-        &mut self,
-        project: &str,
-        choice: Choice,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.open(Selection::Project(project.to_owned()), window, cx);
-        // The focus given while the page is built is taken back by what is built after it: wait
-        // for the frame, then give it.
-        let project = project.to_owned();
-        cx.defer_in(window, move |shell, window, cx| {
-            shell.compose_in(&project, choice, window, cx)
-        });
-    }
-
     /// "End session" in a session's row: the confirmation, which counts the agents that end.
     pub fn ask_end_of(&mut self, session: &str, cx: &mut Context<Self>) {
         let Some(found) = self.snapshot.session(session) else {
@@ -622,16 +607,12 @@ impl Shell {
         self.projects.get(name)
     }
 
-    pub fn place(&self, project: &str, place: &Place) -> Option<&Entity<PlaceNode>> {
-        self.places.get(&(project.to_owned(), place.clone()))
-    }
-
     pub fn session(&self, id: &str) -> Option<&Entity<SessionRow>> {
         self.sessions.get(id)
     }
 
     /// The "Ended" group at the bottom of the tree, once a session ended.
-    pub fn ended(&self) -> Option<&Entity<PlaceNode>> {
+    pub fn ended(&self) -> Option<&Entity<EndedNode>> {
         self.ended.as_ref()
     }
 
@@ -703,6 +684,7 @@ impl Shell {
     fn done(&mut self, outcome: Outcome, window: &mut Window, cx: &mut Context<Self>) {
         match outcome {
             Outcome::Details(details) => {
+                self.read_pulls(&details, cx);
                 if let Some(page) = self.main.read(cx).project_page().cloned() {
                     page.update(cx, |page, cx| page.set_details(&details, cx));
                 }
@@ -1445,6 +1427,33 @@ impl Shell {
         }
     }
 
+    /// What a project page read of its workspaces' pull requests: their sessions' rows say the
+    /// first of each on their second line. A workspace the page could not read keeps what it had.
+    fn read_pulls(&mut self, details: &Details, cx: &mut Context<Self>) {
+        for (name, pulls) in &details.pulls {
+            let key = (details.project.clone(), name.clone());
+            match pulls.first() {
+                Some(pull) => self.pulls.insert(key, pull.clone()),
+                None => self.pulls.remove(&key),
+            };
+        }
+        for session in &self.snapshot.sessions {
+            let Some(row) = self.sessions.get(&session.id) else {
+                continue;
+            };
+            let pull = self.pull_of(&session.project, &session.place);
+            if row.read(cx).pull() != pull {
+                row.update(cx, |row, cx| row.set_pull(pull, cx));
+            }
+        }
+    }
+
+    /// The pull request of the place a session works in, when the window has read it.
+    fn pull_of(&self, project: &str, place: &Place) -> Option<&PullRequest> {
+        let workspace = place.as_ref()?;
+        self.pulls.get(&(project.to_owned(), workspace.clone()))
+    }
+
     /// The rows of `listed`, each the one the tree had or a new one, brought up to date; their
     /// marks are added to `marks`, and each row to `rows`.
     fn session_rows<'a>(
@@ -1486,8 +1495,11 @@ impl Shell {
             }
             // Ended, it sits among other projects' sessions: its row says whose it is.
             let scope = session.ended.then_some(session.project.as_str());
+            let pull = self.pull_of(&session.project, &session.place).cloned();
             row.update(cx, |row, cx| {
                 row.set_scope(scope, cx);
+                row.set_place(&session.place, cx);
+                row.set_pull(pull.as_ref(), cx);
                 row.set_actions(session.ended, session.resumable, cx)
             });
             marks.extend(session.mark);
@@ -1503,43 +1515,23 @@ impl Shell {
         let now = now_ms();
         let this = cx.entity().downgrade();
         let mut projects = HashMap::new();
-        let mut places = HashMap::new();
         let mut sessions = HashMap::new();
         let mut project_nodes = Vec::new();
+        // A workspace that is gone takes its pull request with it.
+        self.pulls
+            .retain(|(project, name), _| snapshot.workspace(project, name).is_some());
         for project in &snapshot.projects {
-            let mut place_nodes = Vec::new();
-            let mut project_marks = Vec::new();
-            let all: Vec<Place> = std::iter::once(None)
-                .chain(project.workspaces.iter().cloned().map(Some))
-                .collect();
-            for place in all {
-                let mut marks = Vec::new();
-                let live = snapshot
-                    .sessions_in(&project.name, &place)
-                    .filter(|session| !session.ended);
-                let rows = self.session_rows(live, &mut sessions, &mut marks, now, cx);
-                let key = (project.name.clone(), place.clone());
-                let node = self.places.remove(&key).unwrap_or_else(|| {
-                    let (name, place) = key.clone();
-                    let this = this.clone();
-                    cx.new(|cx| PlaceNode::new(name, place, this, cx))
-                });
-                let mark = AgentState::strongest(marks.iter().copied());
-                if !node.read(cx).holds(&rows, mark, cx) {
-                    node.update(cx, |node, cx| node.set(rows, mark, cx));
-                }
-                project_marks.extend(mark);
-                place_nodes.push(node.clone());
-                places.insert(key, node);
-            }
+            let mut marks = Vec::new();
+            let live = snapshot.live_sessions_of(&project.name);
+            let rows = self.session_rows(live.into_iter(), &mut sessions, &mut marks, now, cx);
             let node = self.projects.remove(&project.name).unwrap_or_else(|| {
                 let name = project.name.clone();
                 let this = this.clone();
                 cx.new(|cx| ProjectNode::new(name, this, cx))
             });
-            let mark = AgentState::strongest(project_marks);
-            if !node.read(cx).holds(&place_nodes, mark, cx) {
-                node.update(cx, |node, cx| node.set(place_nodes, mark, cx));
+            let mark = AgentState::strongest(marks);
+            if !node.read(cx).holds(&rows, mark, cx) {
+                node.update(cx, |node, cx| node.set(rows, mark, cx));
             }
             if node.read(cx).commands() != project.commands {
                 node.update(cx, |node, cx| node.set_commands(project.commands, cx));
@@ -1553,17 +1545,16 @@ impl Shell {
         let rows = self.session_rows(ended, &mut sessions, &mut marks, now, cx);
         let present = !rows.is_empty();
         if self.ended.is_none() && present {
-            self.ended = Some(cx.new(|cx| PlaceNode::ended(this.clone(), cx)));
+            self.ended = Some(cx.new(EndedNode::new));
         }
         if let Some(group) = self.ended.clone() {
-            if !group.read(cx).holds(&rows, None, cx) {
-                group.update(cx, |group, cx| group.set(rows, None, cx));
+            if !group.read(cx).holds(&rows, cx) {
+                group.update(cx, |group, cx| group.set(rows, cx));
             }
             self.sidebar
                 .update(cx, |sidebar, cx| sidebar.set_ended(group, present, cx));
         }
         self.projects = projects;
-        self.places = places;
         self.sessions = sessions;
         if self.sidebar.read(cx).projects() != project_nodes {
             self.sidebar

@@ -1,14 +1,15 @@
-//! The left tree: "New session", then project › place › session. Every row is its own view, so
-//! one session changing redraws its row and nothing else; a folded project or place shows the
-//! strongest mark of what it holds.
+//! The left tree: "New session", then each project and its sessions in one flat list, the one that
+//! moved last on top, each on two lines (its title, then the place it works in and its pull
+//! request). Every row is its own view, so one session changing redraws its row and nothing else;
+//! a folded project, and the "Ended" group, show the strongest mark of what they hold.
 
 use std::collections::HashSet;
 
-use flottille_ui::motion::PANEL;
+use flottille_ui::motion::{ENTER, PANEL};
 use flottille_ui::rows::TreeLevel;
 use flottille_ui::{
-    AgentState, Button, Fold, Icon, Item, Listing, Menu, Modal, StateIcon, Status, TreeRow, meta,
-    palette, presence, presence_of, section_label, space, tree_children,
+    AgentState, Button, Fold, Icon, Item, Listing, Menu, Modal, StateIcon, Status, TreeRow, fade,
+    meta, palette, presence, presence_of, section_label, space, tipped, tree_children,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -18,9 +19,9 @@ use gpui_kit::{
 };
 
 use crate::actions::Command;
-use crate::composer::Choice;
 use crate::model::{Place, ago};
 use crate::session::end_sentence;
+use crate::session_link::PullRequest;
 use crate::shell::{Selection, Shell};
 
 /// The element id of a project's row.
@@ -28,19 +29,9 @@ pub fn project_id(name: &str) -> ElementId {
     ElementId::Name(format!("project-{name}").into())
 }
 
-/// The element id of a place's row: `place-<project>-main` or `place-<project>-<workspace>`.
-pub fn place_id(project: &str, place: &Place) -> ElementId {
-    ElementId::Name(format!("place-{project}-{}", place_name(place)).into())
-}
-
 /// The element id of the "Ended" group, at the bottom of the tree.
 pub fn ended_id() -> ElementId {
     ElementId::Name("ended".into())
-}
-
-/// The element id of the "+" a place's row offers, which starts a session there.
-pub fn place_new_id(project: &str, place: &Place) -> ElementId {
-    ElementId::Name(format!("place-new-{project}-{}", place_name(place)).into())
 }
 
 /// The element id of the "⋯" menu a session's row offers.
@@ -65,6 +56,29 @@ pub fn session_id(id: &str) -> ElementId {
 
 pub fn place_name(place: &Place) -> &str {
     place.as_deref().unwrap_or("main")
+}
+
+/// The element id of a session row's second line, which holds its place and its pull request.
+pub fn session_line_id(id: &str) -> ElementId {
+    ElementId::Name(format!("session-line-{id}").into())
+}
+
+/// The element id of the place a session works in, on its second line: labelled `main` or the
+/// workspace's name.
+pub fn session_place_id(id: &str) -> ElementId {
+    ElementId::Name(format!("session-place-{id}").into())
+}
+
+/// The element id of the icon before the place's name: a folder (`Project folder`) or a branch
+/// (`Workspace`).
+pub fn session_place_icon_id(id: &str) -> ElementId {
+    ElementId::Name(format!("session-place-icon-{id}").into())
+}
+
+/// The element id of a session's pull request on its second line, labelled with its number and
+/// its checks.
+pub fn session_pull_id(id: &str) -> ElementId {
+    ElementId::Name(format!("session-pull-{id}").into())
 }
 
 /// The element id of the icon that says a command runs in a project.
@@ -188,7 +202,7 @@ pub struct Sidebar {
     /// The rows as drawn: a project that went folds away before it is gone.
     list: Listing<Entity<ProjectNode>>,
     /// The "Ended" group, and whether it holds a session: it folds away when it holds none.
-    ended: Option<(Entity<PlaceNode>, bool)>,
+    ended: Option<(Entity<EndedNode>, bool)>,
     /// The session whose ending the user is asked to confirm, and how many agents end.
     ending: Option<(String, usize)>,
     /// The count the confirmation said last, which it still shows while it fades out.
@@ -226,7 +240,7 @@ impl Sidebar {
     }
 
     /// The "Ended" group, and whether it holds a session now.
-    pub fn set_ended(&mut self, group: Entity<PlaceNode>, present: bool, cx: &mut Context<Self>) {
+    pub fn set_ended(&mut self, group: Entity<EndedNode>, present: bool, cx: &mut Context<Self>) {
         let same = self
             .ended
             .as_ref()
@@ -442,7 +456,7 @@ impl Render for Sidebar {
     }
 }
 
-/// A project's row and, folding under it, its places.
+/// A project's row and, folding under it, its sessions in one list.
 pub struct ProjectNode {
     name: String,
     open: bool,
@@ -452,22 +466,22 @@ pub struct ProjectNode {
     held: Option<AgentState>,
     /// How many commands its agents run now.
     commands: usize,
-    places: Entity<Level<PlaceNode>>,
+    sessions: Entity<Level<SessionRow>>,
     fold: Entity<Fold>,
     shell: WeakEntity<Shell>,
 }
 
 impl ProjectNode {
     pub fn new(name: String, shell: WeakEntity<Shell>, cx: &mut Context<Self>) -> Self {
-        let places = cx.new(|_| Level::new());
-        let fold = cx.new(|_| Fold::new(format!("fold-project-{name}"), places.clone(), true));
+        let sessions = cx.new(|_| Level::new());
+        let fold = cx.new(|_| Fold::new(format!("fold-project-{name}"), sessions.clone(), true));
         Self {
             name,
             open: true,
             mark: Mark::new(cx),
             held: None,
             commands: 0,
-            places,
+            sessions,
             fold,
             shell,
         }
@@ -493,19 +507,30 @@ impl ProjectNode {
         self.open
     }
 
-    /// Whether it holds these places and this mark already.
-    pub fn holds(&self, places: &[Entity<PlaceNode>], mark: Option<AgentState>, cx: &App) -> bool {
-        self.held == mark && self.places.read(cx).rows == places
+    /// Its sessions' rows in the order drawn: the one that moved last first.
+    pub fn sessions(&self, cx: &App) -> Vec<Entity<SessionRow>> {
+        self.sessions.read(cx).rows.clone()
+    }
+
+    /// Whether it holds these sessions and this mark already.
+    pub fn holds(
+        &self,
+        sessions: &[Entity<SessionRow>],
+        mark: Option<AgentState>,
+        cx: &App,
+    ) -> bool {
+        self.held == mark && self.sessions.read(cx).rows == sessions
     }
 
     pub fn set(
         &mut self,
-        places: Vec<Entity<PlaceNode>>,
+        sessions: Vec<Entity<SessionRow>>,
         mark: Option<AgentState>,
         cx: &mut Context<Self>,
     ) {
-        if self.places.read(cx).rows != places {
-            self.places.update(cx, |level, cx| level.set(places, cx));
+        if self.sessions.read(cx).rows != sessions {
+            self.sessions
+                .update(cx, |level, cx| level.set(sessions, cx));
         }
         self.held = mark;
         self.show_mark(cx);
@@ -561,7 +586,7 @@ impl Render for ProjectNode {
     }
 }
 
-/// The rows of one level, on a guide line: the places of a project, the sessions of a place.
+/// The rows of one level, on a guide line: the sessions of a project, or of the "Ended" group.
 pub struct Level<V> {
     rows: Vec<Entity<V>>,
     list: Listing<Entity<V>>,
@@ -596,71 +621,24 @@ impl<V: Render> Render for Level<V> {
     }
 }
 
-/// A place's row (`main` with a folder icon, a workspace with a git-branch icon) and, folding
-/// under it, its sessions; or, at the bottom of the tree, the "Ended" group that gathers the ended
-/// sessions of every project, folded until the user opens it.
-pub struct PlaceNode {
-    project: String,
-    place: Place,
-    /// The "Ended" group: no project and no place of its own.
-    ended: bool,
+/// The "Ended" group, at the bottom of the tree: it gathers the ended sessions of every project,
+/// folded until the user opens it.
+pub struct EndedNode {
     open: bool,
-    mark: Mark,
-    /// The strongest mark of its sessions, which it shows only while it is folded.
-    held: Option<AgentState>,
     sessions: Entity<Level<SessionRow>>,
     fold: Entity<Fold>,
-    shell: WeakEntity<Shell>,
 }
 
-impl PlaceNode {
-    pub fn new(
-        project: String,
-        place: Place,
-        shell: WeakEntity<Shell>,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let sessions = cx.new(|_| Level::new());
-        let fold = cx.new(|_| {
-            Fold::new(
-                format!("fold-place-{project}-{}", place_name(&place)),
-                sessions.clone(),
-                true,
-            )
-        });
-        Self {
-            project,
-            place,
-            ended: false,
-            open: true,
-            mark: Mark::new(cx),
-            held: None,
-            sessions,
-            fold,
-            shell,
-        }
-    }
-
-    /// The "Ended" group, folded.
-    pub fn ended(shell: WeakEntity<Shell>, cx: &mut Context<Self>) -> Self {
+impl EndedNode {
+    /// The group, folded.
+    pub fn new(cx: &mut Context<Self>) -> Self {
         let sessions = cx.new(|_| Level::new());
         let fold = cx.new(|_| Fold::new("fold-ended", sessions.clone(), false));
         Self {
-            project: String::new(),
-            place: None,
-            ended: true,
             open: false,
-            mark: Mark::new(cx),
-            held: None,
             sessions,
             fold,
-            shell,
         }
-    }
-
-    /// The mark it shows: that of its sessions, while it is folded.
-    pub fn mark(&self) -> Option<AgentState> {
-        self.mark.shown
     }
 
     pub fn is_open(&self) -> bool {
@@ -672,37 +650,16 @@ impl PlaceNode {
         self.sessions.read(cx).rows.clone()
     }
 
-    /// Whether it holds these sessions and this mark already.
-    pub fn holds(
-        &self,
-        sessions: &[Entity<SessionRow>],
-        mark: Option<AgentState>,
-        cx: &App,
-    ) -> bool {
-        self.held == mark && self.sessions.read(cx).rows == sessions
+    /// Whether it holds these sessions already.
+    pub fn holds(&self, sessions: &[Entity<SessionRow>], cx: &App) -> bool {
+        self.sessions.read(cx).rows == sessions
     }
 
-    pub fn set(
-        &mut self,
-        sessions: Vec<Entity<SessionRow>>,
-        mark: Option<AgentState>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set(&mut self, sessions: Vec<Entity<SessionRow>>, cx: &mut Context<Self>) {
         if self.sessions.read(cx).rows != sessions {
             self.sessions
                 .update(cx, |level, cx| level.set(sessions, cx));
-            // The "Ended" row counts them.
-            if self.ended {
-                cx.notify();
-            }
-        }
-        self.held = mark;
-        self.show_mark(cx);
-    }
-
-    fn show_mark(&mut self, cx: &mut Context<Self>) {
-        let shown = self.held.filter(|_| !self.open);
-        if self.mark.set(shown, cx) {
+            // The row counts them.
             cx.notify();
         }
     }
@@ -711,56 +668,18 @@ impl PlaceNode {
         self.open = !self.open;
         let open = self.open;
         self.fold.update(cx, |fold, cx| fold.set_open(open, cx));
-        self.show_mark(cx);
         cx.notify();
     }
 }
 
-impl Render for PlaceNode {
+impl Render for EndedNode {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let row = match (self.ended, &self.place) {
-            (true, _) => {
-                let count = self.sessions.read(cx).rows.len();
-                TreeRow::new(ended_id(), TreeLevel::Session, "Ended")
-                    .unfolds_upward()
-                    .trailing(meta(count.to_string(), cx))
-            }
-            (false, place) => {
-                let (shell, project, choice) = (
-                    self.shell.clone(),
-                    self.project.clone(),
-                    place.clone().map_or(Choice::Main, Choice::Workspace),
-                );
-                TreeRow::new(
-                    place_id(&self.project, place),
-                    match place {
-                        None => TreeLevel::Main,
-                        Some(_) => TreeLevel::Workspace,
-                    },
-                    SharedString::from(place_name(place).to_owned()),
-                )
-                .trailing(
-                    self.mark
-                        .icon(&format!("place-{}-{}", self.project, place_name(place))),
-                )
-                .actions(
-                    Button::icon(
-                        place_new_id(&self.project, place),
-                        Icon::Plus,
-                        "New session here",
-                    )
-                    .on_click(move |_, window, cx| {
-                        let (project, choice) = (project.clone(), choice.clone());
-                        shell
-                            .update(cx, |shell, cx| shell.start_in(&project, choice, window, cx))
-                            .ok();
-                    }),
-                    false,
-                )
-            }
-        }
-        .expanded(self.open)
-        .on_click(cx.listener(|this, _, _, cx| this.toggle(cx)));
+        let count = self.sessions.read(cx).rows.len();
+        let row = TreeRow::new(ended_id(), TreeLevel::Session, "Ended")
+            .unfolds_upward()
+            .trailing(meta(count.to_string(), cx))
+            .expanded(self.open)
+            .on_click(cx.listener(|this, _, _, cx| this.toggle(cx)));
         div()
             .flex()
             .flex_col()
@@ -802,8 +721,15 @@ pub struct SessionRow {
     active_at: u64,
     ago: SharedString,
     selected: bool,
-    /// The project it belongs to, said in the "Ended" group where projects are mixed.
+    /// The project it belongs to, said in the "Ended" group where projects are mixed; a row with
+    /// none is a live one, which says its place on a second line.
     scope: Option<SharedString>,
+    /// Where it works: `main`, or a workspace.
+    place: Place,
+    /// Its place's pull request, when the window has read it, and the last one it showed, which
+    /// stays drawn while it fades out.
+    pull: Option<PullRequest>,
+    pull_shown: Option<PullRequest>,
     /// What its "⋯" menu offers: End session while it lives, Resume when it ended and can.
     actions: Actions,
     menu: Option<(Entity<Menu>, Subscription)>,
@@ -834,6 +760,9 @@ impl SessionRow {
             ago: SharedString::default(),
             selected: false,
             scope: None,
+            place: None,
+            pull: None,
+            pull_shown: None,
             actions: Actions::None,
             menu: None,
             shell,
@@ -844,6 +773,33 @@ impl SessionRow {
     pub fn set_scope(&mut self, scope: Option<&str>, cx: &mut Context<Self>) {
         if self.scope.as_deref() != scope {
             self.scope = scope.map(|scope| SharedString::from(scope.to_owned()));
+            cx.notify();
+        }
+    }
+
+    /// The place it works in, `None` for the project folder.
+    pub fn place(&self) -> &Place {
+        &self.place
+    }
+
+    pub fn set_place(&mut self, place: &Place, cx: &mut Context<Self>) {
+        if &self.place != place {
+            self.place = place.clone();
+            cx.notify();
+        }
+    }
+
+    /// The pull request of its place, which the second line shows when there is room.
+    pub fn pull(&self) -> Option<&PullRequest> {
+        self.pull.as_ref()
+    }
+
+    pub fn set_pull(&mut self, pull: Option<&PullRequest>, cx: &mut Context<Self>) {
+        if self.pull.as_ref() != pull {
+            self.pull = pull.cloned();
+            if self.pull.is_some() {
+                self.pull_shown = self.pull.clone();
+            }
             cx.notify();
         }
     }
@@ -1020,7 +976,7 @@ impl Render for SessionRow {
         self.renders += 1;
         let shell = self.shell.clone();
         let id = self.id.clone();
-        let row = TreeRow::new(session_id(&self.id), TreeLevel::Session, self.title.clone())
+        let mut row = TreeRow::new(session_id(&self.id), TreeLevel::Session, self.title.clone())
             .selected(self.selected)
             .on_click(move |_, window, cx| {
                 let session = id.clone();
@@ -1088,6 +1044,118 @@ impl Render for SessionRow {
                 meta(when, cx),
             ))
             .into_any_element();
+        if self.scope.is_none() {
+            row = row.second(self.second_line(window, cx));
+        }
         row.trailing(trailing(id, self.commands, last, cx))
+    }
+}
+
+/// The height of a session's second line.
+const LINE: f32 = 16.;
+
+impl SessionRow {
+    /// Under the title, faint: the place's icon and name, then, when there is room, its pull
+    /// request and its checks' mark. The line is one line high and wraps: what does not fit goes
+    /// under it, out of sight, and the name is cut with an ellipsis. The whole is in a tooltip.
+    fn second_line(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let (name, icon, said) = match &self.place {
+            None => ("main".to_owned(), Icon::Folder, "Project folder"),
+            Some(name) => (name.clone(), Icon::Branch, "Workspace"),
+        };
+        // It fades in when the pull request becomes known, and out when it is gone.
+        let shown = fade(
+            ElementId::Name(format!("session-pull-fade-{}", self.id).into()),
+            self.pull.is_some(),
+            ENTER,
+            window,
+            cx,
+        );
+        let pull = self
+            .pull_shown
+            .clone()
+            .filter(|_| self.pull.is_some() || shown > 0.0);
+        let tip = match &pull {
+            Some(pull) => format!("{name} · {}", pull_said(pull)),
+            None => name.clone(),
+        };
+        let place = div()
+            .id(session_place_id(&self.id))
+            .aria_label(SharedString::from(name.clone()))
+            .flex()
+            .items_center()
+            .gap(space::XS)
+            .max_w_full()
+            .min_w_0()
+            .h(px(LINE))
+            .child(
+                div()
+                    .id(session_place_icon_id(&self.id))
+                    .aria_label(said)
+                    .flex_none()
+                    .child(flottille_ui::icon(icon).size(px(11.)).text_color(p.faint))
+                    .test_support(),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(SharedString::from(name)),
+            )
+            .test_support();
+        let line = div()
+            .id(session_line_id(&self.id))
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_x(space::SM)
+            .h(px(LINE))
+            .overflow_hidden()
+            .text_size(px(11.5))
+            .text_color(p.faint)
+            .child(place)
+            .children(pull.map(|pull| {
+                let (mark, color) = pull_mark(&pull, &p);
+                div()
+                    .id(session_pull_id(&self.id))
+                    .aria_label(SharedString::from(pull_said(&pull)))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(space::XS)
+                    .h(px(LINE))
+                    .opacity(shown)
+                    .child(SharedString::from(format!("#{}", pull.number)))
+                    .children(
+                        mark.map(|mark| flottille_ui::icon(mark).size(px(11.)).text_color(color)),
+                    )
+                    .test_support()
+            }));
+        tipped(line, SharedString::from(tip), LINE, window, cx)
+    }
+}
+
+/// A pull request's number and the state of its checks, said: `#12, checks passing`.
+fn pull_said(pull: &PullRequest) -> String {
+    let checks = match pull.mark.as_deref() {
+        Some("passing") => ", checks passing",
+        Some("failing") => ", checks failing",
+        Some(_) => ", checks pending",
+        None => "",
+    };
+    format!("#{}{checks}", pull.number)
+}
+
+/// The mark of a pull request's checks, drawn by shape as well as by colour: a check, a cross, a
+/// dot; none without checks.
+fn pull_mark(pull: &PullRequest, p: &flottille_ui::Palette) -> (Option<Icon>, gpui_kit::Hsla) {
+    match pull.mark.as_deref() {
+        Some("passing") => (Some(Icon::Check), p.ok),
+        Some("failing") => (Some(Icon::Close), p.fail),
+        Some(_) => (Some(Icon::Running), p.run),
+        None => (None, p.faint),
     }
 }

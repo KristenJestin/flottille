@@ -1573,6 +1573,7 @@ pub fn summary(daemon: &Daemon, agent: &Agent) -> Value {
         "state_reason": agent.state_reason,
         "created_at": agent.created_at,
         "active_at": agent.active_at,
+        "exchanged_at": agent.exchanged_at,
         "ended_at": agent.ended_at,
         "waiting_on_answer": agent.waiting_on_answer,
         "gate_mode": crate::judge::mode(daemon, &agent.id),
