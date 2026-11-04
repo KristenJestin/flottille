@@ -2823,15 +2823,15 @@ impl Confinement {
     }
 
     /// Runs `f` as the core, outside the confinement, once what the extension did is checked; what
-    /// the core changes there is the new state to check against.
+    /// the core changes there is the new state to check against, even when `f` fails after a
+    /// write, so that it is never taken for the extension's.
     fn lifted<T>(&self, connection: &Connection, f: impl FnOnce() -> Result<T>) -> Result<T> {
         self.check(connection)?;
         self.set(None);
-        let result = f().and_then(|value| {
-            *self.outside.borrow_mut() = outside(connection, &self.prefix)?;
-            Ok(value)
-        });
+        let result = f();
+        let taken = outside(connection, &self.prefix);
         self.set(Some(self.prefix.clone()));
+        *self.outside.borrow_mut() = taken?;
         result
     }
 }
@@ -5868,6 +5868,21 @@ mod tests {
         assert!(space.commit().is_err());
 
         assert_eq!(store.append_event("test.two", json!({})).unwrap().seq, 2);
+    }
+
+    #[test]
+    fn a_core_write_that_fails_partway_in_a_space_is_not_taken_for_the_extension_s() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.migrate_extension("test", &[TABLE]).unwrap();
+
+        let space = store.space("test").unwrap();
+        let failed = space.confinement.lifted(space.tables(), || {
+            append_event(space.tables(), "test.half", json!({}))?;
+            Err::<(), _>(Error::Refused("failed partway".into()))
+        });
+
+        assert!(failed.unwrap_err().to_string().contains("failed partway"));
+        space.commit().unwrap();
     }
 
     #[test]
