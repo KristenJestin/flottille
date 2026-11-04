@@ -2632,3 +2632,44 @@ fn removal_checks_the_branch_the_worktree_is_on() {
         "{message}"
     );
 }
+
+#[test]
+fn the_default_branch_name_is_refused_when_it_already_exists() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    let web = fixture.folder.join("web");
+    fixture
+        .user
+        .git(&web, &["branch", "--quiet", "app/login", "develop"]);
+
+    let (code, message) = fixture.create(json!({})).unwrap_err();
+
+    // Only a branch the user names is resumed: a leftover of an earlier workspace is not.
+    assert_eq!(code, "refused");
+    assert!(
+        message.contains("the branch app/login already exists in web"),
+        "{message}"
+    );
+}
+
+#[test]
+fn removal_keeps_a_branch_the_workspace_resumed() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    local_feature(&fixture);
+    let web = fixture.folder.join("web");
+    // The user's own branch, already in the base: removal would see it as landed.
+    fixture
+        .user
+        .git(&web, &["branch", "--quiet", "-f", "feature/x", "develop"]);
+    fixture.create(json!({"branch": "feature/x"})).unwrap();
+    fixture.settled("login");
+
+    fixture.remove("login").unwrap();
+
+    // Flottille did not make it: it is the user's, and stays.
+    assert_eq!(
+        fixture.git(&web, &["branch", "--list", "feature/x"]).trim(),
+        "feature/x"
+    );
+}

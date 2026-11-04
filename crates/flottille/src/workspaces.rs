@@ -533,6 +533,7 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
         .map(|text| crate::tickets::accepted(&project, text).map(|key| key.text()))
         .transpose()
         .map_err(Failure::refused)?;
+    let named = asked.branch.is_some();
     let branch = asked
         .branch
         .unwrap_or_else(|| format!("{}/{}", project.branch_prefix, asked.name));
@@ -580,7 +581,15 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
                  another branch"
             )));
         }
-        let resumed = local || on_remote(&main, &repository.remote, &branch, asked.offline).await?;
+        // Only a branch the user names is resumed: under the default name, a branch already
+        // there is a leftover of an earlier workspace, never work to go on with.
+        if local && !named {
+            return Err(Failure::refused(format!(
+                "the branch {branch} already exists in {path}: choose another name or branch"
+            )));
+        }
+        let resumed = named
+            && (local || on_remote(&main, &repository.remote, &branch, asked.offline).await?);
         repositories.push(Worktree {
             path: path.clone(),
             base,
@@ -2042,6 +2051,10 @@ async fn landed(daemon: &Daemon, workspace: &Workspace) -> Vec<Value> {
     let mut fates = Vec::new();
     let mut unsure = Vec::new();
     for worktree in &workspace.repositories {
+        // A branch it resumed was there before it: the user's, never deleted with it.
+        if worktree.resumed {
+            continue;
+        }
         let main = main_checkout(&workspace.project_folder, &worktree.path);
         let exists = ["show-ref", "--verify", "--quiet", &local];
         if git::output(&main, &exists, Class::Read).await.is_err() {

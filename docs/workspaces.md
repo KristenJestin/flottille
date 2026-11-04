@@ -44,7 +44,10 @@ last fetched when offline or when the remote cannot be listed), a local branch t
 remote's (`git worktree add --track -b <branch> <folder> <remote>/<branch>`). The other
 repositories start it from their base. The base of a repository that resumed its branch is only
 what the branch is compared against (commits ahead, the pull request's target), never where it
-starts.
+starts. Only a branch named is resumed: under the default name, a branch the repository already has
+is a leftover of an earlier workspace, and creation is refused (`the branch app/login already exists
+in web: choose another name or branch`). A resumed branch was there before the workspace: removing
+the workspace never deletes it.
 
 ## The branch
 
