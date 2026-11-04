@@ -677,25 +677,35 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   chooses it, and the pointer marks the row it is on and a click chooses it. Ctrl K waits while
   a dialog or a list is open. It searches what the window already holds from the daemon (the
   tree, the projects), never the content of conversations (that needs an index);
-- left: the tree project › place › session. `main` and the workspaces sit at the same level
-  under their project; a session is titled by the first line of its first message that says what the
-  work is (a greeting or a single word does not: the session is `agent <id>` until a later message
-  of the user does); sessions sit under their place (a session an agent started says it in its
-  page's header, "started by <agent>", not in the tree), with **one mark** at the right of its row,
-  chosen in this order: its state (running, needs the user, waiting) when it has one, else a small
-  dot when something new was written in it since it was last opened (an agent's message, a report,
-  a delivery that woke it, a ticket or a pull request an agent changed), else how long ago it was
-  active; and no text badge. The mark says its words under the pointer (`Needs you: a permission`,
-  `Waiting: checks of #1`, `Running`, `New since you looked: opened a pull request`); the dot is
-  cleared when the session is opened and lives as long as the window. The mark is where the work is, once: on the session's own row while that row
-  is in sight, and on a folded place or project, which shows the strongest mark of what it holds,
-  only while it is folded (never on a row and on its parents together); a session whose agent
-  ended shows no mark. A click on a project's name opens its page and leaves its places as they
-  were, only its chevron folds and unfolds them. A place's row offers, under the pointer, a "+"
-  that opens its project's composer set to start there, with the field focused; a session's row
-  offers a "⋯" menu with End session (the confirmation of the session page, counting the agents
-  that end) and, on an ended session whose agent can resume, Resume, with no need to open the
-  session first;
+- left: the sidebar, each project and, under it, **its sessions in one flat list**, sorted by
+  recent activity (the session that moved last on top; a state is drawn by the row's mark, never
+  by reordering). There is no row for `main` nor for a workspace: workspaces live on the project
+  page, and one with no session is not in the sidebar. A session is titled by the first line of
+  its first message that says what the work is (a greeting or a single word does not: the session
+  is `agent <id>` until a later message of the user does); a session an agent started says it in
+  its page's header, "started by <agent>", not in the sidebar. Each session takes **two lines**:
+  the first is its title and, at the right, **one mark**, chosen in this order: its state
+  (running, needs the user, waiting) when it has one, else a small dot when something new was
+  written in it since it was last opened (an agent's message, a report, a delivery that woke it, a
+  ticket or a pull request an agent changed), else how long ago it was active; and no text badge.
+  The second line, faint, is the place it works in (a folder icon and `main` for the project
+  folder, a branch icon and the workspace's name) and then, when there is room, its pull request
+  `#123` with its checks' mark (a check, a cross or a dot: shape as well as colour); it is cut
+  with an ellipsis inside the row and the whole is in a tooltip. The pull request is the one the
+  project page last read for that workspace (`workspace.forge`): the sidebar asks the forge for
+  none, so a workspace whose project page was never opened in this window shows its name alone,
+  and the pull request fades in when it becomes known. The mark says its words under the pointer
+  (`Needs you: a permission`, `Waiting: checks of #1`, `Running`, `New since you looked: opened a
+  pull request`); the dot is cleared when the session is opened and lives as long as the window.
+  The mark is where the work is, once: on the session's own row while that row is in sight, and on
+  a folded project, which shows the strongest mark of what it holds, only while it is folded
+  (never on a row and on its project together); a session whose agent ended shows no mark. A
+  session that becomes the latest active slides up to the top; the one that is open stays open,
+  whatever moves around it. A click on a project's name opens its page and leaves its sessions as
+  they were, only its chevron folds and unfolds them; a session's row offers a "⋯" menu with End
+  session (the confirmation of the session page, counting the agents that end) and, on an ended
+  session whose agent can resume, Resume, with no need to open the session first. A session is
+  started in a place from the project page (each place's "New session in …");
 - a project page: its repositories (each with its branch, its remote or "local only" and its
   forge; added, removed, which only forgets one, and detected again), its places with their
   sessions, each workspace's card saying where each of its repositories stands (branch, commits
@@ -790,7 +800,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   an answered card leaves). The
   root's row menu ("⋯") holds End session, the only way the window ends an agent: it ends the root
   and its tree, after a confirmation that counts the agents that end. An ended session leaves its
-  place in the left tree for the "Ended" group, folded, pinned at the bottom of the sidebar
+  place in the sidebar for the "Ended" group, folded, pinned at the bottom of the sidebar
   whatever the tree's length and unfolding upward over it (its rows say their project), and its
   page shows,
   in place of the composer, why it ended and Resume when its agent can resume or load its session
