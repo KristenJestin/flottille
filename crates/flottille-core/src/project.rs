@@ -133,8 +133,11 @@ pub struct Task {
     pub ask_before_running: bool,
     /// Obsolete: who added it (a line the user allowed always). Read and not followed: the line
     /// is a plain task, and the daemon's migration drops the key.
+    ///
+    /// Boxed: with `toml`'s `preserve_order`, a `Value` is large enough to make every `Task` too
+    /// big to travel in an `Err`.
     #[serde(default, skip_serializing)]
-    pub added_by: Option<toml::Value>,
+    pub added_by: Option<Box<toml::Value>>,
 }
 
 /// One step of the setup that prepares a new workspace, as written: exactly one of `copy`,
@@ -391,6 +394,9 @@ fn default_run_time_limit() -> u64 {
 
 /// What a project's folder for its workspaces depends on besides its file.
 pub struct Places<'a> {
+    /// Flottille's configuration folder; none when it is not known, and a project's own folder
+    /// is then not kept out of it.
+    pub config: Option<&'a Path>,
     /// Flottille's data folder.
     pub data: &'a Path,
     /// The user's home, where a `~` leads.
@@ -403,6 +409,7 @@ impl<'a> Places<'a> {
     /// The data folder for every project, and no home.
     pub fn of(data: &'a Path) -> Places<'a> {
         Places {
+            config: None,
             data,
             home: None,
             default: &Place::Data,
@@ -571,8 +578,12 @@ fn check(name: &str, mut file: File, places: &Places) -> Result<Project, String>
         Some(prefix) => prefix,
         None => slug(name),
     };
-    let workspaces_root = match &file.workspaces_root {
-        Some(own) => place::typed(own, name, places.home, "workspaces_root")?,
+    let own_root = match &file.workspaces_root {
+        Some(own) => Some(place::typed(own, name, places.home, "workspaces_root")?),
+        None => None,
+    };
+    let workspaces_root = match own_root.clone() {
+        Some(root) => root,
         None => places.default.resolve(
             name,
             &file.folder,
@@ -620,6 +631,21 @@ fn check(name: &str, mut file: File, places: &Places) -> Result<Project, String>
     }
 
     check_repositories(&file.repositories)?;
+    // Only a root the project names is judged here: a default that is refused falls back to the
+    // data folder before it gets to a project, and one project's file must not hide the others.
+    if let Some(root) = &own_root {
+        let repositories: Vec<PathBuf> = file
+            .repositories
+            .iter()
+            .map(|repository| file.folder.join(&repository.path))
+            .collect();
+        let avoid = place::Avoid {
+            config: places.config,
+            data: places.data,
+            home: places.home,
+        };
+        place::allowed(root, &avoid, &repositories, "workspaces_root")?;
+    }
     let known = |path: &str| file.repositories.iter().any(|r| r.path == path);
     let unknown = |key: String, path: &str| format!("{key}: unknown repository \"{path}\"");
     match &file.default_repositories {
@@ -1623,6 +1649,7 @@ mod tests {
             "app",
             text,
             &Places {
+                config: None,
                 data: Path::new(DATA),
                 home: Some(Path::new("/home/someone")),
                 default: place,
