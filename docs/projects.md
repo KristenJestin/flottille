@@ -76,9 +76,9 @@ follows the default of the day.
 existing ones stay where they are and nothing is moved, whichever way the default or the root
 changes.
 
-The window sets both: **Settings**, General tab, "Workspaces folder" (the default, `workspaces_folder.set`),
-and a project's Settings, "Workspaces folder" ("Use the default" or a folder of its own), which
-shows the folder that results. `flottille project show` prints that folder as `workspaces root`.
+The window sets both: **Settings**, Workspaces tab, "Workspaces folder" (the default for every
+project, `workspaces_folder.set`), and a project's Settings, Setup tab, "Workspaces folder" ("Use
+the default" or a folder of its own), which shows the folder that results. `flottille project show` prints that folder as `workspaces root`.
 `workspaces.toml` is edited through the window or by hand; the command line has no command for it.
 
 ## Detecting repositories
