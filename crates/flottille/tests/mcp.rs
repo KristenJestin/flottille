@@ -1387,8 +1387,8 @@ fn run_status_reads_by_default_stops_on_request_and_refuses_what_does_not_fit() 
         ),
         (
             json!({"run": run, "action": "kill"}),
-            "refused: run_status has no action \"kill\": its actions are output (the default) \
-             and stop",
+            "refused: run_status has no action \"kill\": its actions are output (the default), \
+             stop and notify",
         ),
         (json!({"run": run, "tail": 5000}), "tail must be 1 to 1000"),
         (

@@ -902,6 +902,18 @@ pub fn fake_gh() -> PathBuf {
     path
 }
 
+/// The fake development server's binary (`crates/flottille-fake-server`), built beside
+/// Flottille's as the fake agent is.
+pub fn fake_server() -> PathBuf {
+    let path = Path::new(env!("CARGO_BIN_EXE_flottille")).with_file_name("flottille-fake-server");
+    assert!(
+        path.exists(),
+        "{} is missing: run the tests from the workspace's root, or `cargo build -p flottille-fake-server` first",
+        path.display()
+    );
+    path
+}
+
 /// The fake `bkt`'s binary, built beside Flottille's as the fake agent is.
 pub fn fake_bkt() -> PathBuf {
     let path = Path::new(env!("CARGO_BIN_EXE_flottille")).with_file_name("flottille-fake-bkt");

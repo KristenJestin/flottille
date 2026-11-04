@@ -131,6 +131,13 @@ pub struct Task {
     /// Held for approval each time an agent runs it.
     #[serde(default)]
     pub ask_before_running: bool,
+    /// When a run of it is ready: until then it is starting. Without it, a run has no ready state.
+    /// Boxed, as `url`: a task is carried by value in the gate's answers, which stay small.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready: Option<Box<Ready>>,
+    /// Where a run of it answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<Box<TaskUrl>>,
     /// Obsolete: who added it (a line the user allowed always). Read and not followed: the line
     /// is a plain task, and the daemon's migration drops the key.
     ///
@@ -138,6 +145,76 @@ pub struct Task {
     /// big to travel in an `Err`.
     #[serde(default, skip_serializing)]
     pub added_by: Option<Box<toml::Value>>,
+}
+
+/// When a run of a task is ready (`docs/projects.md`, "Tasks"); each is a template, `{url}`
+/// standing for the run's address.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ready {
+    /// Once a line of its output holds this text.
+    Line(String),
+    /// Once a request to this address is answered, whatever the status.
+    Url(String),
+    /// Once this line, run in the task's folder, exits with 0.
+    Command(String),
+}
+
+impl Ready {
+    /// In words, after the task's line: `ready once …`.
+    pub fn said(&self) -> String {
+        match self {
+            Ready::Line(text) => format!("ready once a line says “{text}”"),
+            Ready::Url(url) => format!("ready once {url} answers"),
+            Ready::Command(line) => format!("ready once `{line}` passes"),
+        }
+    }
+
+    /// The line it runs, for `command`.
+    pub fn command(&self) -> Option<&str> {
+        match self {
+            Ready::Command(line) => Some(line),
+            _ => None,
+        }
+    }
+}
+
+/// Where a run of a task answers: an address, a template, or a line that prints it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum TaskUrl {
+    Address(String),
+    Command { command: String },
+}
+
+impl TaskUrl {
+    /// In words, after the task's line.
+    pub fn said(&self) -> String {
+        match self {
+            TaskUrl::Address(url) => format!("at {url}"),
+            TaskUrl::Command { command } => format!("its address from `{command}`"),
+        }
+    }
+
+    /// The line it runs, for `command`.
+    pub fn command(&self) -> Option<&str> {
+        match self {
+            TaskUrl::Command { command } => Some(command),
+            TaskUrl::Address(_) => None,
+        }
+    }
+}
+
+impl Task {
+    /// The lines besides its own that a run of it runs: its ready's and its address's commands.
+    pub fn other_lines(&self) -> Vec<&str> {
+        self.ready
+            .as_deref()
+            .and_then(Ready::command)
+            .into_iter()
+            .chain(self.url.as_deref().and_then(TaskUrl::command))
+            .collect()
+    }
 }
 
 /// One step of the setup that prepares a new workspace, as written: exactly one of `copy`,
@@ -873,6 +950,58 @@ pub fn check_task(name: &str, task: &Task, known: &dyn Fn(&str) -> bool) -> Resu
     {
         return Err(format!(".repository: unknown repository \"{path}\""));
     }
+    let address = |template: &str, with_url: bool| {
+        let starts = ["http://", "https://"]
+            .iter()
+            .chain(with_url.then_some(&"{url}"))
+            .any(|start| template.starts_with(start));
+        if !starts {
+            return Err("the address must start with http:// or https://".to_owned());
+        }
+        Ok(())
+    };
+    let names = |template: &str, with_url: bool| {
+        let extra: &[&str] = if with_url { &["url"] } else { &[] };
+        crate::variables::check_also(template, extra)
+    };
+    match task.ready.as_deref() {
+        Some(Ready::Line(text)) if text.trim().is_empty() => {
+            return Err(".ready: the text must not be empty".into());
+        }
+        Some(Ready::Url(template)) => address(template, true)
+            .and_then(|()| names(template, true))
+            .map_err(|why| format!(".ready: {why}"))?,
+        Some(Ready::Command(line)) if line.trim().is_empty() => {
+            return Err(".ready: the command must not be empty".into());
+        }
+        // The address is known only once the run starts, after the gate judged the line: a line
+        // that takes it would run what the gate never saw.
+        Some(Ready::Command(line)) if crate::variables::check(line).is_err() => {
+            return Err(match names(line, true) {
+                Ok(()) => ".ready: the command cannot use {url}: the address is known only once \
+                           the run starts, after the line was judged; to ask the address itself, \
+                           use ready = { url = \"{url}/…\" }"
+                    .into(),
+                Err(why) => format!(".ready: {why}"),
+            });
+        }
+        Some(Ready::Line(template) | Ready::Command(template)) => {
+            names(template, true).map_err(|why| format!(".ready: {why}"))?;
+        }
+        None => {}
+    }
+    match task.url.as_deref() {
+        Some(TaskUrl::Address(template)) => address(template, false)
+            .and_then(|()| names(template, false))
+            .map_err(|why| format!(".url: {why}"))?,
+        Some(TaskUrl::Command { command }) if command.trim().is_empty() => {
+            return Err(".url: the command must not be empty".into());
+        }
+        Some(TaskUrl::Command { command }) => {
+            names(command, false).map_err(|why| format!(".url: {why}"))?;
+        }
+        None => {}
+    }
     Ok(())
 }
 
@@ -1245,6 +1374,99 @@ mod tests {
         let project = Project::parse("My_App.2", MINIMAL, Path::new(DATA)).unwrap();
 
         assert_eq!(project.branch_prefix, "my-app-2");
+    }
+
+    #[test]
+    fn a_task_says_when_it_is_ready_and_where_it_answers() {
+        let project = parse(&format!(
+            r#"{MINIMAL}
+            [tasks.web]
+            line = "npm run dev"
+            serve = true
+            ready = {{ line = "ready in" }}
+            url = "https://{{workspace}}.app.localhost"
+            [tasks.api]
+            line = "npm run api"
+            ready = {{ url = "{{url}}/health" }}
+            url = {{ command = "portless get api" }}
+            [tasks.db]
+            line = "db start"
+            ready = {{ command = "db ping --host {{workspace}}" }}
+            "#
+        ))
+        .unwrap();
+
+        let web = &project.tasks["web"];
+        assert_eq!(web.ready.as_deref(), Some(&Ready::Line("ready in".into())));
+        assert_eq!(
+            web.url.as_deref(),
+            Some(&TaskUrl::Address(
+                "https://{workspace}.app.localhost".into()
+            ))
+        );
+        let api = &project.tasks["api"];
+        assert_eq!(
+            api.ready.as_deref(),
+            Some(&Ready::Url("{url}/health".into()))
+        );
+        assert_eq!(
+            api.url.as_deref(),
+            Some(&TaskUrl::Command {
+                command: "portless get api".into()
+            })
+        );
+        let db = &project.tasks["db"];
+        assert_eq!(
+            db.ready.as_deref(),
+            Some(&Ready::Command("db ping --host {workspace}".into()))
+        );
+        assert_eq!(db.url, None);
+        assert_eq!(project.tasks["web"].clone(), *web);
+    }
+
+    #[test]
+    fn a_task_s_ready_and_url_are_refused_when_they_cannot_be_used() {
+        for (task, says) in [
+            (
+                r#"ready = { line = "" }"#,
+                "tasks.web.ready: the text must not be empty",
+            ),
+            (
+                r#"ready = { line = "a", url = "http://x" }"#,
+                "tasks.web.ready",
+            ),
+            (
+                r#"ready = { url = "ftp://x" }"#,
+                "tasks.web.ready: the address must start with http:// or https://",
+            ),
+            (r#"ready = { url = "http://{nope}" }"#, "{nope}"),
+            (
+                r#"url = "http://{url}/x""#,
+                "tasks.web.url: “{url}” is not a name Flottille fills",
+            ),
+            (
+                r#"url = "localhost:3000""#,
+                "tasks.web.url: the address must start with http:// or https://",
+            ),
+            (
+                r#"url = { command = "  " }"#,
+                "tasks.web.url: the command must not be empty",
+            ),
+            (
+                r#"ready = { command = "cp {url} {workspace}/k" }"#,
+                "tasks.web.ready: the command cannot use {url}",
+            ),
+        ] {
+            let text = format!(
+                "{MINIMAL}
+[tasks.web]
+line = \"serve\"
+{task}
+"
+            );
+            let refusal = refusal(&text);
+            assert!(refusal.contains(says), "{task}: {refusal}");
+        }
     }
 
     #[test]

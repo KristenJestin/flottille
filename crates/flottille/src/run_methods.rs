@@ -264,6 +264,9 @@ fn run_json(run: &Run) -> Value {
         "signal": run.signal,
         "started_at": run.started_at,
         "ended_at": run.ended_at,
+        "ready": run.ready.map(|ready| ready.as_str()),
+        "url": run.url,
+        "url_error": run.url_error,
     })
 }
 

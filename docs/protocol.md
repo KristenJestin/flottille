@@ -754,8 +754,9 @@ matter's or the first line of its text).
 ### The task methods
 
 A project's tasks (`docs/projects.md`, "Tasks"), as its Settings edit them. A task in a result is
-`{"name", "line", "repository", "serve", "check", "read_only", "ask_before_running"}`,
-`repository` `null` for the place's top. Each write is checked as the file is, and written under
+`{"name", "line", "repository", "serve", "check", "read_only", "ask_before_running", "ready",
+"url"}`, `repository` `null` for the place's top, `ready` `null` or `{"line"}`, `{"url"}` or
+`{"command"}`, `url` `null`, an address or `{"command"}` (`docs/projects.md`, "Tasks"). Each write is checked as the file is, and written under
 `[tasks.<name>]` where it stands, what is around it kept, a flag that is off left out.
 `not-found` for a project or a task that does not exist, `refused` for a task the file would
 refuse, `invalid-config` when the project's file cannot be used.
@@ -771,13 +772,15 @@ refuse, `invalid-config` when the project's file cannot be used.
 #### `task.add`
 
 `{"project", "name", "line", "repository"?, "serve"?, "check"?, "read_only"?,
-"ask_before_running"?}`: the task. `refused` when the project has one of that name.
+"ask_before_running"?, "ready"?, "url"?}`: the task. `refused` when the project has one of that
+name.
 
 #### `task.edit`
 
 `{"project", "name", "line"?, "repository"?, "serve"?, "check"?, "read_only"?,
-"ask_before_running"?}`: what is given replaces what the task had (`repository: null` puts it back
-at the top). Answers the task.
+"ask_before_running"?, "ready"?, "url"?}`: what is given replaces what the task had
+(`repository: null` puts it back at the top; `ready` or `url` `null` or `""` removes it). Answers
+the task.
 
 #### `task.remove`
 
@@ -1092,13 +1095,19 @@ The commands the agents run with `run` (`docs/tools.md`), and the tasks the user
   "signal": null,
   "started_at": 1792843730808,
   "ended_at": null,
+  "ready": "starting",
+  "url": "https://login.app.localhost",
+  "url_error": null,
   "last_line": "listening on :3000"
 }
 ```
 
 `name` is the task it runs, `null` for a line of the agent's. `agent` and `root` are `null` for a
 task the user ran; `project` is always the project's. `state` is `running`,
-`exited`, `stopped` or `interrupted` (`docs/events.md`, "The events of a run"). `last_line` is the
+`exited`, `stopped` or `interrupted` (`docs/events.md`, "The events of a run"). `ready` is
+`null` for a run of a task that says no ready, else `starting`, `ready` or `missed` (it ended before
+it was ready); `url` its address, `url_error` why it has none when its task's line for it failed
+(`docs/projects.md`, "Tasks"). `last_line` is the
 last line of its output with something on it, masked of secrets and as the program wrote it
 (colours included), cut at 300 characters. `tail` is the last 20 lines
 of its output (a list of texts, masked and as written, each cut at 300 characters), which a result

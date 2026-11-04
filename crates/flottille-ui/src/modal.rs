@@ -55,6 +55,7 @@ pub struct Modal {
     id: ElementId,
     title: SharedString,
     sentence: Option<SharedString>,
+    under_title: Option<AnyElement>,
     wide: bool,
     body: Vec<AnyElement>,
     kept: Vec<AnyElement>,
@@ -77,6 +78,7 @@ impl Modal {
             id: id.into(),
             title: title.into(),
             sentence: None,
+            under_title: None,
             wide: false,
             body: Vec::new(),
             kept: Vec::new(),
@@ -123,6 +125,12 @@ impl Modal {
     /// A key pressed in it, other than Escape: a search's arrows.
     pub fn on_key(mut self, f: impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static) -> Self {
         self.on_key = Some(Rc::new(f));
+        self
+    }
+
+    /// What goes under the title and its sentence, in the header: a run's address.
+    pub fn under_title(mut self, element: Option<impl IntoElement>) -> Self {
+        self.under_title = element.map(IntoElement::into_any_element);
         self
     }
 
@@ -287,6 +295,7 @@ impl RenderOnce for Modal {
                         .child(sentence)
                         .test_support()
                 }))
+                .children(self.under_title)
         });
         let header = titles.map(|titles| {
             let header = div().flex_none().pt(px(20.)).px(px(24.)).flex();

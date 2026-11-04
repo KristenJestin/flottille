@@ -658,3 +658,191 @@ fn an_agent_marking_a_task_a_check_or_read_only_is_base() {
         base_held(&user, mcp.call("tasks", edit), why);
     }
 }
+
+#[test]
+fn a_task_s_ready_and_url_are_read_and_written_by_the_user_and_the_agent() {
+    let user = user();
+    project(&user);
+    let added = user
+        .call(
+            "task.add",
+            json!({"project": "app", "name": "web", "line": "npm run dev", "serve": true,
+                "ready": {"line": "ready in"}, "url": "https://{workspace}.app.localhost"}),
+        )
+        .unwrap();
+    assert_eq!(added["ready"], json!({"line": "ready in"}));
+    assert_eq!(added["url"], "https://{workspace}.app.localhost");
+    let text = file(&user);
+    assert!(text.contains(r#"ready = { line = "ready in" }"#), "{text}");
+    assert!(
+        text.contains(r#"url = "https://{workspace}.app.localhost""#),
+        "{text}"
+    );
+    let edited = user
+        .call(
+            "task.edit",
+            json!({"project": "app", "name": "web", "ready": null,
+                "url": {"command": "portless get web"}}),
+        )
+        .unwrap();
+    assert_eq!(edited["ready"], Value::Null);
+    assert_eq!(edited["url"], json!({"command": "portless get web"}));
+    let wrong = user
+        .call(
+            "task.edit",
+            json!({"project": "app", "name": "web", "url": "localhost:3000"}),
+        )
+        .unwrap_err();
+    assert!(wrong.1.contains("http:// or https://"), "{wrong:?}");
+    // The window sends "" for none, since its link drops a null.
+    let cleared = user
+        .call(
+            "task.edit",
+            json!({"project": "app", "name": "web", "url": "", "ready": ""}),
+        )
+        .unwrap();
+    assert_eq!(
+        (&cleared["url"], &cleared["ready"]),
+        (&Value::Null, &Value::Null)
+    );
+    user.call(
+        "task.edit",
+        json!({"project": "app", "name": "web", "url": {"command": "portless get web"}}),
+    )
+    .unwrap();
+    let (_, mcp) = root(&user);
+
+    let listed = done(mcp.call("tasks", json!({"action": "list"})));
+    let shown = done(mcp.call("tasks", json!({"action": "show", "name": "web"})));
+    let number = held(mcp.call(
+        "tasks",
+        json!({"action": "edit", "name": "web", "ready": {"url": "{url}/health"}}),
+    ));
+
+    assert!(
+        listed.contains("its address from `portless get web`"),
+        "{listed}"
+    );
+    assert!(
+        shown.contains("its address from `portless get web`"),
+        "{shown}"
+    );
+    let says = request(&user, number)["says"].to_string();
+    assert!(says.contains("ready once {url}/health answers"), "{says}");
+    approve(&user, number);
+    assert!(
+        file(&user).contains(r#"ready = { url = "{url}/health" }"#),
+        "{}",
+        file(&user)
+    );
+}
+
+#[test]
+fn a_ready_or_url_command_an_agent_sets_is_judged_as_a_run_of_it() {
+    let user = user();
+    project(&user);
+    user.call(
+        "task.add",
+        json!({"project": "app", "name": "web", "line": "./say.sh", "serve": true}),
+    )
+    .unwrap();
+    let (_, mcp) = root(&user);
+
+    let ready = held(mcp.call(
+        "tasks",
+        json!({"action": "edit", "name": "web", "ready": {"command": "sudo true"}}),
+    ));
+    let url = held(mcp.call(
+        "tasks",
+        json!({"action": "edit", "name": "web", "url": {"command": "sudo cat /etc/x"}}),
+    ));
+    let shell = mcp.call(
+        "tasks",
+        json!({"action": "edit", "name": "web", "ready": {"command": "curl x && true"}}),
+    );
+
+    for number in [ready, url] {
+        let asked = request(&user, number);
+        assert_eq!(asked["class"], "base", "{asked}");
+        assert!(
+            asked["reasons"].to_string().contains("the line it sets"),
+            "{asked}"
+        );
+    }
+    assert!(
+        shell.error && shell.text.contains("shell"),
+        "{}",
+        shell.text
+    );
+    assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
+}
+
+#[test]
+fn a_ready_command_cannot_use_the_url_placeholder() {
+    let user = user();
+    project(&user);
+    user.call(
+        "task.add",
+        json!({"project": "app", "name": "web", "line": "./say.sh", "serve": true,
+            "url": {"command": "cat url.txt"}}),
+    )
+    .unwrap();
+    let (_, mcp) = root(&user);
+
+    // The address is known only once the run starts, after the gate judged the line: a line
+    // that takes it runs what the gate never saw.
+    let agent = mcp.call(
+        "tasks",
+        json!({"action": "edit", "name": "web",
+            "ready": {"command": "cp {url} {workspace}/k"}}),
+    );
+    let by_user = user
+        .call(
+            "task.edit",
+            json!({"project": "app", "name": "web",
+                "ready": {"command": "curl {url}/health"}}),
+        )
+        .unwrap_err();
+    let probed = done(mcp.call("tasks", json!({"action": "show", "name": "web"})));
+
+    assert!(agent.error, "{}", agent.text);
+    assert!(
+        agent.text.contains("{url}") && agent.text.contains("ready = { url"),
+        "{}",
+        agent.text
+    );
+    assert!(
+        by_user.1.contains("{url}") && by_user.1.contains("ready = { url"),
+        "{by_user:?}"
+    );
+    assert!(!probed.contains("ready once"), "{probed}");
+    assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
+}
+
+#[test]
+fn moving_a_task_judges_its_ready_and_url_commands_again() {
+    let user = user();
+    project(&user);
+    // The user's own lines: an agent's edit leaves them to run in the folder it says.
+    user.call(
+        "task.add",
+        json!({"project": "app", "name": "web", "line": "./say.sh", "serve": true,
+            "ready": {"command": "sudo true"}, "url": {"command": "sudo cat /etc/x"}}),
+    )
+    .unwrap();
+    let (_, mcp) = root(&user);
+
+    let number = held(mcp.call(
+        "tasks",
+        json!({"action": "edit", "name": "web", "serve": false}),
+    ));
+
+    let asked = request(&user, number);
+    assert_eq!(asked["class"], "base", "{asked}");
+    let reasons = asked["reasons"].to_string();
+    assert!(reasons.contains("the line it sets, sudo true"), "{reasons}");
+    assert!(
+        reasons.contains("the line it sets, sudo cat /etc/x"),
+        "{reasons}"
+    );
+}

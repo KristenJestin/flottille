@@ -9407,6 +9407,106 @@ fn a_task_is_added_edited_and_removed_from_the_tasks_section(cx: &mut TestAppCon
 }
 
 #[gpui_kit::test]
+fn a_task_s_ready_and_address_are_chosen_in_its_form(cx: &mut TestAppContext) {
+    use flottille_window::tasks::{AddressKind, ReadyKind};
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", "tasks", cx);
+    let section = tasks_section(&shell, cx);
+
+    cx.update(|window, cx| window.click("add-task", cx));
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(window.find("task-ready-field-label").visible());
+        assert!(window.find("task-url-field-label").visible());
+        assert!(
+            window
+                .try_find("task-ready-line-block")
+                .is_none_or(|b| !b.visible()),
+            "no field while nothing is said"
+        );
+    });
+    let (name, line) = section.read_with(cx, |s, _| {
+        (
+            s.name_field().unwrap().clone(),
+            s.line_field().unwrap().clone(),
+        )
+    });
+    cx.update(|window, cx| {
+        name.update(cx, |f, cx| f.set_value("web", window, cx));
+        line.update(cx, |f, cx| f.set_value("npm run dev", window, cx));
+    });
+    cx.update(|window, cx| window.click("task-ready-line", cx));
+    cx.update(|window, cx| window.click("task-url-command", cx));
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(window.find("task-ready-line-block").visible());
+        assert!(window.find("task-url-command-block").visible());
+    });
+    let (ready, url) = section.read_with(cx, |s, _| {
+        (
+            s.ready_field(ReadyKind::Line).unwrap().clone(),
+            s.url_field(AddressKind::Command).unwrap().clone(),
+        )
+    });
+    cx.update(|window, cx| {
+        ready.update(cx, |f, cx| f.set_value("ready in", window, cx));
+        url.update(cx, |f, cx| f.set_value("portless get web", window, cx));
+    });
+    cx.update(|window, cx| window.click("save-task", cx));
+
+    let file = || std::fs::read_to_string(user.project_file("atlas")).unwrap();
+    until(&shell, cx, "the file says so", |_| {
+        file().contains(r#"ready = { line = "ready in" }"#)
+    });
+    assert!(
+        file().contains(r#"url = { command = "portless get web" }"#),
+        "{}",
+        file()
+    );
+    until(&shell, cx, "the task is listed", |cx| {
+        !tasks_listed(&shell, cx).is_empty()
+    });
+    settle(cx);
+
+    // Edited, the form shows what the task says, and nothing said is nothing written.
+    cx.update(|window, cx| window.click("task-web", cx));
+    until(&shell, cx, "the form is open on it", |cx| {
+        section.read_with(cx, |s, _| s.is_open())
+    });
+    settle(cx);
+    let shown = section.read_with(cx, |s, cx| {
+        (
+            s.ready_kind(),
+            s.ready_field(ReadyKind::Line)
+                .unwrap()
+                .read(cx)
+                .value()
+                .to_string(),
+        )
+    });
+    assert_eq!(shown, (Some(ReadyKind::Line), "ready in".to_owned()));
+    cx.update(|window, cx| window.click("task-ready-none", cx));
+    settle(cx);
+    assert_eq!(section.read_with(cx, |s, _| s.ready_kind()), None);
+    cx.update(|window, cx| window.click("task-url-address", cx));
+    let url = section.read_with(cx, |s, _| {
+        s.url_field(AddressKind::Address).unwrap().clone()
+    });
+    cx.update(|window, cx| {
+        url.update(cx, |f, cx| {
+            f.set_value("https://{workspace}.atlas.localhost", window, cx)
+        })
+    });
+    cx.update(|window, cx| window.click("save-task", cx));
+    until(&shell, cx, "the file says so", |_| {
+        file().contains(r#"url = "https://{workspace}.atlas.localhost""#)
+    });
+    assert!(!file().contains("ready"), "{}", file());
+}
+
+#[gpui_kit::test]
 fn setup_steps_are_added_reordered_and_removed_in_the_setup_section(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");

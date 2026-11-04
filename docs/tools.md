@@ -293,9 +293,9 @@ own while the judge thought), it is refused (`refused: X: the path changed since
 
 | Tool | Arguments | |
 |---|---|---|
-| `tasks` | `action list \| show \| add \| edit \| remove`, `name?`, `line?`, `repository?`, `serve?`, `check?`, `read_only?`, `ask_before_running?` | The project's tasks (`docs/projects.md`, "Tasks"). `list` gives one line each: `name: line`, and where it runs, whether it keeps running, is a check, changes nothing, is judged each time it runs; `show` gives one. Every agent reads them; a root writes them ("The project"): `add` takes `name` and `line` and the flags, `edit` changes what it is given (`repository: null` puts the task back at the place's top), `remove` removes it, refused while a setup step runs it. A child's write is refused, pointing it to `ask_parent`. |
-| `run` | `task` or `line` (exactly one), `repository?`, `timeout? 1..600`, `why?` | Runs a task (`refused: the project has no task X: list them with tasks {"action": "list"}`) or one line, in the repository's folder (the task's, or the one named) or the place's top. Its description holds a call of each form: `{"task": "test"}`, `{"line": "cargo test -p core", "repository": "api", "timeout": 120}`. |
-| `run_status` | `run`, `action? output \| stop`, `tail? 1..1000`, `start?` | `action output` (the default): the run's state and lines of its output, the last `tail` (40 by default), or `tail` lines from line `start`. `run` may also be the id of a cut result ("Long results"), read by lines with `start`, never stopped. `action stop`: stops the run and everything in its process group, `SIGTERM`, then `SIGKILL` 5 s later, and answers once it ended; `tail` and `start` are refused with it. |
+| `tasks` | `action list \| show \| add \| edit \| remove`, `name?`, `line?`, `repository?`, `serve?`, `check?`, `read_only?`, `ask_before_running?`, `ready?`, `url?` | The project's tasks (`docs/projects.md`, "Tasks"). `list` gives one line each: `name: line`, and where it runs, whether it keeps running, is a check, changes nothing, is judged each time it runs, when it is ready and where it answers; `show` gives one. `ready` is `{"line"}`, `{"url"}` or `{"command"}`, `url` an address or `{"command"}`, `null` removing either; a `command` line is judged as a run of it, as the task's own line is. Every agent reads them; a root writes them ("The project"): `add` takes `name` and `line` and the flags, `edit` changes what it is given (`repository: null` puts the task back at the place's top), `remove` removes it, refused while a setup step runs it. A child's write is refused, pointing it to `ask_parent`. |
+| `run` | `task` or `line` (exactly one), `repository?`, `timeout? 1..600`, `notify? "ready"`, `why?` | Runs a task (`refused: the project has no task X: list them with tasks {"action": "list"}`) or one line, in the repository's folder (the task's, or the one named) or the place's top. Its description holds a call of each form: `{"task": "test"}`, `{"task": "dev", "notify": "ready"}`, `{"line": "cargo test -p core", "repository": "api", "timeout": 120}`. With `notify: "ready"`, for a task that says when it is ready, the agent is told when it is (below); on a task that does not, or a line, it is refused with a sentence. |
+| `run_status` | `run`, `action? output \| stop \| notify`, `when? "ready"`, `tail? 1..1000`, `start?` | `action output` (the default): the run's state and lines of its output, the last `tail` (40 by default), or `tail` lines from line `start`. `run` may also be the id of a cut result ("Long results"), read by lines with `start`, never stopped. `action stop`: stops the run and everything in its process group, `SIGTERM`, then `SIGKILL` 5 s later, and answers once it ended; `tail` and `start` are refused with it. `action notify` with `when: "ready"`: the agent is told when a run already started is ready, as `notify` on `run` does; refused for a run of a task that says no ready. |
 
 Until #131 these were `commands_list`, `commands_run` (its `command` now `task`) and
 `commands_status`. For one release a call under an old name is the new tool's (`commands_list`
@@ -321,6 +321,14 @@ pending requests.
   how to read the lines before or after (`run_status {"run", "start"}`), then the lines. A
   line longer than 2,000 characters shows as several; the lines shown are cut to stay under the
   limit.
+- **Ready and where it answers**: a run of a task that says when it is ready (`docs/projects.md`,
+  "Tasks") says, in `run`'s answer and in `run_status`, `it is starting, not ready yet` (with the
+  call that has the agent told, rather than reading it again and again), `it is ready at <url>`,
+  or `it ended before it was ready`, and its address (`address: <url>`, or `no address: <why>`).
+  With `notify`, a `command-ready` delivery, urgent, says `run <id>: <name> is ready at <url>`
+  once it is; a run that ends before is told by its `command-ended` delivery, which then says
+  `It ended before it was ready.`, never by a second one. The end of a run is told as before,
+  without asking.
 - **Only the agent that started a run** reads or stops it: `refused: X is not a run this agent
   started`.
 - **The output kept** is its last 64 KiB (cut back from a line's start once it passes 80 KiB),

@@ -30,6 +30,38 @@ pub struct Run {
     pub dismissed: bool,
     /// The project it runs in.
     pub project: String,
+    /// Whether it is ready, for a task that says when it is (`docs/projects.md`, "Tasks"); `None`
+    /// for one that does not.
+    pub ready: Option<Readiness>,
+    /// Where it answers, as its task says.
+    pub url: Option<String>,
+    /// Why it has no address, when its task's command for it failed.
+    pub url_error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Readiness {
+    Starting,
+    Ready,
+    /// It ended before it was ready.
+    Missed,
+}
+
+impl Readiness {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Readiness::Starting => "starting",
+            Readiness::Ready => "ready",
+            Readiness::Missed => "missed",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Readiness> {
+        [Readiness::Starting, Readiness::Ready, Readiness::Missed]
+            .into_iter()
+            .find(|ready| ready.as_str() == text)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
