@@ -3651,6 +3651,8 @@ pub struct SessionRail {
     linking: bool,
     /// What the daemon said of the ticket typed.
     ticket_error: Option<SharedString>,
+    /// The last ticket the place had, drawn while its line folds away after an unlink.
+    last_ticket: Option<TicketFacts>,
     _ticket_subscription: Option<Subscription>,
     renders: usize,
 }
@@ -3719,6 +3721,7 @@ impl SessionRail {
             ticket_field: None,
             linking: false,
             ticket_error: None,
+            last_ticket: None,
             _ticket_subscription: None,
             renders: 0,
         }
@@ -4458,7 +4461,11 @@ impl Render for SessionRail {
                 );
             self.ticket_field = Some(field);
         }
-        let ticket = self.place.as_ref().and_then(|p| p.ticket.clone());
+        let linked = self.place.as_ref().and_then(|p| p.ticket.clone());
+        if linked.is_some() {
+            self.last_ticket = linked.clone();
+        }
+        let ticket = linked.or_else(|| self.last_ticket.clone());
         // The ticket is why the workspace exists: its line opens the section's lines, before any
         // pull request.
         let ticket_content = ticket.map(|ticket| {
@@ -4521,15 +4528,19 @@ impl Render for SessionRail {
             .place
             .as_ref()
             .is_some_and(|place| place.ticket_pending);
-        let ticket_line = (ticket_pending || ticket_content.is_some()).then(|| {
+        // Unlinked, the line folds away with what it last said.
+        let ticket_present =
+            ticket_pending || self.place.as_ref().is_some_and(|p| p.ticket.is_some());
+        let ticket_line = presence(
+            "rail-ticket-block",
+            ticket_present,
             awaiting(
                 "rail-ticket-wait",
                 ticket_pending,
                 skeleton_line("rail-ticket-skeleton".to_owned(), 150.),
                 ticket_content.unwrap_or_else(|| div().into_any_element()),
-            )
-            .into_any_element()
-        });
+            ),
+        );
         let ticket_field = self
             .ticket_field
             .clone()
@@ -4571,7 +4582,7 @@ impl Render for SessionRail {
                 div()
                     .flex()
                     .flex_col()
-                    .children(ticket_line)
+                    .child(ticket_line)
                     .children(lines)
                     .child(presence(
                         "rail-no-forge-block",

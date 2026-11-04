@@ -534,3 +534,31 @@ fn a_reconnect_keeps_the_known_pull_requests_and_ticket() {
     assert_eq!(again.pulls.len(), 1);
     assert!(again.ticket.is_some());
 }
+
+#[gpui_kit::test]
+fn an_unlinked_ticket_folds_away_instead_of_vanishing(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    let (shell, cx) = open(&user, &lead, (0, None), cx);
+    until(&shell, cx, "the ticket", |cx| present(cx, "rail-ticket"));
+    settle(cx);
+
+    cx.update(|window, cx| window.click("workspace-menu", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("workspace-unlink-ticket", cx));
+    until(&shell, cx, "the ticket forgotten by the rail", |cx| {
+        session_page(&shell, cx).read_with(cx, |page, cx| {
+            page.rail()
+                .read(cx)
+                .place()
+                .is_some_and(|place| place.ticket.is_none())
+        })
+    });
+    assert!(
+        present(cx, "rail-ticket"),
+        "the line vanished at once instead of folding away"
+    );
+    settle(cx);
+    assert!(!present(cx, "rail-ticket"), "it is gone once folded");
+    assert!(!present(cx, "rail-line-ticket"));
+}
