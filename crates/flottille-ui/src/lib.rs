@@ -21,6 +21,7 @@ pub mod modal;
 pub mod motion;
 pub mod omarchy;
 pub mod page;
+pub mod path;
 pub mod radio;
 pub mod reveal;
 pub mod rows;
@@ -57,6 +58,7 @@ pub use menu::Menu;
 pub use modal::Modal;
 pub use omarchy::Environment;
 pub use page::{EmptyLine, PageHeader, Section};
+pub use path::path_line;
 pub use radio::RadioChoices;
 pub use reveal::{
     Changing, Fold, Growing, Presence, PresenceOf, PulsingLabel, changing, enter, fold_frame,
