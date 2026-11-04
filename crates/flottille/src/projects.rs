@@ -61,6 +61,11 @@ pub struct Projects {
 }
 
 impl Projects {
+    /// The registry the projects are read from.
+    pub fn registry(&self) -> &Registry {
+        &self.registry
+    }
+
     /// Takes the projects there are as the starting point: they are not news.
     pub fn open(paths: &Paths) -> Result<Projects> {
         let registry = Registry::new(paths);
@@ -165,6 +170,12 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> std::result::Result
 /// is on (`null` when it is on none), read by git outside the projects' lock.
 pub async fn show(daemon: Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
     let mut project = call(&daemon, "project.show", params)?;
+    // A project that follows a default which cannot be followed gets the data folder: it says so.
+    if project.get("workspaces_root_own").is_none()
+        && let Err(why) = daemon.projects.lock().unwrap().registry().place_read()
+    {
+        project["workspaces_default_error"] = why.into();
+    }
     let folder = PathBuf::from(project["folder"].as_str().unwrap_or_default());
     for repository in project["repositories"].as_array_mut().into_iter().flatten() {
         let checkout = match repository["path"].as_str().unwrap_or(".") {

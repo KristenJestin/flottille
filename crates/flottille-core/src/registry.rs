@@ -10,6 +10,7 @@ use crate::{Error, Result};
 
 pub struct Registry {
     dir: PathBuf,
+    config: PathBuf,
     data: PathBuf,
     /// The user's default place for workspaces, read at every load so that a change applies at
     /// once.
@@ -30,6 +31,7 @@ impl Registry {
     pub fn new(paths: &Paths) -> Registry {
         Registry {
             dir: paths.projects(),
+            config: paths.config.clone(),
             data: paths.data.clone(),
             default: paths.workspaces_place(),
             home: place::home(),
@@ -40,7 +42,21 @@ impl Registry {
     /// read is Flottille's data folder, since one broken file must not hide every project: the
     /// window says why it is not followed (`workspaces_folder.show`).
     fn place(&self) -> Place {
-        place::read(&self.default).unwrap_or_default()
+        self.place_read().unwrap_or_default()
+    }
+
+    /// What `workspaces.toml` says, or why it cannot be followed.
+    pub fn place_read(&self) -> std::result::Result<Place, String> {
+        place::read(&self.default, &self.avoid())
+    }
+
+    /// What a folder for workspaces keeps out of.
+    pub fn avoid(&self) -> place::Avoid<'_> {
+        place::Avoid {
+            config: Some(&self.config),
+            data: &self.data,
+            home: self.home.as_deref(),
+        }
     }
 
     pub fn load_all(&self) -> Result<Loaded> {
@@ -96,6 +112,7 @@ impl Registry {
     pub fn parse(&self, name: &str, text: &str) -> std::result::Result<Project, ConfigError> {
         let default = self.place();
         let places = Places {
+            config: Some(&self.config),
             data: &self.data,
             home: self.home.as_deref(),
             default: &default,

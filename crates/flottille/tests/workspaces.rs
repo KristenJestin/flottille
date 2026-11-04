@@ -2832,3 +2832,171 @@ fn changing_the_folder_moves_no_existing_workspace() {
     assert_eq!(fixture.settled("second")["state"], "ready");
     assert!(fixture.workspace("second").join("web").is_dir());
 }
+
+#[test]
+fn an_invalid_path_in_workspaces_toml_hides_no_project() {
+    let fixture = Fixture::new(false);
+    following_the_default(&fixture);
+    let file = fixture.user.path("config/flottille/workspaces.toml");
+
+    for (text, why) in [
+        (
+            "place = \"own\"\npath = \"worktrees/<project>\"\n",
+            "path: must be absolute",
+        ),
+        ("place = \"own\"\npath = \"\"\n", "path: must not be empty"),
+        (
+            "place = \"own\"\npath = \"~other/<project>\"\n",
+            "path: must be absolute",
+        ),
+        (
+            "place = \"own\"\npath = \"~/Worktrees\"\n",
+            "path: must hold <project>",
+        ),
+    ] {
+        std::fs::write(&file, text).unwrap();
+
+        let listed = fixture.user.call("project.list", json!({})).unwrap();
+        let shown = fixture
+            .user
+            .call("workspaces_folder.show", json!({}))
+            .unwrap();
+        let project = fixture
+            .user
+            .call("workspaces_folder.show", json!({"project": "app"}))
+            .unwrap();
+        let root = fixture.user.call("project.show", json!({"name": "app"}));
+
+        assert_eq!(listed["projects"][0]["name"], "app", "{text}");
+        assert_eq!(listed["errors"], json!([]), "{text}");
+        assert_eq!(shown["place"], "data", "{text}");
+        let error = shown["error"].as_str().unwrap();
+        assert!(error.starts_with("workspaces.toml: "), "{error}");
+        assert!(error.contains(why), "{text}: {error}");
+        // The project page and `project show` say the default is not followed.
+        assert_eq!(project["fallback"], shown["error"], "{text}");
+        let root = root.unwrap();
+        assert_eq!(
+            root["workspaces_root"],
+            fixture
+                .user
+                .path("data/flottille/workspaces/app")
+                .to_str()
+                .unwrap()
+        );
+        assert_eq!(root["workspaces_default_error"], shown["error"], "{text}");
+    }
+}
+
+#[test]
+fn project_show_says_when_the_default_is_not_followed() {
+    let fixture = Fixture::new(false);
+    following_the_default(&fixture);
+    let show = || {
+        let output = fixture.user.run(&["project", "show", "app"]);
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    assert!(!show().contains("not followed"), "{}", show());
+
+    std::fs::write(
+        fixture.user.path("config/flottille/workspaces.toml"),
+        "place = \"own\"\npath = \"relative\"\n",
+    )
+    .unwrap();
+
+    let text = show();
+    assert!(
+        text.contains("workspaces.toml is not followed, the data folder is used: "),
+        "{text}"
+    );
+}
+
+/// The refusal of the daemon to keep `params`, which writes nothing.
+fn refused(fixture: &Fixture, params: Value) -> String {
+    let file = fixture.user.path("config/flottille/workspaces.toml");
+    let before = std::fs::read_to_string(&file).ok();
+    let (_, message) = set_default(fixture, params).unwrap_err();
+    assert_eq!(std::fs::read_to_string(&file).ok(), before, "{message}");
+    message
+}
+
+#[test]
+fn a_folder_inside_a_repository_of_the_project_is_refused() {
+    let fixture = Fixture::new(false);
+    following_the_default(&fixture);
+    let inside = fixture.folder.join("web/wt");
+
+    let message = refused(
+        &fixture,
+        json!({"project": "app", "own": inside.to_str().unwrap()}),
+    );
+    assert!(message.contains("is inside the repository"), "{message}");
+    assert!(message.contains("workspaces_root"), "{message}");
+    let text = std::fs::read_to_string(fixture.user.project_file("app")).unwrap();
+    assert!(!text.contains("workspaces_root"), "{text}");
+
+    // As a default, it is refused for the project it would land in.
+    let default = fixture.folder.join("web/<project>");
+    let message = refused(
+        &fixture,
+        json!({"place": "own", "path": default.to_str().unwrap()}),
+    );
+    assert!(message.contains("is inside the repository"), "{message}");
+    assert!(message.contains("for the project app"), "{message}");
+}
+
+#[test]
+fn a_folder_inside_flottille_s_config_or_data_folder_is_refused() {
+    let fixture = Fixture::new(false);
+    following_the_default(&fixture);
+    let config = fixture.user.path("config/flottille/<project>");
+    let message = refused(
+        &fixture,
+        json!({"place": "own", "path": config.to_str().unwrap()}),
+    );
+    assert!(message.contains("configuration folder"), "{message}");
+    let data = fixture.user.path("data/flottille/state/<project>");
+    let message = refused(
+        &fixture,
+        json!({"project": "app", "own": data.to_str().unwrap()}),
+    );
+    assert!(message.contains("data folder"), "{message}");
+
+    // The data folder's own workspaces/ is where they go by default: allowed, for both.
+    let workspaces = fixture.user.path("data/flottille/workspaces/<project>");
+    set_default(
+        &fixture,
+        json!({"place": "own", "path": workspaces.to_str().unwrap()}),
+    )
+    .unwrap();
+    set_default(
+        &fixture,
+        json!({"project": "app", "own": workspaces.to_str().unwrap()}),
+    )
+    .unwrap();
+}
+
+#[test]
+fn the_home_folder_itself_is_refused() {
+    let fixture = Fixture::new(false);
+    following_the_default(&fixture);
+
+    let message = refused(&fixture, json!({"project": "app", "own": "~"}));
+    assert!(message.contains("your home folder itself"), "{message}");
+    // `<project>/..` leads back to it.
+    let message = refused(&fixture, json!({"place": "own", "path": "~/<project>/.."}));
+    assert!(message.contains("your home folder itself"), "{message}");
+}
+
+#[test]
+fn an_own_default_without_project_is_refused() {
+    let fixture = Fixture::new(false);
+    following_the_default(&fixture);
+
+    let message = refused(&fixture, json!({"place": "own", "path": "~/Worktrees"}));
+
+    assert_eq!(
+        message,
+        "path: must hold <project>, or every project would share one folder"
+    );
+}

@@ -56,11 +56,11 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
 
 /// The default: `{"place", "path", "error"}`, `path` being what the user typed and `error` why the
 /// file cannot be followed (the data folder is). A project: `{"project", "own", "folder",
-/// "default_folder"}`: its own folder as typed (`null` when it follows the default), the folder
-/// its workspaces are made in, and the one the default would give it.
+/// "default_folder", "fallback"}`: its own folder as typed (`null` when it follows the default),
+/// the folder its workspaces are made in, the one the default would give it, and why the default
+/// is not followed (`null` when it is, or when the project has a folder of its own).
 fn show(daemon: &Daemon, project: Option<&str>) -> Result<Value, Failure> {
-    let file = daemon.paths.workspaces_place();
-    let read = place::read(&file);
+    let read = daemon.projects.lock().unwrap().registry().place_read();
     let Some(name) = project else {
         let (place, error) = match read {
             Ok(place) => (place, None),
@@ -73,6 +73,10 @@ fn show(daemon: &Daemon, project: Option<&str>) -> Result<Value, Failure> {
         return Ok(json!({"place": place.word(), "path": path, "error": error}));
     };
     let loaded = projects::load_project(daemon, name)?;
+    let fallback = read
+        .clone()
+        .err()
+        .filter(|_| loaded.workspaces_root_own.is_none());
     let default_folder = read.unwrap_or_default().resolve(
         name,
         &loaded.folder,
@@ -85,6 +89,7 @@ fn show(daemon: &Daemon, project: Option<&str>) -> Result<Value, Failure> {
         "own": loaded.workspaces_root_own,
         "folder": loaded.workspaces_root,
         "default_folder": default_folder.ok(),
+        "fallback": fallback,
     }))
 }
 
@@ -96,10 +101,36 @@ fn set_default(daemon: &Daemon, word: Option<String>, path: Option<String>) -> R
             let path = path.ok_or_else(|| {
                 Failure::new("invalid-params", "path: a folder of your own needs one")
             })?;
+            let invalid = |why| Failure::new("invalid-params", why);
             // Checked as a project would resolve it, before anything is written.
-            place::typed(&path, "project", place::home().as_deref(), "path")
-                .map_err(|why| Failure::new("invalid-params", why))?;
-            Place::Own(path)
+            let home = place::home();
+            let avoid = place::Avoid {
+                config: Some(&daemon.paths.config),
+                data: &daemon.paths.data,
+                home: home.as_deref(),
+            };
+            place::checked_default(&path, &avoid, "path").map_err(invalid)?;
+            // The folder each project would get must keep out of that project's repositories.
+            let place = Place::Own(path);
+            let loaded = daemon.projects.lock().unwrap().registry().load_all()?;
+            for project in &loaded.projects {
+                let folder = place.resolve(
+                    &project.name,
+                    &project.folder,
+                    avoid.data,
+                    home.as_deref(),
+                    "path",
+                );
+                let repositories: Vec<_> = project
+                    .repositories
+                    .iter()
+                    .map(|repository| project.folder.join(&repository.path))
+                    .collect();
+                folder
+                    .and_then(|folder| place::allowed(&folder, &avoid, &repositories, "path"))
+                    .map_err(|why| invalid(format!("{why} (for the project {})", project.name)))?;
+            }
+            place
         }
         _ => {
             return Err(Failure::new("invalid-params", "place: data, beside or own"));
