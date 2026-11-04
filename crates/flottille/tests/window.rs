@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 use common::User;
 use common::mcp::Mcp;
 use flottille_core::workspace::StepState;
-use flottille_ui::AgentState;
 use flottille_ui::omarchy::Environment;
 use flottille_ui::state::icon_id;
+use flottille_ui::{AgentState, Icon};
 use flottille_window::Shell;
 use flottille_window::actions::Changes;
 use flottille_window::composer::{Choice, Composer, Menu, PlaceChoice};
@@ -6646,6 +6646,15 @@ fn stop_during_a_turn_cancels_it_and_the_next_message_is_taken(cx: &mut TestAppC
     // Stop fades in, in Send's place.
     settle(cx);
     cx.update(|window, _| assert!(window.try_find("reply-stop").is_some(), "Stop is offered"));
+    cx.update(|window, _| {
+        assert!(
+            window
+                .within("reply-stop")
+                .try_find(Icon::Stop.glyph_id())
+                .is_some(),
+            "the composer's Stop draws the filled square"
+        )
+    });
     cx.update(|window, cx| window.click("reply-stop", cx));
     until(&shell, cx, "the turn ends", |cx| {
         !reply.read_with(cx, |r, _| r.is_running())

@@ -244,7 +244,14 @@ impl RenderOnce for Button {
                 ButtonKind::Round => 14.,
                 _ => 14.,
             };
-            button = button.child(icon(glyph).size(px(size)).text_color(ink_now).relative());
+            button = button.child(
+                icon(glyph)
+                    .id(glyph.glyph_id())
+                    .size(px(size * glyph.scale()))
+                    .text_color(ink_now)
+                    .relative()
+                    .test_support(),
+            );
         }
         if let Some(label) = label {
             button = button.child(div().relative().child(label));
