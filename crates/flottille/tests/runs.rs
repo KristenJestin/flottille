@@ -1153,6 +1153,30 @@ fn the_address_is_masked() {
 }
 
 #[test]
+fn a_restarted_server_still_tells_its_agent_when_ready() {
+    let user = User::with_fake_agent().with_fake_escalation();
+    let (_, mcp, workspace) = session(&user);
+    with_tasks(
+        &user,
+        &workspace,
+        "\n[tasks.web]\nline = \"./booting.sh\"\nserve = true\nready = { line = \"ready in\" }\n",
+        &[BOOTING],
+    );
+    let first = run_id(&ok(
+        mcp.call("run", json!({"task": "web", "notify": "ready"}))
+    ));
+
+    let new = restarted(&user, &first);
+
+    let second = new["run"].as_str().unwrap().to_owned();
+    let prompt = prompted(&user, &["[flottille:command-ready]", &second]);
+    assert!(
+        prompt.contains(&format!("run {second}: web is ready")),
+        "{prompt}"
+    );
+}
+
+#[test]
 fn a_probe_s_children_are_killed_when_the_run_ends() {
     let user = User::with_fake_agent();
     let (_, mcp, workspace) = session(&user);

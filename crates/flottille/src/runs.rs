@@ -1244,9 +1244,12 @@ pub async fn restart_by_user(
     } else {
         Phase::Waited
     };
+    // The agent that asked to be told when its server is ready is told of the new run's.
     let readying = Readying {
         probe,
-        notify: false,
+        notify: going
+            .as_ref()
+            .is_some_and(|going| going.notify.load(Ordering::SeqCst)),
     };
     if let Err(why) = start(daemon, run, words, env, secret_values, phase, readying) {
         // The stop was the user's and its end was not told: the agent hears of both.
