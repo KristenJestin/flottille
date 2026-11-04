@@ -8,7 +8,7 @@ use std::ffi::OsString;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use flottille_core::command::split_line;
@@ -274,7 +274,11 @@ async fn request(url: &Url) -> std::io::Result<bool> {
             Host::Ipv4(ip) => ServerName::IpAddress(IpAddr::V4(ip).into()),
             Host::Ipv6(ip) => ServerName::IpAddress(IpAddr::V6(ip).into()),
         };
-        let config = tls(is_local).map_err(std::io::Error::other)?;
+        let config = match is_local {
+            true => LOCAL_TLS.clone(),
+            false => TLS.clone(),
+        }
+        .map_err(std::io::Error::other)?;
         let mut stream = tokio_rustls::TlsConnector::from(config)
             .connect(name, stream)
             .await?;
@@ -287,6 +291,10 @@ async fn request(url: &Url) -> std::io::Result<bool> {
     }
     Ok(&answer == b"HTTP/")
 }
+
+/// Built once, the system's certificates read once, at the first probe that needs them.
+static TLS: LazyLock<Result<Arc<ClientConfig>, String>> = LazyLock::new(|| tls(false));
+static LOCAL_TLS: LazyLock<Result<Arc<ClientConfig>, String>> = LazyLock::new(|| tls(true));
 
 /// The TLS of a probe: the system's certificates, or, for a host of this machine only, any
 /// certificate, since a local development server serves one of its own authority (a probe sends
