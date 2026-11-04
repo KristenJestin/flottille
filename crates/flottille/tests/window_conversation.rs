@@ -377,18 +377,22 @@ fn with_a_waiting_message<'a>(
     String,
     &'a mut VisualTestContext,
 ) {
+    let t0 = Instant::now();
     let (shell, page, cx) = open_session(user, lead, cx);
+    eprintln!("DIAG open_session {:?}", t0.elapsed());
     user.call(
         "agent.send",
         json!({"agent": lead, "message": "work a while"}),
     )
     .unwrap();
+    let t0 = Instant::now();
     let reply = shell
         .read_with(cx, |s, _| s.reply_of(lead).cloned())
         .expect("the session has a composer");
     until(&shell, cx, "the turn runs", |cx| {
         reply.read_with(cx, |r, _| r.is_running())
     });
+    eprintln!("DIAG turn runs {:?}", t0.elapsed());
     let delivery = user
         .call("agent.send", json!({"agent": lead, "message": text}))
         .unwrap()["delivery"]
@@ -398,7 +402,9 @@ fn with_a_waiting_message<'a>(
     until(&shell, cx, "the message waits", |cx| {
         queued(&page, cx) == [text]
     });
+    eprintln!("DIAG message waits {:?}", t0.elapsed());
     settle(cx);
+    eprintln!("DIAG settled {:?}", t0.elapsed());
     (shell, page, reply, delivery, cx)
 }
 
@@ -584,10 +590,13 @@ fn send_now_stops_the_turn_and_the_root_receives_that_message_next_before_the_ot
         .as_str()
         .unwrap()
         .to_owned();
+    eprintln!("DIAG second sent {:?}", asked.elapsed());
     until(&shell, cx, "both wait", |cx| queued(&page, cx).len() == 2);
+    eprintln!("DIAG both wait {:?}", asked.elapsed());
     settle(cx);
 
     cx.update(|window, cx| window.click(queued_button(&second, "send-now"), cx));
+    eprintln!("DIAG clicked {:?}", asked.elapsed());
 
     // The long turn is cut short; the next prompt is the second message alone, and the first
     // follows it.
