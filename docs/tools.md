@@ -370,7 +370,11 @@ pending requests.
   it saw, or the run still going) and the delivery, so the agent may be told the same end twice;
   nothing is lost, and the delivery carries the run's id to recognise it. A command the user stops
   while its call still waits says so in that answer (`was stopped by the user`); the agent's own
-  stop says `was stopped`.
+  stop says `was stopped`. A command the user restarts from the window (`run.restart`) is not
+  delivered as stopped: the agent is told, in a `command-ended` delivery of its own for each
+  restart (so also when it was already told the first run's end), that the user restarted it and
+  which run it now is (its own, read with `run_status`); if the stop happened and the new run could
+  not start, the delivery says that instead. The new run's end is delivered like any other.
 - **The user sees them** (`docs/design.md` §10): the session's right rail lists the commands of
   its tree, a project and a session with one running show it in the left sidebar, and the user can
   read a command's output live and stop it (its whole process group, as above); the rail keeps the

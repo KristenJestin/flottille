@@ -802,7 +802,14 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   it is one), how long, its last output line and Stop, then the last five that ended, greyed, with
   how they ended; a click opens the run's drawer (the same on the project page): its command, its
   task, where it runs, who started it (a link to the agent in its session), since when or how it
-  ended, its output, live and following its end, Copy, and Stop while it runs; `Escape` closes it,
+  ended, its output, live and following its end, Copy, Restart (the daemon's `run.restart`: it
+  stops the command if it runs and starts the same line again in the same place; the drawer, and
+  the modal if it is open, keep the old command drawn, Stop and Restart faded, until the new run's
+  row and output arrive and replace it in place; a refusal is one toast) and Stop while it runs; who started it is cut to two lines there; its
+  **Expand** button opens the same command in a large modal over the window (the rest darkened; a
+  click outside, `Escape` or its close button close it and leave the drawer as it was): the
+  header with Restart and Stop, the facts on one or two lines, and the output taking all the
+  height left, following its end; `Escape` closes the drawer,
   and the conversation's line for that run opens the same drawer. A
   project, and a session, with a command running show a small icon in the left tree, so that no
   server is forgotten. The conversation draws a run as one line, its ANSI colours turned into the

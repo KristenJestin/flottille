@@ -3,7 +3,8 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 
-const MASK: &str = "[masked]";
+/// What a secret is replaced by.
+pub const MASK: &str = "[masked]";
 
 /// Parts of a variable's name that say its value is a secret (`PASS` covers `PASSWORD` and
 /// `PASSWD`, `KEY` covers `API_KEY` and `PRIVATE_KEY`).

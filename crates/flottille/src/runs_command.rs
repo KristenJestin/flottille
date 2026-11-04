@@ -20,6 +20,9 @@ pub enum RunsAction {
     },
     /// Stop a running command and everything it started: the agent that ran it is told
     Stop { run: String },
+    /// Run a command again, in the same place: it is stopped first if it runs, and its agent is
+    /// told
+    Restart { run: String },
 }
 
 pub fn run(paths: &Paths, action: RunsAction) -> Result<()> {
@@ -39,6 +42,17 @@ pub fn run(paths: &Paths, action: RunsAction) -> Result<()> {
             match stopped["run"]["agent"].as_str() {
                 Some(_) => println!("Run {run} is {state}; its agent is told it was you."),
                 None => println!("Run {run} is {state}."),
+            }
+        }
+        RunsAction::Restart { run } => {
+            let restarted = client.request("run.restart", json!({"run": run}))?;
+            let new = restarted["run"]["run"].as_str().unwrap_or("?");
+            match restarted["run"]["agent"].as_str() {
+                Some(_) => println!("Run {run} restarted as {new}; its agent is told."),
+                None => println!("Run {run} restarted as {new}."),
+            }
+            if let Some(notice) = restarted["notice"].as_str() {
+                println!("{notice}.");
             }
         }
     }
