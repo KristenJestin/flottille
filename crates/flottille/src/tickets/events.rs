@@ -47,7 +47,7 @@ pub fn target_named(target: &Value) -> String {
 }
 
 /// What the item of `key` is in the project's tracker: its repository (none for Jira) and key.
-fn item_of(project: &Project, key: &Key) -> Option<(String, String)> {
+pub(super) fn item_of(project: &Project, key: &Key) -> Option<(String, String)> {
     match (project.tracker.as_ref()?, key) {
         (ProjectTracker::Github { repository }, Key::Issue(number)) => {
             Some((repository.clone(), number.to_string()))
@@ -267,7 +267,7 @@ pub(super) async fn subscribe(
     };
     // The read now is stored before the subscription opens, unless a round wrote meanwhile.
     let before = crate::items::before_live(daemon, &project.name);
-    let ticket = match super::read(project, &key).await {
+    let ticket = match super::read_known(daemon, project, &key).await {
         Ok(ticket) => ticket,
         Err(problem) => {
             return Outcome::Failed(format!(

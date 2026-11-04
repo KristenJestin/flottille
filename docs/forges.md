@@ -630,7 +630,7 @@ the rounds come: every minute while a window is connected, every five otherwise.
 login starts with `app/` (as `gh` says an app) or ends with `[bot]`, or that `gh` says `is_bot`;
 this is assumed from `gh`'s output, and the maintainer checks it on a real pull request. A
 Bitbucket author is always taken for a person: what says a bot there is not read. **What
-Flottille posted** is marked (below), and `from: people` leaves it out, whichever agent posted it:
+Flottille posted** is recorded (below), and `from: people` leaves it out, whichever agent posted it:
 the user's own comments, written under the same account, wake the subscription.
 
 ### A wake about failed checks is a summary
@@ -661,28 +661,81 @@ The end of each failed job's log is in `forge` `show` of the pull request.
   every line of a log is. A job whose log cannot be read says `no log:` and why, whole.
 - **The details are `forge` `show`**, which gives the end of every failed job's log as before.
 
-## What Flottille posts is marked
+## What Flottille posts is recorded
 
-What an agent posts goes out through the user's own `gh` and `bkt`, so it appears under the user's
-name. Every body and comment Flottille posts for an agent (`forge` `create` body, `comment`,
-`edit` body, `close` and `reopen` comment; `tickets` `create`, `comment` and `edit` body) ends with
-a line of its own, `<!-- flottille -->` (the marker alone when there is no body): an HTML comment,
-which GitHub and Bitbucket do not render. A `forge edit` or `tickets edit` that changes only the
-title posts no text and adds none. On Jira, `acli` takes a plain-text or ADF body and its public
-reference documents no way to attach hidden content to a comment or a description, so the line
-there is visible: `— posted by a Flottille agent`. A Jira description is only written when the
-agent gave one.
+What an agent posts goes out through the user's own `gh`, `bkt` and `acli`, so it appears under
+the user's name, in front of their colleagues. **Nothing of Flottille is added to it**: no marker,
+no footer, on GitHub, Bitbucket (Cloud and Data Center) and Jira. Every body and comment Flottille
+posts for an agent (`forge` `create` body, `comment`, `edit` body, `close` and `reopen` comment;
+`tickets` `create`, `comment` and `edit` body) goes out as the agent wrote it. A `forge edit` or
+`tickets edit` that changes only the title posts no text and records none.
 
-The marker is how a text read back is told from a person's:
+Flottille knows its own posts by what it records when the forge or the tracker took them. The
+store keeps, for each post that succeeded: the project, the forge or tracker (`github`,
+`bitbucket`, `jira`), the repository (the repository's path in the project for a pull request, the
+tracker's repository for a GitHub issue, none for Jira), the pull request's number or the ticket's
+key, whether it is a `comment` or the item's own `body` (its description), the comment's id when
+the forge answered one, a hash of the text and the time. A post that failed is not recorded. The
+record survives a restart of the daemon, and reading a comment back asks the forge nothing more
+than it did.
 
-- `from: people` leaves out a comment that ends with the marker;
+What the three tools answer to a write decides what identifies the comment:
+
+| Write | Answers | Recorded |
+|---|---|---|
+| `gh pr comment`, `gh issue comment` | the comment's link, `…#issuecomment-<id>` | the id |
+| `gh pr create`, `gh issue create` | the item's link | the item: a `body` |
+| `gh pr edit`, `gh issue edit` (with a body) | the item's link | the item: a `body` |
+| `gh pr close`, `gh pr reopen` (with a comment) | nothing that names the comment | the text's hash |
+| `bkt pr comment`, `bkt pr decline` (with a comment) | `✓ Commented on pull request #N`, nothing that names the comment | the text's hash |
+| `bkt pr create`, `bkt pr edit` (with a body) | the pull request's number | the item: a `body` |
+| `acli jira workitem comment create` | nothing read (`--json` is not asked) | the text's hash |
+| `acli jira workitem create`, `edit` (with a body) | the work item's key | the item: a `body` |
+
+A comment read back is known as an agent's by its record:
+
+- with the id the forge gave it, when the record has one (GitHub): the same words under another
+  id are a person's;
+- else by the hash of its text, and a hash record is **one comment's**: the first comment of those
+  words that was not written before the post (the comments are taken oldest first, by the time the
+  forge gives: GitHub's `createdAt`, Bitbucket Cloud's `created_on`, Data Center's `createdDate`).
+  A person's same words, before it or after it, stay a person's. A comment older than the record
+  by more than five minutes (the clocks differ) is not it. Where a read gives no time the first of the
+  words is taken: Jira's `created` (`2026-10-01T12:00:00.000+0000`) is not read as a time, so for
+  Jira the post claims the first comment of its words.
+
+The hash is of the text as a read gives it: masked (the secrets of a text are masked on every
+read, the record hashes the masked text too), whitespace one space, only the first 500 characters
+counting, and the markdown a tracker rewrites gone: code fences, `*` and `` ` `` marks, heading
+marks, list bullets and numbers. Jira's document format keeps the words of what `acli` was given,
+not that markup (`tickets.md`, "Jira's text"), so the same words found again are still found.
+What the hash does not see: a link written `[text](url)`, which Jira may keep as its text alone,
+and any other rewriting of the words themselves; such a comment is shown as a person's.
+
+Bitbucket's closing comment is the same record: Cloud's reason a pull request was declined with
+and Data Center's comment of the closer are matched as any comment, the reason by its hash, the
+comment by the id it shares with the one among the comments.
+
+The limit of the hash: the user's own comment, written under the same account, that says exactly
+what an agent posted, and was written after it and before the agent's own is read, can be taken
+for the agent's, the agent's then being the person's. A comment read back in the instant between
+the forge taking it and the daemon recording it (milliseconds) is a person's for that read. A
+person's comment that ends with the old marker below is taken for an agent's. Both are accepted.
+
+An item's own text is known by the item and by its words: a ticket whose description an agent
+created or edited is `description_by_agent` while it still reads as the agent left it; a person
+editing it afterwards makes it the person's.
+
+It is how a text read back is told from a person's:
+
+- `from: people` leaves out a comment known as an agent's;
 - a delivery, `forge show` and `tickets show` say `(posted by an agent)` after the author of such a
-  comment, and show its text without the marker.
+  comment.
 
-Assumed, and checked by the maintainer on a real pull request: that GitHub and Bitbucket return the
-HTML comment in the comment's raw text (`gh`'s `body`, Cloud's `content.raw`, Data Center's `text`).
-A person's comment that ends with the marker is taken for an agent's and dropped by `from: people`,
-which is accepted. A comment posted before the marker existed counts as a person's.
+**The old mark is still read.** Before the record, Flottille ended its posts with a line of its
+own, `<!-- flottille -->` on GitHub and Bitbucket and the visible `— posted by a Flottille agent`
+on Jira. A comment or a description that still ends with either is an agent's, and shown without
+it, so that the history posted before keeps reading right. Nothing writes it any more.
 
 ## Tickets
 

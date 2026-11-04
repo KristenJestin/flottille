@@ -35,7 +35,7 @@
 //! The writes answer as `gh` does when they work: `pr create` prints the new pull request's URL
 //! (numbered `created`, 1 by default), `pr merge` and `run rerun` print nothing, and `run list`
 //! prints `runs` of the repository (`{"runs": {"acme/app": [{"databaseId": 7, …}]}}`), `[]`
-//! without. `pr comment`, `pr edit`, `pr close` and `pr reopen` print the pull request's URL, of one the script holds.
+//! without. `pr comment` prints the new comment's URL (`…/pull/N#issuecomment-<commented>`, 1 by default), `pr edit`, `pr close` and `pr reopen` the pull request's URL, of one the script holds.
 //! With `merge_methods` (`{"acme/app": ["merge", "rebase"]}`), `pr merge` fails for a method
 //! (`--squash`, `--merge`, `--rebase`) the repository does not allow, as GitHub refuses it, and
 //! `repo view <repository> --json …Allowed` says them (every one without). `pr view` gives a pull
@@ -83,7 +83,7 @@
 //! title or body hold its words (a simplification of GitHub's search), newest first, at most
 //! `--limit`. `issue create` prints the new issue's URL (numbered `created_issue`, 1 by default);
 //! `issue comment`, `edit`, `close` and `reopen` need an issue the script holds and print its
-//! URL; `issue close --reason` takes `completed` or `not planned` only.
+//! URL (`issue comment`: the comment's, `…#issuecomment-<commented>`); `issue close --reason` takes `completed` or `not planned` only.
 //!
 //! The boards of GitHub Projects: an issue of the script holds `projectItems` (`gh issue view
 //! --json projectItems`: `[{"id": "PVTI_1", "project": {"id": "PVT_a", "title": "Roadmap"},
@@ -402,7 +402,13 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                     number.to_owned()
                 }
             };
-            println!("https://github.com/{repository}/issues/{number}");
+            if words[1] == "comment" {
+                // As `gh issue comment` does: the comment's own link.
+                let id = script["commented"].as_u64().unwrap_or(1);
+                println!("https://github.com/{repository}/issues/{number}#issuecomment-{id}");
+            } else {
+                println!("https://github.com/{repository}/issues/{number}");
+            }
             0
         }
         ["pr", "comment" | "edit" | "close" | "reopen", number, ..] => {
@@ -423,7 +429,13 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 eprintln!("no pull requests found for #{number}");
                 return 1;
             }
-            println!("https://github.com/{repository}/pull/{number}");
+            if words[1] == "comment" {
+                // As `gh pr comment` does: the comment's own link.
+                let id = script["commented"].as_u64().unwrap_or(1);
+                println!("https://github.com/{repository}/pull/{number}#issuecomment-{id}");
+            } else {
+                println!("https://github.com/{repository}/pull/{number}");
+            }
             0
         }
         ["repo", "view", asked, ..] => {
