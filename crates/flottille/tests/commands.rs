@@ -451,6 +451,62 @@ fn forge_write_creates_a_pull_request_with_the_fake_gh_once_allowed() {
     assert!(!calls.iter().any(|call| call.contains("auth token")));
 }
 
+#[test]
+fn a_pull_request_is_opened_from_the_branch_the_worktree_is_on() {
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user);
+    let worktree = user.path("data/flottille/workspaces/app/login");
+    user.git(&worktree, &["switch", "--quiet", "-c", "feature/x"]);
+    let mcp = plain_agent(&user);
+
+    let answer = write(
+        &user,
+        &mcp,
+        json!({"action": "create", "repository": ".", "title": "Add the login page"}),
+    );
+
+    assert!(!answer.error, "{}", answer.text);
+    let calls = gh_calls(&user);
+    let created = calls.iter().find(|c| c.starts_with("pr create")).unwrap();
+    assert!(
+        created.starts_with("pr create -R github.com/acme/app --head feature/x --base main "),
+        "{created}"
+    );
+    let shown = user
+        .call("workspace.show", json!({"project": "app", "name": "login"}))
+        .unwrap();
+    assert_eq!(shown["branch"], "feature/x");
+}
+
+#[test]
+fn pull_request_create_on_a_detached_head_is_refused() {
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user);
+    let worktree = user.path("data/flottille/workspaces/app/login");
+    user.git(&worktree, &["switch", "--quiet", "--detach"]);
+    let hash = user
+        .git_output(&worktree, &["rev-parse", "--short", "HEAD"])
+        .trim()
+        .to_owned();
+    let mcp = plain_agent(&user);
+
+    let answer = write(
+        &user,
+        &mcp,
+        json!({"action": "create", "repository": ".", "title": "Add the login page"}),
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains(&format!(
+            "refused: . is on no branch (detached at {hash}): switch to a branch first"
+        )),
+        "{}",
+        answer.text
+    );
+    assert_eq!(creates(&user), 0);
+}
+
 /// A hook that leaves a mark in `marks` each time it runs.
 fn marking_hook(user: &User, folder: &Path, name: &str) {
     use std::os::unix::fs::PermissionsExt;

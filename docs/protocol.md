@@ -489,7 +489,8 @@ cannot be used.
 `{"project", "name", "repositories"?, "branch"?, "bases"?, "offline"?, "ticket"?}`. Fetches the
 base of each repository, writes the workspace, makes the worktrees and answers the workspace; the
 rest of the setup goes on in the background. `repositories` is the project's default set when left
-out, `branch` is `<branch prefix>/<name>`, `bases` (`{"api": "main"}`) gives a repository it takes
+out, `branch` is `<branch prefix>/<name>` when left out, and a branch that exists already is checked
+out rather than started (`docs/workspaces.md`), `bases` (`{"api": "main"}`) gives a repository it takes
 the branch it starts from in place of its base rule, `offline: true` fetches nothing, and `ticket` (`#123`, `123`
 or a Jira key) links the workspace to a ticket (`tickets.md`); the workspace's `ticket` says it, in
 every answer that shows a workspace, `null` when it has none.
@@ -497,7 +498,7 @@ every answer that shows a workspace, `null` when it has none.
 `refused`, with nothing written nor made, when the name is not one, the ticket is not one, a
 repository is not the project's, a base is chosen for a repository it does not take or is not a
 branch name, the branch is not one git accepts, the project has a workspace of that name, the folder
-exists, the branch exists in a repository, or a repository has none of its base branches, neither
+exists, the branch is checked out in a checkout of a repository (naming it), or a repository has none of its base branches, neither
 on its remote nor itself. A fetch is never a requirement: a repository with no remote, whose fetch
 fails, or whose remote has none of its base branches starts from the first of them it has itself,
 and its base's `note` says so. A worktree that cannot be made is not a refusal: the
@@ -515,7 +516,8 @@ committed them or they are not committed yet, new files git does not ignore coun
 binary file, a link, anything but a regular file, or a file over 8 MiB counts no line; the files a
 setup `copy` step wrote and that are still as it copied them are not changes, and are left out). At most
 1000 new files and 16 MiB of them are read: past that the count stops and `capped` is `true`, the
-real count being higher. It writes nothing, not even git's index. `changes` is `null` when git
+real count being higher. It writes nothing, not even git's index, but the workspace's branch when its worktrees moved to
+another (`workspace.changed`, `docs/workspaces.md`, "The branch"). `changes` is `null` when git
 cannot read the worktree (not made yet, or gone). `workspace.list` leaves it out: it runs no git.
 Each repository also has `branch`, the branch its worktree is on (`null` when on none), `ahead`,
 its commits since its base commit, and `uncommitted`, how many files `git status` shows (the links
@@ -562,12 +564,12 @@ often it asks.
   "read_at": 1792843730808,
   "problem": null,
   "repositories": [
-    {"path": "api", "remote": "origin", "forge": "github", "repository": "acme/api", "note": null,
+    {"path": "api", "branch": "app/login", "remote": "origin", "forge": "github", "repository": "acme/api", "note": null,
      "pull_request": {"number": 12, "title": "Add the login page", "state": "open", "head": "app/login",
        "base": "develop", "mergeable": true, "url": "https://github.com/acme/api/pull/12", "review": "approved",
        "checks": [{"name": "build", "state": "passing"}], "mark": "passing", "comments": 2},
      "error": null},
-    {"path": "web", "remote": "origin", "forge": null, "repository": null,
+    {"path": "web", "branch": "app/login", "remote": "origin", "forge": null, "repository": null,
      "note": "no forge set for this repository: choose it in the project's Settings (the window), or write its `forge` in the project's file; Flottille never guesses it", "pull_request": null, "error": null}
   ]
 }
@@ -575,7 +577,7 @@ often it asks.
 
 `problem` says, with what to do, why a forge cannot be read (`gh` or `bkt` missing, not signed in;
 several are joined by `; `), else `null`; the repositories it stops have no `pull_request`. For
-each repository, `forge` is `github`, `bitbucket` or `null` (then `note` says why), `repository`
+each repository, `branch` is the one it was read for, the branch its worktree is on (`docs/workspaces.md`, "The branch"), `forge` is `github`, `bitbucket` or `null` (then `note` says why), `repository`
 is `owner/name` (a Bitbucket Cloud workspace and name, or a Data Center project key and name),
 `pull_request` is `null` when its branch has none, and `error` says why its forge could not be
 read. A pull request's `state` is `open`, `draft`, `merged` or `closed`; `head` is its branch and `base`

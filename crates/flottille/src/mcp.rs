@@ -474,10 +474,12 @@ const SERVED: [Definition; 28] = [
         name: "workspace",
         title: "The project's workspaces",
         description: "The project's workspaces. list and show read them. A root's writes, \
-            judged: create makes one (worktrees, then setup, judged as a run of each step), \
-            prepare resumes a failed setup, link_ticket links a ticket (null unlinks); remove, \
-            always held for the user, its request saying what would be lost, never the \
-            workspace you work in. name: yours when left out, but for create and remove. {\"action\": \"create\", \
+            judged: create makes one (worktrees, then setup, judged as a run of each step; to \
+            resume a branch, name it), prepare resumes a failed setup, link_ticket links a \
+            ticket (null unlinks); remove, always held for the user, its request saying what \
+            would be lost, never the workspace you work in. name: yours when left out, but for \
+            create and remove. To work on another branch in this workspace, switch with git: the \
+            workspace follows the branch its worktrees are on. {\"action\": \"create\", \
             \"name\": \"login\"}",
         read_only: false,
         idempotent: false,
@@ -487,6 +489,7 @@ const SERVED: [Definition; 28] = [
                 "action": {"type": "string", "enum": ["list", "show", "create", "prepare", "link_ticket", "remove"]},
                 "name": {"type": "string"},
                 "repositories": {"type": "array", "items": {"type": "string"}, "description": "create: by path."},
+                "branch": {"type": "string", "description": "create: <branch prefix>/<name> when left out; an existing branch is checked out."},
                 "ticket": {"type": ["string", "null"], "description": "#123 or ABC-123."}
             }, "required": ["action"], "additionalProperties": false})
         },

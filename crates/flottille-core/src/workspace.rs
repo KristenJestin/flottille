@@ -39,6 +39,10 @@ pub struct Worktree {
     /// in the workspace folder.
     pub path: String,
     pub base: Base,
+    /// Its branch existed when the workspace was made, there or only on its remote: the worktree
+    /// checks it out instead of starting it from the base (`docs/workspaces.md`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resumed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

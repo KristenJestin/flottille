@@ -98,6 +98,8 @@ struct WorkspaceCall {
     /// The workspace; for all but create, the agent's own when left out.
     name: Option<String>,
     repositories: Option<Vec<String>>,
+    /// create: the branch, `<branch prefix>/<name>` when left out; an existing one is resumed.
+    branch: Option<String>,
     /// link_ticket: `null` unlinks.
     #[serde(default, deserialize_with = "present")]
     ticket: Option<Option<String>>,
@@ -1210,7 +1212,7 @@ async fn performed(
                 "create" => {
                     let created = answer(
                         "workspace.create",
-                        json!({"project": name, "name": call.name,
+                        json!({"project": name, "name": call.name, "branch": call.branch,
                             "repositories": call.repositories, "ticket": call.ticket.flatten()}),
                     )
                     .await?;
@@ -1447,7 +1449,13 @@ fn workspace_says(
         "list" => Ok(Vec::new()),
         "create" => {
             let name = named(&call.name, "workspace", action, "login")?;
-            let mut says = create_says(daemon, project, name, &call.repositories)?;
+            let mut says = create_says(
+                daemon,
+                project,
+                name,
+                &call.repositories,
+                call.branch.as_deref(),
+            )?;
             if let Some(Some(ticket)) = &call.ticket {
                 let key = crate::tickets::accepted(project, ticket)
                     .map_err(|why| Outcome::Refused(format!("refused: {why}")))?;
@@ -1531,6 +1539,7 @@ fn create_says(
     project: &Project,
     name: &str,
     repositories: &Option<Vec<String>>,
+    branch: Option<&str>,
 ) -> Result<Vec<String>, Outcome> {
     if !flottille_core::project::valid_name(name) {
         return Err(Outcome::Refused(format!(
@@ -1556,9 +1565,12 @@ fn create_says(
         Some(paths) => format!("with the repositories {}", paths.join(", ")),
         None => "with the project's default repositories".into(),
     };
+    let branch = branch.map_or_else(
+        || format!("{}/{name}", project.branch_prefix),
+        str::to_owned,
+    );
     let mut says = vec![format!(
-        "Create the workspace {name} on the branch {}/{name}, {taken}",
-        project.branch_prefix
+        "Create the workspace {name} on the branch {branch}, {taken}"
     )];
     match project.setup.is_empty() {
         true => says.push("The project has no setup: nothing else runs.".into()),
@@ -1590,7 +1602,7 @@ fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<Strin
             let project = own(daemon, grant)?;
             let repositories: Option<Vec<String>> =
                 serde_json::from_value(args["repositories"].clone()).unwrap_or_default();
-            let mut says = create_says(daemon, &project, name, &repositories)?;
+            let mut says = create_says(daemon, &project, name, &repositories, None)?;
             let whose = match root {
                 true => "a session of the user's",
                 false => "a child",

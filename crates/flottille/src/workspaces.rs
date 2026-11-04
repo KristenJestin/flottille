@@ -193,7 +193,7 @@ fn find(daemon: &Daemon, asked: &WorkspaceName) -> Result<Workspace, Failure> {
 /// `workspace.show`: the workspace, and for each of its repositories the lines changed, the
 /// branch its worktree is on, its commits ahead of its base and its files not committed.
 async fn show(daemon: &Daemon, asked: WorkspaceName) -> Answer {
-    let workspace = find(daemon, &asked)?;
+    let (workspace, _) = follow(daemon, find(daemon, &asked)?).await;
     let mut shown = workspace.to_json();
     if let Some(repositories) = shown["repositories"].as_array_mut() {
         for (repository, worktree) in repositories.iter_mut().zip(&workspace.repositories) {
@@ -424,6 +424,92 @@ fn with(mut data: serde_json::Map<String, Value>, more: Value) -> Value {
     Value::Object(data)
 }
 
+// The branch git says.
+
+/// Where a repository's worktree is now.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Head {
+    Branch(String),
+    /// Detached, at this short hash.
+    Detached(String),
+    /// Its worktree is not made, or git could not say.
+    Unknown,
+}
+
+impl Head {
+    /// The branch its worktree is on, the workspace's recorded one where it is on none.
+    pub fn branch_or<'a>(&'a self, recorded: &'a str) -> &'a str {
+        match self {
+            Head::Branch(branch) => branch,
+            _ => recorded,
+        }
+    }
+}
+
+/// Where each repository's worktree is now (`git symbolic-ref`), in the workspace's order.
+pub async fn heads(workspace: &Workspace) -> Vec<Head> {
+    let mut heads = Vec::new();
+    for worktree in &workspace.repositories {
+        let folder = workspace.folder_of(&worktree.path);
+        // Read only where the worktree is made: git would answer for the one around it.
+        if std::fs::symlink_metadata(folder.join(".git")).is_err() {
+            heads.push(Head::Unknown);
+            continue;
+        }
+        let symbolic = ["symbolic-ref", "--quiet", "--short", "HEAD"];
+        let head = match git::run(&folder, &symbolic, Class::Read).await {
+            Ok(on) if on.success => Head::Branch(on.stdout.trim().to_owned()),
+            Ok(_) => {
+                match git::output(&folder, &["rev-parse", "--short", "HEAD"], Class::Read).await {
+                    Ok(hash) => Head::Detached(hash.trim().to_owned()),
+                    Err(_) => Head::Unknown,
+                }
+            }
+            Err(_) => Head::Unknown,
+        };
+        heads.push(head);
+    }
+    heads
+}
+
+/// The workspace as git says it now, with where each repository's worktree is: when every
+/// worktree made is on one branch other than the recorded one (a `git switch` in it), the record
+/// takes that branch and `workspace.changed` says so. Repositories on different branches leave
+/// the record as it is; each is then read and written for its own.
+pub async fn follow(daemon: &Daemon, mut workspace: Workspace) -> (Workspace, Vec<Head>) {
+    let heads = heads(&workspace).await;
+    let mut made = heads.iter().filter(|head| **head != Head::Unknown);
+    let first = made.next();
+    if let Some(first @ Head::Branch(branch)) = first
+        && *branch != workspace.branch
+        && made.all(|head| head == first)
+    {
+        let event = with(
+            about(&workspace),
+            json!({"branch": branch, "was": workspace.branch}),
+        );
+        let written = daemon.write(|store| {
+            let event =
+                store.set_workspace_branch(workspace.id, branch, ("workspace.changed", event))?;
+            Ok(((), event))
+        });
+        match written {
+            Ok(()) => workspace.branch = branch.clone(),
+            Err(error) => eprintln!("flottille daemon: workspace.changed: {error}"),
+        }
+    }
+    (workspace, heads)
+}
+
+/// Each repository's branch: the one its worktree is on now, the recorded one where it is on
+/// none.
+pub fn branches(workspace: &Workspace, heads: &[Head]) -> Vec<String> {
+    heads
+        .iter()
+        .map(|head| head.branch_or(&workspace.branch).to_owned())
+        .collect()
+}
+
 // Creation.
 
 async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
@@ -447,6 +533,7 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
         .map(|text| crate::tickets::accepted(&project, text).map(|key| key.text()))
         .transpose()
         .map_err(Failure::refused)?;
+    let named = asked.branch.is_some();
     let branch = asked
         .branch
         .unwrap_or_else(|| format!("{}/{}", project.branch_prefix, asked.name));
@@ -484,27 +571,29 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
             None => repository.base.clone(),
         };
         let base = up_to_date_base(&main, path, &repository.remote, &rule, asked.offline).await?;
-        let exists = git::run(
-            &main,
-            &[
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                "--end-of-options",
-                &format!("refs/heads/{branch}"),
-            ],
-            Class::Read,
-        )
-        .await
-        .map_err(Failure::refused)?;
-        if exists.success {
+        let local = commit_of(&main, &format!("refs/heads/{branch}"))
+            .await?
+            .is_some();
+        if local && let Some(elsewhere) = checked_out_in(&main, &branch).await? {
+            return Err(Failure::refused(format!(
+                "the branch {branch} is checked out in {elsewhere} for {path}: a workspace \
+                 cannot take it while it is; switch that checkout to another branch, or choose \
+                 another branch"
+            )));
+        }
+        // Only a branch the user names is resumed: under the default name, a branch already
+        // there is a leftover of an earlier workspace, never work to go on with.
+        if local && !named {
             return Err(Failure::refused(format!(
                 "the branch {branch} already exists in {path}: choose another name or branch"
             )));
         }
+        let resumed = named
+            && (local || on_remote(&main, &repository.remote, &branch, asked.offline).await?);
         repositories.push(Worktree {
             path: path.clone(),
             base,
+            resumed,
         });
     }
 
@@ -607,6 +696,79 @@ async fn check_branch(dir: &Path, branch: &str) -> Result<(), Failure> {
         )));
     }
     Ok(())
+}
+
+/// The checkout of the repository `branch` is on, the main one or another worktree; none when it
+/// is on none.
+async fn checked_out_in(main: &Path, branch: &str) -> Result<Option<String>, Failure> {
+    let list = git::output(main, &["worktree", "list", "--porcelain"], Class::Read)
+        .await
+        .map_err(Failure::refused)?;
+    let wanted = format!("branch refs/heads/{branch}");
+    Ok(list.split("\n\n").find_map(|entry| {
+        let mut lines = entry.lines();
+        let folder = lines.next()?.strip_prefix("worktree ")?;
+        lines.any(|line| line == wanted).then(|| folder.to_owned())
+    }))
+}
+
+/// Whether the remote has `branch`, fetched into its tracking ref when it does. Offline, or when
+/// the remote cannot be listed, its tracking ref as last fetched says it.
+async fn on_remote(
+    main: &Path,
+    remote: &str,
+    branch: &str,
+    offline: bool,
+) -> Result<bool, Failure> {
+    let tracking = format!("refs/remotes/{remote}/{branch}");
+    let has_remote = git::run(
+        main,
+        &["remote", "get-url", "--end-of-options", remote],
+        Class::Read,
+    )
+    .await
+    .map_err(Failure::refused)?
+    .success;
+    if !has_remote {
+        return Ok(false);
+    }
+    let listed = match offline {
+        true => Err(String::new()),
+        false => {
+            let head = format!("refs/heads/{branch}");
+            git::output(
+                main,
+                &["ls-remote", "--heads", "--end-of-options", remote, &head],
+                Class::Read,
+            )
+            .await
+        }
+    };
+    match listed {
+        Ok(listed) if listed.trim().is_empty() => Ok(false),
+        Ok(_) => {
+            let refspec = format!("+refs/heads/{branch}:{tracking}");
+            let fetch = [
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--end-of-options",
+                remote,
+                &refspec,
+            ];
+            git::output(main, &fetch, Class::Read)
+                .await
+                .map_err(|reason| {
+                    Failure::refused(format!(
+                        "{branch} is on {remote}, and it could not be fetched ({}): nothing was \
+                         created",
+                        reason.split_whitespace().collect::<Vec<_>>().join(" ")
+                    ))
+                })?;
+            Ok(true)
+        }
+        Err(_) => Ok(commit_of(main, &tracking).await?.is_some()),
+    }
 }
 
 fn main_checkout(project_folder: &Path, repository: &str) -> PathBuf {
@@ -1087,6 +1249,11 @@ async fn make_worktree(workspace: &Workspace, repository: &str) -> Result<(), St
     // Clears what a folder removed by hand left registered.
     git::output(&main, &["worktree", "prune"], Class::Work).await?;
     let branch = &workspace.branch;
+    let worktree = workspace
+        .repositories
+        .iter()
+        .find(|r| r.path == repository)
+        .expect("a worktree step is for a repository of the workspace");
     let exists = git::run(
         &main,
         &[
@@ -1116,14 +1283,27 @@ async fn make_worktree(workspace: &Workspace, repository: &str) -> Result<(), St
             Class::Work,
         )
         .await?;
+    } else if worktree.resumed {
+        // Only the remote has it: a local branch tracking the remote's.
+        let tracking = format!("refs/remotes/{}/{branch}", worktree.base.remote);
+        git::output(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "--track",
+                "-b",
+                branch,
+                "--end-of-options",
+                &target,
+                &tracking,
+            ],
+            Class::Work,
+        )
+        .await?;
     } else {
-        let base = &workspace
-            .repositories
-            .iter()
-            .find(|r| r.path == repository)
-            .expect("a worktree step is for a repository of the workspace")
-            .base
-            .commit;
+        let base = &worktree.base.commit;
         git::output(
             &main,
             &[
@@ -1615,8 +1795,18 @@ async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checke
     };
     let mut ours = Vec::new();
     let mut read = None;
+    let heads = heads(workspace).await;
     for worktree in &made {
         let dir = workspace.folder_of(&worktree.path);
+        let head = workspace
+            .repositories
+            .iter()
+            .position(|r| r.path == worktree.path)
+            .map_or(&Head::Unknown, |at| &heads[at]);
+        let on = match head {
+            Head::Detached(hash) => format!("on no branch (detached at {hash})"),
+            head => format!("on its branch {}", head.branch_or(&workspace.branch)),
+        };
         let status = git::output(
             &dir,
             &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
@@ -1653,7 +1843,7 @@ async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checke
         let remotes = git::output(&dir, &["remote"], Class::Read)
             .await
             .map_err(|error| cannot_check(&worktree.path, &error))?;
-        let exclude = format!("--exclude={}", workspace.branch);
+        let exclude = format!("--exclude={}", head.branch_or(&workspace.branch));
         let (elsewhere, nowhere): (&[&str], _) = match remotes.trim().is_empty() {
             true => (&[&exclude, "--branches"], "no other branch"),
             false => (&["--remotes"], "no remote"),
@@ -1689,11 +1879,39 @@ async fn checked<'a>(daemon: &Daemon, workspace: &'a Workspace) -> Result<Checke
         }
         if !commits.is_empty() && !merged {
             problems.push(format!(
-                "{} has commits on {nowhere}, on its branch {}: {}",
+                "{} has commits on {nowhere}, {on}: {}",
                 worktree.path,
-                workspace.branch,
                 commits.join(", ")
             ));
+        }
+        // The branch recorded, left by a switch, may still hold work of its own.
+        let recorded = format!("refs/heads/{}", workspace.branch);
+        if head.branch_or(&workspace.branch) != workspace.branch
+            && commit_of(&dir, &recorded).await.ok().flatten().is_some()
+        {
+            let exclude = format!("--exclude={}", workspace.branch);
+            let elsewhere: &[&str] = match remotes.trim().is_empty() {
+                true => &[&exclude, "--branches"],
+                false => &["--remotes"],
+            };
+            let log = [
+                &["log", "--format=%h %s", &recorded, "--not"][..],
+                elsewhere,
+                &[base],
+            ]
+            .concat();
+            let left = git::output(&dir, &log, Class::Read)
+                .await
+                .map_err(|error| cannot_check(&worktree.path, &error))?;
+            let left: Vec<&str> = left.lines().filter(|line| !line.is_empty()).collect();
+            if !left.is_empty() {
+                problems.push(format!(
+                    "{} has commits on {nowhere}, on its branch {}: {}",
+                    worktree.path,
+                    workspace.branch,
+                    left.join(", ")
+                ));
+            }
         }
     }
     Ok(Checked {
@@ -1833,6 +2051,10 @@ async fn landed(daemon: &Daemon, workspace: &Workspace) -> Vec<Value> {
     let mut fates = Vec::new();
     let mut unsure = Vec::new();
     for worktree in &workspace.repositories {
+        // A branch it resumed was there before it: the user's, never deleted with it.
+        if worktree.resumed {
+            continue;
+        }
         let main = main_checkout(&workspace.project_folder, &worktree.path);
         let exists = ["show-ref", "--verify", "--quiet", &local];
         if git::output(&main, &exists, Class::Read).await.is_err() {
@@ -1933,7 +2155,8 @@ async fn landed(daemon: &Daemon, workspace: &Workspace) -> Vec<Value> {
 async fn forge_read(daemon: &Daemon, workspace: &Workspace) -> forge::Read {
     let project = projects::load_project(daemon, &workspace.project).ok();
     let checkouts = forge::repositories_of(workspace, project.as_ref());
-    forge::read(&checkouts, &workspace.branch, false).await
+    let branches = branches(workspace, &heads(workspace).await);
+    forge::read(&checkouts, &branches, false).await
 }
 
 /// The pull request of the repository at `path` when the forge says it is merged.
