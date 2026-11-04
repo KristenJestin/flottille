@@ -1,9 +1,11 @@
 # Extensions
 
-**Status: a proposal, S1 built.** S1 (#332) built the declaration and the registry, activation
-global and per project, `extensions.toml`, `extension.list`/`set`, the data space and the scan that
-the core names no extension, and Specs in the store with its statuses, lock, three modes and
-tickets, from the command line; the rest is a proposal. Written from a discussion with the maintainer
+**Status: a proposal, S1 and S2 built.** S1 (#332) built the declaration and the registry,
+activation global and per project, `extensions.toml`, `extension.list`/`set`, the data space and
+the scan that the core names no extension, and Specs in the store with its statuses, lock, three
+modes and tickets, from the command line. S2 (#333) built the tools an extension gives and the
+Action trigger, and writing a spec: the `spec` tool, "New spec" and "Write the spec", questions and
+answers, from the command line and the protocol; the rest is a proposal. Written from a discussion with the maintainer
 (November 2026), and settled with their answers of 2026-11-03 ("Decisions taken"). No question is
 left open but the one in "Open questions".
 
@@ -142,11 +144,24 @@ lists while the extension is active, through the path a forge or a tracker takes
 gate like any other; the extension's own refusals (a lock, a status) are the gate's, in every
 mode, Full included.
 
+As built: a tool is a `Tool` of the declaration, its MCP definition, `given` (who gets it, `To::Roots`
+for now, and the actions of its `action` argument each may call), a `gate` function (the
+extension's refusal of a call, or none) and a `call` function. `agents::tools_of` adds the tools of
+the extensions active in the project; the server serves them as its own; the gate refuses an
+action the caller is not given and what the extension's `gate` refuses before any mode is looked
+at, and lets the rest pass.
+
 ### Triggers (Specs)
 
 The extension names what it reacts to and the handler that acts. The core dispatches; the
 handler writes the extension's data, sends a delivery, starts a session or a child, or runs a
 call.
+
+As built, the Action trigger is the declaration's `actions`: each is answered by the extension's
+method `<prefix>.<action>`, reached by its name or through `extension.act {name, action, …}`. The
+frame gives the handlers two acts of the core: `start_session` (a `lead` for the user in the
+project's main checkout, started as `agent_launch` starts a root, its first message the
+extension's) and `tell` (a delivery of the extension's kind, `[flottille:<name>]`).
 
 | Trigger | When the core fires it | First needed by |
 |---|---|---|
@@ -449,7 +464,7 @@ development on its own at Ready.
 | Issue | What of Specs | What of the frame |
 |---|---|---|
 | S1 (built) | the spec in the store, statuses, the lock, the three modes, the link to 0..n tickets, the CLI | the declaration and the registry, activation global and per project, `extensions.toml`, `extension.list`/`set`, the data space, the scan that the core names no extension |
-| S2 | the `spec` tool for a root, "New spec" and "Write the spec", questions and answers, Ready and Draft | tools given by an extension, the Action trigger |
+| S2 (built) | the `spec` tool for a root, "New spec" and "Write the spec", questions and answers, Ready and Draft | tools given by an extension, the Action trigger |
 | S3 | the project's Specs tab, a spec's page, its settings tab | screens: a project tab, a page, an action on a ticket's row, the renderer of an extension's tab and of its project section |
 | S4 | the ticket side of the modes | Core event triggers (a ticket changed) |
 | S5 | launching the development, the statuses read from what Flottille sees | Core event triggers (an agent ended, a pull request opened or merged) |

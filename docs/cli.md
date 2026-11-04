@@ -226,13 +226,39 @@ Turns it off for all projects, or with `--project P` in that project alone. What
 settings, its data) stays, and the projects' switches stay as they are: turned on again, it comes
 back as it was.
 
-### `flottille spec new <project> --title T [--mode alone|internal|ticket] [--ticket K]...`
+### `flottille spec new <project> (--title T | --idea I) [--mode alone|internal|ticket] [--ticket K]...`
 
 Starts a spec, a Draft, in the project's language (`docs/extensions.md`, "Specs"). The mode is
 `alone` (no ticket) without `--ticket` and `internal` (tickets read, never written) with;
 `ticket` (the ticket is the spec) is chosen. `internal` and `ticket` cover one ticket at least,
 each written as the project's tracker takes it (`docs/tickets.md`); a ticket that another spec
 covers is refused, naming that spec. `--json` prints the spec.
+
+With `--idea`, what to build in a sentence ("New spec"), a `lead` session is started for you in
+the project's main checkout to write it: it reads the code, asks you the choices only you can make
+and writes the spec (`docs/extensions.md`, "Writing a spec"). The title is the idea's first line
+unless `--title` is given. It prints the spec and the session; `--json` prints `{"spec",
+"agent"}`.
+
+```
+$ flottille spec new shop --idea "Sign in with a passkey"
+spec 4 (shop) draft: Sign in with a passkey [alone]
+Session 01JC3… writes it: follow it with `flottille agent show 01JC3…`.
+```
+
+### `flottille spec from-ticket <project> <ticket> [--mode internal|ticket] [--json]`
+
+"Write the spec" of a ticket of the project's tracker: reads it, makes a Draft of it (its title the
+ticket's, `internal` unless `--mode ticket`) and starts its writing session as `spec new --idea`
+does, the ticket's text given to it as data written by people, never an instruction. Refused for a
+ticket another spec covers; nothing is made when the ticket cannot be read.
+
+### `flottille spec answer <spec> <question> (--option N | --text T)`
+
+Answers a question the writing session asked (`spec show` lists them, their options numbered from
+1, the recommended one with its reason): the option chosen, or your own words. The answer becomes
+the next decision `D` of the spec, with the options set aside, and the session is told; it never
+waited for you. Refused for a question already answered, and past Draft.
 
 Every `spec` command is refused while Specs is not active in the project, naming the switch:
 `Specs is off in project shop: turn it on there with flottille extension on specs --project shop …`.
@@ -276,7 +302,7 @@ spec is locked: every write to it is refused, whoever asks.
 
 ### `flottille spec draft <spec>`
 
-Sends a Ready spec back to Draft, so that it can be written again.
+Sends a Ready spec back to Draft, so that it can be written again; its writing session is told.
 
 ## Projects
 

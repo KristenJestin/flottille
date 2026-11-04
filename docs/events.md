@@ -152,7 +152,7 @@ project: `extension.list` says what it is now.
 
 ### `spec.created`
 
-A spec was started (`spec.new`).
+A spec was started (`spec.new`, `spec.from_ticket`).
 
 | Field | |
 |---|---|
@@ -164,12 +164,12 @@ A spec was started (`spec.new`).
 
 ### `spec.changed`
 
-A Draft was written: a section, or its tickets.
+A Draft was written: a section, its tickets, its questions, or the session that writes it.
 
 | Field | |
 |---|---|
 | `spec`, `project` | |
-| `what` | The section written (`problem`, `behaviour`, `decisions`, `out_of_scope`, `notes`, `verification`, `questions`), or `tickets`. |
+| `what` | The section written (`problem`, `behaviour`, `decisions`, `out_of_scope`, `notes`, `verification`, `questions`), `tickets`, `asked` (the writing session asked a wave of questions), `answered` (the user answered one: a `D` was added), or `writer` (the session started to write it). |
 
 ### `spec.status_changed`
 
