@@ -38,6 +38,7 @@ use crate::rules::RulesEditor;
 use crate::session::{Chose, Follow, Opened, Reply, SessionPage};
 use crate::settings::{Reveal, SettingsPage};
 use crate::tree::{PlaceNode, ProjectNode, SessionRow, Sidebar};
+use crate::workspaces_folder::WorkspacesFolder;
 
 pub mod switcher;
 use switcher::Switcher;
@@ -224,8 +225,15 @@ impl Shell {
         let sidebar = cx.new(|_| Sidebar::new(this.clone()));
         let rules = cx.new(|_| RulesEditor::new(this.clone(), None));
         let judge_guidance = cx.new(|_| RulesEditor::judge(this.clone()));
-        let settings =
-            cx.new(|_| SettingsPage::new(this.clone(), rules.clone(), judge_guidance.clone()));
+        let workspaces = cx.new(|_| WorkspacesFolder::new(this.clone(), None));
+        let settings = cx.new(|_| {
+            SettingsPage::new(
+                this.clone(),
+                rules.clone(),
+                judge_guidance.clone(),
+                workspaces.clone(),
+            )
+        });
         let main = {
             let (this, settings) = (this.clone(), settings.clone());
             cx.new(|cx| MainArea::new(this, settings, cx))
@@ -372,6 +380,9 @@ impl Shell {
         // The shell is being updated here: it asks the daemon itself, not through the page.
         self.perform(Command::ReadProjectSettings(name.clone()));
         self.perform(Command::RulesRead {
+            project: Some(name.clone()),
+        });
+        self.perform(Command::WorkspacesFolderRead {
             project: Some(name.clone()),
         });
         self.project_settings = Some(made.clone());
@@ -651,6 +662,23 @@ impl Shell {
             Update::TextChanged { judge: true, .. } => self.actions.send(Command::JudgeRead),
             Update::DeveloperChanged => self.actions.send(Command::DeveloperRead),
             Update::ToolResultsChanged => self.actions.send(Command::ToolResultsRead),
+            // A default that changed changes the folder every project shows, so the open
+            // project's section reads again too.
+            Update::WorkspacesFolderChanged { project } => {
+                self.actions.send(Command::WorkspacesFolderRead {
+                    project: project.clone(),
+                });
+                if let Some(open) = self
+                    .project_settings
+                    .as_ref()
+                    .map(|page| page.read(cx).name())
+                    && project.as_deref().is_none_or(|name| name != open)
+                {
+                    self.actions.send(Command::WorkspacesFolderRead {
+                        project: Some(open.to_owned()),
+                    });
+                }
+            }
             Update::AppearanceChanged => self.ask_appearance(None),
             Update::Forged(forged) => self.forged(forged, cx),
             Update::News(news) => self.news(news, cx),
@@ -1037,6 +1065,25 @@ impl Shell {
                 };
                 if let Some(editor) = editor {
                     editor.update(cx, |editor, cx| editor.answered(shown, written, window, cx));
+                }
+            }
+            Outcome::WorkspacesFolder {
+                project,
+                written,
+                shown,
+            } => {
+                let section = match &project {
+                    None => Some(self.settings.read(cx).workspaces_folder().clone()),
+                    Some(name) => self
+                        .project_settings
+                        .clone()
+                        .filter(|page| page.read(cx).name() == name)
+                        .map(|page| page.read(cx).workspaces_folder().clone()),
+                };
+                if let Some(section) = section {
+                    section.update(cx, |section, cx| {
+                        section.answered(shown, written, window, cx)
+                    });
                 }
             }
             Outcome::Skills { project, listed } => {
@@ -1841,6 +1888,8 @@ impl Shell {
             self.actions.send(Command::JudgeRead);
             self.actions.send(Command::DeveloperRead);
             self.actions.send(Command::ToolResultsRead);
+            self.actions
+                .send(Command::WorkspacesFolderRead { project: None });
             self.ask_appearance(None);
         }
         let page = self.page_of(&selection, cx);
