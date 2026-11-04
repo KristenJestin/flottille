@@ -27,7 +27,8 @@
 //!
 //! A prompt plays the first turn whose `when` is in its text; a prompt matching none is answered
 //! `ok`. A turn ends with a `result` message: `"stop_reason"` (`end_turn` by default), `"subtype"`
-//! (`success` by default) and `"error"` (a text: the result is an error) shape it.
+//! (`success` by default) and `"error"` (a text: the result is an error) shape it. `"no_window":
+//! true` leaves the model's context window out of the result, as a result that does not say it.
 //!
 //! | Step | What the fake does |
 //! |---|---|
@@ -449,6 +450,9 @@ impl Fake {
                 "webSearchRequests": 0, "costUSD": 0.0125, "contextWindow": 200000,
                 "maxOutputTokens": 32000}},
             "permission_denials": []});
+        if turn["no_window"] == true {
+            result["modelUsage"] = json!({});
+        }
         if let Some(error) = error {
             result["errors"] = json!([error]);
         }

@@ -384,7 +384,9 @@ model or effort the user asked is `agent.options_taken`). Each with `agent` and 
 its end. Its `used` is always a number; `size` is `null` while no one knows the context window yet
 (Claude Code gives it with the end of a turn only: before the session's first `result` the update
 carries `used` alone; the bridge's `usage_update` says a `size` of 0, which the event turns into `null`). The daemon fills in the last `size` the agent reported when its process
-says none, so a process started again after a release keeps the window.
+says none, so a process started again after a release keeps the window, as long as the model is
+the same: `agent.usage` carries the `model` the agent's process runs, and a window reported for
+another model is not carried over.
 
 #### `agent.provider_wait`, `agent.provider_limit`, `agent.provider_error`
 

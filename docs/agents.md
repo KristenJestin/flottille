@@ -601,7 +601,10 @@ bridge runs one session.
   each compaction) the bridge says the context in use as a `usage_update` with a `size` of 0
   (ACP wants a number; it means unknown) until a `result` of this process gave the window, at most once a
   second per turn: the daemon fills in the window the agent had at its last report when the
-  process knows none yet (a process started again after a release). Its `result` ends it: first a
+  process knows none yet (a process started again after a release), unless the agent's model is
+  not the one of that report (a window is its model's: a change of model forgets it, in the
+  bridge and in the daemon). A `result` that gives no window still says the last context in use
+  when the throttle held it back. Its `result` ends it: first a
   `usage_update` (the context in use, as the last message or compaction said, the model's
   context window, and the cost in USD of this `claude` process so far: it counts from zero again
   in each process, after a release or a replacement, and is not the session's), then the prompt's answer with its usage and its stop reason:

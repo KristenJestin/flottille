@@ -1397,15 +1397,28 @@ impl Recorder {
         record(&self.daemon, &self.agent, name, data, activity);
     }
 
-    /// The context window of the agent's last usage report that had one.
-    fn known_window(&self) -> Option<u64> {
+    /// The model the agent's process runs, as it reported it at its start.
+    fn model(&self) -> Option<String> {
         self.daemon
+            .read(|store| store.agent(&self.agent))
+            .ok()??
+            .taken
+            .model
+    }
+
+    /// The context window of the agent's last usage report, when it was said of `model`: another
+    /// model has a window of its own.
+    fn known_window(&self, model: &Option<String>) -> Option<u64> {
+        let last = self
+            .daemon
             .read(|store| store.last_agent_events(&self.agent, "agent.usage", 1))
             .ok()?
             .into_iter()
-            .next()?
-            .data["size"]
-            .as_u64()
+            .next()?;
+        let said_of = last.data["model"].as_str();
+        (said_of == model.as_deref())
+            .then(|| last.data["size"].as_u64())
+            .flatten()
     }
 
     /// The text the agent was streaming is over: what was held back is recorded.
@@ -1446,9 +1459,14 @@ impl acp::Events for Recorder {
         }
         let mut data = mask(data, &self.env);
         // A process that knows no context window yet (a new one, after a release) says the tokens
-        // used alone: the window the agent had at its last report is still its own.
-        if name == "agent.usage" && data["size"].as_u64().is_none() {
-            data["size"] = self.known_window().map_or(Value::Null, Value::from);
+        // used alone: the window the agent had at its last report is still its own, unless its
+        // model changed since.
+        if name == "agent.usage" {
+            let model = self.model();
+            if data["size"].as_u64().is_none() {
+                data["size"] = self.known_window(&model).map_or(Value::Null, Value::from);
+            }
+            data["model"] = model.into();
         }
         // Bookkeeping between two pieces of a message does not end it: it is kept after the
         // message, which stays one. Anything else the agent does (a tool call, a compaction…)

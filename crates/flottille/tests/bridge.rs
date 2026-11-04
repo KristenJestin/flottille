@@ -796,6 +796,43 @@ fn the_models_offered_are_claude_s_own_and_an_unknown_one_is_refused_with_them()
     );
 }
 
+#[test]
+fn a_model_change_does_not_keep_the_old_window_size() {
+    let user = User::with_fake_claude();
+    user.claude_script(json!({
+    "models": [
+        {"value": "default", "displayName": "Default (recommended)", "description": "d"},
+        {"value": "fable", "displayName": "Fable", "description": "f"}
+    ],
+    "turns": [
+        {"when": "first", "do": [{"say": "One."}]},
+        {"when": "second", "do": [{"say": "Two."}]}
+    ]}));
+    let mut bridge = Bridge::start(&user);
+    let session = bridge.open(&user, &[]);
+    let (first, _) = bridge.prompt(&session, "first");
+    first.unwrap();
+    bridge
+        .request(
+            "session/set_config_option",
+            json!({"sessionId": session, "configId": "model", "value": "fable"}),
+        )
+        .0
+        .unwrap();
+
+    let (second, seen) = bridge.prompt(&session, "second");
+
+    second.unwrap();
+    let usage: Vec<Value> = updates(&seen)
+        .into_iter()
+        .filter(|u| u["sessionUpdate"] == "usage_update")
+        .collect();
+    // The message's, the window of the old model not carried over; then the result's, with the
+    // new model's own.
+    assert_eq!(usage[0]["size"], 0, "{usage:?}");
+    assert_eq!(usage.last().unwrap()["size"], 200000, "{usage:?}");
+}
+
 /// The value the model option says its `default` stands for, if any.
 fn recommended(answer: &Value) -> Value {
     answer["configOptions"]
