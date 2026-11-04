@@ -193,8 +193,8 @@ enum Command {
         /// stable, beta or alpha; the one last chosen, or this build's, by default
         #[arg(long, value_parser = ["stable", "beta", "alpha"])]
         channel: Option<String>,
-        /// The branch whose alpha to take (`feat/46-packages`), with `--channel alpha`; this
-        /// build's, or the one last chosen, by default
+        /// The branch whose alpha to take (`feat/46-packages`), with `--channel alpha`; by default
+        /// the branch last chosen with alpha, else this build's
         #[arg(long)]
         branch: Option<String>,
         /// Install this release exactly (`0.3.0-beta.12`), of any channel; the channel
