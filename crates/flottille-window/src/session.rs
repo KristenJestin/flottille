@@ -16,6 +16,7 @@
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::FRAC_PI_2;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -25,8 +26,9 @@ use flottille_ui::color::mix;
 use flottille_ui::motion::{HOVER, Motion, PANEL};
 use flottille_ui::{
     AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Menu, Modal, Palette, Pill,
-    PulsingLabel, Side, StateIcon, Status, Toast, Type, enter, fade, fold_frame, hoverable, icon,
-    palette, presence, presence_of, section_label, selectable, space, text_region, toast, turning,
+    PulsingLabel, Side, StateIcon, Status, Toast, Type, changing, enter, fade, fold_frame,
+    hoverable, icon, palette, presence, presence_of, section_label, selectable, space, text_region,
+    toast, turning,
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{
@@ -47,7 +49,8 @@ use gpui_kit::{
 use crate::actions::{Answer, Command, Picture, RepositoryStatus, RunAct, RunAnswer};
 use crate::commands::CommandInfo;
 use crate::conversation::{
-    Activity, Block, Call, CallState, Change, Conversation, DiffLine, USER, WOKEN_BY_KIND,
+    Activity, Block, Call, CallState, Change, Conversation, DiffLine, Ending, STARTED_SESSION_KIND,
+    Summary, USER, WOKEN_BY_KIND, asks_the_user, in_sight,
 };
 use crate::link::{Connect, Update};
 use crate::mode::ModeSwitch;
@@ -63,6 +66,7 @@ use crate::session_link::{
 use crate::session_options::{Runs, SessionOptions};
 use crate::shell::{Layout, Selection, Shell, now_ms};
 use crate::subscriptions::SubscriptionList;
+use crate::to_end::ToEnd;
 use crate::tree::place_name;
 use crate::waiting::{Waiting, sentences};
 use flottille_ui::drawer::Closed;
@@ -303,7 +307,7 @@ impl SessionPage {
         let drawer = cx.new(|_| Drawer::new("rail-drawer", Side::Right, px(RAIL), rail.clone()));
         let shown = opened.id.clone();
         let conversation =
-            cx.new(|_| ConversationView::new(page, &shown, THE_CONVERSATION.into(), None));
+            cx.new(|cx| ConversationView::new(page, &shown, THE_CONVERSATION.into(), None, cx));
         let _status = cx.observe(&status, |this, status, cx| {
             let needs_you = status.read(cx).state() == AgentState::NeedsYou;
             if this.needs_you != needs_you {
@@ -817,7 +821,7 @@ impl SessionPage {
         let parent = self.parent_of(agent).map(|p| self.said_name(&p));
         let (page, name) = (cx.entity().downgrade(), self.said_name(agent));
         let shown = self.shown.clone();
-        self.conversation = cx.new(|_| ConversationView::new(page, &shown, name, parent));
+        self.conversation = cx.new(|cx| ConversationView::new(page, &shown, name, parent, cx));
         self.rail
             .update(cx, |rail, cx| rail.set_selected(agent.to_owned(), cx));
         self.relink();
@@ -1237,6 +1241,7 @@ impl SessionPage {
                                 row.card = card;
                                 cx.notify();
                             });
+                            view.card_changed(at, cx);
                         }
                     }
                 }
@@ -1611,8 +1616,10 @@ struct Read<'a> {
     follow: bool,
 }
 
-/// The conversation: one row view per block, in a list that lays out and draws only the rows in
-/// view, and follows its end unless the user scrolled up to read.
+/// The conversation: one row view per block, in a list that lays out and draws only the items in
+/// view, and follows its end unless the user scrolled up to read. What the agent said and the
+/// messages it was sent are items of their own; everything between two of them is one group,
+/// one item, folded to a line by default.
 pub struct ConversationView {
     page: WeakEntity<SessionPage>,
     id: String,
@@ -1625,17 +1632,53 @@ pub struct ConversationView {
     earlier: bool,
     /// How many times a row was looked at or changed, for the cost of an update.
     touched: usize,
-    /// The list's items: "Show earlier" first when older events remain, then the rows, a long
-    /// reply as one item per Markdown piece: the list draws only the pieces in view.
+    /// The list's items: "Show earlier" first when older events remain, then the segments, a
+    /// long reply as one item per Markdown piece: the list draws only the pieces in view.
     list: ListState,
     /// The items of each row past its first: the pieces of its reply past the first.
     more: Vec<usize>,
+    /// The rows in sight and the groups, in order: one per stretch of the list.
+    segments: Vec<Segment>,
+    /// The segment of each row.
+    segment_of: Vec<usize>,
+    /// The button back to the end, over the list.
+    to_end: Entity<ToEnd>,
     renders: usize,
 }
 
+/// A stretch of the conversation: a row in sight, or a group of the agent's work, whose line
+/// is kept with it so that a frame never walks the rows it holds to say it.
+enum Segment {
+    Row(usize),
+    Group {
+        rows: Range<usize>,
+        summary: Summary,
+    },
+}
+
+/// The space between two items of the conversation, kept between the rows of a group.
+fn row_gap() -> Pixels {
+    px(18.)
+}
+
+/// The groups the user unfolded, by agent, each by when its first block came: kept while the
+/// window is open, never stored.
+#[derive(Default)]
+struct Unfolded(HashMap<String, HashSet<u64>>);
+
+impl gpui_kit::Global for Unfolded {}
+
 impl ConversationView {
-    fn new(page: WeakEntity<SessionPage>, id: &str, me: String, parent: Option<String>) -> Self {
-        Self {
+    fn new(
+        page: WeakEntity<SessionPage>,
+        id: &str,
+        me: String,
+        parent: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let list = Self::list();
+        let to_end = cx.new(|_| ToEnd::new(list.clone()));
+        let this = Self {
             page,
             id: id.to_owned(),
             model: Conversation::new(me, parent),
@@ -1643,10 +1686,15 @@ impl ConversationView {
             specials: Vec::new(),
             earlier: false,
             touched: 0,
-            list: Self::list(),
+            list,
             more: Vec::new(),
+            segments: Vec::new(),
+            segment_of: Vec::new(),
+            to_end,
             renders: 0,
-        }
+        };
+        this.watch(cx);
+        this
     }
 
     fn list() -> ListState {
@@ -1655,27 +1703,61 @@ impl ConversationView {
         list
     }
 
-    /// The list's first item of a row.
-    fn item(&self, at: usize) -> usize {
-        at + usize::from(self.earlier) + self.more[..at.min(self.more.len())].iter().sum::<usize>()
+    /// The button back to the end moves this list.
+    fn watch(&self, cx: &mut Context<Self>) {
+        let (list, me) = (self.list.clone(), cx.entity().downgrade());
+        self.to_end
+            .update(cx, |to_end, cx| to_end.watch(list, me, cx));
     }
 
-    /// The row of the list's item `ix`, and which of its items it is.
-    fn row_of(&self, ix: usize) -> Option<(usize, usize)> {
+    /// How many items of the list a segment is.
+    fn items_of(&self, segment: &Segment) -> usize {
+        match segment {
+            Segment::Row(at) => 1 + self.more[*at],
+            Segment::Group { .. } => 1,
+        }
+    }
+
+    /// The list's first item of a segment.
+    fn item_of(&self, segment: usize) -> usize {
+        usize::from(self.earlier)
+            + self.segments[..segment.min(self.segments.len())]
+                .iter()
+                .map(|s| self.items_of(s))
+                .sum::<usize>()
+    }
+
+    /// The list's first item of a row's segment.
+    fn item(&self, at: usize) -> usize {
+        match self.segment_of.get(at) {
+            Some(&segment) => self.item_of(segment),
+            None => self.item_of(self.segments.len()),
+        }
+    }
+
+    /// The segment of the list's item `ix`, and which of its items it is.
+    fn segment_at(&self, ix: usize) -> Option<(usize, usize)> {
         let mut ix = ix.checked_sub(usize::from(self.earlier))?;
-        for (at, more) in self.more.iter().enumerate() {
-            if ix <= *more {
+        for (at, segment) in self.segments.iter().enumerate() {
+            let items = self.items_of(segment);
+            if ix < items {
                 return Some((at, ix));
             }
-            ix -= more + 1;
+            ix -= items;
         }
         None
     }
 
-    /// Gives the row `at` one item per piece of its reply, and measures again its last.
+    /// Gives the row `at` one item per piece of its reply, and measures again its last; a row
+    /// of a group measures its group again.
     fn fit(&mut self, at: usize, cx: &gpui_kit::App) {
+        let first = self.item(at);
+        if !matches!(self.segments[self.segment_of[at]], Segment::Row(_)) {
+            self.list.remeasure_items(first..first + 1);
+            return;
+        }
         let more = self.rows[at].read(cx).more_pieces().len();
-        let (first, had) = (self.item(at), self.more[at]);
+        let had = self.more[at];
         if more != had {
             let kept = first + 1 + had.min(more);
             self.list
@@ -1683,6 +1765,47 @@ impl ConversationView {
             self.more[at] = more;
         }
         self.list.remeasure_items(first + more..first + more + 1);
+    }
+
+    /// Places the row `at`, just added at the end: a row of its own, or the last group grows
+    /// by it. Whether a new item was made.
+    fn place(&mut self, at: usize) -> bool {
+        let prose = in_sight(&self.model.blocks()[at]);
+        if !prose
+            && let Some(Segment::Group { rows, .. }) = self.segments.last_mut()
+            && rows.end == at
+        {
+            rows.end = at + 1;
+            self.segment_of.push(self.segments.len() - 1);
+            self.summarise(self.segments.len() - 1);
+            return false;
+        }
+        self.segment_of.push(self.segments.len());
+        self.segments.push(match prose {
+            true => Segment::Row(at),
+            false => Segment::Group {
+                rows: at..at + 1,
+                summary: Summary::default(),
+            },
+        });
+        if !prose {
+            self.summarise(self.segments.len() - 1);
+        }
+        true
+    }
+
+    /// Says the line of a group again, from its rows alone. Whether it changed.
+    fn summarise(&mut self, segment: usize) -> bool {
+        let Some(Segment::Group { rows, summary }) = self.segments.get_mut(segment) else {
+            return false;
+        };
+        let said = Summary::of(
+            &self.model.blocks()[rows.clone()],
+            &self.model.times()[rows.clone()],
+        );
+        let changed = *summary != said;
+        *summary = said;
+        changed
     }
 
     pub fn rows(&self) -> &[Entity<Row>] {
@@ -1712,6 +1835,53 @@ impl ConversationView {
         self.earlier
     }
 
+    /// The groups the conversation folds, each the rows it holds.
+    pub fn groups(&self) -> Vec<Range<usize>> {
+        self.segments
+            .iter()
+            .filter_map(|segment| match segment {
+                Segment::Group { rows, .. } => Some(rows.clone()),
+                Segment::Row(_) => None,
+            })
+            .collect()
+    }
+
+    /// Whether the conversation follows its end.
+    pub fn is_following(&self) -> bool {
+        self.list.is_following_tail()
+    }
+
+    /// The key a group's fold is kept by: when its first block came.
+    fn key(&self, rows: &Range<usize>) -> u64 {
+        self.model.at(rows.start).unwrap_or_default()
+    }
+
+    fn is_unfolded(&self, rows: &Range<usize>, cx: &gpui_kit::App) -> bool {
+        let key = self.key(rows);
+        cx.try_global::<Unfolded>()
+            .and_then(|unfolded| unfolded.0.get(&self.id))
+            .is_some_and(|keys| keys.contains(&key))
+    }
+
+    /// The user folds or unfolds the group of `segment`.
+    fn toggle(&mut self, segment: usize, cx: &mut Context<Self>) {
+        let Some(Segment::Group { rows, .. }) = self.segments.get(segment) else {
+            return;
+        };
+        let key = self.key(rows);
+        let keys = cx
+            .default_global::<Unfolded>()
+            .0
+            .entry(self.id.clone())
+            .or_default();
+        if !keys.remove(&key) {
+            keys.insert(key);
+        }
+        let item = self.item_of(segment);
+        self.list.remeasure_items(item..item + 1);
+        cx.notify();
+    }
+
     /// Makes the rows again from what a link read: the events are folded first, then each
     /// block gets its row.
     fn rebuild(&mut self, read: Read, page: &SessionPage, cx: &mut Context<Self>) {
@@ -1727,16 +1897,20 @@ impl ConversationView {
         self.rows.clear();
         self.specials.clear();
         self.more.clear();
+        self.segments.clear();
+        self.segment_of.clear();
         for at in 0..self.model.blocks().len() {
             self.add_row(at, page, cx);
             self.more[at] = self.rows[at].read(cx).more_pieces().len();
+            self.place(at);
         }
-        let items = self.item(self.rows.len());
+        let items = self.item_of(self.segments.len());
         match read.follow {
             true => {
                 self.list = Self::list();
                 self.list.reset(items);
                 self.list.scroll_to_end();
+                self.watch(cx);
             }
             // Earlier pages read: the rows shown before stay where they were, below them.
             false => self.list.reset(items),
@@ -1758,17 +1932,24 @@ impl ConversationView {
         self.touched += 1;
     }
 
-    /// Adds a row for each block added, and draws again each row whose block changed.
+    /// Adds a row for each block added, and draws again each row whose block changed; a group
+    /// whose line changed is drawn again with it.
     fn changed(&mut self, changes: &[Change], page: &SessionPage, cx: &mut Context<Self>) {
-        let mut added = false;
+        let mut redraw = false;
         for change in changes {
             match change {
                 Change::Added => {
-                    let (at, item) = (self.rows.len(), self.item(self.rows.len()));
+                    let at = self.rows.len();
                     self.add_row(at, page, cx);
-                    self.list.splice(item..item, 1);
+                    let item = self.item_of(self.segments.len());
+                    if self.place(at) {
+                        self.list.splice(item..item, 1);
+                    }
                     self.fit(at, cx);
-                    added = true;
+                    if matches!(self.model.blocks()[at], Block::Text { .. }) {
+                        self.to_end.update(cx, |to_end, cx| to_end.wrote(cx));
+                    }
+                    redraw = true;
                 }
                 Change::Changed(at) => {
                     let block = self.model.blocks()[*at].clone();
@@ -1782,6 +1963,9 @@ impl ConversationView {
                         let item = self.item(*at);
                         self.list.remeasure_items(item..item + 1);
                         self.fit(*at, cx);
+                        redraw |= self.summarise(self.segment_of[*at]);
+                        // A command that ended leaves the group's line.
+                        redraw |= matches!(self.model.blocks()[*at], Block::Command(_));
                     }
                 }
                 Change::Appended(at, piece) => {
@@ -1793,13 +1977,174 @@ impl ConversationView {
                 }
             }
         }
-        if added {
+        if redraw {
             cx.notify();
         }
     }
 
-    /// The list's item `ix`: "Show earlier", a row, or a piece of a row's long reply, in the
-    /// conversation's column.
+    /// A row's card was brought up to date: its group, which may show it outside the fold, is
+    /// drawn again.
+    fn card_changed(&mut self, at: usize, cx: &mut Context<Self>) {
+        let item = self.item(at);
+        self.list.remeasure_items(item..item + 1);
+        cx.notify();
+    }
+
+    /// Whether the row `at` of a group shows under the group's line while it is folded: a call
+    /// held for the user's answer, a command still running, a question asked to the user in the
+    /// last group.
+    fn needs_the_user(&self, at: usize, last: bool, cx: &gpui_kit::App) -> bool {
+        match &self.model.blocks()[at] {
+            Block::Approval { .. } => self.rows[at]
+                .read(cx)
+                .card()
+                .is_some_and(|card| card.decision.is_none()),
+            Block::Command(card) => card.ending == Ending::Running,
+            block => last && asks_the_user(block),
+        }
+    }
+
+    /// Whether the row `at` of a group may show under its line: its fold is its own.
+    fn may_need_the_user(&self, at: usize) -> bool {
+        let block = &self.model.blocks()[at];
+        matches!(block, Block::Approval { .. } | Block::Command(_)) || asks_the_user(block)
+    }
+
+    /// A row of the conversation as the list draws it, entering when it first shows.
+    fn row_element(&self, at: usize) -> AnyElement {
+        enter(
+            ElementId::Name(format!("enter-row-{}-{at}", self.id).into()),
+            0,
+            self.rows[at].clone(),
+        )
+        .into_any_element()
+    }
+
+    /// A group: its line, then its rows, folded away until a click unfolds them; a row that
+    /// needs the user stays in sight under the line, in its place.
+    fn render_group(
+        &mut self,
+        segment: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(Segment::Group { rows, summary }) = self.segments.get(segment) else {
+            return div().into_any_element();
+        };
+        let (rows, summary) = (rows.clone(), summary.clone());
+        let open = self.is_unfolded(&rows, cx);
+        let last = segment + 1 == self.segments.len();
+        let p = palette(cx);
+        let id = |part: &str| ElementId::Name(format!("group-{}{part}", rows.start).into());
+        let pieces = group_line(&summary);
+        let said = SharedString::from(pieces.join(" · "));
+        let failed = (summary.failed > 0).then(|| format!("{} failed", summary.failed));
+        let turn = turning(id("-chevron"), open, window, cx);
+        let line = hoverable(
+            div()
+                .id(id(""))
+                .flex()
+                .items_center()
+                .gap(space::SM)
+                .py(space::XS)
+                .cursor_pointer()
+                .mono(12.)
+                .aria_label(said.clone())
+                .aria_expanded(open)
+                .child(
+                    icon(Icon::Chevron)
+                        .size(px(12.))
+                        .flex_none()
+                        .text_color(p.faint)
+                        .with_transformation(Transformation::rotate(radians(-FRAC_PI_2 * turn))),
+                )
+                .child(changing(id("-said"), said, {
+                    let id = id("-failed");
+                    move |_| {
+                        div()
+                            .flex()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .children(pieces.into_iter().enumerate().map(|(n, piece)| {
+                                let lead = if n == 0 { "" } else { " · " };
+                                match failed.as_ref() == Some(&piece) {
+                                    true => div()
+                                        .flex_none()
+                                        .child(lead)
+                                        .child(
+                                            div()
+                                                .id(id.clone())
+                                                .text_color(p.fail)
+                                                .aria_label(SharedString::from(piece.clone()))
+                                                .child(piece)
+                                                .test_support(),
+                                        )
+                                        .into_any_element(),
+                                    false => div()
+                                        .flex_none()
+                                        .child(format!("{lead}{piece}"))
+                                        .into_any_element(),
+                                }
+                            }))
+                            .into_any_element()
+                    }
+                }))
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle(segment, cx))),
+            move |d, t| d.text_color(mix(p.faint, p.mute, t)),
+        );
+        // The rows that fold run between those that may stay in sight, each run one fold.
+        let mut parts: Vec<AnyElement> = Vec::new();
+        let mut run: Vec<usize> = Vec::new();
+        let fold = |run: &mut Vec<usize>, parts: &mut Vec<AnyElement>, this: &Self| {
+            let Some(&first) = run.first() else {
+                return;
+            };
+            parts.push(
+                presence(
+                    id(&format!("-fold-{first}")),
+                    open,
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(row_gap())
+                        .children(run.drain(..).map(|at| this.row_element(at))),
+                )
+                .gap(row_gap())
+                .into_any_element(),
+            );
+        };
+        for at in rows.clone() {
+            // A request answered by a card below it: no row, not even the gap between two.
+            if matches!(self.model.blocks()[at], Block::Answered { .. }) {
+                continue;
+            }
+            if !self.may_need_the_user(at) {
+                run.push(at);
+                continue;
+            }
+            fold(&mut run, &mut parts, self);
+            let shown = open || self.needs_the_user(at, last, cx);
+            parts.push(
+                presence(id(&format!("-row-{at}")), shown, self.row_element(at))
+                    .gap(row_gap())
+                    .into_any_element(),
+            );
+        }
+        fold(&mut run, &mut parts, self);
+        div()
+            .id(id("-group"))
+            .flex()
+            .flex_col()
+            .gap(row_gap())
+            .child(line)
+            .children(parts)
+            .test_support()
+            .into_any_element()
+    }
+
+    /// The list's item `ix`: "Show earlier", a row, a piece of a row's long reply, or a group,
+    /// in the conversation's column.
     fn render_item(
         &mut self,
         ix: usize,
@@ -1807,15 +2152,19 @@ impl ConversationView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let narrow = window.viewport_size().width < px(crate::shell::NARROW);
-        let (at, piece) = self.row_of(ix).unwrap_or((usize::MAX, 0));
-        let more = self.more.get(at).copied().unwrap_or(0);
+        let (segment, piece) = self.segment_at(ix).unwrap_or((usize::MAX, 0));
+        let at = match self.segments.get(segment) {
+            Some(Segment::Row(at)) => Some(*at),
+            _ => None,
+        };
+        let more = at.and_then(|at| self.more.get(at).copied()).unwrap_or(0);
         // Between the pieces of one reply, the gap of its paragraphs.
         let below = match () {
             _ if piece < more => TextViewStyle::default()
                 .paragraph_gap()
                 .to_pixels(window.rem_size()),
-            _ if ix + 1 == self.item(self.rows.len()) => px(20.),
-            _ => px(18.),
+            _ if ix + 1 == self.item_of(self.segments.len()) => px(20.),
+            _ => row_gap(),
         };
         let column = div()
             .max_w(px(780.))
@@ -1836,13 +2185,13 @@ impl ConversationView {
                 }),
             ));
         }
-        let Some(row) = self.rows.get(at) else {
+        if segment < self.segments.len() && at.is_none() {
+            let group = self.render_group(segment, window, cx);
+            return centred(column.child(group));
+        }
+        let Some(row) = at.and_then(|at| self.rows.get(at)) else {
             return div().into_any_element();
         };
-        // A request answered by a card below it: no row, not even the gap between two.
-        if matches!(row.read(cx).block(), Block::Answered { .. }) {
-            return div().into_any_element();
-        }
         if piece > 0 {
             let row = row.read(cx);
             let shown = row.more_pieces().get(piece - 1).cloned();
@@ -1854,12 +2203,33 @@ impl ConversationView {
             }
             return centred(column.children(shown));
         }
-        centred(column.child(enter(
-            ElementId::Name(format!("enter-row-{}-{at}", self.id).into()),
-            0,
-            row.clone(),
-        )))
+        centred(column.child(self.row_element(at.unwrap_or_default())))
     }
+}
+
+/// Whether a notice is a delivery the agent was sent, folded to one line, rather than the
+/// agent's own end or resumption, or a session it started, said whole.
+fn is_delivery(kind: &str) -> bool {
+    !matches!(kind, "failed" | "ended" | "resumed" | STARTED_SESSION_KIND)
+}
+
+/// The pieces of a group's line: how many steps, their kinds, how many failed, how long it took
+/// or the step running now.
+pub fn group_line(summary: &Summary) -> Vec<String> {
+    let mut pieces = vec![format!(
+        "{} {}",
+        summary.steps,
+        if summary.steps == 1 { "step" } else { "steps" }
+    )];
+    if !summary.kinds.is_empty() {
+        pieces.push(summary.kinds.join(", "));
+    }
+    if summary.failed > 0 {
+        pieces.push(format!("{} failed", summary.failed));
+    }
+    pieces.extend(summary.running.clone());
+    pieces.extend(summary.ms.map(seconds));
+    pieces
 }
 
 impl Render for ConversationView {
@@ -1887,6 +2257,7 @@ impl Render for ConversationView {
         div()
             .id(id)
             .size_full()
+            .relative()
             .child(
                 list(
                     self.list.clone(),
@@ -1894,6 +2265,7 @@ impl Render for ConversationView {
                 )
                 .size_full(),
             )
+            .child(self.to_end.clone())
             .test_support()
             .into_any_element()
     }
@@ -3183,8 +3555,8 @@ impl Render for Row {
                     .test_support()
                     .into_any_element()
             }
-            // A notice is shown whole: a failure's reason, what was not done and why.
-            Block::Notice { kind, text } if kind != WOKEN_BY_KIND => div()
+            // The agent's own end is shown whole: a failure's reason, what was not done and why.
+            Block::Notice { kind, text } if !is_delivery(kind) => div()
                 .id(id("notice"))
                 .flex()
                 .gap(space::SM)
@@ -3195,14 +3567,19 @@ impl Render for Row {
                 .child(div().min_w_0().child(SharedString::from(text.clone())))
                 .test_support()
                 .into_any_element(),
-            // What woke the agent is one line; the forge's text follows it, folded under it
-            // until a click opens it.
+            // A delivery is one line, its kind and its first words, its whole text folded under
+            // it until a click opens it; what woke the agent is its own line, the forge's text
+            // folded under it.
             Block::Notice { kind, text } => {
-                let (first, rest) = match text.split_once('\n') {
-                    Some((first, rest)) => (first.trim(), rest.trim()),
-                    None => (text.trim(), ""),
+                let (first, rest) = match (kind == WOKEN_BY_KIND, text.split_once('\n')) {
+                    (true, Some((first, rest))) => (first.trim().to_owned(), rest.trim()),
+                    (true, None) => (text.trim().to_owned(), ""),
+                    (false, _) => (
+                        text.split_whitespace().collect::<Vec<_>>().join(" "),
+                        text.trim(),
+                    ),
                 };
-                let summary = SharedString::from(first.to_owned());
+                let summary = SharedString::from(first);
                 let detail = SharedString::from(rest.to_owned());
                 let foldable = !rest.is_empty();
                 let turn = turning(id("notice-toggle"), self.open, window, cx);

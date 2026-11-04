@@ -35,9 +35,55 @@ fn script() -> Value {
                 "text": "The tests pass now.\nAll 42 of them, on the branch app/w."}}}]},
         {"when": "open a ticket", "do": [{"mcp": {"tool": "tickets", "keyed": true,
             "arguments": {"action": "create", "title": "Add a logout",
-                "body": "Users stay signed in"}}}]}
+                "body": "Users stay signed in"}}}]},
+        {"when": "work a lot", "do": [
+            {"say": "Looking into it."},
+            {"think": "Where to start."},
+            call("w1", "fs_list", "completed", json!({"path": "."})),
+            call("w2", "fs_read", "failed", json!({"path": "gone.md"})),
+            {"wait": 1100},
+            call("w3", "run", "completed", json!({"line": "cargo test"})),
+            call("w4", "fs_read", "completed", json!({"path": "README.md"})),
+            {"say": "All read."}]},
+        {"when": "hold and run", "do": [
+            call("h1", "run", "in_progress", json!({"line": "sleep 30"})),
+            {"update": {"sessionUpdate": "tool_call_update", "toolCallId": "h1",
+                "status": "completed",
+                "rawOutput": "run r9: `sleep 30` is running after 1.0 s\nit keeps going: ask run_status\n(no output)"}},
+            call("h2", "fs_list", "completed", json!({"path": "."})),
+            {"mcp": {"tool": "agent_launch", "arguments": {"title": "Docs",
+                "brief": "Write the docs", "root": true, "workspace": "w"}}}]},
+        {"when": "grep a while", "do": [
+            call("g1", "fs_list", "completed", json!({"path": "."})),
+            call("g2", "run", "in_progress", json!({"line": "git grep -n TODO"})),
+            {"hold": "release"},
+            {"update": {"sessionUpdate": "tool_call_update", "toolCallId": "g2",
+                "status": "completed"}},
+            call("g3", "fs_read", "completed", json!({"path": "README.md"})),
+            {"hold": "again"},
+            {"say": "Found them."}]},
+        {"when": "ask through a child", "do": [{"mcp": {"tool": "agent_launch",
+            "arguments": {"title": "curious", "brief": "ask your parent"}}}]},
+        {"when": "ask your parent", "do": [{"mcp": {"tool": "ask_parent",
+            "arguments": {"question": "Page Équipe asks: apps/front/src/team.tsx, which layout should the grid take?"}}}]},
+        {"when": "say a lot", "do": [{"say": LONG}]},
+        {"when": "say more", "do": [{"say": "One more thing."}]}
     ]})
 }
+
+/// A tool call of Flottille's, as the agent reports it.
+fn call(id: &str, tool: &str, status: &str, input: Value) -> Value {
+    json!({"update": {"sessionUpdate": "tool_call", "toolCallId": id,
+        "title": format!("mcp__flottille__{tool}"), "kind": "other", "status": status,
+        "rawInput": input}})
+}
+
+/// An answer longer than the window is high.
+const LONG: &str = "One.\n\nTwo.\n\nThree.\n\nFour.\n\nFive.\n\nSix.\n\nSeven.\n\nEight.\n\n\
+    Nine.\n\nTen.\n\nEleven.\n\nTwelve.\n\nThirteen.\n\nFourteen.\n\nFifteen.\n\nSixteen.\n\n\
+    Seventeen.\n\nEighteen.\n\nNineteen.\n\nTwenty.\n\nTwenty-one.\n\nTwenty-two.\n\n\
+    Twenty-three.\n\nTwenty-four.\n\nTwenty-five.\n\nTwenty-six.\n\nTwenty-seven.\n\n\
+    Twenty-eight.\n\nTwenty-nine.\n\nThirty.";
 
 fn user() -> User {
     let user = User::with_fake_agent();
@@ -744,6 +790,7 @@ fn a_ticket_created_in_auto_says_allowed_by_the_judge(cx: &mut TestAppContext) {
     assert_eq!(allowed_by.as_deref(), Some(JUDGE));
 
     // Folded, the steps' line says it; open, the step does.
+    unfold(&page, at, cx);
     let line = label(format!("row-{at}-steps-toggle"), cx).unwrap();
     assert!(line.ends_with("· allowed by the judge"), "{line}");
     cx.update(|window, cx| window.click(format!("row-{at}-steps-toggle"), cx));
@@ -814,6 +861,7 @@ fn a_step_whose_result_was_cut_says_so_with_the_characters_left_out(cx: &mut Tes
     assert_eq!(short_cut, None, "the short note was not cut");
     let mut opened = Vec::new();
     for toggle in [at, short_at] {
+        unfold(&page, toggle, cx);
         if !opened.contains(&toggle) {
             cx.update(|window, cx| window.click(format!("row-{toggle}-steps-toggle"), cx));
             at_rest(cx);
@@ -1013,4 +1061,450 @@ fn a_relayed_card_whose_session_no_longer_exists_has_its_name_and_no_link(cx: &m
         "no link to a session that is gone"
     );
     let _ = shell;
+}
+
+/// Unfolds the group that holds the row `at`, when it is folded: its rows are drawn.
+fn unfold(page: &Entity<SessionPage>, at: usize, cx: &mut VisualTestContext) {
+    let groups = page.read_with(cx, |page, cx| page.conversation().read(cx).groups());
+    let Some(group) = groups.into_iter().find(|group| group.contains(&at)) else {
+        return;
+    };
+    let line = format!("group-{}", group.start);
+    if cx.update(|window, _| window.find(line.clone()).expanded()) == Some(false) {
+        cx.update(|window, cx| window.click(line, cx));
+        settle(cx);
+    }
+}
+
+/// Sends the lead `message`: the window's checks wait for what it does.
+fn worked(user: &User, lead: &str, message: &str) {
+    user.call("agent.send", json!({"agent": lead, "message": message}))
+        .unwrap();
+}
+
+/// The folded groups of the conversation, each the rows it holds.
+fn groups(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Vec<std::ops::Range<usize>> {
+    page.read_with(cx, |page, cx| page.conversation().read(cx).groups())
+}
+
+/// The group that holds the row of the first block that matches.
+fn group_of(
+    page: &Entity<SessionPage>,
+    cx: &mut VisualTestContext,
+    matches: impl Fn(&Block) -> bool,
+) -> std::ops::Range<usize> {
+    let at = row_of(page, cx, matches).expect("the block is shown");
+    groups(page, cx)
+        .into_iter()
+        .find(|group| group.contains(&at))
+        .unwrap_or_else(|| panic!("row {at} is in no group"))
+}
+
+fn is_text(block: &Block, said: &str) -> bool {
+    matches!(block, Block::Text { text } if text == said)
+}
+
+/// The lead's conversation once it worked a lot between two of its sentences.
+fn after_much_work<'a>(
+    user: &User,
+    cx: &'a mut TestAppContext,
+) -> (
+    Entity<Shell>,
+    Entity<SessionPage>,
+    &'a mut VisualTestContext,
+    std::ops::Range<usize>,
+) {
+    let lead = lead(user);
+    worked(user, &lead, "work a lot");
+    let (shell, page, cx) = open_session(user, &lead, cx);
+    until(&shell, cx, "the work is read", |cx| {
+        row_of(&page, cx, |b| is_text(b, "All read.")).is_some()
+    });
+    settle(cx);
+    let group = group_of(&page, cx, |b| matches!(b, Block::Thought { .. }));
+    (shell, page, cx, group)
+}
+
+#[gpui_kit::test]
+fn steps_between_two_messages_are_one_folded_group(cx: &mut TestAppContext) {
+    let user = user();
+    let (_shell, page, cx, group) = after_much_work(&user, cx);
+    let before = row_of(&page, cx, |b| is_text(b, "Looking into it.")).unwrap();
+    let after = row_of(&page, cx, |b| is_text(b, "All read.")).unwrap();
+    assert_eq!(group, before + 1..after, "everything between the two");
+    assert!(has(format!("group-{}", group.start), cx), "one line");
+    for at in group.clone() {
+        assert!(!has(format!("row-{at}-thought"), cx), "row {at} is folded");
+        assert!(!has(format!("row-{at}-steps"), cx), "row {at} is folded");
+    }
+    assert_eq!(
+        cx.update(|window, _| { window.find(format!("group-{}", group.start)).expanded() }),
+        Some(false)
+    );
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn the_group_line_counts_steps_kinds_failures_and_time(cx: &mut TestAppContext) {
+    let user = user();
+    let (_shell, _page, cx, group) = after_much_work(&user, cx);
+    let line = label(format!("group-{}", group.start), cx).expect("the group's line");
+    // A thought and four calls; their kinds in order of first use; the failed read; the time.
+    let (said, time) = line.rsplit_once(" · ").unwrap();
+    assert_eq!(said, "5 steps · fs_list, fs_read, run · 1 failed", "{line}");
+    let seconds: f64 = time.strip_suffix('s').unwrap().parse().unwrap();
+    assert!(seconds >= 1.1, "{line}");
+    assert_eq!(
+        label(format!("group-{}-failed", group.start), cx).as_deref(),
+        Some("1 failed"),
+        "the failures in their own ink"
+    );
+}
+
+#[gpui_kit::test]
+fn a_click_unfolds_the_group_into_today_s_view(cx: &mut TestAppContext) {
+    let user = user();
+    let (_shell, _page, cx, group) = after_much_work(&user, cx);
+    let (thought, steps) = (group.start, group.start + 1);
+    cx.update(|window, cx| window.click(format!("group-{}", group.start), cx));
+    settle(cx);
+    assert!(has(format!("row-{thought}-thought"), cx));
+    assert!(has(format!("row-{steps}-steps"), cx));
+    // Each step keeps its own fold.
+    assert_eq!(
+        label(format!("row-{steps}-steps-toggle"), cx).as_deref(),
+        Some("4 steps · fs_read")
+    );
+    assert_eq!(
+        cx.update(|window, _| { window.find(format!("group-{}", group.start)).expanded() }),
+        Some(true)
+    );
+    at_rest(cx);
+
+    cx.update(|window, cx| window.click(format!("group-{}", group.start), cx));
+    at_rest(cx);
+    assert!(!has(format!("row-{thought}-thought"), cx), "folded again");
+    assert!(!has(format!("row-{steps}-steps"), cx));
+}
+
+#[gpui_kit::test]
+fn the_agent_s_prose_and_the_user_s_messages_are_never_folded(cx: &mut TestAppContext) {
+    let user = user();
+    let (_shell, page, cx, _) = after_much_work(&user, cx);
+    let groups = groups(&page, cx);
+    for (at, block) in blocks(&page, cx).iter().enumerate() {
+        let part = match block {
+            Block::Text { .. } => "text",
+            Block::Message { .. } => "message",
+            _ => continue,
+        };
+        assert!(
+            !groups.iter().any(|group| group.contains(&at)),
+            "row {at} is in no group: {block:?}"
+        );
+        assert!(has(format!("row-{at}-{part}"), cx), "row {at} is drawn");
+    }
+}
+
+#[gpui_kit::test]
+fn a_held_call_or_a_running_command_shows_outside_the_fold(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    worked(&user, &lead, "hold and run");
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    until(&shell, cx, "the request and the command are read", |cx| {
+        row_of(&page, cx, |b| matches!(b, Block::Approval { .. })).is_some()
+            && row_of(&page, cx, |b| matches!(b, Block::Command(_))).is_some()
+    });
+    settle(cx);
+    let group = group_of(&page, cx, |b| matches!(b, Block::Steps { .. }));
+    let steps = row_of(&page, cx, |b| matches!(b, Block::Steps { .. })).unwrap();
+    let card = row_of(&page, cx, |b| matches!(b, Block::Command(_))).unwrap();
+    let request = row_of(&page, cx, |b| matches!(b, Block::Approval { .. })).unwrap();
+    let Block::Approval { number } = blocks(&page, cx)[request] else {
+        unreachable!()
+    };
+    assert!(
+        group.contains(&card) && group.contains(&request),
+        "{group:?}"
+    );
+    assert!(has(format!("group-{}", group.start), cx));
+    assert!(
+        !has(format!("row-{steps}-steps"), cx),
+        "the steps are folded"
+    );
+    assert!(
+        has(format!("command-card-{card}"), cx),
+        "the command still running shows under the line"
+    );
+    assert!(
+        has(format!("approval-line-{number}"), cx),
+        "the call held for the user shows under the line"
+    );
+    let line = cx.update(|window, _| window.find(format!("group-{}", group.start)).bounds());
+    let held = cx.update(|window, _| window.find(format!("approval-line-{number}")).bounds());
+    assert!(line.bottom() <= held.top(), "under the group's line");
+
+    // Answered, it folds away into the group.
+    user.call("approval.deny", json!({"number": number}))
+        .unwrap();
+    until(&shell, cx, "the request is answered", |cx| {
+        page.read_with(cx, |page, _| page.decision(number).is_some())
+    });
+    settle(cx);
+    assert!(
+        !has(format!("approval-line-{number}"), cx),
+        "an answered request folds away"
+    );
+    assert!(
+        has(format!("command-card-{card}"), cx),
+        "the command still runs"
+    );
+}
+
+#[gpui_kit::test]
+fn the_group_in_progress_names_its_running_step(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": "grep a while"}),
+    )
+    .unwrap();
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    until(&shell, cx, "the grep runs", |cx| {
+        blocks(&page, cx)
+            .iter()
+            .any(|b| matches!(b, Block::Steps { calls } if calls.len() == 2))
+    });
+    settle(cx);
+    let group = group_of(&page, cx, |b| matches!(b, Block::Steps { .. }));
+    let line = label(format!("group-{}", group.start), cx).unwrap();
+    assert!(
+        line.starts_with("2 steps · fs_list, run · running git grep -n TODO"),
+        "{line}"
+    );
+    assert!(!has(format!("row-{}-steps", group.start), cx), "folded too");
+
+    // The step ends and another comes: the line follows.
+    std::fs::write(user.path("fake/release"), "").unwrap();
+    until(&shell, cx, "the next step", |cx| {
+        blocks(&page, cx)
+            .iter()
+            .any(|b| matches!(b, Block::Steps { calls } if calls.len() == 3))
+    });
+    settle(cx);
+    let line = label(format!("group-{}", group.start), cx).unwrap();
+    assert!(
+        line.starts_with("3 steps · fs_list, run, fs_read"),
+        "{line}"
+    );
+    assert!(!line.contains("running"), "{line}");
+    std::fs::write(user.path("fake/again"), "").unwrap();
+}
+
+#[gpui_kit::test]
+fn an_unfolded_group_stays_unfolded_while_new_steps_arrive(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": "grep a while"}),
+    )
+    .unwrap();
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    until(&shell, cx, "the grep runs", |cx| {
+        blocks(&page, cx)
+            .iter()
+            .any(|b| matches!(b, Block::Steps { calls } if calls.len() == 2))
+    });
+    settle(cx);
+    let group = group_of(&page, cx, |b| matches!(b, Block::Steps { .. }));
+    cx.update(|window, cx| window.click(format!("group-{}", group.start), cx));
+    settle(cx);
+    assert!(has(format!("row-{}-steps", group.start), cx));
+
+    std::fs::write(user.path("fake/release"), "").unwrap();
+    until(&shell, cx, "the next step", |cx| {
+        blocks(&page, cx)
+            .iter()
+            .any(|b| matches!(b, Block::Steps { calls } if calls.len() == 3))
+    });
+    settle(cx);
+    assert!(
+        has(format!("row-{}-steps", group.start), cx),
+        "still unfolded"
+    );
+    std::fs::write(user.path("fake/again"), "").unwrap();
+    until(&shell, cx, "the turn ends", |cx| {
+        row_of(&page, cx, |b| is_text(b, "Found them.")).is_some()
+    });
+    settle(cx);
+    assert!(
+        has(format!("row-{}-steps", group.start), cx),
+        "still unfolded once the turn ended"
+    );
+}
+
+#[gpui_kit::test]
+fn a_delivery_is_one_folded_line_even_in_an_unfolded_group(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": "ask through a child"}),
+    )
+    .unwrap();
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    let is_question =
+        |b: &Block| matches!(b, Block::Notice { kind, .. } if kind == "child-question");
+    until(&shell, cx, "the child's question reached the lead", |cx| {
+        row_of(&page, cx, is_question).is_some()
+    });
+    settle(cx);
+    let at = row_of(&page, cx, is_question).unwrap();
+    let group = group_of(&page, cx, is_question);
+    assert!(!has(format!("row-{at}-notice"), cx), "in the fold");
+    cx.update(|window, cx| window.click(format!("group-{}", group.start), cx));
+    settle(cx);
+
+    // One line: its kind and its first words.
+    assert!(has(format!("row-{at}-notice"), cx));
+    let first = label(format!("row-{at}-notice-summary"), cx).unwrap();
+    assert!(
+        first.contains("asks: Page Équipe asks: apps/front/src/team.tsx"),
+        "{first}"
+    );
+    assert!(
+        !has(format!("row-{at}-notice-text"), cx),
+        "its text is folded"
+    );
+    let height =
+        cx.update(|window, _| window.find(format!("row-{at}-notice")).bounds().size.height);
+    assert!(height < px(24.), "one line: {height:?}");
+
+    cx.update(|window, cx| window.click(format!("row-{at}-notice-toggle"), cx));
+    settle(cx);
+    let whole = label(format!("row-{at}-notice-text"), cx).unwrap();
+    assert!(
+        whole.contains("which layout should the grid take?"),
+        "{whole}"
+    );
+    at_rest(cx);
+}
+
+/// Scrolls the conversation of `agent` up, as a reader would.
+fn scroll_up(agent: &str, cx: &mut VisualTestContext) {
+    let middle = cx.update(|window, _| {
+        window
+            .find(format!("conversation-{agent}"))
+            .bounds()
+            .center()
+    });
+    for _ in 0..4 {
+        cx.simulate_event(gpui_kit::ScrollWheelEvent {
+            position: middle,
+            delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(400.))),
+            ..Default::default()
+        });
+        settle(cx);
+    }
+}
+
+fn following(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> bool {
+    page.read_with(cx, |page, cx| page.conversation().read(cx).is_following())
+}
+
+#[gpui_kit::test]
+fn a_button_brings_back_to_the_end_when_scrolled_up(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    worked(&user, &lead, "say a lot");
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    until(&shell, cx, "the long answer is read", |cx| {
+        row_of(
+            &page,
+            cx,
+            |b| matches!(b, Block::Text { text } if text.ends_with("Thirty.")),
+        )
+        .is_some()
+    });
+    settle(cx);
+    assert!(following(&page, cx));
+    assert!(!has("conversation-to-end", cx), "at the end, no button");
+
+    scroll_up(&lead, cx);
+    assert!(!following(&page, cx));
+    assert!(has("conversation-to-end", cx), "scrolled up, the button");
+    // Over the conversation, centred, above the composer.
+    let button = cx.update(|window, _| window.find("conversation-to-end").bounds());
+    let conversation = cx.update(|window, _| window.find(format!("conversation-{lead}")).bounds());
+    let composer = cx.update(|window, _| window.find("reply-field").bounds());
+    assert!(button.bottom() <= composer.top(), "{button:?} {composer:?}");
+    assert!(
+        conversation.contains(&button.center()),
+        "over the conversation"
+    );
+    let centre = conversation.center().x;
+    assert!(
+        (button.center().x - centre).abs() < px(2.),
+        "centred: {button:?}"
+    );
+    assert!(!has("conversation-to-end-dot", cx), "nothing new");
+
+    cx.update(|window, cx| window.click("conversation-to-end", cx));
+    at_rest(cx);
+    assert!(following(&page, cx), "it follows the end again");
+    assert!(!has("conversation-to-end", cx), "and the button left");
+}
+
+#[gpui_kit::test]
+fn the_button_marks_new_messages_and_leaves_at_the_end(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    worked(&user, &lead, "say a lot");
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    until(&shell, cx, "the long answer is read", |cx| {
+        row_of(
+            &page,
+            cx,
+            |b| matches!(b, Block::Text { text } if text.ends_with("Thirty.")),
+        )
+        .is_some()
+    });
+    settle(cx);
+    scroll_up(&lead, cx);
+    assert!(has("conversation-to-end", cx));
+    assert!(!has("conversation-to-end-dot", cx));
+
+    user.call("agent.send", json!({"agent": lead, "message": "say more"}))
+        .unwrap();
+    until(&shell, cx, "the new answer is read", |cx| {
+        row_of(&page, cx, |b| is_text(b, "One more thing.")).is_some()
+    });
+    settle(cx);
+    assert!(!following(&page, cx), "still where the user is");
+    assert!(
+        has("conversation-to-end-dot", cx),
+        "the dot says something new"
+    );
+
+    // Back at the end by hand: the button leaves, with its dot.
+    let middle = cx.update(|window, _| {
+        window
+            .find(format!("conversation-{lead}"))
+            .bounds()
+            .center()
+    });
+    for _ in 0..8 {
+        cx.simulate_event(gpui_kit::ScrollWheelEvent {
+            position: middle,
+            delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-800.))),
+            ..Default::default()
+        });
+        settle(cx);
+    }
+    at_rest(cx);
+    assert!(!has("conversation-to-end", cx), "the end is in sight");
+    assert!(!has("conversation-to-end-dot", cx));
 }

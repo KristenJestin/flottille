@@ -160,6 +160,104 @@ impl Call {
     }
 }
 
+/// Whether a block stays in sight between the groups: what the agent said, the messages it was
+/// sent, and why it ended or came back. Everything else folds into the group between two of
+/// them.
+pub fn in_sight(block: &Block) -> bool {
+    match block {
+        Block::Text { .. } | Block::Message { .. } | Block::Relayed { .. } => true,
+        Block::Notice { kind, .. } => matches!(kind.as_str(), "failed" | "ended" | "resumed"),
+        _ => false,
+    }
+}
+
+/// What the line of a group of the agent's work says.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Summary {
+    /// Its thoughts, calls and deliveries.
+    pub steps: usize,
+    /// The kinds of its calls and deliveries, in the order they were first used.
+    pub kinds: Vec<String>,
+    pub failed: usize,
+    /// How long it took, from its first step to its last; none while a step runs.
+    pub ms: Option<u64>,
+    /// The step running now, as the line names it.
+    pub running: Option<String>,
+}
+
+impl Summary {
+    /// The line of the blocks of a group, each with when it came.
+    pub fn of(blocks: &[Block], times: &[u64]) -> Self {
+        let mut summary = Summary::default();
+        let (mut start, mut end) = (u64::MAX, 0);
+        let mut seen = |at: u64| {
+            start = start.min(at);
+            end = end.max(at);
+        };
+        let mut thought = false;
+        let kind = |kinds: &mut Vec<String>, name: &str| {
+            if !kinds.iter().any(|k| k == name) {
+                kinds.push(name.to_owned());
+            }
+        };
+        for (block, &at) in blocks.iter().zip(times) {
+            seen(at);
+            match block {
+                Block::Thought { since, until, .. } => {
+                    summary.steps += 1;
+                    thought = true;
+                    seen(*since);
+                    if let Some(at) = until {
+                        seen(*at);
+                    }
+                }
+                Block::Steps { calls } => {
+                    for call in calls {
+                        summary.steps += 1;
+                        kind(&mut summary.kinds, &call.name);
+                        seen(call.since);
+                        call.until.into_iter().for_each(&mut seen);
+                        match call.state {
+                            CallState::Failed => summary.failed += 1,
+                            CallState::Running => summary.running = Some(running(call)),
+                            _ => {}
+                        }
+                    }
+                }
+                Block::Notice { kind: name, .. } => {
+                    summary.steps += 1;
+                    kind(&mut summary.kinds, name);
+                }
+                Block::Report { .. } => {
+                    summary.steps += 1;
+                    kind(&mut summary.kinds, "report");
+                }
+                _ => {}
+            }
+        }
+        if summary.kinds.is_empty() && thought {
+            summary.kinds.push("thought".into());
+        }
+        summary.ms = (summary.running.is_none() && start <= end).then(|| end - start);
+        summary
+    }
+}
+
+/// A call that runs, as a group's line names it: a command by its line, else the tool.
+fn running(call: &Call) -> String {
+    let input: Option<Value> = serde_json::from_str(&call.args).ok();
+    match input.as_ref().and_then(|input| input["line"].as_str()) {
+        Some(line) => format!("running {line}"),
+        None => format!("running {}", call.name),
+    }
+}
+
+/// Whether a block of the conversation's last group waits on the user while it is folded: a
+/// question the agent asked them (its answer comes as a message, which ends the group).
+pub fn asks_the_user(block: &Block) -> bool {
+    matches!(block, Block::Steps { calls } if calls.iter().any(|call| call.name == "ask_user"))
+}
+
 /// What the agent does while a turn runs, as the line above the composer says it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Activity {
@@ -296,6 +394,11 @@ impl Conversation {
     /// When the block at this index came, in milliseconds since the epoch.
     pub fn at(&self, index: usize) -> Option<u64> {
         self.times.get(index).copied()
+    }
+
+    /// When each block came.
+    pub fn times(&self) -> &[u64] {
+        &self.times
     }
 
     /// The agent shown, as the page names it.

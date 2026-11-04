@@ -33,6 +33,7 @@ pub mod shell;
 pub mod skills;
 pub mod subscriptions;
 pub mod tasks;
+pub mod to_end;
 pub mod tree;
 pub mod waiting;
 pub mod workspaces_folder;
