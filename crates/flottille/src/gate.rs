@@ -643,8 +643,8 @@ fn forge(call: &Call) -> Verdict {
 pub const FORGE_ACTIONS: &str = "list, show, subscribe, unsubscribe, create, comment, edit, merge, checks, close, reopen, \
      pipelines, runs, run_view, run_logs, run, stop and step";
 /// The actions of `tickets`, as a refusal names them.
-pub const TICKET_ACTIONS: &str =
-    "list, search, show, subscribe, unsubscribe, create, comment, edit, close, reopen and status";
+pub const TICKET_ACTIONS: &str = "list, search, show, types, subscribe, unsubscribe, create, comment, edit, close, reopen and \
+     status";
 /// What `tickets close` closes for, as `gh issue close --reason` names it.
 pub const CLOSE_REASONS: [&str; 2] = ["completed", "not planned"];
 /// The arguments of `tickets` that belong to `edit` or `close` alone.
@@ -660,7 +660,9 @@ const TICKET_ONLY: [(&str, &str); 4] = [
 fn tickets(call: &Call) -> Verdict {
     let action = call.args["action"].as_str().unwrap_or_default();
     let said = match action {
-        "list" | "search" | "show" | "subscribe" | "unsubscribe" => return Verdict::Allow,
+        "list" | "search" | "show" | "types" | "subscribe" | "unsubscribe" => {
+            return Verdict::Allow;
+        }
         "create" => "it opens a ticket on the tracker",
         "comment" => "it comments on a ticket on the tracker",
         "edit" => {
@@ -690,6 +692,14 @@ fn tickets(call: &Call) -> Verdict {
                 "refused: tickets {action} takes no {key}: {key} is for {takers}"
             ));
         }
+    }
+    // An assignee is a filter of `list` and `search`, and what `create` and `edit` set.
+    if !["create", "edit"].contains(&action)
+        && call.args.get("assignee").is_some_and(|a| !a.is_null())
+    {
+        return Verdict::Deny(format!(
+            "refused: tickets {action} takes no assignee: assignee is for create and edit"
+        ));
     }
     if let Some(reason) = call.args["reason"].as_str()
         && !CLOSE_REASONS.contains(&reason)
@@ -4090,6 +4100,31 @@ mod tests {
             json!({"action": "delete"}),
             Some(&fixture.never)
         )));
+    }
+
+    #[test]
+    fn types_is_harmless_and_an_assignee_is_for_create_and_edit_only() {
+        let fixture = Fixture::main();
+        assert_eq!(
+            fixture.judge("tickets", json!({"action": "types"}), Some(&fixture.never)),
+            Verdict::Allow
+        );
+        for action in ["create", "edit"] {
+            let verdict = fixture.judge(
+                "tickets",
+                json!({"action": action, "ticket": "ABC-1", "title": "T", "assignee": "@me"}),
+                Some(&fixture.never),
+            );
+            assert!(to_judge(&verdict), "{action}: {verdict:?}");
+        }
+        for action in ["comment", "close", "reopen", "status"] {
+            let verdict = fixture.judge(
+                "tickets",
+                json!({"action": action, "ticket": "ABC-1", "assignee": "@me", "status": "x"}),
+                Some(&fixture.never),
+            );
+            assert!(denied(&verdict), "{action}: {verdict:?}");
+        }
     }
 
     #[test]

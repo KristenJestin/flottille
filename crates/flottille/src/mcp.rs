@@ -365,37 +365,39 @@ const SERVED: [Definition; 28] = [
         title: "Tickets",
         description: "The tickets of the project's tracker (GitHub issues #123, Jira ABC-123), \
             through the user's own gh or acli (no sign-in here: never run them). list: every \
-            ticket of a state (open by default), by label and assignee, in one call, as the \
-            daemon last read them (it says when); search: the same, with words of the title; \
-            show: a workspace's linked ticket (yours; in main, name workspace) or ticket, read \
-            now, detail full adds the comments. Writes, judged, answered at once, the result \
-            maybe later: create, comment, edit, close, reopen, status (Jira moves a work item, \
-            GitHub its board column). subscribe: the next events of a ticket wake you once, by \
-            a delivery (from people: no bot nor agent; minutes: 60 by default); unsubscribe. \
-            {\"action\": \"comment\", \"ticket\": \"#12\", \"body\": \"...\"}",
+            ticket of a state (open by default), by label and assignee, as the daemon last read \
+            them; search: the same, with words of the title; show: a workspace's linked ticket \
+            (in main, name workspace) or ticket, read now, detail full adds the comments; \
+            types: a Jira project's work item types: read them when unsure of a type, a guess \
+            is refused. Writes, judged, answered at once, the result maybe later: create, \
+            comment, edit, close, reopen, status. Nothing is assigned unless you ask, and a \
+            tracker may assign a new work item itself: assignee \"@me\" gives it to the user \
+            (Jira create, edit; null on edit removes it; GitHub edit: assignees). subscribe: \
+            the next events of a ticket wake you once (from people: no bot nor agent; minutes: \
+            60 by default); unsubscribe. {\"action\": \"comment\", \"ticket\": \"#12\", \"body\": \"...\"}",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "search", "show", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status"]},
+                "action": {"type": "string", "enum": ["list", "search", "show", "types", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status"]},
                 "ticket": {"type": "string", "description": "#123 or ABC-123; the workspace's when left out."},
                 "workspace": {"type": "string"},
                 "query": {"type": "string", "description": "search: words."},
                 "state": {"type": "string", "enum": ["open", "closed", "all"]},
                 "label": {"type": "string"},
-                "assignee": {"type": "string"},
+                "assignee": {"type": ["string", "null"], "description": "list, search: only those assigned to them. create, edit on Jira: whom to assign, \"@me\" (the user signed in to acli), an email or an account id; edit: null removes the assignee."},
                 "detail": {"type": "string", "enum": ["short", "full"]},
                 "title": {"type": "string"},
                 "body": {"type": "string", "description": "create, edit: description; comment: the comment."},
                 "labels": {"type": "array", "items": {"type": "string"}, "description": "create, edit: labels to add (GitHub)."},
                 "reason": {"enum": ["completed", "not planned"], "description": "close: completed or not planned (GitHub)."},
                 "remove_labels": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to remove (GitHub)."},
-                "assignees": {"type": "array", "items": {"type": "string"}, "description": "edit: logins to add (GitHub)."},
+                "assignees": {"type": "array", "items": {"type": "string"}, "description": "edit: logins to add (GitHub), \"@me\" for the user."},
                 "remove_assignees": {"type": "array", "items": {"type": "string"}, "description": "edit: logins to remove (GitHub)."},
                 "status": {"type": "string", "description": "status: its name."},
-                "project": {"type": "string", "description": "create on Jira: the tracker's project; status: the board."},
-                "type": {"type": "string", "description": "create on Jira: work item type."},
+                "project": {"type": "string", "description": "create, types on Jira: the tracker's project; status: the board."},
+                "type": {"type": "string", "description": "create on Jira: work item type, one of those types lists."},
                 "events": {"type": "array", "items": {"enum": crate::tickets::EVENTS}},
                 "from": {"enum": crate::subscriptions::FROM},
                 "minutes": {"type": "integer", "minimum": 1, "maximum": crate::subscriptions::LONGEST_MINUTES}

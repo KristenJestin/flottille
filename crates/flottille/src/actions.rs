@@ -472,14 +472,23 @@ pub async fn approved_losses(
 fn posted_says(args: &Value) -> Vec<String> {
     if matches!(
         args["action"].as_str(),
-        Some("list" | "search" | "show") | None
+        Some("list" | "search" | "show" | "types") | None
     ) {
         return Vec::new();
     }
-    [("title", "Its title"), ("body", "Its body")]
-        .into_iter()
-        .filter_map(|(key, said)| Some(format!("{said}: {}", args[key].as_str()?)))
-        .collect()
+    let mut says: Vec<String> = [
+        ("title", "Its title"),
+        ("body", "Its body"),
+        ("assignee", "Its assignee"),
+    ]
+    .into_iter()
+    .filter_map(|(key, said)| Some(format!("{said}: {}", args[key].as_str()?)))
+    .collect();
+    // A `null` assignee is how an edit takes the assignee away.
+    if args["action"] == "edit" && args["assignee"].is_null() && args.get("assignee").is_some() {
+        says.push("It removes the assignee".into());
+    }
+    says
 }
 
 /// Whether the agent is a root, the agent the user talks to.

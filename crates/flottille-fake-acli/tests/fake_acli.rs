@@ -296,3 +296,47 @@ fn a_comment_created_shows_in_the_next_view_as_the_script_s_user_wrote_it() {
     assert_eq!(comments[1]["author"]["displayName"], "Casey Example");
     assert_eq!(comments[1]["body"], "Second");
 }
+
+#[test]
+fn a_project_view_gives_the_scripted_types_and_a_creation_of_another_type_ends_with_1() {
+    let dir = scripted(json!({"types": {"ABC": ["Task", {"name": "Sub-task", "subtask": true}]}}));
+
+    let viewed = fake(dir.path())
+        .args(["jira", "project", "view", "--key", "ABC", "--json"])
+        .output()
+        .unwrap();
+    let unknown = fake(dir.path())
+        .args(["jira", "project", "view", "--key", "XYZ", "--json"])
+        .status()
+        .unwrap();
+    let create = |kind: &str, project: &str| {
+        fake(dir.path())
+            .args([
+                "jira",
+                "workitem",
+                "create",
+                "--project",
+                project,
+                "--summary",
+                "s",
+            ])
+            .args(["--type", kind, "--json"])
+            .status()
+            .unwrap()
+            .code()
+    };
+
+    let viewed: Value = serde_json::from_slice(&viewed.stdout).unwrap();
+    assert_eq!(
+        viewed["issueTypes"],
+        json!([{"name": "Task", "subtask": false}, {"name": "Sub-task", "subtask": true}])
+    );
+    assert_eq!(unknown.code(), Some(1));
+    assert_eq!(create("task", "ABC"), Some(0));
+    assert_eq!(create("Tâche", "ABC"), Some(1));
+    assert_eq!(
+        create("Tâche", "XYZ"),
+        Some(0),
+        "no types scripted, none checked"
+    );
+}
