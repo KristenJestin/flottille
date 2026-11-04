@@ -117,6 +117,8 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Answer {
                 read_only: asked.read_only,
                 ask_before_running: asked.ask_before_running,
                 added_by: None,
+                ready: None,
+                url: None,
             };
             let project = projects::rewrite(daemon, &asked.project, |project, document| {
                 if project.tasks.contains_key(&name) {
@@ -174,11 +176,13 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Answer {
 }
 
 /// `task.run`: the user runs a task in the project folder; answered with its run at once.
-pub fn run(daemon: &Arc<Daemon>, params: Value) -> Answer {
+pub async fn run(daemon: &Arc<Daemon>, params: Value) -> Answer {
     let asked: Named = serde_json::from_value(params)?;
     let project = projects::load_project(daemon, &asked.project)?;
     find(&project, &asked.name)?;
-    let run = crate::runs::run_for_user(daemon, &project, &asked.name).map_err(Failure::refused)?;
+    let run = crate::runs::run_for_user(daemon, &project, &asked.name)
+        .await
+        .map_err(Failure::refused)?;
     Ok(json!({"project": project.name, "name": asked.name, "run": run}))
 }
 

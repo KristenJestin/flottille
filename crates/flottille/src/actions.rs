@@ -217,6 +217,8 @@ pub fn sets(tasks: &BTreeMap<String, Task>, tool: &str, args: &Value) -> Option<
                     read_only: false,
                     ask_before_running: false,
                     added_by: None,
+                    ready: None,
+                    url: None,
                 },
                 _ => tasks.get(&name)?.clone(),
             };
@@ -239,6 +241,8 @@ pub fn sets(tasks: &BTreeMap<String, Task>, tool: &str, args: &Value) -> Option<
                         read_only: false,
                         ask_before_running: false,
                         added_by: None,
+                        ready: None,
+                        url: None,
                     },
                 ),
                 (None, Some(name)) => (Some(name.clone()), tasks.get(name)?.clone()),
@@ -540,6 +544,8 @@ fn tasks_says(project: &Project, call: &TasksCall) -> Result<Vec<String>, Outcom
                 read_only: false,
                 ask_before_running: false,
                 added_by: None,
+                ready: None,
+                url: None,
             },
             call,
         );

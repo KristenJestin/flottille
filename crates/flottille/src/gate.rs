@@ -3728,6 +3728,8 @@ mod tests {
                 read_only: false,
                 ask_before_running: false,
                 added_by: None,
+                ready: None,
+                url: None,
             };
             set(&mut command);
             self.commands.insert(name.into(), command);

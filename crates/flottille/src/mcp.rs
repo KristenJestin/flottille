@@ -234,9 +234,12 @@ const SERVED: [Definition; 28] = [
             unquoted pipe, redirection, glob or &&, and a variable or $( even in double quotes, \
             is refused, put them in a script of the repository; quoted, the others are text. \
             Waits up to timeout seconds (30 by default, 600 at most) and answers \
-            with the end of the output; a longer run keeps going under its run id. Give task or \
-            line: {\"task\": \"test\"}, or {\"line\": \"cargo test -p core\", \
-            \"repository\": \"api\", \"timeout\": 120}.",
+            with the end of the output; a longer run keeps going under its run id, and you are \
+            told when it ends. A server task (serve) answers at once with whether it is starting \
+            or ready and its address; for a task that says when it is ready, notify \"ready\" \
+            has you told when it is, instead of reading run_status again and again. Give task or \
+            line: {\"task\": \"test\"}, {\"task\": \"dev\", \"notify\": \"ready\"}, or \
+            {\"line\": \"cargo test -p core\", \"repository\": \"api\", \"timeout\": 120}.",
         read_only: false,
         idempotent: false,
         destructive: true,
@@ -246,6 +249,7 @@ const SERVED: [Definition; 28] = [
                 "line": {"type": "string", "description": "One command line, split on spaces, quotes kept whole."},
                 "repository": {"type": "string", "description": "Where it runs; the place's top by default."},
                 "timeout": {"type": "integer", "minimum": 1, "maximum": 600},
+                "notify": {"type": "string", "enum": ["ready"], "description": "A task that says when it is ready: you are told when it is, or when it ends before."},
                 "why": {"type": "string", "description": "One sentence: why this run."}
             }, "additionalProperties": false})
         },
@@ -259,7 +263,9 @@ const SERVED: [Definition; 28] = [
             after; only the last 64 KiB of an output are kept. action stop: ends it with \
             everything it started, asked to end, then killed 5 seconds later, and answers once \
             it ended; a run that already ended is left as it is. {\"run\": \"a1b2c3\", \
-            \"action\": \"stop\"} The same call reads a cut result whole: a long result is \
+            \"action\": \"stop\"} action notify with when ready: you are told when a run of \
+            a task that says when it is ready is, rather than reading it again and again: \
+            {\"run\": \"a1b2c3\", \"action\": \"notify\", \"when\": \"ready\"}. The same call reads a cut result whole: a long result is \
             returned as its beginning and its end with a line naming an id (res_...) and the \
             call that reads the lines left out, from start, a page at a time; stop does not \
             apply to it.",
@@ -269,7 +275,8 @@ const SERVED: [Definition; 28] = [
         schema: || {
             json!({"type": "object", "properties": {
                 "run": {"type": "string", "description": "The run id run gave, or the id of a cut result (res_...)."},
-                "action": {"type": "string", "enum": ["output", "stop"], "description": "output by default."},
+                "action": {"type": "string", "enum": ["output", "stop", "notify"], "description": "output by default."},
+                "when": {"type": "string", "enum": ["ready"], "description": "notify: what to be told of."},
                 "tail": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "output: the last lines."},
                 "start": {"type": "integer", "minimum": 1, "description": "output: the first line to show."}
             }, "required": ["run"], "additionalProperties": false})
