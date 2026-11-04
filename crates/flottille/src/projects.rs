@@ -776,7 +776,7 @@ pub fn migrate_files(daemon: &Daemon) {
                  both kept: remove the one you do not want"
             );
         }
-        let Some(migrated) = migrated(&text) else {
+        let Some(migrated) = migrated_for(&text, Some((&name, &projects.data))) else {
             continue;
         };
         // The file is written only when it reads afterwards: one that worked still does, one that
@@ -801,9 +801,35 @@ pub fn migrate_files(daemon: &Daemon) {
 
 /// The text of a project's file with its keys brought to this version, `None` when it holds
 /// none of the former ones (or is no TOML at all).
-pub fn migrated(text: &str) -> Option<String> {
+#[cfg(test)]
+fn migrated(text: &str) -> Option<String> {
+    migrated_for(text, None)
+}
+
+/// As [`migrated`], and for the project `(name, data folder)` when given, its `workspaces_root`
+/// dropped if it only pins the data folder: until the default could be chosen, `project add`
+/// wrote it, and pinned it would never follow the user's default. It resolves the same under the
+/// data default, and the workspaces that exist keep their folder from their record.
+fn migrated_for(text: &str, project: Option<(&str, &Path)>) -> Option<String> {
     let mut document: toml_edit::DocumentMut = text.parse().ok()?;
-    former_keys_renamed(&mut document).then(|| document.to_string())
+    let mut changed = former_keys_renamed(&mut document);
+    if let Some((name, data)) = project {
+        changed |= pinned_default_dropped(&mut document, name, data);
+    }
+    changed.then(|| document.to_string())
+}
+
+/// Removes `workspaces_root` when it is `<data>/workspaces/<name>`, the folder a project
+/// without one gets under the data default. Whether it did.
+fn pinned_default_dropped(document: &mut toml_edit::DocumentMut, name: &str, data: &Path) -> bool {
+    let pinned = document
+        .get("workspaces_root")
+        .and_then(toml_edit::Item::as_str)
+        .is_some_and(|root| Path::new(root) == data.join("workspaces").join(name));
+    if pinned {
+        document.remove("workspaces_root");
+    }
+    pinned
 }
 
 /// The tasks a file holds twice, under their former key `[commands.<name>]` and under

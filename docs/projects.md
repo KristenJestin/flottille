@@ -71,6 +71,10 @@ A project's `workspaces_root` takes the same writing as `own`. A file that canno
 (`workspaces.toml` with a word it does not know) does not hide the projects: the data folder is
 followed, and the window says why. `project add` writes no `workspaces_root`, so a new project
 follows the default of the day.
+At its start the daemon drops from a project's file a `workspaces_root` that is exactly
+`$XDG_DATA_HOME/flottille/workspaces/<project>`: older versions of `project add` wrote it, and pinned
+it would hide the default from that project. It resolves the same under the data default, a folder
+of any other name is kept, and the existing workspaces keep their folder from their record.
 
 **A change applies to the workspaces made after it.** A workspace's record holds its folder: the
 existing ones stay where they are and nothing is moved, whichever way the default or the root

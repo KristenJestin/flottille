@@ -891,6 +891,56 @@ fn the_same_file_without_its_fault_is_migrated() {
     );
 }
 
+#[test]
+fn a_project_pinning_the_old_default_follows_the_new_default() {
+    let user = User::new();
+    let folder = user.path("work/app");
+    std::fs::create_dir_all(&folder).unwrap();
+    // What `project add` wrote until the default could be chosen: the data folder, pinned.
+    let pinned = user.path("data/flottille/workspaces/app");
+    let text = format!(
+        "# Mine.\nfolder = {:?}\nworkspaces_root = {:?}\n\n[[repositories]]\npath = \".\"\n",
+        folder.display().to_string(),
+        pinned.display().to_string()
+    );
+    user.write_project_file("app", &text);
+
+    user.status();
+
+    let written = std::fs::read_to_string(user.project_file("app")).unwrap();
+    assert!(!written.contains("workspaces_root"), "{written}");
+    assert!(written.contains("# Mine."), "{written}");
+    user.call("workspaces_folder.set", json!({"place": "beside"}))
+        .unwrap();
+    let project = user.call("project.show", json!({"name": "app"})).unwrap();
+    assert_eq!(
+        project["workspaces_root"],
+        user.path("work/app-work").to_str().unwrap()
+    );
+    assert!(project.get("workspaces_root_own").is_none(), "{project}");
+}
+
+#[test]
+fn a_project_pinning_another_folder_keeps_it() {
+    let user = User::new();
+    let folder = user.path("work/app");
+    std::fs::create_dir_all(&folder).unwrap();
+    let own = user.path("elsewhere/app");
+    let text = format!(
+        "folder = {:?}\nworkspaces_root = {:?}\n\n[[repositories]]\npath = \".\"\n",
+        folder.display().to_string(),
+        own.display().to_string()
+    );
+    user.write_project_file("app", &text);
+
+    user.status();
+
+    assert_eq!(
+        std::fs::read_to_string(user.project_file("app")).unwrap(),
+        text
+    );
+}
+
 /// A project `app` of three repositories: `api` with its `origin` on GitHub and a `develop`
 /// branch, `lib` with no remote, and `web`, found in the folder but left out of the file, which
 /// holds comments of its user.
