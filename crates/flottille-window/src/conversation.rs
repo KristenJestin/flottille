@@ -143,6 +143,8 @@ pub struct Call {
     pub name: String,
     /// Its arguments on one line.
     pub args: String,
+    /// The file it reads, writes or lists, when it is a file's tool: its line is the path.
+    pub path: Option<String>,
     pub state: CallState,
     pub since: u64,
     pub until: Option<u64>,
@@ -579,6 +581,7 @@ impl Conversation {
                 let call = Call {
                     id: text("id"),
                     args: args_of(&name, &data["raw_input"]),
+                    path: path_of(&name, &data["raw_input"]),
                     name,
                     state: call_state(data["status"].as_str()),
                     since: event.at,
@@ -796,6 +799,7 @@ impl Conversation {
             (call.name == "agent_launch" && !data["raw_input"].is_null()).then(|| call.id.clone());
         if !data["raw_input"].is_null() {
             call.args = args_of(&call.name, &data["raw_input"]);
+            call.path = path_of(&call.name, &data["raw_input"]);
             if call.name == "fs_edit" {
                 self.edits
                     .insert(call.id.clone(), data["raw_input"].clone());
@@ -1353,6 +1357,14 @@ fn args_of(tool: &str, input: &Value) -> String {
     match (tool, input["url"].as_str().or(input["query"].as_str())) {
         ("web", Some(asked)) => cut_args(asked.to_owned()),
         _ => shown_args(input),
+    }
+}
+
+/// The file a file's tool works on: what its line shows in place of its arguments.
+fn path_of(tool: &str, input: &Value) -> Option<String> {
+    match tool {
+        "fs_read" | "fs_write" | "fs_edit" | "fs_list" => input["path"].as_str().map(str::to_owned),
+        _ => None,
     }
 }
 
@@ -2289,6 +2301,34 @@ mod tests {
         assert_eq!(calls[0].name, "web");
         assert_eq!(calls[0].args, "https://docs.example/select");
         assert_eq!(calls[1].args, "tokio select");
+    }
+
+    #[test]
+    fn a_file_step_keeps_its_path_even_when_its_arguments_are_cut() {
+        let mut c = root();
+        let content = "x".repeat(5_000);
+        for (seq, id, tool, input) in [
+            (1, "r", "fs_read", json!({"path": "src/a.rs"})),
+            (
+                3,
+                "w",
+                "fs_write",
+                json!({"path": "src/b.rs", "content": content}),
+            ),
+            (5, "s", "search", json!({"pattern": "x"})),
+        ] {
+            c.apply(&event(
+                seq,
+                "agent.tool_call",
+                json!({"id": id, "title": tool, "status": "in_progress", "raw_input": input}),
+            ));
+        }
+        let Block::Steps { calls } = &c.blocks()[0] else {
+            panic!("{:?}", c.blocks());
+        };
+        assert_eq!(calls[0].path.as_deref(), Some("src/a.rs"));
+        assert_eq!(calls[1].path.as_deref(), Some("src/b.rs"));
+        assert_eq!(calls[2].path, None, "a search has no one file");
     }
 
     #[test]

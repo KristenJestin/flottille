@@ -30,7 +30,9 @@ use flottille_window::settings::SettingsPage;
 use flottille_window::shell::{Layout, Selection};
 use flottille_window::tree::{project_id, session_id};
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{Entity, Focusable as _, TestAppContext, VisualTestContext, px, size};
+use gpui_kit::{
+    Bounds, Entity, Focusable as _, Pixels, TestAppContext, VisualTestContext, px, size,
+};
 use serde_json::json;
 
 /// A user whose fake agent answers "ok", reads `.env` when asked to (a call the gate holds for
@@ -5413,6 +5415,154 @@ fn an_edit_s_diff_is_folded_until_clicked(cx: &mut TestAppContext) {
     settle(cx);
     cx.update(|window, _| assert!(window.try_find(lines.clone()).is_none()));
     assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+}
+
+const DEEP_PATH: &str = "apps/front/src/app/pages/(dashboard)/settings/components/mail-recipient-sheet/mail-recipient-sheet.html";
+
+/// A session whose agent edited `path`, in a window `width` wide: the edit's row.
+fn edit_of<'a>(
+    path: &str,
+    width: f32,
+    cx: &'a mut TestAppContext,
+) -> (Entity<SessionPage>, usize, &'a mut VisualTestContext) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    settle(cx);
+    // The tree is a drawer in a narrow window: the session is opened first, then the window narrows.
+    cx.simulate_resize(size(px(width), px(800.)));
+    settle(cx);
+    read_events(
+        &page,
+        vec![
+            made_up(
+                1,
+                "agent.tool_call",
+                json!({"id": "e", "title": "fs_edit", "status": "in_progress",
+                    "raw_input": {"path": path, "edits": [
+                        {"old": "a\nb", "new": "c\nd\ne"}]}}),
+            ),
+            made_up(
+                2,
+                "agent.tool_call",
+                json!({"id": "e", "update": true, "status": "completed"}),
+            ),
+        ],
+        cx,
+    );
+    frame(cx);
+    let at = blocks(&page, cx)
+        .iter()
+        .position(|b| matches!(b, Block::Diff { .. }))
+        .expect("the edit's diff is a block");
+    unfold(&page, at, cx);
+    settle(cx);
+    (page, at, cx)
+}
+
+fn edit_bounds(at: usize, part: &str, cx: &mut VisualTestContext) -> Bounds<Pixels> {
+    cx.update(|window, _| window.find(format!("row-{at}-{part}")).bounds())
+}
+
+#[gpui_kit::test]
+fn a_long_path_keeps_the_count_inside_the_edit_card(cx: &mut TestAppContext) {
+    let (_page, at, cx) = edit_of(DEEP_PATH, 420., cx);
+    let (card, chevron, count) = (
+        edit_bounds(at, "diff", cx),
+        edit_bounds(at, "diff-chevron", cx),
+        edit_bounds(at, "diff-card-meta", cx),
+    );
+    assert!(card.size.width < px(420.), "the card is narrow: {card:?}");
+    assert!(chevron.right() <= card.right(), "{chevron:?} in {card:?}");
+    assert!(count.right() <= card.right(), "{count:?} in {card:?}");
+    assert!(
+        chevron.right() <= count.left(),
+        "the chevron comes before the count"
+    );
+}
+
+#[gpui_kit::test]
+fn the_file_name_stays_whole_when_the_folder_is_cut(cx: &mut TestAppContext) {
+    let (_page, at, cx) = edit_of("mail-recipient-sheet.html", 420., cx);
+    let alone = edit_bounds(at, "diff-path-name", cx).size.width;
+    let (_page, at, cx) = edit_of(DEEP_PATH, 420., cx);
+    let (name, folder) = (
+        edit_bounds(at, "diff-path-name", cx),
+        edit_bounds(at, "diff-path-folder", cx),
+    );
+    assert_eq!(name.size.width, alone, "the name is whole: {name:?}");
+    assert!(
+        folder.size.width < px(DEEP_PATH.len() as f32 * 6.),
+        "the folder is cut: {folder:?}"
+    );
+    assert!(folder.right() <= name.left() + px(0.5));
+}
+
+#[gpui_kit::test]
+fn the_whole_path_is_in_the_tooltip(cx: &mut TestAppContext) {
+    let (_page, at, cx) = edit_of(DEEP_PATH, 420., cx);
+    let line = format!("row-{at}-diff-path");
+    cx.update(|window, cx| window.hover(line.clone(), cx));
+    cx.executor()
+        .advance_clock(flottille_ui::motion::TOOLTIP + flottille_ui::motion::HOVER * 2);
+    cx.run_until_parked();
+    frame(cx);
+    cx.update(|window, _| {
+        assert_eq!(
+            window.find(format!("{line}-tooltip")).label(),
+            Some(DEEP_PATH)
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn a_long_path_read_stays_inside_its_step(cx: &mut TestAppContext) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    settle(cx);
+    cx.simulate_resize(size(px(420.), px(800.)));
+    settle(cx);
+    read_events(
+        &page,
+        vec![
+            made_up(
+                1,
+                "agent.tool_call",
+                json!({"id": "r", "title": "fs_read", "status": "in_progress",
+                    "raw_input": {"path": DEEP_PATH}}),
+            ),
+            made_up(
+                2,
+                "agent.tool_call",
+                json!({"id": "r", "update": true, "status": "completed"}),
+            ),
+        ],
+        cx,
+    );
+    frame(cx);
+    let at = blocks(&page, cx)
+        .iter()
+        .position(|b| matches!(b, Block::Steps { .. }))
+        .expect("the read is a step");
+    unfold(&page, at, cx);
+    cx.update(|window, cx| window.click(format!("row-{at}-steps-toggle"), cx));
+    settle(cx);
+    let (step, folder, name) = cx.update(|window, _| {
+        (
+            window.find(format!("step-{at}-0")).bounds(),
+            window.find(format!("step-{at}-0-path-folder")).bounds(),
+            window.find(format!("step-{at}-0-path-name")).bounds(),
+        )
+    });
+    assert!(name.right() <= step.right(), "{name:?} in {step:?}");
+    assert!(folder.right() <= name.left() + px(0.5));
+    assert!(
+        folder.size.width < px(DEEP_PATH.len() as f32 * 6.),
+        "{folder:?}"
+    );
 }
 
 #[gpui_kit::test]

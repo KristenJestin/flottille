@@ -27,8 +27,8 @@ use flottille_ui::motion::{HOVER, Motion, PANEL};
 use flottille_ui::{
     AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Menu, Modal, Palette, Pill,
     PulsingLabel, Side, Skeleton, StateIcon, Status, Toast, Type, awaiting, changing, enter, fade,
-    fold_frame, hoverable, icon, palette, presence, presence_of, section_label, selectable, space,
-    text_region, toast, turning,
+    fold_frame, hoverable, icon, palette, path_line, presence, presence_of, section_label,
+    selectable, space, text_region, toast, turning,
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{
@@ -3652,94 +3652,101 @@ impl Render for Row {
                     0 => format!("{done} of {}", calls.len()),
                     _ => "running".to_owned(),
                 };
-                let rows =
-                    calls
-                        .iter()
-                        .zip(&self.calls)
-                        .enumerate()
-                        .map(|(at, (call, (_, mark)))| {
-                            let shown = !self.asks_only || call.name == "ask_user";
-                            let step = div()
-                                .id(ElementId::Name(format!("step-{}-{at}", self.at).into()))
-                                .flex()
-                                .gap(space::MD)
-                                .px(space::XS)
-                                .py(space::SM)
-                                .child(mark.clone())
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap(space::SM)
-                                                .mono(12.5)
-                                                .child(SharedString::from(call.name.clone()))
-                                                .children(call.allowed_by.as_ref().map(|by| {
-                                                    let said = SharedString::from(format!(
-                                                        "allowed by {by}"
-                                                    ));
-                                                    div()
-                                                        .id(ElementId::Name(
-                                                            format!(
-                                                                "step-{}-{at}-allowed",
-                                                                self.at
-                                                            )
+                let rows = calls
+                    .iter()
+                    .zip(&self.calls)
+                    .enumerate()
+                    .map(|(at, (call, (_, mark)))| {
+                        let shown = !self.asks_only || call.name == "ask_user";
+                        let step = div()
+                            .id(ElementId::Name(format!("step-{}-{at}", self.at).into()))
+                            .flex()
+                            .gap(space::MD)
+                            .px(space::XS)
+                            .py(space::SM)
+                            .child(mark.clone())
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(space::SM)
+                                            .mono(12.5)
+                                            .child(SharedString::from(call.name.clone()))
+                                            .children(call.allowed_by.as_ref().map(|by| {
+                                                let said =
+                                                    SharedString::from(format!("allowed by {by}"));
+                                                div()
+                                                    .id(ElementId::Name(
+                                                        format!("step-{}-{at}-allowed", self.at)
                                                             .into(),
-                                                        ))
-                                                        .text_size(px(11.5))
+                                                    ))
+                                                    .text_size(px(11.5))
+                                                    .text_color(p.faint)
+                                                    .aria_label(said.clone())
+                                                    .child(said)
+                                                    .test_support()
+                                            }))
+                                            .when(call.state == CallState::Interrupted, |d| {
+                                                d.child(
+                                                    div()
+                                                        .mono(10.)
+                                                        .medium()
                                                         .text_color(p.faint)
-                                                        .aria_label(said.clone())
-                                                        .child(said)
-                                                        .test_support()
-                                                }))
-                                                .when(call.state == CallState::Interrupted, |d| {
-                                                    d.child(
-                                                        div()
-                                                            .mono(10.)
-                                                            .medium()
-                                                            .text_color(p.faint)
-                                                            .child("INTERRUPTED"),
-                                                    )
-                                                }),
-                                        )
-                                        .child(
-                                            div()
-                                                .mono(11.5)
-                                                .text_color(p.faint)
-                                                .overflow_hidden()
-                                                .whitespace_nowrap()
-                                                .text_ellipsis()
-                                                .child(SharedString::from(call.args.clone())),
-                                        )
-                                        .child(presence(
-                                            ElementId::Name(
-                                                format!("step-{}-{at}-cut-line", self.at).into(),
-                                            ),
-                                            call.cut.is_some(),
-                                            cut_said(
+                                                        .child("INTERRUPTED"),
+                                                )
+                                            }),
+                                    )
+                                    .child(match &call.path {
+                                        Some(path) => div()
+                                            .text_color(p.faint)
+                                            .child(path_line(
                                                 ElementId::Name(
-                                                    format!("step-{}-{at}-cut", self.at).into(),
+                                                    format!("step-{}-{at}-path", self.at).into(),
                                                 ),
-                                                call.cut,
-                                                p.faint,
+                                                path,
+                                                11.5,
+                                                window,
+                                                cx,
+                                            ))
+                                            .into_any_element(),
+                                        None => div()
+                                            .mono(11.5)
+                                            .text_color(p.faint)
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .child(SharedString::from(call.args.clone()))
+                                            .into_any_element(),
+                                    })
+                                    .child(presence(
+                                        ElementId::Name(
+                                            format!("step-{}-{at}-cut-line", self.at).into(),
+                                        ),
+                                        call.cut.is_some(),
+                                        cut_said(
+                                            ElementId::Name(
+                                                format!("step-{}-{at}-cut", self.at).into(),
                                             ),
-                                        )),
-                                )
-                                .child(div().flex_none().mono(11.).text_color(p.faint).child(
-                                    SharedString::from(
-                                        call.duration_ms().map_or("…".into(), seconds),
-                                    ),
-                                ))
-                                .test_support();
-                            presence(
-                                ElementId::Name(format!("step-{}-{at}-shown", self.at).into()),
-                                shown,
-                                step,
+                                            call.cut,
+                                            p.faint,
+                                        ),
+                                    )),
                             )
-                        });
+                            .child(div().flex_none().mono(11.).text_color(p.faint).child(
+                                SharedString::from(call.duration_ms().map_or("…".into(), seconds)),
+                            ))
+                            .test_support();
+                        presence(
+                            ElementId::Name(format!("step-{}-{at}-shown", self.at).into()),
+                            shown,
+                            step,
+                        )
+                    })
+                    .collect::<Vec<_>>();
                 let toggle = || {
                     cx.listener(|this, _, _, cx| {
                         this.open = !this.open;
@@ -3990,22 +3997,32 @@ impl Render for Row {
                     .id(id("diff"))
                     .child(
                         Card::new()
+                            .id(id("diff-card"))
                             .title(hoverable(
                                 div()
                                     .id(id("diff-toggle"))
                                     .flex()
                                     .items_center()
                                     .gap(space::SM)
+                                    .flex_1()
+                                    .min_w_0()
                                     .cursor_pointer()
-                                    .child(icon(Icon::Repository).text_color(p.faint))
-                                    .child(div().mono(12.5).child(SharedString::from(path.clone())))
+                                    .child(icon(Icon::File).flex_none().text_color(p.faint))
+                                    .child(path_line(id("diff-path"), path, 12.5, window, cx))
                                     .child(
-                                        icon(Icon::Chevron)
-                                            .size(px(12.))
-                                            .text_color(p.faint)
-                                            .with_transformation(Transformation::rotate(radians(
-                                                -FRAC_PI_2 * turn,
-                                            ))),
+                                        div()
+                                            .id(id("diff-chevron"))
+                                            .flex_none()
+                                            .ml_auto()
+                                            .child(
+                                                icon(Icon::Chevron)
+                                                    .size(px(12.))
+                                                    .text_color(p.faint)
+                                                    .with_transformation(Transformation::rotate(
+                                                        radians(-FRAC_PI_2 * turn),
+                                                    )),
+                                            )
+                                            .test_support(),
                                     )
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.open = !this.open;
@@ -6618,6 +6635,7 @@ mod tests {
             id: "c".into(),
             name: "run".into(),
             args: String::new(),
+            path: None,
             state: CallState::Done,
             since: 0,
             until: Some(1),
