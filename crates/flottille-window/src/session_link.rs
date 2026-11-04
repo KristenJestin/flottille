@@ -579,12 +579,14 @@ struct Link {
     watched: Arc<Mutex<Option<String>>>,
 }
 
-/// What outlives a connection: the last event seen, to resume after it, and whether the
-/// conversation was read.
+/// What outlives a connection: the last event seen, to resume after it, whether the
+/// conversation was read, and what the place's slow parts last said, which the place of the
+/// next connection shows while it asks again.
 #[derive(Default)]
 struct Resume {
     last: Option<u64>,
     read: bool,
+    known: Known,
 }
 
 /// What the place's slow parts last said: a place read again shows them while it asks again.
@@ -677,8 +679,7 @@ impl Link {
         // reads of seconds.
         self.read_subscriptions(&mut conn)?;
         let mut running = self.read_commands(&mut conn)?;
-        let mut known = Known::default();
-        self.read_place(&mut conn, &mut known)?;
+        self.read_place(&mut conn, &mut resume.known)?;
         let mut next_commands = Instant::now() + COMMANDS_EVERY;
         // The command whose output was last read.
         let mut read_output: Option<String> = None;
@@ -702,7 +703,7 @@ impl Link {
                     self.read_requests(&mut conn)?;
                 }
                 if stale.place {
-                    self.read_place(&mut conn, &mut known)?;
+                    self.read_place(&mut conn, &mut resume.known)?;
                 }
                 if stale.subscriptions {
                     self.read_subscriptions(&mut conn)?;

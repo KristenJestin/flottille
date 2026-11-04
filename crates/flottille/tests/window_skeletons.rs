@@ -6,16 +6,20 @@
 
 mod common;
 
+use std::net::Shutdown;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::User;
 use common::mcp::{Mcp, server_of};
 use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
+use flottille_window::link::Update;
 use flottille_window::session::SessionPage;
+use flottille_window::session_link::{self, SessionUpdate, Where};
 use flottille_window::shell::Selection;
 use flottille_window::tree::session_id;
 use gpui_kit::test::TestWindowExt;
@@ -445,4 +449,88 @@ fn a_card_whose_repository_has_no_pull_request_loses_its_skeleton(cx: &mut TestA
         !present(cx, "pull-skeleton-login-api") && !present(cx, "pull-login-api"),
         "nothing is left where the pull request was waited for"
     );
+}
+
+/// The next `Place` the link sends; the other updates it takes on the way go to `seen`.
+fn next_place(
+    updates: &mut futures::channel::mpsc::UnboundedReceiver<Update>,
+    seen: &mut Vec<SessionUpdate>,
+) -> Box<flottille_window::session_link::PlaceFacts> {
+    let deadline = Instant::now() + Duration::from_secs(40);
+    loop {
+        match updates.try_recv() {
+            Ok(Update::Session { update, .. }) => {
+                if let SessionUpdate::Place(Some(facts)) = update {
+                    return facts;
+                }
+                seen.push(update);
+            }
+            Ok(_) => {}
+            Err(_) => {
+                assert!(Instant::now() < deadline, "the place never came");
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+    }
+}
+
+#[test]
+fn a_reconnect_keeps_the_known_pull_requests_and_ticket() {
+    let user = user();
+    let lead = lead(&user);
+    let streams: Arc<Mutex<Vec<UnixStream>>> = Arc::default();
+    let connector = user.connector();
+    let kept = streams.clone();
+    let connect: flottille_window::Connect = Arc::new(move || {
+        let stream = connector()?;
+        kept.lock().unwrap().push(stream.try_clone()?);
+        Ok(stream)
+    });
+    let (sender, mut updates) = futures::channel::mpsc::unbounded();
+    let _link = session_link::spawn(
+        connect,
+        sender,
+        lead.clone(),
+        lead,
+        Where {
+            project: "app".into(),
+            workspace: Some("login".into()),
+        },
+        1,
+    );
+    let mut seen = Vec::new();
+    let first = next_place(&mut updates, &mut seen);
+    assert!(first.forge_pending && first.ticket_pending, "it is read");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        while let Ok(Update::Session { update, .. }) = updates.try_recv() {
+            seen.push(update);
+        }
+        if seen
+            .iter()
+            .any(|u| matches!(u, SessionUpdate::PlaceTicket(Some(_))))
+            && seen
+                .iter()
+                .any(|u| matches!(u, SessionUpdate::PlaceForge(_)))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the forge and the ticket never came"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    // The socket drops, as when the daemon restarts: the link connects again by itself.
+    for stream in streams.lock().unwrap().drain(..) {
+        let _ = stream.shutdown(Shutdown::Both);
+    }
+    let again = next_place(&mut updates, &mut seen);
+    assert!(
+        !again.forge_pending && !again.ticket_pending,
+        "the pull requests and the ticket flashed back to skeletons over what was shown"
+    );
+    assert_eq!(again.pulls.len(), 1);
+    assert!(again.ticket.is_some());
 }
