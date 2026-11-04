@@ -66,6 +66,8 @@ pub struct Extension {
     pub actions: &'static [&'static str],
     /// The tools it gives to agents while it is active.
     pub tools: &'static [Tool],
+    /// Whether the agent is a session it started (`start_session`).
+    pub started: fn(&Daemon, &str) -> bool,
 }
 
 /// A tool an extension gives (`docs/extensions.md`, "Tools"): served as the core's are, and
@@ -74,8 +76,13 @@ pub struct Tool {
     pub definition: Definition,
     /// Who gets it, and the actions of its `action` argument each of them may call.
     pub given: &'static [(To, &'static [&'static str])],
-    /// The extension's own refusals of a call (a lock, a status): the gate's answer in every
-    /// mode, Full included, before anything is asked or run. `Err` is the sentence that says why.
+    /// The actions declared harmless, as the core's own reads are: they read or write
+    /// Flottille's store and nothing else, and pass in every mode. Any other action is held as a
+    /// call to judge, which the mode lets through, asks the judge or the user about.
+    pub harmless: &'static [&'static str],
+    /// The extension's own refusals of a call (a lock, a status): refused in every mode, Full
+    /// included, before anything is asked or run. `Err` is the sentence that says why; `Ok` lets
+    /// nothing through on its own, it leaves the call to the gate.
     pub gate: fn(&Daemon, &Grant, &Value) -> Result<(), String>,
     pub call: fn(&Arc<Daemon>, &Grant, Value) -> Outcome,
 }
@@ -134,6 +141,31 @@ struct Values {
 
 /// Held while `extensions.toml` is read and written again.
 static WRITING: Mutex<()> = Mutex::new(());
+
+/// Refuses extensions whose tools could not be told apart from another tool: one named as a tool
+/// of the core, which it would shadow, or as another extension's. Checked at the daemon's start.
+pub fn check_tools(extensions: &[&Extension]) -> Result<(), String> {
+    let mut names = Vec::new();
+    for extension in extensions {
+        for tool in extension.tools {
+            let name = tool.definition.name;
+            if crate::mcp::serves(name) {
+                return Err(format!(
+                    "the extension {} gives a tool {name}, the name of a core tool",
+                    extension.name
+                ));
+            }
+            if names.contains(&name) {
+                return Err(format!(
+                    "the extension {} gives a tool {name}, which another extension gives",
+                    extension.name
+                ));
+            }
+            names.push(name);
+        }
+    }
+    Ok(())
+}
 
 /// Brings every extension's tables up to date, at the daemon's start: they are made whether the
 /// extension is on or off, and kept when it is turned off.
@@ -360,6 +392,9 @@ pub fn tools_for(paths: &Paths, project: &Project, root: bool) -> Vec<&'static s
 }
 
 fn tool(name: &str) -> Option<&'static Tool> {
+    if crate::mcp::serves(name) {
+        return None;
+    }
     ALL.iter()
         .flat_map(|extension| extension.tools)
         .find(|tool| tool.definition.name == name)
@@ -376,9 +411,7 @@ pub fn gives(name: &str) -> bool {
     tool(name).is_some()
 }
 
-/// The gate's verdict on a call of a tool an extension gives, `None` for another tool: an action
-/// the caller is not given, or the extension's own refusal, is refused in every mode; the rest
-/// passes.
+/// The gate's verdict on a call of a tool an extension gives, `None` for another tool.
 pub fn classify(daemon: &Daemon, grant: &Grant, name: &str, args: &Value) -> Option<Verdict> {
     let tool = tool(name)?;
     let root = daemon
@@ -386,6 +419,21 @@ pub fn classify(daemon: &Daemon, grant: &Grant, name: &str, args: &Value) -> Opt
         .ok()
         .flatten()
         .is_some_and(|agent| agent.parent.is_none());
+    Some(verdict(tool, root, args, || {
+        (tool.gate)(daemon, grant, args)
+    }))
+}
+
+/// The verdict on a call of `tool` by a root or another agent: an action it is not given, or
+/// one the extension refuses, is refused in every mode; an action the extension declares
+/// harmless passes; any other is held as a call to judge.
+fn verdict(
+    tool: &Tool,
+    root: bool,
+    args: &Value,
+    refusal: impl FnOnce() -> Result<(), String>,
+) -> Verdict {
+    let name = tool.definition.name;
     let actions: Vec<&str> = tool
         .given
         .iter()
@@ -394,15 +442,24 @@ pub fn classify(daemon: &Daemon, grant: &Grant, name: &str, args: &Value) -> Opt
         .collect();
     let action = args["action"].as_str().unwrap_or_default();
     if !actions.contains(&action) {
-        return Some(Verdict::Deny(format!(
+        return Verdict::Deny(format!(
             "refused: {name} takes the actions {}, not {}",
             actions.join(", "),
             args["action"]
-        )));
+        ));
     }
-    Some(match (tool.gate)(daemon, grant, args) {
-        Ok(()) => Verdict::Allow,
-        Err(why) => Verdict::Deny(format!("refused: {why}")),
+    if let Err(why) = refusal() {
+        return Verdict::Deny(format!("refused: {why}"));
+    }
+    if tool.harmless.contains(&action) {
+        return Verdict::Allow;
+    }
+    Verdict::Ask(crate::gate::Ask {
+        reasons: vec![format!(
+            "it calls {name} {action}, an action of an extension's tool not declared harmless"
+        )],
+        class: crate::gate::Class::Judge,
+        kind: approval::Kind::Call,
     })
 }
 
@@ -416,7 +473,9 @@ pub fn perform(daemon: &Arc<Daemon>, grant: &Grant, name: &str, args: Value) -> 
 
 /// Starts a `lead` session for the user in the project's main checkout, as `agent_launch` starts
 /// a root: `message` is its first message, said to be Flottille's. `before` runs once the agent
-/// is made and before it is sent anything; its refusal leaves the agent unsent.
+/// is made and before it is written: its refusal leaves no agent behind. The extension then
+/// knows the session as its own (`Extension::started`), so a daemon stopped before its first
+/// message delivers it at the next start (`tree::brief_at_start`).
 pub fn start_session(
     daemon: &Arc<Daemon>,
     project: &Project,
@@ -425,7 +484,7 @@ pub fn start_session(
     before: impl FnOnce(&Agent) -> Result<(), Failure>,
 ) -> Result<Agent, Failure> {
     let role = crate::roles::role(crate::roles::LEAD).expect("the lead role");
-    let agent = crate::agents::create(
+    let agent = crate::agents::made(
         daemon,
         project,
         crate::agents::New {
@@ -443,8 +502,16 @@ pub fn start_session(
         },
     )?;
     before(&agent)?;
+    crate::agents::write_new(daemon, &agent)?;
     crate::tree::brief(daemon, &agent);
     Ok(agent)
+}
+
+/// Whether an extension started the agent's session (`start_session`): its first message is
+/// Flottille's, not the user's.
+pub fn started(daemon: &Daemon, agent: &str) -> bool {
+    ALL.iter()
+        .any(|extension| (extension.started)(daemon, agent))
 }
 
 /// Tells an agent what happened, as a delivery of the extension's kind (`[flottille:<name>]`):
@@ -932,6 +999,90 @@ mod tests {
                 found.push(path);
             }
         }
+    }
+
+    fn no_schema() -> Value {
+        json!({"type": "object"})
+    }
+
+    fn never_refused(_: &Daemon, _: &Grant, _: &Value) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn not_called(_: &Arc<Daemon>, _: &Grant, _: Value) -> Outcome {
+        Outcome::Done(String::new())
+    }
+
+    /// A tool named `name`, whose actions `read` and `send` roots get, `read` declared harmless.
+    const fn tool_named(name: &'static str) -> Tool {
+        Tool {
+            definition: Definition {
+                name,
+                title: "A test tool",
+                description: "A tool of a test.",
+                read_only: false,
+                idempotent: false,
+                destructive: false,
+                schema: no_schema,
+            },
+            given: &[(To::Roots, &["read", "send"])],
+            harmless: &["read"],
+            gate: never_refused,
+            call: not_called,
+        }
+    }
+
+    #[test]
+    fn an_extension_tool_action_not_declared_harmless_is_held_in_ask_mode() {
+        let tool = tool_named("notes");
+        let send = json!({"action": "send"});
+        // Held as a call to judge: Ask holds it for the user, Auto asks the judge, Full lets it
+        // through (`mcp::serve_call`), as any other call to judge.
+        match verdict(&tool, true, &send, || Ok(())) {
+            Verdict::Ask(ask) => {
+                assert_eq!(ask.class, crate::gate::Class::Judge);
+                assert!(ask.reasons[0].contains("send"), "{:?}", ask.reasons);
+            }
+            other => panic!("not held: {}", other.word()),
+        }
+        let read = json!({"action": "read"});
+        assert!(matches!(
+            verdict(&tool, true, &read, || Ok(())),
+            Verdict::Allow
+        ));
+        // The extension's refusal is the gate's, before any mode is looked at: Full refuses it
+        // too, and a harmless action as well.
+        for args in [&send, &read] {
+            match verdict(&tool, true, args, || Err("it is locked".into())) {
+                Verdict::Deny(why) => assert_eq!(why, "refused: it is locked"),
+                other => panic!("not refused: {}", other.word()),
+            }
+        }
+        // An action it is not given is refused, harmless or not.
+        assert!(matches!(
+            verdict(&tool, false, &read, || Ok(())),
+            Verdict::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn an_extension_tool_cannot_take_a_core_tool_s_name() {
+        assert_eq!(check_tools(ALL), Ok(()));
+        static RUN: [Tool; 1] = [tool_named("run")];
+        let shadowing = Extension {
+            tools: &RUN,
+            ..specs::EXTENSION
+        };
+        let refused = check_tools(&[&shadowing]).unwrap_err();
+        assert!(refused.contains("run"), "{refused}");
+        assert!(refused.contains("core"), "{refused}");
+        static NOTES: [Tool; 1] = [tool_named("notes")];
+        let one = Extension {
+            tools: &NOTES,
+            ..specs::EXTENSION
+        };
+        let refused = check_tools(&[&one, &one]).unwrap_err();
+        assert!(refused.contains("notes"), "{refused}");
     }
 
     #[test]

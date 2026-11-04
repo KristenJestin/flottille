@@ -541,6 +541,14 @@ pub struct New {
 
 /// Writes a new agent, its instructions and tools frozen in it; nothing is sent to it yet.
 pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, Failure> {
+    let agent = made(daemon, project, new)?;
+    write_new(daemon, &agent)?;
+    Ok(agent)
+}
+
+/// A new agent, its instructions and tools frozen in it, not written yet: what may refuse it is
+/// checked.
+pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, Failure> {
     let (place, folder, repositories) = match &new.workspace {
         None => {
             let repositories: Vec<_> = project
@@ -662,9 +670,14 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         gate_mode: new.gate_mode.unwrap_or_default(),
         launched_by: new.launched_by,
     };
+    Ok(agent)
+}
+
+/// Writes the agent `made` made.
+pub fn write_new(daemon: &Daemon, agent: &Agent) -> Result<(), Failure> {
     daemon.write(|store| {
         let event = store.create_agent(
-            &agent,
+            agent,
             (
                 "agent.created",
                 json!({"agent": agent.id, "project": agent.project, "workspace": agent.workspace,
@@ -675,7 +688,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         )?;
         Ok(((), event))
     })?;
-    Ok(agent)
+    Ok(())
 }
 
 /// Changes the model and the effort of a running agent (`docs/agents.md`, "The options"): checked

@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use flottille_core::project::Project;
 use flottille_core::protocol::Event;
+use flottille_core::secrets;
 use flottille_core::store::{Space, now_ms};
 use flottille_core::{Error, Result};
 use rusqlite::{OptionalExtension, params};
@@ -87,7 +88,26 @@ pub const EXTENSION: Extension = Extension {
     },
     actions: &["new", "from_ticket", "answer", "ready", "draft"],
     tools: &[TOOL],
+    started: writes_a_spec,
 };
+
+/// Whether the agent is the session that writes a spec.
+fn writes_a_spec(daemon: &Daemon, agent: &str) -> bool {
+    daemon
+        .write(|store| {
+            let space = store.space(EXTENSION.name)?;
+            let found = space
+                .tables()
+                .query_row(
+                    "SELECT 1 FROM ext_specs_specs WHERE writer = ?1",
+                    params![agent],
+                    |_| Ok(()),
+                )
+                .optional()?;
+            Ok((found.is_some(), None::<Event>))
+        })
+        .unwrap_or(false)
+}
 
 /// What a root of a project where Specs is active may do with its specs; no action makes a spec
 /// Ready or Draft, which are the user's gestures alone.
@@ -113,6 +133,8 @@ const TOOL: Tool = Tool {
         schema: tool_schema,
     },
     given: &[(To::Roots, ACTIONS)],
+    // Each reads or writes a spec in Flottille's store, and nothing of the machine.
+    harmless: ACTIONS,
     gate: tool_gate,
     call: tool_call,
 };
@@ -1137,14 +1159,16 @@ async fn from_ticket(
     start_writing(&daemon, &project, &spec, &message)
 }
 
-/// Starts the session that writes the spec, recorded as its writer before it is sent anything.
+/// Starts the session that writes the spec, recorded as its writer before the session is written.
 fn start_writing(
     daemon: &Arc<Daemon>,
     project: &Project,
     spec: &Spec,
     message: &str,
 ) -> std::result::Result<Value, Failure> {
-    let title = format!("Spec {}: {}", spec.id, spec.title);
+    // A title, maybe a ticket's, is shown as a session's name: masked, on one line, cut.
+    let masked = secrets::mask(&spec.title, &std::env::vars_os().collect());
+    let title = format!("Spec {}: {}", spec.id, title_of(&masked));
     let agent = super::start_session(daemon, project, &title, message, |agent| {
         daemon.write(|store| {
             let space = store.space(EXTENSION.name)?;
@@ -1175,12 +1199,13 @@ fn start_writing(
 }
 
 /// The first message of the session that writes the spec: Flottille's, saying so, with the
-/// method, then the idea, or the ticket framed as data.
+/// method, then the idea, or the ticket framed as data. Flottille's sentences name the spec by
+/// its number: its title may be a ticket's, written by anyone.
 fn first_message(spec: &Spec, idea: &str, ticket: Option<&Ticket>) -> String {
     let id = spec.id;
     let mut text = format!(
         "This first message is Flottille's, not the user's: Specs started this session to write \
-         spec {id}, \"{title}\", of project {project}, with the `spec` tool. The user follows \
+         spec {id} of project {project}, with the `spec` tool. The user follows \
          this session and may write to you here at any time.\n\n\
          The method:\n\
          - Read before you ask: the code, the project's files and the ticket. Never ask the user \
@@ -1197,7 +1222,6 @@ fn first_message(spec: &Spec, idea: &str, ticket: Option<&Ticket>) -> String {
          - Write in the spec's language: {language}.\n\
          - Ready and Draft are the user's: say when the spec is complete with no question open, \
          and the user makes it Ready.\n",
-        title = spec.title,
         project = spec.project,
         language = spec.language,
     );
@@ -1466,6 +1490,22 @@ fn questions_text(spec: &Spec) -> String {
     text
 }
 
+/// What the session writes, masked of the secrets it may hold before it is stored: every text in
+/// it.
+fn masked(value: Value, place: &crate::place::Place) -> Value {
+    match value {
+        Value::String(text) => Value::String(crate::mcp::masked(&text, place)),
+        Value::Array(values) => values.into_iter().map(|v| masked(v, place)).collect(),
+        Value::Object(fields) => Value::Object(
+            fields
+                .into_iter()
+                .map(|(key, value)| (key, masked(value, place)))
+                .collect(),
+        ),
+        value => value,
+    }
+}
+
 fn tool_call(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcome {
     let asked: ToolCall = match crate::mcp::arguments("spec", args) {
         Ok(asked) => asked,
@@ -1495,6 +1535,7 @@ fn tool_call(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcome {
             let (Some(section), Some(content)) = (asked.section, asked.content) else {
                 return Outcome::Refused("refused: write takes the section and its content".into());
             };
+            let content = masked(content, &grant.place);
             let written = write_draft(daemon, id, |_, spec| {
                 writes(spec, agent).map_err(Error::Refused)?;
                 write_section(&project, spec, &section, content)?;
@@ -1509,7 +1550,24 @@ fn tool_call(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcome {
             }
         }
         "ask" => {
-            let wave = match checked_wave(asked.questions.unwrap_or_default()) {
+            let place = &grant.place;
+            let text = |text: Option<String>| text.map(|text| crate::mcp::masked(&text, place));
+            let wave: Vec<Asked> = asked
+                .questions
+                .unwrap_or_default()
+                .into_iter()
+                .map(|asked| Asked {
+                    question: text(asked.question),
+                    options: asked
+                        .options
+                        .iter()
+                        .map(|option| crate::mcp::masked(option, place))
+                        .collect(),
+                    recommended: text(asked.recommended),
+                    reason: text(asked.reason),
+                })
+                .collect();
+            let wave = match checked_wave(wave) {
                 Ok(wave) => wave,
                 Err(why) => return Outcome::Refused(format!("refused: {why}")),
             };

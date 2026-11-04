@@ -750,6 +750,11 @@ const SERVED: [Definition; 28] = [
     },
 ];
 
+/// Whether the tool is one of the core's.
+pub fn serves(name: &str) -> bool {
+    SERVED.iter().any(|tool| tool.name == name)
+}
+
 fn definition(name: &str) -> Option<&'static Definition> {
     SERVED
         .iter()
