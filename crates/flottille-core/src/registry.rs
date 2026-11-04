@@ -32,9 +32,7 @@ impl Registry {
             dir: paths.projects(),
             data: paths.data.clone(),
             default: paths.workspaces_place(),
-            home: std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .filter(|home| home.is_absolute()),
+            home: place::home(),
         }
     }
 
@@ -91,15 +89,18 @@ impl Registry {
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
+        self.parse(name, &text).map(Some).map_err(Error::Config)
+    }
+
+    /// Checks the text of a project's file as `load` would read it.
+    pub fn parse(&self, name: &str, text: &str) -> std::result::Result<Project, ConfigError> {
         let default = self.place();
         let places = Places {
             data: &self.data,
             home: self.home.as_deref(),
             default: &default,
         };
-        Project::parse_in(name, &text, &places)
-            .map(Some)
-            .map_err(Error::Config)
+        Project::parse_in(name, text, &places)
     }
 
     /// Writes the project's file, which must not exist yet. A reader sees the whole file or none.

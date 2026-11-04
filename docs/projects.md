@@ -44,6 +44,43 @@ registered, then the new project's Settings, where it can be checked again or re
 
 All of them take `--json` and print what the daemon answered (`docs/protocol.md`).
 
+## Where the workspaces go
+
+A project's workspaces are made in `<root>/<workspace name>` (`docs/workspaces.md`). The root is, in
+this order:
+
+1. the project's own `workspaces_root`, when its file has one;
+2. the user's default for every project, `workspaces.toml` of Flottille's configuration folder;
+3. Flottille's data folder, `$XDG_DATA_HOME/flottille/workspaces/<project>`, when there is no file.
+
+```toml
+# $XDG_CONFIG_HOME/flottille/workspaces.toml
+place = "beside"                      # "data" (default), "beside" or "own"
+path = "~/Worktrees/<project>"        # with place = "own" only, and then needed
+```
+
+- `data`: `$XDG_DATA_HOME/flottille/workspaces/<project>`. Flottille never writes beside a user's
+  folder unasked, so this stays the default.
+- `beside`: `<parent of the project's folder>/<project>-work`, the project's name, not its folder's.
+- `own`: the folder typed. `<project>` is replaced by the project's name and a leading `~` by the
+  home folder, **when the folder is resolved**: the file keeps what was typed. The result must be
+  absolute, and a relative one is refused naming its key (`path`, or `workspaces_root` in a
+  project's file).
+
+A project's `workspaces_root` takes the same writing as `own`. A file that cannot be followed
+(`workspaces.toml` with a word it does not know) does not hide the projects: the data folder is
+followed, and the window says why. `project add` writes no `workspaces_root`, so a new project
+follows the default of the day.
+
+**A change applies to the workspaces made after it.** A workspace's record holds its folder: the
+existing ones stay where they are and nothing is moved, whichever way the default or the root
+changes.
+
+The window sets both: **Settings**, General tab, "Workspaces folder" (the default, `workspaces_folder.set`),
+and a project's Settings, "Workspaces folder" ("Use the default" or a folder of its own), which
+shows the folder that results. `flottille project show` prints that folder as `workspaces root`.
+`workspaces.toml` is edited through the window or by hand; the command line has no command for it.
+
 ## Detecting repositories
 
 The folder itself, if it holds a `.git`, and the folders one or two levels down that do. A `.git`
@@ -58,7 +95,7 @@ rest.
 # The name is the file's name: this is projects/app.toml. A `name` key is allowed if it says the same.
 folder = "/work/app"                  # absolute
 branch_prefix = "app"                 # default: a slug of the name
-workspaces_root = "/work/app-work"    # absolute; default: $XDG_DATA_HOME/flottille/workspaces/<name>
+workspaces_root = "/work/app-work"    # absolute (`~` and `<project>` allowed); default: the user's, see "Where the workspaces go"
 default_repositories = "all"          # "all", or a list of the repositories a workspace takes
 max_children = 12                     # children running at once, 1 to 12
 run_time_limit = 1800                 # seconds a run step of the setup may take; default 30 min

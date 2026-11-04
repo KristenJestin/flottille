@@ -50,6 +50,26 @@ fn a_single_repository_is_registered() {
 }
 
 #[test]
+fn a_registered_project_s_file_does_not_pin_where_its_workspaces_go() {
+    let user = User::new();
+    let app = user.path("work/app");
+    user.git_init(&app);
+
+    add(&user, &app);
+
+    // Pinned, the user's default for the workspaces would never reach this project.
+    let text = std::fs::read_to_string(user.project_file("app")).unwrap();
+    assert!(!text.contains("workspaces_root"), "{text}");
+    user.call("workspaces_folder.set", json!({"place": "beside"}))
+        .unwrap();
+    let project = user.call("project.show", json!({"name": "app"})).unwrap();
+    assert_eq!(
+        project["workspaces_root"],
+        user.path("work/app-work").to_str().unwrap()
+    );
+}
+
+#[test]
 fn a_folder_holding_three_repositories_and_being_one_registers_all_four() {
     let user = User::new();
     let app = user.path("work/app");

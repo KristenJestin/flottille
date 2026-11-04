@@ -118,6 +118,8 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> std::result::Result
             }
             let project = Project::new(&plan.name, plan.folder, plan.repositories, &projects.data);
             projects.registry.create(&project)?;
+            // The file names no folder for the workspaces: the project is what reads back.
+            let project = load(projects, &project.name)?;
             projects.known.insert(project.name.clone(), project.clone());
             emit(
                 daemon,
@@ -736,7 +738,9 @@ pub fn rewrite(
         })?;
     edit(&project, &mut document)?;
     let text = document.to_string();
-    let edited = Project::parse(name, &text, &projects.data)
+    let edited = projects
+        .registry
+        .parse(name, &text)
         .map_err(|error| Failure::new("invalid-config", error.to_string()))?;
     crate::providers::write_in_place(&file, &text).map_err(unavailable)?;
     announce_edits(daemon, projects)?;
@@ -777,7 +781,7 @@ pub fn migrate_files(daemon: &Daemon) {
         };
         // The file is written only when it reads afterwards: one that worked still does, one that
         // did not now does, or else it stays as the user left it.
-        let usable = |text: &str| Project::parse(&name, text, &projects.data).is_ok();
+        let usable = |text: &str| projects.registry.parse(&name, text).is_ok();
         if !usable(&migrated) {
             if usable(&text) {
                 eprintln!(

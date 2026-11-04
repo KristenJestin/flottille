@@ -50,6 +50,13 @@ impl Place {
     }
 }
 
+/// The user's home, where a `~` leads: `$HOME` when it is absolute.
+pub fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute())
+}
+
 /// The folder a typed text names: `<project>` replaced, a leading `~` expanded, absolute.
 pub fn typed(
     text: &str,

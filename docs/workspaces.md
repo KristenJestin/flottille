@@ -21,8 +21,9 @@ All of them take `--json` and print what the daemon answered (`docs/protocol.md`
 
 ## Where it is
 
-The folder is `<workspaces root>/<name>` (the root is `$XDG_DATA_HOME/flottille/workspaces/<project>`
-unless the project says otherwise), and each repository's worktree is at the repository's path in
+The folder is `<workspaces root>/<name>` (the root is the project's own, else the user's default,
+else `$XDG_DATA_HOME/flottille/workspaces/<project>`: `docs/projects.md`, "Where the workspaces go"; a workspace keeps the
+folder it was made in whatever they become), and each repository's worktree is at the repository's path in
 it: `api` at `<folder>/api`, `libs/core` at `<folder>/libs/core`. The root repository `.` is the
 folder itself, so the workspace looks like the project folder: a command, a path in the
 instructions or a relative link written for the main checkout works the same in a workspace. That
