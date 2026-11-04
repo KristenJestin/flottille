@@ -27,6 +27,7 @@ use serde_json::{Value, json};
 fn script() -> Value {
     json!({"turns": [
         {"when": "work a while", "do": [{"wait": 4000}, {"say": "Done with that."}]},
+        {"when": "work until stopped", "do": [{"hold": "release"}, {"say": "Done with that."}]},
         {"when": "start the docs session", "do": [{"mcp": {"tool": "agent_launch",
             "arguments": {"title": "Docs", "brief": "Write the docs", "root": true,
                 "workspace": "w"}}}]},
@@ -363,11 +364,12 @@ fn a_message_sent_during_a_turn_shows_as_waiting_then_as_sent(cx: &mut TestAppCo
     );
 }
 
-/// The lead works, and a message the user wrote to it waits under the conversation: the
-/// composer, and the waiting message's delivery.
+/// The lead works on `long`, and a message the user wrote to it waits under the conversation:
+/// the composer, and the waiting message's delivery.
 fn with_a_waiting_message<'a>(
     user: &User,
     lead: &str,
+    long: &str,
     text: &str,
     cx: &'a mut TestAppContext,
 ) -> (
@@ -377,22 +379,15 @@ fn with_a_waiting_message<'a>(
     String,
     &'a mut VisualTestContext,
 ) {
-    let t0 = Instant::now();
     let (shell, page, cx) = open_session(user, lead, cx);
-    eprintln!("DIAG open_session {:?}", t0.elapsed());
-    user.call(
-        "agent.send",
-        json!({"agent": lead, "message": "work a while"}),
-    )
-    .unwrap();
-    let t0 = Instant::now();
+    user.call("agent.send", json!({"agent": lead, "message": long}))
+        .unwrap();
     let reply = shell
         .read_with(cx, |s, _| s.reply_of(lead).cloned())
         .expect("the session has a composer");
     until(&shell, cx, "the turn runs", |cx| {
         reply.read_with(cx, |r, _| r.is_running())
     });
-    eprintln!("DIAG turn runs {:?}", t0.elapsed());
     let delivery = user
         .call("agent.send", json!({"agent": lead, "message": text}))
         .unwrap()["delivery"]
@@ -402,9 +397,7 @@ fn with_a_waiting_message<'a>(
     until(&shell, cx, "the message waits", |cx| {
         queued(&page, cx) == [text]
     });
-    eprintln!("DIAG message waits {:?}", t0.elapsed());
     settle(cx);
-    eprintln!("DIAG settled {:?}", t0.elapsed());
     (shell, page, reply, delivery, cx)
 }
 
@@ -422,7 +415,7 @@ fn a_waiting_message_has_send_now_edit_and_cancel_buttons_a_sent_one_has_none(
     let user = user();
     let lead = lead(&user);
     let (shell, page, _, delivery, cx) =
-        with_a_waiting_message(&user, &lead, "and update the docs", cx);
+        with_a_waiting_message(&user, &lead, "work a while", "and update the docs", cx);
 
     for (which, words) in [("send-now", SEND_NOW), ("edit", EDIT), ("cancel", CANCEL)] {
         assert_eq!(
@@ -448,7 +441,8 @@ fn cancelling_a_waiting_message_folds_its_bubble_away_and_the_root_never_receive
 ) {
     let user = user();
     let lead = lead(&user);
-    let (shell, page, _, delivery, cx) = with_a_waiting_message(&user, &lead, "azdsqdsq", cx);
+    let (shell, page, _, delivery, cx) =
+        with_a_waiting_message(&user, &lead, "work a while", "azdsqdsq", cx);
 
     cx.update(|window, cx| window.click(queued_button(&delivery, "cancel"), cx));
 
@@ -546,7 +540,7 @@ fn withdrawing_a_message_the_root_already_read_says_so_in_a_toast_and_the_messag
     let user = user();
     let lead = lead(&user);
     let (shell, page, _, delivery, cx) =
-        with_a_waiting_message(&user, &lead, "and update the docs", cx);
+        with_a_waiting_message(&user, &lead, "work a while", "and update the docs", cx);
     // The root takes it first.
     user.call("agent.cancel", json!({"agent": lead})).unwrap();
     eventually("the root to read it", || {
@@ -578,9 +572,15 @@ fn send_now_stops_the_turn_and_the_root_receives_that_message_next_before_the_ot
 ) {
     let user = user();
     let lead = lead(&user);
-    let asked = Instant::now();
-    let (shell, page, _, first, cx) =
-        with_a_waiting_message(&user, &lead, "and update the docs", cx);
+    // The turn lasts until Send now stops it: one that ends first hands the root both messages
+    // in one prompt, and Send now is refused, however slow the window is to the click.
+    let (shell, page, _, first, cx) = with_a_waiting_message(
+        &user,
+        &lead,
+        "work until stopped",
+        "and update the docs",
+        cx,
+    );
     let second = user
         .call(
             "agent.send",
@@ -590,13 +590,10 @@ fn send_now_stops_the_turn_and_the_root_receives_that_message_next_before_the_ot
         .as_str()
         .unwrap()
         .to_owned();
-    eprintln!("DIAG second sent {:?}", asked.elapsed());
     until(&shell, cx, "both wait", |cx| queued(&page, cx).len() == 2);
-    eprintln!("DIAG both wait {:?}", asked.elapsed());
     settle(cx);
 
     cx.update(|window, cx| window.click(queued_button(&second, "send-now"), cx));
-    eprintln!("DIAG clicked {:?}", asked.elapsed());
 
     // The long turn is cut short; the next prompt is the second message alone, and the first
     // follows it.
@@ -613,27 +610,20 @@ fn send_now_stops_the_turn_and_the_root_receives_that_message_next_before_the_ot
             .any(|p| p.contains("and update the docs"))
     });
     let sent = prompts(&user);
-    let short: Vec<String> = sent
+    let said: Vec<Vec<&str>> = sent
         .iter()
         .map(|p| {
             [
-                "lead the work",
-                "work a while",
+                "work until stopped",
                 "then fix the tests",
                 "and update the docs",
             ]
-            .iter()
-            .filter(|m| p.contains(*m))
-            .copied()
-            .collect::<Vec<_>>()
-            .join(" + ")
+            .into_iter()
+            .filter(|m| p.contains(m))
+            .collect()
         })
         .collect();
-    let seen = format!(
-        "prompts {short:?}, toasts {:?}, {:?} since the long turn was asked",
-        toasts(&shell, cx),
-        asked.elapsed()
-    );
+    let seen = format!("prompts {said:?}, toasts {:?}", toasts(&shell, cx));
     let next = sent.len() - 2;
     assert!(
         sent[next].contains("then fix the tests") && !sent[next].contains("update the docs"),
