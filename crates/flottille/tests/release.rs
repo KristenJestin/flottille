@@ -798,6 +798,45 @@ impl Releases {
         self.files.lock().unwrap().insert(path.to_owned(), body);
     }
 
+    /// Takes the address away: the API answers there not found, as it does for a deleted release.
+    fn delete(&self, path: &str) {
+        self.files.lock().unwrap().remove(path);
+    }
+
+    /// The list the API answers in GitHub's own layout, not `list`'s short one: `author` before
+    /// the tag, `published_at` (`null` on a draft) before the assets, an `uploader` object in each
+    /// asset, and a body of commas and escaped quotes at the end.
+    fn list_as_github(&self, releases: &[&serde_json::Value]) {
+        let each: Vec<String> = releases
+            .iter()
+            .map(|r| {
+                let assets: Vec<String> = r["assets"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|a| {
+                        format!(
+                            r#"{{"name":{},"uploader":{{"login":"kris","id":1,"type":"User"}},"browser_download_url":{}}}"#,
+                            a["name"], a["browser_download_url"]
+                        )
+                    })
+                    .collect();
+                format!(
+                    r#"{{"url":"https://api.github.com/repos/o/r/releases/1","author":{{"login":"kris","id":1,"type":"User"}},"tag_name":{},"draft":{},"prerelease":{},"published_at":{},"assets":[{}],"body":"Changelog, with \"quotes\", and commas.\n- **cli**: one, two"}}"#,
+                    r["tag_name"],
+                    r["published_at"].is_null(),
+                    r["prerelease"],
+                    r["published_at"],
+                    assets.join(",")
+                )
+            })
+            .collect();
+        self.put(
+            "/repos/o/r/releases?per_page=100",
+            format!("[{}]", each.join(",")).into_bytes(),
+        );
+    }
+
     /// The list of releases the API gives, with each one's keys in GitHub's order (the tag, then
     /// when it was published, then its assets), which `install.sh` reads without a JSON parser.
     fn list(&self, releases: &[&serde_json::Value]) {
@@ -1064,6 +1103,46 @@ fn install_sh_takes_the_most_recent_build_and_an_exact_version() {
         &["--version", "0.4.0", "--channel", "beta"],
     );
     assert_eq!(output.status.code(), Some(2), "{output:?}");
+}
+
+#[test]
+fn install_sh_does_not_offer_a_draft() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    let published = releases.release(
+        "v0.4.1-beta.3",
+        "0.4.1-beta.3",
+        &standing_for(programs.path(), "0.4.1-beta.3"),
+        None,
+    );
+    let mut draft = releases.release(
+        "v0.4.1-beta.4",
+        "0.4.1-beta.4",
+        &standing_for(programs.path(), "0.4.1-beta.4"),
+        None,
+    );
+    draft["published_at"] = json!(null);
+    // The draft is listed after the release published last: it takes no date of that one.
+    releases.list_as_github(&[&published, &draft]);
+
+    let home = tempfile::tempdir().unwrap();
+    let output = install(home.path(), &releases, &["--channel", "beta"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        installed_version(home.path()),
+        "flottille 0.4.1-beta.3 (test, 000000000000)"
+    );
+
+    // With no release published, the draft alone is not offered.
+    releases.list_as_github(&[&draft]);
+    let home = tempfile::tempdir().unwrap();
+    let output = install(home.path(), &releases, &["--channel", "beta"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("there is no beta release"),
+        "{output:?}"
+    );
+    assert!(!home.path().join(".local/bin/flottille").exists());
 }
 
 #[test]
@@ -1755,6 +1834,191 @@ fn update_remembers_the_channel_last_chosen() {
 
     choose(&["update", "--channel", "stable"]);
     assert_eq!(plain_update_reads(), ["/repos/o/r/releases/latest"]);
+}
+
+#[test]
+fn a_plain_update_says_which_channel_it_follows() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    three_channels(&releases, programs.path());
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+    let plain_update = || {
+        let binary = installed();
+        let output = user.command_through(&binary, &["update"]).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let choose = |args: &[&str]| {
+        let binary = installed();
+        let output = user.command_through(&binary, args).output().unwrap();
+        assert!(output.status.success(), "{args:?}: {output:?}");
+    };
+
+    // Nothing remembered: no channel is said to be followed.
+    assert!(!plain_update().contains("Following"));
+
+    choose(&[
+        "update",
+        "--channel",
+        "alpha",
+        "--branch",
+        "feat/46-packages",
+    ]);
+    assert!(
+        plain_update().starts_with(
+            "Following the channel last chosen: alpha (feat/46-packages); --channel beta goes back to dev's builds.\n"
+        )
+    );
+
+    choose(&["update", "--channel", "beta"]);
+    assert!(plain_update().starts_with("Following the channel last chosen: beta.\n"));
+}
+
+#[test]
+fn a_remembered_alpha_without_a_release_says_how_to_leave_it() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    three_channels(&releases, programs.path());
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+    let binary = installed();
+    let output = user
+        .command_through(
+            &binary,
+            &[
+                "update",
+                "--channel",
+                "alpha",
+                "--branch",
+                "feat/46-packages",
+            ],
+        )
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    // The branch is merged and its alpha deleted with it.
+    releases.delete("/repos/o/r/releases/tags/alpha-feat-46-packages");
+
+    let binary = installed();
+    let output = user.command_through(&binary, &["update"]).output().unwrap();
+
+    assert!(!output.status.success(), "{output:?}");
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        said.contains("no alpha release for feat/46-packages"),
+        "{said}"
+    );
+    assert!(
+        said.contains("--channel beta (or another --branch) chooses another channel."),
+        "{said}"
+    );
+}
+
+#[test]
+fn a_corrupt_channel_memory_is_read_as_none() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    three_channels(&releases, programs.path());
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+    let memory = user.path("state/flottille");
+    std::fs::create_dir_all(&memory).unwrap();
+    std::fs::write(memory.join("update-channel.json"), b"{\"channel\": \"alp").unwrap();
+    releases.asked.lock().unwrap().clear();
+    let binary = installed();
+
+    let output = user.command_through(&binary, &["update"]).output().unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("Following"),
+        "{output:?}"
+    );
+    // The channel of the build (a local build takes stable), not the broken memory's.
+    let asked: Vec<String> = releases
+        .asked
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|path| path.contains("/releases"))
+        .cloned()
+        .collect();
+    assert_eq!(asked, ["/repos/o/r/releases/latest"]);
+}
+
+#[test]
+fn the_channel_memory_is_replaced_whole_with_no_file_left_beside_it() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    three_channels(&releases, programs.path());
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+    let choose = |args: &[&str]| {
+        let binary = installed();
+        let output = user.command_through(&binary, args).output().unwrap();
+        assert!(output.status.success(), "{args:?}: {output:?}");
+    };
+
+    choose(&[
+        "update",
+        "--channel",
+        "alpha",
+        "--branch",
+        "feat/46-packages",
+    ]);
+    choose(&["update", "--channel", "beta"]);
+
+    let memory = user.path("state/flottille");
+    assert_eq!(common::names_in(&memory), ["update-channel.json"]);
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(memory.join("update-channel.json")).unwrap())
+            .unwrap();
+    assert_eq!(saved["channel"], "beta");
+    assert!(saved["branch"].is_null(), "{saved}");
+}
+
+#[test]
+fn update_does_not_offer_a_draft() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    let published = releases.release(
+        "v0.4.1-beta.3",
+        "0.4.1-beta.3",
+        &standing_for(programs.path(), "0.4.1-beta.3"),
+        None,
+    );
+    let mut draft = releases.release(
+        "v0.4.1-beta.4",
+        "0.4.1-beta.4",
+        &standing_for(programs.path(), "0.4.1-beta.4"),
+        None,
+    );
+    draft["published_at"] = json!(null);
+    // The draft is listed after the release published last: it takes no date of that one.
+    releases.list_as_github(&[&published, &draft]);
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+
+    let binary = installed();
+    let output = user
+        .command_through(&binary, &["update", "--channel", "beta"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let said = Command::new(&binary).arg("--version").output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&said.stdout).trim(),
+        "flottille 0.4.1-beta.3 (test, 000000000000)"
+    );
+
+    // With no release published, the draft alone is not offered.
+    releases.list_as_github(&[&draft]);
+    let binary = installed();
+    let output = user
+        .command_through(&binary, &["update", "--channel", "beta"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("there is no beta release"),
+        "{output:?}"
+    );
 }
 
 #[test]

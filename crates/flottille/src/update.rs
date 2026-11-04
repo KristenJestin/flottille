@@ -60,7 +60,12 @@ fn remembered(paths: &Paths) -> Choice {
 
 fn remember(paths: &Paths, choice: &Choice) -> Result<()> {
     flottille_core::paths::ensure_private_dir(&paths.state)?;
-    std::fs::write(choice_file(paths), serde_json::to_vec(choice)?)?;
+    // Written beside the file and renamed over it, so that the file is the old choice or the new
+    // one, never half of one. The process's id keeps two updates from writing the same file.
+    let file = choice_file(paths);
+    let temp = file.with_extension(format!("json.{}.tmp", std::process::id()));
+    std::fs::write(&temp, serde_json::to_vec(choice)?)?;
+    std::fs::rename(&temp, &file)?;
     Ok(())
 }
 
@@ -88,6 +93,14 @@ pub fn run(
         kept.branch
             .filter(|_| kept.channel.as_deref() == Some(&channel))
     });
+    if !chosen && wanted.is_none() && kept.channel.is_some() {
+        match (channel.as_str(), branch.as_deref()) {
+            ("alpha", Some(branch)) => println!(
+                "Following the channel last chosen: alpha ({branch}); --channel beta goes back to dev's builds."
+            ),
+            _ => println!("Following the channel last chosen: {channel}."),
+        }
+    }
     if Client::connect(paths)?.is_some() {
         return Err(format!(
             "the daemon is running, and would go on from a binary that is gone: stop it first \
@@ -227,12 +240,13 @@ fn exact_url(version: &Version) -> Result<String> {
 
 /// The archive of the release published last among these (ties go to the higher version): a
 /// channel's latest is the newest build, not the highest number, which a numbering change can
-/// leave behind (#413). The dates are UTC and all of one shape, so they compare as text.
+/// leave behind (#413). The dates are UTC and all of one shape, so they compare as text. A draft
+/// has no date and is not published: it is not offered.
 fn latest_published(releases: &[Value]) -> Option<String> {
     releases
         .iter()
-        .flat_map(|release| {
-            let at = release["published_at"].as_str().unwrap_or_default();
+        .filter_map(|release| Some((release["published_at"].as_str()?, release)))
+        .flat_map(|(at, release)| {
             archives(release)
                 .into_iter()
                 .filter_map(move |url| Some(((at, version_of(url.rsplit('/').next()?)?), url)))
@@ -302,8 +316,12 @@ fn archive_url(channel: &str, branch: Option<&str>) -> Result<String> {
                     }
                 })
                 .collect();
-            let release = json(&format!("{}/releases/tags/alpha-{tag}", api()))?
-                .ok_or_else(|| format!("there is no alpha release for {branch}"))?;
+            let release = json(&format!("{}/releases/tags/alpha-{tag}", api()))?.ok_or_else(|| {
+                format!(
+                    "there is no alpha release for {branch}: --channel beta (or another --branch) \
+                     chooses another channel."
+                )
+            })?;
             // Two while it is replaced: the newer.
             highest(archives(&release))
         }

@@ -37,14 +37,17 @@ highest() {
 }
 
 # The archive of the release published last in a list of releases of the API, ties going to the
-# higher version. A release's `published_at` comes before its `assets` in GitHub's answer, so
-# each address is read with the date last seen. The dates are UTC, all of one shape, so they
-# sort as text.
+# higher version. A release's `tag_name` and `published_at` come before its `assets` in GitHub's
+# answer, so each address is read with the date of its own release: reset at each tag, and empty
+# for a draft (`published_at` null), which is not offered. The dates are UTC, all of one shape,
+# so they sort as text.
 latest_published() {
   tr ',' '\n' <"$1" | sed -n \
+    -e 's/.*"tag_name": *"[^"]*".*/T/p' \
     -e 's/.*"published_at": *"\([^"]*\)".*/P \1/p' \
+    -e 's/.*"published_at": *null.*/P/p' \
     -e 's|.*"browser_download_url": *"\([^"]*/flottille-\([^/]*\)-x86_64-linux\.tar\.gz\)".*|U \2 \1|p' |
-    awk '$1 == "P" { at = $2 } $1 == "U" && $3 ~ /\/download\/v[0-9.]*-beta\.[0-9]*\// { print at, $2, $3 }' |
+    awk '$1 == "T" { at = "" } $1 == "P" { at = $2 } $1 == "U" && at != "" && $3 ~ /\/download\/v[0-9.]*-beta\.[0-9]*\// { print at, $2, $3 }' |
     sort -k 1,1 -k 2,2V | tail -n 1 | cut -d ' ' -f 3
 }
 
