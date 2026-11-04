@@ -495,9 +495,17 @@ line names, every program a wrapper or a runner runs included:
 
 - **a login's place**, read or written: `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`,
   `~/.config/gcloud`, `~/.kube`, `~/.docker/config.json`, `~/.config/gh`, `~/.netrc`, `~/.npmrc`,
-  `~/.pypirc`, `~/.git-credentials`, `~/.local/share/keyrings`, `~/Library/Keychains`, the agents'
-  own (`~/.claude`, `~/.claude.json`, `~/.codex`, `~/.local/share/opencode`), wherever they are
-  along a path, and `/etc/shadow`, `/etc/sudoers`, `/etc/sudoers.d`;
+  `~/.pypirc`, `~/.git-credentials`, `~/.local/share/keyrings`, `~/Library/Keychains`,
+  `~/.local/share/opencode`, wherever they are along a path, and `/etc/shadow`, `/etc/sudoers`,
+  `/etc/sudoers.d`; the agents' own folders of the home (`~/.claude`, `~/.claude.json`,
+  `~/.codex`), whole, where the path leads included (a link to them, a project that is the home
+  folder);
+- **an agent's folder anywhere else** (`.claude`, `.claude.json`, `.codex` of a repository, a
+  workspace, a copy in `~/Downloads`): it is a project's configuration, not a login, and is read
+  as any file, but a `.credentials.json` or `auth.json` below it is a login's place, and **a
+  write there** is refused: its settings and hooks run programs the next time the user opens
+  that repository with the agent's own command line, outside the gate, so the agent asks the
+  user to make the change;
 - **a write in or above Flottille's own folders** (its configuration, data, state and runtime:
   the store, `providers.toml`, `developer.toml`, the socket), or of Flottille's own program.
   Reading them stays base: a card in Ask and Auto, allowed in Full, since what they hold has its

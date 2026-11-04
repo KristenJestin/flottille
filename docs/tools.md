@@ -913,10 +913,23 @@ says who answers a call to judge (`docs/design.md` §7.1).
    - a login's place, read or written, by a file tool or as any path a line names: `.ssh`,
      `.gnupg`, `.aws`, `.azure`, `.config/gcloud`, `.kube`, `.docker/config.json`, `.config/gh`,
      `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, `.local/share/keyrings`,
-     `Library/Keychains` and the agents' logins (`.claude`, `.claude.json`, `.codex`,
-     `.local/share/opencode`) wherever they sit along the path, `/etc/shadow`, `/etc/sudoers`,
-     `/etc/sudoers.d`. Inside the place only what sits below it counts; a path outside is checked
-     as written and where it leads, and without a leading `/proc/<process>/root` or `cwd`;
+     `Library/Keychains`, `.local/share/opencode` wherever they sit along the path, `/etc/shadow`,
+     `/etc/sudoers`, `/etc/sudoers.d`. Inside the place only what sits below it counts; a path
+     outside is checked as written and where it leads, and without a leading `/proc/<process>/root`
+     or `cwd`. The agents' own folders of the home (`~/.claude`, `~/.claude.json`, `~/.codex`)
+     are a login's place whole (`refused: X is in a login's place (~/.claude)`), found where any
+     path leads, inside the place too (a link to them, a project that is the home folder), and
+     everywhere when the home is not known; anywhere else such a folder is read as any file, but
+     a `.credentials.json` or `auth.json` below it is a login's place
+     (`(.credentials.json in .claude)`);
+   - a write in an agent's folder that is not the home's (`.claude`, `.claude.json`, `.codex` of
+     a repository or anywhere else): by `fs_write` or `fs_edit`, as a path a line that does not
+     only read names (a line that writes only the place's files, `git add`, `git rm`,
+     `git diff --output`, included), or as the folder such a line runs in. Its settings and hooks
+     run programs the next time the user opens the repository with the agent's own command line,
+     outside the gate: `refused: X is in a repository's agent folder (.claude): its settings and
+     hooks run programs …; ask the user to make the change; nothing was done`. A line that only
+     reads it (`cat`, `ls`, `grep`, `git show`) is judged as any read;
    - a program that reads or prints a login: `gh`/`glab auth token`, `aws configure get` or
      `export-credentials`, `aws ecr get-login-password`, `aws sts get-session-token`,
      `kubectl config view --raw`, `kubectl create token`, `gcloud auth print-*token`,
@@ -979,10 +992,10 @@ says who answers a call to judge (`docs/design.md` §7.1).
    - a sensitive place, read or written: `.env` and `.env.*` anywhere but the templates
      (`.example`, `.sample`, `.template`, `.dist`), `.ssh`, `.gnupg`, `.aws`, `.azure`,
      `.config/gcloud`, `.kube`, `.docker/config.json`, `.config/gh`, `.netrc`, `.npmrc`,
-     `.pypirc`, `.git-credentials`, `.local/share/keyrings`, `Library/Keychains` and the agents'
-     logins (`.claude`, `.claude.json`, `.codex`, `.local/share/opencode`) wherever they sit along
-     the path, `/etc/shadow`, `/etc/sudoers`, `/etc/sudoers.d` (all refused above, read or
-     written), and Flottille's own folders (data, configuration, state, runtime), which are
+     `.pypirc`, `.git-credentials`, `.local/share/keyrings`, `Library/Keychains`,
+     `.local/share/opencode` wherever they sit along the path, the agents' folders of the home
+     (`~/.claude`, `~/.claude.json`, `~/.codex`), `/etc/shadow`, `/etc/sudoers`, `/etc/sudoers.d`
+     (all refused above, read or written), and Flottille's own folders (data, configuration, state, runtime), which are
      base to read and refused to write. Inside the place only what sits below it counts. A path
      outside is checked as written and where it leads (a link anyone made, a configuration
      folder that is a link, a `..` after a link), against Flottille's folders as named and
