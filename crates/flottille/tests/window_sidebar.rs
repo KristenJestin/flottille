@@ -22,8 +22,7 @@ use flottille_window::link::Connect;
 use flottille_window::session::{Reply, SessionPage};
 use flottille_window::shell::Selection;
 use flottille_window::tree::{
-    ended_id, place_id, place_new_id, project_id, session_end_id, session_id, session_menu_id,
-    session_resume_id,
+    ended_id, project_id, session_end_id, session_id, session_menu_id, session_resume_id,
 };
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
@@ -34,7 +33,15 @@ fn user() -> User {
     let user = User::with_fake_agent();
     user.fake_script(json!({"turns": [
         {"when": "HANG", "do": [{"hang": true}]},
-        {"when": "work briefly", "do": [{"wait": 1500}, {"say": "done"}]}
+        {"when": "work briefly", "do": [{"wait": 1500}, {"say": "done"}]},
+        {"when": "work quietly", "do": [{"wait": 1500}]},
+        {"when": "CHATTER", "do": [
+            {"mcp": {"tool": "fs_list", "arguments": {}}}, {"wait": 700},
+            {"mcp": {"tool": "fs_list", "arguments": {}}}, {"wait": 700},
+            {"mcp": {"tool": "fs_list", "arguments": {}}}, {"wait": 700},
+            {"mcp": {"tool": "fs_list", "arguments": {}}}, {"wait": 700},
+            {"mcp": {"tool": "fs_list", "arguments": {}}}, {"wait": 700}
+        ]}
     ]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     user
@@ -311,7 +318,7 @@ fn workspace(user: &User, project: &str, name: &str) {
 const TREE: f32 = 300.;
 
 /// The folds of the left tree: what lies in one that is shut is clipped away, though drawn.
-const FOLDS: [&str; 3] = ["fold-project-app", "fold-place-app-main", "fold-ended"];
+const FOLDS: [&str; 2] = ["fold-project-app", "fold-ended"];
 
 /// Whether the left tree shows what is drawn at `bounds`: left of the page, and in no fold that
 /// is shut.
@@ -384,31 +391,11 @@ fn a_running_agent_shows_one_spinner_on_its_own_row_and_a_folded_parent_shows_on
         mark_of(&shell, &id, cx) == Some(AgentState::Running)
     });
     settle(cx);
-    let (project, main) = shell.read_with(cx, |s, _| {
-        (
-            s.project("app").unwrap().clone(),
-            s.place("app", &None).unwrap().clone(),
-        )
-    });
-    assert_eq!(
-        running_icons(cx),
-        1,
-        "its row, and neither its place nor its project"
-    );
+    let project = shell.read_with(cx, |s, _| s.project("app").unwrap().clone());
+    assert_eq!(running_icons(cx), 1, "its row, and not its project");
     assert_eq!(project.read_with(cx, |p, _| p.mark()), None);
-    assert_eq!(main.read_with(cx, |p, _| p.mark()), None);
 
-    // The place folded: it shows one for what runs inside, and the row is out of sight.
-    cx.update(|window, cx| window.click(place_id("app", &None), cx));
-    settle(cx);
-    assert_eq!(
-        main.read_with(cx, |p, _| p.mark()),
-        Some(AgentState::Running)
-    );
-    assert_eq!(project.read_with(cx, |p, _| p.mark()), None);
-    assert_eq!(running_icons(cx), 1, "the place alone");
-
-    // The project folded too: it shows the one, the place is out of sight.
+    // The project folded: it shows one for what runs inside, and the row is out of sight.
     cx.update(|window, cx| window.click(toggle_id(project_id("app")), cx));
     settle(cx);
     assert_eq!(
@@ -419,8 +406,6 @@ fn a_running_agent_shows_one_spinner_on_its_own_row_and_a_folded_parent_shows_on
 
     // Unfolded again, the mark goes back to the row: it goes with a fade, not at once.
     cx.update(|window, cx| window.click(toggle_id(project_id("app")), cx));
-    settle(cx);
-    cx.update(|window, cx| window.click(place_id("app", &None), cx));
     moving(cx);
     assert!(
         running_icons(cx) >= 1,
@@ -429,7 +414,6 @@ fn a_running_agent_shows_one_spinner_on_its_own_row_and_a_folded_parent_shows_on
     settle(cx);
     assert_eq!(running_icons(cx), 1, "its row, again alone");
     assert_eq!(project.read_with(cx, |p, _| p.mark()), None);
-    assert_eq!(main.read_with(cx, |p, _| p.mark()), None);
 }
 
 #[gpui_kit::test]
@@ -617,12 +601,22 @@ fn has_id(id: gpui_kit::ElementId, cx: &mut VisualTestContext) -> bool {
 }
 
 fn listed_in_main(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
+    listed_in_place(shell, None, cx)
+}
+
+/// The sessions the sidebar lists for `app` that work in `place`, in the order drawn.
+fn listed_in_place(
+    shell: &Entity<Shell>,
+    place: Option<&str>,
+    cx: &mut VisualTestContext,
+) -> Vec<String> {
     shell.read_with(cx, |s, cx| {
-        s.place("app", &None)
+        s.project("app")
             .map(|node| {
                 node.read(cx)
                     .sessions(cx)
                     .iter()
+                    .filter(|row| row.read(cx).place().as_deref() == place)
                     .map(|row| row.read(cx).id().to_owned())
                     .collect()
             })
@@ -631,25 +625,22 @@ fn listed_in_main(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<Stri
 }
 
 #[gpui_kit::test]
-fn a_plus_on_a_place_row_starts_a_session_there_with_the_field_focused(cx: &mut TestAppContext) {
+fn a_new_session_in_a_place_of_the_project_page_starts_there_with_the_field_focused(
+    cx: &mut TestAppContext,
+) {
     let user = user();
     project(&user, "app");
     workspace(&user, "app", "login");
     let id = start(&user, "app", "hello");
     let (shell, cx) = tree_of(&user, &[&id], cx);
-    cx.update(|window, _| {
-        assert!(
-            window
-                .try_find(place_new_id("app", &Some("login".into())))
-                .is_none(),
-            "no + at rest"
-        )
-    });
+    // The sidebar has no place to start from: the project page, which is open, has them.
+    assert!(
+        !has_id(named("place-new-app-login"), cx),
+        "no + in the sidebar"
+    );
 
-    // On a workspace.
-    cx.update(|window, cx| window.hover(place_id("app", &Some("login".into())), cx));
-    settle(cx);
-    cx.update(|window, cx| window.click(place_new_id("app", &Some("login".into())), cx));
+    // In a workspace.
+    cx.update(|window, cx| window.click("new-session-in-login", cx));
     settle(cx);
     assert_eq!(
         shell.read_with(cx, |s, _| s.selected().cloned()),
@@ -669,10 +660,8 @@ fn a_plus_on_a_place_row_starts_a_session_there_with_the_field_focused(cx: &mut 
         "the field has the focus"
     );
 
-    // On `main`.
-    cx.update(|window, cx| window.hover(place_id("app", &None), cx));
-    settle(cx);
-    cx.update(|window, cx| window.click(place_new_id("app", &None), cx));
+    // In `main`.
+    cx.update(|window, cx| window.click("new-session-in-main", cx));
     settle(cx);
     assert_eq!(
         composer.read_with(cx, |c, _| c.choice().clone()),
@@ -697,20 +686,15 @@ fn the_rail_moves_the_session_under_main(cx: &mut TestAppContext) {
     let (url, authorization) = server_of(&user, opened);
     let agent = Mcp::initialize(&url, &authorization);
     let (shell, cx) = tree_of(&user, &[&id], cx);
-    let login = Some("login".to_owned());
-    let listed_in_login = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
-        shell.read_with(cx, |s, cx| {
-            s.place("app", &login).map(|node| {
-                node.read(cx)
-                    .sessions(cx)
-                    .iter()
-                    .map(|row| row.read(cx).id().to_owned())
-                    .collect::<Vec<_>>()
-            })
-        })
-    };
-    assert_eq!(listed_in_login(&shell, cx), Some(vec![id.clone()]));
+    assert_eq!(
+        listed_in_place(&shell, Some("login"), cx),
+        std::slice::from_ref(&id)
+    );
     assert!(listed_in_main(&shell, cx).is_empty());
+    assert_eq!(
+        label_of(named(&format!("session-place-{id}")), cx).as_deref(),
+        Some("login")
+    );
 
     let held = agent.call("workspace", json!({"action": "remove"}));
     let number: u64 = held
@@ -725,26 +709,387 @@ fn the_rail_moves_the_session_under_main(cx: &mut TestAppContext) {
         listed_in_main(&shell, cx) == [id.clone()]
     });
 
-    // The workspace's group folds away, drawn while it goes; the session's row is main's.
-    assert_eq!(listed_in_login(&shell, cx), None);
-    moving(cx);
-    assert!(
-        has_id(place_id("app", &login), cx),
-        "the group is gone at once instead of folding away"
-    );
+    // Its row stays where it is, and its second line says `main` now.
+    assert!(listed_in_place(&shell, Some("login"), cx).is_empty());
     settle(cx);
-    assert!(!has_id(place_id("app", &login), cx));
     assert!(in_tree(session_id(&id), cx));
-    cx.update(|window, _| {
-        assert!(
-            window.find(session_id(&id)).bounds().origin.y
-                > window.find(place_id("app", &None)).bounds().origin.y,
-            "under main"
-        );
-    });
+    assert_eq!(
+        label_of(named(&format!("session-place-{id}")), cx).as_deref(),
+        Some("main")
+    );
     assert_eq!(
         cx.update(|window, cx| window.simulate_next_frame(cx)),
         0,
         "nothing moves at rest"
     );
+}
+
+/// A session started in the workspace `workspace` of `project`, its first turn ended.
+fn start_in(user: &User, project: &str, workspace: &str, message: &str) -> String {
+    let answer = user
+        .call(
+            "agent.start",
+            json!({"project": project, "workspace": workspace, "message": message}),
+        )
+        .unwrap();
+    let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+    eventually("the first turn ends", || state_of(user, &id) == "idle");
+    id
+}
+
+/// The sessions `project` lists in the sidebar, in the order drawn.
+fn listed(shell: &Entity<Shell>, project: &str, cx: &mut VisualTestContext) -> Vec<String> {
+    shell.read_with(cx, |s, cx| {
+        s.project(project)
+            .map(|node| {
+                node.read(cx)
+                    .sessions(cx)
+                    .iter()
+                    .map(|row| row.read(cx).id().to_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+}
+
+fn named(id: &str) -> gpui_kit::ElementId {
+    gpui_kit::ElementId::Name(id.to_owned().into())
+}
+
+fn label_of(id: gpui_kit::ElementId, cx: &mut VisualTestContext) -> Option<String> {
+    cx.update(|window, _| {
+        window
+            .try_find(id)
+            .and_then(|found| found.label().map(str::to_owned))
+    })
+}
+
+fn bounds_of(
+    id: gpui_kit::ElementId,
+    cx: &mut VisualTestContext,
+) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+    cx.update(|window, _| window.find(id).bounds())
+}
+
+#[gpui_kit::test]
+fn a_project_lists_its_sessions_flat_by_recent_activity(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    workspace(&user, "app", "login");
+    let first = start(&user, "app", "first");
+    let second = start_in(&user, "app", "login", "second");
+    let third = start(&user, "app", "third");
+    let (shell, cx) = tree_of(&user, &[&first, &second, &third], cx);
+
+    assert_eq!(
+        listed(&shell, "app", cx),
+        [third.clone(), second.clone(), first.clone()],
+        "one list, the session that moved last on top, whatever its place"
+    );
+    assert!(
+        !has_id(named("place-app-main"), cx) && !has_id(named("place-app-login"), cx),
+        "no row for main nor for a workspace"
+    );
+    let x = |id: &str, cx: &mut VisualTestContext| bounds_of(session_id(id), cx).origin.x;
+    let y = |id: &str, cx: &mut VisualTestContext| bounds_of(session_id(id), cx).origin.y;
+    let (first_x, second_x, third_x) = (x(&first, cx), x(&second, cx), x(&third, cx));
+    assert_eq!(first_x, second_x, "one level");
+    assert_eq!(second_x, third_x, "one level");
+    assert!(first_x > bounds_of(project_id("app"), cx).origin.x);
+    assert!(y(&third, cx) < y(&second, cx) && y(&second, cx) < y(&first, cx));
+
+    // A session that moves goes to the top; the others keep their order.
+    send(&user, &first, "work briefly");
+    until(&shell, cx, "the session that worked is on top", |cx| {
+        listed(&shell, "app", cx).first() == Some(&first)
+    });
+    settle(cx);
+    assert_eq!(listed(&shell, "app", cx), [first, third, second]);
+}
+
+#[gpui_kit::test]
+fn a_session_row_names_its_workspace_on_its_second_line(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    workspace(&user, "app", "login");
+    let id = start_in(&user, "app", "login", "hello");
+    let (_shell, cx) = tree_of(&user, &[&id], cx);
+
+    let row = bounds_of(session_id(&id), cx);
+    let place = bounds_of(named(&format!("session-place-{id}")), cx);
+    assert_eq!(
+        label_of(named(&format!("session-place-{id}")), cx).as_deref(),
+        Some("login")
+    );
+    assert_eq!(
+        label_of(named(&format!("session-place-icon-{id}")), cx).as_deref(),
+        Some("Workspace")
+    );
+    assert!(row.size.height >= px(36.), "two lines: {row:?}");
+    assert!(
+        place.origin.y > row.origin.y + px(14.) && place.bottom() <= row.bottom(),
+        "under the title, inside the row: {place:?} in {row:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn a_session_in_the_project_folder_says_main(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let id = start(&user, "app", "hello");
+    let (_shell, cx) = tree_of(&user, &[&id], cx);
+
+    assert_eq!(
+        label_of(named(&format!("session-place-{id}")), cx).as_deref(),
+        Some("main")
+    );
+    assert_eq!(
+        label_of(named(&format!("session-place-icon-{id}")), cx).as_deref(),
+        Some("Project folder")
+    );
+}
+
+#[gpui_kit::test]
+fn the_pull_request_shows_on_the_second_line_when_there_is_room(cx: &mut TestAppContext) {
+    let user = user().with_fake_gh();
+    project(&user, "app");
+    let long = "a-workspace-whose-name-takes-the-whole-second-line-of-its-row";
+    workspace(&user, "app", "login");
+    workspace(&user, "app", long);
+    let pull = |number: u64, branch: &str| {
+        (
+            branch.to_owned(),
+            json!({"number": number, "title": "A change", "state": "OPEN", "isDraft": false,
+                "headRefOid": "aaaaaaa1", "baseRefName": "main",
+                "url": format!("https://github.com/acme/app/pull/{number}"),
+                "statusCheckRollup": [{"__typename": "CheckRun", "name": "build",
+                    "status": "COMPLETED", "conclusion": "SUCCESS"}],
+                "comments": [], "reviews": []}),
+        )
+    };
+    user.git(
+        &user.path("work/app"),
+        &["remote", "set-url", "origin", "git@github.com:acme/app.git"],
+    );
+    user.call(
+        "project.set_settings",
+        json!({"name": "app", "repositories": [
+            {"path": ".", "forge": {"kind": "github", "repository": "acme/app"}}]}),
+    )
+    .unwrap();
+    let pulls: serde_json::Map<String, serde_json::Value> =
+        [pull(12, "app/login"), pull(13, &format!("app/{long}"))]
+            .into_iter()
+            .collect();
+    user.gh_script(json!({"pulls": {"acme/app": pulls}}));
+    let short_id = start_in(&user, "app", "login", "short");
+    let long_id = start_in(&user, "app", long, "long");
+    let (shell, cx) = tree_of(&user, &[&short_id, &long_id], cx);
+    let pull_id = |id: &str| named(&format!("session-pull-{id}"));
+    until(&shell, cx, "the pull request is read", |cx| {
+        has_id(pull_id(&short_id), cx)
+    });
+    settle(cx);
+
+    assert_eq!(
+        label_of(pull_id(&short_id), cx).as_deref(),
+        Some("#12, checks passing")
+    );
+    let (row, pull) = (
+        bounds_of(session_id(&short_id), cx),
+        bounds_of(pull_id(&short_id), cx),
+    );
+    assert!(
+        pull.bottom() <= row.bottom() && pull.right() <= row.right(),
+        "it fits on the line: {pull:?} in {row:?}"
+    );
+    // No room next to a name that takes the line: the pull request is not shown.
+    let (row, pull) = (
+        bounds_of(session_id(&long_id), cx),
+        has_id(pull_id(&long_id), cx).then(|| bounds_of(pull_id(&long_id), cx)),
+    );
+    assert!(
+        pull.is_none_or(|pull| pull.bottom() > row.bottom() || pull.right() > row.right()),
+        "no room: {pull:?} in {row:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn a_workspace_without_session_is_not_in_the_sidebar(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    workspace(&user, "app", "empty");
+    let id = start(&user, "app", "hello");
+    let (_shell, cx) = tree_of(&user, &[&id], cx);
+
+    assert!(
+        !has_id(named("place-app-empty"), cx),
+        "no row for a workspace that holds no session"
+    );
+    cx.update(|window, _| {
+        assert!(
+            window
+                .find_all(session_id(&id))
+                .iter()
+                .all(|row| row.label() != Some("empty")),
+        )
+    });
+    // The project page, which is open, keeps its card: that is where workspaces live.
+    assert!(
+        has_id(named("new-session-in-empty"), cx),
+        "the card of the workspace is on the project page"
+    );
+}
+
+#[gpui_kit::test]
+fn a_session_becoming_active_slides_to_the_top_and_stays_selected(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let old = start(&user, "app", "old");
+    let kept = start(&user, "app", "kept");
+    let newest = start(&user, "app", "newest");
+    let (shell, cx) = tree_of(&user, &[&old, &kept, &newest], cx);
+    assert_eq!(
+        listed(&shell, "app", cx),
+        [newest.clone(), kept.clone(), old.clone()]
+    );
+
+    // The user is on `kept`, in the middle.
+    cx.update(|window, cx| window.click(session_id(&kept), cx));
+    settle(cx);
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(Selection::Session(kept.clone()))
+    );
+    let (top, before) = (
+        bounds_of(session_id(&newest), cx).origin.y,
+        bounds_of(session_id(&old), cx).origin.y,
+    );
+
+    send(&user, &old, "work briefly");
+    until(&shell, cx, "the session that works is on top", |cx| {
+        listed(&shell, "app", cx).first() == Some(&old)
+    });
+    // It slides: a moment after the order changed it is not at its place yet.
+    let mid = bounds_of(session_id(&old), cx).origin.y;
+    assert!(
+        mid > top && mid <= before,
+        "sliding from {before:?} to {top:?}, now at {mid:?}"
+    );
+    settle(cx);
+    assert_eq!(
+        bounds_of(session_id(&old), cx).origin.y,
+        top,
+        "at its place"
+    );
+    assert_eq!(
+        listed(&shell, "app", cx),
+        [old, newest, kept.clone()],
+        "the others keep their order"
+    );
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(Selection::Session(kept.clone())),
+        "the selection stays where the user put it"
+    );
+    assert!(
+        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some()),
+        "and its page stays open"
+    );
+}
+
+#[gpui_kit::test]
+fn two_working_sessions_keep_their_order_while_they_work(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let resting = start(&user, "app", "resting");
+    let older = start(&user, "app", "older");
+    let newer = start(&user, "app", "newer");
+    let (shell, cx) = tree_of(&user, &[&resting, &older, &newer], cx);
+    assert_eq!(
+        listed(&shell, "app", cx),
+        [newer.clone(), older.clone(), resting.clone()]
+    );
+
+    // The older one is written to first and goes on talking after the newer one is written to
+    // (which says nothing): its last sign of activity is the later one, its last exchange is not.
+    send(&user, &older, "CHATTER");
+    send(&user, &newer, "HANG");
+    eventually("both turns run", || {
+        state_of(&user, &older) == "working" && state_of(&user, &newer) == "working"
+    });
+    let watch = |cx: &mut VisualTestContext| {
+        assert!(
+            state_of(&user, &older) == "working" && state_of(&user, &newer) == "working",
+            "both still work while the order is watched"
+        );
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    };
+    // The window reads the daemon again when a turn begins or ends: another session's turn does
+    // it, after the chunks of the older one landed.
+    std::thread::sleep(Duration::from_millis(1500));
+    send(&user, &resting, "hello");
+    for _ in 0..200 {
+        watch(cx);
+        if listed(&shell, "app", cx).first() == Some(&resting) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    settle(cx);
+    assert_eq!(
+        listed(&shell, "app", cx),
+        [resting, newer, older],
+        "work done during a turn moves no row: the one written to last stays above"
+    );
+}
+
+#[gpui_kit::test]
+fn a_session_moves_up_when_the_user_writes_to_it(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let old = start(&user, "app", "old");
+    let kept = start(&user, "app", "kept");
+    let newest = start(&user, "app", "newest");
+    let (shell, cx) = tree_of(&user, &[&old, &kept, &newest], cx);
+    assert_eq!(
+        listed(&shell, "app", cx),
+        [newest.clone(), kept.clone(), old.clone()]
+    );
+
+    // Its turn says nothing and does not end: only the message can move the row.
+    send(&user, &old, "HANG");
+    until(&shell, cx, "the session written to is on top", |cx| {
+        listed(&shell, "app", cx).first() == Some(&old)
+    });
+    settle(cx);
+    assert_eq!(listed(&shell, "app", cx), [old, newest, kept]);
+}
+
+#[gpui_kit::test]
+fn a_session_moves_up_when_its_turn_ends(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let first = start(&user, "app", "first");
+    let second = start(&user, "app", "second");
+    let third = start(&user, "app", "third");
+    let (shell, cx) = tree_of(&user, &[&first, &second, &third], cx);
+
+    // `first` works quietly, then the user writes to `second`: `second` is on top while
+    // `first` works.
+    send(&user, &first, "work quietly");
+    send(&user, &second, "HANG");
+    until(&shell, cx, "the session written to last is on top", |cx| {
+        listed(&shell, "app", cx) == [second.clone(), first.clone(), third.clone()]
+    });
+    // Its turn ends without a word: the end alone moves it above.
+    until(&shell, cx, "the session whose turn ended is on top", |cx| {
+        listed(&shell, "app", cx).first() == Some(&first)
+    });
+    settle(cx);
+    assert_eq!(state_of(&user, &first), "idle");
+    assert_eq!(listed(&shell, "app", cx), [first, second, third]);
 }

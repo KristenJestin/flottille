@@ -604,6 +604,32 @@ fn a_row_that_moves_slides_from_where_it_was_to_its_place(cx: &mut TestAppContex
 }
 
 #[gpui_kit::test]
+fn a_rising_row_that_moves_slides_too_as_the_tree_s_rows_do(cx: &mut TestAppContext) {
+    // Rising from its first frame, as the tree's rows are: its height was never measured by a
+    // fold.
+    init(cx, Desktop::new(false).env());
+    let (view, cx) = cx.add_window_view(|_, _| Rows {
+        list: Listing::default(),
+        items: vec!["a", "b"],
+        rising: true,
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+    advance(cx, PANEL * 3);
+    let (a, b) = (top("item-a", cx), top("item-b", cx));
+    change(&view, &["b", "a"], cx);
+    advance(cx, PANEL / 3);
+    let sliding = top("item-b", cx);
+    // A row's own height and gap are how far it is from its place: not the gap alone.
+    assert!(
+        a + px(8.) < sliding && sliding < b,
+        "b is on its way up, one row away: {a:?} < {sliding:?} < {b:?}"
+    );
+    advance(cx, PANEL * 2);
+    assert_eq!((top("item-b", cx), top("item-a", cx)), (a, b));
+    assert_eq!(pending_frames(cx), 0);
+}
+
+#[gpui_kit::test]
 fn the_row_below_one_that_goes_does_not_slide_on_top_of_the_fold(cx: &mut TestAppContext) {
     let (view, cx) = rows(&["a", "b", "c"], cx);
     let before = top("item-c", cx);

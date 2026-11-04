@@ -253,6 +253,14 @@ pub(crate) fn shown_frame(
         return div().hidden().into_any_element();
     }
     if open && rising {
+        // A row that slides needs its own height to know how far one row is.
+        let measured = height.clone();
+        let measure = canvas(
+            move |bounds: Bounds<Pixels>, _, _| measured.set(bounds.size.height),
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
         return div()
             .w_full()
             .relative()
@@ -263,7 +271,9 @@ pub(crate) fn shown_frame(
                     .id(id)
                     .aria_expanded(open)
                     .w_full()
+                    .relative()
                     .child(content)
+                    .child(measure)
                     .test_support(),
             )
             .into_any_element();
