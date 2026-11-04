@@ -302,7 +302,9 @@ A task may also say when a run of it is ready and where it answers; nothing is g
 | `url = { command = "<line>" }` | A line that prints the address, run once in the task's folder with the run's environment as the run starts: its first line with something on it, which must be an `http(s)://` address. For a tool that gives each worktree its own address (`portless get api`). |
 
 Each is a template: the names of the variables (`{workspace}`, `{workspace.path}`, `{branch}`,
-`{project}`, `{repository}`) and, in `ready`, `{url}`, the run's address (empty without one). A
+`{project}`, `{repository}`) and, in `ready`'s `url` and `line`, `{url}`, the run's address. A
+line (`ready`'s `command`, `url`'s `command`) never takes `{url}`: the address is known only once
+the run starts, after the line was judged, and the line would run what nobody judged. A
 line is a task's line: split and refused as one, never run by a shell. A probe takes 5 seconds at
 most and never two run at once for one run; probing stops once the run is ready or ended. An
 HTTP probe of a host of this machine (`localhost`, a name under `.localhost`, a loopback address)
@@ -311,7 +313,11 @@ authority; any other host's is checked against the system's.
 
 Without `ready`, a run has no ready state: it runs, as before. With it, a run is `starting`, then
 `ready` (`run.ready`), or ends before it was ready, which it says. A line for the address that
-fails leaves the run without one and says why on it (`url_error`). The window draws a starting
+fails, or prints anything but an `http(s)://` address with a host, leaves the run without one and
+says why on it (`url_error`, masked, as the address itself is); a `ready` that asks for `{url}`
+then cannot be told, and the run says so and keeps running without a ready state. The lines a
+probe or the address start are killed with every process they started once they end, pass their
+limit or the run ends. The window draws a starting
 run with its spinner, a ready one with a solid dot, and its address as a link.
 
 In a monorepo, one task per server reads best, each with its own `ready` and `url`:
