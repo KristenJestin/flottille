@@ -273,12 +273,11 @@ fn extension_set_is_not_reachable_from_an_agent_tool() {
     let (url, authorization) = common::mcp::server_of(&user, 0);
     let lead = Mcp::initialize(&url, &authorization);
 
+    // The root has the `spec` tool Specs gives (`tests/spec_writing.rs`), none that switches it.
     let names = lead.names();
     assert!(names.iter().any(|name| name == "report"), "{names:?}");
     assert!(
-        !names
-            .iter()
-            .any(|name| name.contains("extension") || name.contains("spec")),
+        !names.iter().any(|name| name.contains("extension")),
         "{names:?}"
     );
     for tool in ["extension_set", "extension.set", "spec_ready"] {
@@ -320,13 +319,27 @@ fn the_extension_s_tables_are_created_by_its_migrations_and_kept_when_off() {
     project(&user, "app");
     user.status();
     // Made at the daemon's start, Specs on or off.
-    assert_eq!(tables(&user), ["ext_specs_specs", "ext_specs_tickets"]);
+    assert_eq!(
+        tables(&user),
+        [
+            "ext_specs_questions",
+            "ext_specs_specs",
+            "ext_specs_tickets"
+        ]
+    );
 
     turn(&user, true, None);
     let spec = new_spec(&user, json!({"project": "app", "title": "Login"}));
     turn(&user, false, None);
     assert!(user.run(&["daemon", "stop"]).status.success());
-    assert_eq!(tables(&user), ["ext_specs_specs", "ext_specs_tickets"]);
+    assert_eq!(
+        tables(&user),
+        [
+            "ext_specs_questions",
+            "ext_specs_specs",
+            "ext_specs_tickets"
+        ]
+    );
     let (code, _) = user
         .call("spec.show", json!({"spec": spec["spec"]}))
         .unwrap_err();

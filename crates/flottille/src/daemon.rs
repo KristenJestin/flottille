@@ -72,6 +72,7 @@ pub fn run(paths: &Paths) -> Result<()> {
     ensure_private_dir(&paths.state)?;
     let _lock = take_lock(paths)?;
     let _store_lock = hold_store(paths)?;
+    extensions::check_tools(extensions::ALL)?;
     let mut store = Store::open(&paths.database())?;
     extensions::migrate(&mut store)?;
     // Before anything starts an agent: what a daemon that died left running is its own to kill.
@@ -642,7 +643,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                 } else if request.method == "task.run" {
                     tasks::run(&daemon, request.params).await
                 } else if extensions::answers(&request.method) {
-                    extensions::call(&daemon, &request.method, request.params)
+                    extensions::call(daemon, &request.method, request.params).await
                 } else {
                     workspaces::call(daemon, &request.method, request.params).await
                 };

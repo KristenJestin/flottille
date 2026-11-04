@@ -93,6 +93,12 @@ agent. They change in two ways, and a session never keeps a list its role no lon
   (`project.set_settings`) is announced at once; a project file edited by hand is noticed at the
   next `project.*` request, which announces it, and a process that starts in between reads the
   file as it is.
+- **An extension is turned on or off** (`docs/extensions.md`, "Tools"): the tools it gives are
+  added to, or removed from, the lists of the agents it gives them to, the same way and at once.
+  Globally (`extension.set`, `flottille extension on|off`), every project's running sessions are
+  given their new list before the change is answered; in one project, its switch is in the
+  project's file, announced as above. An `extensions.toml` that cannot be read leaves every
+  extension off, and its tools with it.
 
 Bare mode is kept: only Flottille's tools, only the role's. A session that lists its tools again
 has the new list. One that calls a tool after it was told without listing them again, while the
@@ -705,6 +711,28 @@ The file is written where it stands, its comments kept.
   Such an argument is refused as one that does not fit the tool. A write that cannot be done (an
   unknown command, a skill outside the project folder, a repository the project has not) is
   refused before anything is asked.
+
+## Specs
+
+With Specs active in a project (`docs/extensions.md`, "Specs"), each root of the project has the
+`spec` tool; a child never has it. It is an extension's tool: added and removed as "When the tools
+change" says, and called through the gate as every other.
+
+| Tool | |
+|---|---|
+| `spec {action: read \| write \| ask \| questions, spec, section?, content?, questions?}` | `read`: a spec of the project, whole (`spec.show`'s answer, `docs/protocol.md`). `write {section, content}`: one section of the spec this session writes, whole, as `spec.write` takes it. `ask {questions}`: a wave of questions for the user, each `{question, options, recommended, reason}`: two options at least, none empty or twice, `recommended` one of them, and the reason it is recommended; one question that does not fit refuses the wave, saying which and why. The answers come later, each as a delivery (`[flottille:specs]`) saying the `D` it became: the call waits for no one. `questions`: the questions asked of the spec, numbered, open or answered with their `D`. |
+
+- **Who writes.** A spec is written by the session "New spec" or "Write the spec" started for it
+  (its `writer`); `write` and `ask` by another session, or of a spec with no writing session, are
+  refused: `spec 3 is written by session …: this session does not write it`.
+- **The gate's refusals, in every mode.** An action the caller is not given (`ready`, `draft`:
+  none makes a spec Ready or Draft, which are the user's gestures), and a `write` or an `ask` of a
+  spec past Draft (`spec 3 is Ready: it is locked, and only the user sends it back to Draft`) or
+  that the session does not write, are refused by the gate itself, Full mode included. The rest
+  passes in every mode: Specs declares its four actions harmless, since each reads or writes a
+  spec in Flottille's store and nothing else.
+- **Masked.** What `write` and `ask` hold (every text of a section, a question, its options and
+  its reason) is masked of secrets before it is stored, as `ask_user` is.
 
 ## The tree's tools
 

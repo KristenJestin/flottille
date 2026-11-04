@@ -1066,6 +1066,20 @@ pub fn all(daemon: &Daemon) -> Vec<Project> {
     }
 }
 
+/// Every project's running sessions get the tools their roles have now: a switch outside the
+/// projects' files changed them (`docs/tools.md`, "When the tools change").
+pub fn tools_changed(daemon: &Daemon) {
+    let projects = daemon.projects.lock().unwrap();
+    match projects.registry.load_all() {
+        Ok(loaded) => {
+            for project in &loaded.projects {
+                crate::mcp::project_changed(daemon, project);
+            }
+        }
+        Err(error) => eprintln!("flottille daemon: the projects: {error}"),
+    }
+}
+
 /// Whether the project's file is still there.
 pub fn exists(daemon: &Daemon, name: &str) -> bool {
     let projects = daemon.projects.lock().unwrap();

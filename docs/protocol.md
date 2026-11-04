@@ -373,24 +373,51 @@ is off globally, the projects' switches kept.
   `refused` for a key or a value the declaration does not take, `invalid-config` while the file
   cannot be read.
 
-`extension.set` emits `extension.changed`. The user's door alone reaches them: no tool of an agent
-does.
+- `extension.act {name, action, …}`: a gesture of the user (the Action trigger), answered by the
+  extension's method of that action with the other parameters, as if called by its name
+  (`extension.act {"name": "specs", "action": "answer", "spec": 3, "question": 7, "option": 1}`
+  is `spec.answer`). `refused` for an action the extension does not declare, naming those it does:
+  for Specs `new`, `from_ticket`, `answer`, `ready`, `draft`.
+
+`extension.set` emits `extension.changed`; turning an extension on or off globally gives each
+running session of every project the tools its role has now, before the answer (`docs/tools.md`,
+"When the tools change"), and a project's own switch does the same through its file. The user's
+door alone reaches these methods: no tool of an agent does.
 
 ### The spec methods
 
 Specs' own (`docs/extensions.md`, "Specs"), each refused while Specs is not active in the spec's
 project, naming the switch. A spec is answered as `{"spec", "project", "title", "mode", "status",
 "language", "tickets", "created_at", "updated_at", "problem", "behaviour", "decisions",
-"out_of_scope", "notes", "verification", "questions"}`: `mode` is `alone`, `internal` or `ticket`;
-`status` `draft`, `ready`, `in_progress`, `review` or `done`; `behaviour` a list of `{"id", "text"}`
-(`C1`…), `decisions` of `{"id", "question", "decision", "set_aside"}` (`D1`…), `out_of_scope` of
-`{"text", "reason", "ticket"}`, `verification` of `{"id", "text"}` for a `C`, `questions` of texts.
+"out_of_scope", "notes", "verification", "questions", "asked", "writer"}`: `mode` is `alone`,
+`internal` or `ticket`; `status` `draft`, `ready`, `in_progress`, `review` or `done`; `behaviour` a
+list of `{"id", "text"}` (`C1`…), `decisions` of `{"id", "question", "decision", "set_aside"}`
+(`D1`…), `out_of_scope` of `{"text", "reason", "ticket"}`, `verification` of `{"id", "text"}` for a
+`C`, `questions` of texts; `asked` the questions the writing session asked, each `{"question" (its
+number), "text", "options", "recommended", "reason", "state" (`open` or `answered`), "decision"
+(the `D` it became, `null` while open)}`; `writer` the agent id of the session that writes it,
+`null` for a spec no session was started for.
 
-- `spec.new {project, title, mode?, tickets?}`: a Draft in the project's `language` (its own,
-  else the one of `extensions.toml`, else the user's locale), kept with it. `alone` takes no
+- `spec.new {project, title?, idea?, mode?, tickets?}`: a Draft in the project's `language` (its
+  own, else the one of `extensions.toml`, else the user's locale), kept with it. `alone` takes no
   ticket, `internal` and `ticket` one at least; the mode is `alone` without tickets and
   `internal` with unless given. A ticket is written as the project's tracker takes it
-  (`docs/tickets.md`); one another spec covers is refused, naming that spec.
+  (`docs/tickets.md`); one another spec covers is refused, naming that spec. With `idea` ("New
+  spec"), the title is the idea's first line unless given, and a `lead` session is started for the
+  user in the project's main checkout to write it, its first message Flottille's: the method, then
+  the idea (`docs/extensions.md`, "Writing a spec"). It answers `{"spec", "agent"}`, the spec and
+  the session's agent id; without `idea`, the spec. A title or an idea is needed.
+- `spec.from_ticket {project, ticket, mode?}` ("Write the spec"): reads the ticket on the
+  project's tracker, makes a Draft of it (its title the ticket's, the mode `internal` unless
+  `ticket` is given) and starts its writing session as `spec.new` with `idea` does; the ticket's
+  text follows the method in the first message, framed as data. `refused` for a ticket another spec
+  covers, before anything is read; `unavailable` when the ticket cannot be read, nothing made.
+  Answers `{"spec", "agent"}`.
+- `spec.answer {spec, question, option | text}`: answers a question the writing session asked,
+  with an option (from 1) or a text in the user's own words. The answer becomes the next `D`: the
+  question, the option chosen (or the text), the options set aside (all of them for a text); the
+  question is answered, and the writing session is told with a delivery (`[flottille:specs]`).
+  `refused` for a question already answered, and past Draft. Answers the spec.
 - `spec.list {project?, status?}` answers `{"specs"}`, each `{"spec", "project", "title", "mode",
   "status", "tickets", "questions", "updated_at"}` (`questions` counts the open ones), of the
   projects where Specs is active.
@@ -404,15 +431,19 @@ project, naming the switch. A spec is answered as `{"spec", "project", "title", 
   its verification with it.
 - `spec.link {spec, ticket}` and `spec.unlink {spec, ticket}` cover one more ticket, or one no
   more; the last ticket of a spec `internal` or `ticket` stays.
-- `spec.ready {spec}` moves a Draft to Ready: `refused` while a question is open or `behaviour`
-  is empty. `spec.draft {spec}` moves a Ready spec back to Draft.
+- `spec.ready {spec}` moves a Draft to Ready: `refused` while a question is open (one of
+  `questions`, or one asked and not answered) or `behaviour` is empty. `spec.draft {spec}` moves a
+  Ready spec back to Draft, and tells its writing session with a delivery.
 
-**The lock.** Past Draft, every write to a spec (`spec.write`, `spec.link`, `spec.unlink`) is
-refused, whoever asks, the user's door included: `spec 3 is Ready: it is locked; send it back to
-Draft first`. Every write passes one check, in the same transaction as the write.
+**The lock.** Past Draft, every write to a spec (`spec.write`, `spec.link`, `spec.unlink`,
+`spec.answer`, and the `spec` tool's `write` and `ask`) is refused, whoever asks, the user's door
+included: `spec 3 is Ready: it is locked; send it back to Draft first`. Every write passes one
+check, in the same transaction as the write.
 
-`spec.new` emits `spec.created`; a write `spec.changed`; `spec.ready` and `spec.draft`
-`spec.status_changed`. The user's door alone reaches them: no tool of an agent does yet.
+`spec.new` and `spec.from_ticket` emit `spec.created`; a write, a question asked or answered and the
+writing session recorded `spec.changed`; `spec.ready` and `spec.draft` `spec.status_changed`. The
+user's door alone reaches these methods: an agent has the `spec` tool (`docs/tools.md`, "Specs"),
+whose actions make no spec Ready nor Draft.
 
 ### The appearance methods
 

@@ -341,8 +341,8 @@ impl Drop for Slot<'_> {
 }
 
 /// The first message of an agent a launch made: a child's brief, or the first message of a session
-/// an agent started for the user.
-fn brief(daemon: &Arc<Daemon>, child: &Agent) {
+/// an agent or an extension started for the user.
+pub fn brief(daemon: &Arc<Daemon>, child: &Agent) {
     let (kind, body) = first_message(daemon, child);
     deliveries::deliver(
         daemon,
@@ -355,8 +355,8 @@ fn brief(daemon: &Arc<Daemon>, child: &Agent) {
 }
 
 /// At start: an agent whose first message was never delivered (a daemon stopped while its new
-/// workspace was preparing, and the wait for it lived in memory only) gets it, once its
-/// workspace is ready. The delivery's id is the key, so one stored already is not stored twice.
+/// workspace was preparing, and the wait for it lived in memory only, or before an extension's
+/// session was sent its first message) gets it, once its workspace is ready. The delivery's id is the key, so one stored already is not stored twice.
 pub fn brief_at_start(daemon: &Arc<Daemon>) {
     let agents = match daemon.read(|store| store.agents()) {
         Ok(agents) => agents,
@@ -367,7 +367,9 @@ pub fn brief_at_start(daemon: &Arc<Daemon>) {
     };
     for agent in agents {
         // A session the user started has its message delivered where it is made, as theirs.
-        let launched = agent.parent.is_some() || agent.launched_by.is_some();
+        let launched = agent.parent.is_some()
+            || agent.launched_by.is_some()
+            || crate::extensions::started(daemon, &agent.id);
         if agent.state.is_final() || agent.brief.is_none() || !launched {
             continue;
         }

@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use flottille_core::agent::{Agent, AgentState, Choices, GateMode, new_id};
 use flottille_core::approval;
-use flottille_core::paths::ensure_private_dir;
+use flottille_core::paths::{Paths, ensure_private_dir};
 use flottille_core::project::Project;
 use flottille_core::protocol::{
     AgentImage, AgentName, AgentRun, AgentSend, AgentTrees, ImageUpload,
@@ -541,6 +541,14 @@ pub struct New {
 
 /// Writes a new agent, its instructions and tools frozen in it; nothing is sent to it yet.
 pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, Failure> {
+    let agent = made(daemon, project, new)?;
+    write_new(daemon, &agent)?;
+    Ok(agent)
+}
+
+/// A new agent, its instructions and tools frozen in it, not written yet: what may refuse it is
+/// checked.
+pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, Failure> {
     let (place, folder, repositories) = match &new.workspace {
         None => {
             let repositories: Vec<_> = project
@@ -601,7 +609,13 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
     let now = now_ms();
     let depth = new.parent.as_ref().map_or(0, |(_, depth)| depth + 1);
     let at_depth_limit = depth >= DEPTH_LIMIT;
-    let tools = tools_of(provider, project, new.parent.is_none(), depth);
+    let tools = tools_of(
+        &daemon.paths,
+        provider,
+        project,
+        new.parent.is_none(),
+        depth,
+    );
     let files = roles::project_files(&project.folder, &repositories);
     let skills: Vec<(String, String)> = project
         .skills
@@ -656,9 +670,14 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         gate_mode: new.gate_mode.unwrap_or_default(),
         launched_by: new.launched_by,
     };
+    Ok(agent)
+}
+
+/// Writes the agent `made` made.
+pub fn write_new(daemon: &Daemon, agent: &Agent) -> Result<(), Failure> {
     daemon.write(|store| {
         let event = store.create_agent(
-            &agent,
+            agent,
             (
                 "agent.created",
                 json!({"agent": agent.id, "project": agent.project, "workspace": agent.workspace,
@@ -669,7 +688,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         )?;
         Ok(((), event))
     })?;
-    Ok(agent)
+    Ok(())
 }
 
 /// Changes the model and the effort of a running agent (`docs/agents.md`, "The options"): checked
@@ -918,14 +937,26 @@ pub fn forget_kept_sessions(daemon: &Daemon) {
 }
 
 /// The tools of an agent of `project`, a root or a child at `depth`, as its provider names them:
-/// what its role has in the project as it is now.
-pub fn tools_of(provider: &Provider, project: &Project, root: bool, depth: u32) -> Vec<String> {
-    provider.tools(
+/// what its role has in the project as it is now, and what the extensions active there give it.
+pub fn tools_of(
+    paths: &Paths,
+    provider: &Provider,
+    project: &Project,
+    root: bool,
+    depth: u32,
+) -> Vec<String> {
+    let mut tools = provider.tools(
         root,
         depth >= DEPTH_LIMIT,
         project.repositories.iter().any(|r| r.forge.is_some()),
         project.tracker.is_some(),
-    )
+    );
+    tools.extend(
+        crate::extensions::tools_for(paths, project, root)
+            .into_iter()
+            .map(|tool| format!("{}{tool}", provider.tool_prefix)),
+    );
+    tools
 }
 
 /// The life of one agent: a process per stretch of work, until it stops or fails.

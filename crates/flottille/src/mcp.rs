@@ -750,8 +750,16 @@ const SERVED: [Definition; 28] = [
     },
 ];
 
+/// Whether the tool is one of the core's.
+pub fn serves(name: &str) -> bool {
+    SERVED.iter().any(|tool| tool.name == name)
+}
+
 fn definition(name: &str) -> Option<&'static Definition> {
-    SERVED.iter().find(|tool| tool.name == name)
+    SERVED
+        .iter()
+        .find(|tool| tool.name == name)
+        .or_else(|| crate::extensions::definition(name))
 }
 
 /// The tool as a client lists it. `always_load` loads it upfront in Claude Code instead of
@@ -1312,7 +1320,13 @@ pub fn grant_of(daemon: &Daemon, agent: &Agent) -> Result<Grant, String> {
 /// changed.
 pub fn with_tools_now(daemon: &Daemon, agent: &Agent, project: &Project) -> Option<Agent> {
     let provider = providers::of(agent).ok()?;
-    let tools = crate::agents::tools_of(provider, project, agent.parent.is_none(), agent.depth);
+    let tools = crate::agents::tools_of(
+        &daemon.paths,
+        provider,
+        project,
+        agent.parent.is_none(),
+        agent.depth,
+    );
     // The same tools in another order are the same list: a new order would only cost the
     // session its prompt cache.
     let (now, had): (HashSet<&String>, HashSet<&String>) =
@@ -2007,6 +2021,9 @@ fn removes_a_workspace(tool: &str, args: &Value) -> bool {
 
 /// The gate's verdict on a call of one of the agent's tools.
 pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gate::Verdict {
+    if let Some(verdict) = crate::extensions::classify(daemon, grant, tool, args) {
+        return verdict;
+    }
     if tool == "web" {
         return crate::web::classify(daemon, &grant.agent, args);
     }
@@ -2362,6 +2379,9 @@ async fn performed_once(
         "forge" => crate::forge::forge(daemon, &grant.agent, &grant.place, args).await,
         "tickets" => crate::tickets::tickets(daemon, &grant.agent, &grant.place, args).await,
         "wake" => crate::subscriptions::wake(daemon, &grant.agent, args),
+        tool if crate::extensions::gives(tool) => {
+            crate::extensions::perform(daemon, grant, tool, args)
+        }
         tool if tree::TOOLS.contains(&tool) => tree::call(daemon, grant, tool, args).await,
         tool if crate::actions::TOOLS.contains(&tool) => {
             crate::actions::perform(daemon, grant, tool, args).await
