@@ -4051,7 +4051,9 @@ impl Render for Row {
                                             .px(space::LG)
                                             .bg(bg)
                                             .text_color(ink)
+                                            .overflow_hidden()
                                             .whitespace_nowrap()
+                                            .text_ellipsis()
                                             .child(SharedString::from(text))
                                     }))
                                     .test_support(),
@@ -5605,6 +5607,7 @@ fn fact_line(
                 .justify_end()
                 .overflow_hidden()
                 .whitespace_nowrap()
+                .text_ellipsis()
                 .child(value),
         )
         .test_support()
@@ -6595,7 +6598,9 @@ impl Render for StatusLine {
                 .aria_label(text.clone())
                 .text_size(px(12.5))
                 .text_color(p.faint)
+                .overflow_hidden()
                 .whitespace_nowrap()
+                .text_ellipsis()
                 .opacity(opacity)
                 .child(text)
                 .test_support()
