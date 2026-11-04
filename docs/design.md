@@ -620,8 +620,9 @@ Built as in `reference/hemera.md` §7: a shared base, the role template, a cache
 per-session part, then the project layer, frozen per session. The base has two parts. **What
 Flottille enforces** is fixed text that states what the gate does, so that an agent does not take
 it for its own discipline. **How to work** is the user's: a default text, the user's own for all
-projects, with a project's own added after them (`projects.md`, "Rules"). The global rules sit in the base, before the
-boundary, where every project shares them; a project's own sit just after the per-session part,
+projects, with a project's own added after them (`projects.md`, "Rules"). The global rules sit in
+the base, before the boundary, where every project shares them; a project's own sit just after the
+per-session part,
 since they would otherwise make the shared part differ from one project to the next. Alongside, the
 MCP server's `instructions` explain Flottille itself to the agent (`tools.md`, "The server"). The project layer holds, per
 repository and for the project folder: `CLAUDE.md` or `AGENTS.md` (the agent's own name first),
@@ -730,8 +731,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   edited, removed), its Tasks (a line, where it runs and its flags), its Setup (steps added,
   edited, removed and reordered, each with its kind, where it is done and its time limit), then
   its Rules (the global rules above, read-only and folded, with a link to edit them; a switch,
-  "Use only this project's rules"; the project's text editor, Reset to default, and a line saying a
-  change reaches the agents created from now on);
+  "Use only this project's rules"; the project's text editor, Reset to default, and a line saying
+  a change reaches the agents created from now on);
 - Settings, in tabs (Judge, Providers, Rules, Appearance, Developer mode: one tab shown at a time, as in a project's settings; the first, the Judge, is
   the one it opens on, and a link to a section opens its tab): the Judge tab holds the Auto judge (two lines on Auto: the rules pass what is known to be harmless, a
   small model on the user's own quota decides the rest, base calls always come to the user; "No
