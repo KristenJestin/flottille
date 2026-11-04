@@ -167,7 +167,7 @@ fn jobs_of(item: &Item) -> (Vec<(Job, Option<u64>)>, usize) {
 }
 
 /// A duration as a wake says it: `45 s`, `2 min 5 s`, `1 h 2 min`.
-fn lasted(seconds: u64) -> String {
+pub(super) fn lasted(seconds: u64) -> String {
     match (seconds / 3600, seconds / 60 % 60, seconds % 60) {
         (0, 0, s) => format!("{s} s"),
         (0, m, 0) => format!("{m} min"),

@@ -43,7 +43,7 @@ async fn bkt(args: &[&str]) -> Result<(bool, String, String), Gh> {
 }
 
 /// `bkt <args>`'s output, or a sentence saying why there is none, masked.
-async fn text(args: &[&str]) -> Result<String, String> {
+pub(super) async fn text(args: &[&str]) -> Result<String, String> {
     let shown = args[..2].join(" ");
     match bkt(args).await {
         Ok((true, stdout, _)) => Ok(masked(&stdout)),
@@ -60,7 +60,7 @@ async fn text(args: &[&str]) -> Result<String, String> {
 }
 
 /// `bkt <args>`'s JSON.
-async fn json(args: &[&str]) -> Result<Value, String> {
+pub(super) async fn json(args: &[&str]) -> Result<Value, String> {
     let shown = args[..2].join(" ");
     serde_json::from_str(&text(args).await?)
         .map_err(|error| format!("bkt {shown} answered what is not JSON: {error}"))
@@ -203,7 +203,7 @@ pub(super) async fn pipelines(forge: &Forge, context: &str) -> Result<Vec<u64>, 
 }
 
 /// `head`, then the context and the repository's flags, then `tail`.
-fn command<'a>(
+pub(super) fn command<'a>(
     forge: &'a Forge,
     context: &'a str,
     head: &[&'a str],
@@ -331,7 +331,7 @@ async fn cloud_values(
 
 /// `cloud_values` with more query parameters on the first page, each given as `--param`: the path
 /// never holds a `?`, `bkt api` is not known to merge a param into one.
-async fn cloud_values_with(
+pub(super) async fn cloud_values_with(
     context: &str,
     path: &str,
     total: usize,
@@ -1071,7 +1071,7 @@ async fn allowed(
 }
 
 /// The path of a Cloud repository, for `bkt api`.
-fn cloud_repository(forge: &Forge) -> String {
+pub(super) fn cloud_repository(forge: &Forge) -> String {
     let Forge::Bitbucket { owner, name, .. } = forge else {
         unreachable!()
     };
@@ -1080,7 +1080,7 @@ fn cloud_repository(forge: &Forge) -> String {
 
 /// The branch a pipeline of Bitbucket's API ran for: the branch's own (`ref_name`), or the source
 /// branch of the pull request.
-fn pipeline_branch(pipeline: &Value) -> Option<&str> {
+pub(super) fn pipeline_branch(pipeline: &Value) -> Option<&str> {
     let target = &pipeline["target"];
     match target["type"].as_str()? {
         "pipeline_pullrequest_target" => target["source"].as_str(),

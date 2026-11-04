@@ -303,7 +303,7 @@ const SERVED: [Definition; 28] = [
         title: "Pull requests",
         description: "The pull requests of the project's repositories on their forge, through \
             the user's own gh or bkt (no forge sign-in here: never run them). list: by state \
-            (open by default) and branch, as the daemon last read them (it says when). show: a workspace's branch's (yours; in main, name \
+            (open by default) and branch, as last read. show: a workspace's branch's (yours; in main, name \
             it), or number's, with checks (the log's end of each failed job), review and comment \
             counts; detail full adds texts. Writes, judged, answered at once, the result maybe \
             later: create, merge (method, squash by default; refused with no check, while checks \
@@ -311,14 +311,15 @@ const SERVED: [Definition; 28] = [
             (re-run failed) act on a workspace's branch; comment, edit, close (comment first), \
             reopen on number. subscribe: the next events of a workspace's pull request wakes you \
             once, by a delivery (from people: no bot nor agent; minutes: sized by CI, else 60); \
-            unsubscribe. {\"action\": \"create\", \"repository\": \"api\", \"title\": \
+            unsubscribe. CI: pipelines, runs, run_view, run_logs; judged run, stop, step. \
+            {\"action\": \"create\", \"repository\": \"api\", \"title\": \
             \"fix: ...\", \"body\": \"...\"}",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "show", "subscribe", "unsubscribe", "create", "comment", "edit", "merge", "checks", "close", "reopen"]},
+                "action": {"type": "string", "enum": ["list", "show", "subscribe", "unsubscribe", "create", "comment", "edit", "merge", "checks", "close", "reopen", "pipelines", "runs", "run_view", "run_logs", "run", "stop", "step"]},
                 "workspace": {"type": "string", "description": "Yours when left out; in main, name it."},
                 "repository": {"type": "string", "description": "By path; all of the place's when left out (list, show)."},
                 "number": {"type": "integer", "minimum": 1, "description": "show, comment, edit: a pull request."},
@@ -334,7 +335,14 @@ const SERVED: [Definition; 28] = [
                 "method": {"type": "string", "enum": ["squash", "merge", "rebase"], "description": "merge: squash when left out."},
                 "events": {"type": "array", "items": {"enum": crate::forge::EVENTS}},
                 "from": {"enum": crate::subscriptions::FROM},
-                "minutes": {"type": "integer", "minimum": 1, "maximum": crate::subscriptions::LONGEST_MINUTES}
+                "minutes": {"type": "integer", "minimum": 1, "maximum": crate::subscriptions::LONGEST_MINUTES},
+                "pipeline": {"type": "string", "description": "run: as pipelines lists it (Bitbucket default, custom: <name>, branches: <pattern>; GitHub a workflow's file)."},
+                "variables": {"type": "array", "description": "run: Bitbucket variables, GitHub inputs.", "items": {"type": "object", "properties": {
+                    "key": {"type": "string"}, "value": {"type": "string"}, "secured": {"type": "boolean"}
+                }, "required": ["key", "value"], "additionalProperties": false}},
+                "run": {"type": "integer", "minimum": 1, "description": "run_view, run_logs, stop, step: as runs lists it."},
+                "step": {"type": "string", "description": "run_logs, step: a step's (job's) name, as run_view lists it."},
+                "do": {"type": "string", "enum": ["start", "rerun"], "description": "step: start a manual step, or run one again."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -2383,8 +2391,27 @@ pub fn record_of(args: &Value, place: &Place) -> Value {
         }
     }
     let env = std::env::vars_os().collect();
-    let values = place.secret_values();
-    walk(args, &|text| secrets::mask_also(text, &env, &values))
+    let mut values = place.secret_values();
+    // A secured variable of a pipeline's run is the agent's own secret.
+    values.extend(
+        args["variables"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|variable| variable["secured"] == true)
+            .filter_map(|variable| variable["value"].as_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+    );
+    let mut recorded = walk(args, &|text| secrets::mask_also(text, &env, &values));
+    // However short it is.
+    let variables = recorded.get_mut("variables").and_then(Value::as_array_mut);
+    for variable in variables.into_iter().flatten() {
+        if variable["secured"] == true && variable.get("value").is_some() {
+            variable["value"] = "[masked]".into();
+        }
+    }
+    recorded
 }
 
 /// A text cut at `limit` characters, saying how much was left out.
