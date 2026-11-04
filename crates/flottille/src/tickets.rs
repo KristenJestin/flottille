@@ -124,7 +124,7 @@ impl Ticket {
 
     /// What `tickets show` answers: the comments themselves only when `full`, otherwise their
     /// number and the way to get them, for the ticket that was named when one was.
-    fn text(&self, full: bool, named: Option<&str>) -> String {
+    pub fn text(&self, full: bool, named: Option<&str>) -> String {
         let again = match named {
             Some(ticket) => format!(
                 "{{\"action\": \"show\", \"ticket\": {}, \"detail\": \"full\"}}",

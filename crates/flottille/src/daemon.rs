@@ -642,7 +642,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                 } else if request.method == "task.run" {
                     tasks::run(&daemon, request.params).await
                 } else if extensions::answers(&request.method) {
-                    extensions::call(&daemon, &request.method, request.params)
+                    extensions::call(daemon, &request.method, request.params).await
                 } else {
                     workspaces::call(daemon, &request.method, request.params).await
                 };

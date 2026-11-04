@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use flottille_core::agent::{Agent, AgentState, Choices, GateMode, new_id};
 use flottille_core::approval;
-use flottille_core::paths::ensure_private_dir;
+use flottille_core::paths::{Paths, ensure_private_dir};
 use flottille_core::project::Project;
 use flottille_core::protocol::{
     AgentImage, AgentName, AgentRun, AgentSend, AgentTrees, ImageUpload,
@@ -601,7 +601,13 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
     let now = now_ms();
     let depth = new.parent.as_ref().map_or(0, |(_, depth)| depth + 1);
     let at_depth_limit = depth >= DEPTH_LIMIT;
-    let tools = tools_of(provider, project, new.parent.is_none(), depth);
+    let tools = tools_of(
+        &daemon.paths,
+        provider,
+        project,
+        new.parent.is_none(),
+        depth,
+    );
     let files = roles::project_files(&project.folder, &repositories);
     let skills: Vec<(String, String)> = project
         .skills
@@ -918,14 +924,26 @@ pub fn forget_kept_sessions(daemon: &Daemon) {
 }
 
 /// The tools of an agent of `project`, a root or a child at `depth`, as its provider names them:
-/// what its role has in the project as it is now.
-pub fn tools_of(provider: &Provider, project: &Project, root: bool, depth: u32) -> Vec<String> {
-    provider.tools(
+/// what its role has in the project as it is now, and what the extensions active there give it.
+pub fn tools_of(
+    paths: &Paths,
+    provider: &Provider,
+    project: &Project,
+    root: bool,
+    depth: u32,
+) -> Vec<String> {
+    let mut tools = provider.tools(
         root,
         depth >= DEPTH_LIMIT,
         project.repositories.iter().any(|r| r.forge.is_some()),
         project.tracker.is_some(),
-    )
+    );
+    tools.extend(
+        crate::extensions::tools_for(paths, project, root)
+            .into_iter()
+            .map(|tool| format!("{}{tool}", provider.tool_prefix)),
+    );
+    tools
 }
 
 /// The life of one agent: a process per stretch of work, until it stops or fails.

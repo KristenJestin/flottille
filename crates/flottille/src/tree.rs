@@ -341,8 +341,8 @@ impl Drop for Slot<'_> {
 }
 
 /// The first message of an agent a launch made: a child's brief, or the first message of a session
-/// an agent started for the user.
-fn brief(daemon: &Arc<Daemon>, child: &Agent) {
+/// an agent or an extension started for the user.
+pub fn brief(daemon: &Arc<Daemon>, child: &Agent) {
     let (kind, body) = first_message(daemon, child);
     deliveries::deliver(
         daemon,

@@ -13,11 +13,17 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Subcommand)]
 pub enum SpecAction {
-    /// Start a spec, a draft, in a project where Specs is on
+    /// Start a spec, a draft, in a project where Specs is on; from an idea, a session is started
+    /// in the project's main checkout to write it
     New {
         project: String,
+        /// Its title; the idea's first line by default
+        #[arg(long, required_unless_present = "idea")]
+        title: Option<String>,
+        /// What to build, in a sentence: a lead session reads the code, asks you its questions
+        /// and writes the spec
         #[arg(long)]
-        title: String,
+        idea: Option<String>,
         /// alone (no ticket), internal (tickets read, never written) or ticket (the ticket is
         /// the spec); alone without --ticket, internal with
         #[arg(long, value_parser = ["alone", "internal", "ticket"])]
@@ -27,6 +33,34 @@ pub enum SpecAction {
         tickets: Vec<String>,
         #[arg(long)]
         json: bool,
+    },
+    /// Write the spec of a ticket of the project's tracker: a lead session is started in the
+    /// project's main checkout to write it
+    FromTicket {
+        project: String,
+        ticket: String,
+        /// internal (the ticket read, never written) or ticket (the ticket is the spec); internal
+        /// by default
+        #[arg(long, value_parser = ["internal", "ticket"])]
+        mode: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Answer a question the session writing the spec asked: it becomes a decision (D)
+    Answer {
+        spec: u64,
+        question: u64,
+        /// The option chosen, from 1
+        #[arg(
+            long,
+            value_name = "N",
+            required_unless_present = "text",
+            conflicts_with = "text"
+        )]
+        option: Option<u64>,
+        /// An answer in your own words, setting every option aside
+        #[arg(long)]
+        text: Option<String>,
     },
     /// The specs of the projects where Specs is on, or of one
     List {
@@ -68,15 +102,45 @@ pub fn run(paths: &Paths, action: SpecAction) -> Result<ExitCode> {
         SpecAction::New {
             project,
             title,
+            idea,
             mode,
             tickets,
             json,
+        } => {
+            let answer = client.request(
+                "spec.new",
+                json!({"project": project, "title": title, "idea": idea, "mode": mode,
+                    "tickets": tickets}),
+            )?;
+            if answer.get("agent").is_none() {
+                (answer, json)
+            } else {
+                return started(&answer, json);
+            }
+        }
+        SpecAction::FromTicket {
+            project,
+            ticket,
+            mode,
+            json,
+        } => {
+            let answer = client.request(
+                "spec.from_ticket",
+                json!({"project": project, "ticket": ticket, "mode": mode}),
+            )?;
+            return started(&answer, json);
+        }
+        SpecAction::Answer {
+            spec,
+            question,
+            option,
+            text,
         } => (
             client.request(
-                "spec.new",
-                json!({"project": project, "title": title, "mode": mode, "tickets": tickets}),
+                "spec.answer",
+                json!({"spec": spec, "question": question, "option": option, "text": text}),
             )?,
-            json,
+            false,
         ),
         SpecAction::List {
             project,
@@ -132,6 +196,21 @@ pub fn run(paths: &Paths, action: SpecAction) -> Result<ExitCode> {
         println!("{answer}");
     } else {
         print!("{}", text(&answer));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// A spec and the session started to write it.
+fn started(answer: &Value, json: bool) -> Result<ExitCode> {
+    if json {
+        println!("{answer}");
+    } else {
+        println!(
+            "{}\nSession {} writes it: follow it with `flottille agent show {}`.",
+            line(&answer["spec"]),
+            answer["agent"].as_str().unwrap_or_default(),
+            answer["agent"].as_str().unwrap_or_default()
+        );
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -200,6 +279,30 @@ fn text(spec: &Value) -> String {
     text.push_str("\nOpen questions\n");
     for question in list("questions") {
         text.push_str(&format!("- {}\n", question.as_str().unwrap_or_default()));
+    }
+    for question in list("asked") {
+        let state = match question["decision"].as_str() {
+            Some(decision) => format!("answered, {decision}"),
+            None => "open".to_owned(),
+        };
+        text.push_str(&format!(
+            "Question {} ({state}): {}\n",
+            question["question"],
+            field(&question, "text")
+        ));
+        for (at, option) in question["options"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            let option = option.as_str().unwrap_or_default();
+            let recommended = match option == field(&question, "recommended") {
+                true => format!(" (recommended: {})", field(&question, "reason")),
+                false => String::new(),
+            };
+            text.push_str(&format!("  {}. {option}{recommended}\n", at + 1));
+        }
     }
     text
 }

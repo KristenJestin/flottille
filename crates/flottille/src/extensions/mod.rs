@@ -7,16 +7,21 @@ mod command;
 mod specs;
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use clap::Subcommand;
+use flottille_core::agent::Agent;
+use flottille_core::approval;
 use flottille_core::paths::Paths;
 use flottille_core::project::Project;
 use flottille_core::store::Store;
+use futures::future::BoxFuture;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use crate::daemon::Daemon;
+use crate::gate::Verdict;
+use crate::mcp::{Definition, Grant, Outcome};
 use crate::projects::{self, Failure};
 
 pub use command::run;
@@ -56,6 +61,30 @@ pub struct Extension {
     pub migrations: &'static [&'static str],
     /// The protocol methods it answers, `<prefix>.*`.
     pub methods: Methods,
+    /// The Action trigger: the user's gestures it answers, each by its method
+    /// `<prefix>.<action>`, reached too through `extension.act {name, action, …}`.
+    pub actions: &'static [&'static str],
+    /// The tools it gives to agents while it is active.
+    pub tools: &'static [Tool],
+}
+
+/// A tool an extension gives (`docs/extensions.md`, "Tools"): served as the core's are, and
+/// through the gate like any other.
+pub struct Tool {
+    pub definition: Definition,
+    /// Who gets it, and the actions of its `action` argument each of them may call.
+    pub given: &'static [(To, &'static [&'static str])],
+    /// The extension's own refusals of a call (a lock, a status): the gate's answer in every
+    /// mode, Full included, before anything is asked or run. `Err` is the sentence that says why.
+    pub gate: fn(&Daemon, &Grant, &Value) -> Result<(), String>,
+    pub call: fn(&Arc<Daemon>, &Grant, Value) -> Outcome,
+}
+
+/// Who a tool is given to: the agents an extension launches come with Review.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum To {
+    /// The roots of a project where the extension is active.
+    Roots,
 }
 
 /// What an extension touches: Global comes with the compaction.
@@ -88,9 +117,12 @@ pub enum Kind {
     Language,
 }
 
+/// What an extension's method answers, once its work is done.
+pub type Answered = BoxFuture<'static, Result<Value, Failure>>;
+
 pub struct Methods {
     pub prefix: &'static str,
-    pub call: fn(&Daemon, &str, Value) -> Result<Value, Failure>,
+    pub call: fn(Arc<Daemon>, String, Value) -> Answered,
 }
 
 /// One extension's table, as `extensions.toml` or a project's file holds it, checked.
@@ -306,6 +338,128 @@ fn globally_on(extension: &Extension, global: &BTreeMap<&'static str, Values>) -
         .unwrap_or(extension.on_by_default)
 }
 
+/// Whether the extension is active in the project, as its files say now; a file that cannot be
+/// read leaves it off.
+fn active_in(paths: &Paths, extension: &Extension, project: &Project) -> bool {
+    let Ok(global) = global(paths) else {
+        return false;
+    };
+    globally_on(extension, &global)
+        && of_project(extension, project).is_ok_and(|own| own.enabled != Some(false))
+}
+
+/// The names of the tools the active extensions give an agent of the project, a root or not
+/// (`agents::tools_of`).
+pub fn tools_for(paths: &Paths, project: &Project, root: bool) -> Vec<&'static str> {
+    ALL.iter()
+        .filter(|extension| active_in(paths, extension, project))
+        .flat_map(|extension| extension.tools)
+        .filter(|tool| tool.given.iter().any(|(to, _)| *to == To::Roots && root))
+        .map(|tool| tool.definition.name)
+        .collect()
+}
+
+fn tool(name: &str) -> Option<&'static Tool> {
+    ALL.iter()
+        .flat_map(|extension| extension.tools)
+        .find(|tool| tool.definition.name == name)
+}
+
+/// The definition of a tool an extension gives, active or not: a grant holds only those its
+/// agent was given.
+pub fn definition(name: &str) -> Option<&'static Definition> {
+    tool(name).map(|tool| &tool.definition)
+}
+
+/// Whether the tool is one an extension gives.
+pub fn gives(name: &str) -> bool {
+    tool(name).is_some()
+}
+
+/// The gate's verdict on a call of a tool an extension gives, `None` for another tool: an action
+/// the caller is not given, or the extension's own refusal, is refused in every mode; the rest
+/// passes.
+pub fn classify(daemon: &Daemon, grant: &Grant, name: &str, args: &Value) -> Option<Verdict> {
+    let tool = tool(name)?;
+    let root = daemon
+        .read(|store| store.agent(&grant.agent))
+        .ok()
+        .flatten()
+        .is_some_and(|agent| agent.parent.is_none());
+    let actions: Vec<&str> = tool
+        .given
+        .iter()
+        .filter(|(to, _)| *to == To::Roots && root)
+        .flat_map(|(_, actions)| actions.iter().copied())
+        .collect();
+    let action = args["action"].as_str().unwrap_or_default();
+    if !actions.contains(&action) {
+        return Some(Verdict::Deny(format!(
+            "refused: {name} takes the actions {}, not {}",
+            actions.join(", "),
+            args["action"]
+        )));
+    }
+    Some(match (tool.gate)(daemon, grant, args) {
+        Ok(()) => Verdict::Allow,
+        Err(why) => Verdict::Deny(format!("refused: {why}")),
+    })
+}
+
+/// Performs a call of a tool an extension gives, once the gate let it through.
+pub fn perform(daemon: &Arc<Daemon>, grant: &Grant, name: &str, args: Value) -> Outcome {
+    match tool(name) {
+        Some(tool) => (tool.call)(daemon, grant, args),
+        None => Outcome::Failed(format!("{name} is not served")),
+    }
+}
+
+/// Starts a `lead` session for the user in the project's main checkout, as `agent_launch` starts
+/// a root: `message` is its first message, said to be Flottille's. `before` runs once the agent
+/// is made and before it is sent anything; its refusal leaves the agent unsent.
+pub fn start_session(
+    daemon: &Arc<Daemon>,
+    project: &Project,
+    title: &str,
+    message: &str,
+    before: impl FnOnce(&Agent) -> Result<(), Failure>,
+) -> Result<Agent, Failure> {
+    let role = crate::roles::role(crate::roles::LEAD).expect("the lead role");
+    let agent = crate::agents::create(
+        daemon,
+        project,
+        crate::agents::New {
+            workspace: None,
+            preparing: false,
+            role,
+            parent: None,
+            title: Some(title.to_owned()),
+            brief: message.to_owned(),
+            provider: None,
+            model: None,
+            effort: None,
+            gate_mode: None,
+            launched_by: None,
+        },
+    )?;
+    before(&agent)?;
+    crate::tree::brief(daemon, &agent);
+    Ok(agent)
+}
+
+/// Tells an agent what happened, as a delivery of the extension's kind (`[flottille:<name>]`):
+/// read between its turns, it never waits on a tool call.
+pub fn tell(daemon: &Arc<Daemon>, extension: &Extension, agent: &str, body: &str) {
+    crate::deliveries::deliver(
+        daemon,
+        agent,
+        extension.name,
+        None,
+        body,
+        approval::BETWEEN_TURNS,
+    );
+}
+
 /// The project, when the extension is active there: on globally and not turned off in it. The
 /// refusal names the switch that turns it on.
 pub fn active(daemon: &Daemon, extension: &Extension, project: &str) -> Result<Project, Failure> {
@@ -378,20 +532,45 @@ fn owner(method: &str) -> Option<&'static Extension> {
         .find(|extension| extension.methods.prefix == prefix)
 }
 
-/// Answers `extension.list`, `extension.set` and the extensions' own methods. The user's door
-/// only: no tool of an agent reaches them.
-pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failure> {
+/// Answers `extension.list`, `extension.set`, `extension.act` and the extensions' own methods.
+/// The user's door only: no tool of an agent reaches them.
+pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Value, Failure> {
     match method {
-        "extension.list" => Ok(list(daemon)),
-        "extension.set" => set(daemon, serde_json::from_value(params)?),
+        "extension.list" => Ok(list(&daemon)),
+        "extension.set" => set(&daemon, serde_json::from_value(params)?),
+        "extension.act" => act(daemon, params).await,
         method => match owner(method) {
-            Some(extension) => (extension.methods.call)(daemon, method, params),
+            Some(extension) => (extension.methods.call)(daemon, method.to_owned(), params).await,
             None => Err(Failure::new(
                 "unknown-method",
                 format!("unknown method `{method}`"),
             )),
         },
     }
+}
+
+/// `extension.act {name, action, …}`: a gesture of the user, answered by the extension's method
+/// of that action with the rest of the parameters.
+async fn act(daemon: Arc<Daemon>, params: Value) -> Result<Value, Failure> {
+    let Value::Object(mut params) = params else {
+        return Err(Failure::refused("extension.act takes an object"));
+    };
+    let mut text = |key: &str| match params.remove(key) {
+        Some(Value::String(text)) => Ok(text),
+        _ => Err(Failure::refused(format!(
+            "extension.act: `{key}` is a text"
+        ))),
+    };
+    let (name, action) = (text("name")?, text("action")?);
+    let extension = find(&name).map_err(|why| Failure::new("not-found", why))?;
+    if !extension.actions.contains(&action.as_str()) {
+        return Err(Failure::refused(format!(
+            "{name} has no action {action}: its actions are {}",
+            extension.actions.join(", ")
+        )));
+    }
+    let method = format!("{}.{action}", extension.methods.prefix);
+    (extension.methods.call)(daemon, method, Value::Object(params)).await
 }
 
 fn list(daemon: &Daemon) -> Value {
@@ -591,6 +770,9 @@ fn set(daemon: &Daemon, asked: Set) -> Result<Value, Failure> {
             parse(&text).map_err(|why| Failure::new("invalid-config", why))?;
             std::fs::create_dir_all(&paths.config).map_err(unavailable)?;
             crate::providers::write_in_place(&file(paths), &text).map_err(unavailable)?;
+            // Before the answer: the next call of a session is served the tools it has now. A
+            // project's own switch is its file's, announced when it is rewritten.
+            projects::tools_changed(daemon);
         }
     }
     daemon
