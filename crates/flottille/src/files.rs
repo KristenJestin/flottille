@@ -419,16 +419,18 @@ pub fn read_page(
         let rendered = format!("{:6}\t{}", first_line + n as u64, text);
         if body.len() + rendered.len() > budget {
             if taken == 0 {
-                // One line longer than a page: its start, cut on a character.
-                let mut cut = budget.min(line.len());
+                // One line longer than a page: its start, cut on a character, its number counted
+                // in the page.
+                let number = format!("{first_line:6}\t");
+                let mut cut = budget
+                    .saturating_sub(number.len())
+                    .min(line.len() - 1)
+                    .max(1);
                 while cut > 1 && continuation(line[cut]) {
                     cut -= 1;
                 }
-                body.push_str(&format!(
-                    "{:6}\t{}",
-                    first_line,
-                    String::from_utf8_lossy(&line[..cut])
-                ));
+                body.push_str(&number);
+                body.push_str(&String::from_utf8_lossy(&line[..cut]));
                 taken = cut;
             }
             break;

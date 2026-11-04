@@ -382,6 +382,30 @@ fn a_page_of_fs_read_follows_the_limit_the_user_chose() {
     assert_eq!(whole, 1);
 }
 
+#[test]
+fn a_first_line_just_under_the_page_is_cut_with_its_number_in_the_page() {
+    let user = User::with_fake_agent().with_cut_results();
+    let (_, mcp, folder) = session(&user);
+    // The page holds 7,600 bytes at the default limit: this line fits it, its number does not.
+    std::fs::write(
+        folder.join("wide.txt"),
+        format!("{}\nend\n", "a".repeat(7_596)),
+    )
+    .unwrap();
+
+    let first = read(&mcp, "wide.txt");
+
+    assert!(first.chars().count() < LIMIT, "{} characters", first.len());
+    assert!(!first.contains("left out"), "{first}");
+    let range: Value = serde_json::from_str(first.lines().last().unwrap()).unwrap();
+    let next = range["next"].as_u64().expect("a next page");
+    let rest = ok(mcp.call(
+        "fs_read",
+        json!({"path": "wide.txt", "range": {"offset": next}}),
+    ));
+    assert!(rest.contains("\tend"), "{rest}");
+}
+
 /// The session of a second root agent of the project `app`, which `session` set up.
 fn another_root(user: &User) -> Mcp {
     let opened = user.received_requests("session/new").len();
