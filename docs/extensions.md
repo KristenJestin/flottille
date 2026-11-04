@@ -169,7 +169,13 @@ An extension that keeps anything keeps it in **its own space of the store**: tab
 own. Only the extension reads and writes them; the core and the other extensions never do. They
 are kept when the extension is turned off. The store holds it: while an extension's migration or
 its space runs, SQLite refuses every statement that makes, changes, reads or writes a table outside
-`ext_<name>_…`, and views, pragmas, attachments and the end of the transaction.
+`ext_<name>_…`, and views, pragmas, attachments and the end of the transaction. What SQLite does
+not say to the check is looked at before anything is kept: a table renamed out of the space, a
+counter of the core changed, a table of the space that references one outside it. With no such
+reference, no deletion of the core cascades into the space, and an extension's triggers fire only
+inside it. A name is lower-case letters and digits only, so that no prefix holds another's (`a`
+and `a_b` would share `ext_a_`). This holds the extension's SQL; its Rust code runs in the daemon
+and is trusted as the core is.
 
 An extension may also add facts to what the core says of an agent, under its own name
 (`agent.tree`'s `extensions.<name>`): the spec a session writes or develops, the compaction's
