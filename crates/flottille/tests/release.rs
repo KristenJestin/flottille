@@ -136,7 +136,7 @@ impl Repo {
 // The version.
 
 #[test]
-fn a_feat_since_the_last_stable_tag_bumps_the_minor() {
+fn a_feature_before_1_0_bumps_the_patch() {
     let repo = Repo::new();
     repo.commit("feat(core): start");
     repo.tag("v0.3.0");
@@ -144,7 +144,27 @@ fn a_feat_since_the_last_stable_tag_bumps_the_minor() {
     repo.commit("feat(gui): add a page (#12)");
     repo.commit("fix(cli): a typo (#13)");
 
-    assert_eq!(repo.next(&["stable"]), "0.4.0");
+    assert_eq!(repo.next(&["stable"]), "0.3.1");
+
+    // A feature alone is enough, and it is not the minor.
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.tag("v0.1.1");
+    repo.commit("feat(tools): cut long results (#328)");
+
+    assert_eq!(repo.next(&["stable"]), "0.1.2");
+}
+
+#[test]
+fn a_feature_after_1_0_bumps_the_minor() {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.tag("v1.2.3");
+    repo.commit("docs(repo): say more");
+    repo.commit("feat(gui): add a page (#12)");
+    repo.commit("fix(cli): a typo (#13)");
+
+    assert_eq!(repo.next(&["stable"]), "1.3.0");
 }
 
 #[test]
@@ -179,11 +199,25 @@ fn a_breaking_change_bumps_the_major_from_1_0() {
 }
 
 #[test]
-fn before_1_0_a_breaking_change_bumps_the_minor() {
+fn a_breaking_change_before_1_0_bumps_the_minor() {
     let repo = Repo::new();
     repo.commit("feat(core): start");
     repo.tag("v0.3.4");
     repo.commit("fix(cli)!: rename the commands");
+    assert_eq!(repo.next(&["stable"]), "0.4.0");
+
+    // A feature that breaks is the minor too, not the patch a feature alone is.
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.tag("v0.3.4");
+    repo.commit("feat(cli)!: rename the commands");
+    assert_eq!(repo.next(&["stable"]), "0.4.0");
+
+    // Said in the body's footer instead.
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.tag("v0.3.4");
+    repo.commit("fix(store): a new schema\n\nBREAKING CHANGE: the old store is not read");
     assert_eq!(repo.next(&["stable"]), "0.4.0");
 }
 
@@ -192,8 +226,8 @@ fn without_a_stable_tag_the_versions_count_from_0_0_0() {
     let repo = Repo::new();
     repo.commit("chore(repo): start");
     repo.commit("feat(core): the first thing");
-    assert_eq!(repo.next(&["stable"]), "0.1.0");
-    assert_eq!(repo.next(&["beta"]), "0.1.0-beta.2");
+    assert_eq!(repo.next(&["stable"]), "0.0.1");
+    assert_eq!(repo.next(&["beta"]), "0.0.1-beta.2");
 }
 
 #[test]
@@ -237,9 +271,9 @@ fn a_beta_is_numbered_after_the_previous_one() {
     repo.commit("fix(cli): a typo (#13)");
     assert_eq!(repo.next(&["beta"]), "0.3.1-beta.1");
     repo.commit("feat(gui): add a page (#14)");
-    assert_eq!(repo.next(&["beta"]), "0.4.0-beta.2");
+    assert_eq!(repo.next(&["beta"]), "0.3.1-beta.2");
     repo.commit("docs(repo): say more (#15)");
-    assert_eq!(repo.next(&["beta"]), "0.4.0-beta.3");
+    assert_eq!(repo.next(&["beta"]), "0.3.1-beta.3");
 }
 
 #[test]
@@ -251,8 +285,8 @@ fn pre_release_tags_are_not_stable_ones() {
     repo.tag("v0.4.0-beta.1");
     repo.commit("fix(cli): a typo");
 
-    assert_eq!(repo.next(&["stable"]), "0.4.0");
-    assert_eq!(repo.next(&["beta"]), "0.4.0-beta.2");
+    assert_eq!(repo.next(&["stable"]), "0.3.1");
+    assert_eq!(repo.next(&["beta"]), "0.3.1-beta.2");
 }
 
 #[test]
@@ -266,10 +300,10 @@ fn an_alpha_names_its_branch_and_counts_its_commits() {
 
     assert_eq!(
         repo.next(&["alpha", "--branch", "feat/46-packages"]),
-        "0.4.0-alpha.feat-46-packages.2"
+        "0.3.1-alpha.feat-46-packages.2"
     );
     // Its name as git has it when none is given.
-    assert_eq!(repo.next(&["alpha"]), "0.4.0-alpha.feat-46-packages.2");
+    assert_eq!(repo.next(&["alpha"]), "0.3.1-alpha.feat-46-packages.2");
 }
 
 #[test]
@@ -280,11 +314,11 @@ fn the_stable_version_is_the_beta_of_the_squashed_dev_head_without_its_pre_relea
     repo.git(&["checkout", "--quiet", "-b", "dev"]);
     repo.commit("feat(gui): add a page (#14)");
     repo.commit("fix(cli): a typo (#15)");
-    assert_eq!(repo.next(&["beta"]), "0.4.0-beta.2");
+    assert_eq!(repo.next(&["beta"]), "0.3.1-beta.2");
 
     let dev = repo.squash_dev_into_main();
 
-    assert_eq!(repo.next(&["stable", "--at", &dev]), "0.4.0");
+    assert_eq!(repo.next(&["stable", "--at", &dev]), "0.3.1");
 }
 
 #[test]
@@ -295,17 +329,17 @@ fn after_dev_is_squashed_into_main_the_next_beta_counts_from_the_released_mark()
     repo.git(&["checkout", "--quiet", "-b", "dev"]);
     repo.commit("feat(gui): add a page (#14)");
     repo.commit("fix(cli): a typo (#15)");
-    repo.release("0.4.0");
+    repo.release("0.3.1");
     repo.commit("fix(store): a lock (#16)");
-    assert_eq!(repo.next(&["beta"]), "0.4.1-beta.1");
+    assert_eq!(repo.next(&["beta"]), "0.3.2-beta.1");
 
     // And again: the second squash counts from the second mark.
     repo.commit("feat(gui): another page (#17)");
-    assert_eq!(repo.next(&["beta"]), "0.5.0-beta.2");
-    repo.release("0.5.0");
+    assert_eq!(repo.next(&["beta"]), "0.3.2-beta.2");
+    repo.release("0.3.2");
     repo.commit("docs(repo): say more (#18)");
 
-    assert_eq!(repo.next(&["beta"]), "0.5.1-beta.1");
+    assert_eq!(repo.next(&["beta"]), "0.3.3-beta.1");
 }
 
 #[test]
@@ -338,6 +372,119 @@ fn an_unknown_channel_is_refused() {
         String::from_utf8_lossy(&output.stderr).contains("stable, beta or alpha"),
         "{output:?}"
     );
+}
+
+#[test]
+fn release_as_sets_the_next_version() {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.tag("v0.1.1");
+    repo.git(&["checkout", "--quiet", "-b", "dev"]);
+    repo.commit("feat(tools): cut long results (#328)");
+    repo.commit("feat(specs): the specs (#400)\n\nRelease-As: 0.2.0");
+    repo.commit("fix(cli): a typo (#401)");
+
+    assert_eq!(repo.next(&["stable"]), "0.2.0");
+    // The betas follow it, and so do the alphas.
+    assert_eq!(repo.next(&["beta"]), "0.2.0-beta.3");
+    assert_eq!(
+        repo.next(&["alpha", "--branch", "feat/x"]),
+        "0.2.0-alpha.feat-x.3"
+    );
+
+    // Without it, the same commits give the patch.
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.tag("v0.1.1");
+    repo.commit("feat(tools): cut long results (#328)");
+    assert_eq!(repo.next(&["stable"]), "0.1.2");
+}
+
+#[test]
+fn release_as_is_forgotten_once_released() {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.tag("v0.1.1");
+    repo.git(&["checkout", "--quiet", "-b", "dev"]);
+    repo.commit("feat(specs): the specs (#400)\n\nRelease-As: 0.2.0");
+    repo.release("0.2.0");
+    repo.commit("feat(gui): add a page (#402)");
+
+    assert_eq!(repo.next(&["stable"]), "0.2.1");
+}
+
+#[test]
+fn release_as_is_read_on_dev_s_own_line_only() {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.tag("v0.1.1");
+    repo.git(&["checkout", "--quiet", "-b", "dev"]);
+    repo.git(&["checkout", "--quiet", "-b", "feat/specs"]);
+    repo.commit("feat(specs): a step\n\nRelease-As: 0.9.0");
+    repo.git(&["checkout", "--quiet", "dev"]);
+    repo.commit("fix(cli): a typo (#401)");
+    repo.git(&[
+        "merge",
+        "--quiet",
+        "--no-ff",
+        "-m",
+        "chore(repo): merge",
+        "feat/specs",
+    ]);
+
+    assert_eq!(repo.next(&["stable"]), "0.1.2");
+}
+
+#[test]
+fn release_as_below_the_computed_version_is_refused() {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.tag("v0.1.1");
+    repo.commit("feat(cli)!: rename the commands (#1)");
+    repo.commit("fix(store): a lock (#2)\n\nRelease-As: 0.1.9");
+    let refused = repo.head();
+
+    for channel in ["stable", "beta", "alpha"] {
+        let output = repo.version(&[channel, "--branch", "feat/x"]);
+        assert_eq!(output.status.code(), Some(1), "{channel}: {output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains(&refused), "{channel}: {error}");
+        assert!(
+            error.contains("0.1.9") && error.contains("0.2.0"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn a_malformed_release_as_is_refused() {
+    for value in ["0.2", "v0.2.0", "0.2.0-beta.1", "soon", "0.2.0 now", ""] {
+        let repo = Repo::new();
+        repo.commit("feat(core): start");
+        repo.tag("v0.1.1");
+        repo.commit(&format!(
+            "feat(specs): the specs (#400)\n\nRelease-As: {value}"
+        ));
+        let refused = repo.head();
+
+        let output = repo.version(&["stable"]);
+
+        assert_eq!(output.status.code(), Some(1), "{value:?}: {output:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains(&refused), "{value:?}: {error}");
+        assert!(error.contains("Release-As"), "{value:?}: {error}");
+    }
+}
+
+#[test]
+fn a_release_as_equal_to_the_computed_version_changes_nothing() {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.tag("v0.1.1");
+    repo.commit("fix(store): a lock (#2)\n\nRelease-As: 0.1.2");
+
+    assert_eq!(repo.next(&["stable"]), "0.1.2");
 }
 
 // The changelog.
