@@ -9250,6 +9250,7 @@ fn a_project_s_settings_show_the_global_rules_folded_above_its_editor(cx: &mut T
         Some(String::new())
     );
 
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
     cx.update(|window, cx| window.click("rules-global-edit-atlas", cx));
     settle(cx);
     assert_eq!(settings_shown(cx), ["rules"]);
@@ -9297,6 +9298,7 @@ fn a_project_s_settings_switch_to_use_only_its_rules(cx: &mut TestAppContext) {
     settle(cx);
     let file = std::fs::read_to_string(user.project_file("atlas")).unwrap();
     assert!(file.contains("rules_alone = true"), "{file}");
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
     // The text is kept, and the editor still shows it.
     assert_eq!(
         editor.read_with(cx, |e, cx| e.typed(cx)),
