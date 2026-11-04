@@ -220,7 +220,7 @@ or why the ticket is not taken, before anything is created.
 
 `tickets {action, …}` (`docs/tools.md`, "The tickets"): `list` every ticket of a state in one call
 (by label and assignee), `search` with words, `show` the workspace's ticket or another of the
-project's tracker by its key; `create`, `comment`, `edit` (on GitHub also labels and assignees), `close` (on
+project's tracker by its key, `types` the work item types of a Jira project; `create`, `comment`, `edit` (on GitHub also labels and assignees; on Jira the assignee), `close` (on
 GitHub, completed or not planned), `reopen` and `status` (on GitHub, the Status of the issue on its
 Projects board, `docs/tools.md`), each to judge, held in Ask and allowed in Full as the other writes are. A key the
 tracker does not take, or a creation in a Jira project that is not one of the tracker's, is
@@ -266,10 +266,48 @@ are written (a text holding what looks like a secret is base for the gate, as on
 
 | Write | `acli` |
 |---|---|
-| `create` | `jira workitem create --project <P> --summary <title> [--description <body>] [--type <type>] [--label a,b] --json`, `P` one of the tracker's projects (the only one when it has one); with no type, the project's default |
+| `create` | `jira workitem create --project <P> --summary <title> [--description <body>] [--assignee <who>] [--type <type>] [--label a,b] --json`, `P` one of the tracker's projects (the only one when it has one); with no type, the project's default |
 | `comment` | `jira workitem comment create --key <K> --body <body>` |
-| `edit` | `jira workitem edit --key <K> [--summary <title>] [--description <body>] --yes` |
+| `edit` | `jira workitem edit --key <K> [--summary <title>] [--description <body>] [--assignee <who> \| --remove-assignee] --yes` |
 | `close`, `reopen`, `status` | `jira workitem transition --key <K> --status <name> --yes` |
+
+**The summary, the description and the assignee of `create` and `edit` are built in one place**
+(`work_item_fields`), where the conversion of a text to Atlassian's format (#404) will go.
+
+### Types and assignment
+
+Seen in daily use: an agent guessed a work item type in the user's language (`Tâche`), Jira
+refused it, and the new work item went to the project's default assignee.
+
+- **`types {project?}`** lists a Jira project's work item types, with `acli jira project view
+  --key <P> --json` (not `workitem create --generate-json`, which describes the creation form and
+  not the project), after the site check; the project is left out when the tracker has one. The
+  list is kept five minutes per site and project, in the daemon's memory. A type that is a
+  sub-task is said so (`Sub-task (a sub-task)`). On GitHub the answer is that issues have no
+  type; `gh` lists no issue types that Flottille reads. The `create` description tells the agent
+  to read them when unsure.
+- **A `create` refused for its type**: when `acli` ends with an error and a `type` was given, the
+  project's types are read (the same call) and, if the type named is none of them (any case), the
+  answer is `"Tâche" is not a work item type of ABC: its types are Task, Bug and Story; nothing
+  was written; …` with `acli`'s own line. If the type is one of them, `acli`'s line is the answer,
+  as before: Flottille does not read an error's wording to find its cause.
+- **`assignee`** on Jira `create` (`--assignee`) and `edit` (`--assignee`; `assignee: null` is
+  `--remove-assignee`): `"@me"`, an email or an account id, **as `acli` takes them**. `acli`
+  resolves `@me` itself (`acli jira workitem create --help`: "Use '@me' to self-assign, 'default'
+  to assign to the project's default assignee"), so Flottille reads no account and no credential
+  for it. `default` is `acli`'s too. A blank assignee is no assignee; a `null` one is told from a
+  missing one (a blank is never a removal). On GitHub it is `assignees` (`edit`, `--add-assignee`,
+  `@me` accepted by `gh`); `assignee` there is refused, and on `comment`, `close`, `reopen` and
+  `status` on both trackers.
+- **Nothing is assigned by default**: the user is assigned only when the agent asks for `"@me"`;
+  the tool's description says that a tracker may assign a new work item itself.
+- **The card** of a ticket write says the assignee (`Its assignee: @me`, `It removes the
+  assignee`); each is a write judged as before.
+- **Assumed**, as the other shapes of this page: `project view --json` prints Jira's REST
+  project, with `issueTypes[].name` and `.subtask`. Its page gives flags and no output, and it
+  could not be run (a call to a site). The maintainer checks it with one `tickets {"action":
+  "types"}` on their work machine; a different shape answers `acli did not list the work item
+  types of ABC (no issueTypes)`, and the fix is in `work_item_types`.
 
 **`acli` lists no work item's transitions** (its commands,
 <https://developer.atlassian.com/cloud/acli/reference/commands/jira-workitem/>, have no listing

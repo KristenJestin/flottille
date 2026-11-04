@@ -607,23 +607,36 @@ reasons.
   `--remove-assignee`), `close` (`reason` is `completed` or `not planned`, `--reason`; left out,
   GitHub's own default), `reopen`, and a `status` below. On Jira, once `acli` is checked to be signed in to the
   tracker's site (as for a read), `acli jira workitem create --project <P> --summary <title>
-  [--description <body>] [--type <type>] [--label a,b] --json` in `project {project?, type?}`,
+  [--description <body>] [--assignee <who>] [--type <type>] [--label a,b] --json` in `project
+  {project?, type?}`,
   one of the tracker's projects (it may be left out when the tracker has one), the type the
   project's default when none is given; `acli jira workitem comment create --key <K> --body
-  <body>`; `acli jira workitem edit --key <K> [--summary] [--description] --yes`; and `close`,
+  <body>`; `acli jira workitem edit --key <K> [--summary] [--description] [--assignee <who> |
+  --remove-assignee] --yes`; and `close`,
   `reopen` and `status` as `acli jira workitem transition --key <K> --status <name> --yes`: one
   status is attempted, which Jira's transitions accept or refuse, and the work item's status is
   read back to say what happened; a `reopen` of a work item that is not closed says it is already
   open and writes nothing ([`tickets.md`](tickets.md), "Jira's writes"). A ticket or a project the
   tracker does not take,
   a `status` with no name, a `reason` that is neither value, and, for an argument of another action
-  (`reason` is for close, `remove_labels`, `assignees` and `remove_assignees` for edit) or of the
-  other tracker (on Jira, a label, an assignee or a reason), is refused before anything is asked. A
+  (`reason` is for close, `remove_labels`, `assignees` and `remove_assignees` for edit, `assignee`
+  for create and edit) or of the other tracker (on Jira, a label on edit, `assignees` or a reason;
+  on GitHub, `assignee`: GitHub's is `assignees`), is refused before anything is asked. A
   `title` on `comment`, `close`, `reopen` or `status` is refused before anything is asked
   (`refused: tickets comment takes no title: title is for edit and create`). The request shows
   the title and the body whole, and a long one or one holding a secret is refused or base, as
   for the forge's writes ("The forge"). Locks, a project or a tracker kept read only, are
   planned as their own feature.
+- **`types {project?}`**: the work item types of a Jira project (`acli jira project view --key
+  <P> --json`, its `issueTypes`), kept five minutes; `project` is left out when the tracker has
+  one. On GitHub it answers that issues have no type. A Jira `create` that `acli` refuses for its
+  `type` answers with the project's types, nothing written, so that a type is never guessed
+  twice ([`tickets.md`](tickets.md), "Types and assignment").
+- **`assignee` on Jira**: `create` and `edit` take `"@me"` (the user `acli` is signed in as,
+  which `acli` resolves itself), an email or an account id, as `acli` takes them; `edit` with
+  `assignee: null` removes it. Nothing is assigned unless the agent asks (a tracker may assign a
+  new work item by default). On GitHub, `assignees` (edit), `"@me"` accepted. The request names
+  the assignee (`Its assignee: @me`, `It removes the assignee`).
 - **`status` on GitHub**: sets the Status of the issue on the GitHub Projects (v2) board it is on,
   like Todo, In Progress or Done. The option is found by its name, in any case, among those of the
   board's Status field. The daemon reads the issue's boards (`gh issue view <n> -R … --json
