@@ -1242,7 +1242,7 @@ fn the_branch_name_is_sanitised_the_same_way_everywhere() {
     repo.commit("feat(core): start");
     assert_eq!(
         repo.next(&["alpha", "--branch", branch]),
-        "0.1.0-alpha.feat----x.1"
+        "0.0.1-alpha.feat----x.1"
     );
 
     let releases = Releases::serve();
