@@ -62,6 +62,8 @@ BREAKING='^[a-z]+(\([a-z0-9-]+\))?!: '
 FOOTER=$'(^|\n)BREAKING[ -]CHANGE: '
 FEATURE='^feat(\([a-z0-9-]+\))?: '
 FIX='^(fix|perf)(\([a-z0-9-]+\))?: '
+# First parents only: the release squash a record on dev reaches through its second parent is
+# main's, not dev's (docs/releases.md).
 # 3 a breaking change, 2 a feature, 1 a fix, 0 nothing that bumps.
 bump=0
 while IFS= read -r -d '' message; do
@@ -75,7 +77,7 @@ while IFS= read -r -d '' message; do
     level=1
   fi
   if [ "$level" -gt "$bump" ]; then bump=$level; fi
-done < <(git log -z --no-merges --format=%B "$range")
+done < <(git log -z --first-parent --no-merges --format=%B "$range")
 
 # Before 1.0, a breaking change bumps the minor.
 if [ "$bump" -eq 3 ] && [ "$major" -eq 0 ]; then bump=2; fi
