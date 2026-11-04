@@ -3,6 +3,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/KristenJestin/flottille/main/install.sh | sh
 #   … | sh -s -- --channel beta
 #   … | sh -s -- --channel alpha --branch feat/46-packages
+#   … | sh -s -- --version 0.3.0-beta.12
 # The archive's SHA-256 sum is checked before anything is installed; `flot` is a link to
 # `flottille`. The launcher's entry and icon go to $XDG_DATA_HOME (docs/releases.md).
 # `FLOTTILLE_RELEASES` names another place of the releases' API (for tests).
@@ -33,6 +34,42 @@ archives() {
 # The archive of the highest version among the addresses read, whatever order they come in.
 highest() {
   sed 's|.*/flottille-\([^/]*\)-x86_64-linux\.tar\.gz$|\1 &|' | sort -t ' ' -k 1,1V | tail -n 1 | cut -d ' ' -f 2
+}
+
+# The archive of the release published last in a list of releases of the API, ties going to the
+# higher version. A release's `tag_name` and `published_at` come before its `assets` in GitHub's
+# answer, so each address is read with the date of its own release: reset at each tag, and empty
+# for a draft (`published_at` null), which is not offered. The dates are UTC, all of one shape,
+# so they sort as text.
+latest_published() {
+  tr ',' '\n' <"$1" | sed -n \
+    -e 's/.*"tag_name": *"[^"]*".*/T/p' \
+    -e 's/.*"published_at": *"\([^"]*\)".*/P \1/p' \
+    -e 's/.*"published_at": *null.*/P/p' \
+    -e 's|.*"browser_download_url": *"\([^"]*/flottille-\([^/]*\)-x86_64-linux\.tar\.gz\)".*|U \2 \1|p' |
+    awk '$1 == "T" { at = "" } $1 == "P" { at = $2 } $1 == "U" && at != "" && $3 ~ /\/download\/v[0-9.]*-beta\.[0-9]*\// { print at, $2, $3 }' |
+    sort -k 1,1 -k 2,2V | tail -n 1 | cut -d ' ' -f 3
+}
+
+# The tag a version is published under: an alpha's is its branch's (`0.5.0-alpha.feat-x.7` is
+# in `alpha-feat-x`, replaced in place), any other's is `v` and the version.
+tag_of() {
+  case "$1" in
+    *-alpha.*.*)
+      rest=${1#*-alpha.}
+      printf 'alpha-%s' "${rest%.*}"
+      ;;
+    *) printf 'v%s' "$1" ;;
+  esac
+}
+
+# The versions of the archives in the answer $1, up to five of those nearest the version $2.
+close_versions() {
+  archives "$1" | sed -n 's|.*/flottille-\([^/]*\)-x86_64-linux\.tar\.gz$|\1|p' |
+    { cat; echo "$2"; } | sort -uV |
+    awk -v want="$2" '{ v[NR] = $0; if ($0 == want) at = NR }
+      END { from = at - 2; if (from < 1) from = 1
+            for (i = from; i < from + 6 && i <= NR; i++) if (i != at) print v[i] }' | head -n 5
 }
 
 # Whether Flottille's daemon runs: it holds the lock beside its socket. Asked without starting
@@ -99,6 +136,8 @@ main() {
   api=${FLOTTILLE_RELEASES:-https://api.github.com/repos/KristenJestin/flottille}
   channel=stable
   branch=
+  version=
+  chose=
   while [ $# -gt 0 ]; do
     case "$1" in
       --channel | --branch)
@@ -107,6 +146,15 @@ main() {
           exit 2
         fi
         if [ "$1" = --channel ]; then channel=$2; else branch=$2; fi
+        chose=1
+        shift 2
+        ;;
+      --version)
+        if [ $# -lt 2 ] || [ -z "$2" ]; then
+          echo "install.sh: $1 needs a value" >&2
+          exit 2
+        fi
+        version=$2
         shift 2
         ;;
       *)
@@ -115,6 +163,18 @@ main() {
         ;;
     esac
   done
+
+  if [ -n "$version" ] && [ -n "$chose" ]; then
+    echo "install.sh: --version names a release of any channel: it goes without --channel and --branch" >&2
+    exit 2
+  fi
+  # Written into an address below: a semantic version, nothing else.
+  case "$version" in
+    '') ;;
+    *[!0-9A-Za-z.-]* | .* | -* | *.. | *-) fail "$version is not a version (X.Y.Z, or X.Y.Z-pre)" ;;
+    [0-9]*.[0-9]*.[0-9]*) ;;
+    *) fail "$version is not a version (X.Y.Z, or X.Y.Z-pre)" ;;
+  esac
 
   for program in curl tar sha256sum sort uname; do
     command -v "$program" >/dev/null 2>&1 || fail "$program is needed"
@@ -128,25 +188,45 @@ main() {
   work=$(mktemp -d)
   trap 'rm -rf "$work"' EXIT
   answer="$work/answer.json"
-  case "$channel" in
-    stable)
-      read_api "$api/releases/latest" "$answer" || fail "there is no stable release yet"
-      url=$(archives "$answer" | head -n 1)
-      ;;
-    beta)
-      read_api "$api/releases?per_page=100" "$answer" || fail "cannot read the releases at $api"
-      url=$(archives "$answer" | grep -- '/download/v[0-9.]*-beta\.[0-9]*/' | highest)
-      ;;
-    alpha)
-      [ -n "$branch" ] || fail "the alpha channel needs --branch <name>"
-      # Each byte but ASCII letters, digits and dashes is a dash, as CI names the alpha.
-      tag="alpha-$(printf '%s' "$branch" | LC_ALL=C tr -c 'A-Za-z0-9-' '-')"
-      read_api "$api/releases/tags/$tag" "$answer" || fail "there is no alpha release for $branch"
-      # Two while it is replaced: the newer.
-      url=$(archives "$answer" | highest)
-      ;;
-    *) fail "the channel is stable, beta or alpha" ;;
-  esac
+  if [ -n "$version" ]; then
+    tag=$(tag_of "$version")
+    name="flottille-$version-x86_64-linux.tar.gz"
+    url=
+    if read_api "$api/releases/tags/$tag" "$answer"; then
+      for found in $(archives "$answer"); do
+        case "$found" in */"$name") url=$found ;; esac
+      done
+    fi
+    if [ -z "$url" ]; then
+      echo "install.sh: no release $version for Linux x86_64." >&2
+      list="$work/list.json"
+      if read_api "$api/releases?per_page=100" "$list"; then
+        close=$(close_versions "$list" "$version" | tr '\n' ' ')
+        [ -z "$close" ] || echo "install.sh: close versions: $close" >&2
+      fi
+      exit 1
+    fi
+  else
+    case "$channel" in
+      stable)
+        read_api "$api/releases/latest" "$answer" || fail "there is no stable release yet"
+        url=$(archives "$answer" | head -n 1)
+        ;;
+      beta)
+        read_api "$api/releases?per_page=100" "$answer" || fail "cannot read the releases at $api"
+        url=$(latest_published "$answer")
+        ;;
+      alpha)
+        [ -n "$branch" ] || fail "the alpha channel needs --branch <name>"
+        # Each byte but ASCII letters, digits and dashes is a dash, as CI names the alpha.
+        tag="alpha-$(printf '%s' "$branch" | LC_ALL=C tr -c 'A-Za-z0-9-' '-')"
+        read_api "$api/releases/tags/$tag" "$answer" || fail "there is no alpha release for $branch"
+        # Two while it is replaced: the newer.
+        url=$(archives "$answer" | highest)
+        ;;
+      *) fail "the channel is stable, beta or alpha" ;;
+    esac
+  fi
   [ -n "$url" ] || fail "there is no $channel release for Linux x86_64"
   name=${url##*/}
 
