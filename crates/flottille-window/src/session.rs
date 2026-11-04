@@ -1121,6 +1121,7 @@ impl SessionPage {
                     parent: agent.parent.clone(),
                     ended: matches!(state_of(agent), AgentState::Completed | AgentState::Stopped),
                     context: agent.context,
+                    context_tokens: agent.context_tokens,
                     doing: agent.doing.clone(),
                     waits_on_subscription: agent.waiting_on.as_deref() == Some("subscription"),
                     status,
@@ -3521,6 +3522,8 @@ pub struct RailAgent {
     pub ended: bool,
     /// How much of its context it used, in percent.
     pub context: Option<u64>,
+    /// The tokens its context holds, when the window's size is not known yet.
+    pub context_tokens: Option<u64>,
     /// What it does, in a few words.
     pub doing: String,
     /// It waits between turns for what happens outside (`doing` says what).
@@ -3610,6 +3613,24 @@ struct EndedFold {
     height: Rc<Cell<Pixels>>,
 }
 
+/// The context gauge of one agent's row: its bar unfolds and fades in once the window's size is
+/// known, and its fill follows the use.
+struct Gauge {
+    /// How far the bar is shown: 0 while only the tokens used are known.
+    bar: Motion,
+    /// The use, in percent.
+    fill: Motion,
+}
+
+/// A count of tokens as the row says it: `812`, `45k`, `1.2M`.
+fn tokens(count: u64) -> String {
+    match count {
+        0..1000 => count.to_string(),
+        1000..1_000_000 => format!("{}k", count / 1000),
+        _ => format!("{:.1}M", count as f64 / 1_000_000.0),
+    }
+}
+
 /// The rail: the session's agents, its workspace and its facts.
 pub struct SessionRail {
     page: WeakEntity<SessionPage>,
@@ -3619,6 +3640,8 @@ pub struct SessionRail {
     open_ended: HashSet<String>,
     /// How far each "ended" row's children are unfolded: they stay drawn until a fold ends.
     ended_folds: HashMap<String, EndedFold>,
+    /// The context gauge of each agent's row, moving as the use changes.
+    gauges: HashMap<String, Gauge>,
     selected: String,
     workspace: Option<String>,
     project: String,
@@ -3699,6 +3722,7 @@ impl SessionRail {
             marks: HashMap::new(),
             open_ended: HashSet::new(),
             ended_folds: HashMap::new(),
+            gauges: HashMap::new(),
             menu,
             agent_menu,
             selected: root,
@@ -3843,6 +3867,33 @@ impl SessionRail {
                 cx.new(|cx| StateIcon::new(status, cx))
             });
         }
+        let now = cx.background_executor().now();
+        let reduce = cx.reduce_motion();
+        for agent in &agents {
+            let bar = f32::from(agent.context.is_some());
+            let fill = agent.context.unwrap_or(0) as f32;
+            match self.gauges.get_mut(&agent.id) {
+                // An agent first seen shows its gauge at once: only a change moves.
+                None => {
+                    self.gauges.insert(
+                        agent.id.clone(),
+                        Gauge {
+                            bar: Motion::settled(bar),
+                            fill: Motion::settled(fill),
+                        },
+                    );
+                }
+                Some(gauge) => {
+                    if gauge.bar.target() != bar {
+                        gauge.bar.animate(bar, PANEL, now, reduce);
+                        // The bar unfolds already at its share.
+                        gauge.fill = Motion::settled(fill);
+                    } else {
+                        gauge.fill.animate(fill, PANEL, now, reduce);
+                    }
+                }
+            }
+        }
         self.agents = agents;
         cx.notify();
     }
@@ -3876,6 +3927,15 @@ impl Render for SessionRail {
                 drawn_open.insert(parent.clone());
             } else {
                 fold.motion.settle(now);
+            }
+        }
+        for gauge in self.gauges.values_mut() {
+            for motion in [&mut gauge.bar, &mut gauge.fill] {
+                if motion.is_running(now) {
+                    window.request_animation_frame();
+                } else {
+                    motion.settle(now);
+                }
             }
         }
         // The root alone is ended (the daemon refuses a child), and only while it is not ended.
@@ -3941,9 +4001,22 @@ impl Render for SessionRail {
                     None => agent.doing.clone(),
                 })
             });
-            let gauge = agent.context.map(|used| {
-                let used = used.min(100);
-                // The share and its bar on one line, the share before it.
+            let shown = self.gauges.get(&agent.id);
+            let bar = shown.map_or(f32::from(agent.context.is_some()), |g| g.bar.value(now));
+            let fill = shown.map_or(0., |g| g.fill.value(now));
+            let gauge_text = match (agent.context, agent.context_tokens) {
+                (Some(used), _) => Some((
+                    format!("{}%", used.min(100)),
+                    format!("{}% of the context used", used.min(100)),
+                )),
+                (None, Some(used)) => Some((
+                    tokens(used),
+                    format!("{} tokens in the context", tokens(used)),
+                )),
+                (None, None) => None,
+            };
+            let gauge = gauge_text.map(|(text, label)| {
+                // The share (or the tokens used) and its bar on one line, the share before it.
                 div()
                     .id(ElementId::Name(format!("rail-context-{}", agent.id).into()))
                     .flex()
@@ -3951,23 +4024,32 @@ impl Render for SessionRail {
                     .gap(space::XS)
                     .mono(10.5)
                     .text_color(p.faint)
-                    .aria_label(SharedString::from(format!("{used}% of the context used")))
-                    .child(SharedString::from(format!("{used}%")))
-                    .child(
-                        div()
-                            .w(px(32.))
-                            .h(px(3.))
-                            .rounded(px(2.))
-                            .bg(p.line2)
-                            .overflow_hidden()
-                            .child(
-                                div()
-                                    .h_full()
-                                    .w(px(32. * used as f32 / 100.))
-                                    .rounded(px(2.))
-                                    .bg(p.mute),
-                            ),
-                    )
+                    .aria_label(SharedString::from(label))
+                    .child(SharedString::from(text))
+                    // Drawn while it unfolds and while it folds away, too.
+                    .when(agent.context.is_some() || bar > 0., |d| {
+                        d.child(
+                            div()
+                                .id(ElementId::Name(
+                                    format!("rail-context-bar-{}", agent.id).into(),
+                                ))
+                                .w(px(32.) * bar)
+                                .h(px(3.))
+                                .flex_none()
+                                .rounded(px(2.))
+                                .bg(p.line2)
+                                .opacity(bar)
+                                .overflow_hidden()
+                                .child(
+                                    div()
+                                        .h_full()
+                                        .w(px(32. * fill.clamp(0., 100.) / 100.) * bar)
+                                        .rounded(px(2.))
+                                        .bg(p.mute),
+                                )
+                                .test_support(),
+                        )
+                    })
                     .test_support()
             });
             let row = div()
@@ -5795,6 +5877,7 @@ mod tests {
             images: None,
             gate_mode: Some("auto".into()),
             context: None,
+            context_tokens: None,
             queued: Vec::new(),
             tools_outdated: false,
         }

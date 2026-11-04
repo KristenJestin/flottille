@@ -41,8 +41,7 @@ const USED: u64 = 82_000;
 const SIZE: u64 = 200_000;
 
 fn user() -> User {
-    let user = User::with_fake_agent();
-    user.fake_script(json!({"turns": [
+    user_with(json!([
         {"when": "lead the work", "do": [
             {"usage": {"used": USED, "size": SIZE}}, {"say": "On it."}]},
         {"when": "run server", "do": [
@@ -52,7 +51,12 @@ fn user() -> User {
                 "workspace": "w"}}}]},
         {"when": "write to the session", "do": [{"mcp": {"tool": "session_send",
             "arguments": {"session": "{prompt:agent}", "text": "The tests pass now."}}}]}
-    ]}));
+    ]))
+}
+
+fn user_with(turns: serde_json::Value) -> User {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({ "turns": turns }));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     user
 }
@@ -606,6 +610,59 @@ fn each_agent_row_carries_its_context_gauge_and_the_composer_shows_none(cx: &mut
     assert!(
         !composer.contains("context") && !composer.contains('%'),
         "the composer's bar says no context: {composer}"
+    );
+}
+
+#[gpui_kit::test]
+fn before_the_window_is_known_the_row_shows_tokens_used(cx: &mut TestAppContext) {
+    let user = user_with(json!([
+        {"when": "lead the work", "do": [{"usage": {"used": 45_000, "size": 0}}, {"say": "On it."}]}
+    ]));
+    let (lead, _) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, 1440., cx);
+    until(&shell, cx, "the gauge on the lead's row", |cx| {
+        has(format!("rail-context-{lead}"), cx)
+    });
+    settle(cx);
+
+    assert_eq!(
+        label(format!("rail-context-{lead}"), cx).as_deref(),
+        Some("45k tokens in the context")
+    );
+    assert!(
+        !has(format!("rail-context-bar-{lead}"), cx),
+        "no bar without the window's size"
+    );
+}
+
+#[gpui_kit::test]
+fn the_bar_appears_once_the_window_is_known(cx: &mut TestAppContext) {
+    let user = user_with(json!([
+        {"when": "lead the work", "do": [{"usage": {"used": 45_000, "size": 0}}, {"say": "On it."}]},
+        {"when": "go on", "do": [{"usage": {"used": 50_000, "size": 200_000}}, {"say": "Done."}]}
+    ]));
+    let (lead, _) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, 1440., cx);
+    until(&shell, cx, "the tokens on the lead's row", |cx| {
+        has(format!("rail-context-{lead}"), cx)
+    });
+    assert!(!has(format!("rail-context-bar-{lead}"), cx));
+
+    user.call("agent.send", json!({"agent": lead, "message": "go on"}))
+        .unwrap();
+    until(&shell, cx, "the bar", |cx| {
+        has(format!("rail-context-bar-{lead}"), cx)
+    });
+    settle(cx);
+
+    assert_eq!(
+        label(format!("rail-context-{lead}"), cx).as_deref(),
+        Some("25% of the context used")
+    );
+    let bar = rect(format!("rail-context-bar-{lead}"), cx);
+    assert!(
+        (bar.size.width - px(32.)).abs() < px(0.5),
+        "the bar unfolded to its width: {bar:?}"
     );
 }
 
