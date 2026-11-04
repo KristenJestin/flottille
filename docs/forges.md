@@ -707,10 +707,11 @@ A comment read back is known as an agent's by its record:
 The hash is of the text as a read gives it: masked (the secrets of a text are masked on every
 read, the record hashes the masked text too), whitespace one space, only the first 500 characters
 counting, and the markdown a tracker rewrites gone: code fences, `*` and `` ` `` marks, heading
-marks, list bullets and numbers. Jira's document format keeps the words of what `acli` was given,
-not that markup (`tickets.md`, "Jira's text"), so the same words found again are still found.
-What the hash does not see: a link written `[text](url)`, which Jira may keep as its text alone,
-and any other rewriting of the words themselves; such a comment is shown as a person's.
+marks, list bullets and numbers. What is recorded for a Jira post is the text after the round trip
+(Markdown to Atlassian's format and back, `tickets.md`, "Jira's text"), the text a read gives, so
+the same words found again are still found, whatever the markup. What the hash does not see: any
+rewriting of the words themselves by Jira (a mention, a smart link); such a comment is shown as a
+person's.
 
 Bitbucket's closing comment is the same record: Cloud's reason a pull request was declined with
 and Data Center's comment of the closer are matched as any comment, the reason by its hash, the

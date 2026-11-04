@@ -22,7 +22,7 @@ use crate::daemon::Daemon;
 use crate::gate::{self, Class, Verdict};
 use crate::mcp::{Outcome, arguments};
 use crate::nofollow::{self, Entry};
-use crate::place::{Place, Resolved, Unfollowed};
+use crate::place::{Folder, Place, Resolved, Unfollowed};
 
 /// A page of `fs_read`, at most.
 pub const READ_PAGE_BYTES: u64 = 32 * 1024;
@@ -90,7 +90,21 @@ impl Context<'_> {
         named: &str,
         write: bool,
     ) -> Result<Resolved, Outcome> {
-        let (_, base) = self.place.base(repository).map_err(Outcome::Refused)?;
+        self.path_in(repository, Folder::Path, named, write)
+    }
+
+    /// `path`, for a tool that takes a folder as `field` says.
+    fn path_in(
+        &self,
+        repository: Option<&str>,
+        field: Folder,
+        named: &str,
+        write: bool,
+    ) -> Result<Resolved, Outcome> {
+        let (_, base) = self
+            .place
+            .base_for(repository, field)
+            .map_err(Outcome::Refused)?;
         let resolved = self.place.resolve(base, named);
         if let Some(refusal) = never_opened(&resolved) {
             return Err(refusal);
@@ -632,7 +646,7 @@ pub fn search(cx: &Context, args: Value) -> Outcome {
     if args.pattern.is_empty() {
         return Outcome::Refused("refused: the pattern is empty: name the text to find".into());
     }
-    match cx.path(args.repository.as_deref(), ".", false) {
+    match cx.path_in(args.repository.as_deref(), Folder::Glob, ".", false) {
         Ok(base) => search_in(cx.place, &cx.own(), &base, &args),
         Err(refusal) => refusal,
     }

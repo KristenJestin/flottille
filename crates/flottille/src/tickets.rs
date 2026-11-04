@@ -504,81 +504,13 @@ pub(crate) fn comments_said(comments: &[Comment]) -> Vec<crate::items::Said> {
         .collect()
 }
 
-/// The plain text of a Jira text field: a string as it is, an Atlassian Document Format tree as
-/// its paragraphs, headings and list items, one per line. Nothing is rendered as HTML.
+/// The text of a Jira text field: a string as it is, an Atlassian Document Format tree as the
+/// Markdown it was written as (`adf::to_markdown`). Nothing is rendered as HTML.
 pub fn document_text(field: &Value) -> String {
-    let mut out = String::new();
     match field {
-        Value::String(text) => out.push_str(text),
-        Value::Object(_) => block(field, &mut out),
-        _ => {}
-    }
-    // Three line breaks or more are one empty line.
-    let mut text = String::new();
-    let mut breaks = 0;
-    for c in out.trim().chars() {
-        breaks = if c == '\n' { breaks + 1 } else { 0 };
-        if breaks <= 2 {
-            text.push(c);
-        }
-    }
-    text
-}
-
-/// A node of the tree, and what is under it.
-fn block(node: &Value, out: &mut String) {
-    let children = |out: &mut String| {
-        for child in node["content"].as_array().into_iter().flatten() {
-            block(child, out);
-        }
-    };
-    match node["type"].as_str().unwrap_or_default() {
-        "text" => out.push_str(node["text"].as_str().unwrap_or_default()),
-        "hardBreak" => out.push('\n'),
-        "mention" | "emoji" => out.push_str(
-            node["attrs"]["text"]
-                .as_str()
-                .or(node["attrs"]["shortName"].as_str())
-                .unwrap_or_default(),
-        ),
-        "inlineCard" | "blockCard" => {
-            out.push_str(node["attrs"]["url"].as_str().unwrap_or_default());
-            out.push('\n');
-        }
-        "rule" => out.push_str("---\n"),
-        "bulletList" | "orderedList" => {
-            let ordered = node["type"] == "orderedList";
-            for (at, item) in node["content"].as_array().into_iter().flatten().enumerate() {
-                let mut line = String::new();
-                block(item, &mut line);
-                let bullet = match ordered {
-                    true => format!("{}. ", at + 1),
-                    false => "- ".to_owned(),
-                };
-                out.push_str(&format!("{bullet}{}\n", line.trim().replace('\n', "\n  ")));
-            }
-            out.push('\n');
-        }
-        "tableRow" => {
-            let cells: Vec<String> = node["content"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|cell| {
-                    let mut text = String::new();
-                    block(cell, &mut text);
-                    text.trim().replace('\n', " ")
-                })
-                .collect();
-            out.push_str(&cells.join(" | "));
-            out.push('\n');
-        }
-        "paragraph" | "heading" | "codeBlock" | "blockquote" | "panel" => {
-            children(out);
-            out.push_str("\n\n");
-        }
-        // The document, a list item, a table and anything unknown: its text, if it has any.
-        _ => children(out),
+        Value::String(text) => text.trim().to_owned(),
+        Value::Object(_) => crate::adf::to_markdown(field),
+        _ => String::new(),
     }
 }
 
@@ -1643,20 +1575,72 @@ async fn acli_run(args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// A text for `acli` as Atlassian Document Format, in a file of its own: the agent's Markdown
+/// converted (`adf::from_markdown`), written to a folder only the user can open and removed with
+/// it when this is dropped, so its size and its quotes never reach a command line.
+struct AdfFile {
+    folder: std::path::PathBuf,
+    path: String,
+}
+
+impl AdfFile {
+    fn of(daemon: &Daemon, markdown: &str) -> Result<AdfFile, String> {
+        use std::io::Write;
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let count = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let folder = daemon
+            .paths
+            .runtime
+            .join(format!("adf-{}-{count}", std::process::id()));
+        let failed =
+            |error: std::io::Error| format!("the text could not be prepared for acli: {error}");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&folder)
+            .map_err(failed)?;
+        let file = AdfFile {
+            path: folder.join("text.json").to_string_lossy().into_owned(),
+            folder,
+        };
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&file.path)
+            .and_then(|mut out| {
+                out.write_all(crate::adf::from_markdown(markdown).to_string().as_bytes())
+            })
+            .map_err(failed)?;
+        Ok(file)
+    }
+
+    fn path(&self) -> &str {
+        &self.path
+    }
+}
+
+impl Drop for AdfFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.folder);
+    }
+}
+
 /// The flags that set a Jira work item's own fields, for `create` and `edit` alike, so that
 /// what is written into them is built in one place: its summary, its description and whom it is
-/// assigned to (`Some(None)` takes the assignee away, which only `edit` does).
+/// assigned to (`Some(None)` takes the assignee away, which only `edit` does). The description
+/// is the file `acli` reads it from (`AdfFile`), never the command line.
 fn work_item_fields<'a>(
     title: Option<&'a str>,
-    body: Option<&'a str>,
+    description: Option<&'a AdfFile>,
     assignee: Option<Option<&'a str>>,
 ) -> Vec<&'a str> {
     let mut args = Vec::new();
     if let Some(title) = title {
         args.extend(["--summary", title]);
     }
-    if let Some(body) = body {
-        args.extend(["--description", body]);
+    if let Some(file) = description {
+        args.extend(["--description-file", file.path()]);
     }
     match assignee {
         Some(Some(name)) => args.extend(["--assignee", name]),
@@ -1685,9 +1669,13 @@ async fn create_work_item(
     let labels = asked.labels.as_deref().unwrap_or_default().join(",");
     let mut args = vec!["jira", "workitem", "create", "--project", project];
     let body = asked.body.as_deref().filter(|b| !b.trim().is_empty());
+    let description = match body.map(|body| AdfFile::of(daemon, body)).transpose() {
+        Ok(file) => file,
+        Err(why) => return Outcome::Failed(why),
+    };
     args.extend(work_item_fields(
         Some(title),
-        body,
+        description.as_ref(),
         asked.assigned_to().map(Some),
     ));
     let kind = asked.kind.as_deref().filter(|k| !k.trim().is_empty());
@@ -1713,7 +1701,8 @@ async fn create_work_item(
         Some(key) => {
             let key = masked(key);
             if let Some(body) = body {
-                crate::posts::record_body(daemon, (name, "jira", "", key.as_str()), body);
+                let posted = crate::adf::round_trip(body);
+                crate::posts::record_body(daemon, (name, "jira", "", key.as_str()), &posted);
             }
             Outcome::Done(format!(
                 "The ticket {key} was opened in {project}: https://{site}/browse/{key}"
@@ -1746,9 +1735,13 @@ async fn write_work_item(
         "edit" => args.extend(["edit", "--key", key]),
         _ => return transition(site, key, asked).await,
     }
-    match (action, body) {
-        ("comment", Some(body)) => args.extend(["--body", body]),
-        ("edit", body) => args.extend(work_item_fields(title, body, asked.assignment())),
+    let file = match body.map(|body| AdfFile::of(daemon, body)).transpose() {
+        Ok(file) => file,
+        Err(why) => return Outcome::Failed(why),
+    };
+    match (action, &file) {
+        ("comment", Some(file)) => args.extend(["--body-file", file.path()]),
+        ("edit", file) => args.extend(work_item_fields(title, file.as_ref(), asked.assignment())),
         _ => {}
     }
     if action == "edit" {
@@ -1758,13 +1751,13 @@ async fn write_work_item(
         // `acli` prints nothing that names the comment it created: the record keeps its text.
         Ok(_) if action == "comment" => {
             if let Some(body) = body {
-                crate::posts::record_comment(daemon, on, None, body);
+                crate::posts::record_comment(daemon, on, None, &crate::adf::round_trip(body));
             }
             Outcome::Done(format!("The comment was posted on {key}."))
         }
         Ok(_) => {
             if let (Some(body), "edit") = (body, action) {
-                crate::posts::record_body(daemon, on, body);
+                crate::posts::record_body(daemon, on, &crate::adf::round_trip(body));
             }
             Outcome::Done(format!("{key} was changed."))
         }
@@ -2576,7 +2569,7 @@ mod tests {
 
         assert_eq!(
             document_text(&document),
-            "Goal\n\nLet users log in\n@alice\n\n- form\n- session\n\n1. ship"
+            "## Goal\n\nLet users **log in**\n@alice\n\n- form\n- session\n\n1. ship"
         );
         assert_eq!(
             document_text(&json!("plain <b>text</b>")),
