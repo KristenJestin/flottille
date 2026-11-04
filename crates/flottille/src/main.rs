@@ -58,6 +58,7 @@ mod update;
 mod web;
 mod workspace_command;
 mod workspaces;
+mod workspaces_folder;
 
 use std::io::Write;
 use std::process::ExitCode;

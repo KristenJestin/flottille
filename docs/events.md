@@ -131,6 +131,15 @@ The user chose the limit above which a tool result is cut (`tool_results.set`,
 |---|---|
 | `limit` | The limit in characters, or `"off"` for no cut. |
 
+### `workspaces_folder.changed`
+
+The user chose where workspaces go (`workspaces_folder.set`, `docs/projects.md`, "Where the
+workspaces go"); only the workspaces made afterwards follow it.
+
+| Field | |
+|---|---|
+| `project` | The project whose own folder changed, `null` for the default of every project. |
+
 ### `workspace.created`
 
 A workspace was written, before anything is made on disk (`docs/workspaces.md`). Every event of a

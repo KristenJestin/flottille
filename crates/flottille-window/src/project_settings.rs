@@ -37,6 +37,7 @@ use crate::setup::SetupSection;
 use crate::shell::Shell;
 use crate::skills::SkillsSection;
 use crate::tasks::TasksSection;
+use crate::workspaces_folder::WorkspacesFolder;
 
 /// A text field in Flottille's colours.
 pub fn styled_input(
@@ -400,6 +401,8 @@ pub struct ProjectSettingsPage {
     commands: Entity<CommandsSection>,
     tasks: Entity<TasksSection>,
     setup: Entity<SetupSection>,
+    /// Where its workspaces are made, above the setup that prepares them.
+    workspaces: Entity<WorkspacesFolder>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -418,6 +421,7 @@ impl ProjectSettingsPage {
         let commands = cx.new(|_| CommandsSection::new(shell.clone(), name.clone()));
         let tasks = cx.new(|_| TasksSection::new(shell.clone(), name.clone()));
         let setup = cx.new(|_| SetupSection::new(shell.clone(), name.clone()));
+        let workspaces = cx.new(|_| WorkspacesFolder::new(shell.clone(), Some(name.clone())));
         let repositories = cx.new(|_| ProjectRepositories::new(shell.clone(), name.clone()));
         let programs = cx.new(|_| ProgramChecks::new(shell.clone(), name.clone()));
         // Asked once the shell, which is making this page, is no longer being updated.
@@ -492,6 +496,7 @@ impl ProjectSettingsPage {
             commands,
             tasks,
             setup,
+            workspaces,
             _subscriptions: [observed, checked].into_iter().chain(counted).collect(),
         }
     }
@@ -510,6 +515,10 @@ impl ProjectSettingsPage {
 
     pub fn tasks(&self) -> &Entity<TasksSection> {
         &self.tasks
+    }
+
+    pub fn workspaces_folder(&self) -> &Entity<WorkspacesFolder> {
+        &self.workspaces
     }
 
     pub fn setup(&self) -> &Entity<SetupSection> {
@@ -2067,7 +2076,14 @@ impl Render for ProjectSettingsPage {
             self.skills.clone().into_any_element(),
             self.commands.clone().into_any_element(),
             self.tasks.clone().into_any_element(),
-            self.setup.clone().into_any_element(),
+            // Where the workspaces go belongs with how they are prepared.
+            div()
+                .flex()
+                .flex_col()
+                .gap(space::XXL)
+                .child(self.workspaces.clone())
+                .child(self.setup.clone())
+                .into_any_element(),
             self.rules.clone().into_any_element(),
         ];
         let chosen = self.tab.min(sections.len() - 1);
