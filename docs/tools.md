@@ -729,7 +729,10 @@ change" says, and called through the gate as every other.
   none makes a spec Ready or Draft, which are the user's gestures), and a `write` or an `ask` of a
   spec past Draft (`spec 3 is Ready: it is locked, and only the user sends it back to Draft`) or
   that the session does not write, are refused by the gate itself, Full mode included. The rest
-  passes: reading, and writing the spec it writes, ask nothing of the user.
+  passes in every mode: Specs declares its four actions harmless, since each reads or writes a
+  spec in Flottille's store and nothing else.
+- **Masked.** What `write` and `ask` hold (every text of a section, a question, its options and
+  its reason) is masked of secrets before it is stored, as `ask_user` is.
 
 ## The tree's tools
 

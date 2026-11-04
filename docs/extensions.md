@@ -142,14 +142,20 @@ asks questions, a development session proposes an amendment). The core adds it t
 lists while the extension is active, through the path a forge or a tracker takes today
 (`tools.md`, "When the tools change"), and removes it the same way. Every call goes through the
 gate like any other; the extension's own refusals (a lock, a status) are the gate's, in every
-mode, Full included.
+mode, Full included. An extension can refuse a call, never let one through on its own: an action
+it does not declare harmless is held as a call to judge, which the mode lets through (Full), asks
+the judge about (Auto) or holds for the user (Ask).
 
 As built: a tool is a `Tool` of the declaration, its MCP definition, `given` (who gets it, `To::Roots`
-for now, and the actions of its `action` argument each may call), a `gate` function (the
-extension's refusal of a call, or none) and a `call` function. `agents::tools_of` adds the tools of
-the extensions active in the project; the server serves them as its own; the gate refuses an
-action the caller is not given and what the extension's `gate` refuses before any mode is looked
-at, and lets the rest pass.
+for now, and the actions of its `action` argument each may call), `harmless` (the actions that
+read or write Flottille's store and nothing else, as the core's own reads: they pass in every
+mode), a `gate` function (the extension's refusal of a call, or none) and a `call` function.
+`agents::tools_of` adds the tools of the extensions active in the project; the server serves them
+as its own; the gate refuses an action the caller is not given and what the extension's `gate`
+refuses before any mode is looked at, lets a harmless action pass and holds the rest as a call to
+judge. A tool named as a core tool, or as another extension's, stops the daemon at its start
+(`extensions::check_tools`): it never shadows one. Specs declares its four actions harmless: each
+reads or writes a spec in the store.
 
 ### Triggers (Specs)
 
@@ -161,7 +167,9 @@ As built, the Action trigger is the declaration's `actions`: each is answered by
 method `<prefix>.<action>`, reached by its name or through `extension.act {name, action, …}`. The
 frame gives the handlers two acts of the core: `start_session` (a `lead` for the user in the
 project's main checkout, started as `agent_launch` starts a root, its first message the
-extension's) and `tell` (a delivery of the extension's kind, `[flottille:<name>]`).
+extension's; the extension's `before` records it before the agent is written, so that its refusal
+leaves no agent, and its `started` then knows the session as its own, so that a daemon stopped
+before the first message delivers it at its next start) and `tell` (a delivery of the extension's kind, `[flottille:<name>]`).
 
 | Trigger | When the core fires it | First needed by |
 |---|---|---|
