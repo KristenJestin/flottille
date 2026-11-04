@@ -871,7 +871,9 @@ was asked, or the project's default model, `null` for the agent's default; `take
 at the last start of its process; `reopens` whether its agent offered to resume or load a session
 when it last opened one, `false` once Flottille forgot an ended root's session; `images` whether
 it took images in a prompt when it last started, `null` before it did. `active_at` is its last sign of activity, `null` before the
-first. `instructions` are frozen when the agent is created, `tools` are its role's and change with
+first. `exchanged_at` is its last exchange: the later of the last message the user gave it (the
+moment a prompt took it) and the end of its last turn, `null` before either; unlike `active_at`,
+what the agent does during a turn never moves it, which is what a list of sessions sorts by. `instructions` are frozen when the agent is created, `tools` are its role's and change with
 it (`docs/tools.md`, "When the tools change"); `tools_outdated` says whether its running session
 runs an older list than that. `parent` is the agent that
 launched it (`null` for a root), `depth` its depth in the tree, `epoch` the number of its session
@@ -1013,7 +1015,7 @@ does it with `agent_send` (`docs/tools.md`).
 `{"agent"}`. The whole tree of the agent's root, each agent before its children:
 `{"agents": [{"agent", "doing", "waiting_on", "needs_user", "context", "queued"}]}`. `agent` is the agent in short
 (`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `launched_by`, `depth`, `epoch`, `state`,
-`state_reason`, `created_at`, `active_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
+`state_reason`, `created_at`, `active_at`, `exchanged_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
 took at the last start of its process, else the one asked, `null` for the agent's default before it
 started; `effort`: the same for its effort; `pending`: `{"model", "effort"}` the user changed to and
 the session has not taken yet, `null` when nothing waits; `resumable`: whether `agent.resume` takes it once its last process is gone; `stopping`:

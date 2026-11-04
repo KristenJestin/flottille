@@ -567,6 +567,21 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT;
     CREATE INDEX posts_item ON posts (project, source, repository, key);
 ",
+    "
+    -- The last exchange of a session (`docs/protocol.md`, `agent.tree`): the later of the last
+    -- message the user gave the agent and the end of its last turn, which the sidebar sorts by.
+    -- NULL before either.
+    ALTER TABLE agents ADD COLUMN exchanged_at INTEGER;
+    UPDATE agents SET exchanged_at = (
+        SELECT max(at) FROM (
+            SELECT max(sent_at) AS at FROM deliveries
+                WHERE agent = agents.id AND kind = 'user' AND sent_at IS NOT NULL
+            UNION ALL
+            SELECT max(e.at) FROM agent_events a JOIN events e ON e.seq = a.seq
+                WHERE a.agent = agents.id AND e.name = 'agent.turn_ended'
+        )
+    );
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -579,7 +594,7 @@ const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, sta
     created_at, updated_at, active_at, ended_at, chosen_model, chosen_effort, chosen_mode, \
     taken_model, taken_effort, taken_mode, native_id, agent_version, instructions, tools, parent, \
     depth, epoch, title, brief, reported_at, quiet_turns, waiting_on_answer, reopens, images, gate_mode, \
-    launched_by, pending_model, pending_effort";
+    launched_by, pending_model, pending_effort, exchanged_at";
 
 const DELIVERY_COLUMNS: &str = "id, agent, kind, body, urgency, state, created_at, sent_at, images";
 
@@ -1005,7 +1020,7 @@ impl Store {
             &format!(
                 "INSERT INTO agents ({AGENT_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, \
                  ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, \
-                 ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36)"
+                 ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37)"
             ),
             params![
                 agent.id,
@@ -1044,6 +1059,7 @@ impl Store {
                 agent.launched_by,
                 agent.pending.model,
                 agent.pending.effort,
+                agent.exchanged_at,
             ],
         )?;
         let event = append_agent_event(&transaction, &agent.id, event.0, event.1)?;
@@ -1910,6 +1926,12 @@ impl Store {
             )?;
             if changed > 0 {
                 moved.push(id.clone());
+                // The user's message reaches the agent: the session's last exchange.
+                transaction.execute(
+                    "UPDATE agents SET exchanged_at = ?2 WHERE id = ?1 \
+                     AND EXISTS (SELECT 1 FROM deliveries WHERE id = ?3 AND kind = 'user')",
+                    params![agent, now, id],
+                )?;
             }
         }
         let event = if moved.is_empty() {
@@ -2571,6 +2593,12 @@ fn append_agent_event(
         "INSERT INTO agent_events (seq, agent) VALUES (?1, ?2)",
         params![event.seq, agent],
     )?;
+    if name == "agent.turn_ended" {
+        connection.execute(
+            "UPDATE agents SET exchanged_at = ?2 WHERE id = ?1",
+            params![agent, event.at],
+        )?;
+    }
     Ok(event)
 }
 
@@ -2799,6 +2827,7 @@ fn agent_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Agent>> {
             effort: text(35)?,
             mode: None,
         },
+        exchanged_at: row.get(36)?,
     }))
 }
 
@@ -3481,6 +3510,7 @@ mod tests {
             created_at: 1_792_843_730_808,
             updated_at: 1_792_843_730_808,
             active_at: None,
+            exchanged_at: None,
             ended_at: None,
             chosen: Choices {
                 model: Some("haiku".into()),
@@ -3690,6 +3720,56 @@ mod tests {
             .map(|e| e.seq)
             .collect();
         assert_eq!(names, [replayed.seq, live.seq]);
+    }
+
+    #[test]
+    fn the_last_exchange_moves_with_the_user_s_message_and_the_end_of_a_turn_only() {
+        let mut store = Store::open_in_memory().unwrap();
+        let agent = an_agent();
+        store
+            .create_agent(&agent, ("agent.created", json!({})))
+            .unwrap();
+        let exchanged = |store: &Store| store.agent(&agent.id).unwrap().unwrap().exchanged_at;
+        assert_eq!(exchanged(&store), None, "nothing exchanged yet");
+
+        store
+            .append_agent_event(&agent.id, "agent.message", json!({"text": "hi"}), true)
+            .unwrap();
+        store
+            .append_agent_event(&agent.id, "agent.tool_call", json!({}), true)
+            .unwrap();
+        assert_eq!(
+            exchanged(&store),
+            None,
+            "work done during a turn is no exchange"
+        );
+
+        let mut brief = a_delivery("brief-1", "brief");
+        brief.agent = agent.id.clone();
+        store.deliver(&brief).unwrap();
+        store
+            .move_deliveries(
+                &agent.id,
+                &[brief.id.clone()],
+                "queued",
+                "sending",
+                "prompt",
+            )
+            .unwrap();
+        assert_eq!(exchanged(&store), None, "a brief is not the user's message");
+
+        let mut note = a_delivery("user-1", "user");
+        note.agent = agent.id.clone();
+        store.deliver(&note).unwrap();
+        store
+            .move_deliveries(&agent.id, &[note.id.clone()], "queued", "sending", "prompt")
+            .unwrap();
+        let written = exchanged(&store).expect("the user's message is an exchange");
+
+        let ended = store
+            .append_agent_event(&agent.id, "agent.turn_ended", json!({}), false)
+            .unwrap();
+        assert_eq!(exchanged(&store), Some(ended.at.max(written)));
     }
 
     #[test]
