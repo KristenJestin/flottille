@@ -10596,3 +10596,59 @@ fn the_developer_mode_is_switched_in_settings_with_its_log_s_path_beside_the_swi
     });
     settle(cx);
 }
+
+#[gpui_kit::test]
+fn the_limit_of_tool_results_is_chosen_in_a_section_at_the_end_of_the_providers_tab(
+    cx: &mut TestAppContext,
+) {
+    let user = User::new().with_cut_results();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_settings(&shell, cx);
+    choose_settings_tab("providers", cx);
+    until(&shell, cx, "the page knows the limit", |cx| {
+        page.read_with(cx, |page, _| page.tool_results_known())
+    });
+    settle(cx);
+    assert_eq!(
+        page.read_with(cx, |page, _| page.tool_results_limit()),
+        Some(8_000)
+    );
+    cx.update(|window, _| {
+        assert!(window.find("tool-results-limit").visible());
+    });
+
+    cx.update(|window, cx| window.click("tool-results-limit", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("tool-results-limit-16000", cx));
+    let file = user.path("config/flottille/tool-results.toml");
+    until(&shell, cx, "the daemon says 16000", |cx| {
+        page.read_with(cx, |page, _| page.tool_results_said() == Some(Some(16_000)))
+    });
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("limit = 16000"), "{text}");
+    settle(cx);
+
+    cx.update(|window, cx| window.click("tool-results-limit", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("tool-results-limit-off", cx));
+    settle(cx);
+    until(&shell, cx, "the daemon says Off", |cx| {
+        page.read_with(cx, |page, _| page.tool_results_said() == Some(None))
+    });
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("limit = \"off\""), "{text}");
+    settle(cx);
+
+    // Chosen from elsewhere, the page follows.
+    user.call("tool_results.set", json!({"limit": 4000}))
+        .unwrap();
+    until(&shell, cx, "the page shows 4000", |cx| {
+        page.read_with(cx, |page, _| page.tool_results_said() == Some(Some(4_000)))
+    });
+    settle(cx);
+    assert_eq!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)),
+        0,
+        "nothing moves at rest"
+    );
+}

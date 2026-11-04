@@ -372,3 +372,44 @@ fn a_result_never_shows_a_value_of_the_place_s_env_files() {
     );
     assert!(!answer.text.contains("hunter2-hunter2"), "{}", answer.text);
 }
+
+#[test]
+fn the_result_of_a_call_the_user_approved_is_cut_like_any_other() {
+    let user = User::with_fake_agent().with_cut_results();
+    let (_, mcp, _) = session(&user);
+    let folder = user.path("elsewhere/many");
+    std::fs::create_dir_all(&folder).unwrap();
+    for n in 1..=300 {
+        std::fs::write(folder.join(format!("entry-{n:04}-{}", "x".repeat(40))), "").unwrap();
+    }
+    let number = held(mcp.call(
+        "fs_list",
+        json!({"path": folder.to_str().unwrap(), "depth": 1}),
+    ));
+
+    cli(&user, &["approve", &number.to_string()]).unwrap();
+
+    let body = settled(&user, number).body;
+    assert!(
+        body.contains("characters left out"),
+        "{} characters",
+        body.len()
+    );
+    assert!(
+        body.chars().count() < 8_500,
+        "{} characters",
+        body.chars().count()
+    );
+    assert!(body.contains("entry-0001-"), "{body}");
+    assert!(body.contains("entry-0300-"), "{body}");
+    assert!(!body.contains("entry-0150-"), "{body}");
+    // What was left out is read from the kept text, by the session of the agent it was for.
+    let id = body
+        .split("\"run\": \"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or_else(|| panic!("no id in {body}"));
+    let page = mcp.call("run_status", json!({"run": id, "start": 100}));
+    assert!(!page.error, "{}", page.text);
+    assert!(page.text.contains("entry-0"), "{}", page.text);
+}

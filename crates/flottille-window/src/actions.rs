@@ -94,6 +94,12 @@ pub enum Command {
     DeveloperSet {
         log: bool,
     },
+    /// The limit above which a tool result is cut (`tool_results.show`).
+    ToolResultsRead,
+    /// Chooses it (`tool_results.set`): `None` is Off.
+    ToolResultsSet {
+        limit: Option<usize>,
+    },
     /// The window's appearance (`appearance.show`); `seq` numbers the request (see
     /// `Shell::ask_appearance`).
     AppearanceRead {
@@ -630,6 +636,12 @@ pub enum Outcome {
         written: bool,
         shown: Result<crate::settings::Developer, String>,
     },
+    /// The limit of tool results as the daemon says it (`None` is Off), after a read (`written`
+    /// false) or a choice.
+    ToolResults {
+        written: bool,
+        shown: Result<Option<usize>, String>,
+    },
     /// The window's appearance as the daemon keeps it, after a read (`written` false) or a
     /// choice.
     Appearance {
@@ -1027,6 +1039,19 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 }
             });
             Outcome::Developer { written, shown }
+        }
+        Command::ToolResultsRead | Command::ToolResultsSet { .. } => {
+            let (method, params, written) = match command {
+                Command::ToolResultsSet { limit } => (
+                    "tool_results.set",
+                    json!({"limit": limit.map_or(json!("off"), |l| json!(l))}),
+                    true,
+                ),
+                _ => ("tool_results.show", json!({}), false),
+            };
+            let shown = answer(ask_alone(connect, method, params, bounds.quick))
+                .map(|shown| shown["limit"].as_u64().map(|limit| limit as usize));
+            Outcome::ToolResults { written, shown }
         }
         Command::AppearanceRead { seq } | Command::AppearanceSet { seq, .. } => {
             let (method, params, written) = match command {

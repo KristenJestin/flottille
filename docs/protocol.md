@@ -360,6 +360,24 @@ window and a restart show the same colours.
 `appearance.set` emits `appearance.changed` with what it answers. The user's door alone reaches
 them: no tool of an agent does.
 
+### The tool results methods
+
+`tool_results.show` and `tool_results.set` read and keep the limit above which a tool result is
+cut at the source (`docs/tools.md`, "Long results"): `limit` in `tool-results.toml` of
+Flottille's configuration folder.
+
+- `tool_results.show` answers `{"limit"}`: a number of characters, or `"off"` when results are
+  returned whole. With no file, `8000`. `invalid-config` when the file cannot be read, names
+  another key, or holds a `limit` that is neither `"off"` nor a whole number from 4000 to 40000.
+- `tool_results.set {limit}` takes a number of characters or `"off"`, writes the file
+  (`limit = 16000`, or `limit = "off"`) and answers as `tool_results.show`; `invalid-params` for
+  anything else, a number out of the range and a missing `limit` included (a client leaves null
+  fields out, so `"off"` is a word).
+
+The daemon reads the file at every tool call: a change applies to the next result of every
+running session. `tool_results.set` emits `tool_results.changed` with what it answers. The user's
+door alone reaches them: no tool of an agent does.
+
 ### The skill methods
 
 A project's skills (`docs/skills.md`). The daemon edits the project's file in place, the rest of it

@@ -533,6 +533,19 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE agents ADD COLUMN pending_model TEXT;
     ALTER TABLE agents ADD COLUMN pending_effort TEXT;
 ",
+    "
+    -- The whole text of a tool result that was cut at the source (`docs/tools.md`, \"Long
+    -- results\"), masked, for the agent whose session it is and nobody else: it goes with the
+    -- session, as its runs do.
+    CREATE TABLE tool_results (
+        id         TEXT PRIMARY KEY,
+        agent      TEXT NOT NULL REFERENCES agents (id) ON DELETE CASCADE,
+        tool       TEXT NOT NULL,
+        text       TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX tool_results_agent ON tool_results (agent);
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -570,6 +583,18 @@ pub struct AgentChange {
     pub reported_at: Option<Option<u64>>,
     pub quiet_turns: Option<u32>,
     pub waiting_on_answer: Option<bool>,
+}
+
+/// How many cut tool results of one agent keep their whole text (`docs/tools.md`, "Long
+/// results"): a result is at most 40,000 characters, so an agent holds at most a few MiB.
+pub const KEPT_RESULTS_PER_AGENT: usize = 20;
+
+/// What a cut result's id leads to.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Kept {
+    Text(String),
+    /// Kept once, dropped since for the latest ones.
+    Dropped,
 }
 
 pub struct Store {
@@ -1313,26 +1338,66 @@ impl Store {
         rows.map(|row| row?).collect()
     }
 
-    /// The agents that have runs, ended or not.
+    /// The agents that have runs, ended or not, or a cut tool result kept.
     pub fn agents_with_runs(&self) -> Result<Vec<String>> {
-        let mut statement = self
-            .connection
-            .prepare_cached("SELECT DISTINCT agent FROM runs WHERE agent IS NOT NULL")?;
+        let mut statement = self.connection.prepare_cached(
+            "SELECT agent FROM runs WHERE agent IS NOT NULL UNION SELECT agent FROM tool_results",
+        )?;
         let rows = statement.query_map([], |row| row.get(0))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// The runs of these agents that ended go, their session being over for good. A run still
-    /// running is left to end.
+    /// The runs of these agents that ended go, and the cut tool results kept for them, their
+    /// session being over for good. A run still running is left to end.
     pub fn forget_runs_of(&self, agents: &[String]) -> Result<usize> {
         let mut statement = self
             .connection
             .prepare_cached("DELETE FROM runs WHERE agent = ?1 AND state != 'running'")?;
+        let mut results = self
+            .connection
+            .prepare_cached("DELETE FROM tool_results WHERE agent = ?1")?;
         let mut forgotten = 0;
         for agent in agents {
             forgotten += statement.execute(params![agent])?;
+            forgotten += results.execute(params![agent])?;
         }
         Ok(forgotten)
+    }
+
+    /// Keeps the whole text of a tool result of `agent` that was cut, under its id. Only the
+    /// latest `KEPT_RESULTS_PER_AGENT` of an agent keep their text: the older ones are emptied,
+    /// and say so when read.
+    pub fn keep_result(&self, id: &str, agent: &str, tool: &str, text: &str) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO tool_results (id, agent, tool, text, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, agent, tool, text, now_ms()],
+        )?;
+        self.connection.execute(
+            "UPDATE tool_results SET text = '' WHERE agent = ?1 AND text != '' AND rowid NOT IN \
+             (SELECT rowid FROM tool_results WHERE agent = ?1 AND text != '' \
+              ORDER BY rowid DESC LIMIT ?2)",
+            params![agent, KEPT_RESULTS_PER_AGENT as i64],
+        )?;
+        Ok(())
+    }
+
+    /// What is kept under `id`, for the agent it was kept for alone.
+    pub fn kept_result(&self, id: &str, agent: &str) -> Result<Option<Kept>> {
+        let mut statement = self
+            .connection
+            .prepare_cached("SELECT text FROM tool_results WHERE id = ?1 AND agent = ?2")?;
+        let text: Option<String> = statement
+            .query_row(params![id, agent], |row| row.get(0))
+            .optional()?;
+        // A text kept is never empty: it was longer than the limit.
+        Ok(text.map(|text| {
+            if text.is_empty() {
+                Kept::Dropped
+            } else {
+                Kept::Text(text)
+            }
+        }))
     }
 
     /// Dismisses a run that ended, with its event, in one transaction; `None` when it is still
@@ -4615,6 +4680,58 @@ mod tests {
 
         assert!(store.run("done").unwrap().is_none());
         assert!(store.run("live").unwrap().is_some());
+    }
+
+    #[test]
+    fn a_kept_tool_result_is_read_by_its_agent_alone_and_goes_with_its_session() {
+        let mut store = Store::open_in_memory().unwrap();
+        let agent = runs_of_an_agent(&mut store, &[]);
+        store
+            .keep_result("res_1", &agent, "fs_read", "the whole text")
+            .unwrap();
+
+        assert_eq!(
+            store.kept_result("res_1", &agent).unwrap(),
+            Some(Kept::Text("the whole text".to_owned()))
+        );
+        assert_eq!(store.kept_result("res_1", "another").unwrap(), None);
+        assert_eq!(store.kept_result("res_2", &agent).unwrap(), None);
+        assert_eq!(
+            store.agents_with_runs().unwrap(),
+            std::slice::from_ref(&agent)
+        );
+
+        store.forget_runs_of(std::slice::from_ref(&agent)).unwrap();
+
+        assert_eq!(store.kept_result("res_1", &agent).unwrap(), None);
+        assert!(store.agents_with_runs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn only_the_latest_results_of_an_agent_are_kept_and_a_dropped_one_says_so() {
+        let mut store = Store::open_in_memory().unwrap();
+        let agent = runs_of_an_agent(&mut store, &[]);
+        let kept = KEPT_RESULTS_PER_AGENT;
+        for n in 0..kept + 2 {
+            store
+                .keep_result(&format!("res_{n}"), &agent, "run_status", "text")
+                .unwrap();
+        }
+
+        for n in 0..2 {
+            assert_eq!(
+                store.kept_result(&format!("res_{n}"), &agent).unwrap(),
+                Some(Kept::Dropped)
+            );
+        }
+        for n in 2..kept + 2 {
+            assert_eq!(
+                store.kept_result(&format!("res_{n}"), &agent).unwrap(),
+                Some(Kept::Text("text".to_owned()))
+            );
+        }
+        // Another agent's results are its own count.
+        assert_eq!(store.kept_result("res_0", "another").unwrap(), None);
     }
 
     #[test]
