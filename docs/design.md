@@ -678,8 +678,10 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   a dialog or a list is open. It searches what the window already holds from the daemon (the
   tree, the projects), never the content of conversations (that needs an index);
 - left: the sidebar, each project and, under it, **its sessions in one flat list**, sorted by
-  recent activity (the session that moved last on top; a state is drawn by the row's mark, never
-  by reordering). There is no row for `main` nor for a workspace: workspaces live on the project
+  last exchange (the later of the last message the user gave it and the end of its root's last
+  turn, its creation before either: the session that last had one on top. Work done during a turn
+  never moves a row, so two sessions working at once keep their places; a state is drawn by the
+  row's mark, never by reordering). There is no row for `main` nor for a workspace: workspaces live on the project
   page, and one with no session is not in the sidebar. A session is titled by the first line of
   its first message that says what the work is (a greeting or a single word does not: the session
   is `agent <id>` until a later message of the user does); a session an agent started says it in

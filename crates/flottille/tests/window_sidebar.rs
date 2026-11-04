@@ -33,7 +33,15 @@ fn user() -> User {
     let user = User::with_fake_agent();
     user.fake_script(json!({"turns": [
         {"when": "HANG", "do": [{"hang": true}]},
-        {"when": "work briefly", "do": [{"wait": 1500}, {"say": "done"}]}
+        {"when": "work briefly", "do": [{"wait": 1500}, {"say": "done"}]},
+        {"when": "work quietly", "do": [{"wait": 1500}]},
+        {"when": "CHATTER", "do": [
+            {"mcp": {"tool": "fs_list", "arguments": {}}}, {"wait": 700},
+            {"mcp": {"tool": "fs_list", "arguments": {}}}, {"wait": 700},
+            {"mcp": {"tool": "fs_list", "arguments": {}}}, {"wait": 700},
+            {"mcp": {"tool": "fs_list", "arguments": {}}}, {"wait": 700},
+            {"mcp": {"tool": "fs_list", "arguments": {}}}, {"wait": 700}
+        ]}
     ]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     user
@@ -988,4 +996,100 @@ fn a_session_becoming_active_slides_to_the_top_and_stays_selected(cx: &mut TestA
         shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some()),
         "and its page stays open"
     );
+}
+
+#[gpui_kit::test]
+fn two_working_sessions_keep_their_order_while_they_work(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let resting = start(&user, "app", "resting");
+    let older = start(&user, "app", "older");
+    let newer = start(&user, "app", "newer");
+    let (shell, cx) = tree_of(&user, &[&resting, &older, &newer], cx);
+    assert_eq!(
+        listed(&shell, "app", cx),
+        [newer.clone(), older.clone(), resting.clone()]
+    );
+
+    // The older one is written to first and goes on talking after the newer one is written to
+    // (which says nothing): its last sign of activity is the later one, its last exchange is not.
+    send(&user, &older, "CHATTER");
+    send(&user, &newer, "HANG");
+    eventually("both turns run", || {
+        state_of(&user, &older) == "working" && state_of(&user, &newer) == "working"
+    });
+    let watch = |cx: &mut VisualTestContext| {
+        assert!(
+            state_of(&user, &older) == "working" && state_of(&user, &newer) == "working",
+            "both still work while the order is watched"
+        );
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    };
+    // The window reads the daemon again when a turn begins or ends: another session's turn does
+    // it, after the chunks of the older one landed.
+    std::thread::sleep(Duration::from_millis(1500));
+    send(&user, &resting, "hello");
+    for _ in 0..200 {
+        watch(cx);
+        if listed(&shell, "app", cx).first() == Some(&resting) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    settle(cx);
+    assert_eq!(
+        listed(&shell, "app", cx),
+        [resting, newer, older],
+        "work done during a turn moves no row: the one written to last stays above"
+    );
+}
+
+#[gpui_kit::test]
+fn a_session_moves_up_when_the_user_writes_to_it(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let old = start(&user, "app", "old");
+    let kept = start(&user, "app", "kept");
+    let newest = start(&user, "app", "newest");
+    let (shell, cx) = tree_of(&user, &[&old, &kept, &newest], cx);
+    assert_eq!(
+        listed(&shell, "app", cx),
+        [newest.clone(), kept.clone(), old.clone()]
+    );
+
+    // Its turn says nothing and does not end: only the message can move the row.
+    send(&user, &old, "HANG");
+    until(&shell, cx, "the session written to is on top", |cx| {
+        listed(&shell, "app", cx).first() == Some(&old)
+    });
+    settle(cx);
+    assert_eq!(listed(&shell, "app", cx), [old, newest, kept]);
+}
+
+#[gpui_kit::test]
+fn a_session_moves_up_when_its_turn_ends(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let first = start(&user, "app", "first");
+    let second = start(&user, "app", "second");
+    let third = start(&user, "app", "third");
+    let (shell, cx) = tree_of(&user, &[&first, &second, &third], cx);
+
+    // `first` works quietly, then the user writes to `second`: `second` is on top while
+    // `first` works.
+    send(&user, &first, "work quietly");
+    send(&user, &second, "HANG");
+    until(&shell, cx, "the session written to last is on top", |cx| {
+        listed(&shell, "app", cx) == [second.clone(), first.clone(), third.clone()]
+    });
+    // Its turn ends without a word: the end alone moves it above.
+    until(&shell, cx, "the session whose turn ended is on top", |cx| {
+        listed(&shell, "app", cx).first() == Some(&first)
+    });
+    settle(cx);
+    assert_eq!(state_of(&user, &first), "idle");
+    assert_eq!(listed(&shell, "app", cx), [first, second, third]);
 }
