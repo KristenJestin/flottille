@@ -153,8 +153,8 @@ one each release's notes name, of its own commit.
 
 `install.sh` needs `curl`, `tar`, `sha256sum` and GNU `sort`, and no root. Its body is one
 function called on its last line, so a download cut short runs nothing. It reads the channel's
-release from GitHub's API (stable: the latest release; beta: the highest version among the
-`-beta.` pre-releases, whatever order they were published in; alpha: the branch's
+release from GitHub's API (stable: the latest release; beta: the `-beta.` pre-release published
+last, not the highest version (below); alpha: the branch's
 `alpha-<branch>`, the higher version when it holds two archives while it is replaced), downloads
 its archive and sum, checks the sum (a wrong one installs nothing),
 and puts `flottille` in `~/.local/bin`, written beside it then renamed over it, with `flot` a link
@@ -209,10 +209,11 @@ entry and the icons: to remove Flottille by hand, delete `flottille` and `flot` 
 
 ## Updating
 
-`flottille update [--channel stable|beta|alpha] [--branch <name>] [--force]` replaces the binary
-it runs from with the channel's latest build: by default the channel it was built on (a `local`
-build takes stable), and for alpha the branch it was built from; `--branch` goes with
-`--channel alpha` only. It reads the releases as `install.sh` does, with the user's own `curl`
+`flottille update [--channel stable|beta|alpha] [--branch <name>] [--version <X.Y.Z[-pre]>]
+[--force]` replaces the binary it runs from with the channel's latest build (the most recently
+published, see "Installing"): by default the channel last chosen with `--channel` (and, for alpha,
+its branch), else the one it was built on (a `local` build takes stable) and the branch it was
+built from; `--branch` goes with `--channel alpha` only. It reads the releases as `install.sh` does, with the user's own `curl`
 spawned without a shell, checks the archive's SHA-256 sum (a wrong one replaces nothing), unpacks
 it with `tar` in a folder beside the binary and renames the new binary over the old one: the file
 is the old one or the new one, never half of one.
@@ -222,8 +223,21 @@ is the old one or the new one, never half of one.
   could not start an agent's process, which is this binary too. A client that starts a daemon
   later from a binary replaced while it ran (the window left open) starts it from the new file
   at that path, not from the deleted one.
+- **The channel is remembered.** `--channel` (with its branch for an alpha) is kept once the
+  update succeeds, in `$XDG_STATE_HOME/flottille/update-channel.json`: it is Flottille's own
+  memory, not a setting, so it is not in the configuration. A plain `flottille update` stays on it,
+  so `--channel alpha --branch feat/specs` then `--channel beta` goes there and back. `install.sh`
+  does not write it: after installing another channel by hand, say `--channel` once.
+- **`--version <X.Y.Z[-pre]>` installs that release exactly**, of any channel, as `install.sh
+  --version` does, and goes without `--channel` and `--branch`. A version that does not exist is
+  refused with the nearest published ones, and nothing is downloaded. It does not touch the
+  channel remembered.
 - **The same version is not installed again**: it says so and replaces nothing. **An older one
-  is refused.** `--force` installs either.
+  is refused**, whether it is the latest of the channel (a numbering change left it below this
+  build) or the version asked for. `--force` installs either, and says that **the store is not
+  migrated down**: a store a newer build migrated is refused by an older one ("made by a newer
+  Flottille"). No release says the schema of its build, so Flottille cannot tell before installing
+  that the store would be refused: `--force` is the one guard.
 
 ## For tests
 

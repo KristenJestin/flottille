@@ -10,6 +10,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -738,6 +739,8 @@ struct Releases {
     base: String,
     files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     asked: Arc<Mutex<Vec<String>>>,
+    /// Each release made is published a second after the previous one.
+    published: AtomicUsize,
 }
 
 impl Releases {
@@ -778,7 +781,12 @@ impl Releases {
                 };
             }
         });
-        Releases { base, files, asked }
+        Releases {
+            base,
+            files,
+            asked,
+            published: AtomicUsize::new(0),
+        }
     }
 
     /// The API's base, as `FLOTTILLE_RELEASES` takes it.
@@ -790,8 +798,27 @@ impl Releases {
         self.files.lock().unwrap().insert(path.to_owned(), body);
     }
 
+    /// The list of releases the API gives, with each one's keys in GitHub's order (the tag, then
+    /// when it was published, then its assets), which `install.sh` reads without a JSON parser.
+    fn list(&self, releases: &[&serde_json::Value]) {
+        let each: Vec<String> = releases
+            .iter()
+            .map(|r| {
+                format!(
+                    r#"{{"tag_name":{},"prerelease":{},"published_at":{},"assets":{}}}"#,
+                    r["tag_name"], r["prerelease"], r["published_at"], r["assets"]
+                )
+            })
+            .collect();
+        self.put(
+            "/repos/o/r/releases?per_page=100",
+            format!("[{}]", each.join(",")).into_bytes(),
+        );
+    }
+
     /// A release of that tag, holding the archive of `binary` at `version` and its sum (`sum`
-    /// in place of the right one when given). Its API entry.
+    /// in place of the right one when given). Its API entry, which is also what the tag's own
+    /// address answers.
     fn release(
         &self,
         tag: &str,
@@ -811,14 +838,21 @@ impl Releases {
         self.put(&format!("/download/{tag}/{name}"), archive);
         self.put(&format!("/download/{tag}/{name}.sha256"), sum.into_bytes());
         let url = |name: &str| format!("{}/download/{tag}/{name}", self.base);
-        json!({
+        let n = self.published.fetch_add(1, Ordering::SeqCst);
+        let release = json!({
             "tag_name": tag,
             "prerelease": tag.contains('-'),
+            "published_at": format!("2026-11-04T09:{:02}:{:02}Z", n / 60, n % 60),
             "assets": [
                 {"name": name, "browser_download_url": url(&name)},
                 {"name": format!("{name}.sha256"), "browser_download_url": url(&format!("{name}.sha256"))},
             ],
-        })
+        });
+        self.put(
+            &format!("/repos/o/r/releases/tags/{tag}"),
+            release.to_string().into_bytes(),
+        );
+        release
     }
 }
 
@@ -853,14 +887,7 @@ fn three_channels(releases: &Releases, programs: &Path) {
         "/repos/o/r/releases/latest",
         stable.to_string().into_bytes(),
     );
-    releases.put(
-        "/repos/o/r/releases?per_page=100",
-        json!([alpha, beta, stable]).to_string().into_bytes(),
-    );
-    releases.put(
-        "/repos/o/r/releases/tags/alpha-feat-46-packages",
-        alpha.to_string().into_bytes(),
-    );
+    releases.list(&[&alpha, &beta, &stable]);
 }
 
 /// `install.sh` with these arguments, for a throwaway home.
@@ -958,45 +985,85 @@ fn install_sh_says_when_a_branch_has_no_alpha() {
     );
 }
 
-/// Two betas listed newest first by date, the older version first: beta.10 is the newest by
-/// version.
-fn betas_out_of_order(releases: &Releases, programs: &Path) {
-    let nine = releases.release(
-        "v0.4.1-beta.9",
-        "0.4.1-beta.9",
-        &standing_for(programs, "0.4.1-beta.9"),
-        None,
-    );
-    let ten = releases.release(
-        "v0.4.1-beta.10",
-        "0.4.1-beta.10",
-        &standing_for(programs, "0.4.1-beta.10"),
-        None,
-    );
-    releases.put(
-        "/repos/o/r/releases?per_page=100",
-        json!([nine, ten]).to_string().into_bytes(),
-    );
+/// Betas as (version, when published), listed in that order, as the API lists them: not
+/// necessarily the order they were published in.
+fn betas(releases: &Releases, programs: &Path, published: &[(&str, &str)]) {
+    let made: Vec<serde_json::Value> = published
+        .iter()
+        .map(|(version, at)| {
+            let mut release = releases.release(
+                &format!("v{version}"),
+                version,
+                &standing_for(programs, version),
+                None,
+            );
+            release["published_at"] = json!(at);
+            release
+        })
+        .collect();
+    releases.list(&made.iter().collect::<Vec<_>>());
 }
 
-#[test]
-fn install_sh_picks_the_newest_beta_by_version_not_by_date() {
-    let releases = Releases::serve();
-    let programs = tempfile::tempdir().unwrap();
-    betas_out_of_order(&releases, programs.path());
-    let home = tempfile::tempdir().unwrap();
+/// The case that made #413: a build of `dev` numbered 0.2.0 before the numbering changed
+/// (#358), published before the later 0.1.2 builds, and listed first.
+const STRAY: [(&str, &str); 3] = [
+    ("0.2.0-beta.5", "2026-11-04T09:34:08Z"),
+    ("0.1.2-beta.15", "2026-11-04T10:42:54Z"),
+    ("0.1.2-beta.14", "2026-11-04T10:20:05Z"),
+];
 
-    let output = install(home.path(), &releases, &["--channel", "beta"]);
-
-    assert!(output.status.success(), "{output:?}");
-    let said = Command::new(home.path().join(".local/bin/flottille"))
+/// The version a program installed in `home` says it stands for.
+fn installed_version(home: &Path) -> String {
+    let said = Command::new(home.join(".local/bin/flottille"))
         .arg("--version")
         .output()
         .unwrap();
+    String::from_utf8_lossy(&said.stdout).trim().to_owned()
+}
+
+#[test]
+fn install_sh_takes_the_most_recent_build_and_an_exact_version() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    three_channels(&releases, programs.path());
+    betas(&releases, programs.path(), &STRAY);
+
+    // The latest published of the beta channel, not the highest version.
+    let home = tempfile::tempdir().unwrap();
+    let output = install(home.path(), &releases, &["--channel", "beta"]);
+    assert!(output.status.success(), "{output:?}");
     assert_eq!(
-        String::from_utf8_lossy(&said.stdout).trim(),
-        "flottille 0.4.1-beta.10 (test, 000000000000)"
+        installed_version(home.path()),
+        "flottille 0.1.2-beta.15 (test, 000000000000)"
     );
+
+    // An exact version, of any channel.
+    for version in ["0.2.0-beta.5", "0.4.0", "0.5.0-alpha.feat-46-packages.7"] {
+        let home = tempfile::tempdir().unwrap();
+        let output = install(home.path(), &releases, &["--version", version]);
+        assert!(output.status.success(), "{version}: {output:?}");
+        assert_eq!(
+            installed_version(home.path()),
+            format!("flottille {version} (test, 000000000000)")
+        );
+    }
+
+    // One that does not exist: refused, with the close ones, and nothing installed.
+    let home = tempfile::tempdir().unwrap();
+    let output = install(home.path(), &releases, &["--version", "0.1.2-beta.16"]);
+    assert!(!output.status.success(), "{output:?}");
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(said.contains("no release 0.1.2-beta.16"), "{said}");
+    assert!(said.contains("0.1.2-beta.15"), "{said}");
+    assert!(!home.path().join(".local/bin/flottille").exists());
+
+    // A version is not a channel.
+    let output = install(
+        home.path(),
+        &releases,
+        &["--version", "0.4.0", "--channel", "beta"],
+    );
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
 }
 
 #[test]
@@ -1507,10 +1574,19 @@ fn flottille_update_refuses_while_a_daemon_runs_and_says_to_stop_it_first() {
 }
 
 #[test]
-fn flottille_update_picks_the_newest_beta_by_version_not_by_date() {
+fn update_takes_the_most_recently_published_build_of_its_channel() {
     let releases = Releases::serve();
     let programs = tempfile::tempdir().unwrap();
-    betas_out_of_order(&releases, programs.path());
+    // Listed in no order of publication.
+    betas(
+        &releases,
+        programs.path(),
+        &[
+            ("0.4.1-beta.2", "2026-11-04T10:20:00Z"),
+            ("0.4.1-beta.10", "2026-11-04T11:00:00Z"),
+            ("0.4.1-beta.1", "2026-11-04T09:00:00Z"),
+        ],
+    );
     let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
     let binary = installed();
 
@@ -1524,6 +1600,307 @@ fn flottille_update_picks_the_newest_beta_by_version_not_by_date() {
     assert_eq!(
         String::from_utf8_lossy(&said.stdout).trim(),
         "flottille 0.4.1-beta.10 (test, 000000000000)"
+    );
+}
+
+#[test]
+fn a_stray_higher_version_published_earlier_is_not_taken() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    betas(&releases, programs.path(), &STRAY);
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+    let binary = installed();
+
+    let output = user
+        .command_through(&binary, &["update", "--channel", "beta"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let said = Command::new(&binary).arg("--version").output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&said.stdout).trim(),
+        "flottille 0.1.2-beta.15 (test, 000000000000)"
+    );
+}
+
+#[test]
+fn update_says_when_the_latest_of_a_channel_is_lower_than_this_version() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    betas(
+        &releases,
+        programs.path(),
+        &[
+            ("0.0.2-beta.9", "2026-11-04T09:00:00Z"),
+            ("0.0.1-beta.3", "2026-11-04T10:00:00Z"),
+        ],
+    );
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+    let binary = installed();
+    let before = sha256(&binary);
+
+    let output = user
+        .command_through(&binary, &["update", "--channel", "beta"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "{output:?}");
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        said.contains("0.0.1-beta.3 is the latest of beta"),
+        "{said}"
+    );
+    assert!(said.contains("--force"), "{said}");
+    assert_eq!(sha256(&binary), before);
+
+    let output = user
+        .command_through(&binary, &["update", "--channel", "beta", "--force"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let said = Command::new(&binary).arg("--version").output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&said.stdout).trim(),
+        "flottille 0.0.1-beta.3 (test, 000000000000)"
+    );
+}
+
+#[test]
+fn update_moves_to_the_alpha_of_a_branch_and_back_to_beta() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    three_channels(&releases, programs.path());
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+    let version_of = |binary: &Path| {
+        let said = Command::new(binary).arg("--version").output().unwrap();
+        String::from_utf8_lossy(&said.stdout).trim().to_owned()
+    };
+
+    let binary = installed();
+    let output = user
+        .command_through(
+            &binary,
+            &[
+                "update",
+                "--channel",
+                "alpha",
+                "--branch",
+                "feat/46-packages",
+            ],
+        )
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        version_of(&binary),
+        "flottille 0.5.0-alpha.feat-46-packages.7 (test, 000000000000)"
+    );
+
+    let binary = installed();
+    let output = user
+        .command_through(&binary, &["update", "--channel", "beta"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        version_of(&binary),
+        "flottille 0.4.1-beta.3 (test, 000000000000)"
+    );
+}
+
+#[test]
+fn update_remembers_the_channel_last_chosen() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    three_channels(&releases, programs.path());
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+    // What a plain `flottille update` read, from a binary freshly built (so, not this one's
+    // own memory: the user's state folder is what keeps the choice).
+    let plain_update_reads = || {
+        releases.asked.lock().unwrap().clear();
+        let binary = installed();
+        let output = user.command_through(&binary, &["update"]).output().unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let asked = releases.asked.lock().unwrap().clone();
+        asked
+            .into_iter()
+            .filter(|path| path.contains("/releases"))
+            .collect::<Vec<_>>()
+    };
+    let choose = |args: &[&str]| {
+        let binary = installed();
+        let output = user.command_through(&binary, args).output().unwrap();
+        assert!(output.status.success(), "{args:?}: {output:?}");
+    };
+
+    // Nothing chosen: the channel of the build, and a local build takes stable.
+    assert_eq!(plain_update_reads(), ["/repos/o/r/releases/latest"]);
+
+    choose(&["update", "--channel", "beta"]);
+    assert_eq!(plain_update_reads(), ["/repos/o/r/releases?per_page=100"]);
+
+    choose(&[
+        "update",
+        "--channel",
+        "alpha",
+        "--branch",
+        "feat/46-packages",
+    ]);
+    assert_eq!(
+        plain_update_reads(),
+        ["/repos/o/r/releases/tags/alpha-feat-46-packages"]
+    );
+
+    choose(&["update", "--channel", "stable"]);
+    assert_eq!(plain_update_reads(), ["/repos/o/r/releases/latest"]);
+}
+
+#[test]
+fn update_installs_an_exact_version() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    three_channels(&releases, programs.path());
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+
+    // Of any channel; neither the latest of one nor, for the alpha, a branch to give.
+    for version in ["0.4.0", "0.4.1-beta.3", "0.5.0-alpha.feat-46-packages.7"] {
+        let binary = installed();
+        let output = user
+            .command_through(&binary, &["update", "--version", version])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{version}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(version),
+            "{output:?}"
+        );
+        let said = Command::new(&binary).arg("--version").output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&said.stdout).trim(),
+            format!("flottille {version} (test, 000000000000)")
+        );
+    }
+
+    // A version is not a channel, and it does not change the channel remembered.
+    let binary = installed();
+    let output = user
+        .command_through(
+            &binary,
+            &["update", "--version", "0.4.0", "--channel", "beta"],
+        )
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    releases.asked.lock().unwrap().clear();
+    let output = user.command_through(&binary, &["update"]).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        releases.asked.lock().unwrap()[0],
+        "/repos/o/r/releases/latest",
+        "the version installed set no channel"
+    );
+}
+
+#[test]
+fn an_unknown_version_is_refused_with_close_ones() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    betas(
+        &releases,
+        programs.path(),
+        &[
+            ("0.0.7", "2026-11-04T09:00:00Z"),
+            ("0.4.1-beta.2", "2026-11-04T09:10:00Z"),
+            ("0.4.1-beta.3", "2026-11-04T09:20:00Z"),
+            ("0.4.1-beta.5", "2026-11-04T09:30:00Z"),
+            ("0.4.1-beta.6", "2026-11-04T09:40:00Z"),
+        ],
+    );
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+    let binary = installed();
+    let before = sha256(&binary);
+
+    let output = user
+        .command_through(&binary, &["update", "--version", "0.4.1-beta.4"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "{output:?}");
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(said.contains("no release 0.4.1-beta.4"), "{said}");
+    for close in ["0.4.1-beta.3", "0.4.1-beta.5"] {
+        assert!(said.contains(close), "{said}");
+    }
+    assert!(!said.contains("0.0.7"), "{said}");
+    assert_eq!(sha256(&binary), before);
+    assert!(
+        releases
+            .asked
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|path| !path.contains("/download/")),
+        "something was downloaded"
+    );
+
+    // Something that is not a version is refused before the releases are read.
+    releases.asked.lock().unwrap().clear();
+    for text in ["latest", "0.4", "v0.4.0"] {
+        let output = user
+            .command_through(&binary, &["update", "--version", text])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{text}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("not a version"),
+            "{text}: {output:?}"
+        );
+    }
+    assert!(releases.asked.lock().unwrap().is_empty());
+}
+
+#[test]
+fn going_to_a_lower_version_needs_force() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    betas(
+        &releases,
+        programs.path(),
+        &[("0.0.1", "2026-11-04T09:00:00Z")],
+    );
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+    let binary = installed();
+    let before = sha256(&binary);
+
+    let output = user
+        .command_through(&binary, &["update", "--version", "0.0.1"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "{output:?}");
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(said.contains("0.0.1 is older than this"), "{said}");
+    assert!(said.contains("--force"), "{said}");
+    // It says what going back does to the store.
+    assert!(said.contains("not migrated down"), "{said}");
+    assert_eq!(sha256(&binary), before);
+
+    let output = user
+        .command_through(&binary, &["update", "--version", "0.0.1", "--force"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("not migrated down"),
+        "{output:?}"
+    );
+    let said = Command::new(&binary).arg("--version").output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&said.stdout).trim(),
+        "flottille 0.0.1 (test, 000000000000)"
     );
 }
 
@@ -1605,7 +1982,7 @@ fn flottille_update_refuses_an_older_version_without_force() {
 
     assert!(!output.status.success(), "{output:?}");
     let said = String::from_utf8_lossy(&output.stderr);
-    assert!(said.contains("0.0.1 is older"), "{said}");
+    assert!(said.contains("0.0.1 is the latest of stable"), "{said}");
     assert!(said.contains("--force"), "{said}");
     assert_eq!(sha256(&binary), before);
 
