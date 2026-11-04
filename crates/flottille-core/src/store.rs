@@ -592,16 +592,18 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE runs ADD COLUMN url TEXT;
     ALTER TABLE runs ADD COLUMN url_error TEXT;
 ",
-    "
-    -- How many of each extension's own migrations were applied (`docs/extensions.md`, \"Data\"):
-    -- its tables, `ext_<name>_…`, are brought up to date as the store's are, and kept when it is
-    -- turned off.
-    CREATE TABLE extension_schemas (
+];
+
+/// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its
+/// tables, `ext_<name>_…`, are brought up to date as the store's are, and kept when it is turned
+/// off. Made at every open after the core's migrations, never as one of them, so that its place
+/// never depends on how many the core has.
+const EXTENSION_MIGRATIONS: &str = "
+    CREATE TABLE IF NOT EXISTS extension_migrations (
         name    TEXT PRIMARY KEY,
         applied INTEGER NOT NULL
     ) STRICT;
-",
-];
+";
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
     identity, held_by, forwards, state, decision, created_at, decided_at, kind, says, judgement, place";
@@ -2636,7 +2638,7 @@ impl Store {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let applied: usize = transaction
             .query_row(
-                "SELECT applied FROM extension_schemas WHERE name = ?1",
+                "SELECT applied FROM extension_migrations WHERE name = ?1",
                 [name],
                 |row| row.get(0),
             )
@@ -2657,7 +2659,7 @@ impl Store {
             confinement.check(&transaction)?;
         }
         transaction.execute(
-            "INSERT INTO extension_schemas (name, applied) VALUES (?1, ?2) \
+            "INSERT INTO extension_migrations (name, applied) VALUES (?1, ?2) \
              ON CONFLICT (name) DO UPDATE SET applied = excluded.applied",
             params![name, migrations.len()],
         )?;
@@ -3189,7 +3191,22 @@ fn path_text(path: &Path) -> Result<&str> {
 fn migrate(connection: &mut Connection) -> Result<()> {
     let transaction =
         connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    let applied: usize = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let mut applied: usize =
+        transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    // The alpha builds of the extensions made their bookkeeping, `extension_schemas`, as the last
+    // numbered migration of their day: that number was the core's next, whose migration such a
+    // store never ran. The table's name says such a store, and its count is moved over.
+    let alpha = transaction
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'extension_schemas'",
+            [],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if alpha {
+        applied -= 1;
+    }
     if applied > MIGRATIONS.len() {
         return Err(Error::Refused(format!(
             "the store is at schema {applied}, made by a newer Flottille than this one (schema {})",
@@ -3198,6 +3215,14 @@ fn migrate(connection: &mut Connection) -> Result<()> {
     }
     for migration in &MIGRATIONS[applied..] {
         transaction.execute_batch(migration)?;
+    }
+    transaction.execute_batch(EXTENSION_MIGRATIONS)?;
+    if alpha {
+        transaction.execute_batch(
+            "INSERT INTO extension_migrations (name, applied) \
+                 SELECT name, applied FROM extension_schemas;
+             DROP TABLE extension_schemas;",
+        )?;
     }
     transaction.pragma_update(None, "user_version", MIGRATIONS.len())?;
     transaction.commit()?;
@@ -5913,33 +5938,115 @@ mod tests {
         assert_eq!(store.last_seq().unwrap(), 1);
     }
 
-    #[test]
-    fn a_store_of_the_previous_schema_keeps_its_data_and_gains_the_extensions_tables() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("flottille.db");
-        let old = Connection::open(&path).unwrap();
-        let previous = MIGRATIONS
-            .iter()
-            .position(|m| m.contains("CREATE TABLE extension_schemas"))
-            .unwrap();
-        for migration in &MIGRATIONS[..previous] {
+    /// A store as a build of the core alone leaves it at `version`, with an event.
+    fn a_core_store(path: &Path, version: usize) {
+        let old = Connection::open(path).unwrap();
+        for migration in &MIGRATIONS[..version] {
             old.execute_batch(migration).unwrap();
         }
-        old.pragma_update(None, "user_version", previous).unwrap();
-        old.execute_batch(
-            "INSERT INTO workspaces (project, name, branch, folder, project_folder, created_at, \
-             variables, repositories) VALUES ('app', 'login', 'app/login', '/w', '/p', 100, '{}', '[]');",
-        )
-        .unwrap();
+        old.pragma_update(None, "user_version", version).unwrap();
         append_event(&old, "test.one", json!({})).unwrap();
-        drop(old);
+    }
+
+    #[test]
+    fn a_store_of_the_previous_schema_keeps_its_data_and_gains_the_extensions_tables() {
+        // At every schema, not only one: where the extensions' bookkeeping is made must never
+        // depend on how many migrations the core has.
+        for version in 1..=MIGRATIONS.len() {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("flottille.db");
+            a_core_store(&path, version);
+
+            let mut store = Store::open(&path).unwrap();
+            store.migrate_extension("test", &[TABLE]).unwrap();
+
+            assert_eq!(
+                store.schema_version().unwrap(),
+                MIGRATIONS.len(),
+                "{version}"
+            );
+            assert_eq!(store.last_seq().unwrap(), 1, "{version}");
+            assert!(notes(&mut store).is_empty(), "{version}");
+        }
+    }
+
+    #[test]
+    fn a_store_of_dev_s_latest_schema_gains_the_extensions_table_when_opened() {
+        // The numbered migrations are the core's alone, so a store of the core's latest is this.
+        assert!(!MIGRATIONS.iter().any(|m| m.contains("extension")));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        a_core_store(&path, MIGRATIONS.len());
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO workspaces (project, name, branch, folder, project_folder, \
+                 created_at, variables, repositories) \
+                 VALUES ('app', 'login', 'app/login', '/w', '/p', 100, '{}', '[]');",
+            )
+            .unwrap();
 
         let mut store = Store::open(&path).unwrap();
         store.migrate_extension("test", &[TABLE]).unwrap();
 
         assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len());
         assert!(store.workspace("app", "login").unwrap().is_some());
-        assert_eq!(store.last_seq().unwrap(), 1);
         assert!(notes(&mut store).is_empty());
+        // Opened again, nothing is made twice and the extension's count is kept.
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        store.migrate_extension("test", &[TABLE, COLUMN]).unwrap();
+        assert!(notes(&mut store).is_empty());
+    }
+
+    #[test]
+    fn a_store_of_this_branch_opens_under_the_latest_dev_schema() {
+        // The alpha builds of the extensions made their bookkeeping as the last numbered
+        // migration: at index 27 first, then at 30, each taking the number the core gave its own
+        // next migration.
+        for core in [27, 30] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("flottille.db");
+            a_core_store(&path, core);
+            let old = Connection::open(&path).unwrap();
+            old.execute_batch(
+                "CREATE TABLE extension_schemas (
+                    name    TEXT PRIMARY KEY,
+                    applied INTEGER NOT NULL
+                ) STRICT;",
+            )
+            .unwrap();
+            old.execute_batch(TABLE).unwrap();
+            old.execute(
+                "INSERT INTO extension_schemas (name, applied) VALUES ('test', 1)",
+                [],
+            )
+            .unwrap();
+            old.execute("INSERT INTO ext_test_notes (text) VALUES ('kept')", [])
+                .unwrap();
+            old.pragma_update(None, "user_version", core + 1).unwrap();
+            drop(old);
+
+            let mut store = Store::open(&path).unwrap();
+
+            assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len(), "{core}");
+            // The core's migrations that took the same numbers are applied.
+            for column in [
+                "SELECT place FROM approval_requests",
+                "SELECT ready FROM runs",
+            ] {
+                store.connection.prepare(column).unwrap();
+            }
+            // The extension's count is kept: its first migration is not run again.
+            store.migrate_extension("test", &[TABLE, COLUMN]).unwrap();
+            assert_eq!(notes(&mut store), ["kept"], "{core}");
+            assert_eq!(store.last_seq().unwrap(), 1, "{core}");
+            // Opened again, it is a store like any other.
+            drop(store);
+            assert_eq!(
+                Store::open(&path).unwrap().schema_version().unwrap(),
+                MIGRATIONS.len()
+            );
+        }
     }
 }
