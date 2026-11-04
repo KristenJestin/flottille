@@ -2050,15 +2050,40 @@ fn blocks(
     (!blocks.is_empty()).then(|| blocks.join(", "))
 }
 
+/// Refuses a branch the remote has not got up to its last commit, as the remote-tracking ref
+/// says it (a push leaves it, with or without `-u`; nothing is fetched): a pull request opened
+/// before has no source branch, or one without the work.
+async fn on_remote(folder: &Path, remote: &str, branch: &str) -> Result<(), String> {
+    let tracking = format!("refs/remotes/{remote}/{branch}");
+    let push = format!("push the branch first: git push -u {remote} {branch}");
+    let verified = git::run(
+        folder,
+        &["rev-parse", "--verify", "--quiet", &tracking],
+        Class::Read,
+    )
+    .await;
+    if !verified.is_ok_and(|said| said.success) {
+        return Err(format!("refused: {branch} is not on {remote} yet: {push}"));
+    }
+    let range = format!("{tracking}..HEAD");
+    let ahead = git::output(folder, &["rev-list", "--count", &range], Class::Read)
+        .await
+        .ok()
+        .and_then(|said| said.trim().parse::<u64>().ok());
+    match ahead {
+        Some(0) => Ok(()),
+        Some(commits) => Err(format!(
+            "refused: {branch} is {commits} commit(s) ahead of {remote}: {push}"
+        )),
+        None => Err(format!(
+            "refused: could not tell whether {branch} is on {remote}: {push}"
+        )),
+    }
+}
+
 /// `forge` `create`, `merge` and `checks`: one write to the forge of one repository of a
 /// workspace, for the workspace's branch only, through the user's own `gh` or `bkt`.
 async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
-    let Some(asked_repository) = asked.repository.clone() else {
-        return Outcome::Refused(format!(
-            "refused: forge {} needs repository, one of the workspace's",
-            asked.action
-        ));
-    };
     let name = match workspace_named(daemon, place, asked.workspace.as_deref(), "forge") {
         Ok(name) => name,
         Err(refusal) => return refusal,
@@ -2075,6 +2100,19 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
         Err(failure) => return Outcome::Failed(failure.message),
     };
     let repositories = repositories_of(&workspace, Some(&project));
+    // The only repository of the workspace needs no name.
+    let asked_repository = match (asked.repository.clone(), repositories.as_slice()) {
+        (Some(asked), _) => asked,
+        (None, [only]) => only.path.clone(),
+        (None, _) => {
+            let names: Vec<&str> = repositories.iter().map(|r| r.path.as_str()).collect();
+            return Outcome::Refused(format!(
+                "refused: forge {} needs repository, one of {}",
+                asked.action,
+                names.join(", ")
+            ));
+        }
+    };
     let found = repositories
         .iter()
         .zip(&workspace.repositories)
@@ -2108,6 +2146,16 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
         Err(Some(why)) => return Outcome::Refused(why),
     };
     let branch = head.branch_or(&workspace.branch);
+    if asked.action == "create"
+        && let Err(refusal) = on_remote(
+            &workspace.folder_of(&checkout.path),
+            &repository.base.remote,
+            branch,
+        )
+        .await
+    {
+        return Outcome::Refused(refusal);
+    }
     let reviewers = project.pull_requests.reviewers;
     if matches!(forge, Forge::Bitbucket { .. }) {
         let base = &repository.base.branch;

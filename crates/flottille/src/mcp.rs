@@ -114,7 +114,7 @@ const SERVED: [Definition; 28] = [
         schema: || {
             json!({"type": "object", "properties": {
                 "path": {"type": "string", "description": "Relative to the place, or to the repository when given."},
-                "repository": {"type": "string", "description": "One of the project's repositories, by its path."},
+                "repository": {"type": "string", "description": "One of the project's repositories, by its path (\".\" is the project folder itself), never a folder inside one: that goes in path. Left out: the place's top."},
                 "range": {"type": "object", "properties": {
                     "offset": {"type": "integer", "minimum": 0, "description": "The byte to start at; a page names the next one."},
                     "length": {"type": "integer", "minimum": 1, "maximum": files::READ_PAGE_BYTES}
@@ -135,7 +135,7 @@ const SERVED: [Definition; 28] = [
         schema: || {
             json!({"type": "object", "properties": {
                 "path": {"type": "string", "description": "Relative to the place, or to the repository when given; \".\" for its top."},
-                "repository": {"type": "string"},
+                "repository": {"type": "string", "description": "One of the project's repositories, by its path (\".\" is the project folder itself), never a folder inside one: that goes in path. Left out: the place's top."},
                 "depth": {"type": "integer", "minimum": 1, "maximum": 5}
             }, "required": ["path"], "additionalProperties": false})
         },
@@ -153,7 +153,7 @@ const SERVED: [Definition; 28] = [
         schema: || {
             json!({"type": "object", "properties": {
                 "pattern": {"type": "string", "description": "The text to find."},
-                "repository": {"type": "string"},
+                "repository": {"type": "string", "description": "One of the project's repositories, by its path (\".\" is the project folder itself), never a folder inside one: keep to a folder with glob (\"apps/front/**\"). Left out: the place's top."},
                 "glob": {"type": "string", "description": "Only the files it matches: on the name alone without a /, ** for any folders."},
                 "cursor": {"type": "string", "description": "The cursor a stopped search gave, path:line."}
             }, "required": ["pattern"], "additionalProperties": false})
@@ -172,7 +172,7 @@ const SERVED: [Definition; 28] = [
         schema: || {
             json!({"type": "object", "properties": {
                 "path": {"type": "string"},
-                "repository": {"type": "string"},
+                "repository": {"type": "string", "description": "One of the project's repositories, by its path (\".\" is the project folder itself), never a folder inside one: that goes in path. Left out: the place's top."},
                 "content": {"type": "string", "description": "The whole new content."},
                 "why": {"type": "string", "description": "One sentence: why this write."}
             }, "required": ["path", "content"], "additionalProperties": false})
@@ -191,7 +191,7 @@ const SERVED: [Definition; 28] = [
         schema: || {
             json!({"type": "object", "properties": {
                 "path": {"type": "string"},
-                "repository": {"type": "string"},
+                "repository": {"type": "string", "description": "One of the project's repositories, by its path (\".\" is the project folder itself), never a folder inside one: that goes in path. Left out: the place's top."},
                 "edits": {"type": "array", "minItems": 1, "maxItems": 50, "items": {
                     "type": "object", "properties": {
                         "old": {"type": "string", "minLength": 1, "description": "The text to replace, appearing once."},
@@ -219,7 +219,7 @@ const SERVED: [Definition; 28] = [
                 "action": {"type": "string", "enum": ["list", "show", "add", "edit", "remove"]},
                 "name": {"type": "string"},
                 "line": {"type": "string", "description": "add, edit: one command line, never run by a shell."},
-                "repository": {"type": ["string", "null"], "description": "add, edit: where it runs; the place's top when left out or null."},
+                "repository": {"type": ["string", "null"], "description": "add, edit: a repository of the project, by its path (\".\" is the project folder itself), never a folder inside one; the place's top when left out or null."},
                 "serve": {"type": "boolean", "description": "It keeps running."},
                 "check": {"type": "boolean", "description": "Tests, lint."},
                 "read_only": {"type": "boolean", "description": "It changes nothing."},
@@ -254,7 +254,7 @@ const SERVED: [Definition; 28] = [
             json!({"type": "object", "properties": {
                 "task": {"type": "string", "description": "A task of the project (tasks lists them)."},
                 "line": {"type": "string", "description": "One command line, split on spaces, quotes kept whole."},
-                "repository": {"type": "string", "description": "Where it runs; the place's top by default."},
+                "repository": {"type": "string", "description": "A repository of the project, by its path (\".\" is the project folder itself), never a folder inside one: a program takes its folder as an argument. The place's top by default."},
                 "timeout": {"type": "integer", "minimum": 1, "maximum": 600},
                 "notify": {"type": "string", "enum": ["ready"], "description": "A task that says when it is ready: you are told when it is, or when it ends before."},
                 "why": {"type": "string", "description": "One sentence: why this run."}
@@ -335,12 +335,12 @@ const SERVED: [Definition; 28] = [
             json!({"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["list", "show", "subscribe", "unsubscribe", "create", "comment", "edit", "merge", "checks", "close", "reopen", "pipelines", "runs", "run_view", "run_logs", "run", "stop", "step"]},
                 "workspace": {"type": "string", "description": "Yours when left out; in main, name it."},
-                "repository": {"type": "string", "description": "By path; all of the place's when left out (list, show)."},
+                "repository": {"type": "string", "description": "A repository of the project, by its path (\".\" is the project folder itself), never a folder inside one; all of the place's when left out (list, show); the only one is taken without being named."},
                 "number": {"type": "integer", "minimum": 1, "description": "show, comment, edit: a pull request."},
                 "state": {"type": "string", "enum": ["open", "closed", "merged", "all"]},
                 "branch": {"type": "string", "description": "list: its source branch."},
                 "detail": {"type": "string", "enum": ["short", "full"]},
-                "title": {"type": "string"},
+                "title": {"type": "string", "description": "create, edit: the pull request's title. create needs the branch pushed first (git push -u origin <branch>)."},
                 "body": {"type": "string", "description": "create, edit: description; comment: the comment."},
                 "draft": {"type": "boolean"},
                 "comment": {"type": "string", "description": "close, reopen: posted on the pull request first."},
