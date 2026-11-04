@@ -309,7 +309,14 @@ pub async fn run(
         dismissed: false,
         project: place.project.clone(),
     };
-    if let Err(why) = start(daemon, run, words, env, place.secret_values()) {
+    if let Err(why) = start(
+        daemon,
+        run,
+        words,
+        env,
+        place.secret_values(),
+        Phase::Waited,
+    ) {
         return Outcome::Failed(why);
     }
     if serve {
@@ -374,7 +381,14 @@ pub fn run_for_user(
         dismissed: false,
         project: project.name.clone(),
     };
-    start(daemon, run, words, env, place.secret_values())?;
+    start(
+        daemon,
+        run,
+        words,
+        env,
+        place.secret_values(),
+        Phase::Waited,
+    )?;
     Ok(id)
 }
 
@@ -525,13 +539,16 @@ async fn remote_kept(
     crate::forge::remote_kept(folder, base).await
 }
 
-/// Spawns the run, records it, and leaves a task of its own to follow it to its end.
+/// Spawns the run, records it, and leaves a task of its own to follow it to its end. `phase` is
+/// what it is in from the start: a run that ends at once must find it already detached to have
+/// its end delivered.
 fn start(
     daemon: &Arc<Daemon>,
     run: Run,
     words: Vec<String>,
     env: BTreeMap<OsString, OsString>,
     secrets: Vec<String>,
+    phase: Phase,
 ) -> Result<(), String> {
     let (reader, writer) = std::io::pipe().map_err(|e| format!("cannot run it: {e}"))?;
     let mut command = tokio::process::Command::new(&words[0]);
@@ -576,7 +593,7 @@ fn start(
         env,
         secrets,
         pid,
-        phase: Mutex::new(Phase::Waited),
+        phase: Mutex::new(phase),
         stopped_by_user: AtomicBool::new(false),
         restarted: AtomicBool::new(false),
     });
@@ -930,7 +947,14 @@ pub async fn restart_by_user(
         dismissed: false,
         project: old.project.clone(),
     };
-    if let Err(why) = start(daemon, run, words, env, place.secret_values()) {
+    // An agent's run is detached from the start: its end wakes the agent, as its call's would
+    // have, even when it comes before this function goes on.
+    let phase = if owner.is_some() {
+        Phase::Detached
+    } else {
+        Phase::Waited
+    };
+    if let Err(why) = start(daemon, run, words, env, place.secret_values(), phase) {
         // The stop was the user's and its end was not told: the agent hears of both.
         if stopped && let Some(agent) = &owner {
             let body = format!(
@@ -949,9 +973,7 @@ pub async fn restart_by_user(
         }
         return Err(why);
     }
-    // Its end wakes the agent, as its call's would have.
     if let Some(agent) = &owner {
-        detach(daemon, &id);
         let body = format!(
             "Your command `{}` (run {}) was restarted by the user: it now runs as run {id}, \
              still yours (read it with run_status {{\"run\": \"{id}\"}}).",

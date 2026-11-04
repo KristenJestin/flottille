@@ -740,3 +740,19 @@ fn a_command_of_an_ended_agent_restarts_as_the_user_s() {
         user.call("run.output", json!({"run": second})).unwrap()["output"] == "quick"
     });
 }
+
+#[test]
+fn a_restarted_command_that_ends_at_once_tells_its_agent_its_end() {
+    let user = User::with_fake_agent().with_fake_escalation();
+    let (_, mcp, _) = session(&user);
+    let first = run_id(&ok(mcp.call("run", json!({"task": "quick"}))));
+
+    let new = restarted(&user, &first);
+
+    let second = new["run"].as_str().unwrap().to_owned();
+    let prompt = prompted(
+        &user,
+        &["[flottille:command-ended]", &second, "exited with code 0"],
+    );
+    assert!(!prompt.contains("restarted by the user"), "{prompt}");
+}
