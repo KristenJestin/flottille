@@ -110,9 +110,11 @@ is signed in to (`acli jira auth status`)`. A work item with no `self` is not sh
 A description or a comment longer than 20,000 and 4,000 characters is cut, saying so; only the
 newest 30 comments are kept, the number of older ones is said.
 
-What an agent writes is marked ([`forges.md`](forges.md), "What Flottille posts is marked"): a
-comment that ends with the marker (GitHub) or the visible footer (Jira) is shown as `<author>
-(posted by an agent)`, its text without the mark; a description loses the mark too.
+What an agent writes carries nothing of Flottille, and is known by Flottille's record of it
+([`forges.md`](forges.md), "What Flottille posts is recorded"): a comment it posted is shown as
+`<author> (posted by an agent)`, by the id GitHub gave it or, where the tracker gave none (Jira),
+by a hash of its text. A comment or a description that still ends with the old marker (GitHub) or
+footer (Jira) is shown the same way, without it.
 
 ### Jira's text
 
@@ -231,15 +233,15 @@ ticket (the one named, or the workspace's) wakes the agent once, as a `subscript
 (`docs/design.md` §5.6), with the same shape as `forge` `subscribe`: `commented` (a new comment,
 its author and an excerpt), `status` (Jira's status moved, or the ticket was reopened), `assigned`
 (its assignees changed) and `closed`, which ends any subscription to it. `from: people` leaves out
-a bot (a GitHub login `app/<name>` or `<name>[bot]`, as for a pull request) and a comment marked
-as posted by an agent; `minutes` is 60 by default, 6000 at most. The
+a bot (a GitHub login `app/<name>` or `<name>[bot]`, as for a pull request) and a comment
+known as posted by an agent; `minutes` is 60 by default, 6000 at most. The
 ticket is read once and stored first: what is so now is no event. The answer says when the rounds
 do not see it yet, and so miss what happens before their next one: the tracker had no complete
 round (it never worked), or the item is not stored (a Jira work item whose status Jira gives no
 category for). **A Jira work item's comments are read by the rounds only while a subscription
 to its `commented` follows it** (`acli jira workitem view <KEY> --json --fields comment`, one
 call per work item that changed), since a tracker's every work item would cost one call each;
-a comment is then an `item.commented` as on GitHub, and an agent's own, ending with the footer,
+a comment is then an `item.commented` as on GitHub, and an agent's own, known by its record,
 is said `posted by an agent` and left out of `from: people`. Subscribing again to the same
 ticket replaces the agent's subscription; **`unsubscribe {ticket?}`** cancels those to the ticket
 named, every one when it names none. The events are the rounds' (`item.commented`,

@@ -17,9 +17,10 @@ use common::mcp::{Answer, Mcp, server_of};
 use flottille_core::agent::GateMode;
 use flottille_core::store::Store;
 use serde_json::{Value, json};
-/// What Flottille ends every comment and body it posts for an agent with (`docs/forges.md`).
+/// What Flottille ended the comments and bodies it posted for an agent with before it recorded
+/// them (`docs/forges.md`): the old posts are still read as an agent's.
 const MARKER: &str = "<!-- flottille -->";
-/// The same, where nothing invisible survives: the footer of a Jira comment or description.
+/// The same on Jira.
 const JIRA_FOOTER: &str = "— posted by a Flottille agent";
 
 /// A project `app` of one repository, its `origin` GitHub's `acme/app` (set before the workspace
@@ -344,9 +345,10 @@ fn forge_comment_is_judged_and_posted_once_allowed() {
         done.contains("The comment was posted on pull request #12 of acme/app."),
         "{done}"
     );
-    assert!(words(user.gh_received()).contains(&format!(
-        "pr comment 12 -R github.com/acme/app --body Rebased on main\n\n{MARKER}"
-    )));
+    assert!(
+        words(user.gh_received())
+            .contains(&"pr comment 12 -R github.com/acme/app --body Rebased on main".to_owned())
+    );
     // Refused before anything is asked: no body, no number.
     for args in [
         json!({"action": "comment", "number": 12}),
@@ -718,9 +720,10 @@ fn forge_close_closes_a_github_pull_request_with_a_comment_once_allowed() {
         "{done}"
     );
     let calls = words(user.gh_received());
-    assert!(calls.contains(&format!(
-        "pr close 12 -R github.com/acme/app --comment Superseded by #20\n\n{MARKER}"
-    )));
+    assert!(
+        calls
+            .contains(&"pr close 12 -R github.com/acme/app --comment Superseded by #20".to_owned())
+    );
     // Its state was read first, and the branch is left to the workspace that holds it.
     assert!(calls.iter().any(|call| call.starts_with("pr view 12 ")));
     assert!(user.escalations().is_empty());
@@ -748,9 +751,9 @@ fn forge_close_declines_a_bitbucket_pull_request_with_a_comment() {
         done.contains("The pull request #3 of acme/app was declined."),
         "{done}"
     );
-    assert!(words(user.bkt_received()).contains(&format!(
-        "pr decline 3 --context cloud --workspace acme --repo app --comment Superseded\n\n{MARKER}"
-    )));
+    assert!(words(user.bkt_received()).contains(
+        &"pr decline 3 --context cloud --workspace acme --repo app --comment Superseded".to_owned()
+    ));
 }
 
 #[test]
@@ -843,9 +846,10 @@ fn forge_reopen_reopens_a_closed_github_pull_request() {
         done.contains("The pull request #9 of acme/app was reopened."),
         "{done}"
     );
-    assert!(words(user.gh_received()).contains(&format!(
-        "pr reopen 9 -R github.com/acme/app --comment Needed again\n\n{MARKER}"
-    )));
+    assert!(
+        words(user.gh_received())
+            .contains(&"pr reopen 9 -R github.com/acme/app --comment Needed again".to_owned())
+    );
     // Not one that is open, nor one that was merged.
     let open = allowed_then_refused(
         &user,
@@ -957,13 +961,16 @@ fn forge_list_comment_and_edit_go_through_bkt_on_bitbucket() {
                 .to_owned()
         )
     );
-    assert!(calls.contains(&format!(
-        "pr comment 3 --context cloud --workspace acme --repo app --text Ready\n\n{MARKER}"
-    )));
-    assert!(calls.contains(&format!(
-        "pr edit 3 --context cloud --workspace acme --repo app --description Adds the login \
-         page\n\n{MARKER}"
-    )));
+    assert!(calls.contains(
+        &"pr comment 3 --context cloud --workspace acme --repo app --text Ready".to_owned()
+    ));
+    assert!(
+        calls.contains(
+            &"pr edit 3 --context cloud --workspace acme --repo app --description Adds the login \
+         page"
+                .to_owned()
+        )
+    );
     assert!(user.escalations().is_empty());
 }
 
@@ -1192,10 +1199,10 @@ fn tickets_create_is_judged_and_opens_an_issue_once_allowed() {
     );
     assert_eq!(
         asked,
-        [format!(
+        [
             "issue create -R github.com/acme/app --title Add a logout --body Users stay signed \
-             in\n\n{MARKER} --label feature"
-        )]
+             in --label feature"
+        ]
     );
 }
 
@@ -1211,9 +1218,7 @@ fn tickets_comment_is_judged_and_posted_once_allowed() {
     );
     assert_eq!(
         asked,
-        [format!(
-            "issue comment 1 -R github.com/acme/app --body Fixed on app/login\n\n{MARKER}"
-        )]
+        ["issue comment 1 -R github.com/acme/app --body Fixed on app/login"]
     );
 }
 
@@ -1781,10 +1786,10 @@ fn create_a_jira_work_item_in_a_tracker_s_project() {
     );
     assert_eq!(
         asked,
-        [format!(
+        [
             "jira workitem create --project DEF --summary Add a logout --description Users stay \
-             signed in\n\n{JIRA_FOOTER} --type Story --label feature,auth --json"
-        )]
+             signed in --type Story --label feature,auth --json"
+        ]
     );
 }
 
@@ -1797,9 +1802,7 @@ fn comment_on_a_jira_work_item() {
     assert!(done.contains("The comment was posted on ABC-1."), "{done}");
     assert_eq!(
         asked,
-        [format!(
-            "jira workitem comment create --key ABC-1 --body Fixed on app/login\n\n{JIRA_FOOTER}"
-        )]
+        ["jira workitem comment create --key ABC-1 --body Fixed on app/login"]
     );
 }
 
@@ -1813,10 +1816,10 @@ fn edit_a_jira_work_item_s_summary_and_description() {
     assert!(done.contains("ABC-1 was changed."), "{done}");
     assert_eq!(
         asked,
-        [format!(
+        [
             "jira workitem edit --key ABC-1 --summary The logout fails --description It \
-             hangs\n\n{JIRA_FOOTER} --yes"
-        )]
+             hangs --yes"
+        ]
     );
 }
 
@@ -3683,4 +3686,465 @@ fn the_judge_sees_a_session_send_message_as_the_agent_s_never_the_user_s() {
     );
     let block = before.split_once("<session_message").unwrap().1;
     assert!(block.contains(text), "{prompt}");
+}
+
+// What an agent posts carries nothing of Flottille (#381): the daemon knows its posts by what it
+// recorded when it posted them.
+
+/// `pulls()` with the comments of the pull request `app/login` and of the issue #1, the next
+/// comment posted being numbered 501 by GitHub.
+fn github_with_comments(user: &User, pull: Value, issue_comments: Value) {
+    static CHANGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = CHANGES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let mut script = pulls();
+    script["pulls"]["acme/app"]["app/login"]["comments"] = pull;
+    script["pulls"]["acme/app"]["app/login"]["updatedAt"] =
+        format!("2999-01-01T{:02}:{:02}:00Z", n / 60 % 24, n % 60).into();
+    script["issues"] = json!({"acme/app": {"1": {"number": 1, "title": "The login fails",
+        "state": "OPEN", "body": "About it", "url": "https://github.com/acme/app/issues/1",
+        "labels": [], "assignees": [], "comments": issue_comments}}});
+    script["commented"] = json!(501);
+    user.gh_script(script);
+}
+
+/// A comment as `gh` reads it back: its link names it, as the one `gh pr comment` printed did.
+fn read_back(id: u64, author: &str, body: &str) -> Value {
+    json!({"id": format!("IC_{id}"), "author": {"login": author}, "body": body,
+        "url": format!("https://github.com/acme/app/pull/12#issuecomment-{id}"),
+        "createdAt": "2026-10-01T12:00:00Z"})
+}
+
+/// The agent comments on the pull request `app/login` (held, then allowed).
+fn comment_on_the_pull_request(user: &User, mcp: &Mcp, body: &str) {
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "comment", "number": 12, "body": body}),
+    );
+    judged_then_done(user, answer, || words(user.gh_received()), "pr comment");
+}
+
+/// GitHub: a pull request's comment and an issue's.
+fn github_comments_are_posted_without_a_marker() {
+    let user = user();
+    on_github(&user);
+    github_with_comments(&user, json!([]), json!([]));
+    let (_, mcp) = root_in(&user, Some("login"));
+    comment_on_the_pull_request(&user, &mcp, "Rebased on main");
+    let answer = mcp.call(
+        "tickets",
+        json!({"action": "comment", "ticket": "#1", "body": "Fixed on app/login"}),
+    );
+    judged_then_done(&user, answer, || words(user.gh_received()), "issue comment");
+    let calls = words(user.gh_received());
+    assert!(calls.contains(&"pr comment 12 -R github.com/acme/app --body Rebased on main".into()));
+    assert!(
+        calls.contains(&"issue comment 1 -R github.com/acme/app --body Fixed on app/login".into())
+    );
+}
+
+fn bitbucket_comments_are_posted_without_a_marker() {
+    let user = user();
+    on_bitbucket(&user);
+    user.bkt_script(
+        json!({"pulls": {"acme/app": [{"id": 3, "title": "Work", "state": "OPEN",
+        "source": {"branch": {"name": "app/login"}, "repository": {"full_name": "acme/app"}},
+        "destination": {"branch": {"name": "main"}, "repository": {"full_name": "acme/app"}}}]}}),
+    );
+    let (_, mcp) = root_in(&user, None);
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "comment", "number": 3, "body": "Ready"}),
+    );
+    judged_then_done(&user, answer, || words(user.bkt_received()), "pr comment");
+    let calls = words(user.bkt_received());
+    assert!(
+        calls.contains(
+            &"pr comment 3 --context cloud --workspace acme --repo app --text Ready".into()
+        ),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn an_agent_s_comment_is_posted_without_a_marker() {
+    github_comments_are_posted_without_a_marker();
+    bitbucket_comments_are_posted_without_a_marker();
+    let (_, asked) = jira_written(
+        json!({"action": "comment", "ticket": "ABC-1", "body": "Fixed on app/login"}),
+        "jira workitem comment",
+    );
+    assert_eq!(
+        asked,
+        ["jira workitem comment create --key ABC-1 --body Fixed on app/login"]
+    );
+}
+
+#[test]
+fn show_says_posted_by_an_agent_from_the_record() {
+    let user = user();
+    on_github(&user);
+    github_with_comments(&user, json!([]), json!([]));
+    let (_, mcp) = root_in(&user, Some("login"));
+    comment_on_the_pull_request(&user, &mcp, "Rebased on main");
+    let answer = mcp.call(
+        "tickets",
+        json!({"action": "comment", "ticket": "#1", "body": "Fixed on app/login"}),
+    );
+    judged_then_done(&user, answer, || words(user.gh_received()), "issue comment");
+
+    // The forge answers with GitHub's own numbers: the user's, under the same account, is 502.
+    github_with_comments(
+        &user,
+        json!([
+            read_back(501, "kris", "Rebased on main"),
+            read_back(502, "kris", "Rebased on main")
+        ]),
+        json!([
+            {"author": {"login": "kris"}, "body": "Fixed on app/login",
+             "url": "https://github.com/acme/app/issues/1#issuecomment-501"},
+            {"author": {"login": "kris"}, "body": "Fixed on app/login",
+             "url": "https://github.com/acme/app/issues/1#issuecomment-502"}
+        ]),
+    );
+    let pull = read(
+        &user,
+        mcp.call("forge", json!({"action": "show", "detail": "full"})),
+    );
+    assert!(
+        pull.contains("- kris (posted by an agent): Rebased on main\n"),
+        "{pull}"
+    );
+    // By the record, not by the text: the same words under another number are a person's.
+    assert!(pull.contains("- kris: Rebased on main\n"), "{pull}");
+    let ticket = read(
+        &user,
+        mcp.call(
+            "tickets",
+            json!({"action": "show", "ticket": "#1", "detail": "full"}),
+        ),
+    );
+    assert!(ticket.contains("kris (posted by an agent)"), "{ticket}");
+    assert!(ticket.contains("- kris: Fixed on app/login"), "{ticket}");
+}
+
+#[test]
+fn show_says_posted_by_an_agent_from_the_record_where_the_tracker_gives_no_id() {
+    // Jira: `acli` prints no id for a comment, so the record keeps the text, and the comment read
+    // back is known by it.
+    let user = user();
+    on_jira(&user);
+    jira_items(&user);
+    let (_, mcp) = root_in(&user, None);
+    let answer = mcp.call(
+        "tickets",
+        json!({"action": "comment", "ticket": "ABC-1", "body": "Fixed on app/login"}),
+    );
+    judged_then_done(
+        &user,
+        answer,
+        || words(user.acli_received()),
+        "jira workitem comment",
+    );
+
+    let shown = read(
+        &user,
+        mcp.call(
+            "tickets",
+            json!({"action": "show", "ticket": "ABC-1", "detail": "full"}),
+        ),
+    );
+
+    assert!(shown.contains("(posted by an agent)"), "{shown}");
+    assert!(shown.contains("Fixed on app/login"), "{shown}");
+    assert!(!shown.contains("posted by a Flottille agent"), "{shown}");
+}
+
+/// Every prompt the fake agent was sent that is a subscription's delivery.
+fn deliveries(user: &User) -> Vec<String> {
+    user.received_requests("session/prompt")
+        .iter()
+        .filter_map(|p| p["params"]["prompt"][0]["text"].as_str().map(str::to_owned))
+        .filter(|p| p.contains("[flottille:subscription]"))
+        .collect()
+}
+
+#[test]
+fn from_people_leaves_out_a_comment_the_agent_posted() {
+    let user = user();
+    on_github(&user);
+    github_with_comments(&user, json!([]), json!([]));
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
+    let (_, mcp) = root_in(&user, Some("login"));
+    let subscribed = mcp.call(
+        "forge",
+        json!({"action": "subscribe", "events": ["comment"], "from": "people"}),
+    );
+    assert!(!subscribed.error, "{}", subscribed.text);
+    comment_on_the_pull_request(&user, &mcp, "Rebased on main");
+
+    // The round finds the agent's comment (501) and the user's own, under the same account (502).
+    github_with_comments(
+        &user,
+        json!([
+            read_back(501, "kris", "Rebased on main"),
+            read_back(502, "kris", "Why a new form?")
+        ]),
+        json!([]),
+    );
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
+
+    eventually("the user's comment is delivered", || {
+        !deliveries(&user).is_empty()
+    });
+    let all = deliveries(&user);
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert!(all[0].contains("Why a new form?"), "{}", all[0]);
+    assert!(!all[0].contains("Rebased"), "{}", all[0]);
+}
+
+#[test]
+fn a_comment_with_the_old_marker_is_still_an_agent_s() {
+    let user = user();
+    on_github(&user);
+    github_with_comments(
+        &user,
+        json!([read_back(
+            7,
+            "kris",
+            &format!("Rebased on main\n\n{MARKER}")
+        )]),
+        json!([{"author": {"login": "kris"}, "body": format!("Fixed\n\n{MARKER}")}]),
+    );
+    let (_, mcp) = root_in(&user, Some("login"));
+
+    let pull = read(
+        &user,
+        mcp.call("forge", json!({"action": "show", "detail": "full"})),
+    );
+    let ticket = read(
+        &user,
+        mcp.call(
+            "tickets",
+            json!({"action": "show", "ticket": "#1", "detail": "full"}),
+        ),
+    );
+
+    assert!(
+        pull.contains("- kris (posted by an agent): Rebased on main\n"),
+        "{pull}"
+    );
+    assert!(ticket.contains("kris (posted by an agent)"), "{ticket}");
+    for shown in [&pull, &ticket] {
+        assert!(!shown.contains("flottille -->"), "{shown}");
+    }
+
+    // Jira: the visible footer of before.
+    let user = self::user();
+    on_jira(&user);
+    let mut item = work_item("ABC-1", "The login fails", "example.atlassian.net");
+    item["fields"]["comment"] = json!({"comments": [{"author": {"displayName": "kris"},
+        "created": "2026-10-01T12:00:00.000+0000",
+        "body": format!("Started\n\n{JIRA_FOOTER}")}]});
+    user.acli_script(json!({"items": {"ABC-1": item}}));
+    let (_, mcp) = root_in(&user, None);
+    let shown = read(
+        &user,
+        mcp.call(
+            "tickets",
+            json!({"action": "show", "ticket": "ABC-1", "detail": "full"}),
+        ),
+    );
+    assert!(shown.contains("kris (posted by an agent)"), "{shown}");
+    assert!(!shown.contains("posted by a Flottille agent"), "{shown}");
+}
+
+#[test]
+fn what_an_agent_posted_is_still_known_after_a_daemon_restart() {
+    let user = user();
+    on_github(&user);
+    github_with_comments(&user, json!([]), json!([]));
+    let (_, mcp) = root_in(&user, Some("login"));
+    comment_on_the_pull_request(&user, &mcp, "Rebased on main");
+    drop(mcp);
+
+    let daemon = user.status()["pid"].as_u64().unwrap();
+    // SAFETY: kill has no memory precondition.
+    unsafe { libc::kill(daemon as i32, libc::SIGKILL) };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Path::new(&format!("/proc/{daemon}")).exists() {
+        assert!(Instant::now() < deadline, "the daemon did not die");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    user.status();
+
+    github_with_comments(
+        &user,
+        json!([read_back(501, "kris", "Rebased on main")]),
+        json!([]),
+    );
+    let (_, mcp) = root_in(&user, Some("login"));
+    let shown = read(
+        &user,
+        mcp.call("forge", json!({"action": "show", "detail": "full"})),
+    );
+    assert!(
+        shown.contains("- kris (posted by an agent): Rebased on main\n"),
+        "{shown}"
+    );
+}
+
+/// What the store recorded as posted on an item, as (kind, id of the comment).
+fn recorded(
+    user: &User,
+    source: &str,
+    repository: &str,
+    key: &str,
+) -> Vec<(String, Option<String>)> {
+    store(user)
+        .posts("app", source, repository, key)
+        .unwrap()
+        .into_iter()
+        .map(|post| (post.kind, post.comment_id))
+        .collect()
+}
+
+fn body_of(id: Option<&str>) -> (String, Option<String>) {
+    ("body".to_owned(), id.map(str::to_owned))
+}
+
+fn comment_of(id: Option<&str>) -> (String, Option<String>) {
+    ("comment".to_owned(), id.map(str::to_owned))
+}
+
+#[test]
+fn every_post_of_an_agent_on_github_is_recorded_with_the_id_gh_answers() {
+    let user = user();
+    on_github(&user);
+    github_with_comments(&user, json!([]), json!([]));
+    let mut script: Value =
+        serde_json::from_str(&std::fs::read_to_string(user.path("gh/script.json")).unwrap())
+            .unwrap();
+    script["created_issue"] = json!(46);
+    user.gh_script(script);
+    let (_, mcp) = root_in(&user, Some("login"));
+    let post = |tool: &str, args: Value| {
+        let number = held(&mcp.call(tool, args));
+        allow(&user, number);
+    };
+
+    post(
+        "forge",
+        json!({"action": "comment", "number": 12, "body": "Rebased"}),
+    );
+    post(
+        "forge",
+        json!({"action": "edit", "number": 12, "body": "What it does now"}),
+    );
+    post(
+        "forge",
+        json!({"action": "edit", "number": 12, "title": "Only a title"}),
+    );
+    post(
+        "tickets",
+        json!({"action": "create", "title": "Add a logout", "body": "Users stay in"}),
+    );
+    post("tickets", json!({"action": "create", "title": "No body"}));
+    post(
+        "tickets",
+        json!({"action": "comment", "ticket": "#1", "body": "Fixed"}),
+    );
+    post(
+        "tickets",
+        json!({"action": "edit", "ticket": "#1", "body": "New text"}),
+    );
+
+    // `gh pr comment` and `gh issue comment` print the comment's link; the others print the item's.
+    assert_eq!(
+        recorded(&user, "github", ".", "12"),
+        [comment_of(Some("issuecomment-501")), body_of(None)]
+    );
+    assert_eq!(recorded(&user, "github", ".", "46"), [body_of(None)]);
+    assert_eq!(
+        recorded(&user, "github", ".", "1"),
+        [comment_of(Some("issuecomment-501")), body_of(None)]
+    );
+}
+
+#[test]
+fn a_comment_that_closes_or_reopens_is_recorded_by_its_text_as_gh_and_bkt_give_no_id() {
+    let user = user();
+    on_github(&user);
+    user.gh_script(pulls_to_close());
+    let (_, mcp) = root_in(&user, None);
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "close", "number": 12, "comment": "Superseded by #20"}),
+    );
+    judged_then_done(&user, answer, || words(user.gh_received()), "pr close");
+    assert_eq!(recorded(&user, "github", ".", "12"), [comment_of(None)]);
+    let posts = store(&user).posts("app", "github", ".", "12").unwrap();
+    assert!(posts[0].fingerprint.is_some());
+
+    let user = self::user();
+    on_bitbucket(&user);
+    user.bkt_script(
+        json!({"pulls": {"acme/app": [{"id": 3, "title": "Work", "state": "OPEN",
+        "source": {"branch": {"name": "app/login"}, "repository": {"full_name": "acme/app"}},
+        "destination": {"branch": {"name": "main"}, "repository": {"full_name": "acme/app"}}}]}}),
+    );
+    let (_, mcp) = root_in(&user, None);
+    for args in [
+        json!({"action": "comment", "number": 3, "body": "Ready"}),
+        json!({"action": "edit", "number": 3, "body": "Adds the login page"}),
+        json!({"action": "close", "number": 3, "comment": "Superseded"}),
+    ] {
+        let verb = format!(
+            "pr {}",
+            if args["action"] == "close" {
+                "decline"
+            } else {
+                args["action"].as_str().unwrap()
+            }
+        );
+        let answer = mcp.call("forge", args);
+        judged_then_done(&user, answer, || words(user.bkt_received()), &verb);
+    }
+    assert_eq!(
+        recorded(&user, "bitbucket", ".", "3"),
+        [comment_of(None), body_of(None), comment_of(None)]
+    );
+}
+
+#[test]
+fn every_post_of_an_agent_on_jira_is_recorded_by_its_text() {
+    let user = user();
+    on_jira(&user);
+    jira_items(&user);
+    let (_, mcp) = root_in(&user, None);
+    let calls = || words(user.acli_received());
+    for (args, verb) in [
+        (
+            json!({"action": "create", "title": "Add a logout", "body": "Users stay in", "project": "DEF"}),
+            "jira workitem create",
+        ),
+        (
+            json!({"action": "comment", "ticket": "ABC-1", "body": "Fixed"}),
+            "jira workitem comment",
+        ),
+        (
+            json!({"action": "edit", "ticket": "ABC-1", "body": "New text"}),
+            "jira workitem edit",
+        ),
+    ] {
+        let answer = mcp.call("tickets", args);
+        judged_then_done(&user, answer, calls, verb);
+    }
+
+    assert_eq!(recorded(&user, "jira", "", "DEF-7"), [body_of(None)]);
+    assert_eq!(
+        recorded(&user, "jira", "", "ABC-1"),
+        [comment_of(None), body_of(None)]
+    );
 }

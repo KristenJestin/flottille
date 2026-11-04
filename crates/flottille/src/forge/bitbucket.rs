@@ -13,6 +13,7 @@ use super::{
     Comment, Forge, ForgeCall, Gh, MERGE_METHODS, Pull, Seen, blocks, commit_hash, masked,
     method_refused, run,
 };
+use crate::daemon::Daemon;
 use crate::mcp::Outcome;
 
 /// The size of every page asked of Bitbucket: its pull request list takes 50 at most (`bkt` v0.37.0
@@ -1217,6 +1218,8 @@ fn cloud_comments(comments: &[Value]) -> Vec<Comment> {
             // What says a Bitbucket bot is not read: every author is taken for a person.
             bot: false,
             at: None,
+            id: None,
+            recorded: false,
         })
         .collect()
 }
@@ -1239,6 +1242,8 @@ fn cloud_closing(state: &str, page: &Value) -> Option<Comment> {
         body: masked(reason),
         bot: false,
         at: None,
+        id: None,
+        recorded: false,
     })
 }
 
@@ -1272,6 +1277,8 @@ fn dc_closing(state: &str, activities: &[Value]) -> Option<Comment> {
             body: masked(a["comment"]["text"].as_str().unwrap_or_default()),
             bot: false,
             at: None,
+            id: None,
+            recorded: false,
         })
 }
 
@@ -1284,6 +1291,8 @@ fn dc_comments(activities: &[Value]) -> Vec<Comment> {
             body: masked(comment["text"].as_str().unwrap_or_default()),
             bot: false,
             at: None,
+            id: None,
+            recorded: false,
         });
         for reply in comment["comments"].as_array().into_iter().flatten() {
             walk(reply, out);
@@ -1329,6 +1338,7 @@ pub(super) async fn note(
 /// through and the remote was found where the workspace was created: the same actions and the
 /// same checks as for GitHub, through `bkt`.
 pub(super) async fn write(
+    (daemon, project, path): (&Daemon, &str, &str),
     forge: &Forge,
     branch: &str,
     base: &str,
@@ -1355,7 +1365,7 @@ pub(super) async fn write(
                         .into(),
                 );
             }
-            let body = super::marked(&asked.body.unwrap_or_default());
+            let body = asked.body.unwrap_or_default();
             let mut flags = vec![
                 "--source",
                 branch,
@@ -1384,6 +1394,11 @@ pub(super) async fn write(
                         .collect::<String>()
                 })
                 .and_then(|digits| digits.parse::<u64>().ok());
+            if let (Some(number), false) = (number, body.trim().is_empty()) {
+                let number = number.to_string();
+                let on = (project, "bitbucket", path, number.as_str());
+                crate::posts::record_body(daemon, on, &body);
+            }
             let url = match pulls(forge, context, "all").await {
                 Ok(listed) => listed
                     .into_iter()

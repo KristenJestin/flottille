@@ -349,12 +349,18 @@ pub struct Comment {
     /// When it was written, in milliseconds, where a closing comment is told from the others
     /// (GitHub's); none elsewhere.
     pub at: Option<u64>,
+    /// The id the forge gives it, where it gives one (GitHub's link names it).
+    pub id: Option<String>,
+    /// Flottille's record says an agent posted it (`posts`).
+    pub recorded: bool,
 }
 
 impl Comment {
-    /// The text, without the mark of Flottille, and whether an agent of Flottille posted it.
+    /// The text, without the old mark of Flottille, and whether an agent of Flottille posted it:
+    /// the record says so, or the text ends with the mark of before it was recorded.
     pub fn unmarked(&self) -> (&str, bool) {
-        unmarked(&self.body)
+        let (text, marked) = unmarked(&self.body);
+        (text, marked || self.recorded)
     }
 }
 
@@ -426,6 +432,8 @@ impl Pull {
                     at: comment["createdAt"]
                         .as_str()
                         .and_then(crate::session_read::form),
+                    id: comment["url"].as_str().and_then(crate::posts::comment_id),
+                    recorded: false,
                 })
                 .collect()
         };
@@ -758,36 +766,18 @@ pub(crate) async fn gh_json(args: &[&str]) -> Result<Value, String> {
     }
 }
 
-/// What ends every comment and body Flottille posts for an agent on GitHub and Bitbucket: an HTML
-/// comment, which both forges leave out of what they render. It goes out through the user's own
-/// `gh` or `bkt`, so it is the only way to tell an agent's words from the user's.
+/// What ended every comment and body Flottille posted for an agent on GitHub and Bitbucket before
+/// its posts were recorded (`posts`): an HTML comment. Nothing posts it any more, but a text that
+/// still ends with it was an agent's, and is read so.
 pub(crate) const MARKER: &str = "<!-- flottille -->";
-/// The same on Jira, where nothing invisible survives `acli`: a short visible line.
+/// The same on Jira, where it was a short visible line.
 pub(crate) const FOOTER: &str = "— posted by a Flottille agent";
 /// How a text posted by an agent is said where it is shown to another.
 pub(crate) const BY_AGENT: &str = "posted by an agent";
 
-/// `body`, ended with `end` on a line of its own (`end` alone when there is no body).
-fn ended_with(body: &str, end: &str) -> String {
-    match body.trim_end() {
-        "" => end.to_owned(),
-        body => format!("{body}\n\n{end}"),
-    }
-}
-
-/// What an agent posts on GitHub or Bitbucket: `body`, marked.
-pub(crate) fn marked(body: &str) -> String {
-    ended_with(body, MARKER)
-}
-
-/// What an agent posts on Jira: `body`, with the footer.
-pub(crate) fn footed(body: &str) -> String {
-    ended_with(body, FOOTER)
-}
-
-/// A text read from a forge or a tracker, without the mark of Flottille, and whether it had one:
-/// an agent of Flottille posted it. A person's comment that ends with the mark is taken for an
-/// agent's, which is accepted.
+/// A text read from a forge or a tracker, without the old mark of Flottille, and whether it had
+/// one: an agent of Flottille posted it. A person's comment that ends with the mark is taken for
+/// an agent's, which is accepted.
 pub(crate) fn unmarked(text: &str) -> (&str, bool) {
     let text = text.trim_end();
     for end in [MARKER, FOOTER] {
@@ -1329,6 +1319,19 @@ async fn forge_subscribe(
     Outcome::Done(text)
 }
 
+/// Marks the comments of a pull request that an agent posted, as Flottille's record says
+/// (`posts`).
+fn know_posts(daemon: &Daemon, project: &str, path: &str, forge: &Forge, pull: &mut Pull) {
+    crate::posts::Known::of(
+        daemon,
+        project,
+        forge.kind(),
+        path,
+        &pull.number.to_string(),
+    )
+    .mark_pull(pull);
+}
+
 /// What a live read found of a pull request, stored over what the items keep of it.
 fn remember(daemon: &Arc<Daemon>, project: &str, path: &str, forge: &Forge, pull: &Pull) {
     let mut fetched = fetched_pull(path, forge.kind(), pull, true);
@@ -1640,6 +1643,7 @@ async fn forge_show(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall, numbe
             forge.slug()
         )),
         Ok(Some(mut pull)) => {
+            know_posts(daemon, &place.project, &checkout.path, &forge, &mut pull);
             if held.is_some() {
                 remember(daemon, &place.project, &checkout.path, &forge, &pull);
             }
@@ -1729,10 +1733,11 @@ async fn forge_note(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
         }
     }
     let number = number.to_string();
-    let marked_body = body.map(marked);
-    let body = marked_body.as_deref();
+    // The id of the comment, where the forge answers one: `gh` prints its link, `bkt` none.
     let done = match &forge {
-        Forge::Bitbucket { .. } => bitbucket::note(&forge, action, &number, title, body).await,
+        Forge::Bitbucket { .. } => bitbucket::note(&forge, action, &number, title, body)
+            .await
+            .map(|()| None),
         Forge::GitHub { .. } => {
             let repo = forge.gh_repository();
             let mut args = vec!["pr", action, &number, "-R", &repo];
@@ -1743,15 +1748,31 @@ async fn forge_note(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
             if let Some(body) = body {
                 args.extend(["--body", body]);
             }
-            gh_text(&args).await.map(|_| ())
+            gh_text(&args)
+                .await
+                .map(|said| crate::posts::comment_id_in(&said))
         }
     };
-    match (done, action) {
-        (Err(why), _) => Outcome::Failed(why),
-        (Ok(()), "comment") => Outcome::Done(format!(
-            "The comment was posted on pull request #{number} of {slug}."
-        )),
-        (Ok(()), _) => Outcome::Done(format!("Pull request #{number} of {slug} was changed.")),
+    let on = (
+        place.project.as_str(),
+        forge.kind(),
+        checkout.path.as_str(),
+        number.as_str(),
+    );
+    match (done, action, body) {
+        (Err(why), _, _) => Outcome::Failed(why),
+        (Ok(id), "comment", Some(body)) => {
+            crate::posts::record_comment(daemon, on, id, body);
+            Outcome::Done(format!(
+                "The comment was posted on pull request #{number} of {slug}."
+            ))
+        }
+        (Ok(_), _, body) => {
+            if let Some(body) = body {
+                crate::posts::record_body(daemon, on, body);
+            }
+            Outcome::Done(format!("Pull request #{number} of {slug} was changed."))
+        }
     }
 }
 
@@ -1831,12 +1852,7 @@ async fn forge_close(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
              open a new one for #{number} of {slug}"
         ));
     }
-    let comment = asked
-        .comment
-        .as_deref()
-        .filter(|c| !c.trim().is_empty())
-        .map(marked);
-    let comment = comment.as_deref();
+    let comment = asked.comment.as_deref().filter(|c| !c.trim().is_empty());
     let numbered = number.to_string();
     let repo = forge.gh_repository();
     if !bitbucket && let Err(problem) = signed_in().await {
@@ -1894,6 +1910,17 @@ async fn forge_close(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
     };
     if let Err(why) = done {
         return Outcome::Failed(why);
+    }
+    // Neither `gh pr close` nor `bkt pr decline` says the id of the comment it posted: the record
+    // keeps its text.
+    if let Some(comment) = comment {
+        let on = (
+            place.project.as_str(),
+            forge.kind(),
+            checkout.path.as_str(),
+            numbered.as_str(),
+        );
+        crate::posts::record_comment(daemon, on, None, comment);
     }
     let verb = match (action, bitbucket) {
         ("close", true) => "declined",
@@ -1953,6 +1980,11 @@ async fn forge_read(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall) -> Ou
     // whose logs and runs are read after it.
     let held = crate::items::held_now(daemon, &place.project);
     let mut read = read(&repositories, &branches, obsolete).await;
+    for repository in &mut read.repositories {
+        if let (Some(forge), Some(pull)) = (&repository.forge, &mut repository.pull) {
+            know_posts(daemon, &place.project, &repository.path, forge, pull);
+        }
+    }
     if held.is_some() {
         for repository in &read.repositories {
             if let (Some(forge), Some(pull)) = (&repository.forge, &repository.pull) {
@@ -2079,7 +2111,8 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
     let reviewers = project.pull_requests.reviewers;
     if matches!(forge, Forge::Bitbucket { .. }) {
         let base = &repository.base.branch;
-        return bitbucket::write(&forge, branch, base, &reviewers, asked).await;
+        let on = (daemon, place.project.as_str(), checkout.path.as_str());
+        return bitbucket::write(on, &forge, branch, base, &reviewers, asked).await;
     }
     if let Err(problem) = signed_in().await {
         return Outcome::Failed(problem);
@@ -2094,7 +2127,7 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                 );
             };
             let base = &repository.base.branch;
-            let body = marked(&asked.body.unwrap_or_default());
+            let body = asked.body.unwrap_or_default();
             let mut args = vec![
                 "pr", "create", "-R", &repo, "--head", branch, "--base", base, "--title", &title,
                 "--body", &body,
@@ -2106,10 +2139,23 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                 args.extend(["--reviewer", reviewer]);
             }
             match gh_text(&args).await {
-                Ok(said) => Outcome::Done(format!(
-                    "The pull request of {branch} into {base} was opened in {slug}: {}",
-                    said.trim()
-                )),
+                Ok(said) => {
+                    // `gh` prints the new pull request's link, which ends with its number.
+                    let number = said.trim().rsplit('/').next().unwrap_or_default();
+                    if !body.trim().is_empty() && number.parse::<u64>().is_ok() {
+                        let on = (
+                            place.project.as_str(),
+                            forge.kind(),
+                            checkout.path.as_str(),
+                            number,
+                        );
+                        crate::posts::record_body(daemon, on, &body);
+                    }
+                    Outcome::Done(format!(
+                        "The pull request of {branch} into {base} was opened in {slug}: {}",
+                        said.trim()
+                    ))
+                }
                 Err(why) => Outcome::Failed(why),
             }
         }
@@ -2852,23 +2898,17 @@ mod tests {
         assert_eq!(state(json!({"number": 1, "state": "MERGED"})), "merged");
         assert_eq!(state(json!({"number": 1, "state": "CLOSED"})), "closed");
     }
+
     #[test]
-    fn a_posted_text_ends_with_the_mark_and_is_read_back_without_it() {
-        assert_eq!(marked("Rebased"), "Rebased\n\n<!-- flottille -->");
-        assert_eq!(marked("Rebased\n"), "Rebased\n\n<!-- flottille -->");
-        assert_eq!(marked(""), "<!-- flottille -->");
-        assert_eq!(
-            footed("Rebased"),
-            "Rebased\n\n— posted by a Flottille agent"
-        );
+    fn a_text_with_the_old_mark_is_read_back_without_it_as_an_agent_s() {
         for posted in [
-            marked("Rebased"),
-            footed("Rebased"),
-            marked("Rebased") + "\n",
+            "Rebased\n\n<!-- flottille -->",
+            "Rebased\n\n— posted by a Flottille agent",
+            "Rebased\n\n<!-- flottille -->\n",
         ] {
-            assert_eq!(unmarked(&posted), ("Rebased", true), "{posted:?}");
+            assert_eq!(unmarked(posted), ("Rebased", true), "{posted:?}");
         }
-        assert_eq!(unmarked(&marked("")), ("", true));
+        assert_eq!(unmarked("<!-- flottille -->"), ("", true));
         assert_eq!(unmarked("Thanks"), ("Thanks", false));
         // Only the end counts: a mark quoted in the middle of a person's text is theirs.
         let quoted = "Do not add <!-- flottille --> to it";

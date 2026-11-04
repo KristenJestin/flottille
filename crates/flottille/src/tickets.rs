@@ -76,8 +76,11 @@ pub struct Comment {
     pub at: Option<String>,
     /// Without the mark of Flottille, when it had one.
     pub body: String,
-    /// An agent of Flottille posted it, as its mark says.
+    /// An agent of Flottille posted it, as Flottille's record says (`posts`) or the mark of before
+    /// the record says.
     pub agent: bool,
+    /// The id the tracker gives it, where it gives one (GitHub's link names it).
+    pub id: Option<String>,
 }
 
 impl Comment {
@@ -91,13 +94,14 @@ impl Comment {
 }
 
 /// A comment read from a tracker: its text without the mark of Flottille, and whether it had one.
-fn comment_of(author: String, at: Option<&str>, text: &str) -> Comment {
+fn comment_of(author: String, at: Option<&str>, id: Option<String>, text: &str) -> Comment {
     let (body, agent) = forge::unmarked(text);
     Comment {
         author,
         at: at.map(str::to_owned),
         body: cut(body, COMMENT_CHARS),
         agent,
+        id,
     }
 }
 
@@ -214,6 +218,17 @@ pub fn accepted(project: &Project, text: &str) -> Result<Key, String> {
     Ok(key)
 }
 
+/// `read`, with what an agent posted known by Flottille's record (`posts`).
+pub async fn read_known(daemon: &Daemon, project: &Project, key: &Key) -> Result<Ticket, String> {
+    let mut ticket = read(project, key).await?;
+    if let Some((repository, item)) = events::item_of(project, key) {
+        let source = ticket.tracker.as_str();
+        crate::posts::Known::of(daemon, &project.name, source, &repository, &item)
+            .mark_ticket(&mut ticket);
+    }
+    Ok(ticket)
+}
+
 /// Reads `key` on the project's tracker. `Err` says why it cannot be read, masked, with what to
 /// do.
 pub async fn read(project: &Project, key: &Key) -> Result<Ticket, String> {
@@ -277,6 +292,7 @@ async fn read_issue(forge: &Forge, number: u64) -> Result<Ticket, String> {
             comment_of(
                 said(&comment["author"]["login"]),
                 comment["createdAt"].as_str(),
+                comment["url"].as_str().and_then(crate::posts::comment_id),
                 &said(&comment["body"]),
             )
         })
@@ -463,6 +479,7 @@ fn work_item_comments(fields: &Value) -> Vec<Comment> {
             comment_of(
                 said(&comment["author"]["displayName"]),
                 comment["created"].as_str(),
+                None,
                 &masked(&document_text(&comment["body"])),
             )
         })
@@ -477,6 +494,8 @@ pub(crate) fn comments_said(comments: &[Comment]) -> Vec<crate::items::Said> {
             author: comment.author.clone(),
             bot: forge::is_bot(&json!({"login": comment.author})),
             by_agent: comment.agent,
+            id: comment.id.clone(),
+            at: comment.at.as_deref().and_then(crate::session_read::form),
             state: None,
             excerpt: crate::items::excerpt(&comment.body),
             body: comment.body.clone(),
@@ -819,15 +838,15 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
         "show" => show(daemon, place, &project, &asked).await,
         "subscribe" => events::subscribe(daemon, agent, place, &project, &asked).await,
         "unsubscribe" => events::unsubscribe(daemon, agent, &project, &asked),
-        "create" => create(&project, &asked).await,
+        "create" => create(daemon, &project, &asked).await,
         "comment" | "edit" | "close" | "reopen" | "status" => {
             let key = match key_of(daemon, place, &project, &asked) {
                 Ok(key) => key,
                 Err(refusal) => return refusal,
             };
             match asked.action.as_str() {
-                "status" => status(&project, &asked, &key).await,
-                _ => write(&project, &asked, &key).await,
+                "status" => status(daemon, &project, &asked, &key).await,
+                _ => write(daemon, &project, &asked, &key).await,
             }
         }
         action => Outcome::Refused(format!(
@@ -1271,7 +1290,7 @@ async fn show(
     };
     // A round of the project running stores a read of its own; none starts during this one.
     let held = crate::items::held_now(daemon, &project.name);
-    match read(project, &key).await {
+    match read_known(daemon, project, &key).await {
         Ok(ticket) => {
             if held.is_some() {
                 events::remember(daemon, project, &key, &ticket);
@@ -1298,12 +1317,19 @@ async fn issues_of(project: &Project) -> Result<Forge, Outcome> {
 
 /// `tickets create`: a new issue of the tracker's repository, or a work item of one of its Jira
 /// projects.
-async fn create(project: &Project, asked: &TicketsCall) -> Outcome {
+async fn create(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outcome {
     let Some(title) = asked.title.as_deref().filter(|t| !t.trim().is_empty()) else {
         return Outcome::Refused("refused: tickets create needs title".into());
     };
     if let Some(tracker @ ProjectTracker::Jira { site, projects }) = &project.tracker {
-        return create_work_item(tracker, site, projects, title, asked).await;
+        return create_work_item(
+            daemon,
+            (&project.name, tracker),
+            (site, projects),
+            title,
+            asked,
+        )
+        .await;
     }
     let forge = match issues_of(project).await {
         Ok(forge) => forge,
@@ -1313,25 +1339,40 @@ async fn create(project: &Project, asked: &TicketsCall) -> Outcome {
         return Outcome::Failed(problem);
     }
     let repo = forge.gh_repository();
-    let body = forge::marked(asked.body.as_deref().unwrap_or_default());
+    let body = asked.body.as_deref().unwrap_or_default();
     let mut args = vec![
-        "issue", "create", "-R", &repo, "--title", title, "--body", &body,
+        "issue", "create", "-R", &repo, "--title", title, "--body", body,
     ];
     for label in asked.labels.iter().flatten() {
         args.extend(["--label", label.as_str()]);
     }
     match forge::gh_text(&args).await {
-        Ok(said) => Outcome::Done(format!(
-            "The ticket was opened in {}: {}",
-            forge.slug(),
-            said.trim()
-        )),
+        Ok(said) => {
+            // `gh` prints the new issue's link, which ends with its number.
+            let number = said.trim().rsplit('/').next().unwrap_or_default();
+            if let (Ok(number), false) = (number.parse::<u64>(), body.trim().is_empty())
+                && let Some((repository, key)) = events::item_of(project, &Key::Issue(number))
+            {
+                let on = (
+                    project.name.as_str(),
+                    "github",
+                    repository.as_str(),
+                    key.as_str(),
+                );
+                crate::posts::record_body(daemon, on, body);
+            }
+            Outcome::Done(format!(
+                "The ticket was opened in {}: {}",
+                forge.slug(),
+                said.trim()
+            ))
+        }
         Err(why) => Outcome::Failed(why),
     }
 }
 
 /// `tickets comment`, `edit`, `close`, `reopen` and `status` of an issue or a work item.
-async fn write(project: &Project, asked: &TicketsCall, key: &Key) -> Outcome {
+async fn write(daemon: &Daemon, project: &Project, asked: &TicketsCall, key: &Key) -> Outcome {
     let action = asked.action.as_str();
     let body = asked.body.as_deref().filter(|b| !b.trim().is_empty());
     let title = asked.title.as_deref().filter(|t| !t.trim().is_empty());
@@ -1363,7 +1404,9 @@ async fn write(project: &Project, asked: &TicketsCall, key: &Key) -> Outcome {
         let Some(ProjectTracker::Jira { site, .. }) = &project.tracker else {
             unreachable!("a key the tracker accepts");
         };
-        return write_work_item(site, &key.text(), asked, body, title).await;
+        let on = events::item_of(project, key).unwrap_or_default();
+        let on = (project.name.as_str(), "jira", on.0.as_str(), on.1.as_str());
+        return write_work_item(daemon, on, site, asked, (body, title)).await;
     };
     let forge = match issues_of(project).await {
         Ok(forge) => forge,
@@ -1379,11 +1422,7 @@ async fn write(project: &Project, asked: &TicketsCall, key: &Key) -> Outcome {
     if let Some(title) = title.filter(|_| action == "edit") {
         args.extend(["--title", title]);
     }
-    let marked = body.map(forge::marked);
-    if let Some(body) = marked
-        .as_deref()
-        .filter(|_| action == "comment" || action == "edit")
-    {
+    if let Some(body) = body.filter(|_| action == "comment" || action == "edit") {
         args.extend(["--body", body]);
     }
     if action == "edit" {
@@ -1399,15 +1438,36 @@ async fn write(project: &Project, asked: &TicketsCall, key: &Key) -> Outcome {
     }
     let slug = forge.slug();
     match forge::gh_text(&args).await {
-        Ok(_) => Outcome::Done(match action {
-            "comment" => format!("The comment was posted on #{number} of {slug}."),
-            "edit" => format!("#{number} of {slug} was changed."),
-            "close" => match reason {
-                Some(reason) => format!("#{number} of {slug} was closed as {reason}."),
-                None => format!("#{number} of {slug} was closed."),
-            },
-            _ => format!("#{number} of {slug} was reopened."),
-        }),
+        Ok(said) => {
+            let (repository, item) = events::item_of(project, key).unwrap_or_default();
+            let on = (
+                project.name.as_str(),
+                "github",
+                repository.as_str(),
+                item.as_str(),
+            );
+            match (action, body) {
+                ("comment", Some(body)) => {
+                    crate::posts::record_comment(
+                        daemon,
+                        on,
+                        crate::posts::comment_id_in(&said),
+                        body,
+                    );
+                }
+                ("edit", Some(body)) => crate::posts::record_body(daemon, on, body),
+                _ => {}
+            }
+            Outcome::Done(match action {
+                "comment" => format!("The comment was posted on #{number} of {slug}."),
+                "edit" => format!("#{number} of {slug} was changed."),
+                "close" => match reason {
+                    Some(reason) => format!("#{number} of {slug} was closed as {reason}."),
+                    None => format!("#{number} of {slug} was closed."),
+                },
+                _ => format!("#{number} of {slug} was reopened."),
+            })
+        }
         Err(why) => Outcome::Failed(why),
     }
 }
@@ -1437,9 +1497,9 @@ async fn acli_run(args: &[&str]) -> Result<String, String> {
 /// `tickets create` on Jira: a work item of one of the tracker's projects, of the type named or
 /// the project's default one.
 async fn create_work_item(
-    tracker: &ProjectTracker,
-    site: &str,
-    projects: &[String],
+    daemon: &Daemon,
+    (name, tracker): (&str, &ProjectTracker),
+    (site, projects): (&str, &[String]),
     title: &str,
     asked: &TicketsCall,
 ) -> Outcome {
@@ -1460,12 +1520,8 @@ async fn create_work_item(
         "--summary",
         title,
     ];
-    let footed = asked
-        .body
-        .as_deref()
-        .filter(|b| !b.trim().is_empty())
-        .map(forge::footed);
-    if let Some(body) = footed.as_deref() {
+    let body = asked.body.as_deref().filter(|b| !b.trim().is_empty());
+    if let Some(body) = body {
         args.extend(["--description", body]);
     }
     if let Some(kind) = asked.kind.as_deref().filter(|k| !k.trim().is_empty()) {
@@ -1484,6 +1540,9 @@ async fn create_work_item(
     match created.as_ref().and_then(|item| item["key"].as_str()) {
         Some(key) => {
             let key = masked(key);
+            if let Some(body) = body {
+                crate::posts::record_body(daemon, (name, "jira", "", key.as_str()), body);
+            }
             Outcome::Done(format!(
                 "The ticket {key} was opened in {project}: https://{site}/browse/{key}"
             ))
@@ -1498,12 +1557,13 @@ async fn create_work_item(
 /// `tickets comment`, `edit`, `close`, `reopen` and `status` of a Jira work item, once `acli` is
 /// checked to be signed in to the tracker's site.
 async fn write_work_item(
+    daemon: &Daemon,
+    on: (&str, &str, &str, &str),
     site: &str,
-    key: &str,
     asked: &TicketsCall,
-    body: Option<&str>,
-    title: Option<&str>,
+    (body, title): (Option<&str>, Option<&str>),
 ) -> Outcome {
+    let key = on.3;
     if let Err(problem) = jira_site(site, "written").await {
         return Outcome::Failed(problem);
     }
@@ -1517,8 +1577,7 @@ async fn write_work_item(
     if let Some(title) = title.filter(|_| action == "edit") {
         args.extend(["--summary", title]);
     }
-    let footed = body.map(forge::footed);
-    match (action, footed.as_deref()) {
+    match (action, body) {
         ("comment", Some(body)) => args.extend(["--body", body]),
         ("edit", Some(body)) => args.extend(["--description", body]),
         _ => {}
@@ -1527,8 +1586,19 @@ async fn write_work_item(
         args.push("--yes");
     }
     match acli_run(&args).await {
-        Ok(_) if action == "comment" => Outcome::Done(format!("The comment was posted on {key}.")),
-        Ok(_) => Outcome::Done(format!("{key} was changed.")),
+        // `acli` prints nothing that names the comment it created: the record keeps its text.
+        Ok(_) if action == "comment" => {
+            if let Some(body) = body {
+                crate::posts::record_comment(daemon, on, None, body);
+            }
+            Outcome::Done(format!("The comment was posted on {key}."))
+        }
+        Ok(_) => {
+            if let (Some(body), "edit") = (body, action) {
+                crate::posts::record_body(daemon, on, body);
+            }
+            Outcome::Done(format!("{key} was changed."))
+        }
         Err(why) => Outcome::Failed(why),
     }
 }
@@ -1807,7 +1877,7 @@ fn scoped(why: String) -> String {
 
 /// `tickets status`: the Status of an issue on one of the GitHub Projects boards it is on, set
 /// through `gh project item-edit` with the ids read from the issue and the board's fields.
-async fn status(project: &Project, asked: &TicketsCall, key: &Key) -> Outcome {
+async fn status(daemon: &Daemon, project: &Project, asked: &TicketsCall, key: &Key) -> Outcome {
     let Some(wanted) = asked
         .status
         .as_deref()
@@ -1819,7 +1889,7 @@ async fn status(project: &Project, asked: &TicketsCall, key: &Key) -> Outcome {
         );
     };
     let Key::Issue(number) = key else {
-        return write(project, asked, key).await;
+        return write(daemon, project, asked, key).await;
     };
     let forge = match issues_of(project).await {
         Ok(forge) => forge,
@@ -2140,7 +2210,11 @@ impl Tickets {
                     state: None,
                     body: said(&comment["body"]),
                     bot: forge::is_bot(&comment["author"]),
-                    at: None,
+                    at: comment["createdAt"]
+                        .as_str()
+                        .and_then(crate::session_read::form),
+                    id: comment["url"].as_str().and_then(crate::posts::comment_id),
+                    recorded: false,
                 })
             })
             .collect();

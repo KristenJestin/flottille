@@ -34,6 +34,7 @@ mod nofollow;
 mod opencode;
 mod pilot;
 mod place;
+mod posts;
 mod program;
 mod programs;
 mod project_command;
