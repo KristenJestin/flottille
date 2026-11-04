@@ -392,7 +392,7 @@ pending requests.
 
 | Tool | |
 |---|---|
-| `forge {action, workspace?, repository?, number?, state?, branch?, detail?, title?, body?, draft?, waive?, method?, events?, from?, minutes?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
+| `forge {action, workspace?, repository?, number?, state?, branch?, detail?, title?, body?, draft?, waive?, method?, events?, from?, minutes?, pipeline?, variables?, run?, step?, do?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
 
 - **The repositories** are those of the agent's place: its workspace's, or the project's in
   `main`. One the place does not take is refused (`refused: X is not a repository of this
@@ -477,9 +477,20 @@ pending requests.
   branch when it declines: `delete_branch` there is refused before anything is declined. A
   `title`, a `body` or a `method` on `close` and `reopen` is refused before anything is asked.
 
-`list`, `show`, `subscribe` and `unsubscribe` go through the gate like every call, which allows
-them in every mode; `create`, `comment`, `edit`, `merge`, `checks`, `close` and `reopen` are to
-judge, and a merge that waives the checks base. A write is done only once the repository's remote is checked to lead where its forge is declared. **What a
+- **The CI family** ([`forges.md`](forges.md), "The CI family"): **`pipelines {repository?,
+  branch?}`** what can be run on the branch (Bitbucket's pipelines with a custom one's variables,
+  GitHub's workflows that can be dispatched with their inputs), **`runs {repository?, branch?}`**
+  the recent runs, **`run_view {repository?, run}`** a run's steps (jobs), **`run_logs
+  {repository?, run, step}`** a step's log, masked and cut like other results; **`run
+  {repository?, pipeline, branch?, variables?}`** runs any pipeline on the workspace's branch (or
+  the one named) with `variables` (`[{key, value, secured?}]`, a secured value masked in every
+  result and record), **`stop {repository?, run}`** stops a run, **`step {repository?, run, step,
+  do}`** starts a manual step (`do: start`) or runs one again (`do: rerun`) where the forge allows
+  it, refused naming why elsewhere. A Bitbucket Data Center repository is refused for all of them.
+
+`list`, `show`, `subscribe`, `unsubscribe`, `pipelines`, `runs`, `run_view` and `run_logs` go
+through the gate like every call, which allows them in every mode; `create`, `comment`, `edit`,
+`merge`, `checks`, `close`, `reopen`, `run`, `stop` and `step` are to judge, and a merge that waives the checks base. A write is done only once the repository's remote is checked to lead where its forge is declared. **What a
 write posts is shown whole**: its request says `Its title: …` and `Its body: …` in full (the
 arguments recorded are cut at 500 characters), and the judge is given them whole. A title or a
 body longer than the 8,000 characters the judge is given whole is refused (`refused: the body is
