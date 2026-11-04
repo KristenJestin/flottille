@@ -1527,3 +1527,117 @@ fn a_server_the_user_ran_on_the_project_page_shows_its_dot_and_its_address(
     );
     user.call("run.stop", json!({"run": run})).unwrap();
 }
+
+/// The bounds of an element, if it is drawn.
+fn bounds_of(cx: &mut VisualTestContext, id: &str) -> Option<gpui_kit::Bounds<gpui_kit::Pixels>> {
+    let id = id.to_owned();
+    cx.update(|window, _| window.try_find(id).map(|found| found.bounds()))
+}
+
+#[gpui_kit::test]
+fn the_rail_s_last_line_and_the_address_fold_into_each_other(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp, _) = lead(&user);
+    let run = start(&mcp, "web");
+    let (shell, cx) = open_session(&user, &lead, cx);
+    let link = format!("command-link-{run}");
+    let last = format!("command-last-{run}");
+    until(&shell, cx, "the row shows the address", |cx| {
+        label(cx, &link).is_some()
+    });
+    settle(cx);
+
+    ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
+    // No clock moves while the window takes the end: the fold stands at its first frame.
+    until(&shell, cx, "the row shows its last line", |cx| {
+        label(cx, &last).is_some()
+    });
+
+    let unfolding = bounds_of(cx, &format!("command-last-presence-{run}"));
+    assert!(
+        unfolding.is_some_and(|b| b.size.height < px(1.)),
+        "the last line unfolds, it does not jump in: {unfolding:?}"
+    );
+    assert!(
+        label(cx, &link).is_some(),
+        "the address is still drawn while it folds away"
+    );
+    settle(cx);
+    let unfolded = bounds_of(cx, &format!("command-last-presence-{run}"));
+    assert!(
+        unfolded.is_some_and(|b| b.size.height > px(8.)),
+        "{unfolded:?}"
+    );
+    assert!(label(cx, &link).is_none(), "and gone once folded");
+}
+
+/// Opens the drawer of a running `web`: the run, and what drives the window.
+fn drawer_of_web<'a>(
+    user: &User,
+    lead: &str,
+    mcp: &Mcp,
+    cx: &'a mut TestAppContext,
+) -> (String, Entity<Shell>, &'a mut VisualTestContext) {
+    let run = start(mcp, "web");
+    let (shell, cx) = open_session(user, lead, cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the row shows the address", |cx| {
+        label(cx, &format!("command-link-{run}")).is_some()
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click(format!("command-{run}"), cx));
+    let panel = page.read_with(cx, |page, _| page.command_panel().clone());
+    until(&shell, cx, "the drawer is open", |cx| {
+        panel.read_with(cx, |panel, _| panel.shown().is_some())
+    });
+    settle(cx);
+    (run, shell, cx)
+}
+
+#[gpui_kit::test]
+fn the_drawer_s_address_folds_away_when_the_server_ends(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp, _) = lead(&user);
+    let (run, shell, cx) = drawer_of_web(&user, &lead, &mcp, cx);
+    assert!(label(cx, "run-drawer-link").is_some());
+
+    ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
+    until(&shell, cx, "the drawer says it ended", |cx| {
+        label(cx, "run-drawer-sub").is_some_and(|sub| sub.contains(" after "))
+    });
+
+    assert!(
+        label(cx, "run-drawer-link").is_some(),
+        "the address is still drawn while it folds away"
+    );
+    settle(cx);
+    assert!(
+        label(cx, "run-drawer-link").is_none(),
+        "and gone once folded"
+    );
+}
+
+#[gpui_kit::test]
+fn the_modal_s_address_folds_away_when_the_server_ends(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp, _) = lead(&user);
+    let (run, shell, cx) = drawer_of_web(&user, &lead, &mcp, cx);
+    cx.update(|window, cx| window.click("run-drawer-expand", cx));
+    settle(cx);
+    assert!(label(cx, "run-modal-link").is_some());
+
+    ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
+    until(&shell, cx, "the drawer says it ended", |cx| {
+        label(cx, "run-drawer-sub").is_some_and(|sub| sub.contains(" after "))
+    });
+
+    assert!(
+        label(cx, "run-modal-link").is_some(),
+        "the address is still drawn while it folds away"
+    );
+    settle(cx);
+    assert!(
+        label(cx, "run-modal-link").is_none(),
+        "and gone once folded"
+    );
+}

@@ -735,8 +735,9 @@ impl CommandList {
             move |_: &ClickEvent, _: &mut Window, cx: &mut App| page.open(&run, cx)
         };
         let last = ansi::strip(&row.last_line);
+        // The address while it runs; once it ends, the last one is drawn while it folds away.
         let address = row.address().map(str::to_owned);
-        let link = match &address {
+        let link = match &row.url {
             Some(url) => {
                 let owner = self.page.clone();
                 address_link(
@@ -853,9 +854,11 @@ impl CommandList {
                     // A server's address takes the place of its last line, which its output
                     // still shows; a run that wrote nothing has no line to show, not an empty one.
                     .child(presence(id("link-presence"), address.is_some(), link))
-                    .when(address.is_none() && !last.is_empty(), |d| {
-                        d.child(line(id("last"), last))
-                    }),
+                    .child(presence(
+                        id("last-presence"),
+                        address.is_none() && !last.is_empty(),
+                        line(id("last"), last),
+                    )),
             )
             .children(stop)
             .opacity(if ended { 0.75 } else { 1.0 });
@@ -1447,21 +1450,34 @@ impl Render for CommandPanel {
         };
         let page = self.page.clone();
         let owner = self.page.clone();
+        // Built from the address it had, so that it still shows while it folds away.
         let link = |id: &str, size: f32, window: &mut Window, cx: &mut App| {
-            row.address().map(|url| {
-                let owner = owner.clone();
-                address_link(
-                    ElementId::Name(id.to_owned().into()),
-                    url,
-                    size,
-                    move |url, cx| owner.open_link(url, cx),
-                    window,
-                    cx,
-                )
-            })
+            row.url
+                .as_deref()
+                .map(|url| {
+                    let owner = owner.clone();
+                    address_link(
+                        ElementId::Name(id.to_owned().into()),
+                        url,
+                        size,
+                        move |url, cx| owner.open_link(url, cx),
+                        window,
+                        cx,
+                    )
+                })
+                .unwrap_or_else(|| div().into_any_element())
         };
-        let drawer_link = link("run-drawer-link", 12., window, cx);
-        let modal_link = link("run-modal-link", 12.5, window, cx);
+        let linked = row.address().is_some();
+        let drawer_link = presence(
+            "run-drawer-link-presence",
+            linked,
+            link("run-drawer-link", 12., window, cx),
+        );
+        let modal_link = presence(
+            "run-modal-link-presence",
+            linked,
+            link("run-modal-link", 12.5, window, cx),
+        );
         // Stop and Restart, in the drawer's header and in the modal's: a step of a setup is the
         // daemon's, nobody runs it again from here.
         // They wait, faded, while a restart is on its way.
@@ -1545,7 +1561,7 @@ impl Render for CommandPanel {
                                 .child(SharedString::from(sub.clone()))
                                 .test_support(),
                         )
-                        .children(drawer_link),
+                        .child(drawer_link),
                 )
                 .children(restart)
                 .children(stop)
@@ -1690,7 +1706,7 @@ impl Render for CommandPanel {
             let panel = cx.entity().downgrade();
             let mut modal = Modal::new("run-modal", SharedString::from(row.line.clone()))
                 .sentence(sub)
-                .under_title(modal_link)
+                .under_title(Some(modal_link))
                 .large()
                 .takes_focus()
                 .open(self.expanded)
