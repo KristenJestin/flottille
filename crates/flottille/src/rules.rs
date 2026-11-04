@@ -20,12 +20,12 @@ pub const DEFAULT: &str = include_str!("../roles/rules.md");
 /// The longest rules, in characters: they ride in every session's instructions.
 pub const LIMIT: usize = 8_000;
 
-/// Where the rules an agent got come from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Where the global rules come from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Source {
+    #[default]
     Default,
     Global,
-    Project,
 }
 
 impl Source {
@@ -33,16 +33,31 @@ impl Source {
         match self {
             Source::Default => "default",
             Source::Global => "global",
-            Source::Project => "project",
         }
     }
 }
 
-/// The rules an agent of a project works by.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The rules an agent of a project works by: the global ones, then the project's.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Rules {
-    pub text: String,
+    /// The user's rules for all projects, else the default: what every project shares. Empty
+    /// when the project has `rules_alone`.
+    pub shared: String,
+    /// Where `shared` comes from (also when the project leaves it out).
     pub source: Source,
+    /// The project's own rules, without the part that repeats `shared`.
+    pub own: String,
+    /// The project gets its own rules alone.
+    pub alone: bool,
+    /// The project's text starts with the global one, which is left out of `own`.
+    pub repeats: bool,
+}
+
+/// Why a text was cut to the limit, for each of the two.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Cuts {
+    pub global: Option<String>,
+    pub own: Option<String>,
 }
 
 /// The user's rules for all projects; none while the file is absent.
@@ -57,84 +72,97 @@ pub fn global(paths: &Paths) -> Result<Option<String>, Failure> {
     }
 }
 
-/// The rules of a project's agents: its own, else the user's, else the default. A file that
+/// The rules of a project's agents: the user's, else the default, then its own. A file that
 /// cannot be read is the default, said in the daemon's log: no agent is kept from starting. Rules
 /// edited by hand beyond the limit are cut to it, which the daemon's log says.
 pub fn effective(paths: &Paths, project: &Project) -> Rules {
-    let (rules, cut) = resolved(paths, project);
-    if let Some(cut) = cut {
+    let (rules, cuts) = resolved(paths, project);
+    for cut in [cuts.global, cuts.own].into_iter().flatten() {
         eprintln!("flottille daemon: rules: {cut}");
     }
     rules
 }
 
-/// `effective`, with why the text was cut when it was.
-pub fn resolved(paths: &Paths, project: &Project) -> (Rules, Option<String>) {
+/// `effective`, with why each text was cut when it was.
+pub fn resolved(paths: &Paths, project: &Project) -> (Rules, Cuts) {
+    let (global, source, global_cut) = users(paths);
+    let (stored, own_cut) = own(project);
+    let alone = project.rules_alone;
+    let rest = if alone {
+        None
+    } else {
+        without(&global, &stored)
+    };
+    let repeats = rest.is_some();
+    let rules = Rules {
+        shared: if alone { String::new() } else { global },
+        source,
+        own: rest.unwrap_or(stored),
+        alone,
+        repeats,
+    };
+    (
+        rules,
+        Cuts {
+            global: global_cut,
+            own: own_cut,
+        },
+    )
+}
+
+/// The project's own rules as stored, cut to the limit; empty when it has none.
+pub fn own(project: &Project) -> (String, Option<String>) {
     match &project.rules {
         Some(text) => limited(
             text,
-            Source::Project,
             &format!(
                 "the rules of project {} (the rules key of its file)",
                 project.name
             ),
         ),
-        None => users(paths),
+        None => (String::new(), None),
     }
 }
 
+/// What the project's text adds to the global one when it starts with it (a copy made by hand,
+/// as the doc once advised); none when it does not.
+fn without(global: &str, own: &str) -> Option<String> {
+    let global = global.trim();
+    let rest = own.trim_start().strip_prefix(global)?;
+    (!global.is_empty() && rest.chars().next().is_none_or(char::is_whitespace))
+        .then(|| rest.trim().to_owned())
+}
+
 /// The rules a project without its own follows: the user's, else the default.
-fn users(paths: &Paths) -> (Rules, Option<String>) {
+fn users(paths: &Paths) -> (String, Source, Option<String>) {
     match global(paths) {
-        Ok(Some(text)) => limited(
-            &text,
-            Source::Global,
-            &format!("your rules for all projects ({})", paths.rules().display()),
-        ),
-        Ok(None) => (
-            Rules {
-                text: DEFAULT.to_owned(),
-                source: Source::Default,
-            },
-            None,
-        ),
+        Ok(Some(text)) => {
+            let (text, cut) = limited(
+                &text,
+                &format!("your rules for all projects ({})", paths.rules().display()),
+            );
+            (text, Source::Global, cut)
+        }
+        Ok(None) => (DEFAULT.to_owned(), Source::Default, None),
         Err(failure) => {
             eprintln!("flottille daemon: rules: {}", failure.message);
-            (
-                Rules {
-                    text: DEFAULT.to_owned(),
-                    source: Source::Default,
-                },
-                None,
-            )
+            (DEFAULT.to_owned(), Source::Default, None)
         }
     }
 }
 
 /// The rules as stored, cut to the limit when a hand edit went past it: `rules.set` refuses such
 /// a text, a file edited by hand does not go through it.
-fn limited(text: &str, source: Source, whose: &str) -> (Rules, Option<String>) {
+fn limited(text: &str, whose: &str) -> (String, Option<String>) {
     let count = text.chars().count();
     if count <= LIMIT {
-        return (
-            Rules {
-                text: text.to_owned(),
-                source,
-            },
-            None,
-        );
+        return (text.to_owned(), None);
     }
     let cut = format!(
         "{whose} are {count} characters long and may hold {LIMIT}: agents get the first {LIMIT} \
          only, since the rules ride in every agent's instructions; shorten them"
     );
-    (
-        Rules {
-            text: text.chars().take(LIMIT).collect(),
-            source,
-        },
-        Some(cut),
-    )
+    (text.chars().take(LIMIT).collect(), Some(cut))
 }
 
 /// What is wrong with a text offered as rules.
@@ -159,7 +187,10 @@ struct Which {
 #[serde(deny_unknown_fields)]
 struct Set {
     project: Option<String>,
-    text: String,
+    /// Left out on a project: its text is kept.
+    text: Option<String>,
+    /// Whether the project gets its own rules alone; left out: unchanged.
+    alone: Option<bool>,
 }
 
 /// Answers a `rules.*` request: `rules.show`, `rules.set`, `rules.reset`, for the user's rules
@@ -171,13 +202,27 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
             show(daemon, project.as_deref())
         }
         "rules.set" => {
-            let Set { project, text } = serde_json::from_value(params)?;
-            check(&text).map_err(Failure::refused)?;
-            match &project {
-                Some(name) => {
-                    set_project(daemon, name, Some(&text))?;
+            let Set {
+                project,
+                text,
+                alone,
+            } = serde_json::from_value(params)?;
+            if let Some(text) = &text {
+                check(text).map_err(Failure::refused)?;
+            }
+            match (&project, text) {
+                (Some(name), text) => {
+                    if text.is_none() && alone.is_none() {
+                        return Err(Failure::refused("rules.set needs text or alone"));
+                    }
+                    set_project(daemon, name, text.as_deref(), alone)?;
                 }
-                None => {
+                (None, Some(text)) => {
+                    if alone.is_some() {
+                        return Err(Failure::refused(
+                            "alone is a project's: the rules for all projects have no such switch",
+                        ));
+                    }
                     std::fs::create_dir_all(&daemon.paths.config).map_err(|e| {
                         Failure::new(
                             "unavailable",
@@ -188,6 +233,7 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
                         .map_err(|e| Failure::new("unavailable", format!("rules.md: {e}")))?;
                     announce(daemon, None)?;
                 }
+                (None, None) => return Err(Failure::refused("rules.set needs text")),
             }
             show(daemon, project.as_deref())
         }
@@ -195,7 +241,7 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
             let Which { project } = serde_json::from_value(params)?;
             match &project {
                 Some(name) => {
-                    set_project(daemon, name, None)?;
+                    reset_project(daemon, name)?;
                 }
                 None => {
                     match std::fs::remove_file(daemon.paths.rules()) {
@@ -216,40 +262,71 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
     }
 }
 
-/// `{"project"?, "text", "source", "cut", "default", "global"}`: the text agents get from now on
-/// at that level, where it comes from, why it was cut to the limit (`null` when it was not),
-/// Flottille's default, and the text a project without rules of its own follows.
+/// `{"project"?, "text", "source", "cut", "default", "global", "global_source", "global_cut",
+/// "alone", "repeats"}`. For the user's rules, `text` is what every project follows and `source`
+/// where it comes from (`default` or `global`). For a project, `text` is its own rules (empty
+/// when it has none), `source` is `project` when it has some and else the global source, `cut`
+/// says why its text was cut to the limit (`null` when it was not), `alone` that it leaves the
+/// global rules out and `repeats` that its text starts with the global one, which is then left out
+/// of its agents'. `default` is Flottille's text, `global` the text every project shares.
 fn show(daemon: &Daemon, project: Option<&str>) -> Result<Value, Failure> {
     let paths = &daemon.paths;
     // A file that cannot be read is said to the user, not taken for the default.
     global(paths)?;
-    let (followed, followed_cut) = users(paths);
-    let (rules, cut, name) = match project {
-        Some(name) => {
-            let (rules, cut) = resolved(paths, &projects::load_project(daemon, name)?);
-            (rules, cut, Some(name))
+    let (followed, source, global_cut) = users(paths);
+    let mut shown = json!({"project": project, "text": followed, "source": source.word(),
+        "cut": global_cut, "default": DEFAULT, "global": followed,
+        "global_source": source.word(), "global_cut": global_cut, "alone": false,
+        "repeats": false});
+    if let Some(name) = project {
+        let project = projects::load_project(daemon, name)?;
+        let (rules, cuts) = resolved(paths, &project);
+        let (stored, _) = own(&project);
+        shown["text"] = stored.into();
+        shown["source"] = if project.rules.is_some() {
+            "project"
+        } else {
+            source.word()
         }
-        None => (followed.clone(), followed_cut, None),
-    };
-    Ok(
-        json!({"project": name, "text": rules.text, "source": rules.source.word(), "cut": cut,
-        "default": DEFAULT, "global": followed.text}),
-    )
+        .into();
+        shown["cut"] = cuts.own.into();
+        shown["alone"] = rules.alone.into();
+        shown["repeats"] = rules.repeats.into();
+    }
+    Ok(shown)
 }
 
-/// Writes the project's rules in its file, where the key stands, or removes them (`None`): the
-/// project follows the user's again. The file is read back as a project before it is written.
-pub fn set_project(daemon: &Daemon, name: &str, text: Option<&str>) -> Result<Project, Failure> {
+/// Writes the project's rules in its file, where the keys stand: the text and whether it is
+/// alone, each only when given. The file is read back as a project before it is written.
+pub fn set_project(
+    daemon: &Daemon,
+    name: &str,
+    text: Option<&str>,
+    alone: Option<bool>,
+) -> Result<Project, Failure> {
     if let Some(text) = text {
         check(text).map_err(Failure::refused)?;
     }
     projects::rewrite(daemon, name, |_, document| {
-        match text {
-            Some(text) => document["rules"] = toml_edit::value(text),
-            None => {
-                document.remove("rules");
-            }
+        if let Some(text) = text {
+            document["rules"] = toml_edit::value(text);
         }
+        match alone {
+            Some(true) => document["rules_alone"] = toml_edit::value(true),
+            Some(false) => {
+                document.remove("rules_alone");
+            }
+            None => {}
+        }
+        Ok(())
+    })
+}
+
+/// Removes the project's rules and its `rules_alone`: it gets the global rules again.
+pub fn reset_project(daemon: &Daemon, name: &str) -> Result<Project, Failure> {
+    projects::rewrite(daemon, name, |_, document| {
+        document.remove("rules");
+        document.remove("rules_alone");
         Ok(())
     })
 }
@@ -281,5 +358,18 @@ mod tests {
         assert!(check(&"é".repeat(LIMIT)).is_ok());
         let why = check(&"é".repeat(LIMIT + 1)).unwrap_err();
         assert!(why.contains("8000"), "{why}");
+    }
+
+    #[test]
+    fn only_a_copy_of_the_whole_global_text_is_left_out() {
+        assert_eq!(
+            without("Be brief.\n", "  Be brief.\n\nName branches."),
+            Some("Name branches.".to_owned())
+        );
+        assert_eq!(without("Be brief.", "Be brief.\n"), Some(String::new()));
+        // A project's sentence that merely begins like the global one is its own.
+        assert_eq!(without("Be brief", "Be briefer than that."), None);
+        assert_eq!(without("Be brief.", "Name branches."), None);
+        assert_eq!(without("  \n", "Name branches."), None);
     }
 }

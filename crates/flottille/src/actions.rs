@@ -89,6 +89,8 @@ struct ProjectCall {
     tracker: Option<Option<ProjectTracker>>,
     /// set_rules: the rules.
     text: Option<String>,
+    /// set_rules: whether the project's agents get its rules alone.
+    rules_alone: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -1344,8 +1346,13 @@ async fn performed(
                 "rules" => Ok(rules_text(&project, &daemon.paths)),
                 "set_rules" => {
                     rules_say(&project, &call)?;
-                    let text = call.text.as_deref().unwrap_or_default();
-                    crate::rules::set_project(daemon, &name, Some(text)).map_err(refusal)?;
+                    crate::rules::set_project(
+                        daemon,
+                        &name,
+                        call.text.as_deref(),
+                        call.rules_alone,
+                    )
+                    .map_err(refusal)?;
                     Ok(
                         "Saved. The new rules reach the agents created from now on; you, and the \
                          agents already created, keep the rules you were created with."
@@ -1777,39 +1784,87 @@ const PROJECT_ACTIONS: &str = "settings, set_settings, rules and set_rules";
 
 /// What `set_rules` changes, in words, or the refusal of a call that does not fit.
 fn rules_say(project: &Project, call: &ProjectCall) -> Result<Vec<String>, Outcome> {
-    let Some(text) = &call.text else {
+    if call.text.is_none() && call.rules_alone.is_none() {
         return Err(Outcome::Refused(
-            "refused: set_rules needs text, the rules whole: {\"action\": \"set_rules\", \
-             \"text\": \"Answer in French.\"}; rules reads the current ones"
+            "refused: set_rules needs text or rules_alone: {\"action\": \"set_rules\", \
+             \"text\": \"Answer in French.\"}, the project's rules whole, or {\"action\": \
+             \"set_rules\", \"rules_alone\": true}; rules reads the current ones"
                 .into(),
         ));
-    };
-    crate::rules::check(text).map_err(|why| Outcome::Refused(format!("refused: {why}")))?;
-    let replaced = match project.rules {
-        Some(_) => "its own rules",
-        None => "the rules it follows",
-    };
-    Ok(vec![
-        format!("Replace {replaced} for project {} by:", project.name),
-        text.trim_end().to_owned(),
-    ])
+    }
+    let alone = call.rules_alone.unwrap_or(project.rules_alone);
+    let mut says = Vec::new();
+    if let Some(text) = &call.text {
+        crate::rules::check(text).map_err(|why| Outcome::Refused(format!("refused: {why}")))?;
+        let gets = if alone {
+            "which agents get alone, without the global ones"
+        } else {
+            "which agents get after the global ones"
+        };
+        says.push(format!(
+            "Set the rules of project {}, {gets}, to:",
+            project.name
+        ));
+        says.push(text.trim_end().to_owned());
+    }
+    if call.rules_alone.is_some() {
+        says.push(if alone {
+            format!(
+                "Agents of project {} get only its own rules, not the global ones.",
+                project.name
+            )
+        } else {
+            format!(
+                "Agents of project {} get the global rules, then its own.",
+                project.name
+            )
+        });
+    }
+    Ok(says)
 }
 
 /// What `rules` answers: the rules the agents created from now on get, and where they come from.
 fn rules_text(project: &Project, paths: &flottille_core::paths::Paths) -> String {
-    let (rules, cut) = crate::rules::resolved(paths, project);
-    let from = match rules.source {
-        crate::rules::Source::Project => "this project's own rules",
+    let (rules, cuts) = crate::rules::resolved(paths, project);
+    let global = match rules.source {
         crate::rules::Source::Global => "the user's rules for all projects",
         crate::rules::Source::Default => "Flottille's default rules",
     };
-    let cut = cut.map_or_else(String::new, |cut| format!(" Cut: {cut}."));
-    format!(
-        "The rules agents of project {} get from now on are {from}.{cut} Yours are in your \
-         instructions; set_rules proposes a change, which only the user can allow.\n\n{}",
-        project.name,
-        rules.text.trim_end()
-    )
+    let has_own = !rules.own.trim().is_empty();
+    let gets = match (rules.alone, has_own) {
+        (true, true) => "only this project's own rules".to_owned(),
+        (true, false) => "no rules: this project uses its own alone and has none".to_owned(),
+        (false, true) => format!("{global}, then this project's own rules"),
+        (false, false) => global.to_owned(),
+    };
+    let mut notes = String::new();
+    let global_cut = (!rules.alone)
+        .then_some(&cuts.global)
+        .and_then(Option::as_ref);
+    for cut in global_cut.into_iter().chain(cuts.own.as_ref()) {
+        notes.push_str(&format!(" Cut: {cut}."));
+    }
+    if rules.repeats {
+        notes.push_str(
+            " This project's text starts with the global rules, which agents get once: the \
+             repeat is left out.",
+        );
+    }
+    let mut text = format!(
+        "The rules agents of project {} get from now on are {gets}.{notes} Yours are in your \
+         instructions; set_rules proposes a change, which only the user can allow.",
+        project.name
+    );
+    if !rules.shared.trim().is_empty() {
+        text.push_str(&format!("\n\n# How to work\n\n{}", rules.shared.trim_end()));
+    }
+    if has_own {
+        text.push_str(&format!(
+            "\n\n# This project's rules\n\n{}",
+            rules.own.trim_end()
+        ));
+    }
+    text
 }
 
 /// The agent's own project, as its file says now.

@@ -785,8 +785,10 @@ starts; the agent that started it and the session write to each other with `sess
   12, 12 by default), and a tree is 1 deep: a child, whatever its role, has no `agent_*` tool nor
   `approval_answer`. A launch above a cap is refused with a sentence; it is never queued.
 - **Roles**: `lead` (by default for a root) and `worker` (by default for a child). An agent's
-  instructions are Flottille's base, its role's template, the cache boundary, then what is its
+  instructions are Flottille's base (what Flottille enforces, then the global rules, "How to work":
+  the user's, else the default, left out when the project says `rules_alone`), its role's template, the cache boundary, then what is its
   own: its project, its place, and either "you are the root agent" or its task's title; then the
+  project's own rules, under "This project's rules" (`docs/projects.md`, "Rules"); then the
   project's own instruction files (`CLAUDE.md` else `AGENTS.md`, and `CLAUDE.local.md` else
   `AGENTS.local.md`), read in the agent's place, else in the project's main checkout. The
   templates are in `crates/flottille/roles/`.

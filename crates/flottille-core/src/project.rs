@@ -311,10 +311,13 @@ pub struct Project {
     /// The tracker of its tickets, as the user declared it; none is read without one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tracker: Option<ProjectTracker>,
-    /// How its agents are told to work, in place of the user's global rules; none follows them
-    /// (`docs/projects.md`, "Rules").
+    /// How its agents are told to work, added after the user's global rules (`docs/projects.md`,
+    /// "Rules").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rules: Option<String>,
+    /// Its agents get its rules alone: the user's global rules are left out (`rules_alone`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rules_alone: bool,
     /// Keys of the file that are no longer read, each with what replaces it: said, never
     /// followed nor refused.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -376,6 +379,8 @@ struct File {
     /// Obsolete: read as nothing, and said (`OBSOLETE_AGENT_ACTIONS`).
     agent_actions: Option<toml::Value>,
     rules: Option<String>,
+    #[serde(default)]
+    rules_alone: bool,
     /// Obsolete: read as nothing, and said (`OBSOLETE_FORGES`).
     forges: Option<toml::Value>,
 }
@@ -452,6 +457,7 @@ impl Project {
             pull_requests: PullRequests::default(),
             tracker: None,
             rules: None,
+            rules_alone: false,
             obsolete: Vec::new(),
         }
     }
@@ -787,6 +793,7 @@ fn check(name: &str, mut file: File, places: &Places) -> Result<Project, String>
         pull_requests: file.pull_requests,
         tracker,
         rules: file.rules,
+        rules_alone: file.rules_alone,
         obsolete,
     })
 }

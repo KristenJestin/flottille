@@ -256,11 +256,20 @@ and whatever else they want.
 | All projects | `rules.md` in Flottille's configuration folder (`$XDG_CONFIG_HOME/flottille/`), absent while the default holds | the window's Settings, "Rules"; by hand |
 | One project | the `rules` key of its file | the project's Settings, "Rules"; by hand; `project {action: "set_rules"}` of an agent, held |
 
-The project's rules **replace** the global ones, they do not extend them: a project that wants
-both copies the global text and adds to it. A project without its own follows the global rules,
-or the default when there are none. Rules are at most 8,000 characters; an empty text is no rules. A `rules.md` or a `rules` key
+The project's rules **add to** the global ones: an agent gets the global rules (the user's, else the
+default), then the project's under their own heading, "This project's rules", in that order, so a
+project's rule can narrow a global one. A project without its own gets the global rules alone. A
+project that does not want the global rules at all says `rules_alone = true` in its file (default
+false; the project's Settings, "Use only this project's rules"; `set_rules {rules_alone}`): then its
+rules replace the global ones, and a project with that switch and no rules gets none. Rules are at
+most 8,000 characters, each text on its own; an empty text is no rules. A `rules.md` or a `rules` key
 edited by hand past the limit is cut to it: agents get the first 8,000 characters, and the
 daemon's log, `rules.show`, `project {action: "rules"}` and the editor say why.
+
+A project written before rules added up may hold a copy of the global text, as this page once
+advised, to keep both. When its text starts with the global text, the copy is left out for the
+agent, which gets the global text once and the rest of the project's; the project's Settings says
+so ("these rules repeat the global ones; you can remove that part"). No file is rewritten.
 
 ```toml
 rules = """
@@ -269,13 +278,16 @@ Commit only when asked.
 """
 ```
 
-Reset to default removes the file (global) or the key (project), and the level below shows again.
+Reset to default removes the file (global) or the keys `rules` and `rules_alone` (project), and the
+level below shows again. The project's Settings shows the global rules above its editor, read-only
+and folded, with a link to edit them in Settings.
 
 The text is read when an agent is created and frozen in its instructions (`docs/design.md` §8),
 so a change reaches the agents created after it, and no agent created before. The global rules sit
 before the cache boundary, where every project shares them, so editing them changes the shared
 part once for everyone. A project's own rules would make that part differ from one project to
-the next, so they sit after the boundary. An agent reads the rules the agents created next will get with
+the next, so they sit after the boundary (a project with `rules_alone` leaves the global ones out
+of its agents, and has its own there as well). An agent reads the rules the agents created next will get with
 `project {action: "rules"}` and proposes a change with `set_rules {text}`, a base call that only
 the user allows, since it rewrites the instructions of every agent created after it
 (`docs/tools.md`, "The project").
