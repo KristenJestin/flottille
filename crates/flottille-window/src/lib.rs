@@ -35,6 +35,7 @@ pub mod subscriptions;
 pub mod tasks;
 pub mod tree;
 pub mod waiting;
+pub mod workspaces_folder;
 
 use flottille_ui::Icons;
 use futures::StreamExt as _;

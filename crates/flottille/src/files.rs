@@ -121,7 +121,7 @@ impl Context<'_> {
         let own = self.own();
         let groups = crate::runs::groups_of(self.daemon, self.agent);
         gate::process(&groups, path).or_else(|| {
-            gate::sensitive(&own, path)
+            gate::sensitive(&own, self.place.home.as_deref(), path)
                 .map(|place| format!("{} is a sensitive place ({place})", path.shown))
         })
     }
@@ -633,13 +633,13 @@ pub fn search(cx: &Context, args: Value) -> Outcome {
         return Outcome::Refused("refused: the pattern is empty: name the text to find".into());
     }
     match cx.path(args.repository.as_deref(), ".", false) {
-        Ok(base) => search_in(cx.place, &base, &args),
+        Ok(base) => search_in(cx.place, &cx.own(), &base, &args),
         Err(refusal) => refusal,
     }
 }
 
 /// A search below `base`, whose files are each opened below its folder, never through a link.
-fn search_in(place: &Place, base: &Resolved, args: &SearchArguments) -> Outcome {
+fn search_in(place: &Place, own: &[PathBuf], base: &Resolved, args: &SearchArguments) -> Outcome {
     let cursor = match args.cursor.as_deref().map(parse_cursor).transpose() {
         Ok(cursor) => cursor,
         Err(refusal) => return refusal,
@@ -677,6 +677,11 @@ fn search_in(place: &Place, base: &Resolved, args: &SearchArguments) -> Outcome 
         if let Some(glob) = &args.glob
             && !path_matches(glob, &relative)
         {
+            continue;
+        }
+        // What `fs_read` refuses, a login's file, is never searched either.
+        let at = place.at(&base.path.join(&relative));
+        if gate::forbidden(own, place.home.as_deref(), &at, false).is_some() {
             continue;
         }
         // Line by line: a file far larger than what one call scans is never read whole.
@@ -735,8 +740,8 @@ fn search_in(place: &Place, base: &Resolved, args: &SearchArguments) -> Outcome 
     });
     out.push(format!(
         "limits: {SEARCH_MATCH_LIMIT} matches and {SEARCH_SCAN_BYTES} bytes scanned per call, \
-         lines cut at {HIT_CHARS} characters; .git, node_modules and the .gitignore's patterns \
-         are left out"
+         lines cut at {HIT_CHARS} characters; .git, node_modules, the .gitignore's patterns and \
+         the files of a login's place are left out"
     ));
     if !skipped.is_empty() {
         let more = skipped.len().saturating_sub(SEARCH_SKIPS_LISTED);
@@ -1315,7 +1320,7 @@ mod tests {
                 cursor: None,
             };
             changed_refusal(
-                search_in(&scene.place, &base, &args),
+                search_in(&scene.place, &[], &base, &args),
                 &format!("search {side}"),
             );
         }
@@ -1332,11 +1337,83 @@ mod tests {
             glob: None,
             cursor: None,
         };
-        let Outcome::Done(found) = search_in(&scene.place, &base, &args) else {
+        let Outcome::Done(found) = search_in(&scene.place, &[], &base, &args) else {
             panic!("the search failed");
         };
         assert!(found.starts_with("0 match(es)"), "{found}");
         assert!(!found.contains("f.txt"), "{found}");
+    }
+
+    /// What a search of `token` over the scene's place finds, the scene given a home beside it.
+    fn found_tokens(scene: &mut Scene, files: &[&str]) -> String {
+        scene.place.home = Some(scene.base.join("home"));
+        for file in files {
+            let path = scene.root.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "token = hunter2\n").unwrap();
+        }
+        let base = scene.resolve(&scene.root);
+        let args = SearchArguments {
+            pattern: "token".into(),
+            repository: None,
+            glob: None,
+            cursor: None,
+        };
+        let Outcome::Done(found) = search_in(&scene.place, &[], &base, &args) else {
+            panic!("the search failed");
+        };
+        found
+    }
+
+    #[test]
+    fn search_skips_a_claude_credentials_file() {
+        let mut scene = Scene::new();
+        let found = found_tokens(
+            &mut scene,
+            &[
+                ".claude/.credentials.json",
+                ".claude/commands/deploy-preview.md",
+                ".codex/auth.json",
+            ],
+        );
+        assert!(found.starts_with("1 match(es)"), "{found}");
+        assert!(
+            found.contains(".claude/commands/deploy-preview.md:1"),
+            "{found}"
+        );
+        assert!(!found.contains("credentials"), "{found}");
+        assert!(!found.contains("auth.json"), "{found}");
+    }
+
+    #[test]
+    fn search_skips_a_sensitive_file_inside_a_repository() {
+        let mut scene = Scene::new();
+        let found = found_tokens(
+            &mut scene,
+            &[
+                "notes.txt",
+                ".ssh/id_ed25519",
+                ".netrc",
+                ".npmrc",
+                ".pypirc",
+                ".git-credentials",
+                ".docker/config.json",
+                ".local/share/keyrings/login.keyring",
+            ],
+        );
+        assert!(found.starts_with("1 match(es)"), "{found}");
+        assert!(found.contains("notes.txt:1"), "{found}");
+        for file in [
+            ".ssh",
+            ".netrc",
+            ".npmrc",
+            ".pypirc",
+            "credentials",
+            "docker",
+            "keyring",
+        ] {
+            assert!(!found.contains(file), "{file}: {found}");
+        }
     }
 
     #[test]

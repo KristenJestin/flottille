@@ -1,7 +1,7 @@
 # Workspaces
 
 A workspace is the place one piece of work happens: one git worktree per repository it takes, all
-on one branch, in one folder, prepared in the background by the project's setup
+on one branch (the one git says: "The branch"), in one folder, prepared in the background by the project's setup
 (`docs/projects.md`) and removed only when nothing in it would be lost. It follows
 `docs/reference/hemera.md` §6, with the additions of `docs/design.md` §6.2 that the
 multi-repository case (`docs/reference/multi-repo-case.md`) needs.
@@ -21,8 +21,9 @@ All of them take `--json` and print what the daemon answered (`docs/protocol.md`
 
 ## Where it is
 
-The folder is `<workspaces root>/<name>` (the root is `$XDG_DATA_HOME/flottille/workspaces/<project>`
-unless the project says otherwise), and each repository's worktree is at the repository's path in
+The folder is `<workspaces root>/<name>` (the root is the project's own, else the user's default,
+else `$XDG_DATA_HOME/flottille/workspaces/<project>`: `docs/projects.md`, "Where the workspaces go"; a workspace keeps the
+folder it was made in whatever they become), and each repository's worktree is at the repository's path in
 it: `api` at `<folder>/api`, `libs/core` at `<folder>/libs/core`. The root repository `.` is the
 folder itself, so the workspace looks like the project folder: a command, a path in the
 instructions or a relative link written for the main checkout works the same in a workspace. That
@@ -32,9 +33,35 @@ repository has a plain folder there.
 
 The name is 1 to 64 letters, digits, dots, dashes or underscores, starting with a letter or a
 digit. The branch is `<branch prefix>/<name>` unless `--branch` gives one; `git check-ref-format
---branch` must accept it as it is. Creation is refused when
-the project has a workspace of that name, when the folder exists, or when the branch exists in one
-of the repositories.
+--branch` must accept it as it is. Creation is refused when the project has a workspace of that
+name, when the folder exists, or when the branch is checked out in a checkout of one of the
+repositories, the main one or another worktree (`the branch feature/x is checked out in <folder>
+for web: …`, naming it).
+
+**To resume a branch, name it.** A branch that already exists in a repository is checked out in
+its worktree instead of being started: the repository's own (`git worktree add <folder> <branch>`),
+or, when only its remote has it (`git ls-remote --heads`, then fetched into its tracking ref; as
+last fetched when offline or when the remote cannot be listed), a local branch tracking the
+remote's (`git worktree add --track -b <branch> <folder> <remote>/<branch>`). The other
+repositories start it from their base. The base of a repository that resumed its branch is only
+what the branch is compared against (commits ahead, the pull request's target), never where it
+starts. Only a branch named is resumed: under the default name, a branch the repository already has
+is a leftover of an earlier workspace, and creation is refused (`the branch app/login already exists
+in web: choose another name or branch`). A resumed branch was there before the workspace: removing
+the workspace never deletes it.
+
+## The branch
+
+The branch of a repository is the one its worktree is on now (`git symbolic-ref --short HEAD`),
+not the one recorded when the workspace was made: an agent or the user may `git switch` in it.
+Every place that uses it reads it there: `workspace.show`, the pull requests read and written
+(`docs/forges.md`), and the removal's checks. When every worktree made is on one branch other than
+the recorded one, the record takes it and `workspace.changed` says so (`docs/events.md`), so the
+window and `workspace list` show it; repositories on different branches leave the record as it
+is, and each is read and written for its own. To work on another branch in a workspace, switch
+with git: the workspace follows. A repository on no branch (a detached HEAD) is read for the
+recorded branch, and `forge` `create` refuses it (`refused: <repository> is on no branch (detached
+at <hash>): switch to a branch first`).
 
 ## The repositories it takes
 
@@ -45,7 +72,7 @@ of all.
 The window's New workspace form offers the same: a row per repository of the project, taken or
 not (the default set taken, at least one stays taken), with the base branch it starts from (its
 rule when the field is left empty, which the field says; `--base`), a branch field (`<branch
-prefix>/<name>` when empty), the offline switch (`--offline`), and the optional ticket, previewed
+prefix>/<name>` when empty; "To resume a branch, name it."), the offline switch (`--offline`), and the optional ticket, previewed
 as it is typed (`docs/tickets.md`). The agent's `workspace create` takes `repositories` the same
 way, each repository on its rule.
 
@@ -97,7 +124,7 @@ URL; JWTs and the tokens of the usual forges, registries and providers). A works
 
 | Step | |
 |---|---|
-| `worktree` | `git worktree prune`, then `git worktree add -b <branch> <folder> <base commit>`, or `git worktree add <folder> <branch>` when an earlier attempt made the branch. Done at once when the worktree is there. |
+| `worktree` | `git worktree prune`, then `git worktree add -b <branch> <folder> <base commit>`, or `git worktree add <folder> <branch>` when the branch exists (resumed, or made by an earlier attempt), or `git worktree add --track -b <branch> <folder> <remote>/<branch>` when only the remote had it. Done at once when the worktree is there. |
 | `copy` | Copies what the globs match in the main checkout's repository, a folder with what it holds, never over anything already there (`create_new`). A glob matching nothing copies nothing. |
 | `link` | A symbolic link to the main checkout's entry, unless something is there already. A missing entry fails the step. |
 | `root_entries` | A link to each top-level entry of the project folder that is neither a repository nor holds one, nor `.git` nor `.gitignore` (linking those makes git see the workspace folder as the root repository's checkout with every file deleted), nor holds the workspace, nor is there already. |
@@ -175,10 +202,12 @@ Refused while the workspace is being prepared. Then nothing is touched unless:
   is not committed`); the links Flottille made and the worktrees standing inside the root one are
   not work;
 - in each worktree made, `git log HEAD --not --remotes` shows no commit (`<repository> has commits
-  on no remote, on its branch <branch>: <hash> <subject>, …`); in a repository with no remote at
+  on no remote, on its branch <branch>: <hash> <subject>, …`, the branch it is on now, or `on no
+  branch (detached at <hash>)`); in a repository with no remote at
   all, no commit is on no other branch (`git log HEAD --not --exclude=<branch> --branches`:
   `<repository> has commits on no other branch, on its branch <branch>: …`), since its work stays
-  on its own branches. Commits on no remote are no loss when the repository's forge says the
+  on its own branches. When the worktree is on another branch than the recorded one and the
+  recorded one is still a local branch, it is checked the same way; Commits on no remote are no loss when the repository's forge says the
   branch's pull request is merged and every one of them is in the commit it merged (its head, as
   the forge gives it: GitHub's `headRefOid`, Bitbucket's source commit): a squash-merged branch
   whose remote branch the forge deleted and a fetch pruned. A commit made after, a pull request
@@ -209,15 +238,56 @@ deleted**, nor anything asked of the forge but the pull request's state. Work th
 not merged is not lost by the removal: the workspace is removed and its branch kept.
 
 A root agent removes a workspace the same way, with `workspace` `remove`, always held for the
-user, its card saying what would be lost (`docs/tools.md`, "The workspace"); never the one it
-works in. What would be lost refuses it unless the user's answer said to discard it: then nothing
+user, its card saying what would be lost (`docs/tools.md`, "The workspace"); the one it works in
+too, once its work is done ("Its own workspace", below). What would be lost refuses it unless the user's answer said to discard it: then nothing
 is checked for loss, each worktree is removed with `git worktree remove --force`, and the folder
 with what it held. Its landed branches are then deleted as above, and the others kept, which its
 answer says. It is refused, nothing touched, while the
 workspace is in use outside the agent's tree (`docs/design.md` §5.1): an agent of another tree not
 ended that works in it, or a command run of another tree still running in it, each named; the
-tree's own agents and command runs are no obstacle. The user's `flottille workspace remove` does not check
-this.
+tree's own command runs are no obstacle, nor its agents that ended; its other agents not ended
+are. The user's `flottille workspace remove` does not check this.
+
+### Its own workspace
+
+A root removes the workspace it works in when its work is done (a child removes none), held for
+the user whatever the mode, Full included. Its card says, besides what would be lost, the commands
+of its tree running in it that are stopped (`Stop the commands of this session running in it:
+pnpm dev:api, pnpm dev:front`) and that the session then goes on in the project's folder. Once
+the user allows it, in this order:
+
+1. what the removal of any workspace refuses, nothing touched: another agent not ended works in
+   it, of the tree or not, or a command run of another tree runs there; it is being prepared;
+2. the tree's command runs in it are stopped, as `run.stop` stops one;
+3. the checks and the removal above: refused while something would be lost, unless the answer
+   said to discard it; the use of 1 is checked again once these checks are done, before
+   anything is touched;
+4. in the one store write that forgets the workspace, the agent's place becomes the project's
+   folder (`main`), its instructions saying so for its next process, with `workspace.removed`
+   and `agent.moved` (`docs/events.md`); its running session's grant works in `main` at once;
+   the requests it made that still wait for an answer are cancelled in that write
+   (`approval.cancelled`: their cards leave the window), since they were asked in the workspace
+   and would otherwise be done in `main`, and each is answered to the agent: `Request #12 (run)
+   was not run: you moved from the workspace login to the project's folder (main); ask again if
+   it is still needed.`;
+5. the answer tells the agent: `The workspace login is removed; you now work in the project's
+   folder (main), <folder>`.
+
+From 1 to its end, the session starts nothing in the workspace: its `run`, `agent_launch`,
+`fs_write` and `fs_edit` are refused (`refused: the workspace login is being removed: wait for the
+removal's answer`), and a request of these the user allows meanwhile is not executed. A request keeps the place its agent asked it in (`main`, or
+`workspace <name>`): one that a slow judgement brings back after the move is refused, and one
+allowed once its agent works elsewhere is not run (`not run: asked in the workspace login, which
+you have left; ask again if it is still needed`). The user's
+answer holds to what the card said would be lost, not to the commands it named: one that ended,
+or started, between the card and the answer loses nothing, and is no reason to ask again.
+
+A refusal at 1 or 3 leaves the session in its workspace (its commands stopped at 2 stay stopped).
+A removal that fails halfway (a worktree git cannot remove) keeps the workspace's record, and the
+agent in it, as it keeps it for the user's removal; the agent is moved only by the write that
+forgets the workspace, so it is never left with no place. Its process goes on: its folder is gone
+from under it, but it reaches nothing but through Flottille's tools, which work in `main`; the
+next one starts in the project's folder.
 
 ## Git
 

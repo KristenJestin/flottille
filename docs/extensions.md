@@ -371,7 +371,7 @@ Project-scoped.
 |---|---|---|
 | **Alone** | none | in Flottille only |
 | **Internal** | read, never written: written by others | in Flottille only; at the end a draft comment lists where the spec departs from the ticket, which the user posts or not |
-| **The ticket is the spec** | its description is the spec, marked as Flottille's (`forges.md`, "What Flottille posts is marked") | written to the ticket at each Ready, after reading it again: when someone changed it since Flottille last read it, nothing is written and the user chooses (take the change into the spec, or write over it) |
+| **The ticket is the spec** | its description is the spec, recorded as Flottille's (`forges.md`, "What Flottille posts is recorded") | written to the ticket at each Ready, after reading it again: when someone changed it since Flottille last read it, nothing is written and the user chooses (take the change into the spec, or write over it) |
 
 A spec may cover several tickets; a ticket has at most one spec. With a ticket, the items' rounds
 see it change, and the session working on the spec is told with a delivery; nothing is applied on

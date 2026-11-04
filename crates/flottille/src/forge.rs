@@ -31,12 +31,14 @@ use crate::git::{self, Class};
 use crate::mcp::{Outcome, arguments, full_detail, workspace_named};
 use crate::place::Place;
 use crate::projects::{self, Failure};
+use crate::workspaces::{self, Head};
 
 mod bitbucket;
 mod ci;
 mod closing;
 mod events;
 mod logs;
+mod pipelines;
 
 pub(crate) use events::offer;
 pub use events::{EVENTS, target_named};
@@ -344,15 +346,21 @@ pub struct Comment {
     pub body: String,
     /// Written by a bot (an app), as far as the forge says it.
     pub bot: bool,
-    /// When it was written, in milliseconds, where a closing comment is told from the others
-    /// (GitHub's); none elsewhere.
+    /// When it was written, in milliseconds, where the forge says it: a GitHub closing comment is
+    /// told from the others by it, and a comment of the record's words by it too (`posts`).
     pub at: Option<u64>,
+    /// The id the forge gives it, where it gives one (GitHub's link names it, Bitbucket's number).
+    pub id: Option<String>,
+    /// Flottille's record says an agent posted it (`posts`).
+    pub recorded: bool,
 }
 
 impl Comment {
-    /// The text, without the mark of Flottille, and whether an agent of Flottille posted it.
+    /// The text, without the old mark of Flottille, and whether an agent of Flottille posted it:
+    /// the record says so, or the text ends with the mark of before it was recorded.
     pub fn unmarked(&self) -> (&str, bool) {
-        unmarked(&self.body)
+        let (text, marked) = unmarked(&self.body);
+        (text, marked || self.recorded)
     }
 }
 
@@ -424,6 +432,8 @@ impl Pull {
                     at: comment["createdAt"]
                         .as_str()
                         .and_then(crate::session_read::form),
+                    id: comment["url"].as_str().and_then(crate::posts::comment_id),
+                    recorded: false,
                 })
                 .collect()
         };
@@ -525,6 +535,8 @@ fn check_of(check: &Value) -> (String, &'static str) {
 #[derive(Debug)]
 pub struct Repository {
     pub path: String,
+    /// The branch it was read for: the one its worktree is on.
+    pub branch: String,
     pub remote: String,
     pub forge: Option<Forge>,
     /// Why there is nothing to read: no forge declared, or its remote disagrees.
@@ -550,11 +562,12 @@ impl Read {
     }
 }
 
-/// Reads the forge each repository declares, for `branch`. A repository with none is said as
-/// such; one whose remote leads elsewhere is refused, and its forge is not asked.
-pub async fn read(repositories: &[Checkout], branch: &str, obsolete: bool) -> Read {
+/// Reads the forge each repository declares, for its branch in `branches` (in the same order). A
+/// repository with none is said as such; one whose remote leads elsewhere is refused, and its
+/// forge is not asked.
+pub async fn read(repositories: &[Checkout], branches: &[String], obsolete: bool) -> Read {
     let mut found = Vec::new();
-    for checkout in repositories {
+    for (checkout, branch) in repositories.iter().zip(branches) {
         let (forge, note, error) = match declared_forge(checkout).await {
             Ok(forge) => (Some(forge), None, None),
             Err(None) if obsolete => (
@@ -569,6 +582,7 @@ pub async fn read(repositories: &[Checkout], branch: &str, obsolete: bool) -> Re
         };
         found.push(Repository {
             path: checkout.path.clone(),
+            branch: branch.clone(),
             remote: checkout.remote.clone(),
             forge,
             note,
@@ -595,7 +609,7 @@ pub async fn read(repositories: &[Checkout], branch: &str, obsolete: bool) -> Re
         let read = match &forge {
             Forge::GitHub { .. } => match gh_problem {
                 Some(_) => Err(None),
-                None => pull_of(&forge, branch).await.map_err(Some),
+                None => pull_of(&forge, &repository.branch).await.map_err(Some),
             },
             Forge::Bitbucket { .. } => match contexts.of(&forge).await {
                 Err(problem) => {
@@ -604,7 +618,7 @@ pub async fn read(repositories: &[Checkout], branch: &str, obsolete: bool) -> Re
                     }
                     Err(None)
                 }
-                Ok(context) => bitbucket::pull_of(&forge, &context, branch)
+                Ok(context) => bitbucket::pull_of(&forge, &context, &repository.branch)
                     .await
                     .map_err(Some),
             },
@@ -752,36 +766,18 @@ pub(crate) async fn gh_json(args: &[&str]) -> Result<Value, String> {
     }
 }
 
-/// What ends every comment and body Flottille posts for an agent on GitHub and Bitbucket: an HTML
-/// comment, which both forges leave out of what they render. It goes out through the user's own
-/// `gh` or `bkt`, so it is the only way to tell an agent's words from the user's.
+/// What ended every comment and body Flottille posted for an agent on GitHub and Bitbucket before
+/// its posts were recorded (`posts`): an HTML comment. Nothing posts it any more, but a text that
+/// still ends with it was an agent's, and is read so.
 pub(crate) const MARKER: &str = "<!-- flottille -->";
-/// The same on Jira, where nothing invisible survives `acli`: a short visible line.
+/// The same on Jira, where it was a short visible line.
 pub(crate) const FOOTER: &str = "— posted by a Flottille agent";
 /// How a text posted by an agent is said where it is shown to another.
 pub(crate) const BY_AGENT: &str = "posted by an agent";
 
-/// `body`, ended with `end` on a line of its own (`end` alone when there is no body).
-fn ended_with(body: &str, end: &str) -> String {
-    match body.trim_end() {
-        "" => end.to_owned(),
-        body => format!("{body}\n\n{end}"),
-    }
-}
-
-/// What an agent posts on GitHub or Bitbucket: `body`, marked.
-pub(crate) fn marked(body: &str) -> String {
-    ended_with(body, MARKER)
-}
-
-/// What an agent posts on Jira: `body`, with the footer.
-pub(crate) fn footed(body: &str) -> String {
-    ended_with(body, FOOTER)
-}
-
-/// A text read from a forge or a tracker, without the mark of Flottille, and whether it had one:
-/// an agent of Flottille posted it. A person's comment that ends with the mark is taken for an
-/// agent's, which is accepted.
+/// A text read from a forge or a tracker, without the old mark of Flottille, and whether it had
+/// one: an agent of Flottille posted it. A person's comment that ends with the mark is taken for
+/// an agent's, which is accepted.
 pub(crate) fn unmarked(text: &str) -> (&str, bool) {
     let text = text.trim_end();
     for end in [MARKER, FOOTER] {
@@ -808,6 +804,7 @@ fn state_of(workspace: &Workspace, read: &Read) -> Value {
         "problem": read.problem,
         "repositories": read.repositories.iter().map(|r| json!({
             "path": r.path,
+            "branch": r.branch,
             "remote": r.remote,
             "forge": r.forge.as_ref().map(Forge::kind),
             "repository": r.forge.as_ref().map(Forge::slug),
@@ -908,9 +905,15 @@ async fn refresh_read(daemon: &Arc<Daemon>, workspace: &Workspace) -> (Value, Re
             .iter()
             .any(|o| o == flottille_core::project::OBSOLETE_FORGES)
     });
-    let repositories = repositories_of(workspace, project.as_ref());
-    let read = read(&repositories, &workspace.branch, obsolete).await;
-    let state = state_of(workspace, &read);
+    let (workspace, heads) = workspaces::follow(daemon, workspace.clone()).await;
+    let repositories = repositories_of(&workspace, project.as_ref());
+    let read = read(
+        &repositories,
+        &workspaces::branches(&workspace, &heads),
+        obsolete,
+    )
+    .await;
+    let state = state_of(&workspace, &read);
     let now = now_ms();
     let previous = {
         let mut entries = daemon.forges.entries.lock().unwrap();
@@ -1041,6 +1044,17 @@ pub(crate) struct ForgeCall {
     from: Option<String>,
     /// subscribe: how long it waits at most.
     minutes: Option<u64>,
+    /// run: what to run, as `pipelines` lists it.
+    pipeline: Option<String>,
+    /// run: the pipeline's variables, the workflow's inputs.
+    variables: Option<Vec<pipelines::Variable>>,
+    /// run_view, run_logs, stop, step: the run's number.
+    run: Option<u64>,
+    /// run_logs, step: a step's (a job's) name or id.
+    step: Option<String>,
+    /// step: `start` or `rerun`.
+    #[serde(rename = "do")]
+    verb: Option<String>,
 }
 
 impl ForgeCall {
@@ -1107,6 +1121,9 @@ pub async fn forge(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Value
         ("create" | "merge" | "checks", _) => forge_write(daemon, place, asked).await,
         ("comment" | "edit", _) => forge_note(daemon, place, asked).await,
         ("close" | "reopen", _) => forge_close(daemon, place, asked).await,
+        (action, _) if pipelines::ACTIONS.contains(&action) => {
+            pipelines::call(daemon, place, asked).await
+        }
         (action, _) => Outcome::Refused(format!(
             "refused: forge has no action {action:?}: its actions are {}",
             crate::gate::FORGE_ACTIONS
@@ -1220,7 +1237,7 @@ async fn forge_subscribe(
     let Some(pull) = &repository.pull else {
         return Outcome::Refused(format!(
             "refused: {path} has no pull request for {}: nothing to subscribe to",
-            workspace.branch
+            repository.branch
         ));
     };
     if matches!(pull.state, "merged" | "closed") {
@@ -1300,6 +1317,19 @@ async fn forge_subscribe(
         text.push_str(&format!("\n{line}"));
     }
     Outcome::Done(text)
+}
+
+/// Marks the comments of a pull request that an agent posted, as Flottille's record says
+/// (`posts`).
+fn know_posts(daemon: &Daemon, project: &str, path: &str, forge: &Forge, pull: &mut Pull) {
+    crate::posts::Known::of(
+        daemon,
+        project,
+        forge.kind(),
+        path,
+        &pull.number.to_string(),
+    )
+    .mark_pull(pull);
 }
 
 /// What a live read found of a pull request, stored over what the items keep of it.
@@ -1613,6 +1643,7 @@ async fn forge_show(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall, numbe
             forge.slug()
         )),
         Ok(Some(mut pull)) => {
+            know_posts(daemon, &place.project, &checkout.path, &forge, &mut pull);
             if held.is_some() {
                 remember(daemon, &place.project, &checkout.path, &forge, &pull);
             }
@@ -1702,10 +1733,11 @@ async fn forge_note(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
         }
     }
     let number = number.to_string();
-    let marked_body = body.map(marked);
-    let body = marked_body.as_deref();
+    // The id of the comment, where the forge answers one: `gh` prints its link, `bkt` none.
     let done = match &forge {
-        Forge::Bitbucket { .. } => bitbucket::note(&forge, action, &number, title, body).await,
+        Forge::Bitbucket { .. } => bitbucket::note(&forge, action, &number, title, body)
+            .await
+            .map(|()| None),
         Forge::GitHub { .. } => {
             let repo = forge.gh_repository();
             let mut args = vec!["pr", action, &number, "-R", &repo];
@@ -1716,15 +1748,31 @@ async fn forge_note(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
             if let Some(body) = body {
                 args.extend(["--body", body]);
             }
-            gh_text(&args).await.map(|_| ())
+            gh_text(&args)
+                .await
+                .map(|said| crate::posts::comment_id_in(&said))
         }
     };
-    match (done, action) {
-        (Err(why), _) => Outcome::Failed(why),
-        (Ok(()), "comment") => Outcome::Done(format!(
-            "The comment was posted on pull request #{number} of {slug}."
-        )),
-        (Ok(()), _) => Outcome::Done(format!("Pull request #{number} of {slug} was changed.")),
+    let on = (
+        place.project.as_str(),
+        forge.kind(),
+        checkout.path.as_str(),
+        number.as_str(),
+    );
+    match (done, action, body) {
+        (Err(why), _, _) => Outcome::Failed(why),
+        (Ok(id), "comment", Some(body)) => {
+            crate::posts::record_comment(daemon, on, id, body);
+            Outcome::Done(format!(
+                "The comment was posted on pull request #{number} of {slug}."
+            ))
+        }
+        (Ok(_), _, body) => {
+            if let Some(body) = body {
+                crate::posts::record_body(daemon, on, body);
+            }
+            Outcome::Done(format!("Pull request #{number} of {slug} was changed."))
+        }
     }
 }
 
@@ -1804,12 +1852,7 @@ async fn forge_close(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
              open a new one for #{number} of {slug}"
         ));
     }
-    let comment = asked
-        .comment
-        .as_deref()
-        .filter(|c| !c.trim().is_empty())
-        .map(marked);
-    let comment = comment.as_deref();
+    let comment = asked.comment.as_deref().filter(|c| !c.trim().is_empty());
     let numbered = number.to_string();
     let repo = forge.gh_repository();
     if !bitbucket && let Err(problem) = signed_in().await {
@@ -1868,6 +1911,17 @@ async fn forge_close(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
     if let Err(why) = done {
         return Outcome::Failed(why);
     }
+    // Neither `gh pr close` nor `bkt pr decline` says the id of the comment it posted: the record
+    // keeps its text.
+    if let Some(comment) = comment {
+        let on = (
+            place.project.as_str(),
+            forge.kind(),
+            checkout.path.as_str(),
+            numbered.as_str(),
+        );
+        crate::posts::record_comment(daemon, on, None, comment);
+    }
     let verb = match (action, bitbucket) {
         ("close", true) => "declined",
         ("close", false) => "closed",
@@ -1900,6 +1954,8 @@ async fn forge_read(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall) -> Ou
         Ok(None) => return Outcome::Failed(format!("the workspace {name} is gone")),
         Err(error) => return Outcome::Failed(error.to_string()),
     };
+    let (workspace, heads) = workspaces::follow(daemon, workspace).await;
+    let mut branches = workspaces::branches(&workspace, &heads);
     let project = projects::load_project(daemon, &place.project).ok();
     let obsolete = project.as_ref().is_some_and(|p| {
         p.obsolete
@@ -1916,12 +1972,19 @@ async fn forge_read(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall) -> Ou
                 names.join(", ")
             ));
         }
-        repositories.retain(|r| &r.path == asked);
+        let at = repositories.iter().position(|r| &r.path == asked).unwrap();
+        repositories = vec![repositories.remove(at)];
+        branches = vec![branches.remove(at)];
     }
     // A round of the project running stores a read of its own; none starts during this one,
     // whose logs and runs are read after it.
     let held = crate::items::held_now(daemon, &place.project);
-    let mut read = read(&repositories, &workspace.branch, obsolete).await;
+    let mut read = read(&repositories, &branches, obsolete).await;
+    for repository in &mut read.repositories {
+        if let (Some(forge), Some(pull)) = (&repository.forge, &mut repository.pull) {
+            know_posts(daemon, &place.project, &repository.path, forge, pull);
+        }
+    }
     if held.is_some() {
         for repository in &read.repositories {
             if let (Some(forge), Some(pull)) = (&repository.forge, &repository.pull) {
@@ -2005,6 +2068,7 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
         Ok(None) => return Outcome::Failed(format!("the workspace {name} is gone")),
         Err(error) => return Outcome::Failed(error.to_string()),
     };
+    let (workspace, heads) = workspaces::follow(daemon, workspace).await;
     // The project's reviewers and declared forges, as its file says them now.
     let project = match projects::load_project(daemon, &place.project) {
         Ok(project) => project,
@@ -2014,8 +2078,9 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
     let found = repositories
         .iter()
         .zip(&workspace.repositories)
-        .find(|(checkout, _)| checkout.path == asked_repository);
-    let Some((checkout, repository)) = found else {
+        .zip(&heads)
+        .find(|((checkout, _), _)| checkout.path == asked_repository);
+    let Some(((checkout, repository), head)) = found else {
         let names: Vec<&str> = repositories.iter().map(|r| r.path.as_str()).collect();
         return Outcome::Refused(format!(
             "refused: {asked_repository} is not a repository of the workspace {name}: it has \
@@ -2023,6 +2088,12 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
             names.join(", ")
         ));
     };
+    if let (Head::Detached(hash), "create") = (head, asked.action.as_str()) {
+        return Outcome::Refused(format!(
+            "refused: {asked_repository} is on no branch (detached at {hash}): switch to a \
+             branch first"
+        ));
+    }
     if let Err(refusal) = remote_kept(&checkout.folder, &repository.base).await {
         return Outcome::Refused(refusal);
     }
@@ -2036,11 +2107,12 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
         }
         Err(Some(why)) => return Outcome::Refused(why),
     };
-    let branch = workspace.branch.as_str();
+    let branch = head.branch_or(&workspace.branch);
     let reviewers = project.pull_requests.reviewers;
     if matches!(forge, Forge::Bitbucket { .. }) {
         let base = &repository.base.branch;
-        return bitbucket::write(&forge, branch, base, &reviewers, asked).await;
+        let on = (daemon, place.project.as_str(), checkout.path.as_str());
+        return bitbucket::write(on, &forge, branch, base, &reviewers, asked).await;
     }
     if let Err(problem) = signed_in().await {
         return Outcome::Failed(problem);
@@ -2055,7 +2127,7 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                 );
             };
             let base = &repository.base.branch;
-            let body = marked(&asked.body.unwrap_or_default());
+            let body = asked.body.unwrap_or_default();
             let mut args = vec![
                 "pr", "create", "-R", &repo, "--head", branch, "--base", base, "--title", &title,
                 "--body", &body,
@@ -2067,10 +2139,23 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                 args.extend(["--reviewer", reviewer]);
             }
             match gh_text(&args).await {
-                Ok(said) => Outcome::Done(format!(
-                    "The pull request of {branch} into {base} was opened in {slug}: {}",
-                    said.trim()
-                )),
+                Ok(said) => {
+                    // `gh` prints the new pull request's link, which ends with its number.
+                    let number = said.trim().rsplit('/').next().unwrap_or_default();
+                    if !body.trim().is_empty() && number.parse::<u64>().is_ok() {
+                        let on = (
+                            place.project.as_str(),
+                            forge.kind(),
+                            checkout.path.as_str(),
+                            number,
+                        );
+                        crate::posts::record_body(daemon, on, &body);
+                    }
+                    Outcome::Done(format!(
+                        "The pull request of {branch} into {base} was opened in {slug}: {}",
+                        said.trim()
+                    ))
+                }
                 Err(why) => Outcome::Failed(why),
             }
         }
@@ -2278,7 +2363,7 @@ fn read_text(workspace: &Workspace, read: &Read, full: bool, asked: Option<&str>
         let Some(pull) = &repository.pull else {
             text.push_str(&format!(
                 "\n{named}: no pull request for {}.\n",
-                workspace.branch
+                repository.branch
             ));
             continue;
         };
@@ -2813,23 +2898,17 @@ mod tests {
         assert_eq!(state(json!({"number": 1, "state": "MERGED"})), "merged");
         assert_eq!(state(json!({"number": 1, "state": "CLOSED"})), "closed");
     }
+
     #[test]
-    fn a_posted_text_ends_with_the_mark_and_is_read_back_without_it() {
-        assert_eq!(marked("Rebased"), "Rebased\n\n<!-- flottille -->");
-        assert_eq!(marked("Rebased\n"), "Rebased\n\n<!-- flottille -->");
-        assert_eq!(marked(""), "<!-- flottille -->");
-        assert_eq!(
-            footed("Rebased"),
-            "Rebased\n\n— posted by a Flottille agent"
-        );
+    fn a_text_with_the_old_mark_is_read_back_without_it_as_an_agent_s() {
         for posted in [
-            marked("Rebased"),
-            footed("Rebased"),
-            marked("Rebased") + "\n",
+            "Rebased\n\n<!-- flottille -->",
+            "Rebased\n\n— posted by a Flottille agent",
+            "Rebased\n\n<!-- flottille -->\n",
         ] {
-            assert_eq!(unmarked(&posted), ("Rebased", true), "{posted:?}");
+            assert_eq!(unmarked(posted), ("Rebased", true), "{posted:?}");
         }
-        assert_eq!(unmarked(&marked("")), ("", true));
+        assert_eq!(unmarked("<!-- flottille -->"), ("", true));
         assert_eq!(unmarked("Thanks"), ("Thanks", false));
         // Only the end counts: a mark quoted in the middle of a person's text is theirs.
         let quoted = "Do not add <!-- flottille --> to it";

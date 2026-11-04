@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 
 use crate::agent::{Agent, AgentState, Choices, GateMode};
 use crate::approval::{Decision, Delivery, Forward, Judgement, Kind, Request, RequestState};
-use crate::item::{Check, Cursor, Filter, Item};
+use crate::item::{Check, Cursor, Filter, Item, Post};
 use crate::protocol::Event;
 use crate::run::{Run, RunState};
 use crate::subscription::Subscription;
@@ -549,6 +549,42 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX tool_results_agent ON tool_results (agent);
 ",
     "
+    -- Where the agent worked when it asked (`main`, or `workspace <name>`): a request is done
+    -- only there (`docs/workspaces.md`, \"Its own workspace\"). NULL before it was kept.
+    ALTER TABLE approval_requests ADD COLUMN place TEXT;
+",
+    "
+    -- What Flottille posted for an agent on a forge or a tracker (`docs/forges.md`, \"What Flottille
+    -- posts is recorded\"): the text carries no mark, so the daemon knows its posts by this.
+    CREATE TABLE posts (
+        id          INTEGER PRIMARY KEY,
+        project     TEXT NOT NULL,
+        source      TEXT NOT NULL,
+        repository  TEXT NOT NULL,
+        key         TEXT NOT NULL,
+        kind        TEXT NOT NULL,
+        comment_id  TEXT,
+        fingerprint TEXT,
+        posted_at   INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX posts_item ON posts (project, source, repository, key);
+",
+    "
+    -- The last exchange of a session (`docs/protocol.md`, `agent.tree`): the later of the last
+    -- message the user gave the agent and the end of its last turn, which the sidebar sorts by.
+    -- NULL before either.
+    ALTER TABLE agents ADD COLUMN exchanged_at INTEGER;
+    UPDATE agents SET exchanged_at = (
+        SELECT max(at) FROM (
+            SELECT max(sent_at) AS at FROM deliveries
+                WHERE agent = agents.id AND kind = 'user' AND sent_at IS NOT NULL
+            UNION ALL
+            SELECT max(e.at) FROM agent_events a JOIN events e ON e.seq = a.seq
+                WHERE a.agent = agents.id AND e.name = 'agent.turn_ended'
+        )
+    );
+",
+    "
     -- How many of each extension's own migrations were applied (`docs/extensions.md`, \"Data\"):
     -- its tables, `ext_<name>_…`, are brought up to date as the store's are, and kept when it is
     -- turned off.
@@ -560,7 +596,7 @@ const MIGRATIONS: &[&str] = &[
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
-    identity, held_by, forwards, state, decision, created_at, decided_at, kind, says, judgement";
+    identity, held_by, forwards, state, decision, created_at, decided_at, kind, says, judgement, place";
 
 const RUN_COLUMNS: &str = "id, agent, name, line, folder, state, exit_code, signal, started_at, \
     ended_at, output, dismissed, project";
@@ -569,7 +605,7 @@ const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, sta
     created_at, updated_at, active_at, ended_at, chosen_model, chosen_effort, chosen_mode, \
     taken_model, taken_effort, taken_mode, native_id, agent_version, instructions, tools, parent, \
     depth, epoch, title, brief, reported_at, quiet_turns, waiting_on_answer, reopens, images, gate_mode, \
-    launched_by, pending_model, pending_effort";
+    launched_by, pending_model, pending_effort, exchanged_at";
 
 const DELIVERY_COLUMNS: &str = "id, agent, kind, body, urgency, state, created_at, sent_at, images";
 
@@ -931,6 +967,24 @@ impl Store {
         Ok(event)
     }
 
+    /// Records the branch the workspace's worktrees are on now, with its event, in one
+    /// transaction.
+    pub fn set_workspace_branch(
+        &mut self,
+        workspace: i64,
+        branch: &str,
+        event: (&str, Value),
+    ) -> Result<Event> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "UPDATE workspaces SET branch = ?2 WHERE id = ?1",
+            params![workspace, branch],
+        )?;
+        let event = append_event(&transaction, event.0, event.1)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
     /// Forgets a workspace and its steps, with its event, in one transaction.
     pub fn remove_workspace(&mut self, workspace: i64, event: (&str, Value)) -> Result<Event> {
         let transaction = self.connection.transaction()?;
@@ -940,6 +994,57 @@ impl Store {
         Ok(event)
     }
 
+    /// Forgets a workspace and moves the agent that worked in it to the project's `folder`
+    /// (`main`), its instructions now saying so, with their events, in one transaction: the agent
+    /// is never left in a workspace that is gone. The pending requests the agent made are
+    /// cancelled in it (`why`): they were asked in the workspace, and would otherwise be performed
+    /// in `main`. The events, then the requests cancelled.
+    pub fn remove_workspace_moving(
+        &mut self,
+        workspace: i64,
+        agent: &str,
+        folder: &Path,
+        instructions: &str,
+        events: [(&str, Value); 2],
+        why: &str,
+    ) -> Result<(Vec<Event>, Vec<Request>)> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute("DELETE FROM workspaces WHERE id = ?1", params![workspace])?;
+        transaction.execute(
+            "UPDATE agents SET workspace = NULL, folder = ?2, instructions = ?3, updated_at = ?4 \
+             WHERE id = ?1",
+            params![agent, path_text(folder)?, instructions, now_ms()],
+        )?;
+        let mut written = Vec::new();
+        for (name, data) in events {
+            written.push(append_event(&transaction, name, data)?);
+        }
+        let pending: Vec<Request> = {
+            let mut statement = transaction.prepare_cached(&format!(
+                "SELECT {REQUEST_COLUMNS} FROM approval_requests \
+                 WHERE agent = ?1 AND state = 'pending' ORDER BY number"
+            ))?;
+            let rows = statement.query_map(params![agent], request_row)?;
+            rows.map(|row| row?).collect::<Result<_>>()?
+        };
+        for request in &pending {
+            transaction.execute(
+                "UPDATE approval_requests SET state = 'cancelled', decided_at = ?2 \
+                 WHERE number = ?1",
+                params![request.number, now_ms()],
+            )?;
+            written.push(append_agent_event(
+                &transaction,
+                agent,
+                "approval.cancelled",
+                json!({"number": request.number, "agent": agent, "held_by": request.held_by,
+                    "why": why}),
+            )?);
+        }
+        transaction.commit()?;
+        Ok((written, pending))
+    }
+
     /// Writes a new agent with its event, in one transaction.
     pub fn create_agent(&mut self, agent: &Agent, event: (&str, Value)) -> Result<Event> {
         let transaction = self.connection.transaction()?;
@@ -947,7 +1052,7 @@ impl Store {
             &format!(
                 "INSERT INTO agents ({AGENT_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, \
                  ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, \
-                 ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36)"
+                 ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37)"
             ),
             params![
                 agent.id,
@@ -986,6 +1091,7 @@ impl Store {
                 agent.launched_by,
                 agent.pending.model,
                 agent.pending.effort,
+                agent.exchanged_at,
             ],
         )?;
         let event = append_agent_event(&transaction, &agent.id, event.0, event.1)?;
@@ -1496,8 +1602,9 @@ impl Store {
         let created_at = now_ms();
         let number: u64 = transaction.query_row(
             "INSERT INTO approval_requests (agent, call_key, tool, arguments, shown, reasons, \
-             sensitive, identity, held_by, forwards, state, created_at, kind, says, judgement) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', ?8, ?9, 'pending', ?10, ?11, ?12, ?13) \
+             sensitive, identity, held_by, forwards, state, created_at, kind, says, judgement, \
+             place) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', ?8, ?9, 'pending', ?10, ?11, ?12, ?13, ?14) \
              RETURNING number",
             params![
                 asked.agent,
@@ -1517,6 +1624,7 @@ impl Store {
                     .as_ref()
                     .map(serde_json::to_string)
                     .transpose()?,
+                asked.place,
             ],
             |row| row.get(0),
         )?;
@@ -1850,6 +1958,12 @@ impl Store {
             )?;
             if changed > 0 {
                 moved.push(id.clone());
+                // The user's message reaches the agent: the session's last exchange.
+                transaction.execute(
+                    "UPDATE agents SET exchanged_at = ?2 WHERE id = ?1 \
+                     AND EXISTS (SELECT 1 FROM deliveries WHERE id = ?3 AND kind = 'user')",
+                    params![agent, now, id],
+                )?;
             }
         }
         let event = if moved.is_empty() {
@@ -2160,6 +2274,60 @@ impl Store {
             ],
         )?;
         Ok(())
+    }
+
+    /// Records a post that succeeded. An item's own text (`body`) is recorded once: a later post
+    /// of it replaces the earlier.
+    pub fn add_post(&self, post: &Post) -> Result<()> {
+        if post.kind == "body" {
+            self.connection.execute(
+                "DELETE FROM posts WHERE project = ?1 AND source = ?2 AND repository = ?3 \
+                 AND key = ?4 AND kind = 'body'",
+                params![post.project, post.source, post.repository, post.key],
+            )?;
+        }
+        self.connection.execute(
+            "INSERT INTO posts (project, source, repository, key, kind, comment_id, \
+             fingerprint, posted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                post.project,
+                post.source,
+                post.repository,
+                post.key,
+                post.kind,
+                post.comment_id,
+                post.fingerprint,
+                post.posted_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// What was posted on one item, oldest first.
+    pub fn posts(
+        &self,
+        project: &str,
+        source: &str,
+        repository: &str,
+        key: &str,
+    ) -> Result<Vec<Post>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT kind, comment_id, fingerprint, posted_at FROM posts WHERE project = ?1 \
+             AND source = ?2 AND repository = ?3 AND key = ?4 ORDER BY id",
+        )?;
+        let rows = statement.query_map(params![project, source, repository, key], |row| {
+            Ok(Post {
+                project: project.to_owned(),
+                source: source.to_owned(),
+                repository: repository.to_owned(),
+                key: key.to_owned(),
+                kind: row.get(0)?,
+                comment_id: row.get(1)?,
+                fingerprint: row.get(2)?,
+                posted_at: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// The agent's deliveries `sending` become `sent`: the turn that held them ended.
@@ -2626,6 +2794,12 @@ fn append_agent_event(
         "INSERT INTO agent_events (seq, agent) VALUES (?1, ?2)",
         params![event.seq, agent],
     )?;
+    if name == "agent.turn_ended" {
+        connection.execute(
+            "UPDATE agents SET exchanged_at = ?2 WHERE id = ?1",
+            params![agent, event.at],
+        )?;
+    }
     Ok(event)
 }
 
@@ -2733,6 +2907,7 @@ fn request_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Request>> {
         decision: decision.flatten(),
         created_at: row.get(13)?,
         decided_at: row.get(14)?,
+        place: row.get(18)?,
     }))
 }
 
@@ -2853,6 +3028,7 @@ fn agent_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Agent>> {
             effort: text(35)?,
             mode: None,
         },
+        exchanged_at: row.get(36)?,
     }))
 }
 
@@ -2959,6 +3135,76 @@ mod tests {
         assert!(error.to_string().contains("newer Flottille"), "{error}");
     }
 
+    fn a_post(kind: &str, comment_id: Option<&str>, fingerprint: Option<&str>) -> Post {
+        Post {
+            project: "app".into(),
+            source: "github".into(),
+            repository: "acme/app".into(),
+            key: "12".into(),
+            kind: kind.into(),
+            comment_id: comment_id.map(str::to_owned),
+            fingerprint: fingerprint.map(str::to_owned),
+            posted_at: 7,
+        }
+    }
+
+    #[test]
+    fn the_posts_of_an_item_are_kept_across_a_restart_and_a_body_is_kept_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let store = Store::open(&path).unwrap();
+        let comment = a_post("comment", Some("issuecomment-501"), None);
+        let by_text = a_post("comment", None, Some("abc"));
+        store.add_post(&comment).unwrap();
+        store.add_post(&by_text).unwrap();
+        store.add_post(&a_post("body", None, Some("one"))).unwrap();
+        store.add_post(&a_post("body", None, Some("two"))).unwrap();
+        drop(store);
+
+        let store = Store::open(&path).unwrap();
+
+        let posts = store.posts("app", "github", "acme/app", "12").unwrap();
+        assert_eq!(posts.len(), 3, "{posts:?}");
+        assert_eq!(posts[0], comment);
+        assert_eq!(posts[1], by_text);
+        assert_eq!(posts[2].fingerprint.as_deref(), Some("two"));
+        assert!(
+            store
+                .posts("app", "github", "acme/app", "13")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .posts("other", "github", "acme/app", "12")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_store_before_the_posts_gains_their_table_and_keeps_its_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let old = Connection::open(&path).unwrap();
+        let previous = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("CREATE TABLE posts"))
+            .unwrap();
+        for migration in &MIGRATIONS[..previous] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.pragma_update(None, "user_version", previous).unwrap();
+        append_event(&old, "test.one", json!({})).unwrap();
+        drop(old);
+
+        let store = Store::open(&path).unwrap();
+
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len());
+        assert_eq!(store.last_seq().unwrap(), 1);
+        store.add_post(&a_post("comment", Some("1"), None)).unwrap();
+    }
+
     fn a_workspace() -> Workspace {
         Workspace {
             id: 0,
@@ -2981,6 +3227,7 @@ mod tests {
                     fetched_at: Some(1_792_843_730_000),
                     note: None,
                 },
+                resumed: false,
             }],
             steps: vec![
                 Step {
@@ -3029,6 +3276,25 @@ mod tests {
         assert_eq!(store.workspaces(None).unwrap(), [read]);
         assert!(store.workspaces(Some("other")).unwrap().is_empty());
         assert_eq!(store.workspace("app", "other").unwrap(), None);
+    }
+
+    #[test]
+    fn a_workspace_s_branch_follows_with_its_event() {
+        let mut store = Store::open_in_memory().unwrap();
+        let (id, _) = store
+            .create_workspace(&a_workspace(), ("workspace.created", json!({})))
+            .unwrap();
+
+        let event = store
+            .set_workspace_branch(
+                id,
+                "feature/x",
+                ("workspace.changed", json!({"branch": "feature/x"})),
+            )
+            .unwrap();
+
+        assert_eq!(event.name, "workspace.changed");
+        assert_eq!(store.workspace_by_id(id).unwrap().branch, "feature/x");
     }
 
     #[test]
@@ -3445,6 +3711,7 @@ mod tests {
             created_at: 1_792_843_730_808,
             updated_at: 1_792_843_730_808,
             active_at: None,
+            exchanged_at: None,
             ended_at: None,
             chosen: Choices {
                 model: Some("haiku".into()),
@@ -3654,6 +3921,56 @@ mod tests {
             .map(|e| e.seq)
             .collect();
         assert_eq!(names, [replayed.seq, live.seq]);
+    }
+
+    #[test]
+    fn the_last_exchange_moves_with_the_user_s_message_and_the_end_of_a_turn_only() {
+        let mut store = Store::open_in_memory().unwrap();
+        let agent = an_agent();
+        store
+            .create_agent(&agent, ("agent.created", json!({})))
+            .unwrap();
+        let exchanged = |store: &Store| store.agent(&agent.id).unwrap().unwrap().exchanged_at;
+        assert_eq!(exchanged(&store), None, "nothing exchanged yet");
+
+        store
+            .append_agent_event(&agent.id, "agent.message", json!({"text": "hi"}), true)
+            .unwrap();
+        store
+            .append_agent_event(&agent.id, "agent.tool_call", json!({}), true)
+            .unwrap();
+        assert_eq!(
+            exchanged(&store),
+            None,
+            "work done during a turn is no exchange"
+        );
+
+        let mut brief = a_delivery("brief-1", "brief");
+        brief.agent = agent.id.clone();
+        store.deliver(&brief).unwrap();
+        store
+            .move_deliveries(
+                &agent.id,
+                &[brief.id.clone()],
+                "queued",
+                "sending",
+                "prompt",
+            )
+            .unwrap();
+        assert_eq!(exchanged(&store), None, "a brief is not the user's message");
+
+        let mut note = a_delivery("user-1", "user");
+        note.agent = agent.id.clone();
+        store.deliver(&note).unwrap();
+        store
+            .move_deliveries(&agent.id, &[note.id.clone()], "queued", "sending", "prompt")
+            .unwrap();
+        let written = exchanged(&store).expect("the user's message is an exchange");
+
+        let ended = store
+            .append_agent_event(&agent.id, "agent.turn_ended", json!({}), false)
+            .unwrap();
+        assert_eq!(exchanged(&store), Some(ended.at.max(written)));
     }
 
     #[test]
@@ -4443,6 +4760,7 @@ mod tests {
             decision: Some(Decision::Once),
             created_at: 0,
             decided_at: None,
+            place: None,
         }
     }
 

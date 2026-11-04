@@ -35,7 +35,7 @@
 //! The writes answer as `gh` does when they work: `pr create` prints the new pull request's URL
 //! (numbered `created`, 1 by default), `pr merge` and `run rerun` print nothing, and `run list`
 //! prints `runs` of the repository (`{"runs": {"acme/app": [{"databaseId": 7, …}]}}`), `[]`
-//! without. `pr comment`, `pr edit`, `pr close` and `pr reopen` print the pull request's URL, of one the script holds.
+//! without. `pr comment` prints the new comment's URL (`…/pull/N#issuecomment-<commented>`, 1 by default), `pr edit`, `pr close` and `pr reopen` the pull request's URL, of one the script holds.
 //! With `merge_methods` (`{"acme/app": ["merge", "rebase"]}`), `pr merge` fails for a method
 //! (`--squash`, `--merge`, `--rebase`) the repository does not allow, as GitHub refuses it, and
 //! `repo view <repository> --json …Allowed` says them (every one without). `pr view` gives a pull
@@ -68,18 +68,22 @@
 //! `run_fail` (`{"acme/app": "HTTP 502: Bad Gateway"}`) makes `run list` alone fail that way, the
 //! pull request calls still working.
 //!
-//! `run view --job <id> --log-failed` prints the log `logs` holds for that job of the repository
+//! `run view --job <id> --log-failed` (or `--log`, the whole log) prints the log `logs` holds for that job of the repository
 //! (`{"logs": {"acme/app": {"456": "build\tRun tests\t2026-01-01T00:00:00.0000000Z …\n"}}}`),
 //! as `gh` prints a failed job's steps; a job it does not hold is a log `gh` cannot find. A
-//! `log_delay_ms` makes it wait that long first, as a slow network does. Any other `run view` is
-//! not a command Flottille runs.
+//! `log_delay_ms` makes it wait that long first, as a slow network does. `run view <id> --json …`
+//! prints what `run_views` holds for that run (`{"run_views": {"acme/app": {"77": {"jobs": […],
+//! "…": "…"}}}}`), a run it does not hold being not found. `workflow run <workflow>` prints the
+//! link of the run it started (numbered `dispatched`, 1 by default), as `gh` does when GitHub gives
+//! it, and `run cancel <id>` that the cancel was asked. `run list --branch <b>` keeps the runs whose
+//! `headBranch` is that branch (a run with none is kept).
 //!
 //! `issue list` keeps the issues of `--state` (`open` by default), with a `--label` and an
 //! `--assignee` (`labels[].name`, `assignees[].login`) when given and, for `--search`, those whose
 //! title or body hold its words (a simplification of GitHub's search), newest first, at most
 //! `--limit`. `issue create` prints the new issue's URL (numbered `created_issue`, 1 by default);
 //! `issue comment`, `edit`, `close` and `reopen` need an issue the script holds and print its
-//! URL; `issue close --reason` takes `completed` or `not planned` only.
+//! URL (`issue comment`: the comment's, `…#issuecomment-<commented>`); `issue close --reason` takes `completed` or `not planned` only.
 //!
 //! The boards of GitHub Projects: an issue of the script holds `projectItems` (`gh issue view
 //! --json projectItems`: `[{"id": "PVTI_1", "project": {"id": "PVT_a", "title": "Roadmap"},
@@ -398,7 +402,13 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                     number.to_owned()
                 }
             };
-            println!("https://github.com/{repository}/issues/{number}");
+            if words[1] == "comment" {
+                // As `gh issue comment` does: the comment's own link.
+                let id = script["commented"].as_u64().unwrap_or(1);
+                println!("https://github.com/{repository}/issues/{number}#issuecomment-{id}");
+            } else {
+                println!("https://github.com/{repository}/issues/{number}");
+            }
             0
         }
         ["pr", "comment" | "edit" | "close" | "reopen", number, ..] => {
@@ -419,7 +429,13 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 eprintln!("no pull requests found for #{number}");
                 return 1;
             }
-            println!("https://github.com/{repository}/pull/{number}");
+            if words[1] == "comment" {
+                // As `gh pr comment` does: the comment's own link.
+                let id = script["commented"].as_u64().unwrap_or(1);
+                println!("https://github.com/{repository}/pull/{number}#issuecomment-{id}");
+            } else {
+                println!("https://github.com/{repository}/pull/{number}");
+            }
             0
         }
         ["repo", "view", asked, ..] => {
@@ -455,7 +471,7 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             );
             1
         }
-        ["run", "view", ..] if words.contains(&"--log-failed") => {
+        ["run", "view", ..] if words.contains(&"--log-failed") || words.contains(&"--log") => {
             let (Some(repository), Some(job)) = (repository, option("--job")) else {
                 eprintln!("fake gh: run view needs -R and --job");
                 return 2;
@@ -478,6 +494,54 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 }
             }
         }
+        ["run", "view", id, ..] => {
+            let Some(repository) = repository else {
+                eprintln!("fake gh: no -R");
+                return 2;
+            };
+            if let Some(failure) = script["fail"][repository].as_str() {
+                eprintln!("{failure}");
+                return 1;
+            }
+            match script["run_views"][repository].get(*id) {
+                Some(run) => {
+                    println!("{run}");
+                    0
+                }
+                None => {
+                    eprintln!("could not find any workflow run with ID {id}");
+                    1
+                }
+            }
+        }
+        ["workflow", "run", workflow, ..] => {
+            let Some(repository) = repository else {
+                eprintln!("fake gh: no -R");
+                return 2;
+            };
+            if let Some(failure) = script["fail"][repository].as_str() {
+                eprintln!("{failure}");
+                return 1;
+            }
+            println!("✓ Created workflow_dispatch event for {workflow}");
+            println!(
+                "https://github.com/{repository}/actions/runs/{}",
+                script["dispatched"].as_u64().unwrap_or(1)
+            );
+            0
+        }
+        ["run", "cancel", id, ..] => {
+            let Some(repository) = repository else {
+                eprintln!("fake gh: no -R");
+                return 2;
+            };
+            if let Some(failure) = script["fail"][repository].as_str() {
+                eprintln!("{failure}");
+                return 1;
+            }
+            println!("✓ Request to cancel workflow {id} submitted.");
+            0
+        }
         ["pr", "create" | "merge", ..] | ["run", "list" | "rerun", ..] => {
             let Some(repository) = repository else {
                 eprintln!("fake gh: no -R");
@@ -498,10 +562,20 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                     "https://github.com/{repository}/pull/{}",
                     script["created"].as_u64().unwrap_or(1)
                 ),
-                ["run", "list"] => match &script["runs"][repository] {
-                    Value::Null => println!("[]"),
-                    runs => println!("{runs}"),
-                },
+                // `--branch` keeps the runs of that branch; a run that says none is kept.
+                ["run", "list"] => {
+                    let runs: Vec<&Value> = script["runs"][repository]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|run| {
+                            option("--branch").is_none_or(|branch| {
+                                run["headBranch"].as_str().is_none_or(|on| on == branch)
+                            })
+                        })
+                        .collect();
+                    println!("{}", json!(runs));
+                }
                 _ => {}
             }
             0

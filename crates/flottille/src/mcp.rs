@@ -303,7 +303,7 @@ const SERVED: [Definition; 28] = [
         title: "Pull requests",
         description: "The pull requests of the project's repositories on their forge, through \
             the user's own gh or bkt (no forge sign-in here: never run them). list: by state \
-            (open by default) and branch, as the daemon last read them (it says when). show: a workspace's branch's (yours; in main, name \
+            (open by default) and branch, as last read. show: a workspace's branch's (yours; in main, name \
             it), or number's, with checks (the log's end of each failed job), review and comment \
             counts; detail full adds texts. Writes, judged, answered at once, the result maybe \
             later: create, merge (method, squash by default; refused with no check, while checks \
@@ -311,14 +311,15 @@ const SERVED: [Definition; 28] = [
             (re-run failed) act on a workspace's branch; comment, edit, close (comment first), \
             reopen on number. subscribe: the next events of a workspace's pull request wakes you \
             once, by a delivery (from people: no bot nor agent; minutes: sized by CI, else 60); \
-            unsubscribe. {\"action\": \"create\", \"repository\": \"api\", \"title\": \
+            unsubscribe. CI: pipelines, runs, run_view, run_logs; judged run, stop, step. \
+            {\"action\": \"create\", \"repository\": \"api\", \"title\": \
             \"fix: ...\", \"body\": \"...\"}",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "show", "subscribe", "unsubscribe", "create", "comment", "edit", "merge", "checks", "close", "reopen"]},
+                "action": {"type": "string", "enum": ["list", "show", "subscribe", "unsubscribe", "create", "comment", "edit", "merge", "checks", "close", "reopen", "pipelines", "runs", "run_view", "run_logs", "run", "stop", "step"]},
                 "workspace": {"type": "string", "description": "Yours when left out; in main, name it."},
                 "repository": {"type": "string", "description": "By path; all of the place's when left out (list, show)."},
                 "number": {"type": "integer", "minimum": 1, "description": "show, comment, edit: a pull request."},
@@ -334,7 +335,14 @@ const SERVED: [Definition; 28] = [
                 "method": {"type": "string", "enum": ["squash", "merge", "rebase"], "description": "merge: squash when left out."},
                 "events": {"type": "array", "items": {"enum": crate::forge::EVENTS}},
                 "from": {"enum": crate::subscriptions::FROM},
-                "minutes": {"type": "integer", "minimum": 1, "maximum": crate::subscriptions::LONGEST_MINUTES}
+                "minutes": {"type": "integer", "minimum": 1, "maximum": crate::subscriptions::LONGEST_MINUTES},
+                "pipeline": {"type": "string", "description": "run: as pipelines lists it (Bitbucket default, custom: <name>, branches: <pattern>; GitHub a workflow's file)."},
+                "variables": {"type": "array", "description": "run: Bitbucket variables, GitHub inputs.", "items": {"type": "object", "properties": {
+                    "key": {"type": "string"}, "value": {"type": "string"}, "secured": {"type": "boolean"}
+                }, "required": ["key", "value"], "additionalProperties": false}},
+                "run": {"type": "integer", "minimum": 1, "description": "run_view, run_logs, stop, step: as runs lists it."},
+                "step": {"type": "string", "description": "run_logs, step: a step's (job's) name, as run_view lists it."},
+                "do": {"type": "string", "enum": ["start", "rerun"], "description": "step: start a manual step, or run one again."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -474,10 +482,12 @@ const SERVED: [Definition; 28] = [
         name: "workspace",
         title: "The project's workspaces",
         description: "The project's workspaces. list and show read them. A root's writes, \
-            judged: create makes one (worktrees, then setup, judged as a run of each step), \
-            prepare resumes a failed setup, link_ticket links a ticket (null unlinks); remove, \
-            always held for the user, its request saying what would be lost, never the \
-            workspace you work in. name: yours when left out, but for create and remove. {\"action\": \"create\", \
+            judged: create makes one (worktrees, then setup, judged as a run of each step; to \
+            resume a branch, name it), prepare resumes a failed setup, link_ticket links a \
+            ticket (null unlinks); remove, always held for the user, its request saying what \
+            would be lost: yours too once its work is done, your commands in it stopped, and you \
+            go on in main. name: yours when left out, but for create. To work on another branch in this workspace, switch with git: the \
+            workspace follows the branch its worktrees are on. {\"action\": \"create\", \
             \"name\": \"login\"}",
         read_only: false,
         idempotent: false,
@@ -487,6 +497,7 @@ const SERVED: [Definition; 28] = [
                 "action": {"type": "string", "enum": ["list", "show", "create", "prepare", "link_ticket", "remove"]},
                 "name": {"type": "string"},
                 "repositories": {"type": "array", "items": {"type": "string"}, "description": "create: by path."},
+                "branch": {"type": "string", "description": "create: <branch prefix>/<name> when left out; an existing branch is checked out."},
                 "ticket": {"type": ["string", "null"], "description": "#123 or ABC-123."}
             }, "required": ["action"], "additionalProperties": false})
         },
@@ -975,6 +986,24 @@ impl Server {
             self.changes.send_modify(|n| *n += 1);
         }
         outdated
+    }
+
+    /// The agent's running session now works in `place`: its next calls are decided and
+    /// performed there. Nothing when no process of the agent runs.
+    pub fn move_place(&self, agent: &str, place: Place) {
+        let mut tokens = self.tokens.lock().unwrap();
+        let Tokens {
+            grants, by_agent, ..
+        } = &mut *tokens;
+        if let Some(grant) = by_agent
+            .get(agent)
+            .and_then(|digest| grants.get_mut(digest))
+        {
+            *grant = Arc::new(Grant {
+                place,
+                ..Grant::clone(grant)
+            });
+        }
     }
 
     /// Whether the agent's running session runs an older list of tools than its role has now.
@@ -1779,6 +1808,8 @@ async fn played(
         .is_some_and(|agent| agent.epoch != grant.epoch);
     let outcome = if replaced {
         Outcome::Refused(REPLACED.into())
+    } else if let Some(why) = crate::workspaces::being_removed(daemon, &grant.agent, tool) {
+        Outcome::Refused(format!("refused: {why}"))
     } else if grant.tools.contains(&tool) {
         // A write of the project shows what it changes; one that cannot be done is refused
         // before the user is asked anything.
@@ -1831,7 +1862,10 @@ async fn played(
                         match judged {
                             // In Full, what the gate holds passes, base included: what it
                             // refuses was refused above.
-                            _ if mode == GateMode::Full => {
+                            // Its own workspace is removed only with the user's word.
+                            _ if mode == GateMode::Full
+                                && !removes_own_workspace(grant, tool, &args) =>
+                            {
                                 verdict = Some("full");
                                 if removes_a_workspace(tool, &args) {
                                     crate::actions::remove_losing(daemon, grant, args).await
@@ -2147,6 +2181,12 @@ fn pushed(place: &Place, folder: Option<&Resolved>) -> bool {
     }
 }
 
+/// `workspace` `remove` of the workspace the agent works in: the only one an agent in a
+/// workspace may name.
+fn removes_own_workspace(grant: &Grant, tool: &str, args: &Value) -> bool {
+    removes_a_workspace(tool, args) && grant.place.workspace.is_some()
+}
+
 /// Performs a call the user allowed, of its class, recorded as the agent's: the request's answer.
 /// `discarding`, the losses of a workspace's removal the user said to make even with what would
 /// be lost.
@@ -2351,8 +2391,27 @@ pub fn record_of(args: &Value, place: &Place) -> Value {
         }
     }
     let env = std::env::vars_os().collect();
-    let values = place.secret_values();
-    walk(args, &|text| secrets::mask_also(text, &env, &values))
+    let mut values = place.secret_values();
+    // A secured variable of a pipeline's run is the agent's own secret.
+    values.extend(
+        args["variables"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|variable| variable["secured"] == true)
+            .filter_map(|variable| variable["value"].as_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+    );
+    let mut recorded = walk(args, &|text| secrets::mask_also(text, &env, &values));
+    // However short it is.
+    let variables = recorded.get_mut("variables").and_then(Value::as_array_mut);
+    for variable in variables.into_iter().flatten() {
+        if variable["secured"] == true && variable.get("value").is_some() {
+            variable["value"] = "[masked]".into();
+        }
+    }
+    recorded
 }
 
 /// A text cut at `limit` characters, saying how much was left out.

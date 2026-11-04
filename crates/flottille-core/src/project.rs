@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize, Serializer};
 
 use crate::commands::{Command, OBSOLETE_GRANTS};
 use crate::declared::{ProjectTracker, RepositoryForge};
+use crate::place::{self, Place};
 
 /// Children running at once per project: the bounds of `max_children`.
 pub const CHILDREN_CAP: std::ops::RangeInclusive<u8> = 1..=12;
@@ -132,8 +133,11 @@ pub struct Task {
     pub ask_before_running: bool,
     /// Obsolete: who added it (a line the user allowed always). Read and not followed: the line
     /// is a plain task, and the daemon's migration drops the key.
+    ///
+    /// Boxed: with `toml`'s `preserve_order`, a `Value` is large enough to make every `Task` too
+    /// big to travel in an `Err`.
     #[serde(default, skip_serializing)]
-    pub added_by: Option<toml::Value>,
+    pub added_by: Option<Box<toml::Value>>,
 }
 
 /// One step of the setup that prepares a new workspace, as written: exactly one of `copy`,
@@ -263,8 +267,13 @@ pub struct Project {
     pub folder: PathBuf,
     /// Starts the branches of the project's workspaces; a slug of the name unless set.
     pub branch_prefix: String,
-    /// Where the workspaces are made; absolute.
+    /// Where the workspaces are made; absolute: the project's own `workspaces_root` when it has
+    /// one, else the user's default (`place`).
     pub workspaces_root: PathBuf,
+    /// The project's own `workspaces_root` as the file says it (`~` and `<project>` not yet
+    /// filled in); none follows the default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspaces_root_own: Option<String>,
     pub default_repositories: RepositorySet,
     /// Children running at once, within `CHILDREN_CAP`.
     pub max_children: u8,
@@ -333,7 +342,7 @@ struct File {
     name: Option<String>,
     folder: PathBuf,
     branch_prefix: Option<String>,
-    workspaces_root: Option<PathBuf>,
+    workspaces_root: Option<String>,
     #[serde(default = "all_repositories")]
     default_repositories: RepositorySet,
     // Wide, so that a cap out of range is refused by the check, in its own words.
@@ -389,6 +398,31 @@ fn default_run_time_limit() -> u64 {
     DEFAULT_RUN_TIME_LIMIT
 }
 
+/// What a project's folder for its workspaces depends on besides its file.
+pub struct Places<'a> {
+    /// Flottille's configuration folder; none when it is not known, and a project's own folder
+    /// is then not kept out of it.
+    pub config: Option<&'a Path>,
+    /// Flottille's data folder.
+    pub data: &'a Path,
+    /// The user's home, where a `~` leads.
+    pub home: Option<&'a Path>,
+    /// Where the workspaces of a project that names no folder go.
+    pub default: &'a Place,
+}
+
+impl<'a> Places<'a> {
+    /// The data folder for every project, and no home.
+    pub fn of(data: &'a Path) -> Places<'a> {
+        Places {
+            config: None,
+            data,
+            home: None,
+            default: &Place::Data,
+        }
+    }
+}
+
 impl Project {
     /// A project that takes everything by default: each repository with its remote `origin` and
     /// the base rule `[main]`, nothing else configured. `name` must be valid and `folder`
@@ -399,6 +433,7 @@ impl Project {
             folder,
             branch_prefix: slug(name),
             workspaces_root: data.join("workspaces").join(name),
+            workspaces_root_own: None,
             default_repositories: RepositorySet::All,
             max_children: DEFAULT_CHILDREN_CAP,
             run_time_limit: DEFAULT_RUN_TIME_LIMIT,
@@ -469,6 +504,12 @@ impl Project {
     /// Reads and checks the text of `projects/<name>.toml`. `data` is Flottille's data folder,
     /// where the default workspaces root lives. The first problem found is the one reported.
     pub fn parse(name: &str, text: &str, data: &Path) -> Result<Project, ConfigError> {
+        Project::parse_in(name, text, &Places::of(data))
+    }
+
+    /// As [`Project::parse`], with the user's default place for the workspaces of a project that
+    /// names none.
+    pub fn parse_in(name: &str, text: &str, places: &Places) -> Result<Project, ConfigError> {
         let refuse = |message: String| ConfigError {
             name: name.to_owned(),
             message,
@@ -499,19 +540,27 @@ impl Project {
                 key => format!("{key}: {}", cause.message()),
             })
         })?;
-        check(name, file, data).map_err(refuse)
+        check(name, file, places).map_err(refuse)
     }
 
     /// The text of the project's file.
     pub fn to_toml(&self) -> crate::Result<String> {
-        toml::to_string_pretty(self).map_err(|error| {
+        let refused = |error: &dyn fmt::Display| {
             crate::Error::Refused(format!("cannot write the file of {}: {error}", self.name))
-        })
+        };
+        // The folder the workspaces resolve to is not the file's: a project that names none
+        // follows the user's default, whatever it becomes.
+        let mut table = toml::Table::try_from(self).map_err(|e| refused(&e))?;
+        table.remove("workspaces_root");
+        if let Some(own) = table.remove("workspaces_root_own") {
+            table.insert("workspaces_root".into(), own);
+        }
+        toml::to_string_pretty(&table).map_err(|e| refused(&e))
     }
 }
 
 /// The checks and defaults of a project; the error is `<key>: <what is wrong>`.
-fn check(name: &str, mut file: File, data: &Path) -> Result<Project, String> {
+fn check(name: &str, mut file: File, places: &Places) -> Result<Project, String> {
     let Current {
         tasks,
         setup,
@@ -536,15 +585,19 @@ fn check(name: &str, mut file: File, data: &Path) -> Result<Project, String> {
         Some(prefix) => prefix,
         None => slug(name),
     };
-    let workspaces_root = match file.workspaces_root {
-        Some(root) if !root.is_absolute() => {
-            return Err(format!(
-                "workspaces_root: must be absolute, not \"{}\"",
-                root.display()
-            ));
-        }
+    let own_root = match &file.workspaces_root {
+        Some(own) => Some(place::typed(own, name, places.home, "workspaces_root")?),
+        None => None,
+    };
+    let workspaces_root = match own_root.clone() {
         Some(root) => root,
-        None => data.join("workspaces").join(name),
+        None => places.default.resolve(
+            name,
+            &file.folder,
+            places.data,
+            places.home,
+            "workspaces_root",
+        )?,
     };
     let max_children = u8::try_from(file.max_children)
         .ok()
@@ -585,6 +638,21 @@ fn check(name: &str, mut file: File, data: &Path) -> Result<Project, String> {
     }
 
     check_repositories(&file.repositories)?;
+    // Only a root the project names is judged here: a default that is refused falls back to the
+    // data folder before it gets to a project, and one project's file must not hide the others.
+    if let Some(root) = &own_root {
+        let repositories: Vec<PathBuf> = file
+            .repositories
+            .iter()
+            .map(|repository| file.folder.join(&repository.path))
+            .collect();
+        let avoid = place::Avoid {
+            config: places.config,
+            data: places.data,
+            home: places.home,
+        };
+        place::allowed(root, &avoid, &repositories, "workspaces_root")?;
+    }
     let known = |path: &str| file.repositories.iter().any(|r| r.path == path);
     let unknown = |key: String, path: &str| format!("{key}: unknown repository \"{path}\"");
     match &file.default_repositories {
@@ -710,6 +778,7 @@ fn check(name: &str, mut file: File, data: &Path) -> Result<Project, String> {
         folder: file.folder,
         branch_prefix,
         workspaces_root,
+        workspaces_root_own: file.workspaces_root,
         default_repositories: file.default_repositories,
         max_children,
         run_time_limit: file.run_time_limit,
@@ -1581,6 +1650,78 @@ mod tests {
         assert!(refusal(&relative).starts_with("projects/app.toml: folder: must be absolute"));
         let root = format!("workspaces_root = \"rel\"\n{MINIMAL}");
         assert!(refusal(&root).starts_with("projects/app.toml: workspaces_root: must be absolute"));
+    }
+
+    fn parse_following(place: &Place, text: &str) -> Result<Project, ConfigError> {
+        Project::parse_in(
+            "app",
+            text,
+            &Places {
+                config: None,
+                data: Path::new(DATA),
+                home: Some(Path::new("/home/someone")),
+                default: place,
+            },
+        )
+    }
+
+    #[test]
+    fn a_project_that_names_no_folder_follows_the_default() {
+        let beside = parse_following(&Place::Beside, MINIMAL).unwrap();
+        assert_eq!(beside.workspaces_root, Path::new("/work/app-work"));
+        assert_eq!(beside.workspaces_root_own, None);
+        let own = parse_following(&Place::Own("~/Worktrees/<project>".into()), MINIMAL).unwrap();
+        assert_eq!(
+            own.workspaces_root,
+            Path::new("/home/someone/Worktrees/app")
+        );
+        assert_eq!(own.workspaces_root_own, None);
+    }
+
+    #[test]
+    fn a_project_s_own_folder_wins_over_the_default() {
+        let text = format!("workspaces_root = \"~/wt/<project>\"\n{MINIMAL}");
+        for place in [Place::Data, Place::Beside, Place::Own("/elsewhere".into())] {
+            let project = parse_following(&place, &text).unwrap();
+            assert_eq!(project.workspaces_root, Path::new("/home/someone/wt/app"));
+            // The file keeps what was typed.
+            assert_eq!(
+                project.workspaces_root_own.as_deref(),
+                Some("~/wt/<project>")
+            );
+            let written = project.to_toml().unwrap();
+            assert!(
+                written.contains("workspaces_root = \"~/wt/<project>\""),
+                "{written}"
+            );
+            assert!(!written.contains("workspaces_root_own"), "{written}");
+            assert_eq!(parse_following(&place, &written).unwrap(), project);
+        }
+    }
+
+    #[test]
+    fn a_project_s_file_is_written_without_a_root_unless_it_has_its_own() {
+        let project = Project::new("app", "/work/app".into(), vec![".".into()], Path::new(DATA));
+        let written = project.to_toml().unwrap();
+        assert!(!written.contains("workspaces_root"), "{written}");
+        // Then the default of the day decides, and the file does not pin the data folder.
+        assert_eq!(
+            parse_following(&Place::Beside, &written)
+                .unwrap()
+                .workspaces_root,
+            Path::new("/work/app-work")
+        );
+        // The keys keep their order: the scalars the user reads first come first.
+        assert!(written.find("folder").unwrap() < written.find("[[repositories]]").unwrap());
+    }
+
+    #[test]
+    fn a_relative_own_folder_is_refused_naming_the_key_in_the_file() {
+        let place = Place::Own("rel/<project>".into());
+        assert_eq!(
+            parse_following(&place, MINIMAL).unwrap_err().message,
+            "workspaces_root: must be absolute, not \"rel/<project>\""
+        );
     }
 
     #[test]

@@ -2056,7 +2056,8 @@ impl Render for NewWorkspace {
                     "Branch",
                     input_frame("new-workspace-modal-branch", &self.branch, cx),
                 )
-                .optional(),
+                .optional()
+                .hint("To resume a branch, name it."),
             )
             .action(
                 Button::primary(

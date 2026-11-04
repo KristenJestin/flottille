@@ -16,7 +16,7 @@ use gpui_kit::{
 };
 
 use crate::color::mix;
-use crate::motion::{ENTER, MAX_STAGGER, Motion, PANEL, RISE, STAGGER};
+use crate::motion::{ENTER, HOVER, MAX_STAGGER, Motion, PANEL, RISE, STAGGER, SWAP_FROM};
 use crate::theme::palette;
 
 /// A level of the tree or a card's body that folds and unfolds over [`PANEL`].
@@ -253,6 +253,14 @@ pub(crate) fn shown_frame(
         return div().hidden().into_any_element();
     }
     if open && rising {
+        // A row that slides needs its own height to know how far one row is.
+        let measured = height.clone();
+        let measure = canvas(
+            move |bounds: Bounds<Pixels>, _, _| measured.set(bounds.size.height),
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
         return div()
             .w_full()
             .relative()
@@ -263,7 +271,9 @@ pub(crate) fn shown_frame(
                     .id(id)
                     .aria_expanded(open)
                     .w_full()
+                    .relative()
                     .child(content)
+                    .child(measure)
                     .test_support(),
             )
             .into_any_element();
@@ -369,6 +379,67 @@ impl RenderOnce for PresenceOf {
             div().into_any_element()
         };
         shown_frame(self.id, open, false, &at, self.gap, 0.0, content)
+    }
+}
+
+/// A line whose text changes while its view stays (the folder a setting results in): it fades
+/// back in over [`HOVER`] from [`SWAP_FROM`] when the text differs from the last frame's, and is
+/// still otherwise. Build it on every frame; it is its own state, and a first text is simply
+/// there. `build` draws the line.
+pub fn changing(
+    id: impl Into<ElementId>,
+    text: impl Into<SharedString>,
+    build: impl FnOnce(SharedString) -> AnyElement + 'static,
+) -> Changing {
+    Changing {
+        id: id.into(),
+        text: text.into(),
+        build: Box::new(build),
+    }
+}
+
+#[derive(IntoElement)]
+pub struct Changing {
+    id: ElementId,
+    text: SharedString,
+    build: Box<dyn FnOnce(SharedString) -> AnyElement>,
+}
+
+/// What a [`Changing`] remembers: the text it last drew and its fade.
+struct Changed {
+    text: SharedString,
+    motion: Motion,
+}
+
+impl RenderOnce for Changing {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let key = ElementId::NamedChild(Arc::new(self.id.clone()), "changing".into());
+        let first = self.text.clone();
+        let state = window.use_keyed_state(key, cx, move |_, _| Changed {
+            text: first,
+            motion: Motion::settled(1.0),
+        });
+        let now = cx.background_executor().now();
+        let reduce = cx.reduce_motion();
+        let motion = state.update(cx, |changed, _| {
+            if changed.text != self.text {
+                changed.text = self.text.clone();
+                changed
+                    .motion
+                    .play(SWAP_FROM, 1.0, Duration::ZERO, HOVER, now, reduce);
+            }
+            changed.motion
+        });
+        if motion.is_running(now) {
+            window.request_animation_frame();
+        } else {
+            state.update(cx, |changed, _| changed.motion.settle(now));
+        }
+        div()
+            .id(self.id)
+            .opacity(motion.value(now))
+            .child((self.build)(self.text))
+            .test_support()
     }
 }
 

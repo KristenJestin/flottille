@@ -1,6 +1,6 @@
 //! The commands of the agents, and the tasks the user ran, as the user's clients read them
 //! (`docs/protocol.md`, "The run methods"): the runs of a session, a project or the whole daemon
-//! with the last line of their output, a run's output, and the user's two answers, stop and
+//! with the last line of their output, a run's output, and the user's answers, stop, restart and
 //! dismiss. What the agents do with the same runs is `runs.rs`.
 
 use std::collections::HashMap;
@@ -66,6 +66,10 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         "run.stop" => {
             let Name { run } = serde_json::from_value(params)?;
             stop(&daemon, &run).await
+        }
+        "run.restart" => {
+            let Name { run } = serde_json::from_value(params)?;
+            restart(&daemon, &run).await
         }
         "run.dismiss" => {
             let Name { run } = serde_json::from_value(params)?;
@@ -209,6 +213,15 @@ async fn stop(daemon: &Arc<Daemon>, id: &str) -> Answer {
     }
     let view = runs::view(daemon, id).ok_or_else(|| not_found(id))?;
     Ok(json!({"run": run_json(&view.run)}))
+}
+
+/// Stops the run if it runs and starts its line again in its place; answers with the new run.
+async fn restart(daemon: &Arc<Daemon>, id: &str) -> Answer {
+    let view = runs::view(daemon, id).ok_or_else(|| not_found(id))?;
+    let (run, notice) = runs::restart_by_user(daemon, &view.run)
+        .await
+        .map_err(Failure::refused)?;
+    Ok(json!({"run": run_json(&run), "notice": notice}))
 }
 
 fn dismiss(daemon: &Daemon, id: &str) -> Answer {

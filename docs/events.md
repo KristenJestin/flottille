@@ -131,6 +131,15 @@ The user chose the limit above which a tool result is cut (`tool_results.set`,
 |---|---|
 | `limit` | The limit in characters, or `"off"` for no cut. |
 
+### `workspaces_folder.changed`
+
+The user chose where workspaces go (`workspaces_folder.set`, `docs/projects.md`, "Where the
+workspaces go"); only the workspaces made afterwards follow it.
+
+| Field | |
+|---|---|
+| `project` | The project whose own folder changed, `null` for the default of every project. |
+
 ### `extension.changed`
 
 The user switched an extension or changed its settings (`extension.set`), globally or in a
@@ -236,6 +245,17 @@ The workspace was linked to a ticket, or unlinked ([`tickets.md`](tickets.md)).
 | `project`, `workspace` | |
 | `ticket` | `#123` or `ABC-123`; `null` when unlinked. |
 
+### `workspace.changed`
+
+Every worktree made of the workspace is on one branch other than the recorded one (a `git switch`
+in it), and the record took it ([`workspaces.md`](workspaces.md), "The branch").
+
+| Field | |
+|---|---|
+| `project`, `workspace` | |
+| `branch` | The branch it is on now. |
+| `was` | The branch recorded before. |
+
 ### `workspace.removed`
 
 The workspace's worktrees, folder and record are gone. Its local branches whose work landed are
@@ -273,7 +293,7 @@ than stored.
 
 | Field | |
 |---|---|
-| `comments` (`item.commented`), `reviews` (`item.reviewed`) | The newest, five at most: `{author, bot, by_agent, state, excerpt}`, `by_agent` when an agent of Flottille posted it (`forges.md`, "What Flottille posts is marked"). |
+| `comments` (`item.commented`), `reviews` (`item.reviewed`) | The newest, five at most: `{author, bot, by_agent, state, excerpt}`, `by_agent` when an agent of Flottille posted it (`forges.md`, "What Flottille posts is recorded"). |
 | `review`, `reviewers` (`item.reviewed`) | The decision now; Bitbucket's reviewers and their verdicts. |
 | `verdicts` (`item.reviewed`, Bitbucket) | The reviewers whose verdict is new, `{name, state}`, none `pending`: what a subscription to `review` is told. |
 
@@ -324,6 +344,19 @@ An agent was written, before its process starts.
 | `parent` | The agent that launched it, `null` for a root. |
 | `depth` | 0 for a root, its parent's plus one for a child. |
 | `title` | Its task's title, `null` for a root. |
+
+#### `agent.moved`
+
+The agent removed its own workspace and works in the project folder (`main`) now: the same
+session, written with `workspace.removed` in one transaction, just after it
+([`tools.md`](tools.md), "The workspace").
+
+| Field | |
+|---|---|
+| `agent`, `project` | |
+| `from` | The workspace it worked in. |
+| `to` | `null`: the project folder. |
+| `folder` | Where it works now. |
 
 #### `agent.started`
 
@@ -477,15 +510,16 @@ The agent that held the request passed it up, with one sentence of why.
 
 #### `approval.cancelled`
 
-The request was never answered: the agent that asked, or the one that held it, ended. It is no
-longer pending, so the user never sees it.
+The request was never answered: the agent that asked, or the one that held it, ended, or the
+agent that asked removed its own workspace and works in `main` now (written with
+`agent.moved`). It is no longer pending, so the user never sees it.
 
 | Field | |
 |---|---|
 | `number` | |
 | `agent` | The agent that asked. |
 | `held_by` | Who held it: `user`, or an agent's id. |
-| `why` | Which agent ended, and how. |
+| `why` | Which agent ended, and how; or which agent moved, from which workspace. |
 
 #### `approval.decided`
 
@@ -701,6 +735,9 @@ its id.
 | `state` | `exited` (by itself), `stopped` (`run_status` with `action: stop`, `run.stop`, or the call that started it stopped), `interrupted` (the daemon stopped, or the one that ran it is gone). |
 | `exit_code` | Its exit code, `null` when it did not exit by itself or a signal ended it. |
 | `signal` | The signal that ended it, `null` otherwise. |
+
+A restart (`run.restart`) is a `run.ended` with state `stopped` for the first run, if it ran, then a
+`run.started` for the new one, of the same `agent`, `project` and `name`.
 
 #### `run.dismissed`
 

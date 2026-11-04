@@ -107,6 +107,8 @@ mod tests {
             body: "text".into(),
             bot: false,
             at: Some(at),
+            id: None,
+            recorded: false,
         }
     }
 

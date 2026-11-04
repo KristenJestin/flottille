@@ -22,7 +22,7 @@ use gpui_kit::{
 };
 use serde_json::{Value, json};
 
-use crate::actions::Command;
+use crate::actions::{Command, RunAct, RunAnswer};
 use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line};
 use crate::conversation::Ending;
 use crate::project::repository_label;
@@ -881,12 +881,26 @@ impl ProjectTasks {
         );
     }
 
+    /// The new run of a restart replaces the open command, its row and its output staying drawn
+    /// until its own arrive.
+    fn follow_command(&mut self, run: &str, cx: &mut Context<Self>) {
+        self.open_watch_as(Watch::Run(run.to_owned()), true, cx);
+    }
+
     fn open_watch(&mut self, watch: Watch, cx: &mut Context<Self>) {
+        self.open_watch_as(watch, false, cx);
+    }
+
+    fn open_watch_as(&mut self, watch: Watch, in_place: bool, cx: &mut Context<Self>) {
         let key = watch.key();
         self.watching = Some(watch);
         let rows = self.commands.read(cx).rows().to_vec();
         self.panel.update(cx, |panel, cx| {
-            panel.open(&key, cx);
+            if in_place {
+                panel.follow(&key, cx);
+            } else {
+                panel.open(&key, cx);
+            }
             panel.set_rows(&rows, cx);
         });
         self.drawer.update(cx, |drawer, cx| drawer.open(cx));
@@ -901,22 +915,50 @@ impl ProjectTasks {
     }
 
     pub fn stop_command(&mut self, run: &str, cx: &mut Context<Self>) {
-        self.answer_run(run, false, cx);
+        self.answer_run(run, RunAct::Stop, cx);
     }
 
-    fn answer_run(&mut self, run: &str, dismiss: bool, cx: &mut Context<Self>) {
+    /// The user runs a command again, in the same place: the panel shows the new run once the
+    /// daemon answers.
+    pub fn restart_command(&mut self, run: &str, cx: &mut Context<Self>) {
+        self.answer_run(run, RunAct::Restart, cx);
+    }
+
+    fn answer_run(&mut self, run: &str, act: RunAct, cx: &mut Context<Self>) {
         let command = Command::ProjectRun {
             project: self.project.clone(),
             run: run.to_owned(),
-            dismiss,
+            act,
         };
         perform_later(&self.shell, command, cx);
     }
 
-    /// What the daemon answered to a stop or a dismissal: a refusal is a toast.
-    pub fn run_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
+    /// What the daemon answered to a stop, a restart or a dismissal: a refusal is a toast, and the
+    /// panel shows the new run of a restart.
+    pub fn run_answered(&mut self, answer: RunAnswer, cx: &mut Context<Self>) {
+        let RunAnswer {
+            act,
+            run,
+            refused,
+            restarted,
+            notice,
+        } = answer;
         if let Some(why) = refused {
-            toast(Toast::failure("The run was not stopped").detail(why), cx);
+            let title = match act {
+                RunAct::Restart => "The run was not restarted",
+                _ => "The run was not stopped",
+            };
+            toast(Toast::failure(title).detail(why), cx);
+            if act == RunAct::Restart {
+                self.panel
+                    .update(cx, |panel, cx| panel.restart_refused(&run, cx));
+            }
+        }
+        if let Some(run) = restarted {
+            self.follow_command(&run, cx);
+        }
+        if let Some(notice) = notice {
+            toast(Toast::success("The run is now yours").detail(notice), cx);
         }
         self.read_runs(cx);
     }

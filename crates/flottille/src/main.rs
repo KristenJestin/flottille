@@ -35,6 +35,7 @@ mod nofollow;
 mod opencode;
 mod pilot;
 mod place;
+mod posts;
 mod program;
 mod programs;
 mod project_command;
@@ -59,6 +60,7 @@ mod update;
 mod web;
 mod workspace_command;
 mod workspaces;
+mod workspaces_folder;
 
 use std::io::Write;
 use std::process::ExitCode;

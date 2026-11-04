@@ -1,7 +1,9 @@
 # Forges
 
 What the forge of each repository of a workspace says of the workspace's branch: its pull request
-and the pull request's checks. The first step of the milestone "Forges and tickets"
+and the pull request's checks. A repository's branch is the one its worktree is on now, not the
+one recorded at creation ([`workspaces.md`](workspaces.md), "The branch"): what is read, opened,
+merged and checked follows a `git switch`. The first step of the milestone "Forges and tickets"
 (`docs/design.md` §13). **Reading**, and the writes an agent makes with `forge`, each a call to
 judge at the gate ([`commands.md`](commands.md)).
 
@@ -251,6 +253,9 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
 | `bkt pipeline run --context C --workspace W --repo R --ref <branch> [--selector-type pull-requests --selector-pattern <p>]` | the exit code | `pkg/cmd/pipeline/pipeline.go:81-133` (v0.37.0; the selector flags at `:127-128`), `pkg/bbcloud/client.go:431-482` (`ref_type: branch`, `ref_name`, `selector`) |
 | `bkt pipeline view <build> --context C --workspace W --repo R --json` | `steps[]`: `uuid`, `state.result.name` | `pkg/cmd/pipeline/pipeline.go:416-480` (v0.37.0; `{pipeline, steps}`), `pkg/bbcloud/client.go:559-604` (`PipelineStep`) |
 | `bkt pipeline logs <build> --context C --workspace W --repo R --step <uuid>` | the step's log, as text | `pkg/cmd/pipeline/pipeline.go:679-726` (v0.37.0), `pkg/bbcloud/client.go:692-725` (Cloud only) |
+| `bkt pipeline run … --ref <branch> [--selector-type custom --selector-pattern <name>]`, for `forge` `run` with no variable ("The CI family") | the exit code, and a run's number `#N` when it prints one | `bkt pipeline run --help` of v0.37.0 (`--selector-type`, `--selector-pattern`, `--var`) |
+| `bkt api /repositories/W/R/pipelines/ --context C --method POST --input <json>`, for `forge` `run` with variables | the new pipeline's `build_number` | Atlassian's REST documentation (Pipelines, run a pipeline: `target` a `pipeline_ref_target` with `ref_type`, `ref_name`, `selector.type` and `.pattern`; `variables[]` with `key`, `value`, `secured`); `bkt api --help` of v0.37.0 (`--method`, `--input`) |
+| `bkt api /repositories/W/R/pipelines/{uuid}/stopPipeline --context C --method POST`, for `forge` `stop` | the exit code | Atlassian's REST documentation (Pipelines, stop a pipeline); the uuid is `pipeline.uuid` of `bkt pipeline view --json`, **assumed** |
 
 ### What is chosen, and why
 
@@ -434,6 +439,64 @@ It never reaches a repository outside the agent's place, and is listed to every 
 project whose repository declares a forge, in `main` as in a workspace. Until #141 it was
 `forge_read` and `forge_write`.
 
+## The CI family
+
+An agent asked to "run the CI for the tests" runs it itself: `forge` lists what can be run, reads
+the recent runs, a run's steps and a step's log, runs **any pipeline of any branch** of the place's
+repositories with **any variables**, stops a run and acts on one of its steps. There is no list of
+allowed pipelines in Flottille: a deploy pipeline is run like the others, and the gate decides as
+for every forge write (Full runs it, Ask holds it for the user, Auto asks the judge). `checks`
+(re-run the failed) stays as it is. The repository is one of the place's, its declared forge
+checked against its remote, as for `comment` and `edit`. The branch is the one named (`branch`,
+which git must take for a branch's name), else the one the workspace's repository is on now, else,
+in `main`, the one the project's checkout is on.
+
+| Action | GitHub (`gh`) | Bitbucket Cloud (`bkt`) |
+|---|---|---|
+| `pipelines {repository?, branch?}` (read) | the workflows of `.github/workflows/` that accept `workflow_dispatch`: name, file, inputs (required, type, options, default, description) | the pipelines of `bitbucket-pipelines.yml`: `default`, each of `branches`, `tags` and `pull-requests` by its pattern, each `custom` by its name with the variables it declares (default, allowed values, description) |
+| `runs {repository?, branch?}` (read) | `gh run list -R … [--branch <b>] --limit 20 --json databaseId,workflowName,status,conclusion,event,headBranch,createdAt,startedAt,updatedAt,url` | `bkt api /repositories/W/R/pipelines/ --param pagelen=50 --param sort=-created_on`, the branch's (`target.ref_name`, or `target.source` of a pull request's): `build_number`, the selector, `state`, `trigger.name`, `created_on`, `duration_in_seconds` |
+| `run_view {repository?, run}` (read) | `gh run view <run> -R … --json databaseId,workflowName,status,conclusion,url,jobs` | `bkt pipeline view <run> --json`: `steps[]` (`name`, `uuid`, `state.name`, `state.result.name`) |
+| `run_logs {repository?, run, step}` (read) | `gh run view --job <id> -R … --log`, the job found by its name or id among the run's | `bkt pipeline logs <run> --step <uuid>`, the step found by its name or uuid |
+| `run {repository?, pipeline, branch?, variables?}` (write) | `gh workflow run <file> -R … --ref <b> -f k=v…`; the answer is the run's link when `gh` prints it | without variables `bkt pipeline run --ref <b> [--selector-type <t> --selector-pattern <p>]`; with variables the REST call through `bkt api` (table above); the answer is the run's number and link |
+| `stop {repository?, run}` (write) | `gh run cancel <run> -R …` | `bkt api …/pipelines/{uuid}/stopPipeline --method POST`, the uuid read with `bkt pipeline view` |
+| `step {repository?, run, step, do: start \| rerun}` (write) | `rerun`: `gh run rerun <run> -R … --job <id>`; `start` is refused | refused, naming why |
+
+- **What can be run is read from the branch's own files**, through git, not from the forge: the
+  file as `<remote>/<branch>` holds it (as last fetched, what the forge runs), else as the local
+  branch holds it, which the answer says (`… is not on origin as last fetched, and the forge runs
+  what is pushed`). YAML is read with `serde_norway`. GitHub runs a workflow by `workflow_dispatch`
+  only when the file is also on the default branch: that is GitHub's own refusal, passed on.
+- **A pipeline is named as `pipelines` lists it**: Bitbucket `default`, `custom: <name>` (a bare
+  name is a custom one), `branches: <pattern>`, `tags: <pattern>`, `pull-requests: <pattern>`;
+  GitHub the workflow's file (`e2e.yml`), or anything `gh workflow run` takes.
+- **Variables** are `[{key, value, secured?}]`: a Bitbucket pipeline's variables, a GitHub
+  workflow's inputs. A key is letters, digits, `_` and `-`. On Bitbucket a run with variables goes
+  through the REST call, not `bkt pipeline run --var`: `--var` is a list flag that splits a value
+  at its commas (`PREVIEW_JOBS=api,web` would be two), and has no secured variable.
+- **A secured variable** is sent as Bitbucket's `secured: true`, and its value is in no record of
+  the call (`[masked]` in the arguments stored, shown to the user and given to the judge), nor in
+  any answer, whatever the forge echoed. GitHub has no secured input: the value is still masked
+  the same way in Flottille, and sent as an input.
+- **Steps.** Bitbucket Cloud's REST API has no call that starts a manual step nor runs one step
+  again: its steps are read only (`GET …/steps/`, `…/log`), and only a whole pipeline is run or
+  stopped (checked in Atlassian's OpenAPI description, `swagger.v3.json`, and Atlassian's own
+  answers, feature request BCLOUD-21591). `step` there is refused, naming why and the run's page.
+  GitHub has no manual step: a job that waits is held by its environment's reviewers, a protection
+  the user set for people, which an agent never answers for them; `start` is refused saying so,
+  and `rerun` runs one job again (with what it needs, as `gh run rerun --job` does).
+- **Bitbucket Data Center** has no pipelines `bkt` can read or run: every action of the family is
+  refused naming why, before anything is asked of the forge.
+- **Read like the rest**: every output is masked, a log is cleaned of what a terminal adds and cut
+  like every long tool result (`docs/tools.md`, "Long results").
+- **Assumed, and the maintainer checks it on his Bitbucket**: the run body's shape (`target`,
+  `selector`, `variables`) and the answer's `build_number`, from Atlassian's REST documentation;
+  that `bkt pipeline view --json` gives the run's `pipeline.uuid`; whether `bkt pipeline run`
+  prints the run's number (when it does not, the answer says `forge runs lists it`).
+
+The window says a run an agent started like its other forge writes: `Ran a pipeline` with the
+pipeline's name, in the session's list of what was written, and the tool's step with the run's
+link in its answer.
+
 ## Why a check failed
 
 A pull request that is "failing" tells an agent nothing it can fix. So `forge` `show`, of a
@@ -567,7 +630,7 @@ the rounds come: every minute while a window is connected, every five otherwise.
 login starts with `app/` (as `gh` says an app) or ends with `[bot]`, or that `gh` says `is_bot`;
 this is assumed from `gh`'s output, and the maintainer checks it on a real pull request. A
 Bitbucket author is always taken for a person: what says a bot there is not read. **What
-Flottille posted** is marked (below), and `from: people` leaves it out, whichever agent posted it:
+Flottille posted** is recorded (below), and `from: people` leaves it out, whichever agent posted it:
 the user's own comments, written under the same account, wake the subscription.
 
 ### A wake about failed checks is a summary
@@ -598,28 +661,81 @@ The end of each failed job's log is in `forge` `show` of the pull request.
   every line of a log is. A job whose log cannot be read says `no log:` and why, whole.
 - **The details are `forge` `show`**, which gives the end of every failed job's log as before.
 
-## What Flottille posts is marked
+## What Flottille posts is recorded
 
-What an agent posts goes out through the user's own `gh` and `bkt`, so it appears under the user's
-name. Every body and comment Flottille posts for an agent (`forge` `create` body, `comment`,
-`edit` body, `close` and `reopen` comment; `tickets` `create`, `comment` and `edit` body) ends with
-a line of its own, `<!-- flottille -->` (the marker alone when there is no body): an HTML comment,
-which GitHub and Bitbucket do not render. A `forge edit` or `tickets edit` that changes only the
-title posts no text and adds none. On Jira, `acli` takes a plain-text or ADF body and its public
-reference documents no way to attach hidden content to a comment or a description, so the line
-there is visible: `— posted by a Flottille agent`. A Jira description is only written when the
-agent gave one.
+What an agent posts goes out through the user's own `gh`, `bkt` and `acli`, so it appears under
+the user's name, in front of their colleagues. **Nothing of Flottille is added to it**: no marker,
+no footer, on GitHub, Bitbucket (Cloud and Data Center) and Jira. Every body and comment Flottille
+posts for an agent (`forge` `create` body, `comment`, `edit` body, `close` and `reopen` comment;
+`tickets` `create`, `comment` and `edit` body) goes out as the agent wrote it. A `forge edit` or
+`tickets edit` that changes only the title posts no text and records none.
 
-The marker is how a text read back is told from a person's:
+Flottille knows its own posts by what it records when the forge or the tracker took them. The
+store keeps, for each post that succeeded: the project, the forge or tracker (`github`,
+`bitbucket`, `jira`), the repository (the repository's path in the project for a pull request, the
+tracker's repository for a GitHub issue, none for Jira), the pull request's number or the ticket's
+key, whether it is a `comment` or the item's own `body` (its description), the comment's id when
+the forge answered one, a hash of the text and the time. A post that failed is not recorded. The
+record survives a restart of the daemon, and reading a comment back asks the forge nothing more
+than it did.
 
-- `from: people` leaves out a comment that ends with the marker;
+What the three tools answer to a write decides what identifies the comment:
+
+| Write | Answers | Recorded |
+|---|---|---|
+| `gh pr comment`, `gh issue comment` | the comment's link, `…#issuecomment-<id>` | the id |
+| `gh pr create`, `gh issue create` | the item's link | the item: a `body` |
+| `gh pr edit`, `gh issue edit` (with a body) | the item's link | the item: a `body` |
+| `gh pr close`, `gh pr reopen` (with a comment) | nothing that names the comment | the text's hash |
+| `bkt pr comment`, `bkt pr decline` (with a comment) | `✓ Commented on pull request #N`, nothing that names the comment | the text's hash |
+| `bkt pr create`, `bkt pr edit` (with a body) | the pull request's number | the item: a `body` |
+| `acli jira workitem comment create` | nothing read (`--json` is not asked) | the text's hash |
+| `acli jira workitem create`, `edit` (with a body) | the work item's key | the item: a `body` |
+
+A comment read back is known as an agent's by its record:
+
+- with the id the forge gave it, when the record has one (GitHub): the same words under another
+  id are a person's;
+- else by the hash of its text, and a hash record is **one comment's**: the first comment of those
+  words that was not written before the post (the comments are taken oldest first, by the time the
+  forge gives: GitHub's `createdAt`, Bitbucket Cloud's `created_on`, Data Center's `createdDate`).
+  A person's same words, before it or after it, stay a person's. A comment older than the record
+  by more than five minutes (the clocks differ) is not it. Where a read gives no time the first of the
+  words is taken: Jira's `created` (`2026-10-01T12:00:00.000+0000`) is not read as a time, so for
+  Jira the post claims the first comment of its words.
+
+The hash is of the text as a read gives it: masked (the secrets of a text are masked on every
+read, the record hashes the masked text too), whitespace one space, only the first 500 characters
+counting, and the markdown a tracker rewrites gone: code fences, `*` and `` ` `` marks, heading
+marks, list bullets and numbers. Jira's document format keeps the words of what `acli` was given,
+not that markup (`tickets.md`, "Jira's text"), so the same words found again are still found.
+What the hash does not see: a link written `[text](url)`, which Jira may keep as its text alone,
+and any other rewriting of the words themselves; such a comment is shown as a person's.
+
+Bitbucket's closing comment is the same record: Cloud's reason a pull request was declined with
+and Data Center's comment of the closer are matched as any comment, the reason by its hash, the
+comment by the id it shares with the one among the comments.
+
+The limit of the hash: the user's own comment, written under the same account, that says exactly
+what an agent posted, and was written after it and before the agent's own is read, can be taken
+for the agent's, the agent's then being the person's. A comment read back in the instant between
+the forge taking it and the daemon recording it (milliseconds) is a person's for that read. A
+person's comment that ends with the old marker below is taken for an agent's. Both are accepted.
+
+An item's own text is known by the item and by its words: a ticket whose description an agent
+created or edited is `description_by_agent` while it still reads as the agent left it; a person
+editing it afterwards makes it the person's.
+
+It is how a text read back is told from a person's:
+
+- `from: people` leaves out a comment known as an agent's;
 - a delivery, `forge show` and `tickets show` say `(posted by an agent)` after the author of such a
-  comment, and show its text without the marker.
+  comment.
 
-Assumed, and checked by the maintainer on a real pull request: that GitHub and Bitbucket return the
-HTML comment in the comment's raw text (`gh`'s `body`, Cloud's `content.raw`, Data Center's `text`).
-A person's comment that ends with the marker is taken for an agent's and dropped by `from: people`,
-which is accepted. A comment posted before the marker existed counts as a person's.
+**The old mark is still read.** Before the record, Flottille ended its posts with a line of its
+own, `<!-- flottille -->` on GitHub and Bitbucket and the visible `— posted by a Flottille agent`
+on Jira. A comment or a description that still ends with either is an agent's, and shown without
+it, so that the history posted before keeps reading right. Nothing writes it any more.
 
 ## Tickets
 

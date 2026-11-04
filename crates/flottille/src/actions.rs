@@ -18,7 +18,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
-use crate::mcp::{Grant, Outcome, arguments};
+use crate::mcp::{Grant, Outcome, arguments, workspace_named};
 use crate::place::{Place, Resolved};
 use crate::projects::{self, Failure};
 
@@ -98,6 +98,8 @@ struct WorkspaceCall {
     /// The workspace; for all but create, the agent's own when left out.
     name: Option<String>,
     repositories: Option<Vec<String>>,
+    /// create: the branch, `<branch prefix>/<name>` when left out; an existing one is resumed.
+    branch: Option<String>,
     /// link_ticket: `null` unlinks.
     #[serde(default, deserialize_with = "present")]
     ticket: Option<Option<String>>,
@@ -344,17 +346,38 @@ pub async fn prepared(
     }
 }
 
-/// The workspace a removal names and what removing it would lose.
+/// What a removal names and does: the workspace, what removing it would lose and, when it is the
+/// agent's own, the lines of its tree's commands running in it, which are stopped first.
+struct Removal {
+    name: String,
+    losses: Vec<String>,
+    own: Option<Vec<String>>,
+}
+
 async fn removal_losses(
     daemon: &Daemon,
     grant: &Grant,
     call: &WorkspaceCall,
-) -> Result<(String, Vec<String>), Outcome> {
-    let name = crate::workspaces::removed_named(daemon, &grant.place, call.name.as_deref())?;
-    let losses = crate::workspaces::losses(daemon, &grant.place.project, &name)
+) -> Result<Removal, Outcome> {
+    let place = &grant.place;
+    let name = workspace_named(daemon, place, call.name.as_deref(), "workspace remove")?;
+    let losses = crate::workspaces::losses(daemon, &place.project, &name)
         .await
         .map_err(refusal)?;
-    Ok((name, losses))
+    let own = match place.workspace.as_deref() == Some(name.as_str()) {
+        true => {
+            let workspace = daemon
+                .read(|store| store.workspace(&place.project, &name))
+                .map_err(|error| Outcome::Failed(error.to_string()))?
+                .ok_or_else(|| Outcome::Failed(format!("no workspace {name}")))?;
+            let ours = crate::tree::root_of(daemon, &grant.agent);
+            let runs =
+                crate::workspaces::runs_of_tree(daemon, &workspace, &ours).map_err(refusal)?;
+            Some(runs.into_iter().map(|run| run.line).collect())
+        }
+        false => None,
+    };
+    Ok(Removal { name, losses, own })
 }
 
 /// What removing a workspace does, in words: what would be lost, which the user's answer says to
@@ -364,15 +387,32 @@ async fn removal_says(
     grant: &Grant,
     call: &WorkspaceCall,
 ) -> Result<Vec<String>, Outcome> {
-    let (name, losses) = removal_losses(daemon, grant, call).await?;
-    Ok(removal_words(&name, losses))
+    Ok(removal_words(removal_losses(daemon, grant, call).await?))
 }
 
-fn removal_words(name: &str, losses: Vec<String>) -> Vec<String> {
+/// The line of a removal's card naming the session's commands it stops.
+const STOPPED: &str = "Stop the commands of this session running in it: ";
+
+/// What of a card the user's answer holds to: all of it but the commands a removal of the
+/// agent's own workspace stops, which may end or start between the card and the answer, and
+/// lose nothing either way.
+pub fn compared(says: &[String]) -> Vec<&String> {
+    says.iter()
+        .filter(|said| !said.starts_with(STOPPED))
+        .collect()
+}
+
+fn removal_words(removal: Removal) -> Vec<String> {
+    let Removal { name, losses, own } = removal;
     let mut says = vec![format!(
         "Remove the workspace {name}: its worktrees and its folder, and its branch in each \
          repository where it holds no commit of its own"
     )];
+    if let Some(lines) = &own
+        && !lines.is_empty()
+    {
+        says.push(format!("{STOPPED}{}", lines.join(", ")));
+    }
     if losses.is_empty() {
         says.push("Nothing would be lost".into());
     } else {
@@ -382,6 +422,9 @@ fn removal_words(name: &str, losses: Vec<String>) -> Vec<String> {
                 .into(),
         );
         says.extend(losses);
+    }
+    if own.is_some() {
+        says.push("This session then goes on in the project's folder (main)".into());
     }
     says
 }
@@ -396,12 +439,13 @@ pub async fn approved_losses(
     card: &[String],
 ) -> Result<Vec<String>, Outcome> {
     let call: WorkspaceCall = arguments("workspace", args.clone())?;
-    let (name, losses) = removal_losses(daemon, grant, &call).await?;
-    let says: Vec<String> = removal_words(&name, losses.clone())
+    let removal = removal_losses(daemon, grant, &call).await?;
+    let losses = removal.losses.clone();
+    let says: Vec<String> = removal_words(removal)
         .iter()
         .map(|said| crate::mcp::masked(said, &grant.place))
         .collect();
-    match says == card {
+    match compared(&says) == compared(card) {
         true => Ok(losses),
         false => Err(Outcome::Refused(format!(
             "what it does changed since the user allowed it; it would now: {}",
@@ -982,7 +1026,7 @@ pub async fn remove_losing(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> 
         Err(refused) => return refused,
     };
     let losses = match removal_losses(daemon, grant, &call).await {
-        Ok((_, losses)) => losses,
+        Ok(removal) => removal.losses,
         Err(refused) => return refused,
     };
     crate::workspaces::workspace_remove(
@@ -1210,7 +1254,7 @@ async fn performed(
                 "create" => {
                     let created = answer(
                         "workspace.create",
-                        json!({"project": name, "name": call.name,
+                        json!({"project": name, "name": call.name, "branch": call.branch,
                             "repositories": call.repositories, "ticket": call.ticket.flatten()}),
                     )
                     .await?;
@@ -1447,7 +1491,13 @@ fn workspace_says(
         "list" => Ok(Vec::new()),
         "create" => {
             let name = named(&call.name, "workspace", action, "login")?;
-            let mut says = create_says(daemon, project, name, &call.repositories)?;
+            let mut says = create_says(
+                daemon,
+                project,
+                name,
+                &call.repositories,
+                call.branch.as_deref(),
+            )?;
             if let Some(Some(ticket)) = &call.ticket {
                 let key = crate::tickets::accepted(project, ticket)
                     .map_err(|why| Outcome::Refused(format!("refused: {why}")))?;
@@ -1531,6 +1581,7 @@ fn create_says(
     project: &Project,
     name: &str,
     repositories: &Option<Vec<String>>,
+    branch: Option<&str>,
 ) -> Result<Vec<String>, Outcome> {
     if !flottille_core::project::valid_name(name) {
         return Err(Outcome::Refused(format!(
@@ -1556,9 +1607,12 @@ fn create_says(
         Some(paths) => format!("with the repositories {}", paths.join(", ")),
         None => "with the project's default repositories".into(),
     };
+    let branch = branch.map_or_else(
+        || format!("{}/{name}", project.branch_prefix),
+        str::to_owned,
+    );
     let mut says = vec![format!(
-        "Create the workspace {name} on the branch {}/{name}, {taken}",
-        project.branch_prefix
+        "Create the workspace {name} on the branch {branch}, {taken}"
     )];
     match project.setup.is_empty() {
         true => says.push("The project has no setup: nothing else runs.".into()),
@@ -1590,7 +1644,7 @@ fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<Strin
             let project = own(daemon, grant)?;
             let repositories: Option<Vec<String>> =
                 serde_json::from_value(args["repositories"].clone()).unwrap_or_default();
-            let mut says = create_says(daemon, &project, name, &repositories)?;
+            let mut says = create_says(daemon, &project, name, &repositories, None)?;
             let whose = match root {
                 true => "a session of the user's",
                 false => "a child",

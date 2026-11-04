@@ -2448,3 +2448,555 @@ fn a_dependency_on_itself_or_on_a_repository_the_project_lacks_is_refused() {
     assert_eq!(code, "refused");
     assert!(message.contains("unknown repository \"docs\""), "{message}");
 }
+
+/// Gives `web` a local branch `feature/x` holding a commit of its own, off its `develop`, and
+/// leaves its main checkout on `main`. The commit's short hash.
+fn local_feature(fixture: &Fixture) -> String {
+    let web = fixture.folder.join("web");
+    fixture
+        .user
+        .git(&web, &["checkout", "--quiet", "-b", "feature/x", "develop"]);
+    std::fs::write(web.join("feature.ts"), "export {}\n").unwrap();
+    fixture.user.git(&web, &["add", "."]);
+    fixture
+        .user
+        .git(&web, &["commit", "--quiet", "-m", "the feature"]);
+    fixture.user.git(&web, &["checkout", "--quiet", "main"]);
+    fixture.git(&web, &["rev-parse", "--short", "feature/x"])
+}
+
+#[test]
+fn a_workspace_starts_on_an_existing_local_branch() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    let commit = local_feature(&fixture);
+
+    fixture.create(json!({"branch": "feature/x"})).unwrap();
+
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    let web = fixture.workspace("login").join("web");
+    assert_eq!(
+        fixture.git(&web, &["symbolic-ref", "--short", "HEAD"]),
+        "feature/x"
+    );
+    assert_eq!(fixture.git(&web, &["rev-parse", "--short", "HEAD"]), commit);
+    // The other repositories, which never had it, start it from their base.
+    let lib = fixture.workspace("login").join("lib");
+    assert_eq!(
+        fixture.git(&lib, &["symbolic-ref", "--short", "HEAD"]),
+        "feature/x"
+    );
+    let shown = fixture.show("login").unwrap();
+    assert_eq!(shown["branch"], "feature/x");
+    assert_eq!(shown["repositories"][0]["branch"], "feature/x");
+    // The base is what it is compared against, not where it started.
+    assert_eq!(shown["repositories"][0]["ahead"], 1);
+}
+
+#[test]
+fn a_workspace_starts_on_a_branch_only_the_remote_has() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    let commit = local_feature(&fixture);
+    let web = fixture.folder.join("web");
+    fixture
+        .user
+        .git(&web, &["push", "--quiet", "origin", "feature/x"]);
+    fixture
+        .user
+        .git(&web, &["branch", "--quiet", "-D", "feature/x"]);
+    fixture
+        .user
+        .git(&web, &["update-ref", "-d", "refs/remotes/origin/feature/x"]);
+
+    fixture.create(json!({"branch": "feature/x"})).unwrap();
+
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    let worktree = fixture.workspace("login").join("web");
+    assert_eq!(
+        fixture.git(&worktree, &["symbolic-ref", "--short", "HEAD"]),
+        "feature/x"
+    );
+    assert_eq!(
+        fixture.git(&worktree, &["rev-parse", "--short", "HEAD"]),
+        commit
+    );
+    assert_eq!(
+        fixture.git(&worktree, &["rev-parse", "--abbrev-ref", "@{upstream}"]),
+        "origin/feature/x"
+    );
+}
+
+#[test]
+fn a_branch_checked_out_elsewhere_is_refused_naming_the_worktree() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    local_feature(&fixture);
+    let elsewhere = fixture.user.path("work/elsewhere");
+    fixture.user.git(
+        &fixture.folder.join("web"),
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            elsewhere.to_str().unwrap(),
+            "feature/x",
+        ],
+    );
+
+    let (code, message) = fixture.create(json!({"branch": "feature/x"})).unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert!(
+        message.contains(&format!(
+            "the branch feature/x is checked out in {} for web",
+            elsewhere.display()
+        )),
+        "{message}"
+    );
+    assert!(!fixture.workspace("login").exists());
+    assert_eq!(fixture.show("login").unwrap_err().0, "not-found");
+}
+
+#[test]
+fn a_switch_in_a_workspace_moves_its_recorded_branch_and_the_window_shows_it() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    fixture.create(json!({})).unwrap();
+    fixture.settled("login");
+    for repository in ["web", "api", "lib"] {
+        let worktree = fixture.workspace("login").join(repository);
+        fixture
+            .user
+            .git(&worktree, &["switch", "--quiet", "-c", "feature/y"]);
+    }
+
+    let shown = fixture.show("login").unwrap();
+
+    assert_eq!(shown["branch"], "feature/y");
+    let listed = fixture
+        .user
+        .call("workspace.list", json!({"project": "app"}))
+        .unwrap();
+    assert!(
+        listed.to_string().contains("\"branch\":\"feature/y\""),
+        "{listed}"
+    );
+    // The window's lines of the workspace say the branch git is on.
+    let lines = flottille_window::actions::RepositoryStatus::of_workspace(&shown);
+    assert!(
+        lines
+            .iter()
+            .all(|line| line.line().starts_with("feature/y ·")),
+        "{lines:?}"
+    );
+    // Said once: a second read finds nothing to follow.
+    fixture.show("login").unwrap();
+    let changed: Vec<Value> = fixture
+        .user
+        .watch(&["--after", "0"])
+        .within(Duration::from_millis(500))
+        .into_iter()
+        .filter(|event| event["name"] == "workspace.changed")
+        .collect();
+    assert_eq!(changed.len(), 1, "{changed:?}");
+    assert_eq!(changed[0]["data"]["workspace"], "login");
+    assert_eq!(changed[0]["data"]["branch"], "feature/y");
+    assert_eq!(changed[0]["data"]["was"], "app/login");
+}
+
+#[test]
+fn removal_checks_the_branch_the_worktree_is_on() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    fixture.create(json!({})).unwrap();
+    fixture.settled("login");
+    let lib = fixture.workspace("login").join("lib");
+    fixture
+        .user
+        .git(&lib, &["switch", "--quiet", "-c", "feature/w"]);
+    std::fs::write(lib.join("feature.rs"), "fn f() {}\n").unwrap();
+    fixture.user.git(&lib, &["add", "."]);
+    fixture
+        .user
+        .git(&lib, &["commit", "--quiet", "-m", "add the feature"]);
+    let commit = fixture.git(&lib, &["rev-parse", "--short", "HEAD"]);
+
+    let (code, message) = fixture.remove("login").unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert!(
+        message.contains(&format!(
+            "lib has commits on no remote, on its branch feature/w: {commit} add the feature"
+        )),
+        "{message}"
+    );
+}
+
+#[test]
+fn the_default_branch_name_is_refused_when_it_already_exists() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    let web = fixture.folder.join("web");
+    fixture
+        .user
+        .git(&web, &["branch", "--quiet", "app/login", "develop"]);
+
+    let (code, message) = fixture.create(json!({})).unwrap_err();
+
+    // Only a branch the user names is resumed: a leftover of an earlier workspace is not.
+    assert_eq!(code, "refused");
+    assert!(
+        message.contains("the branch app/login already exists in web"),
+        "{message}"
+    );
+}
+
+#[test]
+fn removal_keeps_a_branch_the_workspace_resumed() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    local_feature(&fixture);
+    let web = fixture.folder.join("web");
+    // The user's own branch, already in the base: removal would see it as landed.
+    fixture
+        .user
+        .git(&web, &["branch", "--quiet", "-f", "feature/x", "develop"]);
+    fixture.create(json!({"branch": "feature/x"})).unwrap();
+    fixture.settled("login");
+
+    fixture.remove("login").unwrap();
+
+    // Flottille did not make it: it is the user's, and stays.
+    assert_eq!(
+        fixture.git(&web, &["branch", "--list", "feature/x"]).trim(),
+        "feature/x"
+    );
+}
+
+/// A project file that names no folder for its workspaces: it follows the user's default.
+fn following_the_default(fixture: &Fixture) {
+    fixture.user.write_project_file(
+        "app",
+        &format!(
+            "folder = \"{}\"\n[[repositories]]\npath = \"web\"\nbase = [\"develop\", \"main\"]\n",
+            fixture.folder.display()
+        ),
+    );
+}
+
+fn set_default(fixture: &Fixture, params: Value) -> Result<Value, (String, String)> {
+    fixture.user.call("workspaces_folder.set", params)
+}
+
+#[test]
+fn the_default_workspaces_folder_is_flottille_s_data_folder() {
+    let fixture = Fixture::new(false);
+    following_the_default(&fixture);
+
+    let shown = fixture
+        .user
+        .call("workspaces_folder.show", json!({}))
+        .unwrap();
+    let project = fixture.user.call("project.show", json!({"name": "app"}));
+
+    assert_eq!(shown["place"], "data");
+    assert_eq!(shown["path"], Value::Null);
+    assert_eq!(
+        project.unwrap()["workspaces_root"],
+        fixture
+            .user
+            .path("data/flottille/workspaces/app")
+            .to_str()
+            .unwrap()
+    );
+}
+
+#[test]
+fn beside_the_project_puts_workspaces_in_project_work() {
+    let fixture = Fixture::new(false);
+    following_the_default(&fixture);
+
+    set_default(&fixture, json!({"place": "beside"})).unwrap();
+    fixture.create(json!({})).unwrap();
+
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    assert!(fixture.workspace("login").join("web/README.md").is_file());
+    assert_eq!(
+        std::fs::read_to_string(fixture.user.path("config/flottille/workspaces.toml")).unwrap(),
+        "place = \"beside\"\n"
+    );
+}
+
+#[test]
+fn a_folder_of_my_own_replaces_project_and_expands_home() {
+    let fixture = Fixture::new(false);
+    following_the_default(&fixture);
+
+    let shown = set_default(
+        &fixture,
+        json!({"place": "own", "path": "~/Worktrees/<project>"}),
+    )
+    .unwrap();
+    fixture.create(json!({})).unwrap();
+
+    // What the user typed is what is kept and shown; the folder it names is the project's.
+    assert_eq!(shown["path"], "~/Worktrees/<project>");
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    assert!(
+        fixture
+            .user
+            .path("home/Worktrees/app/login/web/README.md")
+            .is_file()
+    );
+}
+
+#[test]
+fn a_relative_folder_is_refused_naming_the_field() {
+    let fixture = Fixture::new(false);
+    following_the_default(&fixture);
+    let file = fixture.user.path("config/flottille/workspaces.toml");
+
+    let (code, message) = set_default(
+        &fixture,
+        json!({"place": "own", "path": "worktrees/<project>"}),
+    )
+    .unwrap_err();
+    assert_eq!(code, "invalid-params");
+    assert!(message.starts_with("path: must be absolute"), "{message}");
+    assert!(!file.exists(), "nothing is written");
+
+    let (_, message) = set_default(
+        &fixture,
+        json!({"project": "app", "own": "worktrees/<project>"}),
+    )
+    .unwrap_err();
+    assert!(
+        message.contains("workspaces_root: must be absolute"),
+        "{message}"
+    );
+    let text = std::fs::read_to_string(fixture.user.project_file("app")).unwrap();
+    assert!(!text.contains("workspaces_root"), "{text}");
+}
+
+#[test]
+fn a_project_s_own_folder_wins_over_the_default() {
+    let fixture = Fixture::new(false);
+    following_the_default(&fixture);
+    set_default(&fixture, json!({"place": "beside"})).unwrap();
+
+    let own = fixture.user.path("elsewhere/<project>");
+    let shown = set_default(
+        &fixture,
+        json!({"project": "app", "own": own.to_str().unwrap()}),
+    )
+    .unwrap();
+    fixture.create(json!({})).unwrap();
+
+    assert_eq!(shown["own"], own.to_str().unwrap());
+    assert_eq!(
+        shown["folder"],
+        fixture.user.path("elsewhere/app").to_str().unwrap()
+    );
+    assert_eq!(
+        shown["default_folder"],
+        fixture.root().to_str().unwrap(),
+        "the page says what the default would give"
+    );
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    assert!(fixture.user.path("elsewhere/app/login/web").is_dir());
+    assert!(!fixture.workspace("login").exists());
+
+    // Removing it, the project follows the default again, and its file says so.
+    let shown = set_default(&fixture, json!({"project": "app", "own": null})).unwrap();
+    assert_eq!(shown["own"], Value::Null);
+    assert_eq!(shown["folder"], fixture.root().to_str().unwrap());
+}
+
+#[test]
+fn changing_the_folder_moves_no_existing_workspace() {
+    let fixture = Fixture::new(false);
+    following_the_default(&fixture);
+    fixture.create(json!({"name": "first"})).unwrap();
+    let first = fixture.settled("first");
+    let before = first["folder"].as_str().unwrap().to_owned();
+    assert!(before.starts_with(fixture.user.path("data").to_str().unwrap()));
+
+    set_default(&fixture, json!({"place": "beside"})).unwrap();
+    fixture.create(json!({"name": "second"})).unwrap();
+
+    let after = fixture.settled("first");
+    assert_eq!(after["folder"], before.as_str(), "its record keeps it");
+    assert!(Path::new(&before).join("web/README.md").is_file());
+    assert!(!fixture.workspace("first").exists());
+    assert_eq!(fixture.settled("second")["state"], "ready");
+    assert!(fixture.workspace("second").join("web").is_dir());
+}
+
+#[test]
+fn an_invalid_path_in_workspaces_toml_hides_no_project() {
+    let fixture = Fixture::new(false);
+    following_the_default(&fixture);
+    let file = fixture.user.path("config/flottille/workspaces.toml");
+
+    for (text, why) in [
+        (
+            "place = \"own\"\npath = \"worktrees/<project>\"\n",
+            "path: must be absolute",
+        ),
+        ("place = \"own\"\npath = \"\"\n", "path: must not be empty"),
+        (
+            "place = \"own\"\npath = \"~other/<project>\"\n",
+            "path: must be absolute",
+        ),
+        (
+            "place = \"own\"\npath = \"~/Worktrees\"\n",
+            "path: must hold <project>",
+        ),
+    ] {
+        std::fs::write(&file, text).unwrap();
+
+        let listed = fixture.user.call("project.list", json!({})).unwrap();
+        let shown = fixture
+            .user
+            .call("workspaces_folder.show", json!({}))
+            .unwrap();
+        let project = fixture
+            .user
+            .call("workspaces_folder.show", json!({"project": "app"}))
+            .unwrap();
+        let root = fixture.user.call("project.show", json!({"name": "app"}));
+
+        assert_eq!(listed["projects"][0]["name"], "app", "{text}");
+        assert_eq!(listed["errors"], json!([]), "{text}");
+        assert_eq!(shown["place"], "data", "{text}");
+        let error = shown["error"].as_str().unwrap();
+        assert!(error.starts_with("workspaces.toml: "), "{error}");
+        assert!(error.contains(why), "{text}: {error}");
+        // The project page and `project show` say the default is not followed.
+        assert_eq!(project["fallback"], shown["error"], "{text}");
+        let root = root.unwrap();
+        assert_eq!(
+            root["workspaces_root"],
+            fixture
+                .user
+                .path("data/flottille/workspaces/app")
+                .to_str()
+                .unwrap()
+        );
+        assert_eq!(root["workspaces_default_error"], shown["error"], "{text}");
+    }
+}
+
+#[test]
+fn project_show_says_when_the_default_is_not_followed() {
+    let fixture = Fixture::new(false);
+    following_the_default(&fixture);
+    let show = || {
+        let output = fixture.user.run(&["project", "show", "app"]);
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    assert!(!show().contains("not followed"), "{}", show());
+
+    std::fs::write(
+        fixture.user.path("config/flottille/workspaces.toml"),
+        "place = \"own\"\npath = \"relative\"\n",
+    )
+    .unwrap();
+
+    let text = show();
+    assert!(
+        text.contains("workspaces.toml is not followed, the data folder is used: "),
+        "{text}"
+    );
+}
+
+/// The refusal of the daemon to keep `params`, which writes nothing.
+fn refused(fixture: &Fixture, params: Value) -> String {
+    let file = fixture.user.path("config/flottille/workspaces.toml");
+    let before = std::fs::read_to_string(&file).ok();
+    let (_, message) = set_default(fixture, params).unwrap_err();
+    assert_eq!(std::fs::read_to_string(&file).ok(), before, "{message}");
+    message
+}
+
+#[test]
+fn a_folder_inside_a_repository_of_the_project_is_refused() {
+    let fixture = Fixture::new(false);
+    following_the_default(&fixture);
+    let inside = fixture.folder.join("web/wt");
+
+    let message = refused(
+        &fixture,
+        json!({"project": "app", "own": inside.to_str().unwrap()}),
+    );
+    assert!(message.contains("is inside the repository"), "{message}");
+    assert!(message.contains("workspaces_root"), "{message}");
+    let text = std::fs::read_to_string(fixture.user.project_file("app")).unwrap();
+    assert!(!text.contains("workspaces_root"), "{text}");
+
+    // As a default, it is refused for the project it would land in.
+    let default = fixture.folder.join("web/<project>");
+    let message = refused(
+        &fixture,
+        json!({"place": "own", "path": default.to_str().unwrap()}),
+    );
+    assert!(message.contains("is inside the repository"), "{message}");
+    assert!(message.contains("for the project app"), "{message}");
+}
+
+#[test]
+fn a_folder_inside_flottille_s_config_or_data_folder_is_refused() {
+    let fixture = Fixture::new(false);
+    following_the_default(&fixture);
+    let config = fixture.user.path("config/flottille/<project>");
+    let message = refused(
+        &fixture,
+        json!({"place": "own", "path": config.to_str().unwrap()}),
+    );
+    assert!(message.contains("configuration folder"), "{message}");
+    let data = fixture.user.path("data/flottille/state/<project>");
+    let message = refused(
+        &fixture,
+        json!({"project": "app", "own": data.to_str().unwrap()}),
+    );
+    assert!(message.contains("data folder"), "{message}");
+
+    // The data folder's own workspaces/ is where they go by default: allowed, for both.
+    let workspaces = fixture.user.path("data/flottille/workspaces/<project>");
+    set_default(
+        &fixture,
+        json!({"place": "own", "path": workspaces.to_str().unwrap()}),
+    )
+    .unwrap();
+    set_default(
+        &fixture,
+        json!({"project": "app", "own": workspaces.to_str().unwrap()}),
+    )
+    .unwrap();
+}
+
+#[test]
+fn the_home_folder_itself_is_refused() {
+    let fixture = Fixture::new(false);
+    following_the_default(&fixture);
+
+    let message = refused(&fixture, json!({"project": "app", "own": "~"}));
+    assert!(message.contains("your home folder itself"), "{message}");
+    // `<project>/..` leads back to it.
+    let message = refused(&fixture, json!({"place": "own", "path": "~/<project>/.."}));
+    assert!(message.contains("your home folder itself"), "{message}");
+}
+
+#[test]
+fn an_own_default_without_project_is_refused() {
+    let fixture = Fixture::new(false);
+    following_the_default(&fixture);
+
+    let message = refused(&fixture, json!({"place": "own", "path": "~/Worktrees"}));
+
+    assert_eq!(
+        message,
+        "path: must hold <project>, or every project would share one folder"
+    );
+}

@@ -45,6 +45,9 @@ pub struct Agent {
     pub updated_at: u64,
     /// Its last sign of activity: an update from the agent outside a replay.
     pub active_at: Option<u64>,
+    /// Its last exchange: the later of the last message the user gave it and the end of its last
+    /// turn. Work done during a turn never moves it.
+    pub exchanged_at: Option<u64>,
     pub ended_at: Option<u64>,
     /// What the user chose; nothing means the agent's default.
     pub chosen: Choices,
