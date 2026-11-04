@@ -472,6 +472,21 @@ fn card_of(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Option<(us
     })
 }
 
+/// Unfolds the group that holds the row `at`, when it is folded: its rows are drawn.
+fn unfold(page: &Entity<SessionPage>, at: usize, cx: &mut VisualTestContext) {
+    let groups = page.read_with(cx, |page, cx| page.conversation().read(cx).groups());
+    let Some(group) = groups.into_iter().find(|group| group.contains(&at)) else {
+        return;
+    };
+    let line = page
+        .read_with(cx, |page, cx| page.conversation().read(cx).group_id(&group))
+        .expect("a group's line");
+    if cx.update(|window, _| window.find(line.clone()).expanded()) == Some(false) {
+        cx.update(|window, cx| window.click(line, cx));
+        settle(cx);
+    }
+}
+
 #[gpui_kit::test]
 fn a_run_in_the_conversation_is_one_compact_line_and_its_output_is_in_the_panel_with_its_colours_never_shown_raw(
     cx: &mut TestAppContext,
@@ -494,6 +509,7 @@ fn a_run_in_the_conversation_is_one_compact_line_and_its_output_is_in_the_panel_
     let (at, Block::Command(card)) = card_of(&page, cx).unwrap() else {
         unreachable!()
     };
+    unfold(&page, at, cx);
     assert_eq!(card.line, "./colours.sh");
     assert_eq!(card.ending, Ending::Exited(1));
     assert_eq!(card.allowed_by, None);
@@ -565,6 +581,7 @@ fn a_command_that_came_back_through_an_approval_is_the_same_card_with_who_allowe
     let (at, Block::Command(card)) = card_of(&page, cx).unwrap() else {
         unreachable!()
     };
+    unfold(&page, at, cx);
     assert_eq!(card.ending, Ending::Exited(1));
     assert_eq!(card.allowed_by.as_deref(), Some("you"));
     assert!(
@@ -621,6 +638,7 @@ fn a_running_card_shows_its_end(cx: &mut TestAppContext) {
     let Some((at, Block::Command(card))) = card_of(&page, cx) else {
         unreachable!()
     };
+    unfold(&page, at, cx);
     assert_eq!(label(cx, &format!("command-exit-{at}")).unwrap(), "exit 3");
     assert!(card.seconds.is_some_and(|s| s >= 1.5), "{:?}", card.seconds);
     assert_eq!(card.lines, ["one"], "the final tail of its output");
@@ -722,6 +740,7 @@ fn a_card_whose_command_the_agent_stopped_itself_shows_it_stopped(cx: &mut TestA
     settle(cx);
 
     let (at, _) = card_of(&page, cx).unwrap();
+    unfold(&page, at, cx);
     assert_eq!(label(cx, &format!("command-exit-{at}")).unwrap(), "stopped");
 }
 
@@ -765,6 +784,7 @@ fn the_old_approval_line_is_dropped_when_the_card_follows(cx: &mut TestAppContex
         "no line 'Allowed' above the card"
     );
     let (at, _) = card_of(&page, cx).unwrap();
+    unfold(&page, at, cx);
     assert!(
         cx.update(|window, _| window.try_find(format!("command-allowed-{at}")).is_some()),
         "the card says who allowed it"

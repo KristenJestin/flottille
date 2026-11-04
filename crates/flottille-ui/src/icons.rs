@@ -27,6 +27,7 @@ gpui_kit::assets::icon_assets!(
         Network,
         Menu,
         ArrowUp,
+        ArrowDown,
         ChevronsUpDown,
         Settings,
         Ellipsis,
@@ -136,10 +137,12 @@ pub enum Icon {
     Expand,
     /// Runs a command again.
     Restart,
+    /// Back to the end of a conversation.
+    ToEnd,
 }
 
 impl Icon {
-    pub const ALL: [Self; 35] = [
+    pub const ALL: [Self; 36] = [
         Self::Folder,
         Self::Branch,
         Self::Repository,
@@ -175,6 +178,7 @@ impl Icon {
         Self::Edit,
         Self::Expand,
         Self::Restart,
+        Self::ToEnd,
     ];
 
     pub fn path(self) -> SharedString {
@@ -217,6 +221,7 @@ impl Icon {
             Self::Edit => IconName::Pencil,
             Self::Expand => IconName::Maximize2,
             Self::Restart => IconName::RotateCw,
+            Self::ToEnd => IconName::ArrowDown,
         }
         .path()
     }
