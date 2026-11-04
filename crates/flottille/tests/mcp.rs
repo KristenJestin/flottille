@@ -598,7 +598,48 @@ fn dot_dot_notes_is_inside_and_dot_dot_slash_x_is_outside() {
     held(mcp.call("fs_write", json!({"path": "../y", "content": "y"})));
     assert!(!folder.parent().unwrap().join("y").exists());
     let text = refused(mcp.call("fs_read", json!({"path": "README.md", "repository": "web"})));
-    assert_eq!(text, "refused: the project has no repository web: it has .");
+    assert_eq!(
+        text,
+        "refused: the project has no repository web: it has `.` (the project folder itself)"
+    );
+}
+
+#[test]
+fn a_folder_given_as_repository_is_refused_with_the_field_to_use() {
+    let user = User::with_fake_agent();
+    let (mcp, folder) = session(&user);
+    std::fs::create_dir_all(folder.join("apps/front")).unwrap();
+    let said = |field: &str| {
+        format!(
+            "refused: apps/front is a folder of the repository `.` (the project folder itself), \
+             not a repository: give {field}"
+        )
+    };
+
+    let text = refused(mcp.call("fs_list", json!({"path": ".", "repository": "apps/front"})));
+    assert_eq!(text, said("`path: \"apps/front\"`"));
+    let text = refused(mcp.call(
+        "search",
+        json!({"pattern": "x", "repository": "apps/front"}),
+    ));
+    assert_eq!(text, said("`glob: \"apps/front/**\"`"));
+    let text = refused(mcp.call("run", json!({"line": "true", "repository": "apps/front"})));
+    assert_eq!(
+        text,
+        said("the folder in the command line, as an argument of the program")
+    );
+}
+
+#[test]
+fn a_place_with_one_repository_needs_no_repository_argument() {
+    let user = User::with_fake_agent();
+    let (mcp, folder) = session(&user);
+    std::fs::write(folder.join("a.rs"), "fn needle() {}\n").unwrap();
+
+    assert!(ok(mcp.call("fs_list", json!({"path": "."}))).contains("a.rs"));
+    assert!(ok(mcp.call("search", json!({"pattern": "needle"}))).contains("a.rs:1"));
+    let run = run_id(&ok(mcp.call("run", json!({"line": "true"}))));
+    assert!(!run.is_empty());
 }
 
 #[test]
