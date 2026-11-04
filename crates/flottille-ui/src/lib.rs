@@ -59,8 +59,8 @@ pub use omarchy::Environment;
 pub use page::{EmptyLine, PageHeader, Section};
 pub use radio::RadioChoices;
 pub use reveal::{
-    Fold, Growing, Presence, PresenceOf, PulsingLabel, enter, fold_frame, growing, presence,
-    presence_of,
+    Changing, Fold, Growing, Presence, PresenceOf, PulsingLabel, changing, enter, fold_frame,
+    growing, presence, presence_of,
 };
 pub use rows::{
     ListCard, ListRow, TreeLevel, TreeRow, meta, section_label, toggle_id, tree_children, turning,

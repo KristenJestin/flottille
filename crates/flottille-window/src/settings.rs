@@ -27,12 +27,14 @@ use crate::actions::Command;
 use crate::providers::{Provider, Providers};
 use crate::rules::RulesEditor;
 use crate::shell::Shell;
+use crate::workspaces_folder::WorkspacesFolder;
 
 /// The sections of the page, in order: each index entry's key and label.
-pub const SECTIONS: [(&str, &str); 5] = [
+pub const SECTIONS: [(&str, &str); 6] = [
     ("judge", "Judge"),
     ("providers", "Providers"),
     ("rules", "Rules"),
+    ("workspaces", "Workspaces"),
     ("appearance", "Appearance"),
     ("developer", "Developer mode"),
 ];
@@ -102,6 +104,8 @@ pub struct SettingsPage {
     rules: Entity<RulesEditor>,
     /// The Auto judge's guidance, edited on this page.
     judge_guidance: Entity<RulesEditor>,
+    /// Where the workspaces of every project go, chosen on this page.
+    workspaces: Entity<WorkspacesFolder>,
     /// The judge's picker whose list is open.
     judge_menu: Option<JudgeMenu>,
     /// A judge chosen, until the daemon lists it.
@@ -157,10 +161,12 @@ impl SettingsPage {
         shell: WeakEntity<Shell>,
         rules: Entity<RulesEditor>,
         judge_guidance: Entity<RulesEditor>,
+        workspaces: Entity<WorkspacesFolder>,
     ) -> Self {
         Self {
             rules,
             judge_guidance,
+            workspaces,
             shell,
             providers: Providers::default(),
             pending: HashMap::new(),
@@ -220,6 +226,10 @@ impl SettingsPage {
 
     pub fn judge_guidance(&self) -> &Entity<RulesEditor> {
         &self.judge_guidance
+    }
+
+    pub fn workspaces_folder(&self) -> &Entity<WorkspacesFolder> {
+        &self.workspaces
     }
 
     pub fn providers(&self) -> &Providers {
@@ -1086,6 +1096,7 @@ impl Render for SettingsPage {
                 ),
             ],
             vec![("rules", self.rules.clone().into_any_element())],
+            vec![("workspaces", self.workspaces.clone().into_any_element())],
             vec![("appearance", self.appearance_section(cx).into_any_element())],
             vec![("developer", self.developer_section(cx).into_any_element())],
         ];

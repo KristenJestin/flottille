@@ -61,6 +61,11 @@ pub struct Projects {
 }
 
 impl Projects {
+    /// The registry the projects are read from.
+    pub fn registry(&self) -> &Registry {
+        &self.registry
+    }
+
     /// Takes the projects there are as the starting point: they are not news.
     pub fn open(paths: &Paths) -> Result<Projects> {
         let registry = Registry::new(paths);
@@ -118,6 +123,8 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> std::result::Result
             }
             let project = Project::new(&plan.name, plan.folder, plan.repositories, &projects.data);
             projects.registry.create(&project)?;
+            // The file names no folder for the workspaces: the project is what reads back.
+            let project = load(projects, &project.name)?;
             projects.known.insert(project.name.clone(), project.clone());
             emit(
                 daemon,
@@ -163,6 +170,12 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> std::result::Result
 /// is on (`null` when it is on none), read by git outside the projects' lock.
 pub async fn show(daemon: Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
     let mut project = call(&daemon, "project.show", params)?;
+    // A project that follows a default which cannot be followed gets the data folder: it says so.
+    if project.get("workspaces_root_own").is_none()
+        && let Err(why) = daemon.projects.lock().unwrap().registry().place_read()
+    {
+        project["workspaces_default_error"] = why.into();
+    }
     let folder = PathBuf::from(project["folder"].as_str().unwrap_or_default());
     for repository in project["repositories"].as_array_mut().into_iter().flatten() {
         let checkout = match repository["path"].as_str().unwrap_or(".") {
@@ -736,7 +749,9 @@ pub fn rewrite(
         })?;
     edit(&project, &mut document)?;
     let text = document.to_string();
-    let edited = Project::parse(name, &text, &projects.data)
+    let edited = projects
+        .registry
+        .parse(name, &text)
         .map_err(|error| Failure::new("invalid-config", error.to_string()))?;
     crate::providers::write_in_place(&file, &text).map_err(unavailable)?;
     announce_edits(daemon, projects)?;
@@ -772,12 +787,12 @@ pub fn migrate_files(daemon: &Daemon) {
                  both kept: remove the one you do not want"
             );
         }
-        let Some(migrated) = migrated(&text) else {
+        let Some(migrated) = migrated_for(&text, Some((&name, &projects.data))) else {
             continue;
         };
         // The file is written only when it reads afterwards: one that worked still does, one that
         // did not now does, or else it stays as the user left it.
-        let usable = |text: &str| Project::parse(&name, text, &projects.data).is_ok();
+        let usable = |text: &str| projects.registry.parse(&name, text).is_ok();
         if !usable(&migrated) {
             if usable(&text) {
                 eprintln!(
@@ -797,9 +812,35 @@ pub fn migrate_files(daemon: &Daemon) {
 
 /// The text of a project's file with its keys brought to this version, `None` when it holds
 /// none of the former ones (or is no TOML at all).
-pub fn migrated(text: &str) -> Option<String> {
+#[cfg(test)]
+fn migrated(text: &str) -> Option<String> {
+    migrated_for(text, None)
+}
+
+/// As [`migrated`], and for the project `(name, data folder)` when given, its `workspaces_root`
+/// dropped if it only pins the data folder: until the default could be chosen, `project add`
+/// wrote it, and pinned it would never follow the user's default. It resolves the same under the
+/// data default, and the workspaces that exist keep their folder from their record.
+fn migrated_for(text: &str, project: Option<(&str, &Path)>) -> Option<String> {
     let mut document: toml_edit::DocumentMut = text.parse().ok()?;
-    former_keys_renamed(&mut document).then(|| document.to_string())
+    let mut changed = former_keys_renamed(&mut document);
+    if let Some((name, data)) = project {
+        changed |= pinned_default_dropped(&mut document, name, data);
+    }
+    changed.then(|| document.to_string())
+}
+
+/// Removes `workspaces_root` when it is `<data>/workspaces/<name>`, the folder a project
+/// without one gets under the data default. Whether it did.
+fn pinned_default_dropped(document: &mut toml_edit::DocumentMut, name: &str, data: &Path) -> bool {
+    let pinned = document
+        .get("workspaces_root")
+        .and_then(toml_edit::Item::as_str)
+        .is_some_and(|root| Path::new(root) == data.join("workspaces").join(name));
+    if pinned {
+        document.remove("workspaces_root");
+    }
+    pinned
 }
 
 /// The tasks a file holds twice, under their former key `[commands.<name>]` and under

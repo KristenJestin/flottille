@@ -11,8 +11,8 @@ use std::time::Duration;
 use common::{Desktop, advance, init, pending_frames};
 use flottille_ui::motion::{ENTER, HOVER, MAX_STAGGER, PANEL, RISE, STAGGER};
 use flottille_ui::{
-    Button, Item, Listing, Segmented, StepRow, StepTone, Tabs, enter, presence, presence_of,
-    selectable,
+    Button, Item, Listing, Segmented, StepRow, StepTone, Tabs, changing, enter, presence,
+    presence_of, selectable,
 };
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{
@@ -898,4 +898,49 @@ fn a_colour_that_changes_moves_through_the_colours_between_and_stops(cx: &mut Te
     advance(cx, PANEL * 2);
     assert_eq!(seen.get(), white);
     assert_eq!(pending_frames(cx), 0);
+}
+
+// ── A line whose text changes ──────────────────────────────────────────────────────────────────
+
+struct Said {
+    text: SharedString,
+}
+
+impl Render for Said {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        changing("said-line", self.text.clone(), |text| {
+            div()
+                .id("said-text")
+                .child(text)
+                .test_support()
+                .into_any_element()
+        })
+    }
+}
+
+#[gpui_kit::test]
+fn a_line_whose_text_changes_fades_back_in_over_hover_and_then_stops_asking_for_frames(
+    cx: &mut TestAppContext,
+) {
+    init(cx, Desktop::new(false).env());
+    let (view, cx) = cx.add_window_view(|_, _| Said {
+        text: "first".into(),
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+    advance(cx, HOVER);
+    assert_eq!(pending_frames(cx), 0, "a first text is simply there");
+
+    cx.update(|_, cx| {
+        view.update(cx, |said, cx| {
+            said.text = "second".into();
+            cx.notify()
+        })
+    });
+    cx.update(|window, cx| window.render_frame(cx));
+    assert!(pending_frames(cx) > 0, "the change asks for frames");
+    advance(cx, HOVER / 2);
+    assert!(pending_frames(cx) > 0, "and it is still moving half way");
+    advance(cx, HOVER * 2);
+    assert_eq!(pending_frames(cx), 0);
+    assert!(cx.update(|window, _| window.find("said-text").visible()));
 }

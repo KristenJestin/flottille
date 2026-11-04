@@ -17,6 +17,9 @@ measured on a 16-core Linux machine with a 165 Hz screen. Keep them; they cost a
 - Build cost: a release build from scratch takes 8 to 14 minutes at `nice -n 19` with 6 jobs and
   up to 1 GB of memory for GPUI alone; incremental builds take about 5 s. Binary about 55 MB
   (embed only the icons used: `gpui_kit::assets::icon_assets!(Icons, [Play, …])`).
+  A glyph Lucide does not draw the way Flottille wants (stop: a small filled square) is an SVG
+  of `crates/flottille-ui/assets/icons/`, embedded with `include_bytes!` and served by `Icons`
+  (`icons.rs`) before the Lucide source; `Icon::path` names it like any other.
 - CI (Ubuntu): `pkg-config libfontconfig-dev libfreetype-dev libxkbcommon-dev
   libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev`; only fontconfig
   and freetype are linked at build time. Cache the build (`Swatinem/rust-cache`).
@@ -65,6 +68,7 @@ durations and the easing of `crates/flottille-ui/src/motion.rs` (`HOVER` 140 ms,
 | a page's blocks, a card, anything that shows once | `enter(id, index, element)` |
 | a block that comes and goes while its view stays (an empty-list line, the fields a choice needs, a body that unfolds) | `presence(id, present, element).gap(..)`: build it on every frame, outside a `when`; `.gap` is the gap the parent flex puts between its children, which folds with the block |
 | a line that goes away with its text (an error, a refusal) | `presence_of(id, Option<line>, build)`: it still shows the last line while it folds |
+| a line whose text changes while its view stays (the folder a setting results in) | `changing(id, text, build)`: it fades back in over `HOVER` when the text differs from the last frame's; build it on every frame |
 | a block whose height follows its content (a field that wraps its text and grows by a line) | `growing(id, element)`: it eases to the new height over `PANEL`, also when it shrinks; build it on every frame; `<id>` is the animated frame, so its bounds are the height drawn |
 | the rows of a list that comes from elsewhere | `Listing::sync` on each render, each row drawn inside an `Item`: it unfolds when it arrives, folds away when it leaves (it stays drawn until then), slides when it moves |
 | a level that folds | `Fold` (a view) or `fold_frame` |
