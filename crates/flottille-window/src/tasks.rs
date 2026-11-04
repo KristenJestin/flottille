@@ -22,7 +22,7 @@ use gpui_kit::{
 };
 use serde_json::{Value, json};
 
-use crate::actions::{Command, RunAct};
+use crate::actions::{Command, RunAct, RunAnswer};
 use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line};
 use crate::conversation::Ending;
 use crate::project::repository_label;
@@ -935,23 +935,30 @@ impl ProjectTasks {
 
     /// What the daemon answered to a stop, a restart or a dismissal: a refusal is a toast, and the
     /// panel shows the new run of a restart.
-    pub fn run_answered(
-        &mut self,
-        act: RunAct,
-        refused: Option<String>,
-        restarted: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn run_answered(&mut self, answer: RunAnswer, cx: &mut Context<Self>) {
+        let RunAnswer {
+            act,
+            run,
+            refused,
+            restarted,
+            notice,
+        } = answer;
         if let Some(why) = refused {
             let title = match act {
                 RunAct::Restart => "The run was not restarted",
                 _ => "The run was not stopped",
             };
             toast(Toast::failure(title).detail(why), cx);
-            self.panel.update(cx, |panel, cx| panel.restart_refused(cx));
+            if act == RunAct::Restart {
+                self.panel
+                    .update(cx, |panel, cx| panel.restart_refused(&run, cx));
+            }
         }
         if let Some(run) = restarted {
             self.follow_command(&run, cx);
+        }
+        if let Some(notice) = notice {
+            toast(Toast::success("The run is now yours").detail(notice), cx);
         }
         self.read_runs(cx);
     }

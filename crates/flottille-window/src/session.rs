@@ -44,7 +44,7 @@ use gpui_kit::{
     canvas, div, list, point, px, radians,
 };
 
-use crate::actions::{Answer, Command, Picture, RepositoryStatus, RunAct};
+use crate::actions::{Answer, Command, Picture, RepositoryStatus, RunAct, RunAnswer};
 use crate::commands::CommandInfo;
 use crate::conversation::{
     Activity, Block, Call, CallState, Change, Conversation, DiffLine, USER, WOKEN_BY_KIND,
@@ -736,13 +736,14 @@ impl SessionPage {
     /// What the daemon answered to a stop, a restart or a dismissal: why, when it refused, and the
     /// new run when it restarted one, which takes the open command's place. A refused restart is
     /// said by its toast alone.
-    pub fn command_answered(
-        &mut self,
-        act: RunAct,
-        refused: Option<String>,
-        restarted: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn command_answered(&mut self, answer: RunAnswer, cx: &mut Context<Self>) {
+        let RunAnswer {
+            act,
+            run,
+            refused,
+            restarted,
+            notice,
+        } = answer;
         let mut listed = refused.clone();
         if let (RunAct::Restart, Some(why)) = (act, &refused) {
             toast(
@@ -751,10 +752,16 @@ impl SessionPage {
             );
             listed = None;
             self.command_panel
-                .update(cx, |panel, cx| panel.restart_refused(cx));
+                .update(cx, |panel, cx| panel.restart_refused(&run, cx));
         }
         if let Some(run) = restarted {
             self.follow_command(&run, cx);
+        }
+        if let Some(notice) = notice {
+            toast(
+                Toast::success("The command is now yours").detail(notice),
+                cx,
+            );
         }
         let list = self.commands(cx);
         list.update(cx, |list, cx| list.failed(listed, cx));

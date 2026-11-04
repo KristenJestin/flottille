@@ -13,6 +13,7 @@ use common::User;
 use common::mcp::{Answer, Mcp, server_of};
 use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
+use flottille_window::actions::{RunAct, RunAnswer};
 use flottille_window::conversation::{Block, Ending};
 use flottille_window::runs::CommandRow;
 use flottille_window::session::SessionPage;
@@ -1223,6 +1224,7 @@ fn a_refused_restart_is_said_once_by_a_toast(cx: &mut TestAppContext) {
     let user = user();
     let (lead, mcp, _) = lead(&user);
     let (run, shell, page, cx) = panel_of_server(&user, &lead, &mcp, cx);
+    let panel = page.read_with(cx, |page, _| page.command_panel().clone());
     // The task is gone from the project: the daemon cannot start it again.
     let file = user.project_file("app");
     let text = std::fs::read_to_string(&file).unwrap();
@@ -1250,6 +1252,10 @@ fn a_refused_restart_is_said_once_by_a_toast(cx: &mut TestAppContext) {
         None,
         "not also a failed state in the list"
     );
+    assert!(
+        !panel.read_with(cx, |panel, _| panel.restarting()),
+        "Restart and Stop are enabled again"
+    );
     // The command was left running, and Restart is back.
     let rows = commands(&page, cx);
     assert!(rows.iter().any(|r| r.run == run && r.state == "running"));
@@ -1265,4 +1271,57 @@ fn toasts(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
             .map(|toast| toast.title().to_owned())
             .collect()
     })
+}
+
+#[gpui_kit::test]
+fn the_refusal_of_another_run_keeps_a_restart_pending(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp, _) = lead(&user);
+    let (run, _shell, page, cx) = panel_of_server(&user, &lead, &mcp, cx);
+    let panel = page.read_with(cx, |page, _| page.command_panel().clone());
+    panel.update(cx, |panel, cx| panel.restart_asked(&run, cx));
+    let refused = |act, of: &str| RunAnswer {
+        act,
+        run: of.to_owned(),
+        refused: Some("no".into()),
+        restarted: None,
+        notice: None,
+    };
+
+    page.update(cx, |page, cx| {
+        page.command_answered(refused(RunAct::Stop, "another"), cx)
+    });
+    page.update(cx, |page, cx| {
+        page.command_answered(refused(RunAct::Restart, "another"), cx)
+    });
+    assert!(
+        panel.read_with(cx, |panel, _| panel.restarting()),
+        "the restart of this run still waits"
+    );
+
+    page.update(cx, |page, cx| {
+        page.command_answered(refused(RunAct::Restart, &run), cx)
+    });
+    assert!(!panel.read_with(cx, |panel, _| panel.restarting()));
+    ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
+}
+
+#[gpui_kit::test]
+fn restarting_an_ended_agent_s_command_says_it_is_now_the_user_s(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp, _) = lead(&user);
+    let (run, shell, page, cx) = panel_of_server(&user, &lead, &mcp, cx);
+    let panel = page.read_with(cx, |page, _| page.command_panel().clone());
+    user.call("agent.stop", json!({"agent": lead})).unwrap();
+
+    cx.update(|window, cx| window.click("run-drawer-restart", cx));
+
+    until(&shell, cx, "a toast says the command is the user's", |cx| {
+        toasts(&shell, cx) == ["The command is now yours"]
+    });
+    until(&shell, cx, "the panel follows the new run", |cx| {
+        panel.read_with(cx, |panel, _| panel.run().is_some_and(|new| new != run))
+    });
+    let new = panel.read_with(cx, |panel, _| panel.run().unwrap().to_owned());
+    user.call("run.stop", json!({"run": new})).unwrap();
 }

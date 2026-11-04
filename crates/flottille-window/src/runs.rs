@@ -880,10 +880,18 @@ impl CommandPanel {
         cx.notify();
     }
 
-    /// The restart was refused: the buttons are back.
-    pub fn restart_refused(&mut self, cx: &mut Context<Self>) {
-        self.restarting = None;
-        cx.notify();
+    /// The restart of `run` was refused: the buttons are back, unless what waits is another
+    /// restart.
+    pub fn restart_refused(&mut self, run: &str, cx: &mut Context<Self>) {
+        if self.restarting.as_deref() == Some(run) {
+            self.restarting = None;
+            cx.notify();
+        }
+    }
+
+    /// Whether a restart waits for its new run: Stop and Restart are faded meanwhile.
+    pub fn restarting(&self) -> bool {
+        self.restarting.is_some()
     }
 
     /// The new run of a restart takes the open command's place: its row and its output stay

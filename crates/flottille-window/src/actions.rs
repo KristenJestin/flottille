@@ -87,6 +87,20 @@ impl RunAct {
     }
 }
 
+/// What the daemon answered to what the user did to a command.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RunAnswer {
+    pub act: RunAct,
+    /// The command it was done to.
+    pub run: String,
+    /// Why the daemon refused, or why no answer came.
+    pub refused: Option<String>,
+    /// The new run, when a restart started one.
+    pub restarted: Option<String>,
+    /// What the daemon says of the restart: the command of an agent that ended is the user's now.
+    pub notice: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     /// What the project page shows beyond the shell's read: branches and lines changed.
@@ -741,9 +755,7 @@ pub enum Outcome {
     /// daemon refused with why.
     ProjectRunAnswered {
         project: String,
-        act: RunAct,
-        refused: Option<String>,
-        restarted: Option<String>,
+        answer: RunAnswer,
     },
     Setup {
         project: String,
@@ -809,9 +821,7 @@ pub enum Outcome {
     /// daemon refused with why.
     RunAnswered {
         session: String,
-        act: RunAct,
-        refused: Option<String>,
-        restarted: Option<String>,
+        answer: RunAnswer,
     },
     /// A subscription was cancelled as asked, or the daemon refused with why.
     SubscriptionCancelled {
@@ -986,22 +996,43 @@ fn ask_alone(
     connected(connect)?.ask_within(method, params, bound)
 }
 
-/// What the user does to a command: why the daemon refused, and the new run's id when it ran the
-/// command again.
-fn ask_run(
-    connect: &Connect,
+/// What the user does to a command, and what the daemon answered.
+fn ask_run(connect: &Connect, act: RunAct, run: &str, bound: Duration) -> RunAnswer {
+    run_answer(
+        act,
+        run,
+        ask_alone(connect, act.method(), json!({"run": run}), bound),
+    )
+}
+
+fn run_answer(
     act: RunAct,
     run: &str,
-    bound: Duration,
-) -> (Option<String>, Option<String>) {
-    match ask_alone(connect, act.method(), json!({"run": run}), bound) {
-        Ok(Ok(answer)) => (
-            None,
-            (act == RunAct::Restart)
-                .then(|| answer["run"]["run"].as_str().map(str::to_owned))
-                .flatten(),
-        ),
-        Ok(Err(why)) | Err(why) => (Some(why), None),
+    answered: Result<Result<Value, String>, String>,
+) -> RunAnswer {
+    let (refused, restarted, notice) = match answered {
+        Ok(Ok(answer)) if act == RunAct::Restart => match answer["run"]["run"].as_str() {
+            Some(new) => (
+                None,
+                Some(new.to_owned()),
+                answer["notice"].as_str().map(str::to_owned),
+            ),
+            // Nothing to follow and nothing that waits: said like a refusal.
+            None => (
+                Some("the daemon answered without the new run".to_owned()),
+                None,
+                None,
+            ),
+        },
+        Ok(Ok(_)) => (None, None, None),
+        Ok(Err(why)) | Err(why) => (Some(why), None, None),
+    };
+    RunAnswer {
+        act,
+        run: run.to_owned(),
+        refused,
+        restarted,
+        notice,
     }
 }
 
@@ -1535,15 +1566,10 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 output,
             }
         }
-        Command::ProjectRun { project, run, act } => {
-            let (refused, restarted) = ask_run(connect, act, &run, bounds.quick);
-            Outcome::ProjectRunAnswered {
-                project,
-                act,
-                refused,
-                restarted,
-            }
-        }
+        Command::ProjectRun { project, run, act } => Outcome::ProjectRunAnswered {
+            project,
+            answer: ask_run(connect, act, &run, bounds.quick),
+        },
         Command::Setup { project } => {
             let listed = ask_alone(
                 connect,
@@ -1719,15 +1745,10 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             };
             Outcome::Interrupted { session, refused }
         }
-        Command::Run { session, run, act } => {
-            let (refused, restarted) = ask_run(connect, act, &run, bounds.quick);
-            Outcome::RunAnswered {
-                session,
-                act,
-                refused,
-                restarted,
-            }
-        }
+        Command::Run { session, run, act } => Outcome::RunAnswered {
+            session,
+            answer: ask_run(connect, act, &run, bounds.quick),
+        },
         Command::CancelSubscription {
             session,
             subscription,
@@ -2142,5 +2163,28 @@ mod tests {
         };
         assert_eq!(project, "atlas");
         assert_eq!(why, "the daemon did not answer agent.start within 200 ms");
+    }
+
+    #[test]
+    fn a_restart_answered_without_a_new_run_is_a_refusal() {
+        let answer = run_answer(RunAct::Restart, "r1", Ok(Ok(json!({"run": {}}))));
+
+        assert_eq!(answer.restarted, None);
+        assert!(answer.refused.is_some(), "{answer:?}");
+    }
+
+    #[test]
+    fn a_restart_answer_carries_the_new_run_and_the_notice() {
+        let answer = run_answer(
+            RunAct::Restart,
+            "r1",
+            Ok(Ok(
+                json!({"run": {"run": "r2"}, "notice": "agent a has ended"}),
+            )),
+        );
+
+        assert_eq!(answer.restarted.as_deref(), Some("r2"));
+        assert_eq!(answer.notice.as_deref(), Some("agent a has ended"));
+        assert_eq!(answer.refused, None);
     }
 }
