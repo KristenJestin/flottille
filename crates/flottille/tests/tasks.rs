@@ -694,6 +694,22 @@ fn a_task_s_ready_and_url_are_read_and_written_by_the_user_and_the_agent() {
         )
         .unwrap_err();
     assert!(wrong.1.contains("http:// or https://"), "{wrong:?}");
+    // The window sends "" for none, since its link drops a null.
+    let cleared = user
+        .call(
+            "task.edit",
+            json!({"project": "app", "name": "web", "url": "", "ready": ""}),
+        )
+        .unwrap();
+    assert_eq!(
+        (&cleared["url"], &cleared["ready"]),
+        (&Value::Null, &Value::Null)
+    );
+    user.call(
+        "task.edit",
+        json!({"project": "app", "name": "web", "url": {"command": "portless get web"}}),
+    )
+    .unwrap();
     let (_, mcp) = root(&user);
 
     let listed = done(mcp.call("tasks", json!({"action": "list"})));

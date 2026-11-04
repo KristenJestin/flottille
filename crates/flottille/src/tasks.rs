@@ -41,8 +41,11 @@ struct Add {
     read_only: bool,
     #[serde(default)]
     ask_before_running: bool,
-    ready: Option<Ready>,
-    url: Option<TaskUrl>,
+    /// `null` or `""`: none.
+    #[serde(default, deserialize_with = "present_or_empty")]
+    ready: Option<Option<Ready>>,
+    #[serde(default, deserialize_with = "present_or_empty")]
+    url: Option<Option<TaskUrl>>,
 }
 
 #[derive(Deserialize)]
@@ -58,11 +61,25 @@ struct Edit {
     check: Option<bool>,
     read_only: Option<bool>,
     ask_before_running: Option<bool>,
-    /// Left out: unchanged; `null`: removed.
-    #[serde(default, deserialize_with = "present")]
+    /// Left out: unchanged; `null` or `""` (what the window sends, which drops a `null`):
+    /// removed.
+    #[serde(default, deserialize_with = "present_or_empty")]
     ready: Option<Option<Ready>>,
-    #[serde(default, deserialize_with = "present")]
+    #[serde(default, deserialize_with = "present_or_empty")]
     url: Option<Option<TaskUrl>>,
+}
+
+/// A field given, `null` and `""` being none.
+fn present_or_empty<'de, D: Deserializer<'de>, T: serde::de::DeserializeOwned>(
+    deserializer: D,
+) -> Result<Option<Option<T>>, D::Error> {
+    match Value::deserialize(deserializer)? {
+        Value::Null => Ok(Some(None)),
+        Value::String(text) if text.is_empty() => Ok(Some(None)),
+        value => serde_json::from_value(value)
+            .map(|value| Some(Some(value)))
+            .map_err(serde::de::Error::custom),
+    }
 }
 
 /// A field given, `null` included.
@@ -130,8 +147,8 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Answer {
                 read_only: asked.read_only,
                 ask_before_running: asked.ask_before_running,
                 added_by: None,
-                ready: asked.ready,
-                url: asked.url,
+                ready: asked.ready.flatten(),
+                url: asked.url.flatten(),
             };
             let project = projects::rewrite(daemon, &asked.project, |project, document| {
                 if project.tasks.contains_key(&name) {
