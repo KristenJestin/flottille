@@ -121,7 +121,7 @@ impl Context<'_> {
         let own = self.own();
         let groups = crate::runs::groups_of(self.daemon, self.agent);
         gate::process(&groups, path).or_else(|| {
-            gate::sensitive(&own, path)
+            gate::sensitive(&own, self.place.home.as_deref(), path)
                 .map(|place| format!("{} is a sensitive place ({place})", path.shown))
         })
     }

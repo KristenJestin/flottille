@@ -30,7 +30,7 @@ pub fn guard(below: &Path, real: &Path) -> Option<String> {
         .find_map(|folder| below.strip_prefix(folder).ok())
         .unwrap_or(below);
     let shown = Resolved::real_inside(inside.display().to_string(), real.to_owned());
-    if let Some(place) = gate::sensitive(&[], &shown) {
+    if let Some(place) = gate::sensitive(&[], None, &shown) {
         return Some(format!(
             "it leads to {} in a sensitive place ({place}), which is never read for a skill or a \
              command",
