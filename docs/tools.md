@@ -230,7 +230,7 @@ Paths are shown relative to the place's top.
 |---|---|---|
 | `fs_read` | `path`, `repository?`, `range? {offset?, length? 1..32768}` | A page of a file, lines numbered `%6d\t`, then `(bytes a-b of N; the next page starts at offset M)` or `(…, the end of the file)`, then `{"offset", "end", "size", "next"}`. A page holds at most 32 KiB and ends after its last newline (else on a character); an offset inside a character starts at the next one. A page is cut shorter to keep the result under the limit (a file of empty lines). |
 | `fs_list` | `path`, `repository?`, `depth? 1..5` | The entries, sorted, a folder's after it: `path  file  size`, `path/  folder`, `path  link  -> target`. `.git` is left out. It stops at 1000 entries, or shorter to stay under the limit, and says so. |
-| `search` | `pattern`, `repository?`, `glob?`, `cursor?` | A case-insensitive substring, not a pattern. A sorted, depth-first walk that never enters `.git` or `node_modules` nor follows a link; the top `.gitignore` applies (simple patterns: no `!`, a pattern with a `/` is anchored, a trailing `/` is a folder). `glob` keeps to the files it matches (on the name alone without a `/`; `**` for any folders). A file with a NUL byte in its first 64 KiB is skipped and named (20 at most). Hits are `path:line: text`, trimmed and cut at 200 characters. It stops at 100 matches, 1 MiB read or the size limit, with a cursor `path:line` that resumes it. The head says the count, the stop and its cursor, the limits, the skipped files. |
+| `search` | `pattern`, `repository?`, `glob?`, `cursor?` | A case-insensitive substring, not a pattern. A sorted, depth-first walk that never enters `.git` or `node_modules` nor follows a link; the top `.gitignore` applies (simple patterns: no `!`, a pattern with a `/` is anchored, a trailing `/` is a folder). A file `fs_read` refuses, a login's place (The gate, 1), is never searched. `glob` keeps to the files it matches (on the name alone without a `/`; `**` for any folders). A file with a NUL byte in its first 64 KiB is skipped and named (20 at most). Hits are `path:line: text`, trimmed and cut at 200 characters. It stops at 100 matches, 1 MiB read or the size limit, with a cursor `path:line` that resumes it. The head says the count, the stop and its cursor, the limits, the skipped files. |
 | `fs_write` | `path`, `content`, `repository?`, `why?` | The whole file, made with its folders when new. |
 | `fs_edit` | `path`, `edits [1..50] {old, new}`, `repository?`, `why?` | Each `old` must appear exactly once (overlapping occurrences count) when its turn comes, else `refused: the anchor of edit N appears K time(s) in X; it must appear exactly once. Nothing was changed`. Edits apply in order, spliced (never as a pattern: `$&` is text), all or none. |
 
@@ -919,7 +919,8 @@ says who answers a call to judge (`docs/design.md` §7.1).
      or `cwd`. The agents' own folders of the home (`~/.claude`, `~/.claude.json`, `~/.codex`)
      are a login's place whole (`refused: X is in a login's place (~/.claude)`), found where any
      path leads, inside the place too (a link to them, a project that is the home folder), and
-     everywhere when the home is not known; anywhere else such a folder is read as any file, but
+     where they lead when they are links themselves (dotfiles); everywhere when the home is not
+     known, or when the path goes through a process's folder in `/proc`; anywhere else such a folder is read as any file, but
      a `.credentials.json` or `auth.json` below it is a login's place
      (`(.credentials.json in .claude)`);
    - a write in an agent's folder that is not the home's (`.claude`, `.claude.json`, `.codex` of
