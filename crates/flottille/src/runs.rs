@@ -253,6 +253,7 @@ fn says_no_ready(name: Option<&str>) -> Outcome {
 /// The run's address, or why it has none (masked), and its probe: `Err` when the task's
 /// `ready` cannot be filled or split.
 async fn readied(
+    daemon: &Daemon,
     ready: Option<&Ready>,
     url: Option<&TaskUrl>,
     names: &Names,
@@ -262,7 +263,7 @@ async fn readied(
 ) -> Result<(Option<String>, Option<String>, Option<Probe>), String> {
     let (url, url_error) = match url {
         None => (None, None),
-        Some(url) => match ready::address(url, names, env, folder).await {
+        Some(url) => match ready::address(daemon, url, names, env, folder).await {
             Ok(address) => (Some(address), None),
             Err(why) => (None, Some(secrets::mask_also(&why, env, secret_values))),
         },
@@ -377,6 +378,7 @@ pub async fn run(
     };
     let secret_values = place.secret_values();
     let (url, url_error, probe) = match readied(
+        daemon,
         ready.as_deref(),
         url.as_deref(),
         &names(place, &repository),
@@ -471,6 +473,7 @@ pub async fn run_for_user(
     let env = environment(daemon, &place, repository, false)?;
     let secret_values = place.secret_values();
     let (url, url_error, probe) = readied(
+        daemon,
         task.ready.as_deref(),
         task.url.as_deref(),
         &names(&place, repository),
@@ -755,7 +758,14 @@ async fn probing(daemon: Arc<Daemon>, going: Arc<Going>, probe: Probe) {
             match &probe {
                 Probe::Url(address) => ready::answers(address).await,
                 Probe::Command(words) => {
-                    ready::command_passes(words, &going.env, &going.run.folder).await
+                    ready::command_passes(
+                        &daemon,
+                        &going.run.id,
+                        words,
+                        &going.env,
+                        &going.run.folder,
+                    )
+                    .await
                 }
                 Probe::Line(_) => false,
             }
@@ -1177,6 +1187,7 @@ pub async fn restart_by_user(
     let env = environment(daemon, &place, &repository, false)?;
     let secret_values = place.secret_values();
     let (url, url_error, probe) = readied(
+        daemon,
         ready.as_deref(),
         url.as_deref(),
         &names(&place, &repository),

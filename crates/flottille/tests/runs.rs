@@ -1091,3 +1091,44 @@ fn run_status_notify_on_a_started_run() {
     ));
     assert!(again.contains("is ready"), "{again}");
 }
+
+#[test]
+fn a_probe_s_children_are_killed_when_the_run_ends() {
+    let user = User::with_fake_agent();
+    let (_, mcp, workspace) = session(&user);
+    with_tasks(
+        &user,
+        &workspace,
+        "\n[tasks.db]\nline = \"./db.sh\"\nserve = true\nready = { command = \"./ping.sh\" }\n",
+        &[
+            ("db.sh", "#!/bin/sh\nexec sleep 300\n"),
+            // A probe that leaves a child of its own behind and waits for it.
+            (
+                "ping.sh",
+                "#!/bin/sh\nsh -c 'echo $$ > child.pid; exec sleep 300' &\nwait\n",
+            ),
+        ],
+    );
+    let run = run_id(&ok(mcp.call("run", json!({"task": "db"}))));
+    let pid = workspace.join("child.pid");
+    eventually("the probe's child", || {
+        std::fs::read_to_string(&pid).is_ok_and(|pid| pid.trim().parse().is_ok_and(alive))
+    });
+    let child: u64 = std::fs::read_to_string(&pid)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
+
+    // Well before the probe's own limit (5 s) would have killed it.
+    let deadline = Instant::now() + Duration::from_millis(2500);
+    while alive(child) {
+        assert!(
+            Instant::now() < deadline,
+            "the probe's child {child} still runs"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}

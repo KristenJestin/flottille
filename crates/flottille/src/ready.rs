@@ -19,7 +19,8 @@ use tokio::net::TcpStream;
 use tokio_rustls::rustls::{self, ClientConfig, pki_types::ServerName};
 use url::{Host, Url};
 
-use crate::agents::signal_group;
+use crate::agents::{signal_group, start_time};
+use crate::daemon::Daemon;
 
 /// How long a probe, or the line that prints an address, may take.
 pub const PROBE_LIMIT: Duration = Duration::from_secs(5);
@@ -41,7 +42,15 @@ pub fn probe(ready: &Ready, names: &Names, url: Option<&str>) -> Result<Probe, S
     let extra = [("url", url.unwrap_or_default())];
     Ok(match ready {
         Ready::Line(text) => Probe::Line(variables::fill_also(text, names, &extra)?),
-        Ready::Url(template) => Probe::Url(variables::fill_also(template, names, &extra)?),
+        Ready::Url(template) => {
+            let address = variables::fill_also(template, names, &extra)?;
+            if !is_address(&address) {
+                return Err(format!(
+                    "“{address}” is not an http:// or https:// address with a host"
+                ));
+            }
+            Probe::Url(address)
+        }
         Ready::Command(line) => Probe::Command(words(line, names, &extra)?),
     })
 }
@@ -57,6 +66,7 @@ fn words(line: &str, names: &Names, extra: &[(&str, &str)]) -> Result<Vec<String
 /// The run's address: the task's, filled, or the first line with something on it its command
 /// prints, which must be an `http(s)://` address. `Err` says why there is none.
 pub async fn address(
+    daemon: &Daemon,
     url: &TaskUrl,
     names: &Names,
     env: &BTreeMap<OsString, OsString>,
@@ -70,7 +80,7 @@ pub async fn address(
     let shown = words.join(" ");
     let mut child = spawn(&words, env, folder, true)
         .map_err(|e| format!("the command for its address, `{shown}`, cannot run: {e}"))?;
-    let pid = child.id();
+    let _group = Group::new(daemon, &child, "address");
     let mut stdout = child.stdout.take().expect("piped");
     let mut stderr = child.stderr.take().expect("piped");
     let ran = async {
@@ -83,9 +93,6 @@ pub async fn address(
         (out, err, status)
     };
     let Ok((out, err, status)) = tokio::time::timeout(PROBE_LIMIT, ran).await else {
-        if let Some(pid) = pid {
-            signal_group(pid, libc::SIGKILL);
-        }
         return Err(format!(
             "the command for its address, `{shown}`, did not end within {} s",
             PROBE_LIMIT.as_secs()
@@ -110,7 +117,7 @@ pub async fn address(
         .find(|line| !line.is_empty())
         .map(str::to_owned);
     match first {
-        Some(line) if line.starts_with("http://") || line.starts_with("https://") => Ok(line),
+        Some(line) if is_address(&line) => Ok(line),
         Some(line) => Err(format!(
             "the command for its address, `{shown}`, printed “{}”, not an http:// or https:// \
              address",
@@ -119,6 +126,45 @@ pub async fn address(
         None => Err(format!(
             "the command for its address, `{shown}`, printed nothing"
         )),
+    }
+}
+
+/// An `http(s)://` address with a host, as a request can be sent to.
+pub fn is_address(text: &str) -> bool {
+    Url::parse(text).is_ok_and(|url| {
+        matches!(url.scheme(), "http" | "https") && url.host_str().is_some_and(|h| !h.is_empty())
+    })
+}
+
+/// A line's process group, killed whole when it is dropped, whatever ends the line: its end, its
+/// limit, or the run it probes ending first. Recorded as a run's are, so that a daemon started
+/// after a crash kills it too.
+struct Group<'a> {
+    daemon: &'a Daemon,
+    pid: Option<u32>,
+}
+
+impl<'a> Group<'a> {
+    fn new(daemon: &'a Daemon, child: &tokio::process::Child, run: &str) -> Self {
+        let pid = child.id();
+        if let Some(pid) = pid
+            && let Some(started) = start_time(pid)
+        {
+            let recorded = daemon.read(|store| store.add_run_process(pid, started, run));
+            if let Err(error) = recorded {
+                eprintln!("flottille daemon: recording the probe process {pid}: {error}");
+            }
+        }
+        Self { daemon, pid }
+    }
+}
+
+impl Drop for Group<'_> {
+    fn drop(&mut self) {
+        if let Some(pid) = self.pid {
+            signal_group(pid, libc::SIGKILL);
+            let _ = self.daemon.read(|store| store.remove_run_process(pid));
+        }
     }
 }
 
@@ -157,6 +203,8 @@ fn spawn(
 
 /// Whether the line exits with 0 within the probe's limit; killed past it.
 pub async fn command_passes(
+    daemon: &Daemon,
+    run: &str,
     words: &[String],
     env: &BTreeMap<OsString, OsString>,
     folder: &Path,
@@ -164,15 +212,10 @@ pub async fn command_passes(
     let Ok(mut child) = spawn(words, env, folder, false) else {
         return false;
     };
-    match tokio::time::timeout(PROBE_LIMIT, child.wait()).await {
-        Ok(status) => status.is_ok_and(|status| status.success()),
-        Err(_) => {
-            if let Some(pid) = child.id() {
-                signal_group(pid, libc::SIGKILL);
-            }
-            false
-        }
-    }
+    let _group = Group::new(daemon, &child, run);
+    tokio::time::timeout(PROBE_LIMIT, child.wait())
+        .await
+        .is_ok_and(|status| status.is_ok_and(|status| status.success()))
 }
 
 /// Whether the address answers a request, whatever its status, within the probe's limit.
