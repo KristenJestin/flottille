@@ -68,10 +68,25 @@ path = "~/Worktrees/<project>"        # with place = "own" only, and then needed
   project's file).
 
 A project's `workspaces_root` takes the same writing as `own`. A file that cannot be followed
-(`workspaces.toml` with a word it does not know) does not hide the projects: the data folder is
-followed, and the window says why. `project add` writes no `workspaces_root`, so a new project
-follows the default of the day.
-At its start the daemon drops from a project's file a `workspaces_root` that is exactly
+(`workspaces.toml` with a word it does not know, or a `path` that would be refused when set, see
+below) does not hide the projects: the data folder is followed, the Settings section shows the
+error, and so do the project's page (on the line of the folder that results) and `project show`.
+
+A folder for workspaces is refused, naming the reason, when it is:
+
+- inside one of the project's repositories (a workspace is a checkout of it); for a default, the
+  project it lands in is named;
+- inside Flottille's configuration folder, or its data folder (but the data folder's own
+  `workspaces/`, the default, is allowed);
+- the home folder itself;
+- a default for every project (`own`) without `<project>`: the projects would share one root.
+
+`..` is folded before the folder is compared; a link is not followed. A default edited by hand is
+judged on its own (`<project>`, Flottille's folders, the home), not against each project's
+repositories: that is checked when it is set from the window.
+
+`project add` writes no `workspaces_root`, so a new project follows the default of the day. At its
+start the daemon drops from a project's file a `workspaces_root` that is exactly
 `$XDG_DATA_HOME/flottille/workspaces/<project>`: older versions of `project add` wrote it, and pinned
 it would hide the default from that project. It resolves the same under the data default, a folder
 of any other name is kept, and the existing workspaces keep their folder from their record.
@@ -82,7 +97,8 @@ changes.
 
 The window sets both: **Settings**, Workspaces tab, "Workspaces folder" (the default for every
 project, `workspaces_folder.set`), and a project's Settings, Setup tab, "Workspaces folder" ("Use
-the default" or a folder of its own), which shows the folder that results. `flottille project show` prints that folder as `workspaces root`.
+the default" or a folder of its own), which shows the folder that results. `flottille project show` prints that folder as
+`workspaces root`.
 `workspaces.toml` is edited through the window or by hand; the command line has no command for it.
 
 ## Detecting repositories
