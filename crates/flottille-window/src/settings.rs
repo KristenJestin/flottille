@@ -24,16 +24,18 @@ use gpui_kit::{
 };
 
 use crate::actions::Command;
+use crate::instructions::InstructionsEditor;
 use crate::providers::{Provider, Providers};
 use crate::rules::RulesEditor;
 use crate::shell::Shell;
 use crate::workspaces_folder::WorkspacesFolder;
 
 /// The sections of the page, in order: each index entry's key and label.
-pub const SECTIONS: [(&str, &str); 6] = [
+pub const SECTIONS: [(&str, &str); 7] = [
     ("judge", "Judge"),
     ("providers", "Providers"),
     ("rules", "Rules"),
+    ("instructions", "Instructions"),
     ("workspaces", "Workspaces"),
     ("appearance", "Appearance"),
     ("developer", "Developer mode"),
@@ -104,6 +106,8 @@ pub struct SettingsPage {
     rules: Entity<RulesEditor>,
     /// The Auto judge's guidance, edited on this page.
     judge_guidance: Entity<RulesEditor>,
+    /// The user's own instructions for every agent, edited on this page.
+    instructions: Entity<InstructionsEditor>,
     /// Where the workspaces of every project go, chosen on this page.
     workspaces: Entity<WorkspacesFolder>,
     /// The judge's picker whose list is open.
@@ -161,11 +165,13 @@ impl SettingsPage {
         shell: WeakEntity<Shell>,
         rules: Entity<RulesEditor>,
         judge_guidance: Entity<RulesEditor>,
+        instructions: Entity<InstructionsEditor>,
         workspaces: Entity<WorkspacesFolder>,
     ) -> Self {
         Self {
             rules,
             judge_guidance,
+            instructions,
             workspaces,
             shell,
             providers: Providers::default(),
@@ -226,6 +232,10 @@ impl SettingsPage {
 
     pub fn judge_guidance(&self) -> &Entity<RulesEditor> {
         &self.judge_guidance
+    }
+
+    pub fn instructions(&self) -> &Entity<InstructionsEditor> {
+        &self.instructions
     }
 
     pub fn workspaces_folder(&self) -> &Entity<WorkspacesFolder> {
@@ -1096,6 +1106,7 @@ impl Render for SettingsPage {
                 ),
             ],
             vec![("rules", self.rules.clone().into_any_element())],
+            vec![("instructions", self.instructions.clone().into_any_element())],
             vec![("workspaces", self.workspaces.clone().into_any_element())],
             vec![("appearance", self.appearance_section(cx).into_any_element())],
             vec![("developer", self.developer_section(cx).into_any_element())],

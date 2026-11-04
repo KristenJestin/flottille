@@ -326,6 +326,12 @@ pub enum Command {
         project: Option<String>,
         text: Option<String>,
     },
+    /// The user's own instructions for every agent (`instructions.show`).
+    InstructionsRead,
+    /// Saves them (`instructions.set`); an empty text removes the file.
+    InstructionsWrite {
+        text: String,
+    },
     /// Where workspaces go: the default for every project, or a project's own
     /// (`workspaces_folder.show`).
     WorkspacesFolderRead {
@@ -710,6 +716,11 @@ pub enum Outcome {
         project: Option<String>,
         written: bool,
         shown: Result<Shown, String>,
+    },
+    /// The user's instructions as the daemon says them, after a read (`written` false) or a save.
+    Instructions {
+        written: bool,
+        shown: Result<crate::instructions::Shown, String>,
     },
     /// Where workspaces go as the daemon says it, after a read (`written` false) or a choice.
     WorkspacesFolder {
@@ -1362,6 +1373,29 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 shown: shown.and_then(|shown| shown).map(|shown| Shown::of(&shown)),
                 written: false,
                 project,
+            }
+        }
+        Command::InstructionsRead => {
+            let shown = ask_alone(connect, "instructions.show", json!({}), bounds.quick);
+            Outcome::Instructions {
+                shown: shown
+                    .and_then(|shown| shown)
+                    .map(|shown| crate::instructions::Shown::of(&shown)),
+                written: false,
+            }
+        }
+        Command::InstructionsWrite { text } => {
+            let shown = ask_alone(
+                connect,
+                "instructions.set",
+                json!({"text": text}),
+                bounds.quick,
+            );
+            Outcome::Instructions {
+                shown: shown
+                    .and_then(|shown| shown)
+                    .map(|shown| crate::instructions::Shown::of(&shown)),
+                written: true,
             }
         }
         Command::WorkspacesFolderRead { project } => {

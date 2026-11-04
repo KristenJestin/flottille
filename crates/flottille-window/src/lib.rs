@@ -10,6 +10,7 @@ pub mod composer;
 pub mod conversation;
 pub mod history;
 pub mod instance;
+pub mod instructions;
 pub mod items;
 pub mod link;
 pub mod mode;

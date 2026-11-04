@@ -27,6 +27,7 @@ use crate::actions::{Actions, Command, Outcome, Pick};
 use crate::add_project::AddProject;
 use crate::composer::{Choice, Composer, PlaceChoice};
 use crate::history::{History, Way};
+use crate::instructions::InstructionsEditor;
 use crate::link::{self, Connect, Seen, Update};
 use crate::model::{BellItem, Forged, News, Place, Preparation, Snapshot};
 use crate::open::Opener;
@@ -225,12 +226,14 @@ impl Shell {
         let sidebar = cx.new(|_| Sidebar::new(this.clone()));
         let rules = cx.new(|_| RulesEditor::new(this.clone(), None));
         let judge_guidance = cx.new(|_| RulesEditor::judge(this.clone()));
+        let instructions = cx.new(|_| InstructionsEditor::new(this.clone()));
         let workspaces = cx.new(|_| WorkspacesFolder::new(this.clone(), None));
         let settings = cx.new(|_| {
             SettingsPage::new(
                 this.clone(),
                 rules.clone(),
                 judge_guidance.clone(),
+                instructions.clone(),
                 workspaces.clone(),
             )
         });
@@ -679,6 +682,7 @@ impl Shell {
                     });
                 }
             }
+            Update::InstructionsChanged => self.actions.send(Command::InstructionsRead),
             Update::AppearanceChanged => self.ask_appearance(None),
             Update::Forged(forged) => self.forged(forged, cx),
             Update::News(news) => self.news(news, cx),
@@ -1066,6 +1070,10 @@ impl Shell {
                 if let Some(editor) = editor {
                     editor.update(cx, |editor, cx| editor.answered(shown, written, window, cx));
                 }
+            }
+            Outcome::Instructions { written, shown } => {
+                let editor = self.settings.read(cx).instructions().clone();
+                editor.update(cx, |editor, cx| editor.answered(shown, written, window, cx));
             }
             Outcome::WorkspacesFolder {
                 project,
@@ -1888,6 +1896,7 @@ impl Shell {
             self.actions.send(Command::JudgeRead);
             self.actions.send(Command::DeveloperRead);
             self.actions.send(Command::ToolResultsRead);
+            self.actions.send(Command::InstructionsRead);
             self.actions
                 .send(Command::WorkspacesFolderRead { project: None });
             self.ask_appearance(None);

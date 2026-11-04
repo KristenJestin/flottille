@@ -48,6 +48,8 @@ pub enum Update {
     AppearanceChanged,
     /// The limit of tool results was chosen, from any client: the settings page reads it again.
     ToolResultsChanged,
+    /// The user's instructions changed, from any client: the settings page reads them again.
+    InstructionsChanged,
     /// Where workspaces go was chosen (a project's own when it names one, the default of every
     /// project when `None`), from any client: the sections read it again.
     WorkspacesFolderChanged { project: Option<String> },
@@ -172,6 +174,9 @@ fn follow(
         }
         if event.name == "appearance.changed" {
             let _ = updates.unbounded_send(Update::AppearanceChanged);
+        }
+        if event.name == "instructions.changed" {
+            let _ = updates.unbounded_send(Update::InstructionsChanged);
         }
         if event.name == "workspaces_folder.changed" {
             let _ = updates.unbounded_send(Update::WorkspacesFolderChanged {
