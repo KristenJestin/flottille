@@ -1749,20 +1749,43 @@ fn jira_items(user: &User) {
 }
 
 /// A write of `tickets` on Jira, held for the user then done once allowed: what it answered, and
-/// the calls of `acli` that started with `verb`.
-fn jira_written(args: Value, verb: &str) -> (String, Vec<String>) {
+/// the calls of `acli` that started with `verb`, as the fake recorded them.
+fn jira_sent(args: Value, verb: &str) -> (String, Vec<Value>) {
     let user = user();
     on_jira(&user);
     jira_items(&user);
     let (_, mcp) = root_in(&user, None);
     let calls = || words(user.acli_received());
     let done = judged_then_done(&user, mcp.call("tickets", args), calls, verb);
-    let asked = calls()
+    let asked = user
+        .acli_received()
         .into_iter()
-        .filter(|c| c.starts_with(verb))
+        .filter(|call| words(vec![(*call).clone()])[0].starts_with(verb))
         .collect();
     // Every write is checked to go to the tracker's site first.
     assert_eq!(calls()[0], "jira auth status");
+    (done, asked)
+}
+
+/// A write of `tickets` on Jira: what it answered, and the calls of `acli` that started with
+/// `verb`, a file's path (which is a temporary one) written `<file>`.
+fn jira_written(args: Value, verb: &str) -> (String, Vec<String>) {
+    let (done, asked) = jira_sent(args, verb);
+    let asked = asked
+        .into_iter()
+        .map(|mut call| {
+            let args = call["args"].as_array_mut().unwrap();
+            for at in 1..args.len() {
+                if args[at - 1]
+                    .as_str()
+                    .is_some_and(|flag| flag.ends_with("-file"))
+                {
+                    args[at] = Value::from("<file>");
+                }
+            }
+            words(vec![call]).remove(0)
+        })
+        .collect();
     (done, asked)
 }
 
@@ -1789,8 +1812,8 @@ fn create_a_jira_work_item_in_a_tracker_s_project() {
     assert_eq!(
         asked,
         [
-            "jira workitem create --project DEF --summary Add a logout --description Users stay \
-             signed in --type Story --label feature,auth --json"
+            "jira workitem create --project DEF --summary Add a logout --description-file <file> \
+             --type Story --label feature,auth --json"
         ]
     );
 }
@@ -2011,7 +2034,7 @@ fn comment_on_a_jira_work_item() {
     assert!(done.contains("The comment was posted on ABC-1."), "{done}");
     assert_eq!(
         asked,
-        ["jira workitem comment create --key ABC-1 --body Fixed on app/login"]
+        ["jira workitem comment create --key ABC-1 --body-file <file>"]
     );
 }
 
@@ -2026,10 +2049,237 @@ fn edit_a_jira_work_item_s_summary_and_description() {
     assert_eq!(
         asked,
         [
-            "jira workitem edit --key ABC-1 --summary The logout fails --description It \
-             hangs --yes"
+            "jira workitem edit --key ABC-1 --summary The logout fails --description-file \
+             <file> --yes"
         ]
     );
+}
+
+/// A Markdown with a heading, marks, a list and a code block: what an agent writes.
+const MARKDOWN: &str = "## Goal\n\nLet users **log in** with `code`.\n\n- a form\n- a session\n\n```rust\nfn main() {}\n```";
+
+/// The types of the blocks of an ADF document.
+fn block_types(adf: &Value) -> Vec<&str> {
+    adf["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["type"].as_str().unwrap())
+        .collect()
+}
+
+/// The one file a call of the fake `acli` was handed: it is private, and gone once the call is
+/// done, the fake having read it (and checked it is valid ADF, ending with 1 if not).
+fn file_sent<'a>(call: &'a Value, flag: &str) -> &'a Value {
+    let args: Vec<&str> = call["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(args.contains(&flag), "{flag} not in {args:?}");
+    assert!(
+        !args
+            .iter()
+            .any(|a| matches!(*a, "--description" | "--body")),
+        "the text must not be on the command line: {args:?}"
+    );
+    let file = &call["files"][0];
+    assert_eq!(file["flag"], flag);
+    assert_eq!(file["mode"], 0o600, "{file}");
+    assert_eq!(file["dir_mode"].as_u64().unwrap() & 0o077, 0, "{file}");
+    assert!(
+        !Path::new(file["path"].as_str().unwrap()).exists(),
+        "{file}"
+    );
+    file
+}
+
+#[test]
+fn a_jira_description_written_in_markdown_is_sent_as_adf() {
+    let (done, asked) = jira_sent(
+        json!({"action": "create", "project": "def", "title": "Add a logout", "body": MARKDOWN}),
+        "jira workitem create",
+    );
+    assert!(
+        done.contains("The ticket DEF-7 was opened in DEF"),
+        "{done}"
+    );
+    let adf = &file_sent(&asked[0], "--description-file")["adf"];
+    assert_eq!(
+        block_types(adf),
+        ["heading", "paragraph", "bulletList", "codeBlock"]
+    );
+    assert_eq!(adf["content"][0]["attrs"]["level"], 2);
+    assert_eq!(
+        adf["content"][1]["content"][1],
+        json!({"type": "text", "text": "log in", "marks": [{"type": "strong"}]})
+    );
+    assert_eq!(adf["content"][3]["attrs"]["language"], "rust");
+}
+
+#[test]
+fn a_jira_edit_and_a_jira_comment_are_sent_as_adf() {
+    let (done, asked) = jira_sent(
+        json!({"action": "edit", "ticket": "ABC-1", "title": "The logout fails", "body": MARKDOWN}),
+        "jira workitem edit",
+    );
+    assert!(done.contains("ABC-1 was changed."), "{done}");
+    let adf = &file_sent(&asked[0], "--description-file")["adf"];
+    assert_eq!(
+        block_types(adf),
+        ["heading", "paragraph", "bulletList", "codeBlock"]
+    );
+
+    let (done, asked) = jira_sent(
+        json!({"action": "comment", "ticket": "ABC-1", "body": MARKDOWN}),
+        "jira workitem comment",
+    );
+    assert!(done.contains("The comment was posted on ABC-1."), "{done}");
+    let adf = &file_sent(&asked[0], "--body-file")["adf"];
+    assert_eq!(
+        block_types(adf),
+        ["heading", "paragraph", "bulletList", "codeBlock"]
+    );
+}
+
+#[test]
+fn plain_text_is_sent_as_one_paragraph_per_block() {
+    let (_, asked) = jira_sent(
+        json!({"action": "comment", "ticket": "ABC-1",
+            "body": "Fixed on app/login\nthen merged\n\nNothing else to do"}),
+        "jira workitem comment",
+    );
+    let adf = &file_sent(&asked[0], "--body-file")["adf"];
+    assert_eq!(
+        adf["content"],
+        json!([
+            {"type": "paragraph", "content": [
+                {"type": "text", "text": "Fixed on app/login"}, {"type": "hardBreak"},
+                {"type": "text", "text": "then merged"}]},
+            {"type": "paragraph", "content": [{"type": "text", "text": "Nothing else to do"}]},
+        ])
+    );
+}
+
+#[test]
+fn what_cannot_be_converted_is_kept_as_text() {
+    let (_, asked) = jira_sent(
+        json!({"action": "comment", "ticket": "ABC-1",
+            "body": "<div class=\"x\">raw</div>\n\nA logo ![logo](https://example.com/l.png) here"}),
+        "jira workitem comment",
+    );
+    let adf = &file_sent(&asked[0], "--body-file")["adf"];
+    assert_eq!(
+        adf["content"],
+        json!([
+            {"type": "paragraph", "content": [{"type": "text", "text": "<div class=\"x\">raw</div>"}]},
+            {"type": "paragraph", "content": [{"type": "text",
+                "text": "A logo ![logo](https://example.com/l.png) here"}]},
+        ])
+    );
+}
+
+/// A Markdown with one of each kind converted.
+const EVERYTHING: &str = "## Plan\n\nDo **this** and *that*, not ~~those~~, see \
+    [docs](https://example.com/a) and `code`.\nA second line.\n\n1. one\n2. two\n   - nested\n\n\
+    > quoted\n\n---\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n```rust\nfn main() {}\n```";
+
+#[test]
+fn a_jira_description_read_back_is_the_markdown_written() {
+    let user = user();
+    on_jira(&user);
+    jira_items(&user);
+    let (_, mcp) = root_in(&user, None);
+    let answer = mcp.call(
+        "tickets",
+        json!({"action": "comment", "ticket": "ABC-1", "body": EVERYTHING}),
+    );
+    judged_then_done(
+        &user,
+        answer,
+        || words(user.acli_received()),
+        "jira workitem comment",
+    );
+
+    let shown = read(
+        &user,
+        mcp.call(
+            "tickets",
+            json!({"action": "show", "ticket": "ABC-1", "detail": "full"}),
+        ),
+    );
+    // `show` indents the lines that follow a comment's first.
+    assert!(
+        shown.replace("\n    ", "\n").contains(EVERYTHING),
+        "{shown}"
+    );
+}
+
+#[test]
+fn a_post_flottille_wrote_on_jira_is_still_recognised() {
+    // The text of a comment that Jira keeps as a tree, with a link, a table and marks, is found
+    // by the record after the round trip, not by the Markdown typed.
+    let user = user();
+    on_jira(&user);
+    jira_items(&user);
+    let (_, mcp) = root_in(&user, None);
+    let answer = mcp.call(
+        "tickets",
+        json!({"action": "comment", "ticket": "ABC-1", "body": EVERYTHING}),
+    );
+    judged_then_done(
+        &user,
+        answer,
+        || words(user.acli_received()),
+        "jira workitem comment",
+    );
+
+    let shown = read(
+        &user,
+        mcp.call(
+            "tickets",
+            json!({"action": "show", "ticket": "ABC-1", "detail": "full"}),
+        ),
+    );
+    assert!(
+        shown.contains("Casey Example (posted by an agent)"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn github_and_bitbucket_writes_are_not_converted() {
+    let body = "## Done\n\n**Rebased** on `main`\n\n- a\n- b";
+    let user = user();
+    on_github(&user);
+    user.gh_script(pulls());
+    let (_, mcp) = root_in(&user, None);
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "comment", "number": 12, "body": body}),
+    );
+    judged_then_done(&user, answer, || words(user.gh_received()), "pr comment");
+    assert!(words(user.gh_received()).contains(&format!(
+        "pr comment 12 -R github.com/acme/app --body {body}"
+    )));
+
+    let user = self::user();
+    on_bitbucket(&user);
+    user.bkt_script(
+        json!({"pulls": {"acme/app": [{"id": 3, "title": "Work", "state": "OPEN",
+        "source": {"branch": {"name": "app/login"}, "repository": {"full_name": "acme/app"}},
+        "destination": {"branch": {"name": "main"}, "repository": {"full_name": "acme/app"}}}]}}),
+    );
+    let (_, mcp) = root_in(&user, None);
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "comment", "number": 3, "body": body}),
+    );
+    judged_then_done(&user, answer, || words(user.bkt_received()), "pr comment");
+    assert!(words(user.bkt_received()).contains(&format!(
+        "pr comment 3 --context cloud --workspace acme --repo app --text {body}"
+    )));
 }
 
 #[test]
@@ -3978,7 +4228,7 @@ fn an_agent_s_comment_is_posted_without_a_marker() {
     );
     assert_eq!(
         asked,
-        ["jira workitem comment create --key ABC-1 --body Fixed on app/login"]
+        ["jira workitem comment create --key ABC-1 --body-file <file>"]
     );
 }
 

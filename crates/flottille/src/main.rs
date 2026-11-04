@@ -1,5 +1,6 @@
 mod acp;
 mod actions;
+mod adf;
 mod agent_command;
 mod agents;
 mod appearance;
