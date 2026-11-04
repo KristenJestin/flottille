@@ -14,6 +14,7 @@ mod codex;
 mod codex_bridge;
 mod command_command;
 mod commands;
+mod config_command;
 mod daemon;
 mod deliveries;
 mod desktop;
@@ -72,6 +73,7 @@ use serde_json::{Value, json};
 use crate::agent_command::AgentAction;
 use crate::client::Client;
 use crate::command_command::CommandAction;
+use crate::config_command::ConfigAction;
 use crate::project_command::ProjectAction;
 use crate::runs_command::RunsAction;
 use crate::skill_command::SkillAction;
@@ -108,6 +110,11 @@ enum Command {
     Skill {
         #[command(subcommand)]
         action: SkillAction,
+    },
+    /// What you keep in Flottille's configuration folder: your instructions for every agent
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
     },
     /// Make, follow and remove the workspaces of a project
     Workspace {
@@ -299,6 +306,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         }
         Command::Project { action } => return project_command::run(&paths, action),
         Command::Skill { action } => return skill_command::run(&paths, action),
+        Command::Config { action } => return config_command::run(&paths, action),
         Command::Workspace { action } => return workspace_command::run(&paths, action),
         Command::Agent { action } => return agent_command::run(&paths, action),
         Command::Named { action } => return command_command::run(&paths, action),

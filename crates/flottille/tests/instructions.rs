@@ -137,3 +137,87 @@ fn an_oversized_instructions_file_is_cut_with_a_note() {
         long
     );
 }
+
+fn json_of(user: &User, args: &[&str]) -> Value {
+    let output = user.run(args);
+    assert!(
+        output.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&output.stdout)))
+}
+
+#[test]
+fn config_instructions_shows_and_sets_the_file() {
+    let user = User::with_fake_agent();
+    let file = user.path("config/flottille/instructions.md");
+
+    // Nothing yet: the file is said, and empty.
+    let shown = json_of(&user, &["config", "instructions", "--json"]);
+    assert_eq!(shown["text"], "");
+    assert_eq!(shown["path"], file.to_str().unwrap());
+    let plain = user.run(&["config", "instructions", "--show"]);
+    assert!(plain.status.success());
+    assert!(String::from_utf8_lossy(&plain.stdout).contains("instructions.md"));
+
+    // --file reads a text and keeps it.
+    let source = user.path("mine.md");
+    std::fs::write(&source, "Commit small.\n").unwrap();
+    let set = json_of(
+        &user,
+        &[
+            "config",
+            "instructions",
+            "--file",
+            source.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert_eq!(set["text"], "Commit small.\n");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "Commit small.\n");
+    assert_eq!(
+        json_of(&user, &["config", "instructions", "--show", "--json"])["text"],
+        "Commit small.\n"
+    );
+
+    // --edit opens the user's editor, without a shell, on a copy; what it leaves is kept.
+    let editor = user.path("editor.sh");
+    std::fs::write(
+        &editor,
+        "#!/bin/sh\nprintf 'Answer briefly.\\n' >> \"$1\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&editor, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let mut edit = user.command(&["config", "instructions", "--edit", "--json"]);
+    edit.env("EDITOR", &editor).env_remove("VISUAL");
+    let output = edit.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "Commit small.\nAnswer briefly.\n"
+    );
+
+    // Refused when too long, the file untouched; a missing file is an error too.
+    let long = user.path("long.md");
+    std::fs::write(&long, "x".repeat(8_001)).unwrap();
+    let refused = user.run(&["config", "instructions", "--file", long.to_str().unwrap()]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("8000"));
+    let absent = user.run(&[
+        "config",
+        "instructions",
+        "--file",
+        "/nonexistent/instructions.md",
+    ]);
+    assert!(!absent.status.success());
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "Commit small.\nAnswer briefly.\n"
+    );
+}
