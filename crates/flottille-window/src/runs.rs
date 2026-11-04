@@ -8,14 +8,15 @@
 //! output is untouched.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use flottille_core::ansi;
 use flottille_ui::color::mix;
-use flottille_ui::motion::MODAL;
+use flottille_ui::motion::{MODAL, PANEL};
 use flottille_ui::{
     AgentState, Button, Icon, Item, Listing, Modal, Palette, Skeleton, StateIcon, Status, Toast,
-    Type, awaiting, hoverable, icon, palette, presence, section_label, space, toast,
+    Type, awaiting, fade, hoverable, icon, palette, presence, section_label, space, tipped, toast,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -51,6 +52,22 @@ impl From<WeakEntity<ProjectTasks>> for Owner {
 }
 
 impl Owner {
+    /// Opens a run's address with the system's default handler.
+    fn open_link(&self, url: &str, cx: &mut App) {
+        match self {
+            Owner::Session(page) => {
+                if let Some(page) = page.upgrade() {
+                    page.read(cx).open_link(url);
+                }
+            }
+            Owner::Project(tasks) => {
+                if let Some(tasks) = tasks.upgrade() {
+                    tasks.read(cx).open_link(url, cx);
+                }
+            }
+        }
+    }
+
     fn open(&self, run: &str, cx: &mut App) {
         match self {
             Owner::Session(page) => page.update(cx, |page, cx| page.open_command(run, cx)).ok(),
@@ -121,6 +138,10 @@ pub struct CommandRow {
     /// A step of a workspace's setup, not a command: the daemon starts it, nobody stops it from
     /// here, and its end is `done` or `failed`.
     pub step: bool,
+    /// `starting`, `ready` or `missed` for a task that says when it is ready; none otherwise.
+    pub ready: Option<String>,
+    /// Where it answers, as its task says.
+    pub url: Option<String>,
 }
 
 /// What the drawer follows: a command, or a step of a workspace's setup.
@@ -165,6 +186,8 @@ impl CommandRow {
                 .filter_map(|line| line.as_str().map(str::to_owned))
                 .collect(),
             step: false,
+            ready: value["ready"].as_str().map(str::to_owned),
+            url: value["url"].as_str().map(str::to_owned),
         }
     }
 
@@ -196,11 +219,25 @@ impl CommandRow {
             last_line: String::new(),
             tail: Vec::new(),
             step: true,
+            ready: None,
+            url: None,
         }
     }
 
     pub fn running(&self) -> bool {
         self.state == "running"
+    }
+
+    /// `starting` or `ready` while it runs, for a task that says when it is ready.
+    pub fn readiness(&self) -> Option<&str> {
+        self.ready
+            .as_deref()
+            .filter(|ready| self.running() && matches!(*ready, "starting" | "ready"))
+    }
+
+    /// Its address while it runs: a server's, which is shown in place of its last line.
+    pub fn address(&self) -> Option<&str> {
+        self.url.as_deref().filter(|_| self.running())
     }
 
     pub fn ending(&self) -> Ending {
@@ -416,6 +453,10 @@ pub fn arrange(rows: &[CommandRow]) -> Arranged<'_> {
 /// Who started a command: the task, then the agent as `names` calls it, or the user. The root
 /// agent is not named: its conversation is the page the rail is on, so the name says nothing.
 fn who(row: &CommandRow, names: &HashMap<String, String>) -> Option<String> {
+    // A server that says when it is ready says that instead of who started it.
+    if let (Some(name), Some(ready)) = (&row.name, row.readiness()) {
+        return Some(format!("task {name} · {ready}"));
+    }
     let agent = match row.agent.as_str() {
         "" => Some("you".to_owned()),
         agent => names
@@ -431,14 +472,28 @@ fn who(row: &CommandRow, names: &HashMap<String, String>) -> Option<String> {
     }
 }
 
-/// A command's mark: a spinner while it runs, else the icon of how it ended, in a 16 px box.
+/// A command's mark: a spinner while it runs, else the icon of how it ended, in a 16 px box. A
+/// server that says when it is ready crossfades from its spinner to a solid dot once it is.
 fn run_mark(
     id: ElementId,
+    dot: ElementId,
     row: &CommandRow,
-    spinner: Option<Entity<StateIcon>>,
+    spinner: Option<AnyElement>,
     p: &Palette,
+    window: &mut Window,
+    cx: &mut App,
 ) -> AnyElement {
     let (mark, color, said) = mark_of(row.ending(), p);
+    if let Some(readiness) = row.readiness() {
+        // Where no spinner turns (the drawer), the running mark stands for it.
+        let spinner = spinner.unwrap_or_else(|| {
+            icon(Icon::Running)
+                .size(px(12.))
+                .text_color(p.run)
+                .into_any_element()
+        });
+        return ready_mark(id, dot, readiness == "ready", Some(spinner), p, window, cx);
+    }
     div()
         .id(id)
         .flex_none()
@@ -454,6 +509,119 @@ fn run_mark(
         })
         .test_support()
         .into_any_element()
+}
+
+/// The mark of a server that says when it is ready: its spinner while it starts, then a solid dot
+/// of the ok colour, the one fading into the other over `PANEL`. Its label says which; the dot is
+/// the element `dot` once it shows.
+pub fn ready_mark(
+    id: ElementId,
+    dot: ElementId,
+    ready: bool,
+    spinner: Option<AnyElement>,
+    p: &Palette,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let t = fade(
+        ElementId::NamedChild(Arc::new(id.clone()), "ready".into()),
+        ready,
+        PANEL,
+        window,
+        cx,
+    );
+    let layer = || {
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+    };
+    div()
+        .id(id)
+        .relative()
+        .flex_none()
+        .w(px(16.))
+        .h(px(18.))
+        .aria_label(if ready { "ready" } else { "starting" })
+        .when(t < 1.0, |d| {
+            d.children(spinner.map(|spinner| layer().opacity(1.0 - t).child(spinner)))
+        })
+        .when(t > 0.0, |d| {
+            d.child(
+                layer().opacity(t).child(
+                    div()
+                        .id(dot)
+                        .size(px(8.))
+                        .rounded_full()
+                        .bg(p.ok)
+                        .test_support(),
+                ),
+            )
+        })
+        .test_support()
+        .into_any_element()
+}
+
+/// An address as a row shows it: its host and path, without its scheme.
+pub fn address_shown(url: &str) -> String {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    rest.trim_end_matches('/').to_owned()
+}
+
+/// A run's address as a link: its host and path in the accent, cut with an ellipsis, a small
+/// external-link icon after it, the whole address in a tooltip. A click opens it with the
+/// system's handler, and only that: the row's own click is not given it. Its ink fades on hover.
+pub fn address_link(
+    id: ElementId,
+    url: &str,
+    size: f32,
+    open: impl Fn(&str, &mut App) + 'static,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let p = palette(cx);
+    let shown = address_shown(url);
+    let url = url.to_owned();
+    // The words are the element `id`, which a test finds; the link around them takes the click.
+    let link = div()
+        .id(ElementId::Name(format!("{id}-click").into()))
+        .flex()
+        .items_center()
+        .gap(space::XS)
+        .min_w_0()
+        .cursor_pointer()
+        .mono(size)
+        .child(
+            div()
+                .id(id.clone())
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .aria_label(SharedString::from(shown.clone()))
+                .child(SharedString::from(shown))
+                .test_support(),
+        )
+        .child(icon(Icon::OpenInEditor).size(px(size - 1.)).flex_none())
+        .on_click({
+            let url = url.clone();
+            move |_, _, cx| {
+                cx.stop_propagation();
+                open(&url, cx);
+            }
+        });
+    let link = hoverable(link, move |d, t| d.text_color(mix(p.acc, p.text, t)));
+    let tipped_frame = div()
+        .id(ElementId::Name(format!("{id}-tip").into()))
+        .flex()
+        .min_w_0()
+        .child(link);
+    tipped(tipped_frame, url, size + 6., window, cx).into_any_element()
 }
 
 /// The rail's Runs section: nothing while the session ran no command.
@@ -557,7 +725,14 @@ impl CommandList {
 
     /// One run: its mark, its line, who started it and how long (or how it ended), the last line
     /// of its output, and Stop while it runs. A click opens its drawer.
-    fn run_row(&self, row: &CommandRow, now: u64, p: Palette) -> AnyElement {
+    fn run_row(
+        &self,
+        row: &CommandRow,
+        now: u64,
+        p: Palette,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
         let ended = !row.running();
         let (_, color, said) = mark_of(row.ending(), &p);
         let run = row.run.clone();
@@ -568,6 +743,22 @@ impl CommandList {
             move |_: &ClickEvent, _: &mut Window, cx: &mut App| page.open(&run, cx)
         };
         let last = ansi::strip(&row.last_line);
+        // The address while it runs; once it ends, the last one is drawn while it folds away.
+        let address = row.address().map(str::to_owned);
+        let link = match &row.url {
+            Some(url) => {
+                let owner = self.page.clone();
+                address_link(
+                    id("link"),
+                    url,
+                    11.,
+                    move |url, cx| owner.open_link(url, cx),
+                    window,
+                    cx,
+                )
+            }
+            None => div().into_any_element(),
+        };
         let who = who(row, &self.names);
         let has_who = who.is_some();
         let time = seconds(row.elapsed_ms(now));
@@ -601,9 +792,15 @@ impl CommandList {
             .on_click(open)
             .child(run_mark(
                 id("mark"),
+                id("dot"),
                 row,
-                self.spinners.get(&row.run).cloned(),
+                self.spinners
+                    .get(&row.run)
+                    .cloned()
+                    .map(IntoElement::into_any_element),
                 &p,
+                window,
+                cx,
             ))
             .child(
                 div()
@@ -662,8 +859,14 @@ impl CommandList {
                                     .test_support(),
                             ),
                     )
-                    // A run that wrote nothing has no line to show, not an empty one.
-                    .when(!last.is_empty(), |d| d.child(line(id("last"), last))),
+                    // A server's address takes the place of its last line, which its output
+                    // still shows; a run that wrote nothing has no line to show, not an empty one.
+                    .child(presence(id("link-presence"), address.is_some(), link))
+                    .child(presence(
+                        id("last-presence"),
+                        address.is_none() && !last.is_empty(),
+                        line(id("last"), last),
+                    )),
             )
             .children(stop)
             .opacity(if ended { 0.75 } else { 1.0 });
@@ -672,7 +875,7 @@ impl CommandList {
 }
 
 impl Render for CommandList {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
         let arranged = arrange(&self.rows);
         let entries: Vec<(String, CommandRow)> = arranged
@@ -700,7 +903,7 @@ impl Render for CommandList {
         let rows: Vec<AnyElement> = listed
             .into_iter()
             .map(|(key, row, placement)| {
-                let content = self.run_row(&row, now, p);
+                let content = self.run_row(&row, now, p, window, cx);
                 Item::new(
                     ElementId::Name(format!("command-item-{key}").into()),
                     placement,
@@ -1274,13 +1477,44 @@ impl Render for CommandPanel {
         let sub = match (&row.name, running) {
             _ if row.step && running => format!("Setup step · running for {time}"),
             _ if row.step => format!("Setup step · {said} after {time}"),
-            (Some(task), true) => format!("Task {task} · running for {time}"),
+            (Some(task), true) => match row.readiness() {
+                Some(ready) => format!("Task {task} · {ready} · {time}"),
+                None => format!("Task {task} · running for {time}"),
+            },
             (None, true) => format!("Running for {time}"),
             (Some(task), false) => format!("Task {task} · {said} after {time}"),
             (None, false) => format!("{} after {time}", capitalized(&said)),
         };
         let page = self.page.clone();
         let owner = self.page.clone();
+        // Built from the address it had, so that it still shows while it folds away.
+        let link = |id: &str, size: f32, window: &mut Window, cx: &mut App| {
+            row.url
+                .as_deref()
+                .map(|url| {
+                    let owner = owner.clone();
+                    address_link(
+                        ElementId::Name(id.to_owned().into()),
+                        url,
+                        size,
+                        move |url, cx| owner.open_link(url, cx),
+                        window,
+                        cx,
+                    )
+                })
+                .unwrap_or_else(|| div().into_any_element())
+        };
+        let linked = row.address().is_some();
+        let drawer_link = presence(
+            "run-drawer-link-presence",
+            linked,
+            link("run-drawer-link", 12., window, cx),
+        );
+        let modal_link = presence(
+            "run-modal-link-presence",
+            linked,
+            link("run-modal-link", 12.5, window, cx),
+        );
         // Stop and Restart, in the drawer's header and in the modal's: a step of a setup is the
         // daemon's, nobody runs it again from here.
         // They wait, faded, while a restart is on its way.
@@ -1328,7 +1562,15 @@ impl Render for CommandPanel {
                 .py(space::MD)
                 .border_b_1()
                 .border_color(p.line)
-                .child(run_mark("run-drawer-mark".into(), &row, None, &p))
+                .child(run_mark(
+                    "run-drawer-mark".into(),
+                    "run-drawer-dot".into(),
+                    &row,
+                    None,
+                    &p,
+                    window,
+                    cx,
+                ))
                 .child(
                     div()
                         .flex_1()
@@ -1355,7 +1597,8 @@ impl Render for CommandPanel {
                                 .aria_label(SharedString::from(sub.clone()))
                                 .child(SharedString::from(sub.clone()))
                                 .test_support(),
-                        ),
+                        )
+                        .child(drawer_link),
                 )
                 .children(restart)
                 .children(stop)
@@ -1500,6 +1743,7 @@ impl Render for CommandPanel {
             let panel = cx.entity().downgrade();
             let mut modal = Modal::new("run-modal", SharedString::from(row.line.clone()))
                 .sentence(sub)
+                .under_title(Some(modal_link))
                 .large()
                 .takes_focus()
                 .open(self.expanded)
@@ -1583,6 +1827,8 @@ mod tests {
             last_line: String::new(),
             tail: Vec::new(),
             step: false,
+            ready: None,
+            url: None,
         }
     }
 

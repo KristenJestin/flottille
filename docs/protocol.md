@@ -754,8 +754,9 @@ matter's or the first line of its text).
 ### The task methods
 
 A project's tasks (`docs/projects.md`, "Tasks"), as its Settings edit them. A task in a result is
-`{"name", "line", "repository", "serve", "check", "read_only", "ask_before_running"}`,
-`repository` `null` for the place's top. Each write is checked as the file is, and written under
+`{"name", "line", "repository", "serve", "check", "read_only", "ask_before_running", "ready",
+"url"}`, `repository` `null` for the place's top, `ready` `null` or `{"line"}`, `{"url"}` or
+`{"command"}`, `url` `null`, an address or `{"command"}` (`docs/projects.md`, "Tasks"). Each write is checked as the file is, and written under
 `[tasks.<name>]` where it stands, what is around it kept, a flag that is off left out.
 `not-found` for a project or a task that does not exist, `refused` for a task the file would
 refuse, `invalid-config` when the project's file cannot be used.
@@ -771,13 +772,15 @@ refuse, `invalid-config` when the project's file cannot be used.
 #### `task.add`
 
 `{"project", "name", "line", "repository"?, "serve"?, "check"?, "read_only"?,
-"ask_before_running"?}`: the task. `refused` when the project has one of that name.
+"ask_before_running"?, "ready"?, "url"?}`: the task. `refused` when the project has one of that
+name.
 
 #### `task.edit`
 
 `{"project", "name", "line"?, "repository"?, "serve"?, "check"?, "read_only"?,
-"ask_before_running"?}`: what is given replaces what the task had (`repository: null` puts it back
-at the top). Answers the task.
+"ask_before_running"?, "ready"?, "url"?}`: what is given replaces what the task had
+(`repository: null` puts it back at the top; `ready` or `url` `null` or `""` removes it). Answers
+the task.
 
 #### `task.remove`
 
@@ -871,7 +874,9 @@ was asked, or the project's default model, `null` for the agent's default; `take
 at the last start of its process; `reopens` whether its agent offered to resume or load a session
 when it last opened one, `false` once Flottille forgot an ended root's session; `images` whether
 it took images in a prompt when it last started, `null` before it did. `active_at` is its last sign of activity, `null` before the
-first. `instructions` are frozen when the agent is created, `tools` are its role's and change with
+first. `exchanged_at` is its last exchange: the later of the last message the user gave it (the
+moment a prompt took it) and the end of its last turn, `null` before either; unlike `active_at`,
+what the agent does during a turn never moves it, which is what a list of sessions sorts by. `instructions` are frozen when the agent is created, `tools` are its role's and change with
 it (`docs/tools.md`, "When the tools change"); `tools_outdated` says whether its running session
 runs an older list than that. `parent` is the agent that
 launched it (`null` for a root), `depth` its depth in the tree, `epoch` the number of its session
@@ -1011,9 +1016,9 @@ does it with `agent_send` (`docs/tools.md`).
 #### `agent.tree`
 
 `{"agent"}`. The whole tree of the agent's root, each agent before its children:
-`{"agents": [{"agent", "doing", "waiting_on", "needs_user", "context", "queued"}]}`. `agent` is the agent in short
+`{"agents": [{"agent", "doing", "waiting_on", "needs_user", "context", "context_tokens", "queued"}]}`. `agent` is the agent in short
 (`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `launched_by`, `depth`, `epoch`, `state`,
-`state_reason`, `created_at`, `active_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
+`state_reason`, `created_at`, `active_at`, `exchanged_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
 took at the last start of its process, else the one asked, `null` for the agent's default before it
 started; `effort`: the same for its effort; `pending`: `{"model", "effort"}` the user changed to and
 the session has not taken yet, `null` when nothing waits; `resumable`: whether `agent.resume` takes it once its last process is gone; `stopping`:
@@ -1025,7 +1030,8 @@ has, which a restart replaces, `docs/tools.md`, "When the tools change"); `doing
 root whose own does, `subscription` for an agent between turns that has an open subscription (`doing` then
 says `waiting for #12: checks`, `#12 of api` when the project has several repositories, `waiting for its wake in 20 min`), else `null`; `needs_user`, for the root, whether a request of its tree or its
 own question waits for the user; `context`, how much of its context the agent used at its last
-report (`agent.usage`), in percent, `null` before one; `queued`, for the root, the messages the
+report (`agent.usage`), in percent, `null` before one and while the window's size is not known;
+`context_tokens`, the tokens its context holds at that report, `null` before one; `queued`, for the root, the messages the
 user wrote to it that wait for it to read them between its turns, the oldest first, each
 `{"delivery", "text", "images", "at"}` (its text masked as it is stored, how many pictures go with
 it, when it was written), empty for a child.
@@ -1090,13 +1096,19 @@ The commands the agents run with `run` (`docs/tools.md`), and the tasks the user
   "signal": null,
   "started_at": 1792843730808,
   "ended_at": null,
+  "ready": "starting",
+  "url": "https://login.app.localhost",
+  "url_error": null,
   "last_line": "listening on :3000"
 }
 ```
 
 `name` is the task it runs, `null` for a line of the agent's. `agent` and `root` are `null` for a
 task the user ran; `project` is always the project's. `state` is `running`,
-`exited`, `stopped` or `interrupted` (`docs/events.md`, "The events of a run"). `last_line` is the
+`exited`, `stopped` or `interrupted` (`docs/events.md`, "The events of a run"). `ready` is
+`null` for a run of a task that says no ready, else `starting`, `ready` or `missed` (it ended before
+it was ready); `url` its address, `url_error` why it has none when its task's line for it failed
+(`docs/projects.md`, "Tasks"). `last_line` is the
 last line of its output with something on it, masked of secrets and as the program wrote it
 (colours included), cut at 300 characters. `tail` is the last 20 lines
 of its output (a list of texts, masked and as written, each cut at 300 characters), which a result

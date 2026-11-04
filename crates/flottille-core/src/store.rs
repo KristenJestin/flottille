@@ -11,7 +11,7 @@ use crate::agent::{Agent, AgentState, Choices, GateMode};
 use crate::approval::{Decision, Delivery, Forward, Judgement, Kind, Request, RequestState};
 use crate::item::{Check, Cursor, Filter, Item, Post};
 use crate::protocol::Event;
-use crate::run::{Run, RunState};
+use crate::run::{Readiness, Run, RunState};
 use crate::subscription::Subscription;
 use crate::workspace::{Action, Failure, Step, StepState, Workspace};
 use crate::{Error, Result};
@@ -567,19 +567,41 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT;
     CREATE INDEX posts_item ON posts (project, source, repository, key);
 ",
+    "
+    -- The last exchange of a session (`docs/protocol.md`, `agent.tree`): the later of the last
+    -- message the user gave the agent and the end of its last turn, which the sidebar sorts by.
+    -- NULL before either.
+    ALTER TABLE agents ADD COLUMN exchanged_at INTEGER;
+    UPDATE agents SET exchanged_at = (
+        SELECT max(at) FROM (
+            SELECT max(sent_at) AS at FROM deliveries
+                WHERE agent = agents.id AND kind = 'user' AND sent_at IS NOT NULL
+            UNION ALL
+            SELECT max(e.at) FROM agent_events a JOIN events e ON e.seq = a.seq
+                WHERE a.agent = agents.id AND e.name = 'agent.turn_ended'
+        )
+    );
+",
+    "
+    -- A task's run says when it is ready and where it answers (`docs/projects.md`, \"Tasks\"):
+    -- `ready` is NULL for a task that does not say, else starting, ready or missed.
+    ALTER TABLE runs ADD COLUMN ready TEXT;
+    ALTER TABLE runs ADD COLUMN url TEXT;
+    ALTER TABLE runs ADD COLUMN url_error TEXT;
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
     identity, held_by, forwards, state, decision, created_at, decided_at, kind, says, judgement, place";
 
 const RUN_COLUMNS: &str = "id, agent, name, line, folder, state, exit_code, signal, started_at, \
-    ended_at, output, dismissed, project";
+    ended_at, output, dismissed, project, ready, url, url_error";
 
 const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, state, state_reason, \
     created_at, updated_at, active_at, ended_at, chosen_model, chosen_effort, chosen_mode, \
     taken_model, taken_effort, taken_mode, native_id, agent_version, instructions, tools, parent, \
     depth, epoch, title, brief, reported_at, quiet_turns, waiting_on_answer, reopens, images, gate_mode, \
-    launched_by, pending_model, pending_effort";
+    launched_by, pending_model, pending_effort, exchanged_at";
 
 const DELIVERY_COLUMNS: &str = "id, agent, kind, body, urgency, state, created_at, sent_at, images";
 
@@ -1005,7 +1027,7 @@ impl Store {
             &format!(
                 "INSERT INTO agents ({AGENT_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, \
                  ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, \
-                 ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36)"
+                 ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37)"
             ),
             params![
                 agent.id,
@@ -1044,6 +1066,7 @@ impl Store {
                 agent.launched_by,
                 agent.pending.model,
                 agent.pending.effort,
+                agent.exchanged_at,
             ],
         )?;
         let event = append_agent_event(&transaction, &agent.id, event.0, event.1)?;
@@ -1307,7 +1330,7 @@ impl Store {
         transaction.execute(
             &format!(
                 "INSERT INTO runs ({RUN_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, \
-                 ?10, ?11, ?12, ?13)"
+                 ?10, ?11, ?12, ?13, ?14, ?15, ?16)"
             ),
             params![
                 run.id,
@@ -1323,6 +1346,9 @@ impl Store {
                 run.output,
                 run.dismissed,
                 run.project,
+                run.ready.map(Readiness::as_str),
+                run.url,
+                run.url_error,
             ],
         )?;
         let event = append_event(&transaction, event.0, event.1)?;
@@ -1343,9 +1369,27 @@ impl Store {
     ) -> Result<Option<Event>> {
         let transaction = self.connection.transaction()?;
         let changed = transaction.execute(
-            "UPDATE runs SET state = ?2, exit_code = ?3, signal = ?4, output = ?5, ended_at = ?6 \
+            "UPDATE runs SET state = ?2, exit_code = ?3, signal = ?4, output = ?5, ended_at = ?6, \
+             ready = CASE ready WHEN 'starting' THEN 'missed' ELSE ready END \
              WHERE id = ?1 AND state = 'running'",
             params![id, state.as_str(), exit_code, signal, output, now_ms()],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let event = append_event(&transaction, event.0, event.1)?;
+        transaction.commit()?;
+        Ok(Some(event))
+    }
+
+    /// Marks a starting run ready, with its event, in one transaction; `None` when it was not
+    /// starting (ready already, ended, or with no ready state).
+    pub fn ready_run(&mut self, id: &str, event: (&str, Value)) -> Result<Option<Event>> {
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE runs SET ready = 'ready' WHERE id = ?1 AND state = 'running' \
+             AND ready = 'starting'",
+            params![id],
         )?;
         if changed == 0 {
             return Ok(None);
@@ -1396,7 +1440,7 @@ impl Store {
     pub fn ended_runs_of(&self, agents: &[String], limit: usize, tail: usize) -> Result<Vec<Run>> {
         let mut statement = self.connection.prepare_cached(&format!(
             "SELECT id, agent, name, line, folder, state, exit_code, signal, started_at, \
-             ended_at, substr(output, -{tail}), dismissed, project FROM runs \
+             ended_at, substr(output, -{tail}), dismissed, project, ready, url, url_error FROM runs \
              WHERE agent = ?1 AND state != 'running' AND dismissed = 0 \
              ORDER BY ended_at DESC, id DESC LIMIT ?2"
         ))?;
@@ -1418,7 +1462,7 @@ impl Store {
     pub fn user_runs_of(&self, project: &str, limit: usize, tail: usize) -> Result<Vec<Run>> {
         let mut statement = self.connection.prepare_cached(&format!(
             "SELECT id, agent, name, line, folder, state, exit_code, signal, started_at, \
-             ended_at, substr(output, -{tail}), dismissed, project FROM runs \
+             ended_at, substr(output, -{tail}), dismissed, project, ready, url, url_error FROM runs \
              WHERE agent IS NULL AND project = ?1 AND (state = 'running' OR (dismissed = 0 \
              AND id IN (SELECT id FROM runs WHERE agent IS NULL AND project = ?1 \
              AND state != 'running' AND dismissed = 0 ORDER BY ended_at DESC, id DESC LIMIT ?2))) \
@@ -1910,6 +1954,12 @@ impl Store {
             )?;
             if changed > 0 {
                 moved.push(id.clone());
+                // The user's message reaches the agent: the session's last exchange.
+                transaction.execute(
+                    "UPDATE agents SET exchanged_at = ?2 WHERE id = ?1 \
+                     AND EXISTS (SELECT 1 FROM deliveries WHERE id = ?3 AND kind = 'user')",
+                    params![agent, now, id],
+                )?;
             }
         }
         let event = if moved.is_empty() {
@@ -2571,6 +2621,12 @@ fn append_agent_event(
         "INSERT INTO agent_events (seq, agent) VALUES (?1, ?2)",
         params![event.seq, agent],
     )?;
+    if name == "agent.turn_ended" {
+        connection.execute(
+            "UPDATE agents SET exchanged_at = ?2 WHERE id = ?1",
+            params![agent, event.at],
+        )?;
+    }
     Ok(event)
 }
 
@@ -2609,6 +2665,11 @@ fn run_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Run>> {
         output: row.get(10)?,
         dismissed: row.get(11)?,
         project: row.get(12)?,
+        ready: row
+            .get::<_, Option<String>>(13)?
+            .and_then(|ready| Readiness::parse(&ready)),
+        url: row.get(14)?,
+        url_error: row.get(15)?,
     }))
 }
 
@@ -2799,6 +2860,7 @@ fn agent_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Agent>> {
             effort: text(35)?,
             mode: None,
         },
+        exchanged_at: row.get(36)?,
     }))
 }
 
@@ -3481,6 +3543,7 @@ mod tests {
             created_at: 1_792_843_730_808,
             updated_at: 1_792_843_730_808,
             active_at: None,
+            exchanged_at: None,
             ended_at: None,
             chosen: Choices {
                 model: Some("haiku".into()),
@@ -3690,6 +3753,56 @@ mod tests {
             .map(|e| e.seq)
             .collect();
         assert_eq!(names, [replayed.seq, live.seq]);
+    }
+
+    #[test]
+    fn the_last_exchange_moves_with_the_user_s_message_and_the_end_of_a_turn_only() {
+        let mut store = Store::open_in_memory().unwrap();
+        let agent = an_agent();
+        store
+            .create_agent(&agent, ("agent.created", json!({})))
+            .unwrap();
+        let exchanged = |store: &Store| store.agent(&agent.id).unwrap().unwrap().exchanged_at;
+        assert_eq!(exchanged(&store), None, "nothing exchanged yet");
+
+        store
+            .append_agent_event(&agent.id, "agent.message", json!({"text": "hi"}), true)
+            .unwrap();
+        store
+            .append_agent_event(&agent.id, "agent.tool_call", json!({}), true)
+            .unwrap();
+        assert_eq!(
+            exchanged(&store),
+            None,
+            "work done during a turn is no exchange"
+        );
+
+        let mut brief = a_delivery("brief-1", "brief");
+        brief.agent = agent.id.clone();
+        store.deliver(&brief).unwrap();
+        store
+            .move_deliveries(
+                &agent.id,
+                &[brief.id.clone()],
+                "queued",
+                "sending",
+                "prompt",
+            )
+            .unwrap();
+        assert_eq!(exchanged(&store), None, "a brief is not the user's message");
+
+        let mut note = a_delivery("user-1", "user");
+        note.agent = agent.id.clone();
+        store.deliver(&note).unwrap();
+        store
+            .move_deliveries(&agent.id, &[note.id.clone()], "queued", "sending", "prompt")
+            .unwrap();
+        let written = exchanged(&store).expect("the user's message is an exchange");
+
+        let ended = store
+            .append_agent_event(&agent.id, "agent.turn_ended", json!({}), false)
+            .unwrap();
+        assert_eq!(exchanged(&store), Some(ended.at.max(written)));
     }
 
     #[test]
@@ -3983,6 +4096,9 @@ mod tests {
             output: String::new(),
             dismissed: false,
             project: project.into(),
+            ready: None,
+            url: None,
+            url_error: None,
         };
         for (id, project, at) in [("r1", "app", 5), ("r2", "app", 6), ("r3", "other", 7)] {
             store
@@ -4749,6 +4865,9 @@ mod tests {
             output: String::new(),
             dismissed: false,
             project: "app".into(),
+            ready: None,
+            url: None,
+            url_error: None,
         };
         store.create_run(&run, ("run.started", json!({}))).unwrap();
         assert_eq!(store.run("r1").unwrap().unwrap(), run);
@@ -4788,6 +4907,69 @@ mod tests {
     }
 
     #[test]
+    fn a_run_keeps_whether_it_is_ready_and_its_address() {
+        let mut store = Store::open_in_memory().unwrap();
+        let run = |id: &str| Run {
+            id: id.into(),
+            agent: None,
+            name: Some("web".into()),
+            line: "npm run dev".into(),
+            folder: "/w".into(),
+            state: RunState::Running,
+            exit_code: None,
+            signal: None,
+            started_at: 5,
+            ended_at: None,
+            output: String::new(),
+            dismissed: false,
+            project: "app".into(),
+            ready: Some(Readiness::Starting),
+            url: Some("https://w.app.localhost".into()),
+            url_error: None,
+        };
+        for id in ["r1", "r2"] {
+            store
+                .create_run(&run(id), ("run.started", json!({})))
+                .unwrap();
+        }
+        assert_eq!(store.run("r1").unwrap().unwrap(), run("r1"));
+
+        let ready = store.ready_run("r1", ("run.ready", json!({}))).unwrap();
+        let again = store.ready_run("r1", ("run.ready", json!({}))).unwrap();
+        let end = |store: &mut Store, id| {
+            store
+                .end_run(
+                    id,
+                    RunState::Exited,
+                    Some(1),
+                    None,
+                    "",
+                    ("run.ended", json!({})),
+                )
+                .unwrap()
+        };
+        end(&mut store, "r1");
+        end(&mut store, "r2");
+
+        assert!(ready.is_some() && again.is_none());
+        let r1 = store.run("r1").unwrap().unwrap();
+        assert_eq!(r1.ready, Some(Readiness::Ready), "ready stays once ended");
+        assert_eq!(r1.url.as_deref(), Some("https://w.app.localhost"));
+        let r2 = store.run("r2").unwrap().unwrap();
+        assert_eq!(
+            r2.ready,
+            Some(Readiness::Missed),
+            "it ended before it was ready"
+        );
+        assert!(
+            store
+                .ready_run("r2", ("run.ready", json!({})))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn a_run_that_ended_is_dismissed_once_and_a_running_one_is_not() {
         let mut store = Store::open_in_memory().unwrap();
         store
@@ -4809,6 +4991,9 @@ mod tests {
                 output: String::new(),
                 dismissed: false,
                 project: "app".into(),
+                ready: None,
+                url: None,
+                url_error: None,
             };
             store.create_run(&run, ("run.started", json!({}))).unwrap();
         }
@@ -4867,6 +5052,9 @@ mod tests {
                 output: (*output).into(),
                 dismissed: false,
                 project: "app".into(),
+                ready: None,
+                url: None,
+                url_error: None,
             };
             store.create_run(&run, ("run.started", json!({}))).unwrap();
         }

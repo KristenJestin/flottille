@@ -380,6 +380,14 @@ The agent's plan (`entries`), its context use (`used` and `size` in tokens, `cos
 (`mode`), its options (`options`, as ACP gives them: the agent's own announcement; a change of
 model or effort the user asked is `agent.options_taken`). Each with `agent` and `replay`.
 
+`agent.usage` comes during a turn, after an answer of the agent and at most once a second, and at
+its end. Its `used` is always a number; `size` is `null` while no one knows the context window yet
+(Claude Code gives it with the end of a turn only: before the session's first `result` the update
+carries `used` alone; the bridge's `usage_update` says a `size` of 0, which the event turns into `null`). The daemon fills in the last `size` the agent reported when its process
+says none, so a process started again after a release keeps the window, as long as the model is
+the same: `agent.usage` carries the `model` the agent's process runs, and a window reported for
+another model is not carried over.
+
 #### `agent.provider_wait`, `agent.provider_limit`, `agent.provider_error`
 
 The provider makes the agent wait, refuses it for a limit, or fails its turn for another reason
@@ -687,6 +695,18 @@ its id.
 | `name` | The task, `null` for a line of the agent's. |
 | `line` | The line run, masked of secrets like a call's arguments. |
 | `folder` | Where it runs. |
+| `ready` | `starting` for a task that says when it is ready, else `null`. |
+| `url`, `url_error` | Its address, or why it has none (`docs/projects.md`, "Tasks"). |
+
+#### `run.ready`
+
+A run of a task that says when it is ready is: its probe passed. Once per run, never after it
+ended.
+
+| Field | |
+|---|---|
+| `agent`, `run` | |
+| `url` | Its address, `null` without one. |
 
 #### `run.ended`
 

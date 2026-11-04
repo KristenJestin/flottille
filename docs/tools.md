@@ -293,9 +293,9 @@ own while the judge thought), it is refused (`refused: X: the path changed since
 
 | Tool | Arguments | |
 |---|---|---|
-| `tasks` | `action list \| show \| add \| edit \| remove`, `name?`, `line?`, `repository?`, `serve?`, `check?`, `read_only?`, `ask_before_running?` | The project's tasks (`docs/projects.md`, "Tasks"). `list` gives one line each: `name: line`, and where it runs, whether it keeps running, is a check, changes nothing, is judged each time it runs; `show` gives one. Every agent reads them; a root writes them ("The project"): `add` takes `name` and `line` and the flags, `edit` changes what it is given (`repository: null` puts the task back at the place's top), `remove` removes it, refused while a setup step runs it. A child's write is refused, pointing it to `ask_parent`. |
-| `run` | `task` or `line` (exactly one), `repository?`, `timeout? 1..600`, `why?` | Runs a task (`refused: the project has no task X: list them with tasks {"action": "list"}`) or one line, in the repository's folder (the task's, or the one named) or the place's top. Its description holds a call of each form: `{"task": "test"}`, `{"line": "cargo test -p core", "repository": "api", "timeout": 120}`. |
-| `run_status` | `run`, `action? output \| stop`, `tail? 1..1000`, `start?` | `action output` (the default): the run's state and lines of its output, the last `tail` (40 by default), or `tail` lines from line `start`. `run` may also be the id of a cut result ("Long results"), read by lines with `start`, never stopped. `action stop`: stops the run and everything in its process group, `SIGTERM`, then `SIGKILL` 5 s later, and answers once it ended; `tail` and `start` are refused with it. |
+| `tasks` | `action list \| show \| add \| edit \| remove`, `name?`, `line?`, `repository?`, `serve?`, `check?`, `read_only?`, `ask_before_running?`, `ready?`, `url?` | The project's tasks (`docs/projects.md`, "Tasks"). `list` gives one line each: `name: line`, and where it runs, whether it keeps running, is a check, changes nothing, is judged each time it runs, when it is ready and where it answers; `show` gives one. `ready` is `{"line"}`, `{"url"}` or `{"command"}`, `url` an address or `{"command"}`, `null` removing either; a `command` line is judged as a run of it, as the task's own line is. Every agent reads them; a root writes them ("The project"): `add` takes `name` and `line` and the flags, `edit` changes what it is given (`repository: null` puts the task back at the place's top), `remove` removes it, refused while a setup step runs it. A child's write is refused, pointing it to `ask_parent`. |
+| `run` | `task` or `line` (exactly one), `repository?`, `timeout? 1..600`, `notify? "ready"`, `why?` | Runs a task (`refused: the project has no task X: list them with tasks {"action": "list"}`) or one line, in the repository's folder (the task's, or the one named) or the place's top. Its description holds a call of each form: `{"task": "test"}`, `{"task": "dev", "notify": "ready"}`, `{"line": "cargo test -p core", "repository": "api", "timeout": 120}`. With `notify: "ready"`, for a task that says when it is ready, the agent is told when it is (below); on a task that does not, or a line, it is refused with a sentence. |
+| `run_status` | `run`, `action? output \| stop \| notify`, `when? "ready"`, `tail? 1..1000`, `start?` | `action output` (the default): the run's state and lines of its output, the last `tail` (40 by default), or `tail` lines from line `start`. `run` may also be the id of a cut result ("Long results"), read by lines with `start`, never stopped. `action stop`: stops the run and everything in its process group, `SIGTERM`, then `SIGKILL` 5 s later, and answers once it ended; `tail` and `start` are refused with it. `action notify` with `when: "ready"`: the agent is told when a run already started is ready, as `notify` on `run` does; refused for a run of a task that says no ready. |
 
 Until #131 these were `commands_list`, `commands_run` (its `command` now `task`) and
 `commands_status`. For one release a call under an old name is the new tool's (`commands_list`
@@ -321,6 +321,14 @@ pending requests.
   how to read the lines before or after (`run_status {"run", "start"}`), then the lines. A
   line longer than 2,000 characters shows as several; the lines shown are cut to stay under the
   limit.
+- **Ready and where it answers**: a run of a task that says when it is ready (`docs/projects.md`,
+  "Tasks") says, in `run`'s answer and in `run_status`, `it is starting, not ready yet` (with the
+  call that has the agent told, rather than reading it again and again), `it is ready at <url>`,
+  or `it ended before it was ready`, and its address (`address: <url>`, or `no address: <why>`).
+  With `notify`, a `command-ready` delivery, urgent, says `run <id>: <name> is ready at <url>`
+  once it is; a run that ends before is told by its `command-ended` delivery, which then says
+  `It ended before it was ready.`, never by a second one. The end of a run is told as before,
+  without asking.
 - **Only the agent that started a run** reads or stops it: `refused: X is not a run this agent
   started`.
 - **The output kept** is its last 64 KiB (cut back from a line's start once it passes 80 KiB),
@@ -599,23 +607,36 @@ reasons.
   `--remove-assignee`), `close` (`reason` is `completed` or `not planned`, `--reason`; left out,
   GitHub's own default), `reopen`, and a `status` below. On Jira, once `acli` is checked to be signed in to the
   tracker's site (as for a read), `acli jira workitem create --project <P> --summary <title>
-  [--description <body>] [--type <type>] [--label a,b] --json` in `project {project?, type?}`,
+  [--description <body>] [--assignee <who>] [--type <type>] [--label a,b] --json` in `project
+  {project?, type?}`,
   one of the tracker's projects (it may be left out when the tracker has one), the type the
   project's default when none is given; `acli jira workitem comment create --key <K> --body
-  <body>`; `acli jira workitem edit --key <K> [--summary] [--description] --yes`; and `close`,
+  <body>`; `acli jira workitem edit --key <K> [--summary] [--description] [--assignee <who> |
+  --remove-assignee] --yes`; and `close`,
   `reopen` and `status` as `acli jira workitem transition --key <K> --status <name> --yes`: one
   status is attempted, which Jira's transitions accept or refuse, and the work item's status is
   read back to say what happened; a `reopen` of a work item that is not closed says it is already
   open and writes nothing ([`tickets.md`](tickets.md), "Jira's writes"). A ticket or a project the
   tracker does not take,
   a `status` with no name, a `reason` that is neither value, and, for an argument of another action
-  (`reason` is for close, `remove_labels`, `assignees` and `remove_assignees` for edit) or of the
-  other tracker (on Jira, a label, an assignee or a reason), is refused before anything is asked. A
+  (`reason` is for close, `remove_labels`, `assignees` and `remove_assignees` for edit, `assignee`
+  for create and edit) or of the other tracker (on Jira, a label on edit, `assignees` or a reason;
+  on GitHub, `assignee`: GitHub's is `assignees`), is refused before anything is asked. A
   `title` on `comment`, `close`, `reopen` or `status` is refused before anything is asked
   (`refused: tickets comment takes no title: title is for edit and create`). The request shows
   the title and the body whole, and a long one or one holding a secret is refused or base, as
   for the forge's writes ("The forge"). Locks, a project or a tracker kept read only, are
   planned as their own feature.
+- **`types {project?}`**: the work item types of a Jira project (`acli jira project view --key
+  <P> --json`, its `issueTypes`), kept five minutes; `project` is left out when the tracker has
+  one. On GitHub it answers that issues have no type. A Jira `create` that `acli` refuses for its
+  `type` answers with the project's types, nothing written, so that a type is never guessed
+  twice ([`tickets.md`](tickets.md), "Types and assignment").
+- **`assignee` on Jira**: `create` and `edit` take `"@me"` (the user `acli` is signed in as,
+  which `acli` resolves itself), an email or an account id, as `acli` takes them; `edit` with
+  `assignee: null` removes it. Nothing is assigned unless the agent asks (a tracker may assign a
+  new work item by default). On GitHub, `assignees` (edit), `"@me"` accepted. The request names
+  the assignee (`Its assignee: @me`, `It removes the assignee`).
 - **`status` on GitHub**: sets the Status of the issue on the GitHub Projects (v2) board it is on,
   like Todo, In Progress or Done. The option is found by its name, in any case, among those of the
   board's Status field. The daemon reads the issue's boards (`gh issue view <n> -R … --json
@@ -645,7 +666,7 @@ child none of them (it does its brief). Families with an `action`, as `agent_sta
 | `skills {action: list \| show \| add \| edit \| remove, name?, description?, path?, text?}` | The project's skills (`docs/skills.md`). `add` takes `name`, `description` and one of `path` (a file or a folder of the project folder) and `text` (a text Flottille keeps); `edit` changes what it is given; `remove` removes it, and its text. As `flottille skill` does. |
 | `commands {action: list \| show \| add \| edit \| remove, name?, description?, instructions?, template?}` | The project's commands (`docs/commands.md`). `add` takes `name`, `description` and `instructions`, or a `template` (`open-prs`, `merge-stack`, `close`) added as it is; `edit` changes what it is given. A command is sent to a child by writing `/name` in `agent_send`'s message. A command imported from a `.claude` folder points at a file: `show` names it and gives its text as it is now, and an edit of its instructions is refused (the file's to edit). |
 | `setup {action: list \| add \| edit \| remove \| move, number?, to?, step?}` | The project's setup (`docs/projects.md`, "The setup"), its steps numbered from 1 in order. `add {step, number?}` adds one, the last when `number` is left out; `edit {number, step}` replaces one; `remove {number}`; `move {number, to}`. A `step` is whole, as the file has it: one of `copy` (globs), `link`, `root_entries`, `run` (a line) and `task`, with `repository` or `for_each_repository`, and `time_limit` (seconds) with `run` or `task`; it is checked as the file is. The workspaces made after play it; one already made keeps its own. |
-| `project {action: settings \| set_settings \| rules \| set_rules, …}` | `settings` reads each repository's forge (and what its remote proposes) and the tracker (`docs/projects.md`). `set_settings {repositories?: [{path, forge?, base?, depends_on?}], tracker?}` declares a repository's forge, its base branches (in order of preference) and the repositories it depends on, or the tracker (`null` removes a forge or the tracker, `[]` no dependency; what is left out is kept, a tracker and a repository's forge too), checked by the code of `project.set_settings` itself, as the window's: a forge its remote does not lead to, a base branch missing on the remote, a dependency on itself or a cycle are refused with their reason, nothing saved. The gate judges it as every settings change but the tracker's, which is base; the check runs when the call is done, so a call held for the user may be refused after the approval. `rules` reads the rules the project's agents get from now on and where they come from (the project's own, the user's for all projects, or Flottille's default, `docs/projects.md`, "Rules"); `set_rules {text}` replaces the project's own rules by `text` (8,000 characters at most), for the agents created after: the one that asked keeps what it started with. |
+| `project {action: settings \| set_settings \| rules \| set_rules, …}` | `settings` reads each repository's forge (and what its remote proposes) and the tracker (`docs/projects.md`). `set_settings {repositories?: [{path, forge?, base?, depends_on?}], tracker?}` declares a repository's forge, its base branches (in order of preference) and the repositories it depends on, or the tracker (`null` removes a forge or the tracker, `[]` no dependency; what is left out is kept, a tracker and a repository's forge too), checked by the code of `project.set_settings` itself, as the window's: a forge its remote does not lead to, a base branch missing on the remote, a dependency on itself or a cycle are refused with their reason, nothing saved. The gate judges it as every settings change but the tracker's, which is base; the check runs when the call is done, so a call held for the user may be refused after the approval. `rules` reads the rules the project's agents get from now on and where they come from (the global rules, the user's else Flottille's default, then the project's own; or the project's alone when it says `rules_alone`, `docs/projects.md`, "Rules"), and says when the project's text repeats the global one; `set_rules {text?, rules_alone?}` replaces the project's own rules by `text` (8,000 characters at most) and sets whether it uses only them (`rules_alone`), one of the two at least, what is left out being kept, for the agents created after: the one that asked keeps what it started with. |
 
 The file is written where it stands, its comments kept.
 

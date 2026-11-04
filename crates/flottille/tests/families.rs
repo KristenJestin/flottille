@@ -1743,6 +1743,8 @@ fn jira_items(user: &User) {
         "search": [todo, progress, done],
         "transitions": {"ABC-1": ["In Progress", "Done"], "ABC-3": ["To Do"]},
         "created": "DEF-7",
+        "types": {"ABC": ["Task", "Bug", "Story", {"name": "Sub-task", "subtask": true}],
+            "DEF": ["Task", "Story", "Epic"]},
     }));
 }
 
@@ -1791,6 +1793,213 @@ fn create_a_jira_work_item_in_a_tracker_s_project() {
              signed in --type Story --label feature,auth --json"
         ]
     );
+}
+
+/// The calls of `acli` that read a project's types.
+fn project_views(user: &User) -> Vec<String> {
+    words(user.acli_received())
+        .into_iter()
+        .filter(|call| call.starts_with("jira project view"))
+        .collect()
+}
+
+#[test]
+fn types_lists_a_jira_project_s_work_item_types() {
+    let user = user();
+    on_jira(&user);
+    jira_items(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    let first = read(
+        &user,
+        mcp.call("tickets", json!({"action": "types", "project": "abc"})),
+    );
+    let again = read(
+        &user,
+        mcp.call("tickets", json!({"action": "types", "project": "ABC"})),
+    );
+
+    assert!(
+        first.contains("The work item types of ABC on example.atlassian.net are Task, Bug, Story and Sub-task (a sub-task)"),
+        "{first}"
+    );
+    assert_eq!(again, first);
+    // Cached for a few minutes: the second answer asked Jira nothing.
+    assert_eq!(project_views(&user), ["jira project view --key ABC --json"]);
+    // The tracker has two projects: which one is not guessed.
+    let unsaid = mcp.call("tickets", json!({"action": "types"}));
+    assert!(unsaid.error, "{}", unsaid.text);
+    assert!(
+        unsaid
+            .text
+            .contains("need project, one of the tracker's: ABC, DEF"),
+        "{}",
+        unsaid.text
+    );
+    assert_eq!(project_views(&user).len(), 1);
+}
+
+#[test]
+fn types_on_github_says_issues_have_no_type_and_asks_nothing() {
+    let user = user();
+    on_github(&user);
+    many_issues(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    let said = read(&user, mcp.call("tickets", json!({"action": "types"})));
+
+    assert!(said.contains("GitHub issues have no type"), "{said}");
+    assert!(user.gh_received().is_empty(), "{:?}", user.gh_received());
+}
+
+#[test]
+fn a_create_refused_for_its_type_answers_with_the_types() {
+    let user = user();
+    on_jira(&user);
+    jira_items(&user);
+
+    let (answer, calls) = jira_asked(
+        &user,
+        json!({"action": "create", "project": "ABC", "title": "Add a logout", "type": "Tâche"}),
+    );
+
+    assert!(
+        answer.contains(
+            "\"Tâche\" is not a work item type of ABC: its types are Task, Bug, Story and Sub-task"
+        ),
+        "{answer}"
+    );
+    assert!(answer.contains("nothing was written"), "{answer}");
+    // One attempt, then one read of the types: no other type was tried.
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.starts_with("jira workitem create"))
+            .count(),
+        1
+    );
+    assert_eq!(calls.last().unwrap(), "jira project view --key ABC --json");
+}
+
+#[test]
+fn create_assigns_a_jira_work_item_to_the_user() {
+    let (done, asked) = jira_written(
+        json!({"action": "create", "project": "def", "title": "Add a logout", "type": "Story",
+            "assignee": "@me"}),
+        "jira workitem create",
+    );
+    assert!(
+        done.contains("The ticket DEF-7 was opened in DEF"),
+        "{done}"
+    );
+    assert_eq!(
+        asked,
+        [
+            "jira workitem create --project DEF --summary Add a logout --assignee @me --type Story \
+          --json"
+        ]
+    );
+    // Nobody is assigned unless the agent asks.
+    let (_, unasked) = jira_written(
+        json!({"action": "create", "project": "def", "title": "Add a logout"}),
+        "jira workitem create",
+    );
+    assert!(!unasked[0].contains("--assignee"), "{unasked:?}");
+}
+
+#[test]
+fn edit_assigns_and_unassigns_on_jira() {
+    let (done, asked) = jira_written(
+        json!({"action": "edit", "ticket": "ABC-1", "assignee": "ana@example.org"}),
+        "jira workitem edit",
+    );
+    assert!(done.contains("ABC-1 was changed."), "{done}");
+    assert_eq!(
+        asked,
+        ["jira workitem edit --key ABC-1 --assignee ana@example.org --yes"]
+    );
+    let (done, asked) = jira_written(
+        json!({"action": "edit", "ticket": "ABC-1", "assignee": null}),
+        "jira workitem edit",
+    );
+    assert!(done.contains("ABC-1 was changed."), "{done}");
+    assert_eq!(
+        asked,
+        ["jira workitem edit --key ABC-1 --remove-assignee --yes"]
+    );
+}
+
+#[test]
+fn github_accepts_at_me_as_an_assignee() {
+    let (done, asked) = ticket_written(
+        json!({"action": "edit", "ticket": "#2", "assignees": ["@me"]}),
+        "issue edit",
+    );
+    assert!(done.contains("#2 of acme/app was changed."), "{done}");
+    assert_eq!(
+        asked,
+        ["issue edit 2 -R github.com/acme/app --add-assignee @me"]
+    );
+}
+
+#[test]
+fn the_card_of_a_ticket_write_says_the_assignee() {
+    let user = user();
+    on_jira(&user);
+    jira_items(&user);
+    let (_, mcp) = root_in(&user, None);
+    let says = |args: Value| {
+        held(&mcp.call("tickets", args));
+        let requests = user.call("approval.list", json!({})).unwrap()["requests"].clone();
+        requests.as_array().unwrap().last().unwrap()["says"].clone()
+    };
+
+    let assigned = says(json!({"action": "edit", "ticket": "ABC-1", "assignee": "@me"}));
+    let removed = says(json!({"action": "edit", "ticket": "ABC-1", "assignee": null}));
+
+    assert!(
+        assigned.to_string().contains("Its assignee: @me"),
+        "{assigned}"
+    );
+    assert!(
+        removed.to_string().contains("It removes the assignee"),
+        "{removed}"
+    );
+}
+
+#[test]
+fn an_assignee_where_the_tracker_or_the_action_takes_none_is_refused_before_anything_is_asked() {
+    let jira = user();
+    on_jira(&jira);
+    jira_items(&jira);
+    let (_, mcp) = root_in(&jira, None);
+    let github = user();
+    on_github(&github);
+    many_issues(&github);
+    let (_, on_github) = root_in(&github, None);
+
+    for (mcp, args, refusal) in [
+        (
+            &mcp,
+            json!({"action": "close", "ticket": "ABC-1", "assignee": "@me"}),
+            "refused: tickets close takes no assignee: assignee is for create and edit",
+        ),
+        (
+            &on_github,
+            json!({"action": "edit", "ticket": "#1", "assignee": "ana"}),
+            "refused: tickets edit on GitHub takes assignees, a list of logins, not assignee",
+        ),
+    ] {
+        let refused = mcp.call("tickets", args.clone());
+        assert!(refused.error, "{args}: {}", refused.text);
+        assert!(
+            refused.text.starts_with(refusal),
+            "{args}: {}",
+            refused.text
+        );
+    }
+    assert!(no_request(&jira) && no_request(&github));
+    assert!(jira.acli_received().is_empty() && github.gh_received().is_empty());
 }
 
 #[test]
@@ -2359,7 +2568,7 @@ fn a_write_to_a_key_of_a_project_outside_the_tracker_is_refused() {
         ),
         (
             json!({"action": "create", "title": "x"}),
-            "refused: tickets create on Jira needs project, one of the tracker's: ABC, DEF",
+            "refused: tickets create and types on Jira need project, one of the tracker's: ABC, DEF",
         ),
     ] {
         let refused = mcp.call("tickets", args.clone());

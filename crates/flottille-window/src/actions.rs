@@ -326,6 +326,11 @@ pub enum Command {
         project: Option<String>,
         text: Option<String>,
     },
+    /// Makes a project's agents get its rules alone, or the global ones too (`rules.set`).
+    RulesAlone {
+        project: String,
+        alone: bool,
+    },
     /// Where workspaces go: the default for every project, or a project's own
     /// (`workspaces_folder.show`).
     WorkspacesFolderRead {
@@ -713,6 +718,12 @@ pub enum Outcome {
     Rules {
         project: Option<String>,
         written: bool,
+        shown: Result<Shown, String>,
+    },
+    /// A project's switch to its own rules alone, or back: the rules as the daemon says them.
+    /// What is typed in the editor stays, and is not saved.
+    RulesSwitched {
+        project: String,
         shown: Result<Shown, String>,
     },
     /// Where workspaces go as the daemon says it, after a read (`written` false) or a choice.
@@ -1431,6 +1442,18 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             Outcome::Rules {
                 shown: shown.and_then(|shown| shown).map(|shown| Shown::of(&shown)),
                 written: true,
+                project,
+            }
+        }
+        Command::RulesAlone { project, alone } => {
+            let shown = ask_alone(
+                connect,
+                "rules.set",
+                json!({"project": project, "alone": alone}),
+                bounds.quick,
+            );
+            Outcome::RulesSwitched {
+                shown: shown.and_then(|shown| shown).map(|shown| Shown::of(&shown)),
                 project,
             }
         }

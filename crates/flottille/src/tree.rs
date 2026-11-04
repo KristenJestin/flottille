@@ -669,16 +669,22 @@ pub fn line(daemon: &Daemon, agent: &Agent) -> String {
     parts.join("; ")
 }
 
-/// How much of its context the agent used at its last report, in percent; `None` before one.
+/// How much of its context the agent used at its last report, in percent; `None` before one,
+/// and while the window's size is not known.
 pub fn context_used(daemon: &Daemon, agent: &Agent) -> Option<u64> {
+    let (used, size) = context_tokens(daemon, agent)?;
+    let size = size.filter(|s| *s > 0)?;
+    Some(used * 100 / size)
+}
+
+/// The tokens the agent's context holds at its last report, and the window's size when known.
+pub fn context_tokens(daemon: &Daemon, agent: &Agent) -> Option<(u64, Option<u64>)> {
     let usage = daemon
         .read(|store| store.last_agent_events(&agent.id, "agent.usage", 1))
         .ok()?
         .into_iter()
         .next()?;
-    let used = usage.data["used"].as_u64()?;
-    let size = usage.data["size"].as_u64().filter(|s| *s > 0)?;
-    Some(used * 100 / size)
+    Some((usage.data["used"].as_u64()?, usage.data["size"].as_u64()))
 }
 
 /// What the agent does now, in a few words.
@@ -1573,6 +1579,7 @@ pub fn summary(daemon: &Daemon, agent: &Agent) -> Value {
         "state_reason": agent.state_reason,
         "created_at": agent.created_at,
         "active_at": agent.active_at,
+        "exchanged_at": agent.exchanged_at,
         "ended_at": agent.ended_at,
         "waiting_on_answer": agent.waiting_on_answer,
         "gate_mode": crate::judge::mode(daemon, &agent.id),
@@ -1713,6 +1720,7 @@ pub fn tree(daemon: &Daemon, agent: &Agent) -> Result<Vec<Value>, Failure> {
             "waiting_on": waiting_on,
             "needs_user": needs_user,
             "context": context_used(daemon, &agent),
+            "context_tokens": context_tokens(daemon, &agent).map(|(used, _)| used),
             "queued": queued,
         }));
         let children = daemon.read(|store| store.children(&agent.id))?;

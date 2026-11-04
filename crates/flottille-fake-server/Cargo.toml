@@ -1,0 +1,10 @@
+[package]
+name = "flottille-fake-server"
+description = "A development server that does nothing, for the tests of Flottille's ready tasks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]

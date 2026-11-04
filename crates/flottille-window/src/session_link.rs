@@ -56,6 +56,8 @@ pub struct TreeAgent {
     pub gate_mode: Option<String>,
     /// How much of its context it used at its last report, in percent.
     pub context: Option<u64>,
+    /// The tokens its context holds at that report: known before the window's size is.
+    pub context_tokens: Option<u64>,
     /// What the user wrote to it while it worked, not sent to it yet, the oldest first.
     pub queued: Vec<Queued>,
     /// Its running session runs an older list of tools than its role has: a restart gives the
@@ -113,6 +115,7 @@ impl TreeAgent {
             images: agent["images"].as_bool(),
             gate_mode: text(&agent["gate_mode"]),
             context: entry["context"].as_u64(),
+            context_tokens: entry["context_tokens"].as_u64(),
             queued: entry["queued"]
                 .as_array()
                 .into_iter()

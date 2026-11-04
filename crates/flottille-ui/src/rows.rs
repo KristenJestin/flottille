@@ -49,9 +49,14 @@ pub struct TreeRow {
     selected: bool,
     trailing: Option<AnyElement>,
     actions: Option<(AnyElement, bool)>,
+    /// A faint line under the title: the row is two lines high.
+    second: Option<AnyElement>,
     on_click: Option<OnClick>,
     on_toggle: Option<OnClick>,
 }
+
+/// The height of a tree row that holds a second line.
+pub const TWO_LINES: f32 = 40.;
 
 /// The element id of a project row's chevron, which folds and unfolds the level below.
 pub fn toggle_id(row: impl Into<ElementId>) -> ElementId {
@@ -69,9 +74,17 @@ impl TreeRow {
             selected: false,
             trailing: None,
             actions: None,
+            second: None,
             on_click: None,
             on_toggle: None,
         }
+    }
+
+    /// A faint line under the title (the place a session works in): the row takes two lines, and
+    /// its trailing mark and actions stay on the title's.
+    pub fn second(mut self, element: impl IntoElement) -> Self {
+        self.second = Some(element.into_any_element());
+        self
     }
 
     /// Whether the level below is open; a project row turns its chevron with it.
@@ -141,7 +154,11 @@ impl RenderOnce for TreeRow {
             .flex()
             .items_center()
             .gap(px(if project { 8. } else { 7. }))
-            .h(px(if project { 32. } else { 28. }))
+            .h(px(match (project, self.second.is_some()) {
+                (true, _) => 32.,
+                (false, false) => 28.,
+                (false, true) => TWO_LINES,
+            }))
             .px(px(8.))
             .rounded(radius::ROW)
             .bg(background)
@@ -185,39 +202,55 @@ impl RenderOnce for TreeRow {
             TreeLevel::Workspace => row = row.child(icon(Icon::Branch).text_color(p.faint)),
             TreeLevel::Project | TreeLevel::Session => {}
         }
-        row = row
-            .child(
+        let title = div()
+            .flex_1()
+            .min_w_0()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .child(self.title.clone());
+        let trailing = self
+            .trailing
+            .map(|trailing| div().flex_none().flex().items_center().child(trailing));
+        let actions = self.actions.and_then(|(actions, keep)| {
+            let t = if keep { 1.0 } else { now.hover };
+            (t > 0.0).then(|| {
+                div()
+                    .id(ElementId::NamedChild(
+                        std::sync::Arc::new(self.id.clone()),
+                        "actions".into(),
+                    ))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .w(px(24. * t))
+                    .opacity(t)
+                    // What the row offers is not a click on the row.
+                    .on_click(|_, _, cx| cx.stop_propagation())
+                    .child(actions)
+            })
+        });
+        row = match self.second {
+            None => row.child(title).children(trailing).children(actions),
+            Some(second) => row.child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(self.title.clone()),
-            )
-            .when_some(self.trailing, |d, trailing| {
-                d.child(div().flex_none().flex().items_center().child(trailing))
-            })
-            .when_some(self.actions, |d, (actions, keep)| {
-                let t = if keep { 1.0 } else { now.hover };
-                d.when(t > 0.0, |d| {
-                    d.child(
+                    .flex()
+                    .flex_col()
+                    .child(
                         div()
-                            .id(ElementId::NamedChild(
-                                std::sync::Arc::new(self.id.clone()),
-                                "actions".into(),
-                            ))
-                            .flex_none()
                             .flex()
                             .items_center()
-                            .w(px(24. * t))
-                            .opacity(t)
-                            // What the row offers is not a click on the row.
-                            .on_click(|_, _, cx| cx.stop_propagation())
-                            .child(actions),
+                            .gap(px(7.))
+                            .h(px(18.))
+                            .child(title)
+                            .children(trailing)
+                            .children(actions),
                     )
-                })
-            });
+                    .child(second),
+            ),
+        };
         if let Some(on_click) = self.on_click {
             row = row.on_click(on_click);
         }

@@ -18,7 +18,7 @@ use flottille_window::conversation::Block;
 use flottille_window::link::Connect;
 use flottille_window::runs::KEPT_ENDED;
 use flottille_window::session::SessionPage;
-use flottille_window::tree::{ended_id, place_id, session_id};
+use flottille_window::tree::{ended_id, session_id, session_place_id};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Bounds, Entity, Pixels, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
@@ -41,8 +41,7 @@ const USED: u64 = 82_000;
 const SIZE: u64 = 200_000;
 
 fn user() -> User {
-    let user = User::with_fake_agent();
-    user.fake_script(json!({"turns": [
+    user_with(json!([
         {"when": "lead the work", "do": [
             {"usage": {"used": USED, "size": SIZE}}, {"say": "On it."}]},
         {"when": "run server", "do": [
@@ -52,7 +51,12 @@ fn user() -> User {
                 "workspace": "w"}}}]},
         {"when": "write to the session", "do": [{"mcp": {"tool": "session_send",
             "arguments": {"session": "{prompt:agent}", "text": "The tests pass now."}}}]}
-    ]}));
+    ]))
+}
+
+fn user_with(turns: serde_json::Value) -> User {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({ "turns": turns }));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     user
 }
@@ -610,6 +614,129 @@ fn each_agent_row_carries_its_context_gauge_and_the_composer_shows_none(cx: &mut
 }
 
 #[gpui_kit::test]
+fn before_the_window_is_known_the_row_shows_tokens_used(cx: &mut TestAppContext) {
+    let user = user_with(json!([
+        {"when": "lead the work", "do": [{"usage": {"used": 45_000, "size": 0}}, {"say": "On it."}]}
+    ]));
+    let (lead, _) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, 1440., cx);
+    until(&shell, cx, "the gauge on the lead's row", |cx| {
+        has(format!("rail-context-{lead}"), cx)
+    });
+    settle(cx);
+
+    assert_eq!(
+        label(format!("rail-context-{lead}"), cx).as_deref(),
+        Some("45k tokens in the context")
+    );
+    assert!(
+        !has(format!("rail-context-bar-{lead}"), cx),
+        "no bar without the window's size"
+    );
+}
+
+/// A few frames, enough to be on the way and not yet there.
+fn a_few_frames(cx: &mut VisualTestContext) {
+    for _ in 0..3 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    }
+}
+
+#[gpui_kit::test]
+fn the_gauge_unfolds_as_a_whole_when_the_first_usage_arrives(cx: &mut TestAppContext) {
+    let user = user_with(json!([
+        {"when": "lead the work", "do": [{"say": "On it."}]},
+        {"when": "go on", "do": [{"usage": {"used": 45_000, "size": 0}}, {"say": "Done."}]}
+    ]));
+    let (lead, _) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, 1440., cx);
+    let block = format!("rail-context-{lead}-block");
+    assert!(
+        !has(format!("rail-context-{lead}"), cx),
+        "no usage yet, no gauge"
+    );
+
+    user.call("agent.send", json!({"agent": lead, "message": "go on"}))
+        .unwrap();
+    until(&shell, cx, "the gauge begins to unfold", |cx| {
+        has(format!("rail-context-{lead}"), cx)
+    });
+
+    // On the frame after the first usage: the gauge is a block that unfolds, not at its end.
+    assert!(has(block.clone(), cx), "the gauge is not a presence");
+    let start = rect(block.clone(), cx).size.height;
+    a_few_frames(cx);
+    let midway = rect(block.clone(), cx).size.height;
+    settle(cx);
+    let end = rect(block.clone(), cx).size.height;
+    assert!(end > px(0.), "the gauge has a height once unfolded");
+    assert!(
+        start < end,
+        "in flight at the first frame: {start:?} < {end:?}"
+    );
+    assert!(
+        midway > start && midway < end,
+        "unfolding: {start:?} < {midway:?} < {end:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn the_bar_appears_once_the_window_is_known(cx: &mut TestAppContext) {
+    let user = user_with(json!([
+        {"when": "lead the work", "do": [{"usage": {"used": 45_000, "size": 0}}, {"say": "On it."}]},
+        {"when": "go on", "do": [{"usage": {"used": 50_000, "size": 200_000}}, {"say": "Done."}]}
+    ]));
+    let (lead, _) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, 1440., cx);
+    until(&shell, cx, "the tokens on the lead's row", |cx| {
+        has(format!("rail-context-{lead}"), cx)
+    });
+    assert!(!has(format!("rail-context-bar-{lead}"), cx));
+
+    user.call("agent.send", json!({"agent": lead, "message": "go on"}))
+        .unwrap();
+    until(&shell, cx, "the bar", |cx| {
+        has(format!("rail-context-bar-{lead}"), cx)
+    });
+    // It unfolds, its gap with it: on the way, not at its width at once.
+    let start = rect(format!("rail-context-bar-{lead}"), cx).size.width;
+    // The tokens stay where they were: the bar's gap is not there before the bar is.
+    let gap = |cx: &mut VisualTestContext| {
+        rect(format!("rail-context-{lead}"), cx).right()
+            - rect(format!("rail-context-text-{lead}"), cx).right()
+    };
+    assert!(
+        gap(cx) < px(0.5),
+        "the gap jumps in with the bar: {:?}",
+        gap(cx)
+    );
+    a_few_frames(cx);
+    let midway = rect(format!("rail-context-bar-{lead}"), cx).size.width;
+    assert!(
+        start < midway && midway < px(32.),
+        "unfolding: {start:?} < {midway:?} < 32px"
+    );
+    settle(cx);
+
+    assert!(
+        (gap(cx) - px(32. + 4.)).abs() < px(0.5),
+        "the bar and the gap once unfolded: {:?}",
+        gap(cx)
+    );
+    assert_eq!(
+        label(format!("rail-context-{lead}"), cx).as_deref(),
+        Some("25% of the context used")
+    );
+    let bar = rect(format!("rail-context-bar-{lead}"), cx);
+    assert!(
+        (bar.size.width - px(32.)).abs() < px(0.5),
+        "the bar unfolded to its width: {bar:?}"
+    );
+}
+
+#[gpui_kit::test]
 fn the_workspace_section_has_the_labelled_lines_of_the_card_and_its_menu(cx: &mut TestAppContext) {
     let user = user();
     let (lead, _) = lead(&user);
@@ -808,7 +935,9 @@ fn docs_session(user: &User, lead: &str) -> String {
 }
 
 #[gpui_kit::test]
-fn a_session_an_agent_started_is_listed_under_its_workspace(cx: &mut TestAppContext) {
+fn a_session_an_agent_started_is_listed_in_its_project_and_says_its_workspace(
+    cx: &mut TestAppContext,
+) {
     let user = user();
     let (lead, _) = lead(&user);
     let docs = docs_session(&user, &lead);
@@ -819,11 +948,12 @@ fn a_session_an_agent_started_is_listed_under_its_workspace(cx: &mut TestAppCont
     settle(cx);
 
     let listed: Vec<String> = shell.read_with(cx, |s, cx| {
-        s.place("app", &Some("w".to_owned()))
+        s.project("app")
             .map(|node| {
                 node.read(cx)
                     .sessions(cx)
                     .iter()
+                    .filter(|row| row.read(cx).place().as_deref() == Some("w"))
                     .map(|row| row.read(cx).id().to_owned())
                     .collect()
             })
@@ -831,11 +961,9 @@ fn a_session_an_agent_started_is_listed_under_its_workspace(cx: &mut TestAppCont
     });
     assert!(
         listed.contains(&docs) && listed.contains(&lead),
-        "both under w: {listed:?}"
+        "both in w: {listed:?}"
     );
-    let place = rect(place_id("app", &Some("w".to_owned())), cx);
-    let row = rect(session_id(&docs), cx);
-    assert!(row.origin.y > place.origin.y, "under its workspace's row");
+    assert_eq!(label(session_place_id(&docs), cx).as_deref(), Some("w"));
 }
 
 #[gpui_kit::test]

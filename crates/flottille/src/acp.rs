@@ -724,7 +724,10 @@ fn event_of(update: &Value) -> Option<(&'static str, Map<String, Value>)> {
         "plan" => ("agent.plan", json!({"entries": update["entries"]})),
         "usage_update" => (
             "agent.usage",
-            json!({"used": update["used"], "size": update["size"], "cost": update["cost"]}),
+            // A size of 0 is how an agent that does not know its window yet says so (ACP wants
+            // a number): the event says `null`.
+            json!({"used": update["used"], "size": update["size"].as_u64().filter(|s| *s > 0),
+                "cost": update["cost"]}),
         ),
         "current_mode_update" => (
             "agent.mode_changed",
