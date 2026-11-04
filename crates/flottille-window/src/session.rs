@@ -25,8 +25,9 @@ use flottille_ui::color::mix;
 use flottille_ui::motion::{HOVER, Motion, PANEL};
 use flottille_ui::{
     AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Menu, Modal, Palette, Pill,
-    PulsingLabel, Side, StateIcon, Status, Toast, Type, enter, fade, fold_frame, hoverable, icon,
-    palette, presence, presence_of, section_label, selectable, space, text_region, toast, turning,
+    PulsingLabel, Side, Skeleton, StateIcon, Status, Toast, Type, awaiting, enter, fade,
+    fold_frame, hoverable, icon, palette, presence, presence_of, section_label, selectable, space,
+    text_region, toast, turning,
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{
@@ -57,8 +58,8 @@ use crate::providers::Providers;
 use crate::queued::QueuedMessages;
 use crate::runs::{self, CommandList, CommandPanel, rail_label};
 use crate::session_link::{
-    self, PlaceFacts, PullRequest, RepositoryFacts, Request, SessionLink, SessionUpdate, TreeAgent,
-    Where,
+    self, ForgeFacts, PlaceFacts, PullRequest, RepositoryFacts, Request, SessionLink,
+    SessionUpdate, TicketFacts, TreeAgent, Where,
 };
 use crate::session_options::{Runs, SessionOptions};
 use crate::shell::{Layout, Selection, Shell, now_ms};
@@ -930,6 +931,12 @@ impl SessionPage {
             SessionUpdate::Place(facts) => {
                 self.rail
                     .update(cx, |rail, cx| rail.set_place(facts.map(|facts| *facts), cx));
+            }
+            SessionUpdate::PlaceForge(forge) => {
+                self.rail.update(cx, |rail, cx| rail.set_forge(forge, cx));
+            }
+            SessionUpdate::PlaceTicket(ticket) => {
+                self.rail.update(cx, |rail, cx| rail.set_ticket(ticket, cx));
             }
             SessionUpdate::Commands(rows) => {
                 self.command_panel
@@ -3623,6 +3630,9 @@ pub struct SessionRail {
     workspace: Option<String>,
     project: String,
     place: Option<PlaceFacts>,
+    /// The daemon answered for the place (with facts, or with none): until then the Workspace
+    /// section waits as a skeleton.
+    place_known: bool,
     /// The "⋯" menu of the WORKSPACE section.
     menu: Entity<Menu>,
     /// The "⋯" menu of the root's row: it ends the session.
@@ -3705,6 +3715,7 @@ impl SessionRail {
             workspace: opened.place.clone(),
             project: opened.project.clone(),
             place: None,
+            place_known: false,
             ticket_field: None,
             linking: false,
             ticket_error: None,
@@ -3856,8 +3867,44 @@ impl SessionRail {
 
     /// The place's facts; `None` when the daemon has none (the workspace was removed).
     fn set_place(&mut self, place: Option<PlaceFacts>, cx: &mut Context<Self>) {
-        if self.place != place {
+        let first = !std::mem::replace(&mut self.place_known, true);
+        if self.place != place || first {
             self.place = place;
+            cx.notify();
+        }
+    }
+
+    /// The forge's part of the place, when it answers; the rest of the place is not touched.
+    fn set_forge(&mut self, forge: ForgeFacts, cx: &mut Context<Self>) {
+        let Some(place) = &mut self.place else {
+            return;
+        };
+        let ForgeFacts {
+            pulls,
+            forges,
+            problem,
+        } = forge;
+        if place.forge_pending
+            || place.pulls != pulls
+            || place.forges != forges
+            || place.forge_problem != problem
+        {
+            place.pulls = pulls;
+            place.forges = forges;
+            place.forge_problem = problem;
+            place.forge_pending = false;
+            cx.notify();
+        }
+    }
+
+    /// The ticket's part of the place, when its tracker answers.
+    fn set_ticket(&mut self, ticket: Option<TicketFacts>, cx: &mut Context<Self>) {
+        let Some(place) = &mut self.place else {
+            return;
+        };
+        if place.ticket_pending || place.ticket != ticket {
+            place.ticket = ticket;
+            place.ticket_pending = false;
             cx.notify();
         }
     }
@@ -4214,6 +4261,7 @@ impl Render for SessionRail {
             })
             .collect();
         let several = repositories.len() > 1;
+        let forge_pending = self.place.as_ref().is_some_and(|place| place.forge_pending);
         let mut lines: Vec<AnyElement> = Vec::new();
         for (path, name, facts, status) in repositories {
             let changes = match facts {
@@ -4326,7 +4374,7 @@ impl Render for SessionRail {
                     .test_support()
                     .into_any_element(),
             );
-            if let Some(pull) = pull_of(&path) {
+            let pull_line = pull_of(&path).map(|pull| {
                 let page = self.page.clone();
                 let url = pull.url.clone();
                 let row = pull_row(
@@ -4344,17 +4392,29 @@ impl Render for SessionRail {
                     ),
                     false => "Pull request".to_owned(),
                 };
-                lines.push(
-                    fact_line(
-                        format!("rail-line-pull-{name}"),
-                        Some(Icon::PullRequest),
-                        key,
-                        pull.label(),
-                        pull_hover(row, cx),
-                        p,
+                fact_line(
+                    format!("rail-line-pull-{name}"),
+                    Some(Icon::PullRequest),
+                    key,
+                    pull.label(),
+                    pull_hover(row, cx),
+                    p,
+                )
+                .into_any_element()
+            });
+            // A workspace's pull request waits for its forge: a skeleton stands for the row, and
+            // folds away when the repository turns out to have none.
+            match self.workspace.is_some() {
+                true => lines.push(
+                    awaiting(
+                        ElementId::Name(format!("rail-pull-wait-{name}").into()),
+                        forge_pending,
+                        skeleton_line(format!("rail-pull-skeleton-{name}"), 44.),
+                        pull_line.unwrap_or_else(|| div().into_any_element()),
                     )
                     .into_any_element(),
-                );
+                ),
+                false => lines.extend(pull_line),
             }
         }
         let forge_problem = self.place.as_ref().and_then(|p| p.forge_problem.clone());
@@ -4401,7 +4461,7 @@ impl Render for SessionRail {
         let ticket = self.place.as_ref().and_then(|p| p.ticket.clone());
         // The ticket is why the workspace exists: its line opens the section's lines, before any
         // pull request.
-        let ticket_line = ticket.map(|ticket| {
+        let ticket_content = ticket.map(|ticket| {
             let page = self.page.clone();
             let said = match (&ticket.title, &ticket.problem) {
                 (_, Some(problem)) => problem.clone(),
@@ -4456,6 +4516,20 @@ impl Render for SessionRail {
             )
             .into_any_element()
         });
+        // A linked ticket waits for its tracker: a skeleton holds its line's place until it is read.
+        let ticket_pending = self
+            .place
+            .as_ref()
+            .is_some_and(|place| place.ticket_pending);
+        let ticket_line = (ticket_pending || ticket_content.is_some()).then(|| {
+            awaiting(
+                "rail-ticket-wait",
+                ticket_pending,
+                skeleton_line("rail-ticket-skeleton".to_owned(), 150.),
+                ticket_content.unwrap_or_else(|| div().into_any_element()),
+            )
+            .into_any_element()
+        });
         let ticket_field = self
             .ticket_field
             .clone()
@@ -4489,86 +4563,95 @@ impl Render for SessionRail {
                 Some(self.menu.clone().into_any_element()),
                 cx,
             ))
-            .children(ticket_line)
-            .children(lines)
-            .child(presence(
-                "rail-no-forge-block",
-                no_forge.is_some(),
+            // Before the daemon's first answer the section is a skeleton; its lines replace it.
+            .child(awaiting(
+                "rail-workspace-wait",
+                !self.place_known,
+                workspace_skeleton(),
                 div()
-                    .id("rail-no-forge")
-                    .px(space::XS)
-                    .py(space::XS)
-                    .text_size(px(11.5))
-                    .text_color(p.faint)
-                    .children(no_forge.clone())
-                    .aria_label(no_forge.unwrap_or_default())
-                    .test_support(),
-            ))
-            .children(forge_problem.map(|problem| {
-                div()
-                    .id("rail-forge-problem")
-                    .px(space::XS)
-                    .py(space::XS)
-                    .text_size(px(11.5))
-                    .text_color(p.faint)
-                    .child(SharedString::from(problem))
-                    .test_support()
-            }))
-            .child(presence(
-                "rail-ticket-field-block",
-                self.linking && ticket_field.is_some(),
-                div()
-                    .id("rail-ticket-field")
-                    .h(px(30.))
-                    .mx(space::XS)
-                    .my(space::XS)
-                    .px(space::SM)
-                    .rounded(px(7.))
-                    .bg(p.field)
-                    .border_1()
-                    .border_color(p.line2)
-                    .flex()
-                    .items_center()
-                    .mono(11.5)
-                    .children(ticket_field.map(|field| Input::new(&field)))
-                    .test_support(),
-            ))
-            .child(presence_of(
-                "rail-ticket-error-block",
-                ticket_error,
-                move |error| {
-                    div()
-                        .id("rail-ticket-error")
-                        .px(space::XS)
-                        .py(space::XS)
-                        .text_size(px(11.5))
-                        .text_color(p.fail)
-                        .child(error)
-                        .test_support()
-                        .into_any_element()
-                },
-            ))
-            .child(
-                div()
-                    .id("rail-facts")
-                    .pt(space::SM)
                     .flex()
                     .flex_col()
-                    .children(facts.into_iter().map(|(key, value)| {
-                        let said = SharedString::from(value.clone());
-                        let value = div()
-                            .id(ElementId::Name(format!("rail-fact-{key}-value").into()))
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .mono(FACT_SIZE)
-                            .child(SharedString::from(value))
-                            .test_support();
-                        fact_line(format!("rail-fact-{key}"), None, key, said, value, p)
+                    .children(ticket_line)
+                    .children(lines)
+                    .child(presence(
+                        "rail-no-forge-block",
+                        no_forge.is_some(),
+                        div()
+                            .id("rail-no-forge")
+                            .px(space::XS)
+                            .py(space::XS)
+                            .text_size(px(11.5))
+                            .text_color(p.faint)
+                            .children(no_forge.clone())
+                            .aria_label(no_forge.unwrap_or_default())
+                            .test_support(),
+                    ))
+                    .children(forge_problem.map(|problem| {
+                        div()
+                            .id("rail-forge-problem")
+                            .px(space::XS)
+                            .py(space::XS)
+                            .text_size(px(11.5))
+                            .text_color(p.faint)
+                            .child(SharedString::from(problem))
+                            .test_support()
                     }))
-                    .test_support(),
-            )
+                    .child(presence(
+                        "rail-ticket-field-block",
+                        self.linking && ticket_field.is_some(),
+                        div()
+                            .id("rail-ticket-field")
+                            .h(px(30.))
+                            .mx(space::XS)
+                            .my(space::XS)
+                            .px(space::SM)
+                            .rounded(px(7.))
+                            .bg(p.field)
+                            .border_1()
+                            .border_color(p.line2)
+                            .flex()
+                            .items_center()
+                            .mono(11.5)
+                            .children(ticket_field.map(|field| Input::new(&field)))
+                            .test_support(),
+                    ))
+                    .child(presence_of(
+                        "rail-ticket-error-block",
+                        ticket_error,
+                        move |error| {
+                            div()
+                                .id("rail-ticket-error")
+                                .px(space::XS)
+                                .py(space::XS)
+                                .text_size(px(11.5))
+                                .text_color(p.fail)
+                                .child(error)
+                                .test_support()
+                                .into_any_element()
+                        },
+                    ))
+                    .child(
+                        div()
+                            .id("rail-facts")
+                            .pt(space::SM)
+                            .flex()
+                            .flex_col()
+                            .children(facts.into_iter().map(|(key, value)| {
+                                let said = SharedString::from(value.clone());
+                                let value = div()
+                                    .id(ElementId::Name(format!("rail-fact-{key}-value").into()))
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .mono(FACT_SIZE)
+                                    .child(SharedString::from(value))
+                                    .test_support();
+                                fact_line(format!("rail-fact-{key}"), None, key, said, value, p)
+                            }))
+                            .test_support(),
+                    ),
+            ))
             .test_support();
         div()
             .id("rail")
@@ -4609,6 +4692,41 @@ const FACT_SIZE: f32 = 12.;
 
 /// The width of the icon column of the Workspace section's lines.
 const FACT_ICON: f32 = 14.;
+
+/// A fact line that waits for its read: blocks where its icon, its label and its value will be.
+fn skeleton_line(id: String, value: f32) -> impl IntoElement {
+    let part = |what: &str| ElementId::Name(format!("{id}-{what}").into());
+    div()
+        .id(ElementId::Name(id.clone().into()))
+        .aria_label("Reading…")
+        .px(space::XS)
+        .min_h(px(24.))
+        .flex()
+        .items_center()
+        .gap(space::SM)
+        .child(
+            Skeleton::new(part("icon"))
+                .w(px(FACT_ICON))
+                .h(px(FACT_ICON)),
+        )
+        .child(Skeleton::new(part("label")).w(px(72.)).h(px(10.)))
+        .child(div().flex_1())
+        .child(Skeleton::new(part("value")).w(px(value)).h(px(10.)))
+        .test_support()
+}
+
+/// The Workspace section before the daemon first answered: a line for each of its facts.
+fn workspace_skeleton() -> impl IntoElement {
+    div()
+        .id("rail-workspace-skeleton")
+        .flex()
+        .flex_col()
+        .child(skeleton_line("rail-skeleton-repository".to_owned(), 80.))
+        .child(skeleton_line("rail-skeleton-ticket".to_owned(), 150.))
+        .child(skeleton_line("rail-skeleton-from".to_owned(), 60.))
+        .child(skeleton_line("rail-skeleton-machine".to_owned(), 56.))
+        .test_support()
+}
 
 /// One fact of the Workspace section: the icon column, the label, then the value at the right
 /// edge. Every line of the section sits in the same columns: a fact with no icon keeps the

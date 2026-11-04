@@ -50,7 +50,8 @@
 //! `view_fail` (`{"acme/app": {"12": "HTTP 502: Bad Gateway"}}`) makes `pr view` and `issue view`
 //! of that number alone fail that way; `list_delay_ms` makes `pr list` wait that long first,
 //! `listing_delay_ms` a `pr list` of every branch alone (a round's, not a branch's `--head`),
-//! `view_delay_ms` `pr view`.
+//! `view_delay_ms` `pr view`. `read_delay_ms` makes every `pr` and `issue` call wait that long
+//! before it answers or fails, as a network of seconds does.
 //!
 //! A `--search` of `pr list` and `issue list` keeps, for each `updated:>=<time>` it holds, the
 //! objects whose `updatedAt` is that time or later (compared as the RFC 3339 texts they are, as
@@ -196,6 +197,11 @@ fn answer(script: &Value, args: &[String]) -> i32 {
         },
     });
     let repository = repository.as_deref();
+    if let (Some("pr" | "issue"), Some(ms)) =
+        (words.first().copied(), script["read_delay_ms"].as_u64())
+    {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
     let asks_boards = words.starts_with(&["issue", "view"])
         && option("--json").is_some_and(|fields| fields.contains("projectItems"));
     if script["missing_scope"] == true && (words.first() == Some(&"project") || asks_boards) {

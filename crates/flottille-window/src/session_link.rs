@@ -378,6 +378,33 @@ pub struct PlaceFacts {
     pub ticket: Option<TicketFacts>,
     /// Where each of its repositories stands (a workspace).
     pub statuses: Vec<RepositoryStatus>,
+    /// The forge has not answered yet: the pull requests and forges are still to come.
+    pub forge_pending: bool,
+    /// The ticket is linked and its tracker has not answered yet.
+    pub ticket_pending: bool,
+}
+
+/// The forge's part of a place: what `workspace.forge` says, sent when it answers.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ForgeFacts {
+    pub pulls: Vec<PullRequest>,
+    pub forges: Vec<(String, String)>,
+    pub problem: Option<String>,
+}
+
+impl ForgeFacts {
+    /// The part of a `workspace.forge` answer; nothing when the daemon refused it.
+    fn of(answer: Option<&Value>) -> ForgeFacts {
+        let Some(forge) = answer else {
+            return ForgeFacts::default();
+        };
+        let (pulls, problem) = pull_requests(forge);
+        ForgeFacts {
+            pulls,
+            forges: forge_lines(forge),
+            problem,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -405,8 +432,14 @@ pub enum SessionUpdate {
         number: u64,
         decision: String,
     },
-    /// The place's facts; `None` when the daemon has none (the workspace was removed).
+    /// The place's facts that git knows, at once; `None` when the daemon has none (the workspace
+    /// was removed). The forge's part and the ticket's are marked pending until their own
+    /// updates come.
     Place(Option<Box<PlaceFacts>>),
+    /// The forge's part of the place, when the forge answers: only it is replaced.
+    PlaceForge(ForgeFacts),
+    /// The ticket's part of the place, when the tracker answers: only it is replaced.
+    PlaceTicket(Option<TicketFacts>),
     /// The commands of the session's tree: those running, then those that ended and were not
     /// dismissed.
     Commands(Vec<CommandRow>),
@@ -554,6 +587,13 @@ struct Resume {
     read: bool,
 }
 
+/// What the place's slow parts last said: a place read again shows them while it asks again.
+#[derive(Default)]
+struct Known {
+    ticket: Option<(TicketFacts, Instant)>,
+    forge: Option<ForgeFacts>,
+}
+
 #[derive(Default)]
 struct Stale {
     tree: bool,
@@ -633,10 +673,12 @@ impl Link {
             }
             resume.read = true;
         }
-        let mut ticket = None;
-        self.read_place(&mut conn, &mut ticket)?;
+        // The runs and the subscriptions never wait for the place, whose forge and tracker are
+        // reads of seconds.
         self.read_subscriptions(&mut conn)?;
         let mut running = self.read_commands(&mut conn)?;
+        let mut known = Known::default();
+        self.read_place(&mut conn, &mut known)?;
         let mut next_commands = Instant::now() + COMMANDS_EVERY;
         // The command whose output was last read.
         let mut read_output: Option<String> = None;
@@ -660,7 +702,7 @@ impl Link {
                     self.read_requests(&mut conn)?;
                 }
                 if stale.place {
-                    self.read_place(&mut conn, &mut ticket)?;
+                    self.read_place(&mut conn, &mut known)?;
                 }
                 if stale.subscriptions {
                     self.read_subscriptions(&mut conn)?;
@@ -823,115 +865,124 @@ impl Link {
         Ok(())
     }
 
-    /// The place's facts; `ticket` is the last ticket read, kept for [`TICKET_FRESH`].
-    fn read_place(
-        &self,
-        conn: &mut Conn,
-        ticket: &mut Option<(TicketFacts, Instant)>,
-    ) -> Result<(), String> {
-        let facts = match &self.place.workspace {
-            Some(name) => {
-                let shown = conn.ask(
-                    "workspace.show",
-                    json!({"project": self.place.project, "name": name}),
-                )?;
-                // A workspace removed under the session: it has no facts, the link goes on.
-                let Ok(shown) = shown else {
-                    self.send(SessionUpdate::Place(None));
-                    return Ok(());
-                };
-                let mut bases: Vec<String> = Vec::new();
-                let mut repositories = Vec::new();
-                for repository in shown["repositories"].as_array().into_iter().flatten() {
-                    let base = repository["base"]["branch"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_owned();
-                    if !bases.contains(&base) {
-                        bases.push(base);
-                    }
-                    let changes = &repository["changes"];
-                    let changes = (!changes.is_null()).then(|| Changes {
-                        added: changes["added"].as_u64().unwrap_or(0),
-                        removed: changes["removed"].as_u64().unwrap_or(0),
-                        capped: changes["capped"] == true,
-                    });
-                    repositories.push((
-                        repository["path"].as_str().unwrap_or_default().to_owned(),
-                        RepositoryFacts::Changes(changes),
-                    ));
-                }
-                // Watched for as long as this connection lasts: the daemon reads the forges again
-                // about once a minute, and says when they changed.
-                let forge = conn.ask(
-                    "workspace.forge",
-                    json!({"project": self.place.project, "name": name, "watch": true}),
-                )?;
-                let (pulls, forge_problem) =
-                    forge.as_ref().map_or((Vec::new(), None), pull_requests);
-                let linked = shown["ticket"].as_str();
-                if ticket.as_ref().is_none_or(|(kept, at)| {
-                    Some(kept.reference.as_str()) != linked || at.elapsed() > TICKET_FRESH
-                }) {
-                    *ticket = match linked {
-                        None => None,
-                        Some(reference) => conn
-                            .ask(
-                                "workspace.ticket",
-                                json!({"project": self.place.project, "name": name}),
-                            )?
-                            .ok()
-                            .and_then(|read| ticket_facts(&read))
-                            .or_else(|| {
-                                Some(TicketFacts {
-                                    reference: reference.to_owned(),
-                                    state: None,
-                                    title: None,
-                                    url: None,
-                                    problem: Some("the ticket could not be read".into()),
-                                })
-                            })
-                            .map(|facts| (facts, Instant::now())),
-                    };
-                }
-                let forges = forge.as_ref().map_or(Vec::new(), forge_lines);
-                PlaceFacts {
-                    forges,
-                    ticket: ticket.as_ref().map(|(facts, _)| facts.clone()),
-                    statuses: RepositoryStatus::of_workspace(&shown),
-                    repositories,
-                    branch: shown["branch"].as_str().map(str::to_owned),
-                    bases,
-                    prepared_ms: shown["ready_at"].as_u64().map(|ready| {
-                        ready.saturating_sub(shown["created_at"].as_u64().unwrap_or(0))
-                    }),
-                    pulls,
-                    forge_problem,
-                }
-            }
-            None => {
-                let Ok(shown) = conn.ask("project.show", json!({"name": self.place.project}))?
-                else {
-                    self.send(SessionUpdate::Place(None));
-                    return Ok(());
-                };
-                PlaceFacts {
-                    repositories: shown["repositories"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .map(|r| {
-                            (
-                                r["path"].as_str().unwrap_or_default().to_owned(),
-                                RepositoryFacts::Branch(r["branch"].as_str().map(str::to_owned)),
-                            )
-                        })
-                        .collect(),
-                    ..PlaceFacts::default()
-                }
-            }
+    /// The place's facts, in parts, each sent when it is read: what git knows first (with the
+    /// forge's part and the ticket's marked pending unless `known` holds them from an earlier
+    /// read, which stay shown while they are asked again), then the forge's part, then the
+    /// ticket's. `known` keeps the ticket for [`TICKET_FRESH`].
+    fn read_place(&self, conn: &mut Conn, known: &mut Known) -> Result<(), String> {
+        let Some(name) = &self.place.workspace else {
+            let Ok(shown) = conn.ask("project.show", json!({"name": self.place.project}))? else {
+                self.send(SessionUpdate::Place(None));
+                return Ok(());
+            };
+            let facts = PlaceFacts {
+                repositories: shown["repositories"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|r| {
+                        (
+                            r["path"].as_str().unwrap_or_default().to_owned(),
+                            RepositoryFacts::Branch(r["branch"].as_str().map(str::to_owned)),
+                        )
+                    })
+                    .collect(),
+                ..PlaceFacts::default()
+            };
+            self.send(SessionUpdate::Place(Some(Box::new(facts))));
+            return Ok(());
         };
-        self.send(SessionUpdate::Place(Some(Box::new(facts))));
+        let shown = conn.ask(
+            "workspace.show",
+            json!({"project": self.place.project, "name": name}),
+        )?;
+        // A workspace removed under the session: it has no facts, the link goes on.
+        let Ok(shown) = shown else {
+            self.send(SessionUpdate::Place(None));
+            return Ok(());
+        };
+        let mut bases: Vec<String> = Vec::new();
+        let mut repositories = Vec::new();
+        for repository in shown["repositories"].as_array().into_iter().flatten() {
+            let base = repository["base"]["branch"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            if !bases.contains(&base) {
+                bases.push(base);
+            }
+            let changes = &repository["changes"];
+            let changes = (!changes.is_null()).then(|| Changes {
+                added: changes["added"].as_u64().unwrap_or(0),
+                removed: changes["removed"].as_u64().unwrap_or(0),
+                capped: changes["capped"] == true,
+            });
+            repositories.push((
+                repository["path"].as_str().unwrap_or_default().to_owned(),
+                RepositoryFacts::Changes(changes),
+            ));
+        }
+        let linked = shown["ticket"].as_str();
+        if known
+            .ticket
+            .as_ref()
+            .is_some_and(|(kept, _)| Some(kept.reference.as_str()) != linked)
+        {
+            known.ticket = None;
+        }
+        let ticket_stale = linked.is_some()
+            && known
+                .ticket
+                .as_ref()
+                .is_none_or(|(_, at)| at.elapsed() > TICKET_FRESH);
+        let forge = known.forge.clone().unwrap_or_default();
+        let facts = PlaceFacts {
+            forges: forge.forges,
+            ticket: known.ticket.as_ref().map(|(facts, _)| facts.clone()),
+            statuses: RepositoryStatus::of_workspace(&shown),
+            repositories,
+            branch: shown["branch"].as_str().map(str::to_owned),
+            bases,
+            prepared_ms: shown["ready_at"]
+                .as_u64()
+                .map(|ready| ready.saturating_sub(shown["created_at"].as_u64().unwrap_or(0))),
+            pulls: forge.pulls,
+            forge_problem: forge.problem,
+            forge_pending: known.forge.is_none(),
+            ticket_pending: linked.is_some() && known.ticket.is_none(),
+        };
+        if !self.send(SessionUpdate::Place(Some(Box::new(facts)))) {
+            return Ok(());
+        }
+        // Watched for as long as this connection lasts: the daemon reads the forges again about
+        // once a minute, and says when they changed.
+        let answer = conn.ask(
+            "workspace.forge",
+            json!({"project": self.place.project, "name": name, "watch": true}),
+        )?;
+        let part = ForgeFacts::of(answer.as_ref().ok());
+        known.forge = Some(part.clone());
+        self.send(SessionUpdate::PlaceForge(part));
+        if ticket_stale {
+            let read = conn
+                .ask(
+                    "workspace.ticket",
+                    json!({"project": self.place.project, "name": name}),
+                )?
+                .ok()
+                .and_then(|read| ticket_facts(&read))
+                .or_else(|| {
+                    linked.map(|reference| TicketFacts {
+                        reference: reference.to_owned(),
+                        state: None,
+                        title: None,
+                        url: None,
+                        problem: Some("the ticket could not be read".into()),
+                    })
+                });
+            known.ticket = read.clone().map(|facts| (facts, Instant::now()));
+            self.send(SessionUpdate::PlaceTicket(read));
+        }
         Ok(())
     }
 }
