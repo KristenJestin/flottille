@@ -974,6 +974,17 @@ pub fn check_task(name: &str, task: &Task, known: &dyn Fn(&str) -> bool) -> Resu
         Some(Ready::Command(line)) if line.trim().is_empty() => {
             return Err(".ready: the command must not be empty".into());
         }
+        // The address is known only once the run starts, after the gate judged the line: a line
+        // that takes it would run what the gate never saw.
+        Some(Ready::Command(line)) if crate::variables::check(line).is_err() => {
+            return Err(match names(line, true) {
+                Ok(()) => ".ready: the command cannot use {url}: the address is known only once \
+                           the run starts, after the line was judged; to ask the address itself, \
+                           use ready = { url = \"{url}/…\" }"
+                    .into(),
+                Err(why) => format!(".ready: {why}"),
+            });
+        }
         Some(Ready::Line(template) | Ready::Command(template)) => {
             names(template, true).map_err(|why| format!(".ready: {why}"))?;
         }
@@ -1440,6 +1451,10 @@ mod tests {
             (
                 r#"url = { command = "  " }"#,
                 "tasks.web.url: the command must not be empty",
+            ),
+            (
+                r#"ready = { command = "cp {url} {workspace}/k" }"#,
+                "tasks.web.ready: the command cannot use {url}",
             ),
         ] {
             let text = format!(

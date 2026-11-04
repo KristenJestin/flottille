@@ -776,3 +776,45 @@ fn a_ready_or_url_command_an_agent_sets_is_judged_as_a_run_of_it() {
     );
     assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
 }
+
+#[test]
+fn a_ready_command_cannot_use_the_url_placeholder() {
+    let user = user();
+    project(&user);
+    user.call(
+        "task.add",
+        json!({"project": "app", "name": "web", "line": "./say.sh", "serve": true,
+            "url": {"command": "cat url.txt"}}),
+    )
+    .unwrap();
+    let (_, mcp) = root(&user);
+
+    // The address is known only once the run starts, after the gate judged the line: a line
+    // that takes it runs what the gate never saw.
+    let agent = mcp.call(
+        "tasks",
+        json!({"action": "edit", "name": "web",
+            "ready": {"command": "cp {url} {workspace}/k"}}),
+    );
+    let by_user = user
+        .call(
+            "task.edit",
+            json!({"project": "app", "name": "web",
+                "ready": {"command": "curl {url}/health"}}),
+        )
+        .unwrap_err();
+    let probed = done(mcp.call("tasks", json!({"action": "show", "name": "web"})));
+
+    assert!(agent.error, "{}", agent.text);
+    assert!(
+        agent.text.contains("{url}") && agent.text.contains("ready = { url"),
+        "{}",
+        agent.text
+    );
+    assert!(
+        by_user.1.contains("{url}") && by_user.1.contains("ready = { url"),
+        "{by_user:?}"
+    );
+    assert!(!probed.contains("ready once"), "{probed}");
+    assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
+}
