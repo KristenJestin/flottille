@@ -61,8 +61,19 @@ for HEAD by default):
   first commit.
 - **The next version** follows the Angular commits counted (`tools/commit-message.sh` is the rule
   they follow), merges left out: `feat` bumps the minor, `fix` and `perf` the patch, a `!` after
-  the type or a `BREAKING CHANGE:` footer the major. Before 1.0, a breaking change bumps the
-  minor. Nothing that bumps is the next patch.
+  the type or a `BREAKING CHANGE:` footer the major. Nothing that bumps is the next patch.
+  **Before 1.0, everything bumps one level less**: a breaking change bumps the minor and a `feat`
+  the patch, so the 0.1 line takes the everyday features (0.1.2, 0.1.3…) and the minor moves
+  only when the maintainer says so (below). From 1.0 on, `feat` bumps the minor again.
+- **`Release-As: X.Y.Z` moves the version by hand.** A footer of that form in the message of a
+  commit of dev's own line since the last release (a squash's body) sets the next stable version,
+  and the betas and alphas that follow it (`0.2.0-beta.N`). It applies when it is above the
+  computed one (equal changes nothing; with several, the highest wins), and it is forgotten once
+  released, the next release counting from its mark. A value below the computed version, or not
+  `X.Y.Z`, is refused: `tools/version.sh` exits 1 naming the commit, and so fails the build until
+  the commit is fixed. Example: the Specs pull request is developed on `feat/specs` and reaches
+  `dev` as one squash whose body ends with `Release-As: 0.2.0`; the next stable is `0.2.0`
+  instead of `0.1.x`, the betas after it `0.2.0-beta.N`, and the release after that `0.2.1`.
 - **Only the build's own line is read**: the commits counted, the types that bump and the
   changelog follow first parents only, so the release squash a record reaches through its
   second parent is neither counted nor listed, and a merge is one commit of that line.
