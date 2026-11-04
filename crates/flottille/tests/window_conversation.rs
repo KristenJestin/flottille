@@ -572,6 +572,7 @@ fn send_now_stops_the_turn_and_the_root_receives_that_message_next_before_the_ot
 ) {
     let user = user();
     let lead = lead(&user);
+    let asked = Instant::now();
     let (shell, page, _, first, cx) =
         with_a_waiting_message(&user, &lead, "and update the docs", cx);
     let second = user
@@ -603,9 +604,33 @@ fn send_now_stops_the_turn_and_the_root_receives_that_message_next_before_the_ot
             .any(|p| p.contains("and update the docs"))
     });
     let sent = prompts(&user);
+    let short: Vec<String> = sent
+        .iter()
+        .map(|p| {
+            [
+                "lead the work",
+                "work a while",
+                "then fix the tests",
+                "and update the docs",
+            ]
+            .iter()
+            .filter(|m| p.contains(*m))
+            .copied()
+            .collect::<Vec<_>>()
+            .join(" + ")
+        })
+        .collect();
+    let seen = format!(
+        "prompts {short:?}, toasts {:?}, {:?} since the long turn was asked",
+        toasts(&shell, cx),
+        asked.elapsed()
+    );
     let next = sent.len() - 2;
-    assert!(sent[next].contains("then fix the tests") && !sent[next].contains("update the docs"));
-    assert!(sent[next + 1].contains("and update the docs"));
+    assert!(
+        sent[next].contains("then fix the tests") && !sent[next].contains("update the docs"),
+        "{seen}"
+    );
+    assert!(sent[next + 1].contains("and update the docs"), "{seen}");
     let _ = first;
 }
 
