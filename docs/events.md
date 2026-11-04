@@ -197,6 +197,17 @@ The workspace was linked to a ticket, or unlinked ([`tickets.md`](tickets.md)).
 | `project`, `workspace` | |
 | `ticket` | `#123` or `ABC-123`; `null` when unlinked. |
 
+### `workspace.changed`
+
+Every worktree made of the workspace is on one branch other than the recorded one (a `git switch`
+in it), and the record took it ([`workspaces.md`](workspaces.md), "The branch").
+
+| Field | |
+|---|---|
+| `project`, `workspace` | |
+| `branch` | The branch it is on now. |
+| `was` | The branch recorded before. |
+
 ### `workspace.removed`
 
 The workspace's worktrees, folder and record are gone. Its local branches whose work landed are

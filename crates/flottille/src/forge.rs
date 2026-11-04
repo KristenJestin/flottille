@@ -31,6 +31,7 @@ use crate::git::{self, Class};
 use crate::mcp::{Outcome, arguments, full_detail, workspace_named};
 use crate::place::Place;
 use crate::projects::{self, Failure};
+use crate::workspaces::{self, Head};
 
 mod bitbucket;
 mod ci;
@@ -525,6 +526,8 @@ fn check_of(check: &Value) -> (String, &'static str) {
 #[derive(Debug)]
 pub struct Repository {
     pub path: String,
+    /// The branch it was read for: the one its worktree is on.
+    pub branch: String,
     pub remote: String,
     pub forge: Option<Forge>,
     /// Why there is nothing to read: no forge declared, or its remote disagrees.
@@ -550,11 +553,12 @@ impl Read {
     }
 }
 
-/// Reads the forge each repository declares, for `branch`. A repository with none is said as
-/// such; one whose remote leads elsewhere is refused, and its forge is not asked.
-pub async fn read(repositories: &[Checkout], branch: &str, obsolete: bool) -> Read {
+/// Reads the forge each repository declares, for its branch in `branches` (in the same order). A
+/// repository with none is said as such; one whose remote leads elsewhere is refused, and its
+/// forge is not asked.
+pub async fn read(repositories: &[Checkout], branches: &[String], obsolete: bool) -> Read {
     let mut found = Vec::new();
-    for checkout in repositories {
+    for (checkout, branch) in repositories.iter().zip(branches) {
         let (forge, note, error) = match declared_forge(checkout).await {
             Ok(forge) => (Some(forge), None, None),
             Err(None) if obsolete => (
@@ -569,6 +573,7 @@ pub async fn read(repositories: &[Checkout], branch: &str, obsolete: bool) -> Re
         };
         found.push(Repository {
             path: checkout.path.clone(),
+            branch: branch.clone(),
             remote: checkout.remote.clone(),
             forge,
             note,
@@ -595,7 +600,7 @@ pub async fn read(repositories: &[Checkout], branch: &str, obsolete: bool) -> Re
         let read = match &forge {
             Forge::GitHub { .. } => match gh_problem {
                 Some(_) => Err(None),
-                None => pull_of(&forge, branch).await.map_err(Some),
+                None => pull_of(&forge, &repository.branch).await.map_err(Some),
             },
             Forge::Bitbucket { .. } => match contexts.of(&forge).await {
                 Err(problem) => {
@@ -604,7 +609,7 @@ pub async fn read(repositories: &[Checkout], branch: &str, obsolete: bool) -> Re
                     }
                     Err(None)
                 }
-                Ok(context) => bitbucket::pull_of(&forge, &context, branch)
+                Ok(context) => bitbucket::pull_of(&forge, &context, &repository.branch)
                     .await
                     .map_err(Some),
             },
@@ -808,6 +813,7 @@ fn state_of(workspace: &Workspace, read: &Read) -> Value {
         "problem": read.problem,
         "repositories": read.repositories.iter().map(|r| json!({
             "path": r.path,
+            "branch": r.branch,
             "remote": r.remote,
             "forge": r.forge.as_ref().map(Forge::kind),
             "repository": r.forge.as_ref().map(Forge::slug),
@@ -908,9 +914,15 @@ async fn refresh_read(daemon: &Arc<Daemon>, workspace: &Workspace) -> (Value, Re
             .iter()
             .any(|o| o == flottille_core::project::OBSOLETE_FORGES)
     });
-    let repositories = repositories_of(workspace, project.as_ref());
-    let read = read(&repositories, &workspace.branch, obsolete).await;
-    let state = state_of(workspace, &read);
+    let (workspace, heads) = workspaces::follow(daemon, workspace.clone()).await;
+    let repositories = repositories_of(&workspace, project.as_ref());
+    let read = read(
+        &repositories,
+        &workspaces::branches(&workspace, &heads),
+        obsolete,
+    )
+    .await;
+    let state = state_of(&workspace, &read);
     let now = now_ms();
     let previous = {
         let mut entries = daemon.forges.entries.lock().unwrap();
@@ -1220,7 +1232,7 @@ async fn forge_subscribe(
     let Some(pull) = &repository.pull else {
         return Outcome::Refused(format!(
             "refused: {path} has no pull request for {}: nothing to subscribe to",
-            workspace.branch
+            repository.branch
         ));
     };
     if matches!(pull.state, "merged" | "closed") {
@@ -1900,6 +1912,8 @@ async fn forge_read(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall) -> Ou
         Ok(None) => return Outcome::Failed(format!("the workspace {name} is gone")),
         Err(error) => return Outcome::Failed(error.to_string()),
     };
+    let (workspace, heads) = workspaces::follow(daemon, workspace).await;
+    let mut branches = workspaces::branches(&workspace, &heads);
     let project = projects::load_project(daemon, &place.project).ok();
     let obsolete = project.as_ref().is_some_and(|p| {
         p.obsolete
@@ -1916,12 +1930,14 @@ async fn forge_read(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall) -> Ou
                 names.join(", ")
             ));
         }
-        repositories.retain(|r| &r.path == asked);
+        let at = repositories.iter().position(|r| &r.path == asked).unwrap();
+        repositories = vec![repositories.remove(at)];
+        branches = vec![branches.remove(at)];
     }
     // A round of the project running stores a read of its own; none starts during this one,
     // whose logs and runs are read after it.
     let held = crate::items::held_now(daemon, &place.project);
-    let mut read = read(&repositories, &workspace.branch, obsolete).await;
+    let mut read = read(&repositories, &branches, obsolete).await;
     if held.is_some() {
         for repository in &read.repositories {
             if let (Some(forge), Some(pull)) = (&repository.forge, &repository.pull) {
@@ -2005,6 +2021,7 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
         Ok(None) => return Outcome::Failed(format!("the workspace {name} is gone")),
         Err(error) => return Outcome::Failed(error.to_string()),
     };
+    let (workspace, heads) = workspaces::follow(daemon, workspace).await;
     // The project's reviewers and declared forges, as its file says them now.
     let project = match projects::load_project(daemon, &place.project) {
         Ok(project) => project,
@@ -2014,8 +2031,9 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
     let found = repositories
         .iter()
         .zip(&workspace.repositories)
-        .find(|(checkout, _)| checkout.path == asked_repository);
-    let Some((checkout, repository)) = found else {
+        .zip(&heads)
+        .find(|((checkout, _), _)| checkout.path == asked_repository);
+    let Some(((checkout, repository), head)) = found else {
         let names: Vec<&str> = repositories.iter().map(|r| r.path.as_str()).collect();
         return Outcome::Refused(format!(
             "refused: {asked_repository} is not a repository of the workspace {name}: it has \
@@ -2023,6 +2041,12 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
             names.join(", ")
         ));
     };
+    if let (Head::Detached(hash), "create") = (head, asked.action.as_str()) {
+        return Outcome::Refused(format!(
+            "refused: {asked_repository} is on no branch (detached at {hash}): switch to a \
+             branch first"
+        ));
+    }
     if let Err(refusal) = remote_kept(&checkout.folder, &repository.base).await {
         return Outcome::Refused(refusal);
     }
@@ -2036,7 +2060,7 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
         }
         Err(Some(why)) => return Outcome::Refused(why),
     };
-    let branch = workspace.branch.as_str();
+    let branch = head.branch_or(&workspace.branch);
     let reviewers = project.pull_requests.reviewers;
     if matches!(forge, Forge::Bitbucket { .. }) {
         let base = &repository.base.branch;
@@ -2278,7 +2302,7 @@ fn read_text(workspace: &Workspace, read: &Read, full: bool, asked: Option<&str>
         let Some(pull) = &repository.pull else {
             text.push_str(&format!(
                 "\n{named}: no pull request for {}.\n",
-                workspace.branch
+                repository.branch
             ));
             continue;
         };

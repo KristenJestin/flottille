@@ -2448,3 +2448,187 @@ fn a_dependency_on_itself_or_on_a_repository_the_project_lacks_is_refused() {
     assert_eq!(code, "refused");
     assert!(message.contains("unknown repository \"docs\""), "{message}");
 }
+
+/// Gives `web` a local branch `feature/x` holding a commit of its own, off its `develop`, and
+/// leaves its main checkout on `main`. The commit's short hash.
+fn local_feature(fixture: &Fixture) -> String {
+    let web = fixture.folder.join("web");
+    fixture
+        .user
+        .git(&web, &["checkout", "--quiet", "-b", "feature/x", "develop"]);
+    std::fs::write(web.join("feature.ts"), "export {}\n").unwrap();
+    fixture.user.git(&web, &["add", "."]);
+    fixture
+        .user
+        .git(&web, &["commit", "--quiet", "-m", "the feature"]);
+    fixture.user.git(&web, &["checkout", "--quiet", "main"]);
+    fixture.git(&web, &["rev-parse", "--short", "feature/x"])
+}
+
+#[test]
+fn a_workspace_starts_on_an_existing_local_branch() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    let commit = local_feature(&fixture);
+
+    fixture.create(json!({"branch": "feature/x"})).unwrap();
+
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    let web = fixture.workspace("login").join("web");
+    assert_eq!(
+        fixture.git(&web, &["symbolic-ref", "--short", "HEAD"]),
+        "feature/x"
+    );
+    assert_eq!(fixture.git(&web, &["rev-parse", "--short", "HEAD"]), commit);
+    // The other repositories, which never had it, start it from their base.
+    let lib = fixture.workspace("login").join("lib");
+    assert_eq!(
+        fixture.git(&lib, &["symbolic-ref", "--short", "HEAD"]),
+        "feature/x"
+    );
+    let shown = fixture.show("login").unwrap();
+    assert_eq!(shown["branch"], "feature/x");
+    assert_eq!(shown["repositories"][0]["branch"], "feature/x");
+    // The base is what it is compared against, not where it started.
+    assert_eq!(shown["repositories"][0]["ahead"], 1);
+}
+
+#[test]
+fn a_workspace_starts_on_a_branch_only_the_remote_has() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    let commit = local_feature(&fixture);
+    let web = fixture.folder.join("web");
+    fixture
+        .user
+        .git(&web, &["push", "--quiet", "origin", "feature/x"]);
+    fixture
+        .user
+        .git(&web, &["branch", "--quiet", "-D", "feature/x"]);
+    fixture
+        .user
+        .git(&web, &["update-ref", "-d", "refs/remotes/origin/feature/x"]);
+
+    fixture.create(json!({"branch": "feature/x"})).unwrap();
+
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    let worktree = fixture.workspace("login").join("web");
+    assert_eq!(
+        fixture.git(&worktree, &["symbolic-ref", "--short", "HEAD"]),
+        "feature/x"
+    );
+    assert_eq!(
+        fixture.git(&worktree, &["rev-parse", "--short", "HEAD"]),
+        commit
+    );
+    assert_eq!(
+        fixture.git(&worktree, &["rev-parse", "--abbrev-ref", "@{upstream}"]),
+        "origin/feature/x"
+    );
+}
+
+#[test]
+fn a_branch_checked_out_elsewhere_is_refused_naming_the_worktree() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    local_feature(&fixture);
+    let elsewhere = fixture.user.path("work/elsewhere");
+    fixture.user.git(
+        &fixture.folder.join("web"),
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            elsewhere.to_str().unwrap(),
+            "feature/x",
+        ],
+    );
+
+    let (code, message) = fixture.create(json!({"branch": "feature/x"})).unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert!(
+        message.contains(&format!(
+            "the branch feature/x is checked out in {} for web",
+            elsewhere.display()
+        )),
+        "{message}"
+    );
+    assert!(!fixture.workspace("login").exists());
+    assert_eq!(fixture.show("login").unwrap_err().0, "not-found");
+}
+
+#[test]
+fn a_switch_in_a_workspace_moves_its_recorded_branch_and_the_window_shows_it() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    fixture.create(json!({})).unwrap();
+    fixture.settled("login");
+    for repository in ["web", "api", "lib"] {
+        let worktree = fixture.workspace("login").join(repository);
+        fixture
+            .user
+            .git(&worktree, &["switch", "--quiet", "-c", "feature/y"]);
+    }
+
+    let shown = fixture.show("login").unwrap();
+
+    assert_eq!(shown["branch"], "feature/y");
+    let listed = fixture
+        .user
+        .call("workspace.list", json!({"project": "app"}))
+        .unwrap();
+    assert!(
+        listed.to_string().contains("\"branch\":\"feature/y\""),
+        "{listed}"
+    );
+    // The window's lines of the workspace say the branch git is on.
+    let lines = flottille_window::actions::RepositoryStatus::of_workspace(&shown);
+    assert!(
+        lines
+            .iter()
+            .all(|line| line.line().starts_with("feature/y ·")),
+        "{lines:?}"
+    );
+    // Said once: a second read finds nothing to follow.
+    fixture.show("login").unwrap();
+    let changed: Vec<Value> = fixture
+        .user
+        .watch(&["--after", "0"])
+        .within(Duration::from_millis(500))
+        .into_iter()
+        .filter(|event| event["name"] == "workspace.changed")
+        .collect();
+    assert_eq!(changed.len(), 1, "{changed:?}");
+    assert_eq!(changed[0]["data"]["workspace"], "login");
+    assert_eq!(changed[0]["data"]["branch"], "feature/y");
+    assert_eq!(changed[0]["data"]["was"], "app/login");
+}
+
+#[test]
+fn removal_checks_the_branch_the_worktree_is_on() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    fixture.create(json!({})).unwrap();
+    fixture.settled("login");
+    let lib = fixture.workspace("login").join("lib");
+    fixture
+        .user
+        .git(&lib, &["switch", "--quiet", "-c", "feature/w"]);
+    std::fs::write(lib.join("feature.rs"), "fn f() {}\n").unwrap();
+    fixture.user.git(&lib, &["add", "."]);
+    fixture
+        .user
+        .git(&lib, &["commit", "--quiet", "-m", "add the feature"]);
+    let commit = fixture.git(&lib, &["rev-parse", "--short", "HEAD"]);
+
+    let (code, message) = fixture.remove("login").unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert!(
+        message.contains(&format!(
+            "lib has commits on no remote, on its branch feature/w: {commit} add the feature"
+        )),
+        "{message}"
+    );
+}

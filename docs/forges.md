@@ -1,7 +1,9 @@
 # Forges
 
 What the forge of each repository of a workspace says of the workspace's branch: its pull request
-and the pull request's checks. The first step of the milestone "Forges and tickets"
+and the pull request's checks. A repository's branch is the one its worktree is on now, not the
+one recorded at creation ([`workspaces.md`](workspaces.md), "The branch"): what is read, opened,
+merged and checked follows a `git switch`. The first step of the milestone "Forges and tickets"
 (`docs/design.md` §13). **Reading**, and the writes an agent makes with `forge`, each a call to
 judge at the gate ([`commands.md`](commands.md)).
 

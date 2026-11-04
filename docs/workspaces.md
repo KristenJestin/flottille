@@ -1,7 +1,7 @@
 # Workspaces
 
 A workspace is the place one piece of work happens: one git worktree per repository it takes, all
-on one branch, in one folder, prepared in the background by the project's setup
+on one branch (the one git says: "The branch"), in one folder, prepared in the background by the project's setup
 (`docs/projects.md`) and removed only when nothing in it would be lost. It follows
 `docs/reference/hemera.md` §6, with the additions of `docs/design.md` §6.2 that the
 multi-repository case (`docs/reference/multi-repo-case.md`) needs.
@@ -32,9 +32,32 @@ repository has a plain folder there.
 
 The name is 1 to 64 letters, digits, dots, dashes or underscores, starting with a letter or a
 digit. The branch is `<branch prefix>/<name>` unless `--branch` gives one; `git check-ref-format
---branch` must accept it as it is. Creation is refused when
-the project has a workspace of that name, when the folder exists, or when the branch exists in one
-of the repositories.
+--branch` must accept it as it is. Creation is refused when the project has a workspace of that
+name, when the folder exists, or when the branch is checked out in a checkout of one of the
+repositories, the main one or another worktree (`the branch feature/x is checked out in <folder>
+for web: …`, naming it).
+
+**To resume a branch, name it.** A branch that already exists in a repository is checked out in
+its worktree instead of being started: the repository's own (`git worktree add <folder> <branch>`),
+or, when only its remote has it (`git ls-remote --heads`, then fetched into its tracking ref; as
+last fetched when offline or when the remote cannot be listed), a local branch tracking the
+remote's (`git worktree add --track -b <branch> <folder> <remote>/<branch>`). The other
+repositories start it from their base. The base of a repository that resumed its branch is only
+what the branch is compared against (commits ahead, the pull request's target), never where it
+starts.
+
+## The branch
+
+The branch of a repository is the one its worktree is on now (`git symbolic-ref --short HEAD`),
+not the one recorded when the workspace was made: an agent or the user may `git switch` in it.
+Every place that uses it reads it there: `workspace.show`, the pull requests read and written
+(`docs/forges.md`), and the removal's checks. When every worktree made is on one branch other than
+the recorded one, the record takes it and `workspace.changed` says so (`docs/events.md`), so the
+window and `workspace list` show it; repositories on different branches leave the record as it
+is, and each is read and written for its own. To work on another branch in a workspace, switch
+with git: the workspace follows. A repository on no branch (a detached HEAD) is read for the
+recorded branch, and `forge` `create` refuses it (`refused: <repository> is on no branch (detached
+at <hash>): switch to a branch first`).
 
 ## The repositories it takes
 
@@ -45,7 +68,7 @@ of all.
 The window's New workspace form offers the same: a row per repository of the project, taken or
 not (the default set taken, at least one stays taken), with the base branch it starts from (its
 rule when the field is left empty, which the field says; `--base`), a branch field (`<branch
-prefix>/<name>` when empty), the offline switch (`--offline`), and the optional ticket, previewed
+prefix>/<name>` when empty; "To resume a branch, name it."), the offline switch (`--offline`), and the optional ticket, previewed
 as it is typed (`docs/tickets.md`). The agent's `workspace create` takes `repositories` the same
 way, each repository on its rule.
 
@@ -97,7 +120,7 @@ URL; JWTs and the tokens of the usual forges, registries and providers). A works
 
 | Step | |
 |---|---|
-| `worktree` | `git worktree prune`, then `git worktree add -b <branch> <folder> <base commit>`, or `git worktree add <folder> <branch>` when an earlier attempt made the branch. Done at once when the worktree is there. |
+| `worktree` | `git worktree prune`, then `git worktree add -b <branch> <folder> <base commit>`, or `git worktree add <folder> <branch>` when the branch exists (resumed, or made by an earlier attempt), or `git worktree add --track -b <branch> <folder> <remote>/<branch>` when only the remote had it. Done at once when the worktree is there. |
 | `copy` | Copies what the globs match in the main checkout's repository, a folder with what it holds, never over anything already there (`create_new`). A glob matching nothing copies nothing. |
 | `link` | A symbolic link to the main checkout's entry, unless something is there already. A missing entry fails the step. |
 | `root_entries` | A link to each top-level entry of the project folder that is neither a repository nor holds one, nor `.git` nor `.gitignore` (linking those makes git see the workspace folder as the root repository's checkout with every file deleted), nor holds the workspace, nor is there already. |
@@ -175,10 +198,12 @@ Refused while the workspace is being prepared. Then nothing is touched unless:
   is not committed`); the links Flottille made and the worktrees standing inside the root one are
   not work;
 - in each worktree made, `git log HEAD --not --remotes` shows no commit (`<repository> has commits
-  on no remote, on its branch <branch>: <hash> <subject>, …`); in a repository with no remote at
+  on no remote, on its branch <branch>: <hash> <subject>, …`, the branch it is on now, or `on no
+  branch (detached at <hash>)`); in a repository with no remote at
   all, no commit is on no other branch (`git log HEAD --not --exclude=<branch> --branches`:
   `<repository> has commits on no other branch, on its branch <branch>: …`), since its work stays
-  on its own branches. Commits on no remote are no loss when the repository's forge says the
+  on its own branches. When the worktree is on another branch than the recorded one and the
+  recorded one is still a local branch, it is checked the same way; Commits on no remote are no loss when the repository's forge says the
   branch's pull request is merged and every one of them is in the commit it merged (its head, as
   the forge gives it: GitHub's `headRefOid`, Bitbucket's source commit): a squash-merged branch
   whose remote branch the forge deleted and a fetch pruned. A commit made after, a pull request
