@@ -663,6 +663,9 @@ its id.
 | `exit_code` | Its exit code, `null` when it did not exit by itself or a signal ended it. |
 | `signal` | The signal that ended it, `null` otherwise. |
 
+A restart (`run.restart`) is a `run.ended` with state `stopped` for the first run, if it ran, then a
+`run.started` for the new one, of the same `agent`, `project` and `name`.
+
 #### `run.dismissed`
 
 The user dismissed a command that ended (`run.dismiss`): it is no longer listed.

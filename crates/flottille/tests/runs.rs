@@ -450,3 +450,139 @@ fn the_runs_of_a_session_are_pruned_when_it_is_forgotten_for_good() {
         assert_eq!(gone.0, "not-found", "{gone:?}");
     }
 }
+
+// Restarting a command (`run.restart`).
+
+/// The run an answer of `run.restart` names.
+fn restarted(user: &User, run: &str) -> Value {
+    user.call("run.restart", json!({"run": run})).unwrap()["run"].clone()
+}
+
+#[test]
+fn restart_runs_the_same_line_in_the_same_place() {
+    let user = User::with_fake_agent().with_fake_escalation();
+    let (agent, mcp, workspace) = session(&user);
+    let first = run_id(&ok(mcp.call("run", json!({"task": "quick"}))));
+
+    let new = restarted(&user, &first);
+
+    let second = new["run"].as_str().unwrap();
+    assert_ne!(second, first);
+    assert_eq!(new["line"], "./quick.sh");
+    assert_eq!(new["name"], "quick", "a task restarts as the same task");
+    assert_eq!(new["project"], "app");
+    assert_eq!(new["agent"], agent);
+    assert_eq!(
+        PathBuf::from(new["folder"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        workspace.canonicalize().unwrap(),
+        "in the workspace it ran in"
+    );
+    eventually("its output", || {
+        user.call("run.output", json!({"run": second})).unwrap()["output"] == "quick"
+    });
+    assert!(user.escalations().is_empty());
+}
+
+#[test]
+fn restart_runs_a_task_the_user_ran_as_the_same_task_in_the_project_folder() {
+    use std::os::unix::fs::PermissionsExt;
+    let user = User::with_fake_agent().with_fake_escalation();
+    session(&user);
+    let script = user.path("work/app/quick.sh");
+    std::fs::write(&script, "#!/bin/sh\necho in the project\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let first = user
+        .call("task.run", json!({"project": "app", "name": "quick"}))
+        .unwrap()["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let new = restarted(&user, &first);
+
+    assert_ne!(new["run"], first.as_str());
+    assert_eq!(new["name"], "quick");
+    assert_eq!(new["agent"], Value::Null, "the user's run stays the user's");
+    assert_eq!(
+        PathBuf::from(new["folder"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        user.path("work/app").canonicalize().unwrap()
+    );
+    let second = new["run"].as_str().unwrap().to_owned();
+    eventually("its output", || {
+        user.call("run.output", json!({"run": second})).unwrap()["output"] == "in the project"
+    });
+    assert!(user.escalations().is_empty());
+}
+
+#[test]
+fn restart_stops_a_running_command_first() {
+    let user = User::with_fake_agent().with_fake_escalation();
+    let (_, mcp, workspace) = session(&user);
+    let first = start(&mcp, "server");
+    eventually("the child's pid", || workspace.join("child.pid").exists());
+    let child: u64 = std::fs::read_to_string(workspace.join("child.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    let new = restarted(&user, &first);
+
+    let before = user.call("run.output", json!({"run": first})).unwrap();
+    assert_eq!(before["state"], "stopped", "{before}");
+    assert_eq!(new["state"], "running");
+    eventually("the old group to be gone", || !alive(child));
+    user.call("run.stop", json!({"run": new["run"]})).unwrap();
+}
+
+#[test]
+fn an_agent_s_restarted_command_stays_the_agent_s_and_it_is_told() {
+    let user = User::with_fake_agent().with_fake_escalation();
+    let (agent, mcp, _) = session(&user);
+    let first = start(&mcp, "server");
+
+    let new = restarted(&user, &first);
+
+    let second = new["run"].as_str().unwrap().to_owned();
+    assert_eq!(new["agent"], agent, "it stays the agent's");
+    let prompt = prompted(&user, &["[flottille:command-ended]", &first, &second]);
+    assert!(prompt.contains("restarted by the user"), "{prompt}");
+    // The agent reads the new run like its own.
+    let status = ok(mcp.call("run_status", json!({"run": second})));
+    assert!(status.contains("is running"), "{status}");
+    // The new run's end wakes it as the first one's did.
+    user.call("run.stop", json!({"run": second})).unwrap();
+    prompted(
+        &user,
+        &["[flottille:command-ended]", &second, "stopped by the user"],
+    );
+}
+
+#[test]
+fn restart_of_a_stranger_is_not_found() {
+    let user = User::with_fake_agent().with_fake_escalation();
+    session(&user);
+
+    let missing = user
+        .call("run.restart", json!({"run": "nothing"}))
+        .unwrap_err();
+
+    assert_eq!(missing.0, "not-found", "{missing:?}");
+}
+
+#[test]
+fn the_command_line_restarts_a_run() {
+    let user = User::with_fake_agent().with_fake_escalation();
+    let (agent, mcp, _) = session(&user);
+    let first = run_id(&ok(mcp.call("run", json!({"task": "quick"}))));
+
+    let said = cli(&user, &["runs", "restart", &first]).unwrap();
+
+    let all = listed(&user, &agent);
+    let new = all.iter().find(|c| c["run"] != first.as_str()).unwrap();
+    assert!(said.contains(new["run"].as_str().unwrap()), "{said}");
+}

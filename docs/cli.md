@@ -796,6 +796,11 @@ Stop one with `flottille runs stop <run>`.
 Stops the command and everything it started, and tells the agent that started it, if one did,
 that you did (`run.stop`).
 
+### `flottille runs restart <run>`
+
+Stops the command if it runs and starts the same line again in the same place, as a new run that
+stays the agent's, if an agent started it; the agent is told (`run.restart`).
+
 ### `flottille approvals`
 
 The requests of your agents that wait for your answer: the call, its class, why the gate held it,

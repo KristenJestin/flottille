@@ -1091,6 +1091,20 @@ command running, what it wrote so far. `not-found` when there is no such run.
 agent that started it, if one did, is told the user stopped it (`command-ended`, `docs/tools.md`). A command that
 already ended is answered as it is. `not-found` when there is no such run.
 
+#### `run.restart`
+
+`{"run"}`. `{"run": {...}}`, the new run: stops the command if it runs (as `run.stop` does, and waits for
+its end), then starts the same line again in the same place (the same project, workspace and
+folder, the same task if it was one, with the environment of a command started the same way, no
+shell) and answers with the new run, which keeps who started the first: a command of an agent stays
+that agent's, and the agent reads it with `run_status` and is woken when it ends; a task the user
+ran stays the user's. The agent is told once (`command-ended`, `docs/tools.md`) that the user restarted
+it and what the new run's id is. It is the user's act, so the gate is not asked. A command that
+already ended is started again too. `not-found` when there is no such run; `refused` when its line
+cannot be started again (the task is gone, or the line holds a secret its stored form masks): the
+command is then left as it was. Emits `run.ended` for the first, if it ran, then `run.started`
+(`docs/events.md`).
+
 #### `run.dismiss`
 
 `{"run"}`. `{"run"}`: a command that ended is no longer listed with `ended`, and `run.dismissed` is
