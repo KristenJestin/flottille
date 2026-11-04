@@ -706,6 +706,22 @@ impl Snapshot {
             .filter(move |s| s.project == project && &s.place == place)
     }
 
+    /// The sessions of a project that have not ended, whatever their place: the one that moved
+    /// last first, then the newest.
+    pub fn live_sessions_of(&self, project: &str) -> Vec<&Session> {
+        let mut live: Vec<&Session> = self
+            .sessions
+            .iter()
+            .filter(|s| s.project == project && !s.ended)
+            .collect();
+        live.sort_by(|a, b| {
+            (b.active_at, b.created_at)
+                .cmp(&(a.active_at, a.created_at))
+                .then(a.id.cmp(&b.id))
+        });
+        live
+    }
+
     pub fn session(&self, id: &str) -> Option<&Session> {
         self.sessions.iter().find(|s| s.id == id)
     }
