@@ -131,15 +131,19 @@ pub struct Task {
     #[serde(default)]
     pub ask_before_running: bool,
     /// When a run of it is ready: until then it is starting. Without it, a run has no ready state.
+    /// Boxed, as `url`: a task is carried by value in the gate's answers, which stay small.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ready: Option<Ready>,
+    pub ready: Option<Box<Ready>>,
     /// Where a run of it answers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<TaskUrl>,
+    pub url: Option<Box<TaskUrl>>,
     /// Obsolete: who added it (a line the user allowed always). Read and not followed: the line
     /// is a plain task, and the daemon's migration drops the key.
+    ///
+    /// Boxed: with `toml`'s `preserve_order`, a `Value` is large enough to make every `Task` too
+    /// big to travel in an `Err`.
     #[serde(default, skip_serializing)]
-    pub added_by: Option<toml::Value>,
+    pub added_by: Option<Box<toml::Value>>,
 }
 
 /// When a run of a task is ready (`docs/projects.md`, "Tasks"); each is a template, `{url}`
@@ -204,10 +208,10 @@ impl Task {
     /// The lines besides its own that a run of it runs: its ready's and its address's commands.
     pub fn other_lines(&self) -> Vec<&str> {
         self.ready
-            .as_ref()
+            .as_deref()
             .and_then(Ready::command)
             .into_iter()
-            .chain(self.url.as_ref().and_then(TaskUrl::command))
+            .chain(self.url.as_deref().and_then(TaskUrl::command))
             .collect()
     }
 }
@@ -894,7 +898,7 @@ pub fn check_task(name: &str, task: &Task, known: &dyn Fn(&str) -> bool) -> Resu
         let extra: &[&str] = if with_url { &["url"] } else { &[] };
         crate::variables::check_also(template, extra)
     };
-    match &task.ready {
+    match task.ready.as_deref() {
         Some(Ready::Line(text)) if text.trim().is_empty() => {
             return Err(".ready: the text must not be empty".into());
         }
@@ -909,7 +913,7 @@ pub fn check_task(name: &str, task: &Task, known: &dyn Fn(&str) -> bool) -> Resu
         }
         None => {}
     }
-    match &task.url {
+    match task.url.as_deref() {
         Some(TaskUrl::Address(template)) => address(template, false)
             .and_then(|()| names(template, false))
             .map_err(|why| format!(".url: {why}"))?,
@@ -1316,23 +1320,28 @@ mod tests {
         .unwrap();
 
         let web = &project.tasks["web"];
-        assert_eq!(web.ready, Some(Ready::Line("ready in".into())));
+        assert_eq!(web.ready.as_deref(), Some(&Ready::Line("ready in".into())));
         assert_eq!(
-            web.url,
-            Some(TaskUrl::Address("https://{workspace}.app.localhost".into()))
+            web.url.as_deref(),
+            Some(&TaskUrl::Address(
+                "https://{workspace}.app.localhost".into()
+            ))
         );
         let api = &project.tasks["api"];
-        assert_eq!(api.ready, Some(Ready::Url("{url}/health".into())));
         assert_eq!(
-            api.url,
-            Some(TaskUrl::Command {
+            api.ready.as_deref(),
+            Some(&Ready::Url("{url}/health".into()))
+        );
+        assert_eq!(
+            api.url.as_deref(),
+            Some(&TaskUrl::Command {
                 command: "portless get api".into()
             })
         );
         let db = &project.tasks["db"];
         assert_eq!(
-            db.ready,
-            Some(Ready::Command("db ping --host {workspace}".into()))
+            db.ready.as_deref(),
+            Some(&Ready::Command("db ping --host {workspace}".into()))
         );
         assert_eq!(db.url, None);
         assert_eq!(project.tasks["web"].clone(), *web);

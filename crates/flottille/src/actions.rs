@@ -62,9 +62,9 @@ struct TasksCall {
     ask_before_running: Option<bool>,
     /// Left out: unchanged; `null`: removed.
     #[serde(default, deserialize_with = "present")]
-    ready: Option<Option<Ready>>,
+    ready: Option<Option<Box<Ready>>>,
     #[serde(default, deserialize_with = "present")]
-    url: Option<Option<TaskUrl>>,
+    url: Option<Option<Box<TaskUrl>>>,
 }
 
 #[derive(Deserialize)]

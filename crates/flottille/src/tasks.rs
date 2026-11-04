@@ -43,9 +43,9 @@ struct Add {
     ask_before_running: bool,
     /// `null` or `""`: none.
     #[serde(default, deserialize_with = "present_or_empty")]
-    ready: Option<Option<Ready>>,
+    ready: Option<Option<Box<Ready>>>,
     #[serde(default, deserialize_with = "present_or_empty")]
-    url: Option<Option<TaskUrl>>,
+    url: Option<Option<Box<TaskUrl>>>,
 }
 
 #[derive(Deserialize)]
@@ -64,9 +64,9 @@ struct Edit {
     /// Left out: unchanged; `null` or `""` (what the window sends, which drops a `null`):
     /// removed.
     #[serde(default, deserialize_with = "present_or_empty")]
-    ready: Option<Option<Ready>>,
+    ready: Option<Option<Box<Ready>>>,
     #[serde(default, deserialize_with = "present_or_empty")]
-    url: Option<Option<TaskUrl>>,
+    url: Option<Option<Box<TaskUrl>>>,
 }
 
 /// A field given, `null` and `""` being none.
@@ -288,7 +288,7 @@ fn write(
         }
     }
     // Inline tables, as the user writes them: `ready = { line = "ready in" }`.
-    match &task.ready {
+    match task.ready.as_deref() {
         Some(ready) => {
             let (key, text) = match ready {
                 Ready::Line(text) => ("line", text),
@@ -301,7 +301,7 @@ fn write(
             entry.remove("ready");
         }
     }
-    match &task.url {
+    match task.url.as_deref() {
         Some(TaskUrl::Address(url)) => {
             entry.insert("url", toml_edit::value(url));
         }

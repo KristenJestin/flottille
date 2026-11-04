@@ -184,8 +184,8 @@ struct Request {
     /// Where it runs.
     folder: Resolved,
     /// When it is ready and where it answers, as its task says.
-    ready: Option<Ready>,
-    url: Option<TaskUrl>,
+    ready: Option<Box<Ready>>,
+    url: Option<Box<TaskUrl>>,
 }
 
 fn request(daemon: &Daemon, place: &Place, args: RunArguments) -> Result<Request, Outcome> {
@@ -377,8 +377,8 @@ pub async fn run(
     };
     let secret_values = place.secret_values();
     let (url, url_error, probe) = match readied(
-        ready.as_ref(),
-        url.as_ref(),
+        ready.as_deref(),
+        url.as_deref(),
         &names(place, &repository),
         &env,
         &folder.path,
@@ -471,8 +471,8 @@ pub async fn run_for_user(
     let env = environment(daemon, &place, repository, false)?;
     let secret_values = place.secret_values();
     let (url, url_error, probe) = readied(
-        task.ready.as_ref(),
-        task.url.as_ref(),
+        task.ready.as_deref(),
+        task.url.as_deref(),
         &names(&place, repository),
         &env,
         &folder.path,
@@ -1177,8 +1177,8 @@ pub async fn restart_by_user(
     let env = environment(daemon, &place, &repository, false)?;
     let secret_values = place.secret_values();
     let (url, url_error, probe) = readied(
-        ready.as_ref(),
-        url.as_ref(),
+        ready.as_deref(),
+        url.as_deref(),
         &names(&place, &repository),
         &env,
         &old.folder,
