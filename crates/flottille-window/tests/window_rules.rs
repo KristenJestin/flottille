@@ -237,3 +237,40 @@ fn every_markdown_of_the_window_is_drawn_in_the_palette() {
         found.join("\n")
     );
 }
+
+// ── A state mark is an icon, never a text character ────────────────────────────────────────────
+
+/// The lines that draw a state mark with a character (`✓ ✗ ● ■ ×`, or `–` alone in a string),
+/// which looks like ASCII next to the stroked icons: a mark is an `Icon` of `flottille-ui`.
+fn text_marks(source: &str) -> Vec<(usize, String)> {
+    code(source)
+        .filter(|(_, line)| line.chars().any(|c| "✓✗●■×".contains(c)) || line.contains("\"–\""))
+        .map(|(at, line)| (at, line.to_owned()))
+        .collect()
+}
+
+#[test]
+fn a_state_mark_drawn_with_a_character_is_found() {
+    for sample in [
+        "Ending::Exited(0) => (\"✓\", p.ok),",
+        "let mark = if ready { \"✓\" } else { \"✗\" };",
+        "Some(_) => (\"●\", p.run, \"checks pending\"),",
+        "Ending::Stopped => (\"■\", p.faint),",
+        "Ending::Interrupted => (\"–\", p.faint),",
+        ".child(\"×\")",
+    ] {
+        assert_eq!(text_marks(sample).len(), 1, "{sample}");
+    }
+    assert!(text_marks("// a comment about ✓ and ✗").is_empty());
+    assert!(text_marks(".child(icon(Icon::Check))").is_empty());
+}
+
+#[test]
+fn every_state_mark_of_the_window_is_an_icon() {
+    let found = offenders(text_marks);
+    assert!(
+        found.is_empty(),
+        "a state mark is an `Icon` drawn with `icon(..)`, not a text character:\n{}",
+        found.join("\n")
+    );
+}

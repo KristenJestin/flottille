@@ -8,10 +8,12 @@
 #   tools/version.sh base [--at <rev>]                    <tag> <commit> the versions count from
 # `--at` is the commit to compute for, HEAD by default. The last release is the highest stable
 # tag `vX.Y.Z`, wherever it is, and the versions count from its mark `released/vX.Y.Z`, the head
-# of dev it released (the tag's own commit when it has no mark). `feat` bumps the minor, `fix`
-# and `perf` the patch, `!` or a `BREAKING CHANGE:` footer the major (the minor before 1.0), and
-# nothing that bumps is the next patch: the stable version is the beta's without its
-# pre-release. N counts the commits since the mark.
+# of dev it released (the tag's own commit when it has no mark). `feat` bumps the minor from 1.0
+# on and the patch before it, `fix` and `perf` the patch, `!` or a `BREAKING CHANGE:` footer the
+# major (the minor before 1.0), and nothing that bumps is the next patch. A `Release-As: X.Y.Z`
+# footer in a commit of the line sets the next version when it is above the computed one, and is
+# refused (exit 1, naming the commit) when it is below or not X.Y.Z. The stable version is the
+# beta's without its pre-release. N counts the commits since the mark.
 set -euo pipefail
 
 channel=${1:-}
@@ -59,6 +61,8 @@ IFS=. read -r major minor patch <<<"${base#v}"
 major=${major:-0} minor=${minor:-0} patch=${patch:-0}
 
 BREAKING='^[a-z]+(\([a-z0-9-]+\))?!: '
+RELEASE_AS='^Release-As:[[:space:]]*(.*[^[:space:]])?[[:space:]]*$'
+SEMVER='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
 FOOTER=$'(^|\n)BREAKING[ -]CHANGE: '
 FEATURE='^feat(\([a-z0-9-]+\))?: '
 FIX='^(fix|perf)(\([a-z0-9-]+\))?: '
@@ -66,7 +70,10 @@ FIX='^(fix|perf)(\([a-z0-9-]+\))?: '
 # main's, not dev's (docs/releases.md).
 # 3 a breaking change, 2 a feature, 1 a fix, 0 nothing that bumps.
 bump=0
-while IFS= read -r -d '' message; do
+declare -a requested=() requested_by=()
+while IFS= read -r -d '' record; do
+  commit=${record%%$'\n'*}
+  message=${record#*$'\n'}
   subject=${message%%$'\n'*}
   level=0
   if [[ $subject =~ $BREAKING ]] || [[ $message =~ $FOOTER ]]; then
@@ -77,16 +84,38 @@ while IFS= read -r -d '' message; do
     level=1
   fi
   if [ "$level" -gt "$bump" ]; then bump=$level; fi
-done < <(git log -z --first-parent --no-merges --format=%B "$range")
+  while IFS= read -r line; do
+    if [[ $line =~ $RELEASE_AS ]]; then
+      requested+=("${BASH_REMATCH[1]}")
+      requested_by+=("$commit")
+    fi
+  done <<<"$message"
+done < <(git log -z --first-parent --no-merges --format=%H%n%B "$range")
 
-# Before 1.0, a breaking change bumps the minor.
-if [ "$bump" -eq 3 ] && [ "$major" -eq 0 ]; then bump=2; fi
+# Before 1.0, everything bumps one level less: a breaking change the minor, a feature the patch.
+if [ "$major" -eq 0 ] && [ "$bump" -gt 0 ]; then bump=$((bump - 1)); fi
 case "$bump" in
   3) major=$((major + 1)) minor=0 patch=0 ;;
   2) minor=$((minor + 1)) patch=0 ;;
   *) patch=$((patch + 1)) ;;
 esac
 next="$major.$minor.$patch"
+
+# The highest of the requested versions wins, each of them above (or as high as) the computed one.
+for i in "${!requested[@]}"; do
+  wanted=${requested[$i]}
+  if ! [[ $wanted =~ $SEMVER ]]; then
+    echo "version.sh: commit ${requested_by[$i]} says Release-As: '$wanted', which is not X.Y.Z" >&2
+    exit 1
+  fi
+  if [ "$(printf '%s\n%s\n' "$wanted" "$next" | sort -V | head -n 1)" != "$next" ]; then
+    echo "version.sh: commit ${requested_by[$i]} says Release-As: $wanted, below the computed $next" >&2
+    exit 1
+  fi
+done
+for wanted in "${requested[@]}"; do
+  if [ "$(printf '%s\n%s\n' "$wanted" "$next" | sort -V | tail -n 1)" = "$wanted" ]; then next=$wanted; fi
+done
 
 case "$channel" in
   stable) echo "$next" ;;
