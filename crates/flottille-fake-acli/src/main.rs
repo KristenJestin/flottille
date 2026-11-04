@@ -45,6 +45,12 @@
 //! A JQL that names `currentUser()` is answered with the script's `mine_search`, none without:
 //! the work items of the signed-in user.
 //!
+//! `acli jira project view --key P --json` prints `{"key": P, "issueTypes": [{"name": …, "subtask":
+//! …}]}` (assumed, as Jira's REST project is: the page of the command gives no output), from the
+//! script's `types` (`{"ABC": ["Task", "Bug", {"name": "Sub-task", "subtask": true}]}`); a project
+//! with none ends with 1. With a `types` for the project, a `workitem create --type T` of a type
+//! it does not hold ends with 1, as Jira refuses it.
+//!
 //! The writes change nothing but the status a transition moves and the comments a `comment
 //! create` adds: the test reads them in the record.
 //!
@@ -192,10 +198,35 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
             let Some(project) = value(rest, "--project") else {
                 return not_run(&words);
             };
+            if let (Some(kind), Some(types)) = (value(rest, "--type"), types_of(script, project))
+                && !types.iter().any(|t| t.0.eq_ignore_ascii_case(kind))
+            {
+                eprintln!(
+                    "✗ Error: the work item type {kind:?} is not valid for project {project}"
+                );
+                return 1;
+            }
             let key = script["created"]
                 .as_str()
                 .map_or_else(|| format!("{project}-1"), str::to_owned);
             println!("{}", json!({"key": key}));
+            0
+        }
+        ["jira", "project", "view", rest @ ..] if rest.contains(&"--json") => {
+            let Some(project) = value(rest, "--key") else {
+                return not_run(&words);
+            };
+            let Some(types) = types_of(script, project) else {
+                eprintln!(
+                    "✗ Error: project {project} does not exist or you do not have permission to see it"
+                );
+                return 1;
+            };
+            let types: Vec<Value> = types
+                .into_iter()
+                .map(|(name, subtask)| json!({"name": name, "subtask": subtask}))
+                .collect();
+            println!("{}", json!({"key": project, "issueTypes": types}));
             0
         }
         ["jira", "workitem", "comment", "create", rest @ ..] if rest.contains(&"--body") => {
@@ -240,6 +271,21 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
         }
         _ => not_run(&words),
     }
+}
+
+/// The work item types the script gives `project`: each one's name and whether it is a sub-task;
+/// none when the script says nothing of the project.
+fn types_of(script: &Value, project: &str) -> Option<Vec<(String, bool)>> {
+    let types = script["types"][project].as_array()?;
+    Some(
+        types
+            .iter()
+            .filter_map(|kind| match kind.as_str() {
+                Some(name) => Some((name.to_owned(), false)),
+                None => Some((kind["name"].as_str()?.to_owned(), kind["subtask"] == true)),
+            })
+            .collect(),
+    )
 }
 
 /// Where the transitions that took left the work items: `moved.json`, written by the fake.
