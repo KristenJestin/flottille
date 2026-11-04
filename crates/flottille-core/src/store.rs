@@ -928,7 +928,9 @@ impl Store {
 
     /// Forgets a workspace and moves the agent that worked in it to the project's `folder`
     /// (`main`), its instructions now saying so, with their events, in one transaction: the agent
-    /// is never left in a workspace that is gone.
+    /// is never left in a workspace that is gone. The pending requests the agent made are
+    /// cancelled in it (`why`): they were asked in the workspace, and would otherwise be performed
+    /// in `main`. The events, then the requests cancelled.
     pub fn remove_workspace_moving(
         &mut self,
         workspace: i64,
@@ -936,7 +938,8 @@ impl Store {
         folder: &Path,
         instructions: &str,
         events: [(&str, Value); 2],
-    ) -> Result<Vec<Event>> {
+        why: &str,
+    ) -> Result<(Vec<Event>, Vec<Request>)> {
         let transaction = self.connection.transaction()?;
         transaction.execute("DELETE FROM workspaces WHERE id = ?1", params![workspace])?;
         transaction.execute(
@@ -948,8 +951,30 @@ impl Store {
         for (name, data) in events {
             written.push(append_event(&transaction, name, data)?);
         }
+        let pending: Vec<Request> = {
+            let mut statement = transaction.prepare_cached(&format!(
+                "SELECT {REQUEST_COLUMNS} FROM approval_requests \
+                 WHERE agent = ?1 AND state = 'pending' ORDER BY number"
+            ))?;
+            let rows = statement.query_map(params![agent], request_row)?;
+            rows.map(|row| row?).collect::<Result<_>>()?
+        };
+        for request in &pending {
+            transaction.execute(
+                "UPDATE approval_requests SET state = 'cancelled', decided_at = ?2 \
+                 WHERE number = ?1",
+                params![request.number, now_ms()],
+            )?;
+            written.push(append_agent_event(
+                &transaction,
+                agent,
+                "approval.cancelled",
+                json!({"number": request.number, "agent": agent, "held_by": request.held_by,
+                    "why": why}),
+            )?);
+        }
         transaction.commit()?;
-        Ok(written)
+        Ok((written, pending))
     }
 
     /// Writes a new agent with its event, in one transaction.

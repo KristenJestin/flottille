@@ -669,6 +669,134 @@ fn a_child_still_removes_no_workspace() {
     assert!(folder.exists());
 }
 
+/// The agent's delivery answering request `number`, once there is one.
+fn answer_of(user: &User, number: u64) -> Delivery {
+    let id = format!("approval-{number}");
+    eventually("the answer", || {
+        store(user).delivery(&id).unwrap().is_some()
+    });
+    store(user).delivery(&id).unwrap().unwrap()
+}
+
+/// The request `number` as the store holds it, whatever its state.
+fn stored_request(user: &User, number: u64) -> flottille_core::approval::Request {
+    store(user).request(number).unwrap().unwrap()
+}
+
+#[test]
+fn a_request_held_before_the_move_is_not_run_in_main() {
+    let user = user();
+    let main = project(&user);
+    login(&user);
+    let (_, mcp) = root_in_login(&user);
+    // Work of main's own, not committed: a reset run there would discard it.
+    std::fs::write(main.join("flaky.sh"), "changed in main\n").unwrap();
+    let reset = held(mcp.call("run", json!({"line": "git reset --hard"})));
+    let removal = held(mcp.call("workspace", json!({"action": "remove"})));
+
+    let body = answer(&user, "approve", removal).body;
+    assert!(body.contains("has now done it"), "{body}");
+
+    // Never performed after the move: answered to the agent, and the user has nothing to allow.
+    let body = answer_of(&user, reset).body;
+    assert!(
+        body.contains(
+            "not run: you moved from the workspace login to the project's folder (main); ask \
+             again if it is still needed"
+        ),
+        "{body}"
+    );
+    assert_eq!(
+        stored_request(&user, reset).state,
+        flottille_core::approval::RequestState::Cancelled
+    );
+    let output = user.run(&["approve", &reset.to_string()]);
+    assert!(!output.status.success(), "allowed after the move");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        std::fs::read_to_string(main.join("flaky.sh")).unwrap(),
+        "changed in main\n"
+    );
+    assert!(
+        store(&user)
+            .events_after(0, 100_000)
+            .unwrap()
+            .iter()
+            .any(|e| e.name == "approval.cancelled" && e.data["number"] == reset),
+        "no approval.cancelled for the window"
+    );
+}
+
+#[test]
+fn a_held_write_with_a_relative_path_is_not_run_after_the_move() {
+    let user = user();
+    let main = project(&user);
+    let folder = login(&user);
+    let (_, mcp) = root_in_login(&user);
+    let write = held(mcp.call("fs_write", json!({"path": "../y", "content": "y"})));
+    let removal = held(mcp.call("workspace", json!({"action": "remove"})));
+
+    answer(&user, "approve", removal);
+
+    let body = answer_of(&user, write).body;
+    assert!(body.contains("not run: you moved"), "{body}");
+    let output = user.run(&["approve", &write.to_string()]);
+    assert!(!output.status.success(), "allowed after the move");
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        !main.parent().unwrap().join("y").exists(),
+        "written by main"
+    );
+    assert!(!folder.parent().unwrap().join("y").exists());
+}
+
+#[test]
+fn a_run_started_while_the_workspace_is_removed_is_refused() {
+    let user = user();
+    let main = project(&user);
+    // A command that does not stop at once: the removal waits for it, and meanwhile the
+    // session tries to start another.
+    let stubborn = main.join("stubborn.sh");
+    std::fs::write(
+        &stubborn,
+        "#!/bin/sh\ntrap '' TERM\nwhile true; do sleep 0.1; done\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        &stubborn,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    user.git(&main, &["add", "stubborn.sh"]);
+    user.git(&main, &["commit", "--quiet", "-m", "stubborn"]);
+    // A workspace starts from the remote's branch.
+    user.git(&main, &["push", "--quiet", "origin", "main"]);
+    let folder = login(&user);
+    let (_, mcp) = root_in_login(&user);
+    let number = held(mcp.call("run", json!({"line": "./stubborn.sh", "timeout": 1})));
+    answer(&user, "approve", number);
+    let removal = held(mcp.call("workspace", json!({"action": "remove"})));
+
+    let output = user.run(&["approve", &removal.to_string()]);
+    assert!(output.status.success());
+    // The removal stops it first, which takes its whole grace (5 s).
+    std::thread::sleep(Duration::from_secs(1));
+
+    let text = refused(mcp.call("run", json!({"line": "true"})));
+    assert!(
+        text.contains("the workspace login is being removed"),
+        "{text}"
+    );
+    let text = refused(mcp.call("fs_write", json!({"path": "x", "content": "x"})));
+    assert!(
+        text.contains("the workspace login is being removed"),
+        "{text}"
+    );
+    let body = answer_of(&user, removal).body;
+    assert!(body.contains("has now done it"), "{body}");
+    assert!(!folder.exists(), "recreated by a write");
+}
+
 #[test]
 fn a_command_ending_before_the_answer_does_not_refuse_the_removal() {
     let user = user();
@@ -693,4 +821,15 @@ fn a_command_ending_before_the_answer_does_not_refuse_the_removal() {
     let body = answer(&user, "approve", removal).body;
     assert!(body.contains("has now done it"), "{body}");
     assert!(!folder.exists());
+}
+
+#[test]
+fn the_own_workspace_removal_is_held_in_ask_and_auto() {
+    for user in [user(), judged_user()] {
+        project(&user);
+        let folder = login(&user);
+        let (_, mcp) = root_in_login(&user);
+        held(mcp.call("workspace", json!({"action": "remove"})));
+        assert!(folder.exists(), "removed without the user");
+    }
 }

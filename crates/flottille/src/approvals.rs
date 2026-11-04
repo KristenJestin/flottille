@@ -264,6 +264,9 @@ async fn performed(
     if agent.state.is_final() {
         return not_executed("the agent that asked has ended.".into());
     }
+    if let Some(why) = crate::workspaces::being_removed(daemon, &agent.id, tool) {
+        return not_executed(format!("{why}."));
+    }
     let grant = match mcp::grant_of(daemon, &agent) {
         Ok(grant) => Arc::new(grant),
         Err(why) => return not_executed(format!("{why}.")),

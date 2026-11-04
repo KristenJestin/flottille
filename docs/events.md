@@ -462,15 +462,16 @@ The agent that held the request passed it up, with one sentence of why.
 
 #### `approval.cancelled`
 
-The request was never answered: the agent that asked, or the one that held it, ended. It is no
-longer pending, so the user never sees it.
+The request was never answered: the agent that asked, or the one that held it, ended, or the
+agent that asked removed its own workspace and works in `main` now (written with
+`agent.moved`). It is no longer pending, so the user never sees it.
 
 | Field | |
 |---|---|
 | `number` | |
 | `agent` | The agent that asked. |
 | `held_by` | Who held it: `user`, or an agent's id. |
-| `why` | Which agent ended, and how. |
+| `why` | Which agent ended, and how; or which agent moved, from which workspace. |
 
 #### `approval.decided`
 

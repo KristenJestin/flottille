@@ -259,12 +259,24 @@ the user allows it, in this order:
    it, of the tree or not, or a command run of another tree runs there; it is being prepared;
 2. the tree's command runs in it are stopped, as `run.stop` stops one;
 3. the checks and the removal above: refused while something would be lost, unless the answer
-   said to discard it;
+   said to discard it; the use of 1 is checked again once these checks are done, before
+   anything is touched;
 4. in the one store write that forgets the workspace, the agent's place becomes the project's
    folder (`main`), its instructions saying so for its next process, with `workspace.removed`
-   and `agent.moved` (`docs/events.md`); then its running session's grant works in `main`;
+   and `agent.moved` (`docs/events.md`); its running session's grant works in `main` at once;
+   the requests it made that still wait for an answer are cancelled in that write
+   (`approval.cancelled`: their cards leave the window), since they were asked in the workspace
+   and would otherwise be done in `main`, and each is answered to the agent: `Request #12 (run)
+   was not run: you moved from the workspace login to the project's folder (main); ask again if
+   it is still needed.`;
 5. the answer tells the agent: `The workspace login is removed; you now work in the project's
    folder (main), <folder>`.
+
+From 1 to its end, the session starts nothing in the workspace: its `run`, `agent_launch`,
+`fs_write` and `fs_edit` are refused (`refused: the workspace login is being removed: wait for the
+removal's answer`), and a request of these the user allows meanwhile is not executed. The user's
+answer holds to what the card said would be lost, not to the commands it named: one that ended,
+or started, between the card and the answer loses nothing, and is no reason to ask again.
 
 A refusal at 1 or 3 leaves the session in its workspace (its commands stopped at 2 stay stopped).
 A removal that fails halfway (a worktree git cannot remove) keeps the workspace's record, and the

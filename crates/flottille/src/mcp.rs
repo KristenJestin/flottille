@@ -1800,6 +1800,8 @@ async fn played(
         .is_some_and(|agent| agent.epoch != grant.epoch);
     let outcome = if replaced {
         Outcome::Refused(REPLACED.into())
+    } else if let Some(why) = crate::workspaces::being_removed(daemon, &grant.agent, tool) {
+        Outcome::Refused(format!("refused: {why}"))
     } else if grant.tools.contains(&tool) {
         // A write of the project shows what it changes; one that cannot be done is refused
         // before the user is asked anything.
