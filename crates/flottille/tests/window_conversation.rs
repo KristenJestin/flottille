@@ -1887,3 +1887,99 @@ fn wheel_up(agent: &str, cx: &mut VisualTestContext) {
         ..Default::default()
     });
 }
+
+fn offset(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> f32 {
+    page.read_with(cx, |page, cx| {
+        f32::from(page.conversation().read(cx).scroll_offset())
+    })
+}
+
+/// The lead's long answer, scrolled up.
+fn scrolled_up<'a>(
+    user: &User,
+    cx: &'a mut TestAppContext,
+) -> (String, Entity<SessionPage>, &'a mut VisualTestContext) {
+    let lead = lead(user);
+    worked(user, &lead, "say a lot");
+    let (shell, page, cx) = open_session(user, &lead, cx);
+    until(&shell, cx, "the long answer is read", |cx| {
+        row_of(
+            &page,
+            cx,
+            |b| matches!(b, Block::Text { text } if text.ends_with("Thirty.")),
+        )
+        .is_some()
+    });
+    settle(cx);
+    scroll_up(&lead, cx);
+    (lead, page, cx)
+}
+
+fn frame(cx: &mut VisualTestContext) {
+    cx.executor().advance_clock(Duration::from_millis(16));
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn the_scroll_to_the_end_eases_over_frames(cx: &mut TestAppContext) {
+    let user = user();
+    let (_lead, page, cx) = scrolled_up(&user, cx);
+    let from = offset(&page, cx);
+    cx.update(|window, cx| window.click("conversation-to-end", cx));
+    for _ in 0..5 {
+        frame(cx);
+    }
+    let midway = offset(&page, cx);
+    assert!(!following(&page, cx), "still on its way");
+    at_rest(cx);
+    let to = offset(&page, cx);
+    assert!(from < midway && midway < to, "{from} < {midway} < {to}");
+    assert!(following(&page, cx));
+}
+
+#[gpui_kit::test]
+fn a_wheel_scroll_stops_the_scroll_to_the_end(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, page, cx) = scrolled_up(&user, cx);
+    cx.update(|window, cx| window.click("conversation-to-end", cx));
+    frame(cx);
+    frame(cx);
+    wheel_up(&lead, cx);
+    let stopped = offset(&page, cx);
+    at_rest(cx);
+    assert_eq!(
+        offset(&page, cx),
+        stopped,
+        "it stays where the user scrolled"
+    );
+    assert!(!following(&page, cx));
+    assert!(has("conversation-to-end", cx), "the button is back");
+}
+
+#[gpui_kit::test]
+fn the_button_to_the_end_rises_into_place(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    worked(&user, &lead, "say a lot");
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    until(&shell, cx, "the long answer is read", |cx| {
+        row_of(
+            &page,
+            cx,
+            |b| matches!(b, Block::Text { text } if text.ends_with("Thirty.")),
+        )
+        .is_some()
+    });
+    settle(cx);
+    wheel_up(&lead, cx);
+    cx.run_until_parked();
+    frame(cx);
+    let arriving = cx.update(|window, _| window.find("conversation-to-end").bounds());
+    at_rest(cx);
+    let placed = cx.update(|window, _| window.find("conversation-to-end").bounds());
+    assert!(
+        arriving.top() > placed.top(),
+        "from below: {arriving:?} then {placed:?}"
+    );
+}
