@@ -1060,6 +1060,16 @@ impl Shell {
                     editor.update(cx, |editor, cx| editor.answered(shown, written, window, cx));
                 }
             }
+            Outcome::RulesSwitched { project, shown } => {
+                let editor = self
+                    .project_settings
+                    .clone()
+                    .filter(|page| page.read(cx).name() == project)
+                    .map(|page| page.read(cx).rules().clone());
+                if let Some(editor) = editor {
+                    editor.update(cx, |editor, cx| editor.switched(shown, cx));
+                }
+            }
             Outcome::WorkspacesFolder {
                 project,
                 written,

@@ -327,6 +327,29 @@ impl RulesEditor {
         cx.notify();
     }
 
+    /// The daemon's answer to the switch: what it says the rules are now. What is typed stays
+    /// as it is, and is not saved with the switch.
+    pub fn switched(&mut self, said: Result<Shown, String>, cx: &mut Context<Self>) {
+        self.waiting = false;
+        match said {
+            Ok(shown) => {
+                let said = if shown.alone {
+                    Toast::success("Only this project's rules are used")
+                } else {
+                    Toast::success("The global rules are used too")
+                };
+                toast(
+                    said.detail("The agents created from now on follow them."),
+                    cx,
+                );
+                self.problem = None;
+                self.shown = Some(shown);
+            }
+            Err(why) => toast(Toast::failure("Rules not switched").detail(why), cx),
+        }
+        cx.notify();
+    }
+
     pub fn save(&mut self, cx: &mut Context<Self>) {
         let Some(text) = self.typed(cx) else {
             return;

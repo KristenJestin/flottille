@@ -9308,6 +9308,45 @@ fn a_project_s_settings_switch_to_use_only_its_rules(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_switch_keeps_the_rules_being_typed(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    user.call("rules.set", json!({"text": "Answer in French."}))
+        .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    let page = open_project_settings(&shell, "atlas", cx);
+    choose_tab("rules", cx);
+    let editor = page.read_with(cx, |page, _| page.rules().clone());
+    until(&shell, cx, "the rules are shown", |cx| {
+        editor.read_with(cx, |e, _| e.shown().is_some())
+    });
+    settle(cx);
+
+    // Typing is not saved, and the switch does not throw it away.
+    type_rules(&editor, "Name branches feat/<n>.", cx);
+    cx.update(|window, cx| window.click("rules-alone-atlas", cx));
+    until(&shell, cx, "the switch is saved", |cx| {
+        editor.read_with(cx, |e, _| e.is_alone())
+    });
+    settle(cx);
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.typed(cx)),
+        Some("Name branches feat/<n>.".to_owned())
+    );
+    let file = std::fs::read_to_string(user.project_file("atlas")).unwrap_or_default();
+    assert!(!file.contains("feat/"), "{file}");
+    toast_said(&shell, "Only this project's rules are used", cx);
+    assert!(
+        !toasts(&shell, cx)
+            .iter()
+            .any(|title| title.contains("Rules saved")),
+        "{:?}",
+        toasts(&shell, cx)
+    );
+}
+
+#[gpui_kit::test]
 fn a_project_s_settings_say_when_its_rules_repeat_the_global_ones(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");

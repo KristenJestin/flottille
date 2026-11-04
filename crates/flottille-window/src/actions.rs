@@ -716,6 +716,12 @@ pub enum Outcome {
         written: bool,
         shown: Result<Shown, String>,
     },
+    /// A project's switch to its own rules alone, or back: the rules as the daemon says them.
+    /// What is typed in the editor stays, and is not saved.
+    RulesSwitched {
+        project: String,
+        shown: Result<Shown, String>,
+    },
     /// Where workspaces go as the daemon says it, after a read (`written` false) or a choice.
     WorkspacesFolder {
         project: Option<String>,
@@ -1430,10 +1436,9 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 json!({"project": project, "alone": alone}),
                 bounds.quick,
             );
-            Outcome::Rules {
+            Outcome::RulesSwitched {
                 shown: shown.and_then(|shown| shown).map(|shown| Shown::of(&shown)),
-                written: true,
-                project: Some(project),
+                project,
             }
         }
         Command::Skills { project } => {
