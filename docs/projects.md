@@ -234,6 +234,45 @@ runs cannot be removed. The Tasks section of the project's Settings adds, edits 
 (`task.*`, `docs/protocol.md`), and so does a root agent with `tasks`, each write judged
 (`docs/tools.md`).
 
+A task may also say when a run of it is ready and where it answers; nothing is guessed:
+
+| Key | |
+|---|---|
+| `ready = { line = "<text>" }` | Ready once a line of its output holds the text (plain text, no pattern). |
+| `ready = { url = "<url>" }` | Ready once a request to the address is answered, whatever the status, tried every second. |
+| `ready = { command = "<line>" }` | Ready once that line exits with 0, run every second in the task's folder with the run's environment, its output dropped. |
+| `url = "<url>"` | Where it answers: an `http://` or `https://` address. |
+| `url = { command = "<line>" }` | A line that prints the address, run once in the task's folder with the run's environment as the run starts: its first line with something on it, which must be an `http(s)://` address. For a tool that gives each worktree its own address (`portless get api`). |
+
+Each is a template: the names of the variables (`{workspace}`, `{workspace.path}`, `{branch}`,
+`{project}`, `{repository}`) and, in `ready`, `{url}`, the run's address (empty without one). A
+line is a task's line: split and refused as one, never run by a shell. A probe takes 5 seconds at
+most and never two run at once for one run; probing stops once the run is ready or ended. An
+HTTP probe of a host of this machine (`localhost`, a name under `.localhost`, a loopback address)
+takes its certificate as it is, since a local development server serves one of its own
+authority; any other host's is checked against the system's.
+
+Without `ready`, a run has no ready state: it runs, as before. With it, a run is `starting`, then
+`ready` (`run.ready`), or ends before it was ready, which it says. A line for the address that
+fails leaves the run without one and says why on it (`url_error`). The window draws a starting
+run with its spinner, a ready one with a solid dot, and its address as a link.
+
+In a monorepo, one task per server reads best, each with its own `ready` and `url`:
+
+```toml
+[tasks."web:dev"]
+line = "pnpm --filter web dev"
+serve = true
+url = { command = "portless get web" }
+ready = { url = "{url}" }
+
+[tasks."api:dev"]
+line = "pnpm --filter api dev"
+serve = true
+url = "http://{workspace}.api.localhost:8080"
+ready = { line = "listening on" }
+```
+
 ## Skills
 
 `[skills.<name>]` lists texts an agent reads with `skill_read` when its task needs them: a file or
