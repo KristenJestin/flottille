@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 use common::User;
 use common::mcp::Mcp;
 use flottille_core::workspace::StepState;
-use flottille_ui::AgentState;
 use flottille_ui::omarchy::Environment;
 use flottille_ui::state::icon_id;
+use flottille_ui::{AgentState, Icon};
 use flottille_window::Shell;
 use flottille_window::actions::Changes;
 use flottille_window::composer::{Choice, Composer, Menu, PlaceChoice};
@@ -28,7 +28,7 @@ use flottille_window::project_settings::{
 use flottille_window::session::{RailRow, Reply, SessionPage};
 use flottille_window::settings::SettingsPage;
 use flottille_window::shell::{Layout, Selection};
-use flottille_window::tree::{place_id, project_id, session_id};
+use flottille_window::tree::{project_id, session_id};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, Focusable as _, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
@@ -212,9 +212,7 @@ fn the_title_of_a_session_that_began_with_a_greeting_follows_the_first_message_t
 }
 
 #[gpui_kit::test]
-fn two_projects_main_and_a_workspace_with_sessions_under_each_appear_in_the_tree(
-    cx: &mut TestAppContext,
-) {
+fn two_projects_with_their_sessions_in_one_list_each_appear_in_the_tree(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");
     project(&user, "notes");
@@ -232,29 +230,22 @@ fn two_projects_main_and_a_workspace_with_sessions_under_each_appear_in_the_tree
         })
     });
     cx.update(|window, _| {
-        for id in [
-            project_id("atlas"),
-            project_id("notes"),
-            place_id("atlas", &None),
-            place_id("atlas", &Some("export-csv".into())),
-            place_id("notes", &None),
-        ] {
+        for id in [project_id("atlas"), project_id("notes")] {
             assert!(window.try_find(id.clone()).is_some(), "{id:?} is not shown");
         }
-        // One level below the other, each on its own guide line.
+        // One level below the project, each session on the project's guide line.
         let x = |id| window.find(id).bounds().origin.x;
-        assert!(x(place_id("atlas", &None)) > x(project_id("atlas")));
+        assert!(x(session_id(&in_main)) > x(project_id("atlas")));
         assert_eq!(
-            x(place_id("atlas", &None)),
-            x(place_id("atlas", &Some("export-csv".into()))),
-            "main and the workspaces sit at the same level"
+            x(session_id(&in_main)),
+            x(session_id(&in_workspace)),
+            "main's sessions and a workspace's sit at the same level"
         );
-        assert!(x(session_id(&in_main)) > x(place_id("atlas", &None)));
     });
-    let sessions_of = |project: &str, place: Option<&str>, cx: &mut VisualTestContext| {
+    let sessions_of = |project: &str, cx: &mut VisualTestContext| {
         shell.read_with(cx, |shell, cx| {
             shell
-                .place(project, &place.map(str::to_owned))
+                .project(project)
                 .unwrap()
                 .read(cx)
                 .sessions(cx)
@@ -263,16 +254,16 @@ fn two_projects_main_and_a_workspace_with_sessions_under_each_appear_in_the_tree
                 .collect::<Vec<_>>()
         })
     };
-    assert_eq!(sessions_of("atlas", None, cx), ["Release notes for 2.4"]);
+    // The one that moved last first: the workspace's, started after main's.
     assert_eq!(
-        sessions_of("atlas", Some("export-csv"), cx),
-        ["CSV export by tenant"]
+        sessions_of("atlas", cx),
+        ["CSV export by tenant", "Release notes for 2.4"]
     );
-    assert_eq!(sessions_of("notes", None, cx), ["Offline sync spike"]);
+    assert_eq!(sessions_of("notes", cx), ["Offline sync spike"]);
 }
 
 #[gpui_kit::test]
-fn a_session_that_starts_waiting_marks_its_row_its_folded_place_and_its_folded_project_and_the_bell_count_goes_up(
+fn a_session_that_starts_waiting_marks_its_row_and_its_folded_project_and_the_bell_count_goes_up(
     cx: &mut TestAppContext,
 ) {
     let user = user();
@@ -284,26 +275,15 @@ fn a_session_that_starts_waiting_marks_its_row_its_folded_place_and_its_folded_p
     });
     assert_eq!(shell.read_with(cx, |s, cx| s.top().read(cx).count()), 0);
 
-    // Fold the place, then the project (its chevron: its name opens its page and folds nothing).
-    cx.update(|window, cx| window.click(place_id("atlas", &None), cx));
+    // Fold the project (its chevron: its name opens its page and folds nothing).
     cx.update(|window, cx| window.click(flottille_ui::toggle_id(project_id("atlas")), cx));
-    let (place, project) = shell.read_with(cx, |shell, _| {
-        (
-            shell.place("atlas", &None).unwrap().clone(),
-            shell.project("atlas").unwrap().clone(),
-        )
-    });
-    assert!(!place.read_with(cx, |p, _| p.is_open()));
+    let project = shell.read_with(cx, |shell, _| shell.project("atlas").unwrap().clone());
     assert!(!project.read_with(cx, |p, _| p.is_open()));
 
     send(&user, &id, "read the env");
     until(&shell, cx, "the session waits for the user", |cx| {
         mark_of(&shell, &id, cx) == Some(AgentState::NeedsYou)
     });
-    assert_eq!(
-        place.read_with(cx, |p, _| p.mark()),
-        Some(AgentState::NeedsYou)
-    );
     assert_eq!(
         project.read_with(cx, |p, _| p.mark()),
         Some(AgentState::NeedsYou),
@@ -313,9 +293,8 @@ fn a_session_that_starts_waiting_marks_its_row_its_folded_place_and_its_folded_p
     cx.update(|window, cx| window.render_frame(cx));
     let shown = cx.update(|window, _| window.find_all(icon_id(AgentState::NeedsYou)).len());
     assert_eq!(
-        shown, 4,
-        "the row, the place and the project show the mark, and the session's row on the project \
-         page"
+        shown, 3,
+        "the row and the project show the mark, and the session's row on the project page"
     );
 }
 
@@ -2135,7 +2114,7 @@ fn the_card_of_a_command_an_agent_adds_says_what_it_writes_and_is_confirmed_once
 }
 
 #[gpui_kit::test]
-fn a_workspace_an_agent_creates_shows_its_setup_on_the_card_then_appears_in_the_tree(
+fn a_workspace_an_agent_creates_shows_its_setup_on_the_card_then_is_created(
     cx: &mut TestAppContext,
 ) {
     let user = team_user();
@@ -2154,12 +2133,12 @@ fn a_workspace_an_agent_creates_shows_its_setup_on_the_card_then_appears_in_the_
     );
     // The setup's own copy of a secret is what the user configured: to judge, not base.
     assert!(!card.base);
-    let login = place_id("app", &Some("login".into()));
-    cx.update(|window, _| assert!(window.try_find(login.clone()).is_none()));
+    let created = |cx: &mut VisualTestContext| {
+        shell.read_with(cx, |s, _| s.snapshot().workspace("app", "login").is_some())
+    };
+    assert!(!created(cx));
     cx.update(|window, cx| window.click(format!("allow-{number}"), cx));
-    until(&shell, cx, "the workspace is in the tree", |cx| {
-        cx.update(|window, _| window.try_find(login.clone()).is_some())
-    });
+    until(&shell, cx, "the workspace is created", |cx| created(cx));
 }
 
 #[gpui_kit::test]
@@ -3540,13 +3519,14 @@ fn opening_settings_shows_the_judge_and_its_guidance_alone(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
-fn settings_has_five_tabs_in_order(cx: &mut TestAppContext) {
+fn settings_has_six_tabs_in_order(cx: &mut TestAppContext) {
     assert_eq!(
         flottille_window::settings::SECTIONS[..],
         [
             ("judge", "Judge"),
             ("providers", "Providers"),
             ("rules", "Rules"),
+            ("workspaces", "Workspaces"),
             ("appearance", "Appearance"),
             ("developer", "Developer mode"),
         ]
@@ -3563,7 +3543,7 @@ fn settings_has_five_tabs_in_order(cx: &mut TestAppContext) {
             .iter()
             .map(|key| window.find(format!("settings-tabs-{key}")).bounds().left())
             .collect();
-        assert_eq!(lefts.len(), 5);
+        assert_eq!(lefts.len(), 6);
         assert!(lefts.windows(2).all(|pair| pair[0] < pair[1]), "{lefts:?}");
         assert!(
             window.try_find("settings-tabs-guidance").is_none(),
@@ -6565,11 +6545,12 @@ fn lead_with_two_workers<'a>(
 /// The sessions a place of the left tree lists.
 fn listed_in(shell: &Entity<Shell>, place: Place, cx: &mut VisualTestContext) -> Vec<String> {
     shell.read_with(cx, |s, cx| {
-        s.place("app", &place)
+        s.project("app")
             .map(|node| {
                 node.read(cx)
                     .sessions(cx)
                     .iter()
+                    .filter(|row| row.read(cx).place() == &place)
                     .map(|row| row.read(cx).id().to_owned())
                     .collect()
             })
@@ -6645,6 +6626,15 @@ fn stop_during_a_turn_cancels_it_and_the_next_message_is_taken(cx: &mut TestAppC
     // Stop fades in, in Send's place.
     settle(cx);
     cx.update(|window, _| assert!(window.try_find("reply-stop").is_some(), "Stop is offered"));
+    cx.update(|window, _| {
+        assert!(
+            window
+                .within("reply-stop")
+                .try_find(Icon::Stop.glyph_id())
+                .is_some(),
+            "the composer's Stop draws the filled square"
+        )
+    });
     cx.update(|window, cx| window.click("reply-stop", cx));
     until(&shell, cx, "the turn ends", |cx| {
         !reply.read_with(cx, |r, _| r.is_running())
@@ -9140,7 +9130,7 @@ fn the_rules_page_edits_the_rules_of_every_project_saves_them_and_resets_them_to
 }
 
 #[gpui_kit::test]
-fn a_project_s_settings_have_a_rules_section_that_replaces_the_global_rules_and_resets(
+fn a_project_s_settings_have_a_rules_section_that_adds_to_the_global_rules_and_resets(
     cx: &mut TestAppContext,
 ) {
     use flottille_window::rules::Source;
@@ -9158,7 +9148,8 @@ fn a_project_s_settings_have_a_rules_section_that_replaces_the_global_rules_and_
     });
     settle(cx);
 
-    // Without rules of its own the project follows the global ones, and shows them.
+    // Without rules of its own the project follows the global ones: its editor is empty, to
+    // be filled with what is particular to the project.
     editor.read_with(cx, |e, _| {
         assert_eq!(e.project(), Some("atlas"));
         assert_eq!(e.shown().unwrap().source, Source::Global);
@@ -9166,20 +9157,21 @@ fn a_project_s_settings_have_a_rules_section_that_replaces_the_global_rules_and_
     });
     assert_eq!(
         editor.read_with(cx, |e, cx| e.typed(cx)),
-        Some("Answer in French.".to_owned())
+        Some(String::new())
     );
+    assert!(!editor.read_with(cx, |e, cx| e.savable(cx)));
     cx.update(|window, _| {
         assert!(window.find("rules-text-atlas").visible());
         assert!(window.find("rules-reach-atlas").visible());
     });
 
-    type_rules(&editor, "Answer in Spanish.", cx);
+    type_rules(&editor, "Name branches feat/<n>.", cx);
     cx.update(|window, cx| window.click("rules-save-atlas", cx));
     until(&shell, cx, "the project's rules are saved", |cx| {
         editor.read_with(cx, |e, _| e.is_own())
     });
     let file = std::fs::read_to_string(user.project_file("atlas")).unwrap();
-    assert!(file.contains("Answer in Spanish."), "{file}");
+    assert!(file.contains("Name branches feat/<n>."), "{file}");
     // The user's own are untouched.
     assert_eq!(
         user.call("rules.show", json!({})).unwrap()["text"],
@@ -9190,22 +9182,22 @@ fn a_project_s_settings_have_a_rules_section_that_replaces_the_global_rules_and_
     until(
         &shell,
         cx,
-        "the project follows the global rules again",
+        "the project follows the global rules alone again",
         |cx| editor.read_with(cx, |e, _| !e.is_own()),
     );
     assert_eq!(
         editor.read_with(cx, |e, cx| e.typed(cx)),
-        Some("Answer in French.".to_owned())
+        Some(String::new())
     );
     assert!(
         !std::fs::read_to_string(user.project_file("atlas"))
             .unwrap()
-            .contains("Spanish")
+            .contains("feat/")
     );
 }
 
 #[gpui_kit::test]
-fn a_project_s_rules_can_be_saved_identical_to_the_global_text(cx: &mut TestAppContext) {
+fn a_project_s_settings_show_the_global_rules_folded_above_its_editor(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");
     user.call("rules.set", json!({"text": "Answer in French."}))
@@ -9220,20 +9212,182 @@ fn a_project_s_rules_can_be_saved_identical_to_the_global_text(cx: &mut TestAppC
     });
     settle(cx);
 
-    // What is shown is the user's text; what the project stores is nothing. Saving it unchanged
-    // gives the project the same text as its own, so a later change of the global rules leaves it.
-    assert!(editor.read_with(cx, |e, cx| e.savable(cx)));
-    cx.update(|window, cx| window.click("rules-save-atlas", cx));
-    until(&shell, cx, "the project's rules are saved", |cx| {
-        editor.read_with(cx, |e, _| e.is_own())
+    // Folded by default: the header is there, the text is not.
+    cx.update(|window, _| {
+        assert!(window.find("rules-global-toggle-atlas").visible());
+        assert!(window.try_find("rules-global-text-atlas").is_none());
     });
-    let shown = user
-        .call("rules.show", json!({"project": "atlas"}))
+
+    // It unfolds, read only: the user's text, and a way to edit it where it lives.
+    cx.update(|window, cx| window.click("rules-global-toggle-atlas", cx));
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(window.find("rules-global-text-atlas").visible());
+        assert!(window.find("rules-global-edit-atlas").visible());
+    });
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.typed(cx)),
+        Some(String::new())
+    );
+
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+    cx.update(|window, cx| window.click("rules-global-edit-atlas", cx));
+    settle(cx);
+    assert_eq!(settings_shown(cx), ["rules"]);
+    cx.update(|window, _| assert!(window.find("rules-text-").visible()));
+}
+
+#[gpui_kit::test]
+fn a_project_s_settings_switch_to_use_only_its_rules(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    user.call("rules.set", json!({"text": "Answer in French."}))
         .unwrap();
-    assert_eq!(shown["source"], "project", "{shown}");
-    assert_eq!(shown["text"], "Answer in French.");
-    // Its own now, unchanged: nothing more to save.
-    assert!(!editor.read_with(cx, |e, cx| e.savable(cx)));
+    user.call(
+        "rules.set",
+        json!({"project": "atlas", "text": "Answer in Spanish."}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    let page = open_project_settings(&shell, "atlas", cx);
+    choose_tab("rules", cx);
+    let editor = page.read_with(cx, |page, _| page.rules().clone());
+    until(&shell, cx, "the rules are shown", |cx| {
+        editor.read_with(cx, |e, _| e.shown().is_some())
+    });
+    settle(cx);
+
+    cx.update(|window, _| {
+        let switch = window.find("rules-alone-atlas");
+        assert!(switch.visible());
+        assert!(window.find("rules-alone-atlas-label").visible());
+    });
+    assert!(
+        !user
+            .call("rules.show", json!({"project": "atlas"}))
+            .unwrap()["alone"]
+            .as_bool()
+            .unwrap()
+    );
+
+    cx.update(|window, cx| window.click("rules-alone-atlas", cx));
+    until(&shell, cx, "the switch is saved", |cx| {
+        editor.read_with(cx, |e, _| e.is_alone())
+    });
+    settle(cx);
+    let file = std::fs::read_to_string(user.project_file("atlas")).unwrap();
+    assert!(file.contains("rules_alone = true"), "{file}");
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+    // The text is kept, and the editor still shows it.
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.typed(cx)),
+        Some("Answer in Spanish.".to_owned())
+    );
+    cx.update(|window, cx| window.click("rules-alone-atlas", cx));
+    until(&shell, cx, "the switch is saved again", |cx| {
+        editor.read_with(cx, |e, _| !e.is_alone())
+    });
+    let file = std::fs::read_to_string(user.project_file("atlas")).unwrap();
+    assert!(!file.contains("rules_alone"), "{file}");
+
+    // Alone again: the agent started now is not told the global rules.
+    cx.update(|window, cx| window.click("rules-alone-atlas", cx));
+    until(&shell, cx, "the switch is saved once more", |cx| {
+        editor.read_with(cx, |e, _| e.is_alone())
+    });
+    let agent = start(&user, "atlas", None, "hello");
+    let text = user.call("agent.show", json!({"agent": agent})).unwrap()["agent"]["instructions"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        !text.contains("French") && text.contains("Answer in Spanish."),
+        "{text}"
+    );
+}
+
+#[gpui_kit::test]
+fn the_switch_keeps_the_rules_being_typed(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    user.call("rules.set", json!({"text": "Answer in French."}))
+        .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    let page = open_project_settings(&shell, "atlas", cx);
+    choose_tab("rules", cx);
+    let editor = page.read_with(cx, |page, _| page.rules().clone());
+    until(&shell, cx, "the rules are shown", |cx| {
+        editor.read_with(cx, |e, _| e.shown().is_some())
+    });
+    settle(cx);
+
+    // Typing is not saved, and the switch does not throw it away.
+    type_rules(&editor, "Name branches feat/<n>.", cx);
+    cx.update(|window, cx| window.click("rules-alone-atlas", cx));
+    until(&shell, cx, "the switch is saved", |cx| {
+        editor.read_with(cx, |e, _| e.is_alone())
+    });
+    settle(cx);
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.typed(cx)),
+        Some("Name branches feat/<n>.".to_owned())
+    );
+    let file = std::fs::read_to_string(user.project_file("atlas")).unwrap_or_default();
+    assert!(!file.contains("feat/"), "{file}");
+    toast_said(&shell, "Only this project's rules are used", cx);
+    assert!(
+        !toasts(&shell, cx)
+            .iter()
+            .any(|title| title.contains("Rules saved")),
+        "{:?}",
+        toasts(&shell, cx)
+    );
+}
+
+#[gpui_kit::test]
+fn a_project_s_settings_say_when_its_rules_repeat_the_global_ones(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    user.call("rules.set", json!({"text": "Answer in French."}))
+        .unwrap();
+    user.call(
+        "rules.set",
+        json!({"project": "atlas", "text": "Answer in French.\n\nName branches feat/<n>."}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    let page = open_project_settings(&shell, "atlas", cx);
+    choose_tab("rules", cx);
+    let editor = page.read_with(cx, |page, _| page.rules().clone());
+    until(&shell, cx, "the rules are shown", |cx| {
+        editor.read_with(cx, |e, _| e.shown().is_some())
+    });
+    settle(cx);
+
+    cx.update(|window, _| {
+        let note = window.find("rules-repeats-atlas");
+        assert!(note.visible());
+        assert_eq!(
+            note.label(),
+            Some("These rules repeat the global ones; you can remove that part.")
+        );
+    });
+
+    // Removing the copy ends the note.
+    type_rules(&editor, "Name branches feat/<n>.", cx);
+    cx.update(|window, cx| window.click("rules-save-atlas", cx));
+    until(&shell, cx, "the note goes", |cx| {
+        let repeats = user
+            .call("rules.show", json!({"project": "atlas"}))
+            .unwrap()["repeats"]
+            == true;
+        !repeats && editor.read_with(cx, |e, cx| !e.is_edited(cx))
+    });
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find("rules-repeats-atlas").is_none()));
 }
 
 #[gpui_kit::test]
@@ -9414,6 +9568,106 @@ fn a_task_is_added_edited_and_removed_from_the_tasks_section(cx: &mut TestAppCon
         tasks_listed(&shell, cx).is_empty()
     });
     assert!(!file().contains("tasks"), "{}", file());
+}
+
+#[gpui_kit::test]
+fn a_task_s_ready_and_address_are_chosen_in_its_form(cx: &mut TestAppContext) {
+    use flottille_window::tasks::{AddressKind, ReadyKind};
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", "tasks", cx);
+    let section = tasks_section(&shell, cx);
+
+    cx.update(|window, cx| window.click("add-task", cx));
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(window.find("task-ready-field-label").visible());
+        assert!(window.find("task-url-field-label").visible());
+        assert!(
+            window
+                .try_find("task-ready-line-block")
+                .is_none_or(|b| !b.visible()),
+            "no field while nothing is said"
+        );
+    });
+    let (name, line) = section.read_with(cx, |s, _| {
+        (
+            s.name_field().unwrap().clone(),
+            s.line_field().unwrap().clone(),
+        )
+    });
+    cx.update(|window, cx| {
+        name.update(cx, |f, cx| f.set_value("web", window, cx));
+        line.update(cx, |f, cx| f.set_value("npm run dev", window, cx));
+    });
+    cx.update(|window, cx| window.click("task-ready-line", cx));
+    cx.update(|window, cx| window.click("task-url-command", cx));
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(window.find("task-ready-line-block").visible());
+        assert!(window.find("task-url-command-block").visible());
+    });
+    let (ready, url) = section.read_with(cx, |s, _| {
+        (
+            s.ready_field(ReadyKind::Line).unwrap().clone(),
+            s.url_field(AddressKind::Command).unwrap().clone(),
+        )
+    });
+    cx.update(|window, cx| {
+        ready.update(cx, |f, cx| f.set_value("ready in", window, cx));
+        url.update(cx, |f, cx| f.set_value("portless get web", window, cx));
+    });
+    cx.update(|window, cx| window.click("save-task", cx));
+
+    let file = || std::fs::read_to_string(user.project_file("atlas")).unwrap();
+    until(&shell, cx, "the file says so", |_| {
+        file().contains(r#"ready = { line = "ready in" }"#)
+    });
+    assert!(
+        file().contains(r#"url = { command = "portless get web" }"#),
+        "{}",
+        file()
+    );
+    until(&shell, cx, "the task is listed", |cx| {
+        !tasks_listed(&shell, cx).is_empty()
+    });
+    settle(cx);
+
+    // Edited, the form shows what the task says, and nothing said is nothing written.
+    cx.update(|window, cx| window.click("task-web", cx));
+    until(&shell, cx, "the form is open on it", |cx| {
+        section.read_with(cx, |s, _| s.is_open())
+    });
+    settle(cx);
+    let shown = section.read_with(cx, |s, cx| {
+        (
+            s.ready_kind(),
+            s.ready_field(ReadyKind::Line)
+                .unwrap()
+                .read(cx)
+                .value()
+                .to_string(),
+        )
+    });
+    assert_eq!(shown, (Some(ReadyKind::Line), "ready in".to_owned()));
+    cx.update(|window, cx| window.click("task-ready-none", cx));
+    settle(cx);
+    assert_eq!(section.read_with(cx, |s, _| s.ready_kind()), None);
+    cx.update(|window, cx| window.click("task-url-address", cx));
+    let url = section.read_with(cx, |s, _| {
+        s.url_field(AddressKind::Address).unwrap().clone()
+    });
+    cx.update(|window, cx| {
+        url.update(cx, |f, cx| {
+            f.set_value("https://{workspace}.atlas.localhost", window, cx)
+        })
+    });
+    cx.update(|window, cx| window.click("save-task", cx));
+    until(&shell, cx, "the file says so", |_| {
+        file().contains(r#"url = "https://{workspace}.atlas.localhost""#)
+    });
+    assert!(!file().contains("ready"), "{}", file());
 }
 
 #[gpui_kit::test]
@@ -10651,4 +10905,281 @@ fn the_limit_of_tool_results_is_chosen_in_a_section_at_the_end_of_the_providers_
         0,
         "nothing moves at rest"
     );
+}
+
+/// Types `text` in the field of a workspaces-folder section.
+fn type_folder(
+    section: &Entity<flottille_window::workspaces_folder::WorkspacesFolder>,
+    text: &str,
+    cx: &mut VisualTestContext,
+) {
+    let field = section
+        .read_with(cx, |section, _| section.field().cloned())
+        .expect("the field is made once the section is drawn");
+    field.update_in(cx, |field, window, cx| field.set_value(text, window, cx));
+    settle(cx);
+}
+
+#[gpui_kit::test]
+fn the_settings_page_sets_the_default_and_the_project_page_its_own(cx: &mut TestAppContext) {
+    use flottille_window::workspaces_folder::Place;
+
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let settings = open_settings(&shell, cx);
+    choose_settings_tab("workspaces", cx);
+    let section = settings.read_with(cx, |page, _| page.workspaces_folder().clone());
+    until(&shell, cx, "the default is read", |cx| {
+        section.read_with(cx, |section, _| section.shown().is_some())
+    });
+    settle(cx);
+    // Today's default, with its field folded away.
+    assert_eq!(section.read_with(cx, |s, _| s.place()), Place::Data);
+    cx.update(|window, _| {
+        assert!(window.find("workspaces-choice-default-data").visible());
+        assert!(window.find("workspaces-choice-default-beside").visible());
+        assert!(window.try_find("workspaces-path-default").is_none());
+    });
+    let file = user.path("config/flottille/workspaces.toml");
+    assert!(!file.exists());
+
+    // Beside the project: kept at once, and a project with no folder of its own follows it.
+    cx.update(|window, cx| window.click("workspaces-choice-default-beside", cx));
+    until(&shell, cx, "the daemon keeps beside", |cx| {
+        section.read_with(cx, |s, _| {
+            s.shown().is_some_and(|shown| shown.place == Place::Beside)
+        })
+    });
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "place = \"beside\"\n"
+    );
+    let shown = user.call("project.show", json!({"name": "atlas"})).unwrap();
+    assert_eq!(
+        shown["workspaces_root"],
+        user.path("work/atlas-work").to_str().unwrap()
+    );
+
+    // A folder of my own: its field unfolds, and Save keeps what was typed, not what it expands to.
+    cx.update(|window, cx| window.click("workspaces-choice-default-own", cx));
+    settle(cx);
+    cx.update(|window, _| assert!(window.find("workspaces-path-default").visible()));
+    assert!(
+        !section.read_with(cx, |s, cx| s.savable(cx)),
+        "nothing typed"
+    );
+    type_folder(&section, "~/Worktrees/<project>", cx);
+    assert!(
+        section.read_with(cx, |s, cx| s.savable(cx)),
+        "a folder typed"
+    );
+    cx.update(|window, cx| window.click("workspaces-save-default", cx));
+    until(&shell, cx, "the daemon keeps the folder", |cx| {
+        section.read_with(cx, |s, _| {
+            s.shown().is_some_and(|shown| shown.place == Place::Own)
+        })
+    });
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("path = \"~/Worktrees/<project>\""), "{text}");
+    settle(cx);
+
+    // Another kind folds the field away.
+    cx.update(|window, cx| window.click("workspaces-choice-default-data", cx));
+    until(&shell, cx, "the daemon keeps the data folder", |cx| {
+        section.read_with(cx, |s, _| {
+            s.shown().is_some_and(|shown| shown.place == Place::Data)
+        })
+    });
+    settle(cx);
+    cx.update(|window, _| assert!(window.try_find("workspaces-path-default").is_none()));
+    cx.update(|window, cx| window.click("workspaces-choice-default-own", cx));
+    settle(cx);
+    type_folder(&section, "~/Worktrees/<project>", cx);
+    cx.update(|window, cx| window.click("workspaces-save-default", cx));
+    until(&shell, cx, "the folder is kept again", |cx| {
+        section.read_with(cx, |s, _| {
+            s.shown().is_some_and(|shown| shown.place == Place::Own)
+        })
+    });
+
+    // The project's page: the folder that results, then a folder of its own, then the default.
+    let page = open_project_settings(&shell, "atlas", cx);
+    choose_tab("setup", cx);
+    let own = page.read_with(cx, |page, _| page.workspaces_folder().clone());
+    until(&shell, cx, "the project's folder is read", |cx| {
+        own.read_with(cx, |s, _| s.folder().is_some())
+    });
+    settle(cx);
+    let home = user.path("home/Worktrees/atlas");
+    assert_eq!(
+        text_of("workspaces-folder-atlas", cx),
+        Some(format!("Its workspaces are made in {}", home.display()))
+    );
+    cx.update(|window, cx| window.click("workspaces-choice-atlas-own", cx));
+    settle(cx);
+    type_folder(&own, "/srv/trees/<project>", cx);
+    cx.update(|window, cx| window.click("workspaces-save-atlas", cx));
+    until(&shell, cx, "the project's own folder is kept", |cx| {
+        own.read_with(cx, |s, _| s.folder() == Some("/srv/trees/atlas"))
+    });
+    settle(cx);
+    let text = std::fs::read_to_string(user.project_file("atlas")).unwrap();
+    assert!(
+        text.contains("workspaces_root = \"/srv/trees/<project>\""),
+        "{text}"
+    );
+    assert_eq!(
+        text_of("workspaces-folder-atlas", cx),
+        Some("Its workspaces are made in /srv/trees/atlas".to_owned())
+    );
+
+    cx.update(|window, cx| window.click("workspaces-choice-atlas-data", cx));
+    until(&shell, cx, "the project follows the default again", |cx| {
+        own.read_with(cx, |s, _| s.folder() == Some(home.to_str().unwrap()))
+    });
+    let text = std::fs::read_to_string(user.project_file("atlas")).unwrap();
+    assert!(!text.contains("workspaces_root"), "{text}");
+    settle(cx);
+    assert_eq!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)),
+        0,
+        "nothing moves at rest"
+    );
+}
+
+#[gpui_kit::test]
+fn a_relative_folder_is_refused_under_its_field_and_nothing_is_written(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let settings = open_settings(&shell, cx);
+    choose_settings_tab("workspaces", cx);
+    let section = settings.read_with(cx, |page, _| page.workspaces_folder().clone());
+    until(&shell, cx, "the default is read", |cx| {
+        section.read_with(cx, |section, _| section.shown().is_some())
+    });
+    cx.update(|window, cx| window.click("workspaces-choice-default-own", cx));
+    settle(cx);
+    type_folder(&section, "worktrees/<project>", cx);
+    cx.update(|window, cx| window.click("workspaces-save-default", cx));
+    until(&shell, cx, "the refusal is shown", |cx| {
+        section.read_with(cx, |s, _| s.problem().is_some())
+    });
+    settle(cx);
+    let said = text_of("workspaces-problem-default", cx).expect("said under the field");
+    assert!(said.starts_with("path: must be absolute"), "{said}");
+    assert!(!user.path("config/flottille/workspaces.toml").exists());
+
+    // Typing again clears it, folding the line away.
+    cx.update(|window, cx| window.click("workspaces-path-default", cx));
+    cx.simulate_input("x");
+    settle(cx);
+    assert!(section.read_with(cx, |s, _| s.problem().is_none()));
+    cx.update(|window, _| assert!(window.try_find("workspaces-problem-default").is_none()));
+}
+
+#[gpui_kit::test]
+fn a_saved_workspaces_folder_says_so_in_a_toast_and_the_data_line_shows_the_real_folder(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let settings = open_settings(&shell, cx);
+    choose_settings_tab("workspaces", cx);
+    let section = settings.read_with(cx, |page, _| page.workspaces_folder().clone());
+    until(&shell, cx, "the default is read", |cx| {
+        section.read_with(cx, |section, _| section.shown().is_some())
+    });
+    settle(cx);
+    // The XDG folder of this user, not a path written in the window's code.
+    let said = text_of("workspaces-choice-default-data-line", cx).expect("the line is shown");
+    let data = user.path("data/flottille");
+    assert!(
+        said.starts_with(&format!("{}/workspaces/<project>", data.display())),
+        "{said}"
+    );
+    assert!(!said.contains(".local/share"), "{said}");
+
+    cx.update(|window, cx| window.click("workspaces-choice-default-beside", cx));
+
+    toast_said(&shell, "Workspaces folder saved", cx);
+}
+
+#[gpui_kit::test]
+fn a_refused_beside_is_a_failure_toast_and_not_a_line_under_the_field(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    // A folder where the file goes: the daemon cannot keep the choice.
+    std::fs::create_dir_all(user.path("config/flottille/workspaces.toml")).unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let settings = open_settings(&shell, cx);
+    choose_settings_tab("workspaces", cx);
+    let section = settings.read_with(cx, |page, _| page.workspaces_folder().clone());
+    until(&shell, cx, "the default is read", |cx| {
+        section.read_with(cx, |section, _| section.shown().is_some())
+    });
+
+    cx.update(|window, cx| window.click("workspaces-choice-default-beside", cx));
+
+    toast_said(&shell, "The workspaces folder was not kept", cx);
+    settle(cx);
+    assert!(section.read_with(cx, |s, _| s.problem().is_none()));
+    cx.update(|window, _| assert!(window.try_find("workspaces-problem-default").is_none()));
+    assert!(
+        !toasts(&shell, cx)
+            .iter()
+            .any(|title| title.contains("saved")),
+        "no success"
+    );
+}
+
+#[gpui_kit::test]
+fn a_refused_path_stays_under_its_field_without_a_toast(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let settings = open_settings(&shell, cx);
+    choose_settings_tab("workspaces", cx);
+    let section = settings.read_with(cx, |page, _| page.workspaces_folder().clone());
+    until(&shell, cx, "the default is read", |cx| {
+        section.read_with(cx, |section, _| section.shown().is_some())
+    });
+    cx.update(|window, cx| window.click("workspaces-choice-default-own", cx));
+    settle(cx);
+    type_folder(&section, "~/Worktrees", cx);
+    cx.update(|window, cx| window.click("workspaces-save-default", cx));
+    until(&shell, cx, "the refusal is shown", |cx| {
+        section.read_with(cx, |s, _| s.problem().is_some())
+    });
+    settle(cx);
+
+    let said = text_of("workspaces-problem-default", cx).expect("said under the field");
+    assert!(said.contains("must hold <project>"), "{said}");
+    assert_eq!(toasts(&shell, cx), Vec::<String>::new());
+}
+
+#[gpui_kit::test]
+fn the_project_page_says_when_the_default_cannot_be_followed(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let file = user.path("config/flottille/workspaces.toml");
+    std::fs::write(&file, "place = \"own\"\npath = \"relative\"\n").unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_project_settings(&shell, "atlas", cx);
+    choose_tab("setup", cx);
+    let own = page.read_with(cx, |page, _| page.workspaces_folder().clone());
+    until(&shell, cx, "the project's folder is read", |cx| {
+        own.read_with(cx, |s, _| s.folder().is_some())
+    });
+    settle(cx);
+
+    let line = text_of("workspaces-folder-atlas", cx).expect("the folder line");
+
+    assert!(
+        line.contains("The default cannot be followed, so the data folder is used"),
+        "{line}"
+    );
+    assert!(line.contains("path: must be absolute"), "{line}");
 }

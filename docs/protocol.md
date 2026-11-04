@@ -146,7 +146,9 @@ result is the object of its file with every default filled in:
 ```
 
 `workspaces_root` is an absolute path in a real answer: `$XDG_DATA_HOME` stands for the user's data
-folder here. `default_repositories` is `"all"` or a list of repository paths; `variables` and
+folder here. It is where the project's workspaces are made now (`docs/projects.md`, "Where the
+workspaces go"); `workspaces_root_own` is added, as the file says it (`~` and `<project>` not yet
+filled in), when the project names a folder of its own. `default_repositories` is `"all"` or a list of repository paths; `variables` and
 `commands` are left out when empty. The files are the user's to edit: before it answers any `project.*` request, the
 daemon reads them again and announces what changed in them since the last such request as events
 (`docs/events.md`).
@@ -163,7 +165,10 @@ message starts with the key at fault). A file with an error does not hide the ot
 
 `{"name"}`. The result is the project, each repository with `branch`: the branch its checkout in
 the project folder is on now, `null` when it is on none (a detached checkout, a folder git cannot
-read, or one that is not a repository of its own yet). `project.list` leaves it out: it runs no git. `not-found` when there is none,
+read, or one that is not a repository of its own yet). `project.list` leaves it out: it runs no git.
+When the project follows a default that cannot be followed (`workspaces.toml` is invalid, see
+`workspaces_folder.show`), the result also holds `workspaces_default_error`, the reason; the data
+folder is what `workspaces_root` then is. `not-found` when there is none,
 `invalid-config` when its file cannot be used.
 
 #### `project.detect`
@@ -443,6 +448,34 @@ The daemon reads the file at every tool call: a change applies to the next resul
 running session. `tool_results.set` emits `tool_results.changed` with what it answers. The user's
 door alone reaches them: no tool of an agent does.
 
+### The workspaces folder methods
+
+`workspaces_folder.show` and `workspaces_folder.set` read and keep where workspaces go
+(`docs/projects.md`, "Where the workspaces go"): the user's default for every project
+(`workspaces.toml` of Flottille's configuration folder), or, with a `project`, that project's own
+`workspaces_root`.
+
+- `workspaces_folder.show {}` answers `{"place", "path", "error", "data"}`: `place` is `data`,
+  `beside` or `own`; `path` is the folder as typed with `own`, else `null`; `error` says why the
+  file cannot be followed (the data folder is), else `null`; `data` is Flottille's data folder.
+- `workspaces_folder.show {project}` answers `{"project", "own", "folder", "default_folder",
+  "fallback"}`: its own folder as typed (`null` when it follows the default), the folder its
+  workspaces are made in now, the one the default would give it, and `fallback`, why the default
+  is not followed when the project follows it (else `null`). `not-found` for an unknown project.
+- `workspaces_folder.set {place, path?}` keeps the default (`path` with `own` only, and needed
+  then). `workspaces_folder.set {project, own}` writes the project's key where it stands, the
+  file's comments kept, and removes it when `own` is left out or `null`. Both answer as `show`.
+  `invalid-params` for a `place` that is not one of the three and for a folder that is not
+  absolute once `~` is expanded, with the key at fault first (`path: must be absolute, not "x"`),
+  and for a folder `docs/projects.md` forbids (inside a repository of the project, Flottille's
+  configuration or data folder, the home folder itself, or a default without `<project>`), the
+  reason first; a project's refusal is `invalid-config` and names `workspaces_root`. Nothing is
+  written then.
+
+Only the workspaces made afterwards follow a change; none is moved. `workspaces_folder.set` emits
+`workspaces_folder.changed` with `{"project"}` (`null` for the default). The user's door alone
+reaches them: no tool of an agent does.
+
 ### The skill methods
 
 A project's skills (`docs/skills.md`). The daemon edits the project's file in place, the rest of it
@@ -554,7 +587,8 @@ cannot be used.
 `{"project", "name", "repositories"?, "branch"?, "bases"?, "offline"?, "ticket"?}`. Fetches the
 base of each repository, writes the workspace, makes the worktrees and answers the workspace; the
 rest of the setup goes on in the background. `repositories` is the project's default set when left
-out, `branch` is `<branch prefix>/<name>`, `bases` (`{"api": "main"}`) gives a repository it takes
+out, `branch` is `<branch prefix>/<name>` when left out, and a branch that exists already is checked
+out rather than started (`docs/workspaces.md`), `bases` (`{"api": "main"}`) gives a repository it takes
 the branch it starts from in place of its base rule, `offline: true` fetches nothing, and `ticket` (`#123`, `123`
 or a Jira key) links the workspace to a ticket (`tickets.md`); the workspace's `ticket` says it, in
 every answer that shows a workspace, `null` when it has none.
@@ -562,7 +596,7 @@ every answer that shows a workspace, `null` when it has none.
 `refused`, with nothing written nor made, when the name is not one, the ticket is not one, a
 repository is not the project's, a base is chosen for a repository it does not take or is not a
 branch name, the branch is not one git accepts, the project has a workspace of that name, the folder
-exists, the branch exists in a repository, or a repository has none of its base branches, neither
+exists, the branch is checked out in a checkout of a repository (naming it), or a repository has none of its base branches, neither
 on its remote nor itself. A fetch is never a requirement: a repository with no remote, whose fetch
 fails, or whose remote has none of its base branches starts from the first of them it has itself,
 and its base's `note` says so. A worktree that cannot be made is not a refusal: the
@@ -580,7 +614,8 @@ committed them or they are not committed yet, new files git does not ignore coun
 binary file, a link, anything but a regular file, or a file over 8 MiB counts no line; the files a
 setup `copy` step wrote and that are still as it copied them are not changes, and are left out). At most
 1000 new files and 16 MiB of them are read: past that the count stops and `capped` is `true`, the
-real count being higher. It writes nothing, not even git's index. `changes` is `null` when git
+real count being higher. It writes nothing, not even git's index, but the workspace's branch when its worktrees moved to
+another (`workspace.changed`, `docs/workspaces.md`, "The branch"). `changes` is `null` when git
 cannot read the worktree (not made yet, or gone). `workspace.list` leaves it out: it runs no git.
 Each repository also has `branch`, the branch its worktree is on (`null` when on none), `ahead`,
 its commits since its base commit, and `uncommitted`, how many files `git status` shows (the links
@@ -627,12 +662,12 @@ often it asks.
   "read_at": 1792843730808,
   "problem": null,
   "repositories": [
-    {"path": "api", "remote": "origin", "forge": "github", "repository": "acme/api", "note": null,
+    {"path": "api", "branch": "app/login", "remote": "origin", "forge": "github", "repository": "acme/api", "note": null,
      "pull_request": {"number": 12, "title": "Add the login page", "state": "open", "head": "app/login",
        "base": "develop", "mergeable": true, "url": "https://github.com/acme/api/pull/12", "review": "approved",
        "checks": [{"name": "build", "state": "passing"}], "mark": "passing", "comments": 2},
      "error": null},
-    {"path": "web", "remote": "origin", "forge": null, "repository": null,
+    {"path": "web", "branch": "app/login", "remote": "origin", "forge": null, "repository": null,
      "note": "no forge set for this repository: choose it in the project's Settings (the window), or write its `forge` in the project's file; Flottille never guesses it", "pull_request": null, "error": null}
   ]
 }
@@ -640,7 +675,7 @@ often it asks.
 
 `problem` says, with what to do, why a forge cannot be read (`gh` or `bkt` missing, not signed in;
 several are joined by `; `), else `null`; the repositories it stops have no `pull_request`. For
-each repository, `forge` is `github`, `bitbucket` or `null` (then `note` says why), `repository`
+each repository, `branch` is the one it was read for, the branch its worktree is on (`docs/workspaces.md`, "The branch"), `forge` is `github`, `bitbucket` or `null` (then `note` says why), `repository`
 is `owner/name` (a Bitbucket Cloud workspace and name, or a Data Center project key and name),
 `pull_request` is `null` when its branch has none, and `error` says why its forge could not be
 read. A pull request's `state` is `open`, `draft`, `merged` or `closed`; `head` is its branch and `base`
@@ -784,8 +819,9 @@ matter's or the first line of its text).
 ### The task methods
 
 A project's tasks (`docs/projects.md`, "Tasks"), as its Settings edit them. A task in a result is
-`{"name", "line", "repository", "serve", "check", "read_only", "ask_before_running"}`,
-`repository` `null` for the place's top. Each write is checked as the file is, and written under
+`{"name", "line", "repository", "serve", "check", "read_only", "ask_before_running", "ready",
+"url"}`, `repository` `null` for the place's top, `ready` `null` or `{"line"}`, `{"url"}` or
+`{"command"}`, `url` `null`, an address or `{"command"}` (`docs/projects.md`, "Tasks"). Each write is checked as the file is, and written under
 `[tasks.<name>]` where it stands, what is around it kept, a flag that is off left out.
 `not-found` for a project or a task that does not exist, `refused` for a task the file would
 refuse, `invalid-config` when the project's file cannot be used.
@@ -801,13 +837,15 @@ refuse, `invalid-config` when the project's file cannot be used.
 #### `task.add`
 
 `{"project", "name", "line", "repository"?, "serve"?, "check"?, "read_only"?,
-"ask_before_running"?}`: the task. `refused` when the project has one of that name.
+"ask_before_running"?, "ready"?, "url"?}`: the task. `refused` when the project has one of that
+name.
 
 #### `task.edit`
 
 `{"project", "name", "line"?, "repository"?, "serve"?, "check"?, "read_only"?,
-"ask_before_running"?}`: what is given replaces what the task had (`repository: null` puts it back
-at the top). Answers the task.
+"ask_before_running"?, "ready"?, "url"?}`: what is given replaces what the task had
+(`repository: null` puts it back at the top; `ready` or `url` `null` or `""` removes it). Answers
+the task.
 
 #### `task.remove`
 
@@ -901,7 +939,9 @@ was asked, or the project's default model, `null` for the agent's default; `take
 at the last start of its process; `reopens` whether its agent offered to resume or load a session
 when it last opened one, `false` once Flottille forgot an ended root's session; `images` whether
 it took images in a prompt when it last started, `null` before it did. `active_at` is its last sign of activity, `null` before the
-first. `instructions` are frozen when the agent is created, `tools` are its role's and change with
+first. `exchanged_at` is its last exchange: the later of the last message the user gave it (the
+moment a prompt took it) and the end of its last turn, `null` before either; unlike `active_at`,
+what the agent does during a turn never moves it, which is what a list of sessions sorts by. `instructions` are frozen when the agent is created, `tools` are its role's and change with
 it (`docs/tools.md`, "When the tools change"); `tools_outdated` says whether its running session
 runs an older list than that. `parent` is the agent that
 launched it (`null` for a root), `depth` its depth in the tree, `epoch` the number of its session
@@ -1043,7 +1083,7 @@ does it with `agent_send` (`docs/tools.md`).
 `{"agent"}`. The whole tree of the agent's root, each agent before its children:
 `{"agents": [{"agent", "doing", "waiting_on", "needs_user", "context", "queued"}]}`. `agent` is the agent in short
 (`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `launched_by`, `depth`, `epoch`, `state`,
-`state_reason`, `created_at`, `active_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
+`state_reason`, `created_at`, `active_at`, `exchanged_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
 took at the last start of its process, else the one asked, `null` for the agent's default before it
 started; `effort`: the same for its effort; `pending`: `{"model", "effort"}` the user changed to and
 the session has not taken yet, `null` when nothing waits; `resumable`: whether `agent.resume` takes it once its last process is gone; `stopping`:
@@ -1120,13 +1160,19 @@ The commands the agents run with `run` (`docs/tools.md`), and the tasks the user
   "signal": null,
   "started_at": 1792843730808,
   "ended_at": null,
+  "ready": "starting",
+  "url": "https://login.app.localhost",
+  "url_error": null,
   "last_line": "listening on :3000"
 }
 ```
 
 `name` is the task it runs, `null` for a line of the agent's. `agent` and `root` are `null` for a
 task the user ran; `project` is always the project's. `state` is `running`,
-`exited`, `stopped` or `interrupted` (`docs/events.md`, "The events of a run"). `last_line` is the
+`exited`, `stopped` or `interrupted` (`docs/events.md`, "The events of a run"). `ready` is
+`null` for a run of a task that says no ready, else `starting`, `ready` or `missed` (it ended before
+it was ready); `url` its address, `url_error` why it has none when its task's line for it failed
+(`docs/projects.md`, "Tasks"). `last_line` is the
 last line of its output with something on it, masked of secrets and as the program wrote it
 (colours included), cut at 300 characters. `tail` is the last 20 lines
 of its output (a list of texts, masked and as written, each cut at 300 characters), which a result
@@ -1155,6 +1201,26 @@ command running, what it wrote so far. `not-found` when there is no such run.
 `SIGKILL` 5 s later, as `run_status` with `action: stop` does) and answers once it ended. The
 agent that started it, if one did, is told the user stopped it (`command-ended`, `docs/tools.md`). A command that
 already ended is answered as it is. `not-found` when there is no such run.
+
+#### `run.restart`
+
+`{"run"}`. `{"run": {...}, "notice"}`, the new run: stops the command if it runs (as `run.stop` does,
+and waits for its end), then starts the same line again in the same place (the same project,
+workspace, repository and folder, the same task if it was one, with the environment of a command
+started the same way, no shell) and answers with the new run, which keeps who started the first: a
+command of an agent stays that agent's, and the agent reads it with `run_status` and is woken when it
+ends; a task the user ran stays the user's. The agent is told (`command-ended`, `docs/tools.md`)
+that the user restarted it and what the new run's id is, each time a restart happens, also when the
+agent was already told that the first run ended; if the command was stopped and the new run could
+not start, it is told that too and why. It is the user's act, so the gate is not asked, and a
+restart never carries a push approval: the new run starts unlifted, as a command of the user's does,
+whatever the first one was let to do. A command that already ended is started again too. A command of
+an agent that has ended (or is gone) restarts as a run of the user's, with no agent, and `notice`
+says so; otherwise `notice` is `null`. `not-found` when there is no such run; `refused` when its
+line cannot be started again (the task is gone, or the line holds a secret its stored form masks),
+or when the run is already being restarted (`run R is being restarted`): the command is then left as
+it was. A start that fails after the stop (the program cannot be spawned) is refused too, but then
+the command is stopped; its agent is told so. Emits `run.ended` for the first, if it ran, then `run.started` (`docs/events.md`).
 
 #### `run.dismiss`
 

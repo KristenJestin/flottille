@@ -48,6 +48,9 @@ pub enum Update {
     AppearanceChanged,
     /// The limit of tool results was chosen, from any client: the settings page reads it again.
     ToolResultsChanged,
+    /// Where workspaces go was chosen (a project's own when it names one, the default of every
+    /// project when `None`), from any client: the sections read it again.
+    WorkspacesFolderChanged { project: Option<String> },
     /// An agent created or changed a ticket or a pull request.
     Forged(model::Forged),
     /// An agent said something, reported, or was woken: news for its session.
@@ -169,6 +172,11 @@ fn follow(
         }
         if event.name == "appearance.changed" {
             let _ = updates.unbounded_send(Update::AppearanceChanged);
+        }
+        if event.name == "workspaces_folder.changed" {
+            let _ = updates.unbounded_send(Update::WorkspacesFolderChanged {
+                project: event.data["project"].as_str().map(str::to_owned),
+            });
         }
         if event.name == "tool_results.changed" {
             let _ = updates.unbounded_send(Update::ToolResultsChanged);
@@ -359,6 +367,8 @@ fn matters(event: &Event) -> bool {
                 | "agent.resumed"
                 | "agent.reported"
                 | "agent.asked"
+                // A session that removed its own workspace goes on under main.
+                | "agent.moved"
         ),
         _ => false,
     }
@@ -699,6 +709,7 @@ mod tests {
             "a session at rest or waiting"
         );
         assert!(matters(&event("workspace.created", json!({}))));
+        assert!(matters(&event("agent.moved", json!({}))), "the rail");
         assert!(
             matters(&event("workspace.step_done", json!({}))),
             "a card shows the preparation"

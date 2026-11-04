@@ -169,7 +169,23 @@ An extension that keeps anything keeps it in **its own space of the store**: tab
 own. Only the extension reads and writes them; the core and the other extensions never do. They
 are kept when the extension is turned off. The store holds it: while an extension's migration or
 its space runs, SQLite refuses every statement that makes, changes, reads or writes a table outside
-`ext_<name>_…`, and views, pragmas, attachments and the end of the transaction.
+`ext_<name>_…`, and views, pragmas, attachments and the end of the transaction. What SQLite does
+not say to the check is looked at before anything is kept: a table renamed out of the space, a
+counter of the core changed, a table of the space that references one outside it. With no such
+reference, no deletion of the core cascades into the space, and an extension's triggers fire only
+inside it. A name is lower-case letters and digits only, so that no prefix holds another's (`a`
+and `a_b` would share `ext_a_`). This holds the extension's SQL; its Rust code runs in the daemon
+and is trusted as the core is.
+
+The store counts each extension's applied migrations in `extension_migrations`. That table is made
+when the store opens, after the core's numbered migrations, and never as one of them: a numbered
+migration takes the next number, and while the extensions are built on a branch of their own, the
+core's next migration takes the same number on `dev`. A store that ran one of the two would then
+open as up to date under the other build, and never run the migration it is missing. The alpha
+builds of Specs made this table as their last numbered migration, under the name
+`extension_schemas`. The store recognises such a store by that name: it counts the store one
+migration lower, runs the core's migrations it is missing, and moves the count to
+`extension_migrations`.
 
 An extension may also add facts to what the core says of an agent, under its own name
 (`agent.tree`'s `extensions.<name>`): the spec a session writes or develops, the compaction's
@@ -371,7 +387,7 @@ Project-scoped.
 |---|---|---|
 | **Alone** | none | in Flottille only |
 | **Internal** | read, never written: written by others | in Flottille only; at the end a draft comment lists where the spec departs from the ticket, which the user posts or not |
-| **The ticket is the spec** | its description is the spec, marked as Flottille's (`forges.md`, "What Flottille posts is marked") | written to the ticket at each Ready, after reading it again: when someone changed it since Flottille last read it, nothing is written and the user chooses (take the change into the spec, or write over it) |
+| **The ticket is the spec** | its description is the spec, recorded as Flottille's (`forges.md`, "What Flottille posts is recorded") | written to the ticket at each Ready, after reading it again: when someone changed it since Flottille last read it, nothing is written and the user chooses (take the change into the spec, or write over it) |
 
 A spec may cover several tickets; a ticket has at most one spec. With a ticket, the items' rounds
 see it change, and the session working on the spec is told with a delivery; nothing is applied on

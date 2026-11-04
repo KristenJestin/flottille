@@ -11,14 +11,16 @@ use std::sync::Arc;
 
 use flottille_core::commands::{self, Command};
 use flottille_core::declared::{ProjectTracker, RepositoryForge};
-use flottille_core::project::{Project, SetupStep, Skill, StepKind, Task, check_skill, check_task};
+use flottille_core::project::{
+    Project, Ready, SetupStep, Skill, StepKind, Task, TaskUrl, check_skill, check_task,
+};
 use flottille_core::protocol;
 use flottille_core::workspace::{Action, State, Step, StepState, Workspace};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
-use crate::mcp::{Grant, Outcome, arguments};
+use crate::mcp::{Grant, Outcome, arguments, workspace_named};
 use crate::place::{Place, Resolved};
 use crate::projects::{self, Failure};
 
@@ -58,6 +60,11 @@ struct TasksCall {
     check: Option<bool>,
     read_only: Option<bool>,
     ask_before_running: Option<bool>,
+    /// Left out: unchanged; `null`: removed.
+    #[serde(default, deserialize_with = "present")]
+    ready: Option<Option<Box<Ready>>>,
+    #[serde(default, deserialize_with = "present")]
+    url: Option<Option<Box<TaskUrl>>>,
 }
 
 #[derive(Deserialize)]
@@ -89,6 +96,8 @@ struct ProjectCall {
     tracker: Option<Option<ProjectTracker>>,
     /// set_rules: the rules.
     text: Option<String>,
+    /// set_rules: whether the project's agents get its rules alone.
+    rules_alone: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -98,6 +107,8 @@ struct WorkspaceCall {
     /// The workspace; for all but create, the agent's own when left out.
     name: Option<String>,
     repositories: Option<Vec<String>>,
+    /// create: the branch, `<branch prefix>/<name>` when left out; an existing one is resumed.
+    branch: Option<String>,
     /// link_ticket: `null` unlinks.
     #[serde(default, deserialize_with = "present")]
     ticket: Option<Option<String>>,
@@ -215,6 +226,8 @@ pub fn sets(tasks: &BTreeMap<String, Task>, tool: &str, args: &Value) -> Option<
                     read_only: false,
                     ask_before_running: false,
                     added_by: None,
+                    ready: None,
+                    url: None,
                 },
                 _ => tasks.get(&name)?.clone(),
             };
@@ -237,6 +250,8 @@ pub fn sets(tasks: &BTreeMap<String, Task>, tool: &str, args: &Value) -> Option<
                         read_only: false,
                         ask_before_running: false,
                         added_by: None,
+                        ready: None,
+                        url: None,
                     },
                 ),
                 (None, Some(name)) => (Some(name.clone()), tasks.get(name)?.clone()),
@@ -344,17 +359,38 @@ pub async fn prepared(
     }
 }
 
-/// The workspace a removal names and what removing it would lose.
+/// What a removal names and does: the workspace, what removing it would lose and, when it is the
+/// agent's own, the lines of its tree's commands running in it, which are stopped first.
+struct Removal {
+    name: String,
+    losses: Vec<String>,
+    own: Option<Vec<String>>,
+}
+
 async fn removal_losses(
     daemon: &Daemon,
     grant: &Grant,
     call: &WorkspaceCall,
-) -> Result<(String, Vec<String>), Outcome> {
-    let name = crate::workspaces::removed_named(daemon, &grant.place, call.name.as_deref())?;
-    let losses = crate::workspaces::losses(daemon, &grant.place.project, &name)
+) -> Result<Removal, Outcome> {
+    let place = &grant.place;
+    let name = workspace_named(daemon, place, call.name.as_deref(), "workspace remove")?;
+    let losses = crate::workspaces::losses(daemon, &place.project, &name)
         .await
         .map_err(refusal)?;
-    Ok((name, losses))
+    let own = match place.workspace.as_deref() == Some(name.as_str()) {
+        true => {
+            let workspace = daemon
+                .read(|store| store.workspace(&place.project, &name))
+                .map_err(|error| Outcome::Failed(error.to_string()))?
+                .ok_or_else(|| Outcome::Failed(format!("no workspace {name}")))?;
+            let ours = crate::tree::root_of(daemon, &grant.agent);
+            let runs =
+                crate::workspaces::runs_of_tree(daemon, &workspace, &ours).map_err(refusal)?;
+            Some(runs.into_iter().map(|run| run.line).collect())
+        }
+        false => None,
+    };
+    Ok(Removal { name, losses, own })
 }
 
 /// What removing a workspace does, in words: what would be lost, which the user's answer says to
@@ -364,15 +400,32 @@ async fn removal_says(
     grant: &Grant,
     call: &WorkspaceCall,
 ) -> Result<Vec<String>, Outcome> {
-    let (name, losses) = removal_losses(daemon, grant, call).await?;
-    Ok(removal_words(&name, losses))
+    Ok(removal_words(removal_losses(daemon, grant, call).await?))
 }
 
-fn removal_words(name: &str, losses: Vec<String>) -> Vec<String> {
+/// The line of a removal's card naming the session's commands it stops.
+const STOPPED: &str = "Stop the commands of this session running in it: ";
+
+/// What of a card the user's answer holds to: all of it but the commands a removal of the
+/// agent's own workspace stops, which may end or start between the card and the answer, and
+/// lose nothing either way.
+pub fn compared(says: &[String]) -> Vec<&String> {
+    says.iter()
+        .filter(|said| !said.starts_with(STOPPED))
+        .collect()
+}
+
+fn removal_words(removal: Removal) -> Vec<String> {
+    let Removal { name, losses, own } = removal;
     let mut says = vec![format!(
         "Remove the workspace {name}: its worktrees and its folder, and its branch in each \
          repository where it holds no commit of its own"
     )];
+    if let Some(lines) = &own
+        && !lines.is_empty()
+    {
+        says.push(format!("{STOPPED}{}", lines.join(", ")));
+    }
     if losses.is_empty() {
         says.push("Nothing would be lost".into());
     } else {
@@ -382,6 +435,9 @@ fn removal_words(name: &str, losses: Vec<String>) -> Vec<String> {
                 .into(),
         );
         says.extend(losses);
+    }
+    if own.is_some() {
+        says.push("This session then goes on in the project's folder (main)".into());
     }
     says
 }
@@ -396,12 +452,13 @@ pub async fn approved_losses(
     card: &[String],
 ) -> Result<Vec<String>, Outcome> {
     let call: WorkspaceCall = arguments("workspace", args.clone())?;
-    let (name, losses) = removal_losses(daemon, grant, &call).await?;
-    let says: Vec<String> = removal_words(&name, losses.clone())
+    let removal = removal_losses(daemon, grant, &call).await?;
+    let losses = removal.losses.clone();
+    let says: Vec<String> = removal_words(removal)
         .iter()
         .map(|said| crate::mcp::masked(said, &grant.place))
         .collect();
-    match says == card {
+    match compared(&says) == compared(card) {
         true => Ok(losses),
         false => Err(Outcome::Refused(format!(
             "what it does changed since the user allowed it; it would now: {}",
@@ -450,6 +507,12 @@ fn task_said(task: &Task) -> String {
             notes.push(note.to_owned());
         }
     }
+    if let Some(ready) = &task.ready {
+        notes.push(ready.said());
+    }
+    if let Some(url) = &task.url {
+        notes.push(url.said());
+    }
     match notes.is_empty() {
         true => format!("`{}`", task.line),
         false => format!("`{}` ({})", task.line, notes.join(", ")),
@@ -470,7 +533,9 @@ fn tasks_says(project: &Project, call: &TasksCall) -> Result<Vec<String>, Outcom
     let check = |task: &Task| {
         check_task(name, task, &known)
             .map_err(|error| Outcome::Refused(format!("refused: tasks.{name}{error}")))?;
-        flottille_core::command::split_line(&task.line).map_err(Outcome::Refused)?;
+        for line in std::iter::once(task.line.as_str()).chain(task.other_lines()) {
+            flottille_core::command::split_line(line).map_err(Outcome::Refused)?;
+        }
         Ok::<(), Outcome>(())
     };
     if action == "add" {
@@ -496,6 +561,8 @@ fn tasks_says(project: &Project, call: &TasksCall) -> Result<Vec<String>, Outcom
                 read_only: false,
                 ask_before_running: false,
                 added_by: None,
+                ready: None,
+                url: None,
             },
             call,
         );
@@ -531,7 +598,7 @@ fn tasks_says(project: &Project, call: &TasksCall) -> Result<Vec<String>, Outcom
             if changed == *task {
                 return Err(Outcome::Refused(format!(
                     "refused: this edit changes nothing of the task {name}: give line, \
-                     repository or a flag"
+                     repository, a flag, ready or url"
                 )));
             }
             // What it was is part of what the user allows: edited meanwhile, nothing is done.
@@ -561,6 +628,12 @@ fn edited(task: &Task, call: &TasksCall) -> Task {
         if let Some(value) = value {
             *field = value;
         }
+    }
+    if let Some(ready) = &call.ready {
+        task.ready = ready.clone();
+    }
+    if let Some(url) = &call.url {
+        task.url = url.clone();
     }
     task
 }
@@ -982,7 +1055,7 @@ pub async fn remove_losing(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> 
         Err(refused) => return refused,
     };
     let losses = match removal_losses(daemon, grant, &call).await {
-        Ok((_, losses)) => losses,
+        Ok(removal) => removal.losses,
         Err(refused) => return refused,
     };
     crate::workspaces::workspace_remove(
@@ -1092,6 +1165,12 @@ async fn performed(
                         if let Some(value) = value {
                             params[key] = value.into();
                         }
+                    }
+                    if let Some(ready) = &call.ready {
+                        params["ready"] = json!(ready);
+                    }
+                    if let Some(url) = &call.url {
+                        params["url"] = json!(url);
                     }
                     answer(&format!("task.{action}"), params)?;
                     Ok(match action {
@@ -1210,7 +1289,7 @@ async fn performed(
                 "create" => {
                     let created = answer(
                         "workspace.create",
-                        json!({"project": name, "name": call.name,
+                        json!({"project": name, "name": call.name, "branch": call.branch,
                             "repositories": call.repositories, "ticket": call.ticket.flatten()}),
                     )
                     .await?;
@@ -1300,8 +1379,13 @@ async fn performed(
                 "rules" => Ok(rules_text(&project, &daemon.paths)),
                 "set_rules" => {
                     rules_say(&project, &call)?;
-                    let text = call.text.as_deref().unwrap_or_default();
-                    crate::rules::set_project(daemon, &name, Some(text)).map_err(refusal)?;
+                    crate::rules::set_project(
+                        daemon,
+                        &name,
+                        call.text.as_deref(),
+                        call.rules_alone,
+                    )
+                    .map_err(refusal)?;
                     Ok(
                         "Saved. The new rules reach the agents created from now on; you, and the \
                          agents already created, keep the rules you were created with."
@@ -1447,7 +1531,13 @@ fn workspace_says(
         "list" => Ok(Vec::new()),
         "create" => {
             let name = named(&call.name, "workspace", action, "login")?;
-            let mut says = create_says(daemon, project, name, &call.repositories)?;
+            let mut says = create_says(
+                daemon,
+                project,
+                name,
+                &call.repositories,
+                call.branch.as_deref(),
+            )?;
             if let Some(Some(ticket)) = &call.ticket {
                 let key = crate::tickets::accepted(project, ticket)
                     .map_err(|why| Outcome::Refused(format!("refused: {why}")))?;
@@ -1531,6 +1621,7 @@ fn create_says(
     project: &Project,
     name: &str,
     repositories: &Option<Vec<String>>,
+    branch: Option<&str>,
 ) -> Result<Vec<String>, Outcome> {
     if !flottille_core::project::valid_name(name) {
         return Err(Outcome::Refused(format!(
@@ -1556,9 +1647,12 @@ fn create_says(
         Some(paths) => format!("with the repositories {}", paths.join(", ")),
         None => "with the project's default repositories".into(),
     };
+    let branch = branch.map_or_else(
+        || format!("{}/{name}", project.branch_prefix),
+        str::to_owned,
+    );
     let mut says = vec![format!(
-        "Create the workspace {name} on the branch {}/{name}, {taken}",
-        project.branch_prefix
+        "Create the workspace {name} on the branch {branch}, {taken}"
     )];
     match project.setup.is_empty() {
         true => says.push("The project has no setup: nothing else runs.".into()),
@@ -1590,7 +1684,7 @@ fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<Strin
             let project = own(daemon, grant)?;
             let repositories: Option<Vec<String>> =
                 serde_json::from_value(args["repositories"].clone()).unwrap_or_default();
-            let mut says = create_says(daemon, &project, name, &repositories)?;
+            let mut says = create_says(daemon, &project, name, &repositories, None)?;
             let whose = match root {
                 true => "a session of the user's",
                 false => "a child",
@@ -1723,39 +1817,87 @@ const PROJECT_ACTIONS: &str = "settings, set_settings, rules and set_rules";
 
 /// What `set_rules` changes, in words, or the refusal of a call that does not fit.
 fn rules_say(project: &Project, call: &ProjectCall) -> Result<Vec<String>, Outcome> {
-    let Some(text) = &call.text else {
+    if call.text.is_none() && call.rules_alone.is_none() {
         return Err(Outcome::Refused(
-            "refused: set_rules needs text, the rules whole: {\"action\": \"set_rules\", \
-             \"text\": \"Answer in French.\"}; rules reads the current ones"
+            "refused: set_rules needs text or rules_alone: {\"action\": \"set_rules\", \
+             \"text\": \"Answer in French.\"}, the project's rules whole, or {\"action\": \
+             \"set_rules\", \"rules_alone\": true}; rules reads the current ones"
                 .into(),
         ));
-    };
-    crate::rules::check(text).map_err(|why| Outcome::Refused(format!("refused: {why}")))?;
-    let replaced = match project.rules {
-        Some(_) => "its own rules",
-        None => "the rules it follows",
-    };
-    Ok(vec![
-        format!("Replace {replaced} for project {} by:", project.name),
-        text.trim_end().to_owned(),
-    ])
+    }
+    let alone = call.rules_alone.unwrap_or(project.rules_alone);
+    let mut says = Vec::new();
+    if let Some(text) = &call.text {
+        crate::rules::check(text).map_err(|why| Outcome::Refused(format!("refused: {why}")))?;
+        let gets = if alone {
+            "which agents get alone, without the global ones"
+        } else {
+            "which agents get after the global ones"
+        };
+        says.push(format!(
+            "Set the rules of project {}, {gets}, to:",
+            project.name
+        ));
+        says.push(text.trim_end().to_owned());
+    }
+    if call.rules_alone.is_some() {
+        says.push(if alone {
+            format!(
+                "Agents of project {} get only its own rules, not the global ones.",
+                project.name
+            )
+        } else {
+            format!(
+                "Agents of project {} get the global rules, then its own.",
+                project.name
+            )
+        });
+    }
+    Ok(says)
 }
 
 /// What `rules` answers: the rules the agents created from now on get, and where they come from.
 fn rules_text(project: &Project, paths: &flottille_core::paths::Paths) -> String {
-    let (rules, cut) = crate::rules::resolved(paths, project);
-    let from = match rules.source {
-        crate::rules::Source::Project => "this project's own rules",
+    let (rules, cuts) = crate::rules::resolved(paths, project);
+    let global = match rules.source {
         crate::rules::Source::Global => "the user's rules for all projects",
         crate::rules::Source::Default => "Flottille's default rules",
     };
-    let cut = cut.map_or_else(String::new, |cut| format!(" Cut: {cut}."));
-    format!(
-        "The rules agents of project {} get from now on are {from}.{cut} Yours are in your \
-         instructions; set_rules proposes a change, which only the user can allow.\n\n{}",
-        project.name,
-        rules.text.trim_end()
-    )
+    let has_own = !rules.own.trim().is_empty();
+    let gets = match (rules.alone, has_own) {
+        (true, true) => "only this project's own rules".to_owned(),
+        (true, false) => "no rules: this project uses its own alone and has none".to_owned(),
+        (false, true) => format!("{global}, then this project's own rules"),
+        (false, false) => global.to_owned(),
+    };
+    let mut notes = String::new();
+    let global_cut = (!rules.alone)
+        .then_some(&cuts.global)
+        .and_then(Option::as_ref);
+    for cut in global_cut.into_iter().chain(cuts.own.as_ref()) {
+        notes.push_str(&format!(" Cut: {cut}."));
+    }
+    if rules.repeats {
+        notes.push_str(
+            " This project's text starts with the global rules, which agents get once: the \
+             repeat is left out.",
+        );
+    }
+    let mut text = format!(
+        "The rules agents of project {} get from now on are {gets}.{notes} Yours are in your \
+         instructions; set_rules proposes a change, which only the user can allow.",
+        project.name
+    );
+    if !rules.shared.trim().is_empty() {
+        text.push_str(&format!("\n\n# How to work\n\n{}", rules.shared.trim_end()));
+    }
+    if has_own {
+        text.push_str(&format!(
+            "\n\n# This project's rules\n\n{}",
+            rules.own.trim_end()
+        ));
+    }
+    text
 }
 
 /// The agent's own project, as its file says now.

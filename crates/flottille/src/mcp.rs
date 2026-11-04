@@ -223,7 +223,14 @@ const SERVED: [Definition; 28] = [
                 "serve": {"type": "boolean", "description": "It keeps running."},
                 "check": {"type": "boolean", "description": "Tests, lint."},
                 "read_only": {"type": "boolean", "description": "It changes nothing."},
-                "ask_before_running": {"type": "boolean", "description": "Judged each time it runs."}
+                "ask_before_running": {"type": "boolean", "description": "Judged each time it runs."},
+                "ready": {"type": ["object", "null"], "description": "add, edit: when a run of it is ready, one of {\"line\": text its output prints}, {\"url\": an address that answers}, {\"command\": a line that exits 0}; templated ({workspace}, {url}…); null removes it.", "properties": {
+                    "line": {"type": "string"}, "url": {"type": "string"}, "command": {"type": "string"}
+                }, "minProperties": 1, "maxProperties": 1, "additionalProperties": false},
+                "url": {"description": "add, edit: where a run of it answers: an address (templated, \"https://{workspace}.app.localhost\") or {\"command\": a line that prints it}; null removes it.", "anyOf": [
+                    {"type": "string"}, {"type": "null"},
+                    {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"], "additionalProperties": false}
+                ]}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -234,9 +241,12 @@ const SERVED: [Definition; 28] = [
             unquoted pipe, redirection, glob or &&, and a variable or $( even in double quotes, \
             is refused, put them in a script of the repository; quoted, the others are text. \
             Waits up to timeout seconds (30 by default, 600 at most) and answers \
-            with the end of the output; a longer run keeps going under its run id. Give task or \
-            line: {\"task\": \"test\"}, or {\"line\": \"cargo test -p core\", \
-            \"repository\": \"api\", \"timeout\": 120}.",
+            with the end of the output; a longer run keeps going under its run id, and you are \
+            told when it ends. A server task (serve) answers at once with whether it is starting \
+            or ready and its address; for a task that says when it is ready, notify \"ready\" \
+            has you told when it is, instead of reading run_status again and again. Give task or \
+            line: {\"task\": \"test\"}, {\"task\": \"dev\", \"notify\": \"ready\"}, or \
+            {\"line\": \"cargo test -p core\", \"repository\": \"api\", \"timeout\": 120}.",
         read_only: false,
         idempotent: false,
         destructive: true,
@@ -246,6 +256,7 @@ const SERVED: [Definition; 28] = [
                 "line": {"type": "string", "description": "One command line, split on spaces, quotes kept whole."},
                 "repository": {"type": "string", "description": "Where it runs; the place's top by default."},
                 "timeout": {"type": "integer", "minimum": 1, "maximum": 600},
+                "notify": {"type": "string", "enum": ["ready"], "description": "A task that says when it is ready: you are told when it is, or when it ends before."},
                 "why": {"type": "string", "description": "One sentence: why this run."}
             }, "additionalProperties": false})
         },
@@ -259,7 +270,9 @@ const SERVED: [Definition; 28] = [
             after; only the last 64 KiB of an output are kept. action stop: ends it with \
             everything it started, asked to end, then killed 5 seconds later, and answers once \
             it ended; a run that already ended is left as it is. {\"run\": \"a1b2c3\", \
-            \"action\": \"stop\"} The same call reads a cut result whole: a long result is \
+            \"action\": \"stop\"} action notify with when ready: you are told when a run of \
+            a task that says when it is ready is, rather than reading it again and again: \
+            {\"run\": \"a1b2c3\", \"action\": \"notify\", \"when\": \"ready\"}. The same call reads a cut result whole: a long result is \
             returned as its beginning and its end with a line naming an id (res_...) and the \
             call that reads the lines left out, from start, a page at a time; stop does not \
             apply to it.",
@@ -269,7 +282,8 @@ const SERVED: [Definition; 28] = [
         schema: || {
             json!({"type": "object", "properties": {
                 "run": {"type": "string", "description": "The run id run gave, or the id of a cut result (res_...)."},
-                "action": {"type": "string", "enum": ["output", "stop"], "description": "output by default."},
+                "action": {"type": "string", "enum": ["output", "stop", "notify"], "description": "output by default."},
+                "when": {"type": "string", "enum": ["ready"], "description": "notify: what to be told of."},
                 "tail": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "output: the last lines."},
                 "start": {"type": "integer", "minimum": 1, "description": "output: the first line to show."}
             }, "required": ["run"], "additionalProperties": false})
@@ -303,7 +317,7 @@ const SERVED: [Definition; 28] = [
         title: "Pull requests",
         description: "The pull requests of the project's repositories on their forge, through \
             the user's own gh or bkt (no forge sign-in here: never run them). list: by state \
-            (open by default) and branch, as the daemon last read them (it says when). show: a workspace's branch's (yours; in main, name \
+            (open by default) and branch, as last read. show: a workspace's branch's (yours; in main, name \
             it), or number's, with checks (the log's end of each failed job), review and comment \
             counts; detail full adds texts. Writes, judged, answered at once, the result maybe \
             later: create, merge (method, squash by default; refused with no check, while checks \
@@ -311,14 +325,15 @@ const SERVED: [Definition; 28] = [
             (re-run failed) act on a workspace's branch; comment, edit, close (comment first), \
             reopen on number. subscribe: the next events of a workspace's pull request wakes you \
             once, by a delivery (from people: no bot nor agent; minutes: sized by CI, else 60); \
-            unsubscribe. {\"action\": \"create\", \"repository\": \"api\", \"title\": \
+            unsubscribe. CI: pipelines, runs, run_view, run_logs; judged run, stop, step. \
+            {\"action\": \"create\", \"repository\": \"api\", \"title\": \
             \"fix: ...\", \"body\": \"...\"}",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "show", "subscribe", "unsubscribe", "create", "comment", "edit", "merge", "checks", "close", "reopen"]},
+                "action": {"type": "string", "enum": ["list", "show", "subscribe", "unsubscribe", "create", "comment", "edit", "merge", "checks", "close", "reopen", "pipelines", "runs", "run_view", "run_logs", "run", "stop", "step"]},
                 "workspace": {"type": "string", "description": "Yours when left out; in main, name it."},
                 "repository": {"type": "string", "description": "By path; all of the place's when left out (list, show)."},
                 "number": {"type": "integer", "minimum": 1, "description": "show, comment, edit: a pull request."},
@@ -334,7 +349,14 @@ const SERVED: [Definition; 28] = [
                 "method": {"type": "string", "enum": ["squash", "merge", "rebase"], "description": "merge: squash when left out."},
                 "events": {"type": "array", "items": {"enum": crate::forge::EVENTS}},
                 "from": {"enum": crate::subscriptions::FROM},
-                "minutes": {"type": "integer", "minimum": 1, "maximum": crate::subscriptions::LONGEST_MINUTES}
+                "minutes": {"type": "integer", "minimum": 1, "maximum": crate::subscriptions::LONGEST_MINUTES},
+                "pipeline": {"type": "string", "description": "run: as pipelines lists it (Bitbucket default, custom: <name>, branches: <pattern>; GitHub a workflow's file)."},
+                "variables": {"type": "array", "description": "run: Bitbucket variables, GitHub inputs.", "items": {"type": "object", "properties": {
+                    "key": {"type": "string"}, "value": {"type": "string"}, "secured": {"type": "boolean"}
+                }, "required": ["key", "value"], "additionalProperties": false}},
+                "run": {"type": "integer", "minimum": 1, "description": "run_view, run_logs, stop, step: as runs lists it."},
+                "step": {"type": "string", "description": "run_logs, step: a step's (job's) name, as run_view lists it."},
+                "do": {"type": "string", "enum": ["start", "rerun"], "description": "step: start a manual step, or run one again."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -447,8 +469,9 @@ const SERVED: [Definition; 28] = [
         description: "This project's settings. settings reads each repository's forge and the \
             tracker; set_settings declares them (null removes one; a tracker left out is kept), \
             and a repository's base branches and dependencies; what is left out is kept, a \
-            refused change saves nothing. rules reads how agents are told to work; set_rules \
-            replaces them, for the agents created after. A change is done once the judge or the \
+            refused change saves nothing. rules reads how agents are told to work (the global \
+            rules, then the project's); set_rules replaces the project's text and sets \
+            rules_alone, for the agents created after. A change is done once the judge or the \
             user allows it, of the tracker or of the rules only once the user does: you are \
             answered at once, the result may come later. {\"action\": \"set_settings\", \
             \"repositories\": [{\"path\": \"api\", \"base\": [\"develop\", \"main\"], \
@@ -466,7 +489,8 @@ const SERVED: [Definition; 28] = [
                     "depends_on": {"type": "array", "items": {"type": "string"}, "description": "Repository paths, [] for none; no cycle."}
                 }, "required": ["path"], "additionalProperties": false}},
                 "tracker": {"type": ["object", "null"], "description": "{kind: github, repository: <path>} or {kind: jira, site, projects}."},
-                "text": {"type": "string", "description": "set_rules: the rules, whole, at most 8000 characters; they replace the project's current ones."}
+                "text": {"type": "string", "description": "set_rules: the project's rules, whole, at most 8000 characters; they replace its current ones and come after the global ones."},
+                "rules_alone": {"type": "boolean", "description": "set_rules: true to give the project's agents its rules alone, without the global ones; false for both. Text or rules_alone, at least one."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -474,10 +498,12 @@ const SERVED: [Definition; 28] = [
         name: "workspace",
         title: "The project's workspaces",
         description: "The project's workspaces. list and show read them. A root's writes, \
-            judged: create makes one (worktrees, then setup, judged as a run of each step), \
-            prepare resumes a failed setup, link_ticket links a ticket (null unlinks); remove, \
-            always held for the user, its request saying what would be lost, never the \
-            workspace you work in. name: yours when left out, but for create and remove. {\"action\": \"create\", \
+            judged: create makes one (worktrees, then setup, judged as a run of each step; to \
+            resume a branch, name it), prepare resumes a failed setup, link_ticket links a \
+            ticket (null unlinks); remove, always held for the user, its request saying what \
+            would be lost: yours too once its work is done, your commands in it stopped, and you \
+            go on in main. name: yours when left out, but for create. To work on another branch in this workspace, switch with git: the \
+            workspace follows the branch its worktrees are on. {\"action\": \"create\", \
             \"name\": \"login\"}",
         read_only: false,
         idempotent: false,
@@ -487,6 +513,7 @@ const SERVED: [Definition; 28] = [
                 "action": {"type": "string", "enum": ["list", "show", "create", "prepare", "link_ticket", "remove"]},
                 "name": {"type": "string"},
                 "repositories": {"type": "array", "items": {"type": "string"}, "description": "create: by path."},
+                "branch": {"type": "string", "description": "create: <branch prefix>/<name> when left out; an existing branch is checked out."},
                 "ticket": {"type": ["string", "null"], "description": "#123 or ABC-123."}
             }, "required": ["action"], "additionalProperties": false})
         },
@@ -975,6 +1002,24 @@ impl Server {
             self.changes.send_modify(|n| *n += 1);
         }
         outdated
+    }
+
+    /// The agent's running session now works in `place`: its next calls are decided and
+    /// performed there. Nothing when no process of the agent runs.
+    pub fn move_place(&self, agent: &str, place: Place) {
+        let mut tokens = self.tokens.lock().unwrap();
+        let Tokens {
+            grants, by_agent, ..
+        } = &mut *tokens;
+        if let Some(grant) = by_agent
+            .get(agent)
+            .and_then(|digest| grants.get_mut(digest))
+        {
+            *grant = Arc::new(Grant {
+                place,
+                ..Grant::clone(grant)
+            });
+        }
     }
 
     /// Whether the agent's running session runs an older list of tools than its role has now.
@@ -1779,6 +1824,8 @@ async fn played(
         .is_some_and(|agent| agent.epoch != grant.epoch);
     let outcome = if replaced {
         Outcome::Refused(REPLACED.into())
+    } else if let Some(why) = crate::workspaces::being_removed(daemon, &grant.agent, tool) {
+        Outcome::Refused(format!("refused: {why}"))
     } else if grant.tools.contains(&tool) {
         // A write of the project shows what it changes; one that cannot be done is refused
         // before the user is asked anything.
@@ -1831,7 +1878,10 @@ async fn played(
                         match judged {
                             // In Full, what the gate holds passes, base included: what it
                             // refuses was refused above.
-                            _ if mode == GateMode::Full => {
+                            // Its own workspace is removed only with the user's word.
+                            _ if mode == GateMode::Full
+                                && !removes_own_workspace(grant, tool, &args) =>
+                            {
                                 verdict = Some("full");
                                 if removes_a_workspace(tool, &args) {
                                     crate::actions::remove_losing(daemon, grant, args).await
@@ -2147,6 +2197,12 @@ fn pushed(place: &Place, folder: Option<&Resolved>) -> bool {
     }
 }
 
+/// `workspace` `remove` of the workspace the agent works in: the only one an agent in a
+/// workspace may name.
+fn removes_own_workspace(grant: &Grant, tool: &str, args: &Value) -> bool {
+    removes_a_workspace(tool, args) && grant.place.workspace.is_some()
+}
+
 /// Performs a call the user allowed, of its class, recorded as the agent's: the request's answer.
 /// `discarding`, the losses of a workspace's removal the user said to make even with what would
 /// be lost.
@@ -2351,8 +2407,27 @@ pub fn record_of(args: &Value, place: &Place) -> Value {
         }
     }
     let env = std::env::vars_os().collect();
-    let values = place.secret_values();
-    walk(args, &|text| secrets::mask_also(text, &env, &values))
+    let mut values = place.secret_values();
+    // A secured variable of a pipeline's run is the agent's own secret.
+    values.extend(
+        args["variables"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|variable| variable["secured"] == true)
+            .filter_map(|variable| variable["value"].as_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+    );
+    let mut recorded = walk(args, &|text| secrets::mask_also(text, &env, &values));
+    // However short it is.
+    let variables = recorded.get_mut("variables").and_then(Value::as_array_mut);
+    for variable in variables.into_iter().flatten() {
+        if variable["secured"] == true && variable.get("value").is_some() {
+            variable["value"] = "[masked]".into();
+        }
+    }
+    recorded
 }
 
 /// A text cut at `limit` characters, saying how much was left out.

@@ -12,6 +12,11 @@
 //! and the dialog fades and rises when it opens, and the other way when it closes. Once the close
 //! animation has ended nothing is drawn.
 //!
+//! A [`large`](Modal::large) one is for looking at something at length (a command's output): nearly
+//! the whole window, a margin around it; the title and its sentence on the left of the header, the
+//! actions and a close button on its right, no Cancel and no footer, and the body takes all the
+//! height left, for its owner to scroll.
+//!
 //! A [`search`](Modal::search) is the same dialog for finding something (the window's quick
 //! switcher): near the top of the window, where the eye already is, its height following its
 //! results; its field above the results, which scroll; no title drawn and no Cancel.
@@ -27,6 +32,7 @@ use gpui_kit::{
 };
 
 use crate::button::Button;
+use crate::icons::Icon;
 use crate::interact::{dismiss_on_navigate, open_holding_overlay};
 use crate::layer;
 use crate::motion::{MODAL, Motion, RISE};
@@ -49,6 +55,7 @@ pub struct Modal {
     id: ElementId,
     title: SharedString,
     sentence: Option<SharedString>,
+    under_title: Option<AnyElement>,
     wide: bool,
     body: Vec<AnyElement>,
     kept: Vec<AnyElement>,
@@ -58,6 +65,7 @@ pub struct Modal {
     cancel: SharedString,
     takes_focus: bool,
     search: bool,
+    large: bool,
     above: Vec<AnyElement>,
     scroll: Option<ScrollHandle>,
     on_key: Option<KeyHandler>,
@@ -70,6 +78,7 @@ impl Modal {
             id: id.into(),
             title: title.into(),
             sentence: None,
+            under_title: None,
             wide: false,
             body: Vec::new(),
             kept: Vec::new(),
@@ -79,6 +88,7 @@ impl Modal {
             cancel: "Cancel".into(),
             takes_focus: false,
             search: false,
+            large: false,
             above: Vec::new(),
             scroll: None,
             on_key: None,
@@ -90,6 +100,13 @@ impl Modal {
     /// and its body (the results) drawn close together.
     pub fn search(mut self) -> Self {
         self.search = true;
+        self
+    }
+
+    /// Nearly the whole window, to look at something at length: its actions are in the header
+    /// beside a close button, there is no Cancel, and the body takes the height left.
+    pub fn large(mut self) -> Self {
+        self.large = true;
         self
     }
 
@@ -108,6 +125,12 @@ impl Modal {
     /// A key pressed in it, other than Escape: a search's arrows.
     pub fn on_key(mut self, f: impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static) -> Self {
         self.on_key = Some(Rc::new(f));
+        self
+    }
+
+    /// What goes under the title and its sentence, in the header: a run's address.
+    pub fn under_title(mut self, element: Option<impl IntoElement>) -> Self {
+        self.under_title = element.map(IntoElement::into_any_element);
         self
     }
 
@@ -176,7 +199,7 @@ fn part(id: &ElementId, name: &'static str) -> ElementId {
 }
 
 impl RenderOnce for Modal {
-    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state = window.use_keyed_state(part(&self.id, "motion"), cx, |_, _| Shown {
             open: false,
             motion: Motion::settled(0.0),
@@ -233,18 +256,23 @@ impl RenderOnce for Modal {
             .test_support();
         let scrim = dismiss_on_navigate(scrim, close.clone());
         let search = self.search;
+        let large = self.large;
         let title = self.title.clone();
-        let width = if self.wide || search {
+        let (header_actions, footer_actions) = if large {
+            (std::mem::take(&mut self.actions), Vec::new())
+        } else {
+            (Vec::new(), std::mem::take(&mut self.actions))
+        };
+        let on_close_button = close.clone();
+        let width = if large {
+            viewport.width - space::XL * 2.
+        } else if self.wide || search {
             space::DIALOG_WIDE
         } else {
             space::DIALOG
         };
-        let header = (!search).then(|| {
+        let titles = (!search).then(|| {
             div()
-                .flex_none()
-                .pt(px(20.))
-                .px(px(24.))
-                .flex()
                 .flex_col()
                 .gap(px(4.))
                 .child(
@@ -267,6 +295,23 @@ impl RenderOnce for Modal {
                         .child(sentence)
                         .test_support()
                 }))
+                .children(self.under_title)
+        });
+        let header = titles.map(|titles| {
+            let header = div().flex_none().pt(px(20.)).px(px(24.)).flex();
+            if large {
+                header
+                    .items_start()
+                    .gap(space::MD)
+                    .child(titles.flex_1().min_w_0().flex())
+                    .children(header_actions)
+                    .child(
+                        Button::icon(part(&self.id, "close"), Icon::Close, "Close (Esc)")
+                            .on_click(move |_, window, cx| on_close_button(window, cx)),
+                    )
+            } else {
+                header.flex_col().child(titles.flex())
+            }
         });
         let above = (!self.above.is_empty()).then(|| {
             div()
@@ -293,6 +338,19 @@ impl RenderOnce for Modal {
                         .into_iter()
                         .map(|child| div().flex_none().child(child)),
                 )
+            } else if large {
+                // The owner's body takes the height and scrolls what it holds itself.
+                div()
+                    .id(part(&self.id, "body"))
+                    .flex_1()
+                    .min_h_0()
+                    .px(px(24.))
+                    .pt(px(16.))
+                    .pb(px(24.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(16.))
+                    .children(self.body)
             } else {
                 scrolled.child(
                     div()
@@ -311,7 +369,7 @@ impl RenderOnce for Modal {
             .flex()
             .flex_col()
             .children(self.kept);
-        let footer = (!search).then(|| {
+        let footer = (!search && !large).then(|| {
             div()
                 .flex_none()
                 .pt(px(14.))
@@ -325,7 +383,7 @@ impl RenderOnce for Modal {
                     Button::quiet(part(&self.id, "cancel"), self.cancel)
                         .on_click(move |_, window, cx| on_cancel(window, cx)),
                 )
-                .children(self.actions)
+                .children(footer_actions)
         });
         let on_other_key = self.on_key;
         let mut panel = div()
@@ -336,6 +394,7 @@ impl RenderOnce for Modal {
             .opacity(t)
             .w(width)
             .max_w(viewport.width - px(48.))
+            .when(large, |d| d.h(viewport.height - space::XL * 2.))
             .max_h(if search {
                 viewport.height - space::XXXL * 2.
             } else {

@@ -146,6 +146,9 @@ pub struct Daemon {
     pub projects: Mutex<Projects>,
     /// The workspaces being prepared or removed: one at a time for each.
     pub preparing: Mutex<HashSet<i64>>,
+    /// The agents removing their own workspace, with its name and how many removals of it are
+    /// under way: meanwhile they start nothing in it (`workspaces::being_removed`).
+    pub removing: Mutex<HashMap<String, (String, usize)>>,
     /// What the setup steps running write, by workspace and step: they are read while they run
     /// and kept in the store once they ended.
     pub step_outputs: Mutex<HashMap<(i64, u32), Arc<workspaces::StepLive>>>,
@@ -310,6 +313,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         }),
         projects: Mutex::new(projects),
         preparing: Mutex::new(HashSet::new()),
+        removing: Mutex::new(HashMap::new()),
         step_outputs: Mutex::new(HashMap::new()),
         agents: Live::default(),
         mcp: mcp::Server::new(tools.local_addr()?.port()),
@@ -636,7 +640,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                 } else if request.method == "project.ticket" {
                     tickets::preview(daemon, request.params).await
                 } else if request.method == "task.run" {
-                    tasks::run(&daemon, request.params)
+                    tasks::run(&daemon, request.params).await
                 } else if extensions::answers(&request.method) {
                     extensions::call(&daemon, &request.method, request.params)
                 } else {
@@ -729,6 +733,13 @@ fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) 
         ),
         method if method.starts_with("tool_results.") => (
             match crate::results::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+            },
+            None,
+        ),
+        method if method.starts_with("workspaces_folder.") => (
+            match crate::workspaces_folder::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => Message::error(Some(id), failure.code, failure.message),
             },

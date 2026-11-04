@@ -833,3 +833,57 @@ fn in_ask_a_text_word_or_a_launcher_s_name_as_an_argument_is_held_not_refused() 
     }
     assert!(user.launches().is_empty(), "{:?}", user.launches());
 }
+
+#[test]
+fn in_full_a_repository_s_claude_commands_are_readable_but_never_written() {
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_fake_launchers();
+    let (id, mcp, place) = session(&user);
+    set_mode(&user, &id, "full");
+    std::fs::create_dir_all(place.join(".claude/commands")).unwrap();
+    std::fs::write(
+        place.join(".claude/commands/deploy-preview.md"),
+        "Deploy a preview of the branch.\n",
+    )
+    .unwrap();
+    std::fs::write(
+        place.join(".claude/.credentials.json"),
+        "{\"token\": \"fake-login\"}\n",
+    )
+    .unwrap();
+    let home = user.path("home/.claude/commands/deploy-preview.md");
+    std::fs::create_dir_all(home.parent().unwrap()).unwrap();
+    std::fs::write(&home, "The user's own command.\n").unwrap();
+
+    let read = done(mcp.call(
+        "fs_read",
+        json!({"path": ".claude/commands/deploy-preview.md"}),
+    ));
+    assert!(read.contains("Deploy a preview"), "{read}");
+    let ran = done(mcp.call(
+        "run",
+        json!({"line": "cat .claude/commands/deploy-preview.md"}),
+    ));
+    assert!(ran.contains("exited with code 0"), "{ran}");
+
+    let written = refused(mcp.call(
+        "fs_write",
+        json!({"path": ".claude/settings.json", "content": "{\"hooks\": {}}\n"}),
+    ));
+    assert!(
+        written.contains("hooks") && written.contains("ask the user"),
+        "{written}"
+    );
+    assert!(!place.join(".claude/settings.json").exists());
+    for (tool, args) in [
+        ("fs_read", json!({"path": ".claude/.credentials.json"})),
+        ("fs_read", json!({"path": home})),
+        ("run", json!({"line": format!("cat {}", home.display())})),
+    ] {
+        let said = refused(mcp.call(tool, args.clone()));
+        assert!(said.contains("login"), "{args}: {said}");
+        assert!(!said.contains("fake-login"), "{said}");
+    }
+    assert!(no_request(&user));
+}

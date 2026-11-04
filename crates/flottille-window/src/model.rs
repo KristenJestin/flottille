@@ -206,6 +206,10 @@ pub struct Session {
     pub ended: bool,
     /// The last sign of activity of its tree, in milliseconds since the Unix epoch.
     pub active_at: u64,
+    /// Its last exchange: the later of the last message the user gave its root and the end of its
+    /// root's last turn, its creation before either. The sidebar sorts by it: work done during a
+    /// turn never moves a row.
+    pub exchanged_at: u64,
     pub created_at: u64,
     /// How many commands the agents of its tree run now.
     pub commands: usize,
@@ -276,6 +280,7 @@ impl Forged {
         let (said, excerpt) = match (tool, field("action")) {
             ("forge", "create") => ("Opened a pull request", field("title").to_owned()),
             ("forge", "merge") => ("Merged a pull request", field("repository").to_owned()),
+            ("forge", "run") => ("Ran a pipeline", field("pipeline").to_owned()),
             ("forge", "comment") => ("Commented on a pull request", on(&number, &[field("body")])),
             ("forge", "edit") => (
                 "Edited a pull request",
@@ -625,6 +630,9 @@ impl Snapshot {
                     resumable: agent["resumable"] == true,
                     ended: ended(agent),
                     active_at,
+                    exchanged_at: agent["exchanged_at"]
+                        .as_u64()
+                        .unwrap_or_else(|| number(agent, "created_at")),
                     created_at: number(agent, "created_at"),
                     commands: commands_of("root", &id),
                     started_by: agent["launched_by"].as_str().map(name_of),
@@ -703,6 +711,22 @@ impl Snapshot {
         self.sessions
             .iter()
             .filter(move |s| s.project == project && &s.place == place)
+    }
+
+    /// The sessions of a project that have not ended, whatever their place: the one whose last
+    /// exchange is the latest first, then the newest.
+    pub fn live_sessions_of(&self, project: &str) -> Vec<&Session> {
+        let mut live: Vec<&Session> = self
+            .sessions
+            .iter()
+            .filter(|s| s.project == project && !s.ended)
+            .collect();
+        live.sort_by(|a, b| {
+            (b.exchanged_at, b.created_at)
+                .cmp(&(a.exchanged_at, a.created_at))
+                .then(a.id.cmp(&b.id))
+        });
+        live
     }
 
     pub fn session(&self, id: &str) -> Option<&Session> {
@@ -840,6 +864,17 @@ mod tests {
             Some((
                 "Commented on a pull request".into(),
                 "#12: Fixed the test".into(),
+                false
+            ))
+        );
+        assert_eq!(
+            said(
+                "forge",
+                json!({"action": "run", "pipeline": "custom: deploy-preview"})
+            ),
+            Some((
+                "Ran a pipeline".into(),
+                "custom: deploy-preview".into(),
                 false
             ))
         );

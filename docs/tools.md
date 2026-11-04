@@ -230,7 +230,7 @@ Paths are shown relative to the place's top.
 |---|---|---|
 | `fs_read` | `path`, `repository?`, `range? {offset?, length? 1..32768}` | A page of a file, lines numbered `%6d\t`, then `(bytes a-b of N; the next page starts at offset M)` or `(…, the end of the file)`, then `{"offset", "end", "size", "next"}`. A page holds at most 32 KiB and ends after its last newline (else on a character); an offset inside a character starts at the next one. A page is cut shorter to keep the result under the limit (a file of empty lines). |
 | `fs_list` | `path`, `repository?`, `depth? 1..5` | The entries, sorted, a folder's after it: `path  file  size`, `path/  folder`, `path  link  -> target`. `.git` is left out. It stops at 1000 entries, or shorter to stay under the limit, and says so. |
-| `search` | `pattern`, `repository?`, `glob?`, `cursor?` | A case-insensitive substring, not a pattern. A sorted, depth-first walk that never enters `.git` or `node_modules` nor follows a link; the top `.gitignore` applies (simple patterns: no `!`, a pattern with a `/` is anchored, a trailing `/` is a folder). `glob` keeps to the files it matches (on the name alone without a `/`; `**` for any folders). A file with a NUL byte in its first 64 KiB is skipped and named (20 at most). Hits are `path:line: text`, trimmed and cut at 200 characters. It stops at 100 matches, 1 MiB read or the size limit, with a cursor `path:line` that resumes it. The head says the count, the stop and its cursor, the limits, the skipped files. |
+| `search` | `pattern`, `repository?`, `glob?`, `cursor?` | A case-insensitive substring, not a pattern. A sorted, depth-first walk that never enters `.git` or `node_modules` nor follows a link; the top `.gitignore` applies (simple patterns: no `!`, a pattern with a `/` is anchored, a trailing `/` is a folder). A file `fs_read` refuses, a login's place (The gate, 1), is never searched. `glob` keeps to the files it matches (on the name alone without a `/`; `**` for any folders). A file with a NUL byte in its first 64 KiB is skipped and named (20 at most). Hits are `path:line: text`, trimmed and cut at 200 characters. It stops at 100 matches, 1 MiB read or the size limit, with a cursor `path:line` that resumes it. The head says the count, the stop and its cursor, the limits, the skipped files. |
 | `fs_write` | `path`, `content`, `repository?`, `why?` | The whole file, made with its folders when new. |
 | `fs_edit` | `path`, `edits [1..50] {old, new}`, `repository?`, `why?` | Each `old` must appear exactly once (overlapping occurrences count) when its turn comes, else `refused: the anchor of edit N appears K time(s) in X; it must appear exactly once. Nothing was changed`. Edits apply in order, spliced (never as a pattern: `$&` is text), all or none. |
 
@@ -293,9 +293,9 @@ own while the judge thought), it is refused (`refused: X: the path changed since
 
 | Tool | Arguments | |
 |---|---|---|
-| `tasks` | `action list \| show \| add \| edit \| remove`, `name?`, `line?`, `repository?`, `serve?`, `check?`, `read_only?`, `ask_before_running?` | The project's tasks (`docs/projects.md`, "Tasks"). `list` gives one line each: `name: line`, and where it runs, whether it keeps running, is a check, changes nothing, is judged each time it runs; `show` gives one. Every agent reads them; a root writes them ("The project"): `add` takes `name` and `line` and the flags, `edit` changes what it is given (`repository: null` puts the task back at the place's top), `remove` removes it, refused while a setup step runs it. A child's write is refused, pointing it to `ask_parent`. |
-| `run` | `task` or `line` (exactly one), `repository?`, `timeout? 1..600`, `why?` | Runs a task (`refused: the project has no task X: list them with tasks {"action": "list"}`) or one line, in the repository's folder (the task's, or the one named) or the place's top. Its description holds a call of each form: `{"task": "test"}`, `{"line": "cargo test -p core", "repository": "api", "timeout": 120}`. |
-| `run_status` | `run`, `action? output \| stop`, `tail? 1..1000`, `start?` | `action output` (the default): the run's state and lines of its output, the last `tail` (40 by default), or `tail` lines from line `start`. `run` may also be the id of a cut result ("Long results"), read by lines with `start`, never stopped. `action stop`: stops the run and everything in its process group, `SIGTERM`, then `SIGKILL` 5 s later, and answers once it ended; `tail` and `start` are refused with it. |
+| `tasks` | `action list \| show \| add \| edit \| remove`, `name?`, `line?`, `repository?`, `serve?`, `check?`, `read_only?`, `ask_before_running?`, `ready?`, `url?` | The project's tasks (`docs/projects.md`, "Tasks"). `list` gives one line each: `name: line`, and where it runs, whether it keeps running, is a check, changes nothing, is judged each time it runs, when it is ready and where it answers; `show` gives one. `ready` is `{"line"}`, `{"url"}` or `{"command"}`, `url` an address or `{"command"}`, `null` removing either; a `command` line is judged as a run of it, as the task's own line is. Every agent reads them; a root writes them ("The project"): `add` takes `name` and `line` and the flags, `edit` changes what it is given (`repository: null` puts the task back at the place's top), `remove` removes it, refused while a setup step runs it. A child's write is refused, pointing it to `ask_parent`. |
+| `run` | `task` or `line` (exactly one), `repository?`, `timeout? 1..600`, `notify? "ready"`, `why?` | Runs a task (`refused: the project has no task X: list them with tasks {"action": "list"}`) or one line, in the repository's folder (the task's, or the one named) or the place's top. Its description holds a call of each form: `{"task": "test"}`, `{"task": "dev", "notify": "ready"}`, `{"line": "cargo test -p core", "repository": "api", "timeout": 120}`. With `notify: "ready"`, for a task that says when it is ready, the agent is told when it is (below); on a task that does not, or a line, it is refused with a sentence. |
+| `run_status` | `run`, `action? output \| stop \| notify`, `when? "ready"`, `tail? 1..1000`, `start?` | `action output` (the default): the run's state and lines of its output, the last `tail` (40 by default), or `tail` lines from line `start`. `run` may also be the id of a cut result ("Long results"), read by lines with `start`, never stopped. `action stop`: stops the run and everything in its process group, `SIGTERM`, then `SIGKILL` 5 s later, and answers once it ended; `tail` and `start` are refused with it. `action notify` with `when: "ready"`: the agent is told when a run already started is ready, as `notify` on `run` does; refused for a run of a task that says no ready. |
 
 Until #131 these were `commands_list`, `commands_run` (its `command` now `task`) and
 `commands_status`. For one release a call under an old name is the new tool's (`commands_list`
@@ -321,6 +321,14 @@ pending requests.
   how to read the lines before or after (`run_status {"run", "start"}`), then the lines. A
   line longer than 2,000 characters shows as several; the lines shown are cut to stay under the
   limit.
+- **Ready and where it answers**: a run of a task that says when it is ready (`docs/projects.md`,
+  "Tasks") says, in `run`'s answer and in `run_status`, `it is starting, not ready yet` (with the
+  call that has the agent told, rather than reading it again and again), `it is ready at <url>`,
+  or `it ended before it was ready`, and its address (`address: <url>`, or `no address: <why>`).
+  With `notify`, a `command-ready` delivery, urgent, says `run <id>: <name> is ready at <url>`
+  once it is; a run that ends before is told by its `command-ended` delivery, which then says
+  `It ended before it was ready.`, never by a second one. The end of a run is told as before,
+  without asking.
 - **Only the agent that started a run** reads or stops it: `refused: X is not a run this agent
   started`.
 - **The output kept** is its last 64 KiB (cut back from a line's start once it passes 80 KiB),
@@ -370,7 +378,11 @@ pending requests.
   it saw, or the run still going) and the delivery, so the agent may be told the same end twice;
   nothing is lost, and the delivery carries the run's id to recognise it. A command the user stops
   while its call still waits says so in that answer (`was stopped by the user`); the agent's own
-  stop says `was stopped`.
+  stop says `was stopped`. A command the user restarts from the window (`run.restart`) is not
+  delivered as stopped: the agent is told, in a `command-ended` delivery of its own for each
+  restart (so also when it was already told the first run's end), that the user restarted it and
+  which run it now is (its own, read with `run_status`); if the stop happened and the new run could
+  not start, the delivery says that instead. The new run's end is delivered like any other.
 - **The user sees them** (`docs/design.md` §10): the session's right rail lists the commands of
   its tree, a project and a session with one running show it in the left sidebar, and the user can
   read a command's output live and stop it (its whole process group, as above); the rail keeps the
@@ -392,7 +404,7 @@ pending requests.
 
 | Tool | |
 |---|---|
-| `forge {action, workspace?, repository?, number?, state?, branch?, detail?, title?, body?, draft?, waive?, method?, events?, from?, minutes?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
+| `forge {action, workspace?, repository?, number?, state?, branch?, detail?, title?, body?, draft?, waive?, method?, events?, from?, minutes?, pipeline?, variables?, run?, step?, do?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
 
 - **The repositories** are those of the agent's place: its workspace's, or the project's in
   `main`. One the place does not take is refused (`refused: X is not a repository of this
@@ -433,8 +445,8 @@ pending requests.
   once; what is so already (checks that already ended) is no event, `show` reads it; when the
   rounds have not read the repository's pull requests once yet, the answer says what happens
   before their first is not seen. `from` is
-  `anyone` (the default) or `people`: no bot, nor a comment marked as posted by an agent
-  ([`forges.md`](forges.md), "What Flottille posts is marked"). `minutes` is how
+  `anyone` (the default) or `people`: no bot, nor a comment known as posted by an agent
+  ([`forges.md`](forges.md), "What Flottille posts is recorded"). `minutes` is how
   long it waits, 60 by default, 6000 (100 hours) at most. Without `minutes` the wait is sized by the
   repository's CI instead, and the answer says the duration taken and why: twice the average of
   its recent runs, from 15 minutes to the longest, 60 when there is no run to measure by
@@ -455,7 +467,9 @@ pending requests.
   `method`, `squash` (the default), `merge` or `rebase` (refused when no check ran on it or all were skipped, while its
   checks fail or run or a review asks for changes, unless `waive` gives the
   user's words, which holds the merge for their approval), or re-runs the failed jobs of its last
-  commit's pipelines (`docs/commands.md`, "`forge`").
+  commit's pipelines (`docs/commands.md`, "`forge`"). The branch is the one the repository's
+  worktree is on now (`docs/workspaces.md`, "The branch"); `create` on a detached HEAD is refused
+  (`refused: api is on no branch (detached at 1a2b3c4): switch to a branch first`).
 - **`comment {number, repository?, body}`** posts a comment on a pull request of a repository of
   the place; **`edit {number, repository?, title?, body?}`** changes its title or description, at
   least one of them (`gh pr comment`, `gh pr edit`; `bkt pr comment --text`, `bkt pr edit --title
@@ -475,9 +489,20 @@ pending requests.
   branch when it declines: `delete_branch` there is refused before anything is declined. A
   `title`, a `body` or a `method` on `close` and `reopen` is refused before anything is asked.
 
-`list`, `show`, `subscribe` and `unsubscribe` go through the gate like every call, which allows
-them in every mode; `create`, `comment`, `edit`, `merge`, `checks`, `close` and `reopen` are to
-judge, and a merge that waives the checks base. A write is done only once the repository's remote is checked to lead where its forge is declared. **What a
+- **The CI family** ([`forges.md`](forges.md), "The CI family"): **`pipelines {repository?,
+  branch?}`** what can be run on the branch (Bitbucket's pipelines with a custom one's variables,
+  GitHub's workflows that can be dispatched with their inputs), **`runs {repository?, branch?}`**
+  the recent runs, **`run_view {repository?, run}`** a run's steps (jobs), **`run_logs
+  {repository?, run, step}`** a step's log, masked and cut like other results; **`run
+  {repository?, pipeline, branch?, variables?}`** runs any pipeline on the workspace's branch (or
+  the one named) with `variables` (`[{key, value, secured?}]`, a secured value masked in every
+  result and record), **`stop {repository?, run}`** stops a run, **`step {repository?, run, step,
+  do}`** starts a manual step (`do: start`) or runs one again (`do: rerun`) where the forge allows
+  it, refused naming why elsewhere. A Bitbucket Data Center repository is refused for all of them.
+
+`list`, `show`, `subscribe`, `unsubscribe`, `pipelines`, `runs`, `run_view` and `run_logs` go
+through the gate like every call, which allows them in every mode; `create`, `comment`, `edit`,
+`merge`, `checks`, `close`, `reopen`, `run`, `stop` and `step` are to judge, and a merge that waives the checks base. A write is done only once the repository's remote is checked to lead where its forge is declared. **What a
 write posts is shown whole**: its request says `Its title: …` and `Its body: …` in full (the
 arguments recorded are cut at 500 characters), and the judge is given them whole. A title or a
 body longer than the 8,000 characters the judge is given whole is refused (`refused: the body is
@@ -512,8 +537,8 @@ It is the agent's own bookkeeping: the gate allows it in every mode, never held.
 
 | Tool | |
 |---|---|
-| `workspace {action: list \| show \| create \| prepare \| link_ticket \| remove, name?, repositories?, ticket?}` | The project's workspaces, as the window manages them (`docs/workspaces.md`). `list` gives each one's state, branch, repositories and ticket; `show {name?}` one whole, each step of its preparation with its state and why a failed one failed. `create {name, repositories?, ticket?}` makes one as `workspace.create` does: its worktrees, answered once they are made, then its setup in the background. `prepare {name?}` resumes a failed preparation (`workspace.prepare`); `link_ticket {name?, ticket}` links its ticket, and unlinks it with `ticket: null` (`workspace.link_ticket`). `name` is the agent's own workspace when left out, but for `create`; in `main` it names one. Every agent has it. A child reads the workspaces; its writes, `remove` included, are refused (`refused: the agent the user talks to manages the project's workspaces; … ask your parent (ask_parent)`). |
-| `remove {name}` | Removes a workspace of the project, as `flottille workspace remove` does (`docs/workspaces.md`, "Removal"), **always held for the user**, whatever the mode and the judge: a request whose card says what would be lost, each repository's uncommitted files and commits on no remote (`This would be lost, and the workspace is removed only if your answer says to discard it:`, `api has commits on no remote, on its branch shop/login: 1a2b3c4 Add the login`), or `Nothing would be lost`. Allowed, it is refused, nothing touched, while something would be lost, unless the user's answer said to discard it (`flottille approve <n> --discard`), and while another agent than the caller works in the workspace, of its tree or not, or a command run not the tree's own runs there (`refused: workspace … is not removed, nothing was touched: the agent …, outside this agent's tree, works in it…`, `the agent …, of this agent's tree, works in it`), each named; then deletes, in each repository, the workspace's local branch once its work has landed (no commit of its own, or its pull request merged, as the forge says), never the remote one, and keeps the others, its answer saying each and why (`docs/workspaces.md`, "Removal"). An agent never removes the workspace it works in, whose folder its removal would take from under it (`refused: this agent works in the workspace login, and removing it would take the folder it works in from under it: …`), named or left out; a child removes none. Until #141 it was the tool `workspace_remove {workspace?}`, still answered for one release. |
+| `workspace {action: list \| show \| create \| prepare \| link_ticket \| remove, name?, repositories?, ticket?}` | The project's workspaces, as the window manages them (`docs/workspaces.md`). `list` gives each one's state, branch, repositories and ticket; `show {name?}` one whole, each step of its preparation with its state and why a failed one failed. `create {name, repositories?, branch?, ticket?}` makes one as `workspace.create` does: its worktrees, answered once they are made, then its setup in the background; `branch` is `<branch prefix>/<name>` when left out, and an existing branch is checked out (its description: "to resume a branch, name it"). `prepare {name?}` resumes a failed preparation (`workspace.prepare`); `link_ticket {name?, ticket}` links its ticket, and unlinks it with `ticket: null` (`workspace.link_ticket`). `name` is the agent's own workspace when left out, but for `create`; in `main` it names one. Every agent has it. Its description says, in one line, that to work on another branch in a workspace an agent switches with git and the workspace follows (`docs/workspaces.md`, "The branch"). A child reads the workspaces; its writes, `remove` included, are refused (`refused: the agent the user talks to manages the project's workspaces; … ask your parent (ask_parent)`). |
+| `remove {name}` | Removes a workspace of the project, as `flottille workspace remove` does (`docs/workspaces.md`, "Removal"), **always held for the user**, whatever the mode and the judge: a request whose card says what would be lost, each repository's uncommitted files and commits on no remote (`This would be lost, and the workspace is removed only if your answer says to discard it:`, `api has commits on no remote, on its branch shop/login: 1a2b3c4 Add the login`), or `Nothing would be lost`. Allowed, it is refused, nothing touched, while something would be lost, unless the user's answer said to discard it (`flottille approve <n> --discard`), and while another agent than the caller works in the workspace, of its tree or not, or a command run not the tree's own runs there (`refused: workspace … is not removed, nothing was touched: the agent …, outside this agent's tree, works in it…`, `the agent …, of this agent's tree, works in it`), each named; then deletes, in each repository, the workspace's local branch once its work has landed (no commit of its own, or its pull request merged, as the forge says), never the remote one, and keeps the others, its answer saying each and why (`docs/workspaces.md`, "Removal"). A root removes the workspace it works in too, named or left out, once its work is done, held whatever the mode, Full included: its card also says the commands of its tree running in it, stopped first as `run.stop` stops one (`Stop the commands of this session running in it: pnpm dev:api, pnpm dev:front`), and `This session then goes on in the project's folder (main)`; once it is removed, the session goes on in `main` (its place, its grant and its record, in the write that forgets the workspace), and the answer says so (`The workspace login is removed; you now work in the project's folder (main), …`; `docs/workspaces.md`, "Its own workspace"). Its requests still waiting are then cancelled and answered as not run, and while the removal is carried out its `run`, `agent_launch`, `fs_write` and `fs_edit` are refused (`refused: the workspace login is being removed: …`). A child removes none. Until #141 it was the tool `workspace_remove {workspace?}`, still answered for one release. |
 
 `list` and `show` run at once. `remove` is base (above). `create`, `prepare` and `link_ticket` are to judge, as any
 write of "The project" is: an `action` request, which says what it does in words and is done only while
@@ -628,7 +653,7 @@ child none of them (it does its brief). Families with an `action`, as `agent_sta
 | `skills {action: list \| show \| add \| edit \| remove, name?, description?, path?, text?}` | The project's skills (`docs/skills.md`). `add` takes `name`, `description` and one of `path` (a file or a folder of the project folder) and `text` (a text Flottille keeps); `edit` changes what it is given; `remove` removes it, and its text. As `flottille skill` does. |
 | `commands {action: list \| show \| add \| edit \| remove, name?, description?, instructions?, template?}` | The project's commands (`docs/commands.md`). `add` takes `name`, `description` and `instructions`, or a `template` (`open-prs`, `merge-stack`, `close`) added as it is; `edit` changes what it is given. A command is sent to a child by writing `/name` in `agent_send`'s message. A command imported from a `.claude` folder points at a file: `show` names it and gives its text as it is now, and an edit of its instructions is refused (the file's to edit). |
 | `setup {action: list \| add \| edit \| remove \| move, number?, to?, step?}` | The project's setup (`docs/projects.md`, "The setup"), its steps numbered from 1 in order. `add {step, number?}` adds one, the last when `number` is left out; `edit {number, step}` replaces one; `remove {number}`; `move {number, to}`. A `step` is whole, as the file has it: one of `copy` (globs), `link`, `root_entries`, `run` (a line) and `task`, with `repository` or `for_each_repository`, and `time_limit` (seconds) with `run` or `task`; it is checked as the file is. The workspaces made after play it; one already made keeps its own. |
-| `project {action: settings \| set_settings \| rules \| set_rules, …}` | `settings` reads each repository's forge (and what its remote proposes) and the tracker (`docs/projects.md`). `set_settings {repositories?: [{path, forge?, base?, depends_on?}], tracker?}` declares a repository's forge, its base branches (in order of preference) and the repositories it depends on, or the tracker (`null` removes a forge or the tracker, `[]` no dependency; what is left out is kept, a tracker and a repository's forge too), checked by the code of `project.set_settings` itself, as the window's: a forge its remote does not lead to, a base branch missing on the remote, a dependency on itself or a cycle are refused with their reason, nothing saved. The gate judges it as every settings change but the tracker's, which is base; the check runs when the call is done, so a call held for the user may be refused after the approval. `rules` reads the rules the project's agents get from now on and where they come from (the project's own, the user's for all projects, or Flottille's default, `docs/projects.md`, "Rules"); `set_rules {text}` replaces the project's own rules by `text` (8,000 characters at most), for the agents created after: the one that asked keeps what it started with. |
+| `project {action: settings \| set_settings \| rules \| set_rules, …}` | `settings` reads each repository's forge (and what its remote proposes) and the tracker (`docs/projects.md`). `set_settings {repositories?: [{path, forge?, base?, depends_on?}], tracker?}` declares a repository's forge, its base branches (in order of preference) and the repositories it depends on, or the tracker (`null` removes a forge or the tracker, `[]` no dependency; what is left out is kept, a tracker and a repository's forge too), checked by the code of `project.set_settings` itself, as the window's: a forge its remote does not lead to, a base branch missing on the remote, a dependency on itself or a cycle are refused with their reason, nothing saved. The gate judges it as every settings change but the tracker's, which is base; the check runs when the call is done, so a call held for the user may be refused after the approval. `rules` reads the rules the project's agents get from now on and where they come from (the global rules, the user's else Flottille's default, then the project's own; or the project's alone when it says `rules_alone`, `docs/projects.md`, "Rules"), and says when the project's text repeats the global one; `set_rules {text?, rules_alone?}` replaces the project's own rules by `text` (8,000 characters at most) and sets whether it uses only them (`rules_alone`), one of the two at least, what is left out being kept, for the agents created after: the one that asked keeps what it started with. |
 
 The file is written where it stands, its comments kept.
 
@@ -913,10 +938,24 @@ says who answers a call to judge (`docs/design.md` §7.1).
    - a login's place, read or written, by a file tool or as any path a line names: `.ssh`,
      `.gnupg`, `.aws`, `.azure`, `.config/gcloud`, `.kube`, `.docker/config.json`, `.config/gh`,
      `.netrc`, `.npmrc`, `.pypirc`, `.git-credentials`, `.local/share/keyrings`,
-     `Library/Keychains` and the agents' logins (`.claude`, `.claude.json`, `.codex`,
-     `.local/share/opencode`) wherever they sit along the path, `/etc/shadow`, `/etc/sudoers`,
-     `/etc/sudoers.d`. Inside the place only what sits below it counts; a path outside is checked
-     as written and where it leads, and without a leading `/proc/<process>/root` or `cwd`;
+     `Library/Keychains`, `.local/share/opencode` wherever they sit along the path, `/etc/shadow`,
+     `/etc/sudoers`, `/etc/sudoers.d`. Inside the place only what sits below it counts; a path
+     outside is checked as written and where it leads, and without a leading `/proc/<process>/root`
+     or `cwd`. The agents' own folders of the home (`~/.claude`, `~/.claude.json`, `~/.codex`)
+     are a login's place whole (`refused: X is in a login's place (~/.claude)`), found where any
+     path leads, inside the place too (a link to them, a project that is the home folder), and
+     where they lead when they are links themselves (dotfiles); everywhere when the home is not
+     known, or when the path goes through a process's folder in `/proc`; anywhere else such a folder is read as any file, but
+     a `.credentials.json` or `auth.json` below it is a login's place
+     (`(.credentials.json in .claude)`);
+   - a write in an agent's folder that is not the home's (`.claude`, `.claude.json`, `.codex` of
+     a repository or anywhere else): by `fs_write` or `fs_edit`, as a path a line that does not
+     only read names (a line that writes only the place's files, `git add`, `git rm`,
+     `git diff --output`, included), or as the folder such a line runs in. Its settings and hooks
+     run programs the next time the user opens the repository with the agent's own command line,
+     outside the gate: `refused: X is in a repository's agent folder (.claude): its settings and
+     hooks run programs …; ask the user to make the change; nothing was done`. A line that only
+     reads it (`cat`, `ls`, `grep`, `git show`) is judged as any read;
    - a program that reads or prints a login: `gh`/`glab auth token`, `aws configure get` or
      `export-credentials`, `aws ecr get-login-password`, `aws sts get-session-token`,
      `kubectl config view --raw`, `kubectl create token`, `gcloud auth print-*token`,
@@ -979,10 +1018,10 @@ says who answers a call to judge (`docs/design.md` §7.1).
    - a sensitive place, read or written: `.env` and `.env.*` anywhere but the templates
      (`.example`, `.sample`, `.template`, `.dist`), `.ssh`, `.gnupg`, `.aws`, `.azure`,
      `.config/gcloud`, `.kube`, `.docker/config.json`, `.config/gh`, `.netrc`, `.npmrc`,
-     `.pypirc`, `.git-credentials`, `.local/share/keyrings`, `Library/Keychains` and the agents'
-     logins (`.claude`, `.claude.json`, `.codex`, `.local/share/opencode`) wherever they sit along
-     the path, `/etc/shadow`, `/etc/sudoers`, `/etc/sudoers.d` (all refused above, read or
-     written), and Flottille's own folders (data, configuration, state, runtime), which are
+     `.pypirc`, `.git-credentials`, `.local/share/keyrings`, `Library/Keychains`,
+     `.local/share/opencode` wherever they sit along the path, the agents' folders of the home
+     (`~/.claude`, `~/.claude.json`, `~/.codex`), `/etc/shadow`, `/etc/sudoers`, `/etc/sudoers.d`
+     (all refused above, read or written), and Flottille's own folders (data, configuration, state, runtime), which are
      base to read and refused to write. Inside the place only what sits below it counts. A path
      outside is checked as written and where it leads (a link anyone made, a configuration
      folder that is a link, a `..` after a link), against Flottille's folders as named and

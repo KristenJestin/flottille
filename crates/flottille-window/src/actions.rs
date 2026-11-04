@@ -66,6 +66,41 @@ impl Picture {
     }
 }
 
+/// What the user does to a command, as the daemon's `run.*` methods have it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunAct {
+    /// Stops it and everything it started.
+    Stop,
+    /// Stops it if it runs, then runs its line again in the same place.
+    Restart,
+    /// Takes one that ended off the list.
+    Dismiss,
+}
+
+impl RunAct {
+    fn method(self) -> &'static str {
+        match self {
+            RunAct::Stop => "run.stop",
+            RunAct::Restart => "run.restart",
+            RunAct::Dismiss => "run.dismiss",
+        }
+    }
+}
+
+/// What the daemon answered to what the user did to a command.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RunAnswer {
+    pub act: RunAct,
+    /// The command it was done to.
+    pub run: String,
+    /// Why the daemon refused, or why no answer came.
+    pub refused: Option<String>,
+    /// The new run, when a restart started one.
+    pub restarted: Option<String>,
+    /// What the daemon says of the restart: the command of an agent that ended is the user's now.
+    pub notice: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     /// What the project page shows beyond the shell's read: branches and lines changed.
@@ -242,11 +277,12 @@ pub enum Command {
         project: String,
         output: Option<Watch>,
     },
-    /// Stops a task the user ran and everything it started, or dismisses one that ended.
+    /// Stops a task the user ran and everything it started, runs it again, or dismisses one that
+    /// ended.
     ProjectRun {
         project: String,
         run: String,
-        dismiss: bool,
+        act: RunAct,
     },
     /// The project's setup.
     Setup {
@@ -289,6 +325,23 @@ pub enum Command {
     RulesWrite {
         project: Option<String>,
         text: Option<String>,
+    },
+    /// Makes a project's agents get its rules alone, or the global ones too (`rules.set`).
+    RulesAlone {
+        project: String,
+        alone: bool,
+    },
+    /// Where workspaces go: the default for every project, or a project's own
+    /// (`workspaces_folder.show`).
+    WorkspacesFolderRead {
+        project: Option<String>,
+    },
+    /// Keeps it (`workspaces_folder.set`): the default's `place` and `path`, or a project's own
+    /// folder in `path` (none follows the default).
+    WorkspacesFolderSet {
+        project: Option<String>,
+        place: Option<String>,
+        path: Option<String>,
     },
     /// A message to a session's root agent: the only agent the window writes to.
     Reply {
@@ -338,11 +391,12 @@ pub enum Command {
         model: Option<String>,
         effort: Option<String>,
     },
-    /// Stops a command of the session and everything it started, or dismisses one that ended.
+    /// Stops a command of the session and everything it started, runs it again, or dismisses one
+    /// that ended.
     Run {
         session: String,
         run: String,
-        dismiss: bool,
+        act: RunAct,
     },
     /// Ends a subscription of the session's agents, as the agent's own `unsubscribe` does.
     CancelSubscription {
@@ -662,6 +716,18 @@ pub enum Outcome {
         written: bool,
         shown: Result<Shown, String>,
     },
+    /// A project's switch to its own rules alone, or back: the rules as the daemon says them.
+    /// What is typed in the editor stays, and is not saved.
+    RulesSwitched {
+        project: String,
+        shown: Result<Shown, String>,
+    },
+    /// Where workspaces go as the daemon says it, after a read (`written` false) or a choice.
+    WorkspacesFolder {
+        project: Option<String>,
+        written: bool,
+        shown: Result<crate::workspaces_folder::Shown, String>,
+    },
     /// What `.claude` holds of a kind, each file with its state, or why it cannot be read.
     ClaudeFound {
         project: String,
@@ -714,10 +780,11 @@ pub enum Outcome {
         listed: Result<Vec<CommandRow>, String>,
         output: Option<Box<CommandOutput>>,
     },
-    /// A task the user ran was stopped or dismissed, or the daemon refused with why.
+    /// A task the user ran was stopped, restarted (as the run `restarted`) or dismissed, or the
+    /// daemon refused with why.
     ProjectRunAnswered {
         project: String,
-        refused: Option<String>,
+        answer: RunAnswer,
     },
     Setup {
         project: String,
@@ -779,10 +846,11 @@ pub enum Outcome {
         session: String,
         refused: Option<String>,
     },
-    /// A command was stopped or dismissed as asked, or the daemon refused with why.
+    /// A command was stopped, restarted (as the run `restarted`) or dismissed as asked, or the
+    /// daemon refused with why.
     RunAnswered {
         session: String,
-        refused: Option<String>,
+        answer: RunAnswer,
     },
     /// A subscription was cancelled as asked, or the daemon refused with why.
     SubscriptionCancelled {
@@ -955,6 +1023,46 @@ fn ask_alone(
     bound: Duration,
 ) -> Result<Result<Value, String>, String> {
     connected(connect)?.ask_within(method, params, bound)
+}
+
+/// What the user does to a command, and what the daemon answered.
+fn ask_run(connect: &Connect, act: RunAct, run: &str, bound: Duration) -> RunAnswer {
+    run_answer(
+        act,
+        run,
+        ask_alone(connect, act.method(), json!({"run": run}), bound),
+    )
+}
+
+fn run_answer(
+    act: RunAct,
+    run: &str,
+    answered: Result<Result<Value, String>, String>,
+) -> RunAnswer {
+    let (refused, restarted, notice) = match answered {
+        Ok(Ok(answer)) if act == RunAct::Restart => match answer["run"]["run"].as_str() {
+            Some(new) => (
+                None,
+                Some(new.to_owned()),
+                answer["notice"].as_str().map(str::to_owned),
+            ),
+            // Nothing to follow and nothing that waits: said like a refusal.
+            None => (
+                Some("the daemon answered without the new run".to_owned()),
+                None,
+                None,
+            ),
+        },
+        Ok(Ok(_)) => (None, None, None),
+        Ok(Err(why)) | Err(why) => (Some(why), None, None),
+    };
+    RunAnswer {
+        act,
+        run: run.to_owned(),
+        refused,
+        restarted,
+        notice,
+    }
 }
 
 fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
@@ -1267,6 +1375,39 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 project,
             }
         }
+        Command::WorkspacesFolderRead { project } => {
+            let shown = ask_alone(
+                connect,
+                "workspaces_folder.show",
+                json!({"project": project}),
+                bounds.quick,
+            );
+            Outcome::WorkspacesFolder {
+                shown: shown
+                    .and_then(|shown| shown)
+                    .map(|shown| crate::workspaces_folder::Shown::of(&shown, project.is_some())),
+                written: false,
+                project,
+            }
+        }
+        Command::WorkspacesFolderSet {
+            project,
+            place,
+            path,
+        } => {
+            let params = match &project {
+                Some(project) => json!({"project": project, "own": path}),
+                None => json!({"place": place, "path": path}),
+            };
+            let shown = ask_alone(connect, "workspaces_folder.set", params, bounds.quick);
+            Outcome::WorkspacesFolder {
+                shown: shown
+                    .and_then(|shown| shown)
+                    .map(|shown| crate::workspaces_folder::Shown::of(&shown, project.is_some())),
+                written: true,
+                project,
+            }
+        }
         Command::RulesWrite { project, text } => {
             let shown = match &text {
                 Some(text) => ask_alone(
@@ -1285,6 +1426,18 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             Outcome::Rules {
                 shown: shown.and_then(|shown| shown).map(|shown| Shown::of(&shown)),
                 written: true,
+                project,
+            }
+        }
+        Command::RulesAlone { project, alone } => {
+            let shown = ask_alone(
+                connect,
+                "rules.set",
+                json!({"project": project, "alone": alone}),
+                bounds.quick,
+            );
+            Outcome::RulesSwitched {
+                shown: shown.and_then(|shown| shown).map(|shown| Shown::of(&shown)),
                 project,
             }
         }
@@ -1487,18 +1640,10 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 output,
             }
         }
-        Command::ProjectRun {
+        Command::ProjectRun { project, run, act } => Outcome::ProjectRunAnswered {
             project,
-            run,
-            dismiss,
-        } => {
-            let method = if dismiss { "run.dismiss" } else { "run.stop" };
-            let refused = match ask_alone(connect, method, json!({"run": run}), bounds.quick) {
-                Ok(Ok(_)) => None,
-                Ok(Err(why)) | Err(why) => Some(why),
-            };
-            Outcome::ProjectRunAnswered { project, refused }
-        }
+            answer: ask_run(connect, act, &run, bounds.quick),
+        },
         Command::Setup { project } => {
             let listed = ask_alone(
                 connect,
@@ -1674,18 +1819,10 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             };
             Outcome::Interrupted { session, refused }
         }
-        Command::Run {
+        Command::Run { session, run, act } => Outcome::RunAnswered {
             session,
-            run,
-            dismiss,
-        } => {
-            let method = if dismiss { "run.dismiss" } else { "run.stop" };
-            let refused = match ask_alone(connect, method, json!({"run": run}), bounds.quick) {
-                Ok(Ok(_)) => None,
-                Ok(Err(why)) | Err(why) => Some(why),
-            };
-            Outcome::RunAnswered { session, refused }
-        }
+            answer: ask_run(connect, act, &run, bounds.quick),
+        },
         Command::CancelSubscription {
             session,
             subscription,
@@ -2100,5 +2237,28 @@ mod tests {
         };
         assert_eq!(project, "atlas");
         assert_eq!(why, "the daemon did not answer agent.start within 200 ms");
+    }
+
+    #[test]
+    fn a_restart_answered_without_a_new_run_is_a_refusal() {
+        let answer = run_answer(RunAct::Restart, "r1", Ok(Ok(json!({"run": {}}))));
+
+        assert_eq!(answer.restarted, None);
+        assert!(answer.refused.is_some(), "{answer:?}");
+    }
+
+    #[test]
+    fn a_restart_answer_carries_the_new_run_and_the_notice() {
+        let answer = run_answer(
+            RunAct::Restart,
+            "r1",
+            Ok(Ok(
+                json!({"run": {"run": "r2"}, "notice": "agent a has ended"}),
+            )),
+        );
+
+        assert_eq!(answer.restarted.as_deref(), Some("r2"));
+        assert_eq!(answer.notice.as_deref(), Some("agent a has ended"));
+        assert_eq!(answer.refused, None);
     }
 }

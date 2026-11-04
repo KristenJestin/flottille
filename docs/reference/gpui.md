@@ -17,6 +17,9 @@ measured on a 16-core Linux machine with a 165 Hz screen. Keep them; they cost a
 - Build cost: a release build from scratch takes 8 to 14 minutes at `nice -n 19` with 6 jobs and
   up to 1 GB of memory for GPUI alone; incremental builds take about 5 s. Binary about 55 MB
   (embed only the icons used: `gpui_kit::assets::icon_assets!(Icons, [Play, …])`).
+  A glyph Lucide does not draw the way Flottille wants (stop: a small filled square) is an SVG
+  of `crates/flottille-ui/assets/icons/`, embedded with `include_bytes!` and served by `Icons`
+  (`icons.rs`) before the Lucide source; `Icon::path` names it like any other.
 - CI (Ubuntu): `pkg-config libfontconfig-dev libfreetype-dev libxkbcommon-dev
   libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev`; only fontconfig
   and freetype are linked at build time. Cache the build (`Swatinem/rust-cache`).
@@ -65,6 +68,7 @@ durations and the easing of `crates/flottille-ui/src/motion.rs` (`HOVER` 140 ms,
 | a page's blocks, a card, anything that shows once | `enter(id, index, element)` |
 | a block that comes and goes while its view stays (an empty-list line, the fields a choice needs, a body that unfolds) | `presence(id, present, element).gap(..)`: build it on every frame, outside a `when`; `.gap` is the gap the parent flex puts between its children, which folds with the block |
 | a line that goes away with its text (an error, a refusal) | `presence_of(id, Option<line>, build)`: it still shows the last line while it folds |
+| a line whose text changes while its view stays (the folder a setting results in) | `changing(id, text, build)`: it fades back in over `HOVER` when the text differs from the last frame's; build it on every frame |
 | a block whose height follows its content (a field that wraps its text and grows by a line) | `growing(id, element)`: it eases to the new height over `PANEL`, also when it shrinks; build it on every frame; `<id>` is the animated frame, so its bounds are the height drawn |
 | the rows of a list that comes from elsewhere | `Listing::sync` on each render, each row drawn inside an `Item`: it unfolds when it arrives, folds away when it leaves (it stays drawn until then), slides when it moves |
 | a level that folds | `Fold` (a view) or `fold_frame` |
@@ -160,7 +164,7 @@ The components that hold them:
 | `Section::new(id, title)` | `.count(c)`, `.sentence(s)`, `.action(Button)`, then its children |
 | `Menu::new(..).entry(..).danger(id, label, f)` | a "⋯" menu; danger entries come last, after a line |
 | `Confirm::new(id, question)` | `.sentence(s)`, `.action(label)`, `.refused(Option<why>)`, `.open(bool)`, `.on_confirm(f)`, `.on_cancel(f)`; ids `<id>-action`, `<id>-cancel`, `<id>-scrim` |
-| `Modal::new(id, title)` | a form dialog: `.sentence(s)`, `.wide()`, `.action(Button)`, `.on_close(f)`; its body scrolls between the title and the buttons when the window is too small, and `.kept(el)` stays in sight under it (a refusal). `.search()` makes it a search over the page (the quick switcher): near the top, 640 px, no title drawn (it is its label) and no Cancel, `.above(field)` over the results, `.scroll(&handle)` for the body, `.on_key(f)` for the arrows. While a dialog or a list is open, `keys_held(cx)` says so and the window's shortcuts wait |
+| `Modal::new(id, title)` | a form dialog: `.sentence(s)`, `.wide()`, `.action(Button)`, `.on_close(f)`; its body scrolls between the title and the buttons when the window is too small, and `.kept(el)` stays in sight under it (a refusal). `.large()` makes it nearly the whole window (a 32 px margin) for looking at something at length: the title and sentence left in the header, `.action(..)`s and a close button (`<id>-close`) on its right, no Cancel and no footer, and the body takes the height left (its owner scrolls it); `.takes_focus()` so that Escape reaches it. `.search()` makes it a search over the page (the quick switcher): near the top, 640 px, no title drawn (it is its label) and no Cancel, `.above(field)` over the results, `.scroll(&handle)` for the body, `.on_key(f)` for the arrows. While a dialog or a list is open, `keys_held(cx)` says so and the window's shortcuts wait |
 | `toast(Toast::success(t).detail(d), cx)` / `Toast::failure` | rule 3; the shell owns the `ToastStack` |
 | `Field::new(id, label, control)` | `.optional()`, `.hint(h)`, `.hint_mono()`, `.error(Option<e>)` |
 | `Switch::new(id, on, label)` | `.hint(h)`, `.on_click(f)`; the whole row toggles |

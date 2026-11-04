@@ -137,7 +137,11 @@ impl RenderOnce for Dropdown {
             .when(self.strong, |d| d.medium())
             .when(self.mono, |d| d.mono(12.))
             .when_some(self.leading, |d, glyph| {
-                d.child(icon(glyph).size(px(14.)).text_color(p.faint))
+                d.child(
+                    icon(glyph)
+                        .size(px(14. * glyph.scale()))
+                        .text_color(p.faint),
+                )
             })
             .child(self.label)
             .child(icon(Icon::Choose).size(px(10.)).text_color(p.faint))
@@ -357,7 +361,11 @@ impl RenderOnce for MenuItem {
             .gap(px(8.))
             .text_size(px(13.))
             .when_some(self.leading, |d, glyph| {
-                d.child(icon(glyph).size(px(14.)).text_color(p.faint))
+                d.child(
+                    icon(glyph)
+                        .size(px(14. * glyph.scale()))
+                        .text_color(p.faint),
+                )
             })
             .child(div().flex_1().min_w_0().child(self.label))
             .when_some(self.note, |d, note| {

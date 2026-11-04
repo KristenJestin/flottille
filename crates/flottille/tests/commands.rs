@@ -14,9 +14,6 @@ use common::mcp::{Answer, Mcp, server_of};
 use flottille_core::store::Store;
 use serde_json::{Value, json};
 
-/// What Flottille ends every comment and body it posts for an agent with (`docs/forges.md`).
-const MARKER: &str = "<!-- flottille -->";
-
 /// A project `app` that is one repository, pushed to a bare remote `origin`, with its ready
 /// workspace `login` on the branch `app/login`. Its folder and the remote's.
 fn fixture(user: &User) -> (PathBuf, PathBuf) {
@@ -441,14 +438,68 @@ fn forge_write_creates_a_pull_request_with_the_fake_gh_once_allowed() {
     let created = calls.iter().find(|c| c.starts_with("pr create")).unwrap();
     assert_eq!(
         created,
-        &format!(
-            "pr create -R github.com/acme/app --head app/login --base main --title Add the login \
-             page --body What it does\n\n{MARKER}"
-        )
+        "pr create -R github.com/acme/app --head app/login --base main --title Add the login \
+             page --body What it does"
     );
     assert_eq!(creates(&user), 1);
     // The daemon's own sign-in: the agent never had a token.
     assert!(!calls.iter().any(|call| call.contains("auth token")));
+}
+
+#[test]
+fn a_pull_request_is_opened_from_the_branch_the_worktree_is_on() {
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user);
+    let worktree = user.path("data/flottille/workspaces/app/login");
+    user.git(&worktree, &["switch", "--quiet", "-c", "feature/x"]);
+    let mcp = plain_agent(&user);
+
+    let answer = write(
+        &user,
+        &mcp,
+        json!({"action": "create", "repository": ".", "title": "Add the login page"}),
+    );
+
+    assert!(!answer.error, "{}", answer.text);
+    let calls = gh_calls(&user);
+    let created = calls.iter().find(|c| c.starts_with("pr create")).unwrap();
+    assert!(
+        created.starts_with("pr create -R github.com/acme/app --head feature/x --base main "),
+        "{created}"
+    );
+    let shown = user
+        .call("workspace.show", json!({"project": "app", "name": "login"}))
+        .unwrap();
+    assert_eq!(shown["branch"], "feature/x");
+}
+
+#[test]
+fn pull_request_create_on_a_detached_head_is_refused() {
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user);
+    let worktree = user.path("data/flottille/workspaces/app/login");
+    user.git(&worktree, &["switch", "--quiet", "--detach"]);
+    let hash = user
+        .git_output(&worktree, &["rev-parse", "--short", "HEAD"])
+        .trim()
+        .to_owned();
+    let mcp = plain_agent(&user);
+
+    let answer = write(
+        &user,
+        &mcp,
+        json!({"action": "create", "repository": ".", "title": "Add the login page"}),
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains(&format!(
+            "refused: . is on no branch (detached at {hash}): switch to a branch first"
+        )),
+        "{}",
+        answer.text
+    );
+    assert_eq!(creates(&user), 0);
 }
 
 /// A hook that leaves a mark in `marks` each time it runs.
@@ -970,11 +1021,9 @@ fn open_the_pull_requests_reports_first_opens_nothing_before_the_confirmation_th
     let created = calls.iter().find(|c| c.starts_with("pr create")).unwrap();
     assert_eq!(
         created,
-        &format!(
-            "pr create -R github.com/acme/api --head app/login --base main --title \
-             feat(LOGIN-1): add the login --body Adds the login page.\n\n{MARKER} --reviewer alice \
+        "pr create -R github.com/acme/api --head app/login --base main --title \
+             feat(LOGIN-1): add the login --body Adds the login page. --reviewer alice \
              --reviewer bob"
-        )
     );
     // The repositories with no commit of their own get nothing.
     for name in ["lib", "web"] {
@@ -1104,7 +1153,8 @@ fn merge_a_stack_refuses_while_a_check_is_failing_and_merges_the_levels_in_order
 }
 
 #[test]
-fn close_leaves_the_removal_to_main_which_stops_on_unpushed_work_and_deletes_empty_branches() {
+fn close_asks_to_remove_its_own_workspace_and_main_s_removal_stops_on_unpushed_work_and_deletes_empty_branches()
+ {
     let user = User::with_fake_agent();
     let workspace = stack(&user, false, "");
     let main = user.path("work/app");
@@ -1112,14 +1162,21 @@ fn close_leaves_the_removal_to_main_which_stops_on_unpushed_work_and_deletes_emp
     adopt(&user, "close");
     let (closer, close) = run(&user, "close");
     let brief = brief_of(&user, "The command close of project app");
-    assert!(brief.contains("you cannot remove it"), "{brief}");
-    // It works in the workspace: it cannot remove it.
-    let refused = close.call("workspace", json!({"action": "remove"}));
     assert!(
-        refused.error && refused.text.contains("works in the workspace login"),
-        "{}",
-        refused.text
+        brief.contains("remove it (`workspace` `remove`)"),
+        "{brief}"
     );
+    // It works in the workspace: its removal is held for the user.
+    let held = close.call("workspace", json!({"action": "remove"}));
+    assert!(
+        !held.error && held.text.starts_with("Waiting for the user's approval"),
+        "{}",
+        held.text
+    );
+    for request in waiting(&user) {
+        user.call("approval.deny", json!({"number": request["number"]}))
+            .unwrap();
+    }
     let reported = close.call("report", json!({"text": "Ready to be removed."}));
     assert!(!reported.error, "{}", reported.text);
     user.call("agent.stop", json!({"agent": closer})).unwrap();
@@ -1255,10 +1312,8 @@ fn forge_write_creates_a_bitbucket_pull_request_with_the_fake_bkt_once_allowed()
     let created = calls.iter().find(|c| c.starts_with("pr create")).unwrap();
     assert_eq!(
         created,
-        &format!(
-            "pr create --context cloud --workspace acme --repo app --source app/login --target \
-             main --title Add the login page --description What it does\n\n{MARKER}"
-        )
+        "pr create --context cloud --workspace acme --repo app --source app/login --target \
+             main --title Add the login page --description What it does"
     );
     assert_eq!(bkt_calls_starting(&user, "pr create"), 1);
     // The daemon's own sign-in: of it, the contexts are all that was read.
@@ -1306,10 +1361,11 @@ fn forge_write_names_a_data_center_repository_by_its_project() {
 
     assert!(!answer.error, "{}", answer.text);
     assert!(
-        bkt_calls(&user).contains(&format!(
-            "pr create --context work --project APP --repo app --source app/login --target main \
-             --title Login --description {MARKER}"
-        )),
+        bkt_calls(&user).contains(
+            &"pr create --context work --project APP --repo app --source app/login --target main \
+             --title Login --description "
+                .to_owned()
+        ),
         "{:?}",
         bkt_calls(&user)
     );
@@ -1608,10 +1664,8 @@ fn bitbucket_pr_create_asks_the_project_s_reviewers() {
     let created = calls.iter().find(|c| c.starts_with("pr create")).unwrap();
     assert_eq!(
         created,
-        &format!(
-            "pr create --context cloud --workspace acme --repo app --source app/login --target \
-             main --title Login --description Adds it\n\n{MARKER} --reviewer alice --reviewer bob"
-        )
+        "pr create --context cloud --workspace acme --repo app --source app/login --target \
+             main --title Login --description Adds it --reviewer alice --reviewer bob"
     );
 }
 
@@ -2380,4 +2434,57 @@ fn an_inline_command_stays_inline_when_it_is_edited() {
         "{edited}"
     );
     assert!(!edited.contains("[commands.ship]"), "{edited}");
+}
+
+/// What the store recorded as posted on the pull request `number` of `source`'s repository `.`.
+fn posted_on(user: &User, source: &str, number: &str) -> Vec<(String, Option<String>)> {
+    Store::open(&user.path("state/flottille/flottille.db"))
+        .unwrap()
+        .posts("app", source, ".", number)
+        .unwrap()
+        .into_iter()
+        .map(|post| (post.kind, post.comment_id))
+        .collect()
+}
+
+#[test]
+fn a_pull_request_body_is_created_without_a_marker() {
+    let create = json!({"action": "create", "repository": ".", "title": "Add the login page",
+        "body": "What it does"});
+
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user);
+    user.gh_script(json!({"created": 12}));
+    let mcp = plain_agent(&user);
+    write(&user, &mcp, create.clone());
+    let calls = gh_calls(&user);
+    let created = calls.iter().find(|c| c.starts_with("pr create")).unwrap();
+    assert!(
+        created.ends_with("--title Add the login page --body What it does"),
+        "{created}"
+    );
+    assert!(!created.contains("flottille"), "{created}");
+    // The body is the pull request itself: no id of a comment.
+    assert_eq!(
+        posted_on(&user, "github", "12"),
+        [("body".to_owned(), None)]
+    );
+
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
+    user.bkt_script(json!({"created": 12,
+        "pulls": {"acme/app": [cloud_pull(12, "acme/app", "acme/app", "main")]}}));
+    let mcp = plain_agent(&user);
+    write(&user, &mcp, create);
+    let calls = bkt_calls(&user);
+    let created = calls.iter().find(|c| c.starts_with("pr create")).unwrap();
+    assert!(
+        created.ends_with("--title Add the login page --description What it does"),
+        "{created}"
+    );
+    assert!(!created.contains("flottille"), "{created}");
+    assert_eq!(
+        posted_on(&user, "bitbucket", "12"),
+        [("body".to_owned(), None)]
+    );
 }

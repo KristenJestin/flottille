@@ -217,23 +217,27 @@ fn json_of(item: &toml_edit::Item, at: &str) -> Result<Value, String> {
     }
 }
 
-/// A setting's value as `extensions.toml` writes it; `None` for `null`, its default.
-fn toml_of(value: &Value) -> Option<toml_edit::Value> {
-    Some(match value {
-        Value::Null => return None,
+/// A setting's value as `extensions.toml` writes it. `null` is taken as the whole value alone (the
+/// setting back to its default): TOML has no `null` to keep inside an array or a table.
+fn toml_of(value: &Value) -> Result<toml_edit::Value, String> {
+    Ok(match value {
+        Value::Null => return Err("null is taken only as the whole value, for the default".into()),
         Value::Bool(flag) => (*flag).into(),
         Value::Number(number) => match number.as_i64() {
             Some(integer) => integer.into(),
-            None => number.as_f64()?.into(),
+            None => number
+                .as_f64()
+                .ok_or_else(|| format!("{number}: not a number TOML can write"))?
+                .into(),
         },
         Value::String(text) => text.as_str().into(),
         Value::Array(values) => {
-            toml_edit::Value::Array(values.iter().filter_map(toml_of).collect())
+            toml_edit::Value::Array(values.iter().map(toml_of).collect::<Result<_, String>>()?)
         }
         Value::Object(map) => toml_edit::Value::InlineTable(
             map.iter()
-                .filter_map(|(key, value)| Some((key.as_str(), toml_of(value)?)))
-                .collect(),
+                .map(|(key, value)| Ok((key.as_str(), toml_of(value)?)))
+                .collect::<Result<_, String>>()?,
         ),
     })
 }
@@ -496,14 +500,24 @@ fn set(daemon: &Daemon, asked: Set) -> Result<Value, Failure> {
             return Err(Failure::refused(format!("{at}.{key}: unknown key")));
         }
     }
+    let mut written = Vec::new();
+    for (key, value) in &asked.settings {
+        let value = match value {
+            Value::Null => None,
+            value => {
+                Some(toml_of(value).map_err(|why| Failure::refused(format!("{at}.{key}: {why}")))?)
+            }
+        };
+        written.push((key, value));
+    }
     let edit = |table: &mut toml_edit::Table| {
         if let Some(enabled) = asked.enabled {
             table.insert("enabled", toml_edit::value(enabled));
         }
-        for (key, value) in &asked.settings {
-            match toml_of(value) {
+        for (key, value) in &written {
+            match value {
                 Some(value) => {
-                    table.insert(key, toml_edit::value(value));
+                    table.insert(key, toml_edit::value(value.clone()));
                 }
                 None => {
                     table.remove(key);
@@ -636,8 +650,21 @@ mod tests {
     }
 
     #[test]
+    fn a_null_inside_a_setting_s_value_is_refused_not_dropped() {
+        assert!(toml_of(&json!(["a", null])).is_err());
+        assert!(toml_of(&json!({"a": 1, "b": null})).is_err());
+        assert!(toml_of(&json!({"a": [1, "b"]})).is_ok());
+    }
+
+    #[test]
     fn each_extension_keeps_its_tables_in_its_own_space() {
         for extension in ALL {
+            let name = extension.name;
+            assert!(
+                name.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+                "{name}: the store takes letters and digits alone"
+            );
             let own = format!("ext_{}_", extension.name);
             for migration in extension.migrations {
                 for word in migration.split_whitespace() {

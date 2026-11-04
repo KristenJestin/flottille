@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize, Serializer};
 
 use crate::commands::{Command, OBSOLETE_GRANTS};
 use crate::declared::{ProjectTracker, RepositoryForge};
+use crate::place::{self, Place};
 
 /// Children running at once per project: the bounds of `max_children`.
 pub const CHILDREN_CAP: std::ops::RangeInclusive<u8> = 1..=12;
@@ -130,10 +131,90 @@ pub struct Task {
     /// Held for approval each time an agent runs it.
     #[serde(default)]
     pub ask_before_running: bool,
+    /// When a run of it is ready: until then it is starting. Without it, a run has no ready state.
+    /// Boxed, as `url`: a task is carried by value in the gate's answers, which stay small.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready: Option<Box<Ready>>,
+    /// Where a run of it answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<Box<TaskUrl>>,
     /// Obsolete: who added it (a line the user allowed always). Read and not followed: the line
     /// is a plain task, and the daemon's migration drops the key.
+    ///
+    /// Boxed: with `toml`'s `preserve_order`, a `Value` is large enough to make every `Task` too
+    /// big to travel in an `Err`.
     #[serde(default, skip_serializing)]
-    pub added_by: Option<toml::Value>,
+    pub added_by: Option<Box<toml::Value>>,
+}
+
+/// When a run of a task is ready (`docs/projects.md`, "Tasks"); each is a template, `{url}`
+/// standing for the run's address.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ready {
+    /// Once a line of its output holds this text.
+    Line(String),
+    /// Once a request to this address is answered, whatever the status.
+    Url(String),
+    /// Once this line, run in the task's folder, exits with 0.
+    Command(String),
+}
+
+impl Ready {
+    /// In words, after the task's line: `ready once …`.
+    pub fn said(&self) -> String {
+        match self {
+            Ready::Line(text) => format!("ready once a line says “{text}”"),
+            Ready::Url(url) => format!("ready once {url} answers"),
+            Ready::Command(line) => format!("ready once `{line}` passes"),
+        }
+    }
+
+    /// The line it runs, for `command`.
+    pub fn command(&self) -> Option<&str> {
+        match self {
+            Ready::Command(line) => Some(line),
+            _ => None,
+        }
+    }
+}
+
+/// Where a run of a task answers: an address, a template, or a line that prints it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum TaskUrl {
+    Address(String),
+    Command { command: String },
+}
+
+impl TaskUrl {
+    /// In words, after the task's line.
+    pub fn said(&self) -> String {
+        match self {
+            TaskUrl::Address(url) => format!("at {url}"),
+            TaskUrl::Command { command } => format!("its address from `{command}`"),
+        }
+    }
+
+    /// The line it runs, for `command`.
+    pub fn command(&self) -> Option<&str> {
+        match self {
+            TaskUrl::Command { command } => Some(command),
+            TaskUrl::Address(_) => None,
+        }
+    }
+}
+
+impl Task {
+    /// The lines besides its own that a run of it runs: its ready's and its address's commands.
+    pub fn other_lines(&self) -> Vec<&str> {
+        self.ready
+            .as_deref()
+            .and_then(Ready::command)
+            .into_iter()
+            .chain(self.url.as_deref().and_then(TaskUrl::command))
+            .collect()
+    }
 }
 
 /// One step of the setup that prepares a new workspace, as written: exactly one of `copy`,
@@ -263,8 +344,13 @@ pub struct Project {
     pub folder: PathBuf,
     /// Starts the branches of the project's workspaces; a slug of the name unless set.
     pub branch_prefix: String,
-    /// Where the workspaces are made; absolute.
+    /// Where the workspaces are made; absolute: the project's own `workspaces_root` when it has
+    /// one, else the user's default (`place`).
     pub workspaces_root: PathBuf,
+    /// The project's own `workspaces_root` as the file says it (`~` and `<project>` not yet
+    /// filled in); none follows the default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspaces_root_own: Option<String>,
     pub default_repositories: RepositorySet,
     /// Children running at once, within `CHILDREN_CAP`.
     pub max_children: u8,
@@ -302,14 +388,17 @@ pub struct Project {
     /// The tracker of its tickets, as the user declared it; none is read without one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tracker: Option<ProjectTracker>,
-    /// How its agents are told to work, in place of the user's global rules; none follows them
-    /// (`docs/projects.md`, "Rules").
+    /// How its agents are told to work, added after the user's global rules (`docs/projects.md`,
+    /// "Rules").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rules: Option<String>,
     /// Each extension's switch and its own values for the project, by the extension's name, as
     /// written: the extension checks them against its schema (`docs/extensions.md`).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub extensions: BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
+    /// Its agents get its rules alone: the user's global rules are left out (`rules_alone`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub rules_alone: bool,
     /// Keys of the file that are no longer read, each with what replaces it: said, never
     /// followed nor refused.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -333,7 +422,7 @@ struct File {
     name: Option<String>,
     folder: PathBuf,
     branch_prefix: Option<String>,
-    workspaces_root: Option<PathBuf>,
+    workspaces_root: Option<String>,
     #[serde(default = "all_repositories")]
     default_repositories: RepositorySet,
     // Wide, so that a cap out of range is refused by the check, in its own words.
@@ -373,6 +462,8 @@ struct File {
     rules: Option<String>,
     #[serde(default)]
     extensions: BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
+    #[serde(default)]
+    rules_alone: bool,
     /// Obsolete: read as nothing, and said (`OBSOLETE_FORGES`).
     forges: Option<toml::Value>,
 }
@@ -389,6 +480,31 @@ fn default_run_time_limit() -> u64 {
     DEFAULT_RUN_TIME_LIMIT
 }
 
+/// What a project's folder for its workspaces depends on besides its file.
+pub struct Places<'a> {
+    /// Flottille's configuration folder; none when it is not known, and a project's own folder
+    /// is then not kept out of it.
+    pub config: Option<&'a Path>,
+    /// Flottille's data folder.
+    pub data: &'a Path,
+    /// The user's home, where a `~` leads.
+    pub home: Option<&'a Path>,
+    /// Where the workspaces of a project that names no folder go.
+    pub default: &'a Place,
+}
+
+impl<'a> Places<'a> {
+    /// The data folder for every project, and no home.
+    pub fn of(data: &'a Path) -> Places<'a> {
+        Places {
+            config: None,
+            data,
+            home: None,
+            default: &Place::Data,
+        }
+    }
+}
+
 impl Project {
     /// A project that takes everything by default: each repository with its remote `origin` and
     /// the base rule `[main]`, nothing else configured. `name` must be valid and `folder`
@@ -399,6 +515,7 @@ impl Project {
             folder,
             branch_prefix: slug(name),
             workspaces_root: data.join("workspaces").join(name),
+            workspaces_root_own: None,
             default_repositories: RepositorySet::All,
             max_children: DEFAULT_CHILDREN_CAP,
             run_time_limit: DEFAULT_RUN_TIME_LIMIT,
@@ -424,6 +541,7 @@ impl Project {
             tracker: None,
             rules: None,
             extensions: BTreeMap::new(),
+            rules_alone: false,
             obsolete: Vec::new(),
         }
     }
@@ -469,6 +587,12 @@ impl Project {
     /// Reads and checks the text of `projects/<name>.toml`. `data` is Flottille's data folder,
     /// where the default workspaces root lives. The first problem found is the one reported.
     pub fn parse(name: &str, text: &str, data: &Path) -> Result<Project, ConfigError> {
+        Project::parse_in(name, text, &Places::of(data))
+    }
+
+    /// As [`Project::parse`], with the user's default place for the workspaces of a project that
+    /// names none.
+    pub fn parse_in(name: &str, text: &str, places: &Places) -> Result<Project, ConfigError> {
         let refuse = |message: String| ConfigError {
             name: name.to_owned(),
             message,
@@ -499,19 +623,27 @@ impl Project {
                 key => format!("{key}: {}", cause.message()),
             })
         })?;
-        check(name, file, data).map_err(refuse)
+        check(name, file, places).map_err(refuse)
     }
 
     /// The text of the project's file.
     pub fn to_toml(&self) -> crate::Result<String> {
-        toml::to_string_pretty(self).map_err(|error| {
+        let refused = |error: &dyn fmt::Display| {
             crate::Error::Refused(format!("cannot write the file of {}: {error}", self.name))
-        })
+        };
+        // The folder the workspaces resolve to is not the file's: a project that names none
+        // follows the user's default, whatever it becomes.
+        let mut table = toml::Table::try_from(self).map_err(|e| refused(&e))?;
+        table.remove("workspaces_root");
+        if let Some(own) = table.remove("workspaces_root_own") {
+            table.insert("workspaces_root".into(), own);
+        }
+        toml::to_string_pretty(&table).map_err(|e| refused(&e))
     }
 }
 
 /// The checks and defaults of a project; the error is `<key>: <what is wrong>`.
-fn check(name: &str, mut file: File, data: &Path) -> Result<Project, String> {
+fn check(name: &str, mut file: File, places: &Places) -> Result<Project, String> {
     let Current {
         tasks,
         setup,
@@ -536,15 +668,19 @@ fn check(name: &str, mut file: File, data: &Path) -> Result<Project, String> {
         Some(prefix) => prefix,
         None => slug(name),
     };
-    let workspaces_root = match file.workspaces_root {
-        Some(root) if !root.is_absolute() => {
-            return Err(format!(
-                "workspaces_root: must be absolute, not \"{}\"",
-                root.display()
-            ));
-        }
+    let own_root = match &file.workspaces_root {
+        Some(own) => Some(place::typed(own, name, places.home, "workspaces_root")?),
+        None => None,
+    };
+    let workspaces_root = match own_root.clone() {
         Some(root) => root,
-        None => data.join("workspaces").join(name),
+        None => places.default.resolve(
+            name,
+            &file.folder,
+            places.data,
+            places.home,
+            "workspaces_root",
+        )?,
     };
     let max_children = u8::try_from(file.max_children)
         .ok()
@@ -585,6 +721,21 @@ fn check(name: &str, mut file: File, data: &Path) -> Result<Project, String> {
     }
 
     check_repositories(&file.repositories)?;
+    // Only a root the project names is judged here: a default that is refused falls back to the
+    // data folder before it gets to a project, and one project's file must not hide the others.
+    if let Some(root) = &own_root {
+        let repositories: Vec<PathBuf> = file
+            .repositories
+            .iter()
+            .map(|repository| file.folder.join(&repository.path))
+            .collect();
+        let avoid = place::Avoid {
+            config: places.config,
+            data: places.data,
+            home: places.home,
+        };
+        place::allowed(root, &avoid, &repositories, "workspaces_root")?;
+    }
     let known = |path: &str| file.repositories.iter().any(|r| r.path == path);
     let unknown = |key: String, path: &str| format!("{key}: unknown repository \"{path}\"");
     match &file.default_repositories {
@@ -710,6 +861,7 @@ fn check(name: &str, mut file: File, data: &Path) -> Result<Project, String> {
         folder: file.folder,
         branch_prefix,
         workspaces_root,
+        workspaces_root_own: file.workspaces_root,
         default_repositories: file.default_repositories,
         max_children,
         run_time_limit: file.run_time_limit,
@@ -726,6 +878,7 @@ fn check(name: &str, mut file: File, data: &Path) -> Result<Project, String> {
         tracker,
         rules: file.rules,
         extensions: file.extensions,
+        rules_alone: file.rules_alone,
         obsolete,
     })
 }
@@ -811,6 +964,58 @@ pub fn check_task(name: &str, task: &Task, known: &dyn Fn(&str) -> bool) -> Resu
         && !known(path)
     {
         return Err(format!(".repository: unknown repository \"{path}\""));
+    }
+    let address = |template: &str, with_url: bool| {
+        let starts = ["http://", "https://"]
+            .iter()
+            .chain(with_url.then_some(&"{url}"))
+            .any(|start| template.starts_with(start));
+        if !starts {
+            return Err("the address must start with http:// or https://".to_owned());
+        }
+        Ok(())
+    };
+    let names = |template: &str, with_url: bool| {
+        let extra: &[&str] = if with_url { &["url"] } else { &[] };
+        crate::variables::check_also(template, extra)
+    };
+    match task.ready.as_deref() {
+        Some(Ready::Line(text)) if text.trim().is_empty() => {
+            return Err(".ready: the text must not be empty".into());
+        }
+        Some(Ready::Url(template)) => address(template, true)
+            .and_then(|()| names(template, true))
+            .map_err(|why| format!(".ready: {why}"))?,
+        Some(Ready::Command(line)) if line.trim().is_empty() => {
+            return Err(".ready: the command must not be empty".into());
+        }
+        // The address is known only once the run starts, after the gate judged the line: a line
+        // that takes it would run what the gate never saw.
+        Some(Ready::Command(line)) if crate::variables::check(line).is_err() => {
+            return Err(match names(line, true) {
+                Ok(()) => ".ready: the command cannot use {url}: the address is known only once \
+                           the run starts, after the line was judged; to ask the address itself, \
+                           use ready = { url = \"{url}/…\" }"
+                    .into(),
+                Err(why) => format!(".ready: {why}"),
+            });
+        }
+        Some(Ready::Line(template) | Ready::Command(template)) => {
+            names(template, true).map_err(|why| format!(".ready: {why}"))?;
+        }
+        None => {}
+    }
+    match task.url.as_deref() {
+        Some(TaskUrl::Address(template)) => address(template, false)
+            .and_then(|()| names(template, false))
+            .map_err(|why| format!(".url: {why}"))?,
+        Some(TaskUrl::Command { command }) if command.trim().is_empty() => {
+            return Err(".url: the command must not be empty".into());
+        }
+        Some(TaskUrl::Command { command }) => {
+            names(command, false).map_err(|why| format!(".url: {why}"))?;
+        }
+        None => {}
     }
     Ok(())
 }
@@ -1184,6 +1389,99 @@ mod tests {
         let project = Project::parse("My_App.2", MINIMAL, Path::new(DATA)).unwrap();
 
         assert_eq!(project.branch_prefix, "my-app-2");
+    }
+
+    #[test]
+    fn a_task_says_when_it_is_ready_and_where_it_answers() {
+        let project = parse(&format!(
+            r#"{MINIMAL}
+            [tasks.web]
+            line = "npm run dev"
+            serve = true
+            ready = {{ line = "ready in" }}
+            url = "https://{{workspace}}.app.localhost"
+            [tasks.api]
+            line = "npm run api"
+            ready = {{ url = "{{url}}/health" }}
+            url = {{ command = "portless get api" }}
+            [tasks.db]
+            line = "db start"
+            ready = {{ command = "db ping --host {{workspace}}" }}
+            "#
+        ))
+        .unwrap();
+
+        let web = &project.tasks["web"];
+        assert_eq!(web.ready.as_deref(), Some(&Ready::Line("ready in".into())));
+        assert_eq!(
+            web.url.as_deref(),
+            Some(&TaskUrl::Address(
+                "https://{workspace}.app.localhost".into()
+            ))
+        );
+        let api = &project.tasks["api"];
+        assert_eq!(
+            api.ready.as_deref(),
+            Some(&Ready::Url("{url}/health".into()))
+        );
+        assert_eq!(
+            api.url.as_deref(),
+            Some(&TaskUrl::Command {
+                command: "portless get api".into()
+            })
+        );
+        let db = &project.tasks["db"];
+        assert_eq!(
+            db.ready.as_deref(),
+            Some(&Ready::Command("db ping --host {workspace}".into()))
+        );
+        assert_eq!(db.url, None);
+        assert_eq!(project.tasks["web"].clone(), *web);
+    }
+
+    #[test]
+    fn a_task_s_ready_and_url_are_refused_when_they_cannot_be_used() {
+        for (task, says) in [
+            (
+                r#"ready = { line = "" }"#,
+                "tasks.web.ready: the text must not be empty",
+            ),
+            (
+                r#"ready = { line = "a", url = "http://x" }"#,
+                "tasks.web.ready",
+            ),
+            (
+                r#"ready = { url = "ftp://x" }"#,
+                "tasks.web.ready: the address must start with http:// or https://",
+            ),
+            (r#"ready = { url = "http://{nope}" }"#, "{nope}"),
+            (
+                r#"url = "http://{url}/x""#,
+                "tasks.web.url: “{url}” is not a name Flottille fills",
+            ),
+            (
+                r#"url = "localhost:3000""#,
+                "tasks.web.url: the address must start with http:// or https://",
+            ),
+            (
+                r#"url = { command = "  " }"#,
+                "tasks.web.url: the command must not be empty",
+            ),
+            (
+                r#"ready = { command = "cp {url} {workspace}/k" }"#,
+                "tasks.web.ready: the command cannot use {url}",
+            ),
+        ] {
+            let text = format!(
+                "{MINIMAL}
+[tasks.web]
+line = \"serve\"
+{task}
+"
+            );
+            let refusal = refusal(&text);
+            assert!(refusal.contains(says), "{task}: {refusal}");
+        }
     }
 
     #[test]
@@ -1581,6 +1879,78 @@ mod tests {
         assert!(refusal(&relative).starts_with("projects/app.toml: folder: must be absolute"));
         let root = format!("workspaces_root = \"rel\"\n{MINIMAL}");
         assert!(refusal(&root).starts_with("projects/app.toml: workspaces_root: must be absolute"));
+    }
+
+    fn parse_following(place: &Place, text: &str) -> Result<Project, ConfigError> {
+        Project::parse_in(
+            "app",
+            text,
+            &Places {
+                config: None,
+                data: Path::new(DATA),
+                home: Some(Path::new("/home/someone")),
+                default: place,
+            },
+        )
+    }
+
+    #[test]
+    fn a_project_that_names_no_folder_follows_the_default() {
+        let beside = parse_following(&Place::Beside, MINIMAL).unwrap();
+        assert_eq!(beside.workspaces_root, Path::new("/work/app-work"));
+        assert_eq!(beside.workspaces_root_own, None);
+        let own = parse_following(&Place::Own("~/Worktrees/<project>".into()), MINIMAL).unwrap();
+        assert_eq!(
+            own.workspaces_root,
+            Path::new("/home/someone/Worktrees/app")
+        );
+        assert_eq!(own.workspaces_root_own, None);
+    }
+
+    #[test]
+    fn a_project_s_own_folder_wins_over_the_default() {
+        let text = format!("workspaces_root = \"~/wt/<project>\"\n{MINIMAL}");
+        for place in [Place::Data, Place::Beside, Place::Own("/elsewhere".into())] {
+            let project = parse_following(&place, &text).unwrap();
+            assert_eq!(project.workspaces_root, Path::new("/home/someone/wt/app"));
+            // The file keeps what was typed.
+            assert_eq!(
+                project.workspaces_root_own.as_deref(),
+                Some("~/wt/<project>")
+            );
+            let written = project.to_toml().unwrap();
+            assert!(
+                written.contains("workspaces_root = \"~/wt/<project>\""),
+                "{written}"
+            );
+            assert!(!written.contains("workspaces_root_own"), "{written}");
+            assert_eq!(parse_following(&place, &written).unwrap(), project);
+        }
+    }
+
+    #[test]
+    fn a_project_s_file_is_written_without_a_root_unless_it_has_its_own() {
+        let project = Project::new("app", "/work/app".into(), vec![".".into()], Path::new(DATA));
+        let written = project.to_toml().unwrap();
+        assert!(!written.contains("workspaces_root"), "{written}");
+        // Then the default of the day decides, and the file does not pin the data folder.
+        assert_eq!(
+            parse_following(&Place::Beside, &written)
+                .unwrap()
+                .workspaces_root,
+            Path::new("/work/app-work")
+        );
+        // The keys keep their order: the scalars the user reads first come first.
+        assert!(written.find("folder").unwrap() < written.find("[[repositories]]").unwrap());
+    }
+
+    #[test]
+    fn a_relative_own_folder_is_refused_naming_the_key_in_the_file() {
+        let place = Place::Own("rel/<project>".into());
+        assert_eq!(
+            parse_following(&place, MINIMAL).unwrap_err().message,
+            "workspaces_root: must be absolute, not \"rel/<project>\""
+        );
     }
 
     #[test]

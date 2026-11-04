@@ -43,8 +43,12 @@ const EXCERPT_CHARS: usize = 200;
 pub struct Said {
     pub author: String,
     pub bot: bool,
-    /// Posted by an agent of Flottille (`docs/forges.md`, "What Flottille posts is marked").
+    /// Posted by an agent of Flottille (`docs/forges.md`, "What Flottille posts is recorded").
     pub by_agent: bool,
+    /// The id the forge gives the comment, and when it was written, to tell it by the record of
+    /// what was posted (`posts`).
+    pub id: Option<String>,
+    pub at: Option<u64>,
     pub state: Option<String>,
     pub excerpt: String,
     /// The whole text, without the mark of Flottille: what an item's detail shows.
@@ -58,6 +62,8 @@ impl Said {
             author: comment.author.clone(),
             bot: comment.bot,
             by_agent,
+            id: comment.id.clone(),
+            at: comment.at,
             state: comment.state.clone(),
             excerpt: excerpt(text),
             body: text.to_owned(),
@@ -677,6 +683,7 @@ pub fn unseen(
 /// round's events are from what it was then. As in a round, it is opened only when open and not
 /// made before that first round.
 pub fn put_live(daemon: &Arc<Daemon>, mut fetched: Fetched) {
+    know_posts(daemon, &fetched.item.project.clone(), &mut fetched);
     let item = &mut fetched.item;
     // Cut as a round cuts it, so that the next round finds no change of it.
     if let Some(description) = item.details["description"].as_str() {
@@ -756,6 +763,14 @@ pub fn put_live(daemon: &Arc<Daemon>, mut fetched: Fetched) {
     if let Err(error) = flush(daemon, &project, &mut vec![fetched.item], &mut events) {
         eprintln!("flottille daemon: items of {project}: {error}");
     }
+}
+
+/// Marks the comments of `fetched` that an agent posted, as Flottille's record of its posts says
+/// (`posts`): no text carries a mark any more.
+fn know_posts(daemon: &Daemon, project: &str, fetched: &mut Fetched) {
+    let item = &fetched.item;
+    crate::posts::Known::of(daemon, project, &item.source, &item.repository, &item.key)
+        .mark_said(&mut fetched.comments);
 }
 
 /// How old what a source read is, from when its last complete round started: `as of 40 s ago`.
@@ -887,6 +902,7 @@ async fn read_round(
         {
             match reader.detail(&mut fetched).await {
                 Ok(true) if fetched.detailed => {
+                    know_posts(daemon, &project.name, &mut fetched);
                     let comments = fetched.comments.iter().map(|c| c.in_discussion("comment"));
                     let reviews = fetched.reviews.iter().map(|r| r.in_discussion("review"));
                     let said: Vec<Value> = comments.chain(reviews).collect();
@@ -1409,6 +1425,8 @@ mod tests {
             author: author.into(),
             bot: false,
             by_agent: false,
+            id: None,
+            at: None,
             state: None,
             excerpt: "hello".into(),
             body: "hello".into(),

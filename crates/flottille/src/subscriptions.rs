@@ -51,7 +51,7 @@ pub struct Event {
 pub struct By {
     pub name: String,
     pub bot: bool,
-    /// A Flottille agent wrote it, as the mark of Flottille on it says (`forge::marked`).
+    /// A Flottille agent wrote it, as Flottille's record of its posts says (`posts`).
     pub marked: bool,
 }
 

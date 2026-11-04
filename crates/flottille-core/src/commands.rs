@@ -197,7 +197,7 @@ follows its merges is done. The repositories of one level are merged together.
    left, and why.";
 
 const CLOSE: &str = "\
-Close this workspace: check that nothing in it would be lost, then say it can be removed.
+Close this workspace: check that nothing in it would be lost, then remove it.
 
 1. Audit each repository of the workspace (the list above), reading in that repository
    (`run` with its `repository`):
@@ -213,11 +213,11 @@ Close this workspace: check that nothing in it would be lost, then say it can be
 3. If the closing stops, change nothing: send the user (`ask_user`) the audit, what keeps the
    workspace open and what they can do (commit and push, merge the pull request, or open it
    first), then `report`.
-4. Otherwise the workspace can go. You work in it, so you cannot remove it (`workspace` `remove`
-   refuses the workspace its caller works in): `report` the audit and that it is ready to be
-   removed, by the user (Remove, in the window) or by the agent they talk to in main, and what
-   its removal keeps (the branches with commits stay in the repositories and on their
-   remotes; the empty ones are deleted with it).";
+4. Otherwise the workspace can go: remove it (`workspace` `remove`). The user is asked; once they
+   allow it, your commands running in it are stopped, it is removed, and you go on in the
+   project's folder (main). Then `report` the audit and what its removal kept (the branches
+   with commits stay in the repositories and on their remotes; the empty ones are deleted with
+   it).";
 
 #[cfg(test)]
 mod tests {

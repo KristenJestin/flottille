@@ -73,6 +73,27 @@ pub struct Cursor {
     pub note: Option<String>,
 }
 
+/// What Flottille posted for an agent on a forge or a tracker, kept when the post succeeded: the
+/// text itself carries nothing of Flottille (`docs/forges.md`, "What Flottille posts is recorded").
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Post {
+    pub project: String,
+    /// `github`, `bitbucket` or `jira`, as an item's source.
+    pub source: String,
+    /// The item's repository, as the item says it (empty for Jira).
+    pub repository: String,
+    /// The pull request's number or the ticket's key.
+    pub key: String,
+    /// `comment`, or `body` for the item's own text (its description).
+    pub kind: String,
+    /// The comment's id as the forge answered it; none where it answers none.
+    pub comment_id: Option<String>,
+    /// What identifies a comment without an id: a hash of its text.
+    pub fingerprint: Option<String>,
+    /// When it was posted, in milliseconds.
+    pub posted_at: u64,
+}
+
 /// What `items.list` keeps.
 #[derive(Clone, Debug, Default)]
 pub struct Filter {

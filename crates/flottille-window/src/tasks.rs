@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use flottille_ui::drawer::Closed;
 use flottille_ui::{
     AgentState, Button, Confirm, Drawer, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu,
-    Modal, Placement, Section, Select, SelectOption, StateIcon, Status, Switch, Toast, Type, icon,
-    palette, presence, space, toast,
+    Modal, Placement, RadioChoices, Section, Select, SelectOption, StateIcon, Status, Switch,
+    Toast, Type, icon, palette, presence, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
@@ -22,7 +22,7 @@ use gpui_kit::{
 };
 use serde_json::{Value, json};
 
-use crate::actions::Command;
+use crate::actions::{Command, RunAct, RunAnswer};
 use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line};
 use crate::conversation::Ending;
 use crate::project::repository_label;
@@ -45,6 +45,110 @@ pub struct TaskInfo {
     pub check: bool,
     pub read_only: bool,
     pub ask_before_running: bool,
+    /// When a run of it is ready, and the text, address or line that says it.
+    pub ready: Option<(ReadyKind, String)>,
+    /// Where a run of it answers: an address, or a line that prints it.
+    pub url: Option<(AddressKind, String)>,
+}
+
+/// How a task says it is ready (`docs/projects.md`, "Tasks").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadyKind {
+    Line,
+    Url,
+    Command,
+}
+
+impl ReadyKind {
+    pub const ALL: [ReadyKind; 3] = [ReadyKind::Line, ReadyKind::Url, ReadyKind::Command];
+
+    /// Its key in the file and the protocol.
+    pub fn key(self) -> &'static str {
+        match self {
+            ReadyKind::Line => "line",
+            ReadyKind::Url => "url",
+            ReadyKind::Command => "command",
+        }
+    }
+
+    fn choice(self) -> (&'static str, &'static str) {
+        match self {
+            ReadyKind::Line => (
+                "A line of its output",
+                "Ready once a line it prints holds a text.",
+            ),
+            ReadyKind::Url => (
+                "An address answers",
+                "Ready once a request to it is answered.",
+            ),
+            ReadyKind::Command => ("A command passes", "Ready once a line exits with 0."),
+        }
+    }
+
+    fn field(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            ReadyKind::Line => (
+                "Text in its output",
+                "ready in",
+                "Plain text, no pattern. For example: ready in",
+            ),
+            ReadyKind::Url => (
+                "Address",
+                "{url}/health",
+                "Tried every second. For example: {url}/health, or http://localhost:5173",
+            ),
+            ReadyKind::Command => (
+                "Command line",
+                "pg_isready -h localhost",
+                "Run every second in its folder, never through a shell. For example: \
+                 pg_isready -h localhost",
+            ),
+        }
+    }
+}
+
+/// How a task says where it answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AddressKind {
+    Address,
+    Command,
+}
+
+impl AddressKind {
+    pub const ALL: [AddressKind; 2] = [AddressKind::Address, AddressKind::Command];
+
+    fn key(self) -> &'static str {
+        match self {
+            AddressKind::Address => "address",
+            AddressKind::Command => "command",
+        }
+    }
+
+    fn choice(self) -> (&'static str, &'static str) {
+        match self {
+            AddressKind::Address => ("An address", "The same for every run, or templated."),
+            AddressKind::Command => (
+                "A command prints it",
+                "For an address given by a tool, per workspace.",
+            ),
+        }
+    }
+
+    fn field(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            AddressKind::Address => (
+                "Address",
+                "https://{workspace}.app.localhost",
+                "For example: https://{workspace}.app.localhost",
+            ),
+            AddressKind::Command => (
+                "Command line",
+                "portless get web",
+                "Run once as it starts; its first line is the address. For example: portless \
+                 get web",
+            ),
+        }
+    }
 }
 
 impl TaskInfo {
@@ -58,6 +162,17 @@ impl TaskInfo {
             check: value["check"] == true,
             read_only: value["read_only"] == true,
             ask_before_running: value["ask_before_running"] == true,
+            ready: ReadyKind::ALL.into_iter().find_map(|kind| {
+                value["ready"][kind.key()]
+                    .as_str()
+                    .map(|text| (kind, text.to_owned()))
+            }),
+            url: match &value["url"] {
+                Value::String(url) => Some((AddressKind::Address, url.clone())),
+                url => url["command"]
+                    .as_str()
+                    .map(|line| (AddressKind::Command, line.to_owned())),
+            },
         }
     }
 
@@ -152,6 +267,20 @@ impl Flag {
 struct Fields {
     name: Entity<InputState>,
     line: Entity<InputState>,
+    /// One field for each kind of ready, and of address: a kind keeps what was typed for it.
+    ready: [Entity<InputState>; 3],
+    url: [Entity<InputState>; 2],
+}
+
+fn ready_at(kind: ReadyKind) -> usize {
+    ReadyKind::ALL.iter().position(|k| *k == kind).unwrap_or(0)
+}
+
+fn url_at(kind: AddressKind) -> usize {
+    AddressKind::ALL
+        .iter()
+        .position(|k| *k == kind)
+        .unwrap_or(0)
 }
 
 /// What a write was, for the toast its answer says.
@@ -235,6 +364,35 @@ impl TasksSection {
         self.fields.as_ref().map(|f| &f.line)
     }
 
+    /// The field of a kind of ready.
+    pub fn ready_field(&self, kind: ReadyKind) -> Option<&Entity<InputState>> {
+        self.fields.as_ref().map(|f| &f.ready[ready_at(kind)])
+    }
+
+    /// The field of a kind of address.
+    pub fn url_field(&self, kind: AddressKind) -> Option<&Entity<InputState>> {
+        self.fields.as_ref().map(|f| &f.url[url_at(kind)])
+    }
+
+    /// The kind of ready the form says, none when it says nothing.
+    pub fn ready_kind(&self) -> Option<ReadyKind> {
+        self.flags.ready.as_ref().map(|(kind, _)| *kind)
+    }
+
+    /// Says when the task is ready, or not.
+    pub fn choose_ready(&mut self, kind: Option<ReadyKind>, cx: &mut Context<Self>) {
+        self.flags.ready = kind.map(|kind| (kind, String::new()));
+        self.form_error = None;
+        cx.notify();
+    }
+
+    /// Says where the task answers, or not.
+    pub fn choose_url(&mut self, kind: Option<AddressKind>, cx: &mut Context<Self>) {
+        self.flags.url = kind.map(|kind| (kind, String::new()));
+        self.form_error = None;
+        cx.notify();
+    }
+
     pub fn is_confirming(&self) -> bool {
         self.confirming.is_some()
     }
@@ -281,8 +439,10 @@ impl TasksSection {
         if self.fields.is_none() {
             let name = line_field("test", window, cx);
             let line = line_field("pnpm test", window, cx);
+            let ready = ReadyKind::ALL.map(|kind| line_field(kind.field().1, window, cx));
+            let url = AddressKind::ALL.map(|kind| line_field(kind.field().1, window, cx));
             // Typing clears what a refusal said.
-            for input in [&name, &line] {
+            for input in [&name, &line].into_iter().chain(&ready).chain(&url) {
                 self._subscriptions
                     .push(cx.subscribe(input, |this, _, event, cx| {
                         if matches!(event, InputEvent::Change) && this.form_error.take().is_some() {
@@ -290,7 +450,12 @@ impl TasksSection {
                         }
                     }));
             }
-            self.fields = Some(Fields { name, line });
+            self.fields = Some(Fields {
+                name,
+                line,
+                ready,
+                url,
+            });
         }
         self.fields.as_ref().expect("made above")
     }
@@ -299,9 +464,24 @@ impl TasksSection {
     pub fn open(&mut self, info: Option<&TaskInfo>, window: &mut Window, cx: &mut Context<Self>) {
         let fields = self.fields(window, cx);
         let (name, line) = (fields.name.clone(), fields.line.clone());
+        let (ready, url) = (fields.ready.clone(), fields.url.clone());
         let shown = info.cloned().unwrap_or_default();
         name.update(cx, |f, cx| f.set_value(shown.name.clone(), window, cx));
         line.update(cx, |f, cx| f.set_value(shown.line.clone(), window, cx));
+        for (at, field) in ready.iter().enumerate() {
+            let text = match &shown.ready {
+                Some((kind, text)) if ready_at(*kind) == at => text.clone(),
+                _ => String::new(),
+            };
+            field.update(cx, |f, cx| f.set_value(text, window, cx));
+        }
+        for (at, field) in url.iter().enumerate() {
+            let text = match &shown.url {
+                Some((kind, text)) if url_at(*kind) == at => text.clone(),
+                _ => String::new(),
+            };
+            field.update(cx, |f, cx| f.set_value(text, window, cx));
+        }
         self.flags = shown;
         self.editing = Some(info.map(|info| info.name.clone()));
         self.form_error = None;
@@ -369,6 +549,16 @@ impl TasksSection {
         for flag in Flag::ALL {
             params[flag.key()] = flag.of(&self.flags).into();
         }
+        // None is `""`: the link drops a `null`, which would leave it as it was.
+        params["ready"] = match self.ready_kind() {
+            Some(kind) => json!({kind.key(): value(&fields.ready[ready_at(kind)])}),
+            None => "".into(),
+        };
+        params["url"] = match self.flags.url.as_ref().map(|(kind, _)| *kind) {
+            Some(AddressKind::Address) => value(&fields.url[0]).into(),
+            Some(AddressKind::Command) => json!({"command": value(&fields.url[1])}),
+            None => "".into(),
+        };
         let (method, writing) = match original {
             Some(_) => ("task.edit", Writing::Saved(name)),
             None => ("task.add", Writing::Added(name)),
@@ -590,6 +780,7 @@ impl TasksSection {
                 "What it is",
                 div().flex().flex_col().gap(space::MD).children(switches),
             ))
+            .child(self.ready_and_url(cx))
             .child(problem_line(
                 "task-error",
                 self.form_error.clone(),
@@ -609,6 +800,117 @@ impl TasksSection {
             .disabled(self.saving)
             .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
         )
+    }
+}
+
+impl TasksSection {
+    /// When a run of the task is ready, and where it answers: each a choice, and under it the
+    /// field the choice needs, which unfolds with it.
+    fn ready_and_url(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(fields) = self.fields.as_ref() else {
+            return div().into_any_element();
+        };
+        let this = cx.entity().downgrade();
+        let mut ready = RadioChoices::new("task-ready", "Ready when").choice(
+            "none",
+            "Not said",
+            "A run of it is running, and that is all.",
+        );
+        for kind in ReadyKind::ALL {
+            let (title, line) = kind.choice();
+            ready = ready.choice(kind.key(), title, line);
+        }
+        let ready = ready
+            .chosen(self.ready_kind().map_or(0, |kind| ready_at(kind) + 1))
+            .on_choose(move |index, _, cx| {
+                let kind = index.checked_sub(1).map(|at| ReadyKind::ALL[at]);
+                this.update(cx, |this, cx| this.choose_ready(kind, cx)).ok();
+            });
+        let this = cx.entity().downgrade();
+        let url_kind = self.flags.url.as_ref().map(|(kind, _)| *kind);
+        let mut url = RadioChoices::new("task-url", "Its address").choice(
+            "none",
+            "None",
+            "It serves nothing to open.",
+        );
+        for kind in AddressKind::ALL {
+            let (title, line) = kind.choice();
+            url = url.choice(kind.key(), title, line);
+        }
+        let url = url
+            .chosen(url_kind.map_or(0, |kind| url_at(kind) + 1))
+            .on_choose(move |index, _, cx| {
+                let kind = index.checked_sub(1).map(|at| AddressKind::ALL[at]);
+                this.update(cx, |this, cx| this.choose_url(kind, cx)).ok();
+            });
+        // `input` is the box's id, `<kind>-input`; the block and its field are named after the kind.
+        let block = |input_id: &'static str, shown: bool, field: (&str, &str, &str), input| {
+            let (label, _, hint) = field;
+            let id = input_id.trim_end_matches("-input");
+            presence(
+                ElementId::Name(format!("{id}-block").into()),
+                shown,
+                Field::new(
+                    ElementId::Name(format!("{id}-text").into()),
+                    label.to_owned(),
+                    boxed(input_id, Input::new(input), cx),
+                )
+                .hint(hint.to_owned()),
+            )
+            .gap(space::MD)
+        };
+        let ready_blocks: Vec<_> = ReadyKind::ALL
+            .into_iter()
+            .map(|kind| {
+                block(
+                    match kind {
+                        ReadyKind::Line => "task-ready-line-input",
+                        ReadyKind::Url => "task-ready-url-input",
+                        ReadyKind::Command => "task-ready-command-input",
+                    },
+                    self.ready_kind() == Some(kind),
+                    kind.field(),
+                    &fields.ready[ready_at(kind)],
+                )
+            })
+            .collect();
+        let url_blocks: Vec<_> = AddressKind::ALL
+            .into_iter()
+            .map(|kind| {
+                block(
+                    match kind {
+                        AddressKind::Address => "task-url-address-input",
+                        AddressKind::Command => "task-url-command-input",
+                    },
+                    url_kind == Some(kind),
+                    kind.field(),
+                    &fields.url[url_at(kind)],
+                )
+            })
+            .collect();
+        div()
+            .flex()
+            .flex_col()
+            .gap(space::LG)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(Field::new("task-ready-field", "Ready when", ready).optional())
+                    .children(ready_blocks),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        Field::new("task-url-field", "Its address", url)
+                            .optional()
+                            .hint("Shown on its run, a link that opens it."),
+                    )
+                    .children(url_blocks),
+            )
+            .into_any_element()
     }
 }
 
@@ -740,6 +1042,13 @@ impl ProjectTasks {
 
     pub fn problem(&self) -> Option<&str> {
         self.problem.as_deref()
+    }
+
+    /// Opens a run's address with the system's default handler.
+    pub fn open_link(&self, url: &str, cx: &App) {
+        if let Some(shell) = self.shell.upgrade() {
+            shell.read(cx).open_link(url);
+        }
     }
 
     pub fn commands(&self) -> &Entity<CommandList> {
@@ -881,12 +1190,26 @@ impl ProjectTasks {
         );
     }
 
+    /// The new run of a restart replaces the open command, its row and its output staying drawn
+    /// until its own arrive.
+    fn follow_command(&mut self, run: &str, cx: &mut Context<Self>) {
+        self.open_watch_as(Watch::Run(run.to_owned()), true, cx);
+    }
+
     fn open_watch(&mut self, watch: Watch, cx: &mut Context<Self>) {
+        self.open_watch_as(watch, false, cx);
+    }
+
+    fn open_watch_as(&mut self, watch: Watch, in_place: bool, cx: &mut Context<Self>) {
         let key = watch.key();
         self.watching = Some(watch);
         let rows = self.commands.read(cx).rows().to_vec();
         self.panel.update(cx, |panel, cx| {
-            panel.open(&key, cx);
+            if in_place {
+                panel.follow(&key, cx);
+            } else {
+                panel.open(&key, cx);
+            }
             panel.set_rows(&rows, cx);
         });
         self.drawer.update(cx, |drawer, cx| drawer.open(cx));
@@ -901,22 +1224,50 @@ impl ProjectTasks {
     }
 
     pub fn stop_command(&mut self, run: &str, cx: &mut Context<Self>) {
-        self.answer_run(run, false, cx);
+        self.answer_run(run, RunAct::Stop, cx);
     }
 
-    fn answer_run(&mut self, run: &str, dismiss: bool, cx: &mut Context<Self>) {
+    /// The user runs a command again, in the same place: the panel shows the new run once the
+    /// daemon answers.
+    pub fn restart_command(&mut self, run: &str, cx: &mut Context<Self>) {
+        self.answer_run(run, RunAct::Restart, cx);
+    }
+
+    fn answer_run(&mut self, run: &str, act: RunAct, cx: &mut Context<Self>) {
         let command = Command::ProjectRun {
             project: self.project.clone(),
             run: run.to_owned(),
-            dismiss,
+            act,
         };
         perform_later(&self.shell, command, cx);
     }
 
-    /// What the daemon answered to a stop or a dismissal: a refusal is a toast.
-    pub fn run_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
+    /// What the daemon answered to a stop, a restart or a dismissal: a refusal is a toast, and the
+    /// panel shows the new run of a restart.
+    pub fn run_answered(&mut self, answer: RunAnswer, cx: &mut Context<Self>) {
+        let RunAnswer {
+            act,
+            run,
+            refused,
+            restarted,
+            notice,
+        } = answer;
         if let Some(why) = refused {
-            toast(Toast::failure("The run was not stopped").detail(why), cx);
+            let title = match act {
+                RunAct::Restart => "The run was not restarted",
+                _ => "The run was not stopped",
+            };
+            toast(Toast::failure(title).detail(why), cx);
+            if act == RunAct::Restart {
+                self.panel
+                    .update(cx, |panel, cx| panel.restart_refused(&run, cx));
+            }
+        }
+        if let Some(run) = restarted {
+            self.follow_command(&run, cx);
+        }
+        if let Some(notice) = notice {
+            toast(Toast::success("The run is now yours").detail(notice), cx);
         }
         self.read_runs(cx);
     }
@@ -942,7 +1293,7 @@ impl ProjectTasks {
         icon.clone()
     }
 
-    fn runs_section(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn runs_section(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let rows = self.commands.read(cx).rows().to_vec();
         let arranged = arrange(&rows);
         let running = arranged.running.len();
@@ -969,13 +1320,27 @@ impl ProjectTasks {
         let mut card = ListCard::new("project-runs-list");
         for (key, row, placement) in listed {
             let mark = self.mark(&row, cx);
+            let mark = match row.readiness() {
+                Some(ready) => crate::runs::ready_mark(
+                    ElementId::Name(format!("project-run-mark-{}", row.run).into()),
+                    ElementId::Name(format!("project-run-dot-{}", row.run).into()),
+                    ready == "ready",
+                    Some(mark.into_any_element()),
+                    &p,
+                    window,
+                    cx,
+                ),
+                None => mark.into_any_element(),
+            };
             let who = match row.agent.as_str() {
                 "" => "by you".to_owned(),
                 agent => format!("by agent {agent}"),
             };
-            let detail = match &row.name {
-                Some(task) => format!("task {task} · {who} · {}", seconds(row.elapsed_ms(now))),
-                None => format!("{who} · {}", seconds(row.elapsed_ms(now))),
+            let time = seconds(row.elapsed_ms(now));
+            let detail = match (&row.name, row.readiness()) {
+                (Some(task), Some(ready)) => format!("task {task} · {ready} · {time}"),
+                (Some(task), None) => format!("task {task} · {who} · {time}"),
+                (None, _) => format!("{who} · {time}"),
             };
             let page = cx.entity().downgrade();
             let open = row.run.clone();
@@ -1019,7 +1384,22 @@ impl ProjectTasks {
                     .ok();
             });
             let last = flottille_core::ansi::strip(&row.last_line);
-            if !last.is_empty() {
+            // A server's address takes the place of its last line, which its output still shows.
+            if let Some(url) = row.address() {
+                let page = cx.entity().downgrade();
+                list_row = list_row.below(crate::runs::address_link(
+                    ElementId::Name(format!("project-run-link-{}", row.run).into()),
+                    url,
+                    11.5,
+                    move |url, cx| {
+                        if let Some(page) = page.upgrade() {
+                            page.read(cx).open_link(url, cx);
+                        }
+                    },
+                    window,
+                    cx,
+                ));
+            } else if !last.is_empty() {
                 list_row = list_row.line(SharedString::from(last));
             }
             card = card.item(
@@ -1042,9 +1422,9 @@ impl ProjectTasks {
 }
 
 impl Render for ProjectTasks {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let runs = self.runs_section(cx);
+        let runs = self.runs_section(window, cx);
         let tasks = self.listed.clone().unwrap_or_default();
         let at = cx.background_executor().now();
         self.rows.sync(

@@ -13,6 +13,7 @@ use super::{
     Comment, Forge, ForgeCall, Gh, MERGE_METHODS, Pull, Seen, blocks, commit_hash, masked,
     method_refused, run,
 };
+use crate::daemon::Daemon;
 use crate::mcp::Outcome;
 
 /// The size of every page asked of Bitbucket: its pull request list takes 50 at most (`bkt` v0.37.0
@@ -43,7 +44,7 @@ async fn bkt(args: &[&str]) -> Result<(bool, String, String), Gh> {
 }
 
 /// `bkt <args>`'s output, or a sentence saying why there is none, masked.
-async fn text(args: &[&str]) -> Result<String, String> {
+pub(super) async fn text(args: &[&str]) -> Result<String, String> {
     let shown = args[..2].join(" ");
     match bkt(args).await {
         Ok((true, stdout, _)) => Ok(masked(&stdout)),
@@ -60,7 +61,7 @@ async fn text(args: &[&str]) -> Result<String, String> {
 }
 
 /// `bkt <args>`'s JSON.
-async fn json(args: &[&str]) -> Result<Value, String> {
+pub(super) async fn json(args: &[&str]) -> Result<Value, String> {
     let shown = args[..2].join(" ");
     serde_json::from_str(&text(args).await?)
         .map_err(|error| format!("bkt {shown} answered what is not JSON: {error}"))
@@ -203,7 +204,7 @@ pub(super) async fn pipelines(forge: &Forge, context: &str) -> Result<Vec<u64>, 
 }
 
 /// `head`, then the context and the repository's flags, then `tail`.
-fn command<'a>(
+pub(super) fn command<'a>(
     forge: &'a Forge,
     context: &'a str,
     head: &[&'a str],
@@ -331,7 +332,7 @@ async fn cloud_values(
 
 /// `cloud_values` with more query parameters on the first page, each given as `--param`: the path
 /// never holds a `?`, `bkt api` is not known to merge a param into one.
-async fn cloud_values_with(
+pub(super) async fn cloud_values_with(
     context: &str,
     path: &str,
     total: usize,
@@ -1071,7 +1072,7 @@ async fn allowed(
 }
 
 /// The path of a Cloud repository, for `bkt api`.
-fn cloud_repository(forge: &Forge) -> String {
+pub(super) fn cloud_repository(forge: &Forge) -> String {
     let Forge::Bitbucket { owner, name, .. } = forge else {
         unreachable!()
     };
@@ -1080,7 +1081,7 @@ fn cloud_repository(forge: &Forge) -> String {
 
 /// The branch a pipeline of Bitbucket's API ran for: the branch's own (`ref_name`), or the source
 /// branch of the pull request.
-fn pipeline_branch(pipeline: &Value) -> Option<&str> {
+pub(super) fn pipeline_branch(pipeline: &Value) -> Option<&str> {
     let target = &pipeline["target"];
     match target["type"].as_str()? {
         "pipeline_pullrequest_target" => target["source"].as_str(),
@@ -1216,9 +1217,16 @@ fn cloud_comments(comments: &[Value]) -> Vec<Comment> {
             body: masked(c["content"]["raw"].as_str().unwrap_or_default()),
             // What says a Bitbucket bot is not read: every author is taken for a person.
             bot: false,
-            at: None,
+            at: c["created_on"].as_str().and_then(crate::session_read::form),
+            id: id_of(&c["id"]),
+            recorded: false,
         })
         .collect()
+}
+
+/// A comment's number, as Bitbucket gives it, to tell it from another of the same words.
+fn id_of(id: &Value) -> Option<String> {
+    id.as_u64().map(|id| id.to_string())
 }
 
 /// What a merged or declined Cloud pull request was closed with, from its own page: the reason it
@@ -1239,6 +1247,8 @@ fn cloud_closing(state: &str, page: &Value) -> Option<Comment> {
         body: masked(reason),
         bot: false,
         at: None,
+        id: None,
+        recorded: false,
     })
 }
 
@@ -1271,7 +1281,10 @@ fn dc_closing(state: &str, activities: &[Value]) -> Option<Comment> {
             state: None,
             body: masked(a["comment"]["text"].as_str().unwrap_or_default()),
             bot: false,
-            at: None,
+            at: a["comment"]["createdDate"].as_u64(),
+            // The same comment as the one among the comments: it is told by its id.
+            id: id_of(&a["comment"]["id"]),
+            recorded: false,
         })
 }
 
@@ -1283,7 +1296,9 @@ fn dc_comments(activities: &[Value]) -> Vec<Comment> {
             state: None,
             body: masked(comment["text"].as_str().unwrap_or_default()),
             bot: false,
-            at: None,
+            at: comment["createdDate"].as_u64(),
+            id: id_of(&comment["id"]),
+            recorded: false,
         });
         for reply in comment["comments"].as_array().into_iter().flatten() {
             walk(reply, out);
@@ -1329,6 +1344,7 @@ pub(super) async fn note(
 /// through and the remote was found where the workspace was created: the same actions and the
 /// same checks as for GitHub, through `bkt`.
 pub(super) async fn write(
+    (daemon, project, path): (&Daemon, &str, &str),
     forge: &Forge,
     branch: &str,
     base: &str,
@@ -1355,7 +1371,7 @@ pub(super) async fn write(
                         .into(),
                 );
             }
-            let body = super::marked(&asked.body.unwrap_or_default());
+            let body = asked.body.unwrap_or_default();
             let mut flags = vec![
                 "--source",
                 branch,
@@ -1384,6 +1400,11 @@ pub(super) async fn write(
                         .collect::<String>()
                 })
                 .and_then(|digits| digits.parse::<u64>().ok());
+            if let (Some(number), false) = (number, body.trim().is_empty()) {
+                let number = number.to_string();
+                let on = (project, "bitbucket", path, number.as_str());
+                crate::posts::record_body(daemon, on, &body);
+            }
             let url = match pulls(forge, context, "all").await {
                 Ok(listed) => listed
                     .into_iter()

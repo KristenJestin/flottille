@@ -179,8 +179,9 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
   their checks (`forges.md`), and opens, comments, edits or merges them or re-runs a failed
   pipeline, each write a call to judge (§7); in `main` it names the workspace;
 - the workspace (every agent): `workspace`, which lists and reads the workspaces, and, for a root,
-  creates and prepares them, and removes one it does not work in, always held for the user, its
-  card saying what would be lost;
+  creates and prepares them, and removes one, always held for the user, its card saying what
+  would be lost: the one it works in too, once its work is done, which stops its commands there
+  and moves the session to `main`;
 - skills: `skill_read`, one of the project's skills, texts read when relevant (`skills.md`);
 - the web (every agent): `web`, which reads a page (its main content as Markdown, a PDF's text)
   or searches through DuckDuckGo, never this machine nor a private network; a URL the agent was
@@ -495,9 +496,17 @@ line names, every program a wrapper or a runner runs included:
 
 - **a login's place**, read or written: `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.azure`,
   `~/.config/gcloud`, `~/.kube`, `~/.docker/config.json`, `~/.config/gh`, `~/.netrc`, `~/.npmrc`,
-  `~/.pypirc`, `~/.git-credentials`, `~/.local/share/keyrings`, `~/Library/Keychains`, the agents'
-  own (`~/.claude`, `~/.claude.json`, `~/.codex`, `~/.local/share/opencode`), wherever they are
-  along a path, and `/etc/shadow`, `/etc/sudoers`, `/etc/sudoers.d`;
+  `~/.pypirc`, `~/.git-credentials`, `~/.local/share/keyrings`, `~/Library/Keychains`,
+  `~/.local/share/opencode`, wherever they are along a path, and `/etc/shadow`, `/etc/sudoers`,
+  `/etc/sudoers.d`; the agents' own folders of the home (`~/.claude`, `~/.claude.json`,
+  `~/.codex`), whole, where the path leads included (a link to them, a project that is the home
+  folder);
+- **an agent's folder anywhere else** (`.claude`, `.claude.json`, `.codex` of a repository, a
+  workspace, a copy in `~/Downloads`): it is a project's configuration, not a login, and is read
+  as any file, but a `.credentials.json` or `auth.json` below it is a login's place, and **a
+  write there** is refused: its settings and hooks run programs the next time the user opens
+  that repository with the agent's own command line, outside the gate, so the agent asks the
+  user to make the change;
 - **a write in or above Flottille's own folders** (its configuration, data, state and runtime:
   the store, `providers.toml`, `developer.toml`, the socket), or of Flottille's own program.
   Reading them stays base: a card in Ask and Auto, allowed in Full, since what they hold has its
@@ -611,8 +620,9 @@ Built as in `reference/hemera.md` §7: a shared base, the role template, a cache
 per-session part, then the project layer, frozen per session. The base has two parts. **What
 Flottille enforces** is fixed text that states what the gate does, so that an agent does not take
 it for its own discipline. **How to work** is the user's: a default text, the user's own for all
-projects, or a project's own (`projects.md`, "Rules"). The global rules sit in the base, before the
-boundary, where every project shares them; a project's own sit just after the per-session part,
+projects, with a project's own added after them (`projects.md`, "Rules"). The global rules sit in
+the base, before the boundary, where every project shares them; a project's own sit just after the
+per-session part,
 since they would otherwise make the shared part differ from one project to the next. Alongside, the
 MCP server's `instructions` explain Flottille itself to the agent (`tools.md`, "The server"). The project layer holds, per
 repository and for the project folder: `CLAUDE.md` or `AGENTS.md` (the agent's own name first),
@@ -668,25 +678,37 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   chooses it, and the pointer marks the row it is on and a click chooses it. Ctrl K waits while
   a dialog or a list is open. It searches what the window already holds from the daemon (the
   tree, the projects), never the content of conversations (that needs an index);
-- left: the tree project › place › session. `main` and the workspaces sit at the same level
-  under their project; a session is titled by the first line of its first message that says what the
-  work is (a greeting or a single word does not: the session is `agent <id>` until a later message
-  of the user does); sessions sit under their place (a session an agent started says it in its
-  page's header, "started by <agent>", not in the tree), with **one mark** at the right of its row,
-  chosen in this order: its state (running, needs the user, waiting) when it has one, else a small
-  dot when something new was written in it since it was last opened (an agent's message, a report,
-  a delivery that woke it, a ticket or a pull request an agent changed), else how long ago it was
-  active; and no text badge. The mark says its words under the pointer (`Needs you: a permission`,
-  `Waiting: checks of #1`, `Running`, `New since you looked: opened a pull request`); the dot is
-  cleared when the session is opened and lives as long as the window. The mark is where the work is, once: on the session's own row while that row
-  is in sight, and on a folded place or project, which shows the strongest mark of what it holds,
-  only while it is folded (never on a row and on its parents together); a session whose agent
-  ended shows no mark. A click on a project's name opens its page and leaves its places as they
-  were, only its chevron folds and unfolds them. A place's row offers, under the pointer, a "+"
-  that opens its project's composer set to start there, with the field focused; a session's row
-  offers a "⋯" menu with End session (the confirmation of the session page, counting the agents
-  that end) and, on an ended session whose agent can resume, Resume, with no need to open the
-  session first;
+- left: the sidebar, each project and, under it, **its sessions in one flat list**, sorted by
+  last exchange (the later of the last message the user gave it and the end of its root's last
+  turn, its creation before either: the session that last had one on top. Work done during a turn
+  never moves a row, so two sessions working at once keep their places; a state is drawn by the
+  row's mark, never by reordering). There is no row for `main` nor for a workspace: workspaces live on the project
+  page, and one with no session is not in the sidebar. A session is titled by the first line of
+  its first message that says what the work is (a greeting or a single word does not: the session
+  is `agent <id>` until a later message of the user does); a session an agent started says it in
+  its page's header, "started by <agent>", not in the sidebar. Each session takes **two lines**:
+  the first is its title and, at the right, **one mark**, chosen in this order: its state
+  (running, needs the user, waiting) when it has one, else a small dot when something new was
+  written in it since it was last opened (an agent's message, a report, a delivery that woke it, a
+  ticket or a pull request an agent changed), else how long ago it was active; and no text badge.
+  The second line, faint, is the place it works in (a folder icon and `main` for the project
+  folder, a branch icon and the workspace's name) and then, when there is room, its pull request
+  `#123` with its checks' mark (a check, a cross or a dot: shape as well as colour); it is cut
+  with an ellipsis inside the row and the whole is in a tooltip. The pull request is the one the
+  project page last read for that workspace (`workspace.forge`): the sidebar asks the forge for
+  none, so a workspace whose project page was never opened in this window shows its name alone,
+  and the pull request fades in when it becomes known. The mark says its words under the pointer
+  (`Needs you: a permission`, `Waiting: checks of #1`, `Running`, `New since you looked: opened a
+  pull request`); the dot is cleared when the session is opened and lives as long as the window.
+  The mark is where the work is, once: on the session's own row while that row is in sight, and on
+  a folded project, which shows the strongest mark of what it holds, only while it is folded
+  (never on a row and on its project together); a session whose agent ended shows no mark. A
+  session that becomes the latest active slides up to the top; the one that is open stays open,
+  whatever moves around it. A click on a project's name opens its page and leaves its sessions as
+  they were, only its chevron folds and unfolds them; a session's row offers a "⋯" menu with End
+  session (the confirmation of the session page, counting the agents that end) and, on an ended
+  session whose agent can resume, Resume, with no need to open the session first. A session is
+  started in a place from the project page (each place's "New session in …");
 - a project page: its repositories (each with its branch, its remote or "local only" and its
   forge; added, removed, which only forgets one, and detected again), its places with their
   sessions, each workspace's card saying where each of its repositories stands (branch, commits
@@ -708,8 +730,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   added, edited, removed), its Commands (added from a list of the templates and a blank one,
   edited, removed), its Tasks (a line, where it runs and its flags), its Setup (steps added,
   edited, removed and reordered, each with its kind, where it is done and its time limit), then
-  its Rules (a text editor, Reset to default, and a line saying a change reaches the agents
-  created from now on);
+  its Rules (the global rules above, read-only and folded, with a link to edit them; a switch,
+  "Use only this project's rules"; the project's text editor, Reset to default, and a line saying
+  a change reaches the agents created from now on);
 - Settings, in tabs (Judge, Providers, Rules, Appearance, Developer mode: one tab shown at a time, as in a project's settings; the first, the Judge, is
   the one it opens on, and a link to a section opens its tab): the Judge tab holds the Auto judge (two lines on Auto: the rules pass what is known to be harmless, a
   small model on the user's own quota decides the rest, base calls always come to the user; "No
@@ -781,7 +804,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   an answered card leaves). The
   root's row menu ("⋯") holds End session, the only way the window ends an agent: it ends the root
   and its tree, after a confirmation that counts the agents that end. An ended session leaves its
-  place in the left tree for the "Ended" group, folded, pinned at the bottom of the sidebar
+  place in the sidebar for the "Ended" group, folded, pinned at the bottom of the sidebar
   whatever the tree's length and unfolding upward over it (its rows say their project), and its
   page shows,
   in place of the composer, why it ended and Resume when its agent can resume or load its session
@@ -794,7 +817,14 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   it is one), how long, its last output line and Stop, then the last five that ended, greyed, with
   how they ended; a click opens the run's drawer (the same on the project page): its command, its
   task, where it runs, who started it (a link to the agent in its session), since when or how it
-  ended, its output, live and following its end, Copy, and Stop while it runs; `Escape` closes it,
+  ended, its output, live and following its end, Copy, Restart (the daemon's `run.restart`: it
+  stops the command if it runs and starts the same line again in the same place; the drawer, and
+  the modal if it is open, keep the old command drawn, Stop and Restart faded, until the new run's
+  row and output arrive and replace it in place; a refusal is one toast) and Stop while it runs; who started it is cut to two lines there; its
+  **Expand** button opens the same command in a large modal over the window (the rest darkened; a
+  click outside, `Escape` or its close button close it and leave the drawer as it was): the
+  header with Restart and Stop, the facts on one or two lines, and the output taking all the
+  height left, following its end; `Escape` closes the drawer,
   and the conversation's line for that run opens the same drawer. A
   project, and a session, with a command running show a small icon in the left tree, so that no
   server is forgotten. The conversation draws a run as one line, its ANSI colours turned into the

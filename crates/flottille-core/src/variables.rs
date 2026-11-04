@@ -45,6 +45,11 @@ impl Names {
 
 /// `template` with its names filled. `{{` and `}}` are a literal brace.
 pub fn fill(template: &str, names: &Names) -> Result<String, String> {
+    fill_also(template, names, &[])
+}
+
+/// `fill`, with names of its own besides Flottille's (a task's `{url}`).
+pub fn fill_also(template: &str, names: &Names, extra: &[(&str, &str)]) -> Result<String, String> {
     let mut filled = String::new();
     walk(template, |piece| match piece {
         Piece::Text(text) => {
@@ -52,7 +57,11 @@ pub fn fill(template: &str, names: &Names) -> Result<String, String> {
             Ok(())
         }
         Piece::Name(name) => {
-            filled.push_str(names.get(name).ok_or_else(|| unknown(name))?);
+            let value = names
+                .get(name)
+                .or_else(|| extra.iter().find(|(n, _)| *n == name).map(|(_, v)| *v))
+                .ok_or_else(|| unknown(name, &extra.iter().map(|(n, _)| *n).collect::<Vec<_>>()))?;
+            filled.push_str(value);
             Ok(())
         }
     })?;
@@ -61,16 +70,28 @@ pub fn fill(template: &str, names: &Names) -> Result<String, String> {
 
 /// Whether every name of `template` is one Flottille fills, without filling it.
 pub fn check(template: &str) -> Result<(), String> {
+    check_also(template, &[])
+}
+
+/// `check`, with names of its own besides Flottille's.
+pub fn check_also(template: &str, extra: &[&str]) -> Result<(), String> {
     walk(template, |piece| match piece {
-        Piece::Name(name) if !NAMES.contains(&name) => Err(unknown(name)),
+        Piece::Name(name) if !NAMES.contains(&name) && !extra.contains(&name) => {
+            Err(unknown(name, extra))
+        }
         _ => Ok(()),
     })
 }
 
-fn unknown(name: &str) -> String {
+fn unknown(name: &str, extra: &[&str]) -> String {
     format!(
         "“{{{name}}}” is not a name Flottille fills: use {}, or {{{{ for a brace",
-        NAMES.map(|name| format!("{{{name}}}")).join(", ")
+        NAMES
+            .iter()
+            .chain(extra)
+            .map(|name| format!("{{{name}}}"))
+            .collect::<Vec<_>>()
+            .join(", ")
     )
 }
 

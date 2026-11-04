@@ -7,7 +7,7 @@
 //! for its end a while, then answers that it keeps going; its output is kept (its end), masked
 //! when shown or stored.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::Stdio;
@@ -15,10 +15,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use flottille_core::agent::new_id;
+use flottille_core::agent::{AgentState, new_id};
 use flottille_core::approval;
 use flottille_core::command::split_line;
-use flottille_core::run::{Run, RunState};
+use flottille_core::project::{Ready, TaskUrl};
+use flottille_core::run::{Readiness, Run, RunState};
 use flottille_core::secrets;
 use flottille_core::store::{Store, now_ms};
 use flottille_core::variables::{self, Names};
@@ -34,6 +35,7 @@ use crate::gate::{self, Verdict};
 use crate::mcp::{Outcome, arguments, masked};
 use crate::place::{Place, Resolved};
 use crate::projects;
+use crate::ready::{self, Probe};
 
 /// What the call waits for the end of a run, by default and at most, in seconds.
 const WAIT_SECONDS: u64 = 30;
@@ -72,6 +74,8 @@ const FORGE_CONFIGS: [&str; 3] = ["GH_CONFIG_DIR", "GLAB_CONFIG_DIR", "BKT_CONFI
 #[derive(Default)]
 pub struct Live {
     runs: Mutex<HashMap<String, Arc<Going>>>,
+    /// The runs a `run.restart` is working on.
+    restarting: Mutex<HashSet<String>>,
 }
 
 /// A run going on.
@@ -92,6 +96,23 @@ struct Going {
     phase: Mutex<Phase>,
     /// The user stopped it (`run.stop`), which the agent is told.
     stopped_by_user: AtomicBool,
+    /// The user stopped it to start it again (`run.restart`), which tells the agent once, with
+    /// the new run's id, and not by its end.
+    restarted: AtomicBool,
+    /// Whether it is ready, for a task that says when (`docs/projects.md`, "Tasks").
+    readiness: Mutex<Option<Readiness>>,
+    /// The text a line of its output holds once it is ready, when that is what its task says.
+    ready_line: Option<String>,
+    /// The end of its output not yet looked at for that text, from a line's start.
+    unseen: Mutex<Vec<u8>>,
+    /// The agent asked to be told when it is ready (`notify`).
+    notify: AtomicBool,
+}
+
+/// How a run is told ready: its probe, and whether its agent asked to be told.
+struct Readying {
+    probe: Option<Probe>,
+    notify: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -147,6 +168,8 @@ struct RunArguments {
     line: Option<String>,
     repository: Option<String>,
     timeout: Option<u64>,
+    /// `ready`: the agent is told when the run is ready.
+    notify: Option<String>,
     #[allow(dead_code)]
     why: Option<String>,
 }
@@ -160,10 +183,13 @@ struct Request {
     serve: bool,
     /// Where it runs.
     folder: Resolved,
+    /// When it is ready and where it answers, as its task says.
+    ready: Option<Box<Ready>>,
+    url: Option<Box<TaskUrl>>,
 }
 
 fn request(daemon: &Daemon, place: &Place, args: RunArguments) -> Result<Request, Outcome> {
-    let (name, line, repository, serve) = match (args.task, args.line) {
+    let (name, line, repository, serve, ready, url) = match (args.task, args.line) {
         (Some(name), None) => {
             let project = match projects::load_project(daemon, &place.project) {
                 Ok(project) => project,
@@ -176,9 +202,16 @@ fn request(daemon: &Daemon, place: &Place, args: RunArguments) -> Result<Request
                 )));
             };
             let repository = args.repository.or(task.repository.clone());
-            (Some(name), task.line.clone(), repository, task.serve)
+            (
+                Some(name),
+                task.line.clone(),
+                repository,
+                task.serve,
+                task.ready.clone(),
+                task.url.clone(),
+            )
         }
-        (None, Some(line)) => (None, line, args.repository, false),
+        (None, Some(line)) => (None, line, args.repository, false, None, None),
         _ => {
             return Err(Outcome::Refused(
                 "refused: give exactly one of task (one of the project's) and line".into(),
@@ -198,7 +231,62 @@ fn request(daemon: &Daemon, place: &Place, args: RunArguments) -> Result<Request
         repository,
         serve,
         folder,
+        ready,
+        url,
     })
+}
+
+/// Why a run cannot be told ready, for `notify` on a task that does not say when it is.
+fn says_no_ready(name: Option<&str>) -> Outcome {
+    Outcome::Refused(match name {
+        Some(name) => format!(
+            "refused: task {name} says no ready (a line it prints, an address that answers or a \
+             command that passes), so Flottille cannot tell when it is ready; it tells you when \
+             the run ends, without notify"
+        ),
+        None => "refused: a line says no ready: only a task that says when it is ready can \
+                 notify; Flottille tells you when the run ends, without notify"
+            .into(),
+    })
+}
+
+/// The run's address, or why it has none, both masked, and its probe: `Err` when the task's
+/// `ready` cannot be filled or split. A `ready` that asks the address it has not got has no
+/// probe: the run cannot be told ready, which its reason says, rather than waiting forever.
+async fn readied(
+    daemon: &Daemon,
+    ready: Option<&Ready>,
+    url: Option<&TaskUrl>,
+    names: &Names,
+    env: &BTreeMap<OsString, OsString>,
+    folder: &Path,
+    secret_values: &[String],
+) -> Result<(Option<String>, Option<String>, Option<Probe>), String> {
+    let (url, url_error) = match url {
+        None => (None, None),
+        Some(url) => match ready::address(daemon, url, names, env, folder).await {
+            Ok(address) => (Some(secrets::mask_also(&address, env, secret_values)), None),
+            Err(why) => (None, Some(secrets::mask_also(&why, env, secret_values))),
+        },
+    };
+    let asks_url = |template: &str| variables::check(template).is_err();
+    let ready = match (ready, &url_error) {
+        (
+            Some(Ready::Url(template) | Ready::Line(template) | Ready::Command(template)),
+            Some(why),
+        ) if asks_url(template) => {
+            let why = format!(
+                "{why}; its ready asks for the address, so Flottille cannot tell when it is ready"
+            );
+            return Ok((None, Some(why), None));
+        }
+        (ready, _) => ready,
+    };
+    let probe = ready
+        .map(|ready| ready::probe(ready, names, url.as_deref()))
+        .transpose()
+        .map_err(|why| format!("its ready cannot be used: {why}"))?;
+    Ok((url, url_error, probe))
 }
 
 /// The folder a call to `run` would run in, the words it would start and the task it names, for
@@ -238,6 +326,16 @@ pub async fn run(
         Ok(args) => args,
         Err(refusal) => return refusal,
     };
+    let notify = match args.notify.as_deref() {
+        None => false,
+        Some("ready") => true,
+        Some(other) => {
+            return Outcome::Refused(format!(
+                "refused: notify has only \"ready\", not {other:?}: Flottille tells you when the \
+                 run ends without it"
+            ));
+        }
+    };
     let wait = args.timeout.unwrap_or(WAIT_SECONDS);
     if !(1..=WAIT_SECONDS_MAX).contains(&wait) {
         return Outcome::Refused(format!(
@@ -252,10 +350,15 @@ pub async fn run(
         repository,
         serve,
         folder,
+        ready,
+        url,
     } = match request(daemon, place, args) {
         Ok(request) => request,
         Err(refusal) => return refusal,
     };
+    if notify && ready.is_none() {
+        return says_no_ready(name.as_deref());
+    }
     if !approved && let Verdict::Deny(why) = gate::contained(std::slice::from_ref(&folder)) {
         return Outcome::Refused(why);
     }
@@ -276,6 +379,9 @@ pub async fn run(
             .find(|g| g.run.agent.as_deref() == Some(agent) && g.run.name == name)
             .cloned()
     {
+        if notify {
+            going.notify.store(true, Ordering::SeqCst);
+        }
         return Outcome::Done(describe(daemon, &going.run.id, None, None, true, false));
     }
     // Only a push the gate read, and that the user or the judge let through, goes out.
@@ -283,6 +389,21 @@ pub async fn run(
     let env = match environment(daemon, place, &repository, lift) {
         Ok(env) => env,
         Err(why) => return Outcome::Failed(why),
+    };
+    let secret_values = place.secret_values();
+    let (url, url_error, probe) = match readied(
+        daemon,
+        ready.as_deref(),
+        url.as_deref(),
+        &names(place, &repository),
+        &env,
+        &folder.path,
+        &secret_values,
+    )
+    .await
+    {
+        Ok(readied) => readied,
+        Err(why) => return Outcome::Refused(format!("refused: {why}")),
     };
     let id = match new_id() {
         Ok(id) => id,
@@ -303,8 +424,19 @@ pub async fn run(
         output: String::new(),
         dismissed: false,
         project: place.project.clone(),
+        ready: probe.as_ref().map(|_| Readiness::Starting),
+        url,
+        url_error,
     };
-    if let Err(why) = start(daemon, run, words, env, place.secret_values()) {
+    if let Err(why) = start(
+        daemon,
+        run,
+        words,
+        env,
+        secret_values,
+        Phase::Waited,
+        Readying { probe, notify },
+    ) {
         return Outcome::Failed(why);
     }
     if serve {
@@ -330,7 +462,7 @@ pub async fn run(
 /// which the gate does not see, since the user asked for it, in the environment an agent's run
 /// gets. It is not waited for: the window follows it in the project's list of commands. A task
 /// that keeps running and already runs for the user is joined, not started twice.
-pub fn run_for_user(
+pub async fn run_for_user(
     daemon: &Arc<Daemon>,
     project: &flottille_core::project::Project,
     name: &str,
@@ -353,6 +485,17 @@ pub fn run_for_user(
     let (repository, base) = place.base(task.repository.as_deref())?;
     let folder = place.resolve(base, ".");
     let env = environment(daemon, &place, repository, false)?;
+    let secret_values = place.secret_values();
+    let (url, url_error, probe) = readied(
+        daemon,
+        task.ready.as_deref(),
+        task.url.as_deref(),
+        &names(&place, repository),
+        &env,
+        &folder.path,
+        &secret_values,
+    )
+    .await?;
     let id = new_id().map_err(|error| error.to_string())?;
     let run = Run {
         id: id.clone(),
@@ -368,8 +511,22 @@ pub fn run_for_user(
         output: String::new(),
         dismissed: false,
         project: project.name.clone(),
+        ready: probe.as_ref().map(|_| Readiness::Starting),
+        url,
+        url_error,
     };
-    start(daemon, run, words, env, place.secret_values())?;
+    start(
+        daemon,
+        run,
+        words,
+        env,
+        secret_values,
+        Phase::Waited,
+        Readying {
+            probe,
+            notify: false,
+        },
+    )?;
     Ok(id)
 }
 
@@ -520,13 +677,17 @@ async fn remote_kept(
     crate::forge::remote_kept(folder, base).await
 }
 
-/// Spawns the run, records it, and leaves a task of its own to follow it to its end.
+/// Spawns the run, records it, and leaves a task of its own to follow it to its end. `phase` is
+/// what it is in from the start: a run that ends at once must find it already detached to have
+/// its end delivered.
 fn start(
     daemon: &Arc<Daemon>,
     run: Run,
     words: Vec<String>,
     env: BTreeMap<OsString, OsString>,
     secrets: Vec<String>,
+    phase: Phase,
+    readying: Readying,
 ) -> Result<(), String> {
     let (reader, writer) = std::io::pipe().map_err(|e| format!("cannot run it: {e}"))?;
     let mut command = tokio::process::Command::new(&words[0]);
@@ -552,7 +713,8 @@ fn start(
     let reader = tokio::net::unix::pipe::Receiver::from_owned_fd(reader.into())
         .map_err(|e| format!("cannot read the output of {}: {e}", words[0]))?;
     let event = json!({"agent": run.agent, "project": run.project, "run": run.id,
-        "name": run.name, "line": run.line, "folder": run.folder});
+        "name": run.name, "line": run.line, "folder": run.folder,
+        "ready": run.ready.map(Readiness::as_str), "url": run.url, "url_error": run.url_error});
     daemon
         .write(|store| {
             let event = store.create_run(&run, ("run.started", event))?;
@@ -562,6 +724,7 @@ fn start(
             Ok(((), event))
         })
         .map_err(|e| e.to_string())?;
+    let run_ready = run.ready;
     let going = Arc::new(Going {
         run,
         output: Mutex::default(),
@@ -571,8 +734,16 @@ fn start(
         env,
         secrets,
         pid,
-        phase: Mutex::new(Phase::Waited),
+        phase: Mutex::new(phase),
         stopped_by_user: AtomicBool::new(false),
+        restarted: AtomicBool::new(false),
+        readiness: Mutex::new(run_ready),
+        ready_line: match &readying.probe {
+            Some(Probe::Line(text)) => Some(text.clone()),
+            _ => None,
+        },
+        unseen: Mutex::default(),
+        notify: AtomicBool::new(readying.notify),
     });
     daemon
         .mcp
@@ -581,8 +752,117 @@ fn start(
         .lock()
         .unwrap()
         .insert(going.run.id.clone(), going.clone());
+    if let Some(probe @ (Probe::Url(_) | Probe::Command(_))) = readying.probe {
+        tokio::spawn(probing(daemon.clone(), going.clone(), probe));
+    }
     tokio::spawn(follow(daemon.clone(), going, child, pid, reader));
     Ok(())
+}
+
+/// Whether the run is still starting, not ready yet.
+fn starting(going: &Going) -> bool {
+    *going.readiness.lock().unwrap() == Some(Readiness::Starting)
+}
+
+/// Probes the starting run once a second, one probe at a time, until it is ready or ends.
+async fn probing(daemon: Arc<Daemon>, going: Arc<Going>, probe: Probe) {
+    let mut end = going.end.subscribe();
+    while starting(&going) {
+        let passed = async {
+            match &probe {
+                Probe::Url(address) => ready::answers(address).await,
+                Probe::Command(words) => {
+                    ready::command_passes(
+                        &daemon,
+                        &going.run.id,
+                        words,
+                        &going.env,
+                        &going.run.folder,
+                    )
+                    .await
+                }
+                Probe::Line(_) => false,
+            }
+        };
+        tokio::select! {
+            passed = passed => if passed {
+                mark_ready(&daemon, &going);
+                return;
+            },
+            _ = end.wait_for(Option::is_some) => return,
+        }
+        tokio::select! {
+            () = tokio::time::sleep(ready::PROBE_EVERY) => {}
+            _ = end.wait_for(Option::is_some) => return,
+        }
+    }
+}
+
+/// Whether the output just read, after what came before it on its line, holds the ready text.
+fn line_seen(going: &Going, read: &[u8]) -> bool {
+    let Some(text) = &going.ready_line else {
+        return false;
+    };
+    let mut unseen = going.unseen.lock().unwrap();
+    unseen.extend_from_slice(read);
+    let seen = String::from_utf8_lossy(&unseen).contains(text.as_str());
+    // What is left to look at is the line not ended yet, bounded.
+    let from = unseen
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |at| at + 1)
+        .max(unseen.len().saturating_sub(OUTPUT_MARGIN));
+    unseen.drain(..from);
+    seen
+}
+
+/// The starting run is ready: recorded, announced (`run.ready`), and told to its agent when it
+/// asked.
+fn mark_ready(daemon: &Arc<Daemon>, going: &Going) {
+    {
+        let mut readiness = going.readiness.lock().unwrap();
+        if *readiness != Some(Readiness::Starting) {
+            return;
+        }
+        *readiness = Some(Readiness::Ready);
+    }
+    let run = &going.run;
+    let event = json!({"agent": run.agent, "project": run.project, "run": run.id,
+        "url": run.url});
+    let result = daemon.write(|store| Ok(((), store.ready_run(&run.id, ("run.ready", event))?)));
+    if let Err(error) = result {
+        eprintln!("flottille daemon: run {}: {error}", run.id);
+    }
+    if going.notify.load(Ordering::SeqCst)
+        && let Some(agent) = &run.agent
+    {
+        let name = run
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("`{}`", run.line));
+        let at = run
+            .url
+            .as_ref()
+            .map_or(String::new(), |url| format!(" at {url}"));
+        deliveries::deliver(
+            daemon,
+            agent,
+            "command-ready",
+            Some(format!("command-ready-{}", run.id)),
+            &format!(
+                "run {}: {name} is ready{at} (read it with run_status {{\"run\": \"{}\"}}).",
+                run.id, run.id
+            ),
+            approval::URGENT,
+        );
+    }
+}
+
+/// The run as it is now: its record, and whether it is ready.
+fn current(going: &Going) -> Run {
+    let mut run = going.run.clone();
+    run.ready = *going.readiness.lock().unwrap();
+    run
 }
 
 /// Reads the run's output until it ends by itself or is stopped, then records its end.
@@ -602,7 +882,12 @@ async fn follow(
             status = child.wait() => break status.ok(),
             read = reader.read(&mut buffer), if open => match read {
                 Ok(0) | Err(_) => open = false,
-                Ok(read) => going.output.lock().unwrap().push(&buffer[..read]),
+                Ok(read) => {
+                    going.output.lock().unwrap().push(&buffer[..read]);
+                    if starting(&going) && line_seen(&going, &buffer[..read]) {
+                        mark_ready(&daemon, &going);
+                    }
+                }
             },
             () = going.stop.notified() => {
                 signal_group(pid, libc::SIGTERM);
@@ -640,6 +925,14 @@ async fn follow(
         },
     };
     let output = masked_output(&going);
+    let missed = {
+        let mut readiness = going.readiness.lock().unwrap();
+        let missed = *readiness == Some(Readiness::Starting);
+        if missed {
+            *readiness = Some(Readiness::Missed);
+        }
+        missed
+    };
     let run = &going.run;
     let event = json!({"agent": run.agent, "project": run.project, "run": run.id,
         "state": end.state.as_str(), "exit_code": end.exit_code, "signal": end.signal});
@@ -663,17 +956,17 @@ async fn follow(
         std::mem::replace(&mut *going.phase.lock().unwrap(), Phase::Over) == Phase::Detached;
     let by_user = going.stopped_by_user.load(Ordering::SeqCst);
     // Told to the agent only when no call was left to answer, and only for an end that is news
-    // to it: not its own stop, nor the daemon's or its own end.
+    // to it: not its own stop, nor the daemon's or its own end, nor a restart, which says more.
     let told = match end.state {
         RunState::Exited => true,
-        RunState::Stopped => by_user,
+        RunState::Stopped => by_user && !going.restarted.load(Ordering::SeqCst),
         RunState::Running | RunState::Interrupted => false,
     };
     if detached
         && told
         && let Some(agent) = &run.agent
     {
-        let body = ended_text(&going, end, &output, by_user);
+        let body = ended_text(&going, end, &output, by_user, missed);
         deliveries::deliver(
             &daemon,
             agent,
@@ -688,13 +981,16 @@ async fn follow(
 
 /// What the agent is told of a run that ended after its call: how it ended, how long it ran and
 /// the end of its output.
-fn ended_text(going: &Going, end: End, output: &str, by_user: bool) -> String {
+fn ended_text(going: &Going, end: End, output: &str, by_user: bool, missed: bool) -> String {
     let state = state_text(Some(end), by_user);
     let seconds = (now_ms() - going.run.started_at) as f64 / 1000.0;
     let mut text = format!(
         "Your command `{}` (run {}) {state} after {seconds:.1} s.",
         going.run.line, going.run.id
     );
+    if missed {
+        text.push_str(" It ended before it was ready.");
+    }
     let lines = display_lines(output);
     if lines.is_empty() {
         text.push_str("\nIt wrote nothing.");
@@ -783,7 +1079,7 @@ pub fn view(daemon: &Daemon, id: &str) -> Option<View> {
         let cut = going.output.lock().unwrap().cut > 0;
         return Some(View {
             output: masked_output(&going),
-            run: going.run.clone(),
+            run: current(&going),
             cut,
         });
     }
@@ -805,6 +1101,197 @@ pub async fn stop_by_user(daemon: &Daemon, id: &str) {
     stop(daemon, id, RunState::Stopped).await;
 }
 
+/// A run being restarted (`run.restart`), until the guard is dropped.
+struct Restarting<'a> {
+    live: &'a Live,
+    id: String,
+}
+
+impl<'a> Restarting<'a> {
+    fn begin(live: &'a Live, id: &str) -> Result<Self, String> {
+        if !live.restarting.lock().unwrap().insert(id.to_owned()) {
+            return Err(format!("run {id} is being restarted"));
+        }
+        Ok(Restarting {
+            live,
+            id: id.to_owned(),
+        })
+    }
+}
+
+impl Drop for Restarting<'_> {
+    fn drop(&mut self) {
+        self.live.restarting.lock().unwrap().remove(&self.id);
+    }
+}
+
+/// The user runs the run again: its line in its place, as a new run of the same owner and the
+/// same task if it is one. The run stops first if it runs, and its agent is told once, with the
+/// new run's id; it is told too when the restart fails after the stop. A command of an agent that
+/// ended becomes the user's, which the notice says. It is the user's act on the user's socket, so
+/// the gate is not asked, and it never carries a push approval: it starts unlifted.
+pub async fn restart_by_user(
+    daemon: &Arc<Daemon>,
+    old: &Run,
+) -> Result<(Run, Option<String>), String> {
+    let _restarting = Restarting::begin(&daemon.mcp.runs, &old.id)?;
+    // All is read before the run is stopped: a refusal leaves it running.
+    let project = projects::load_project(daemon, &old.project).map_err(|f| f.message)?;
+    let owner = old
+        .agent
+        .as_ref()
+        .and_then(|id| daemon.read(|store| store.agent(id)).ok().flatten());
+    let alive = owner
+        .as_ref()
+        .filter(|agent| !matches!(agent.state, AgentState::Ended | AgentState::Failed));
+    let place = match owner
+        .as_ref()
+        .map(|agent| crate::mcp::grant_of(daemon, agent))
+    {
+        Some(Ok(grant)) => grant.place,
+        Some(Err(why)) if alive.is_some() => return Err(why),
+        _ => Place::main(&project, project.folder.clone()),
+    };
+    let notice = old.agent.as_ref().filter(|_| alive.is_none()).map(|agent| {
+        format!("agent {agent} has ended: the command now runs as yours, with no agent to tell")
+    });
+    let here = |folder: &Path| std::fs::canonicalize(folder).ok();
+    let repository = place
+        .repositories
+        .iter()
+        .find(|(_, folder)| here(folder) == here(&old.folder))
+        .map(|(path, _)| path.clone());
+    let (name, line, words, repository, ready, url) = match &old.name {
+        Some(name) => {
+            let args = RunArguments {
+                task: Some(name.clone()),
+                line: None,
+                repository,
+                timeout: None,
+                notify: None,
+                why: None,
+            };
+            match request(daemon, &place, args) {
+                Ok(r) => (r.name, r.line, r.words, r.repository, r.ready, r.url),
+                Err(Outcome::Refused(why) | Outcome::Failed(why) | Outcome::Held(why)) => {
+                    return Err(why);
+                }
+                Err(Outcome::Done(_)) => unreachable!("a request is refused or it fits"),
+            }
+        }
+        None => {
+            // The stored line is masked: what was masked is not known any more.
+            if old.line.contains(secrets::MASK) {
+                return Err(format!(
+                    "run {} holds a secret its line masks: run it again from its owner",
+                    old.id
+                ));
+            }
+            let words = split_line(&old.line)?;
+            (
+                None,
+                old.line.clone(),
+                words,
+                repository.unwrap_or_else(|| ".".into()),
+                None,
+                None,
+            )
+        }
+    };
+    let env = environment(daemon, &place, &repository, false)?;
+    let secret_values = place.secret_values();
+    let (url, url_error, probe) = readied(
+        daemon,
+        ready.as_deref(),
+        url.as_deref(),
+        &names(&place, &repository),
+        &env,
+        &old.folder,
+        &secret_values,
+    )
+    .await?;
+    let id = new_id().map_err(|error| error.to_string())?;
+    let going = daemon.mcp.runs.runs.lock().unwrap().get(&old.id).cloned();
+    let stopped = going.is_some();
+    if let Some(going) = &going {
+        going.restarted.store(true, Ordering::SeqCst);
+        stop_by_user(daemon, &old.id).await;
+    }
+    let owner = alive.map(|agent| agent.id.clone());
+    let run = Run {
+        id: id.clone(),
+        agent: owner.clone(),
+        name,
+        line: masked(&line, &place),
+        // Where it ran: a repository of the place, or a folder the task's line named.
+        folder: old.folder.clone(),
+        state: RunState::Running,
+        exit_code: None,
+        signal: None,
+        started_at: now_ms(),
+        ended_at: None,
+        output: String::new(),
+        dismissed: false,
+        project: old.project.clone(),
+        ready: probe.as_ref().map(|_| Readiness::Starting),
+        url,
+        url_error,
+    };
+    // An agent's run is detached from the start: its end wakes the agent, as its call's would
+    // have, even when it comes before this function goes on.
+    let phase = if owner.is_some() {
+        Phase::Detached
+    } else {
+        Phase::Waited
+    };
+    // The agent that asked to be told when its server is ready is told of the new run's.
+    let readying = Readying {
+        probe,
+        notify: going
+            .as_ref()
+            .is_some_and(|going| going.notify.load(Ordering::SeqCst)),
+    };
+    if let Err(why) = start(daemon, run, words, env, secret_values, phase, readying) {
+        // The stop was the user's and its end was not told: the agent hears of both.
+        if stopped && let Some(agent) = &owner {
+            let body = format!(
+                "Your command `{}` (run {}) was stopped by the user, who restarted it, but it \
+                 could not start again: {why}. Nothing runs it now.",
+                old.line, old.id
+            );
+            deliveries::deliver(
+                daemon,
+                agent,
+                "command-ended",
+                Some(format!("command-restart-failed-{id}")),
+                &body,
+                approval::URGENT,
+            );
+        }
+        return Err(why);
+    }
+    if let Some(agent) = &owner {
+        let body = format!(
+            "Your command `{}` (run {}) was restarted by the user: it now runs as run {id}, \
+             still yours (read it with run_status {{\"run\": \"{id}\"}}).",
+            old.line, old.id
+        );
+        // Its own id: the first run's end may already have been delivered, or a second restart
+        // of it told.
+        deliveries::deliver(
+            daemon,
+            agent,
+            "command-ended",
+            Some(format!("command-restarted-{id}")),
+            &body,
+            approval::URGENT,
+        );
+    }
+    view(daemon, &id)
+        .map(|view| (view.run, notice))
+        .ok_or_else(|| "the run ended at once".to_owned())
+}
+
 // Reading and stopping.
 
 #[derive(Deserialize)]
@@ -814,6 +1301,8 @@ struct StatusArguments {
     action: Option<String>,
     tail: Option<usize>,
     start: Option<usize>,
+    /// notify: what to be told of; only `ready`.
+    when: Option<String>,
 }
 
 /// `run_status`: the state and the output of a run this agent started, or its stop.
@@ -833,10 +1322,38 @@ pub async fn run_status(daemon: &Daemon, agent: &str, args: Value) -> Outcome {
             args.start,
         );
     }
-    if let Err(refusal) = own(daemon, agent, &args.run) {
-        return refusal;
+    let run = match own(daemon, agent, &args.run) {
+        Ok(run) => run,
+        Err(refusal) => return refusal,
+    };
+    if args.when.is_some() && args.action.as_deref() != Some("notify") {
+        return Outcome::Refused("refused: when goes with action notify".into());
     }
     match args.action.as_deref().unwrap_or("output") {
+        "notify" => {
+            if args.tail.is_some() || args.start.is_some() {
+                return Outcome::Refused(
+                    "refused: tail and start are for action output; action notify only asks to \
+                     be told"
+                        .into(),
+                );
+            }
+            if args.when.as_deref() != Some("ready") {
+                return Outcome::Refused(
+                    "refused: action notify takes when: \"ready\"; Flottille tells you when a \
+                     run ends without asking"
+                        .into(),
+                );
+            }
+            if run.ready.is_none() {
+                return says_no_ready(run.name.as_deref());
+            }
+            let going = daemon.mcp.runs.runs.lock().unwrap().get(&run.id).cloned();
+            if let Some(going) = going {
+                going.notify.store(true, Ordering::SeqCst);
+            }
+            Outcome::Done(describe(daemon, &run.id, Some(1), None, false, false))
+        }
         "output" => {
             let tail = args.tail.unwrap_or(TAIL_LINES);
             if !(1..=TAIL_LINES_MAX).contains(&tail) {
@@ -865,8 +1382,8 @@ pub async fn run_status(daemon: &Daemon, agent: &str, args: Value) -> Outcome {
             Outcome::Done(describe(daemon, &args.run, None, None, false, false))
         }
         other => Outcome::Refused(format!(
-            "refused: run_status has no action {other:?}: its actions are output (the default) \
-             and stop"
+            "refused: run_status has no action {other:?}: its actions are output (the default), \
+             stop and notify"
         )),
     }
 }
@@ -897,7 +1414,7 @@ fn describe(
         Some(going) => {
             let cut = going.output.lock().unwrap().cut;
             let end = *going.end.borrow();
-            (going.run.clone(), end, masked_output(going), cut)
+            (current(going), end, masked_output(going), cut)
         }
         None => match daemon.read(|store| store.run(id)) {
             Ok(Some(run)) => {
@@ -919,6 +1436,10 @@ fn describe(
     let state = state_text(end, by_user);
     let seconds = (run.ended_at.unwrap_or_else(now_ms) - run.started_at) as f64 / 1000.0;
     let mut text = format!("run {}: {label} {state} after {seconds:.1} s", run.id);
+    let told = going
+        .as_ref()
+        .is_some_and(|going| going.notify.load(Ordering::SeqCst));
+    text.push_str(&readiness_text(&run, end.is_none(), told));
     if end.is_none() && answer_of_run {
         text.push_str(&format!(
             "\nit keeps going: read it with run_status {{\"run\": \"{id}\"}}, stop it with \
@@ -956,6 +1477,43 @@ fn describe(
     text.push_str(&about);
     text.push('\n');
     text.push_str(&lines[from..to].join("\n"));
+    text
+}
+
+/// What an answer says of whether the run is ready and where it answers; nothing for a run whose
+/// task says neither.
+fn readiness_text(run: &Run, running: bool, told: bool) -> String {
+    let mut text = String::new();
+    match run.ready {
+        Some(Readiness::Ready) => {
+            text.push_str("\nit is ready");
+            if let Some(url) = &run.url {
+                text.push_str(&format!(" at {url}"));
+            }
+        }
+        Some(Readiness::Starting) if running && told => text.push_str(
+            "\nit is starting, not ready yet: Flottille tells you when it is ready, or when it \
+             ends before",
+        ),
+        Some(Readiness::Starting) if running => text.push_str(&format!(
+            "\nit is starting, not ready yet: run_status {{\"run\": \"{id}\", \"action\": \
+             \"notify\", \"when\": \"ready\"}} has Flottille tell you when it is, rather than \
+             reading it again",
+            id = run.id
+        )),
+        Some(Readiness::Starting | Readiness::Missed) => {
+            text.push_str("\nit ended before it was ready");
+        }
+        None => {}
+    }
+    if run.ready != Some(Readiness::Ready)
+        && let Some(url) = &run.url
+    {
+        text.push_str(&format!("\naddress: {url}"));
+    }
+    if let Some(why) = &run.url_error {
+        text.push_str(&format!("\nno address: {why}"));
+    }
     text
 }
 

@@ -4,12 +4,18 @@ use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use crate::paths::Paths;
-use crate::project::{ConfigError, Project, valid_name};
+use crate::place::{self, Place};
+use crate::project::{ConfigError, Places, Project, valid_name};
 use crate::{Error, Result};
 
 pub struct Registry {
     dir: PathBuf,
+    config: PathBuf,
     data: PathBuf,
+    /// The user's default place for workspaces, read at every load so that a change applies at
+    /// once.
+    default: PathBuf,
+    home: Option<PathBuf>,
 }
 
 /// Every file of the folder, read.
@@ -25,7 +31,31 @@ impl Registry {
     pub fn new(paths: &Paths) -> Registry {
         Registry {
             dir: paths.projects(),
+            config: paths.config.clone(),
             data: paths.data.clone(),
+            default: paths.workspaces_place(),
+            home: place::home(),
+        }
+    }
+
+    /// Where the workspaces of a project that names no folder go now. A default that cannot be
+    /// read is Flottille's data folder, since one broken file must not hide every project: the
+    /// window says why it is not followed (`workspaces_folder.show`).
+    fn place(&self) -> Place {
+        self.place_read().unwrap_or_default()
+    }
+
+    /// What `workspaces.toml` says, or why it cannot be followed.
+    pub fn place_read(&self) -> std::result::Result<Place, String> {
+        place::read(&self.default, &self.avoid())
+    }
+
+    /// What a folder for workspaces keeps out of.
+    pub fn avoid(&self) -> place::Avoid<'_> {
+        place::Avoid {
+            config: Some(&self.config),
+            data: &self.data,
+            home: self.home.as_deref(),
         }
     }
 
@@ -75,9 +105,19 @@ impl Registry {
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        Project::parse(name, &text, &self.data)
-            .map(Some)
-            .map_err(Error::Config)
+        self.parse(name, &text).map(Some).map_err(Error::Config)
+    }
+
+    /// Checks the text of a project's file as `load` would read it.
+    pub fn parse(&self, name: &str, text: &str) -> std::result::Result<Project, ConfigError> {
+        let default = self.place();
+        let places = Places {
+            config: Some(&self.config),
+            data: &self.data,
+            home: self.home.as_deref(),
+            default: &default,
+        };
+        Project::parse_in(name, text, &places)
     }
 
     /// Writes the project's file, which must not exist yet. A reader sees the whole file or none.
@@ -118,6 +158,8 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     const TEXT: &str = "folder = \"/work/app\"\n[[repositories]]\npath = \".\"\n";
@@ -140,12 +182,30 @@ mod tests {
 
     #[test]
     fn a_created_project_is_loaded_back() {
-        let (_dir, registry) = registry();
-        let app = project("app");
+        let (dir, registry) = registry();
+        // The file names no folder for the workspaces: they follow the data folder of the day.
+        let app = Project::parse("app", TEXT, &dir.path().join("data")).unwrap();
 
         registry.create(&app).unwrap();
 
         assert_eq!(registry.load("app").unwrap(), Some(app));
+    }
+
+    #[test]
+    fn the_default_in_workspaces_toml_is_followed_at_once_by_a_project_with_no_folder() {
+        let (dir, registry) = registry();
+        registry.create(&project("app")).unwrap();
+        let root = |registry: &Registry| registry.load("app").unwrap().unwrap().workspaces_root;
+        assert_eq!(root(&registry), dir.path().join("data/workspaces/app"));
+
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        let file = dir.path().join("config/workspaces.toml");
+        std::fs::write(&file, "place = \"beside\"\n").unwrap();
+        assert_eq!(root(&registry), Path::new("/work/app-work"));
+
+        // A file that cannot be read hides no project: the data folder is followed.
+        std::fs::write(&file, "place = \"elsewhere\"\n").unwrap();
+        assert_eq!(root(&registry), dir.path().join("data/workspaces/app"));
     }
 
     #[test]

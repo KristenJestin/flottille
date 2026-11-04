@@ -44,7 +44,7 @@ use gpui_kit::{
     canvas, div, list, point, px, radians,
 };
 
-use crate::actions::{Answer, Command, Picture, RepositoryStatus};
+use crate::actions::{Answer, Command, Picture, RepositoryStatus, RunAct, RunAnswer};
 use crate::commands::CommandInfo;
 use crate::conversation::{
     Activity, Block, Call, CallState, Change, Conversation, DiffLine, USER, WOKEN_BY_KIND,
@@ -693,7 +693,22 @@ impl SessionPage {
             Command::Run {
                 session: self.opened.id.clone(),
                 run: run.to_owned(),
-                dismiss: false,
+                act: RunAct::Stop,
+            },
+            cx,
+        );
+    }
+
+    /// The user runs a command again, in the same place: the daemon stops it if it runs, and
+    /// the panel shows the new run once it answers.
+    pub fn restart_command(&mut self, run: &str, cx: &mut Context<Self>) {
+        let list = self.commands(cx);
+        list.update(cx, |list, cx| list.failed(None, cx));
+        self.perform(
+            Command::Run {
+                session: self.opened.id.clone(),
+                run: run.to_owned(),
+                act: RunAct::Restart,
             },
             cx,
         );
@@ -718,10 +733,53 @@ impl SessionPage {
         list.update(cx, |list, cx| list.failed(refused, cx));
     }
 
-    /// What the daemon answered to a stop or a dismissal: why, when it refused.
-    pub fn command_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
+    /// What the daemon answered to a stop, a restart or a dismissal: why, when it refused, and the
+    /// new run when it restarted one, which takes the open command's place. A refused restart is
+    /// said by its toast alone.
+    pub fn command_answered(&mut self, answer: RunAnswer, cx: &mut Context<Self>) {
+        let RunAnswer {
+            act,
+            run,
+            refused,
+            restarted,
+            notice,
+        } = answer;
+        let mut listed = refused.clone();
+        if let (RunAct::Restart, Some(why)) = (act, &refused) {
+            toast(
+                Toast::failure("The command was not restarted").detail(why.clone()),
+                cx,
+            );
+            listed = None;
+            self.command_panel
+                .update(cx, |panel, cx| panel.restart_refused(&run, cx));
+        }
+        if let Some(run) = restarted {
+            self.follow_command(&run, cx);
+        }
+        if let Some(notice) = notice {
+            toast(
+                Toast::success("The command is now yours").detail(notice),
+                cx,
+            );
+        }
         let list = self.commands(cx);
-        list.update(cx, |list, cx| list.failed(refused, cx));
+        list.update(cx, |list, cx| list.failed(listed, cx));
+    }
+
+    /// The new run of a restart replaces the open command, its row and its output staying drawn
+    /// until its own arrive.
+    fn follow_command(&mut self, run: &str, cx: &mut Context<Self>) {
+        self.watching = Some(run.to_owned());
+        if let Some(link) = &self.link {
+            link.watch(Some(run.to_owned()));
+        }
+        let rows = self.commands(cx).read(cx).rows().to_vec();
+        self.command_panel.update(cx, |panel, cx| {
+            panel.follow(run, cx);
+            panel.set_rows(&rows, cx);
+        });
+        self.run_drawer.update(cx, |drawer, cx| drawer.open(cx));
     }
 
     /// Reads one more page of the shown agent's conversation, before those shown.
@@ -4661,11 +4719,11 @@ pub fn workspace_menu(id: &str, actions: WorkspaceActions, cx: &mut Context<Menu
 /// colour. The place card draws the same.
 pub(crate) fn pull_row(id: ElementId, pull: &PullRequest, cx: &App) -> Stateful<Div> {
     let p = palette(cx);
-    let (glyph, color, said) = match pull.mark.as_deref() {
-        Some("passing") => ("✓", p.ok, "checks passing"),
-        Some("failing") => ("✗", p.fail, "checks failing"),
-        Some(_) => ("●", p.run, "checks pending"),
-        None => ("", p.faint, "no checks"),
+    let (mark, color, said) = match pull.mark.as_deref() {
+        Some("passing") => (Some(Icon::Check), p.ok, "checks passing"),
+        Some("failing") => (Some(Icon::Close), p.fail, "checks failing"),
+        Some(_) => (Some(Icon::Running), p.run, "checks pending"),
+        None => (None, p.faint, "no checks"),
     };
     div()
         .id(id)
@@ -4676,7 +4734,7 @@ pub(crate) fn pull_row(id: ElementId, pull: &PullRequest, cx: &App) -> Stateful<
         .mono(FACT_SIZE)
         .aria_label(SharedString::from(format!("{}, {said}", pull.label())))
         .child(SharedString::from(pull.label()))
-        .child(div().text_color(color).child(glyph))
+        .children(mark.map(|mark| icon(mark).size(px(12.)).text_color(color)))
 }
 
 /// A [`pull_row`] once its handlers and children are on: its hover fades in.
@@ -5353,14 +5411,16 @@ impl Render for Reply {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_size(px(12.))
                             .cursor_pointer()
                             .aria_label("Remove the picture")
-                            .child("×")
                             .on_click(cx.listener(move |this, _, _, cx| this.detach(at, cx))),
+                        // An icon does not inherit the ink: it is drawn here, in the ink this frame.
                         move |d, t| {
-                            d.text_color(mix(p.mute, p.text, t))
-                                .bg(mix(p.card2, p.hover, t))
+                            d.bg(mix(p.card2, p.hover, t)).child(
+                                icon(Icon::Close)
+                                    .size(px(12.))
+                                    .text_color(mix(p.mute, p.text, t)),
+                            )
                         },
                     ))
                     .test_support()
