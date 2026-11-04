@@ -2,7 +2,7 @@
 //! `cargo test` build its binary, which the tests of the tasks that say when they are ready run.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpStream;
 use std::process::{Command, Stdio};
 
 fn server() -> Command {
@@ -21,14 +21,11 @@ fn it_prints_its_lines_then_exits_with_its_code() {
 }
 
 #[test]
-fn it_answers_every_request_on_the_port_it_is_given() {
-    let port = TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
+fn it_answers_every_request_on_the_port_it_takes() {
+    // Port 0: the server takes a free port itself and says which, so that no other test can take
+    // it between a check and the server's bind.
     let mut child = server()
-        .args(["--listen", &port.to_string()])
+        .args(["--listen", "0"])
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
@@ -36,6 +33,12 @@ fn it_answers_every_request_on_the_port_it_is_given() {
     BufReader::new(child.stdout.take().unwrap())
         .read_line(&mut announced)
         .unwrap();
+    let port: u16 = announced
+        .trim_end()
+        .strip_prefix("listening on http://127.0.0.1:")
+        .and_then(|port| port.parse().ok())
+        .unwrap_or_else(|| panic!("no port announced: {announced:?}"));
+    assert_ne!(port, 0);
 
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     stream
@@ -46,10 +49,6 @@ fn it_answers_every_request_on_the_port_it_is_given() {
     child.kill().unwrap();
     child.wait().unwrap();
 
-    assert_eq!(
-        announced.trim_end(),
-        format!("listening on http://127.0.0.1:{port}")
-    );
     assert!(
         response.starts_with("HTTP/1.1 204 No Content"),
         "{response}"
