@@ -213,7 +213,7 @@ fn sensitive(folder: &Path, target: &Path) -> Option<String> {
     let below = Path::new(&shown)
         .strip_prefix(claude_folder::SKILLS)
         .map_or(shown.clone(), |below| below.display().to_string());
-    gate::sensitive(&[], &Resolved::real_inside(below, target.to_owned()))
+    gate::sensitive(&[], None, &Resolved::real_inside(below, target.to_owned()))
 }
 
 fn held_for_the_user(folder: &Path, target: &Path, named: &str) -> Result<(), Outcome> {
