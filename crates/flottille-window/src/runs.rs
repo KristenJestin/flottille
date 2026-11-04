@@ -15,8 +15,8 @@ use flottille_core::ansi;
 use flottille_ui::color::mix;
 use flottille_ui::motion::{MODAL, PANEL};
 use flottille_ui::{
-    AgentState, Button, Icon, Item, Listing, Modal, Palette, StateIcon, Status, Toast, Type, fade,
-    hoverable, icon, palette, presence, section_label, space, tipped, toast,
+    AgentState, Button, Icon, Item, Listing, Modal, Palette, Skeleton, StateIcon, Status, Toast,
+    Type, awaiting, fade, hoverable, icon, palette, presence, section_label, space, tipped, toast,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -635,6 +635,8 @@ pub struct CommandList {
     /// The spinner of each running command.
     spinners: HashMap<String, Entity<StateIcon>>,
     error: Option<SharedString>,
+    /// The daemon listed the commands once: until then the section waits as a skeleton.
+    known: bool,
     /// Draws the time again each second, while a command runs.
     ticker: Option<Task<()>>,
     renders: usize,
@@ -649,6 +651,7 @@ impl CommandList {
             names: HashMap::new(),
             spinners: HashMap::new(),
             error: None,
+            known: false,
             ticker: None,
             renders: 0,
         }
@@ -673,6 +676,11 @@ impl CommandList {
 
     /// What the daemon listed; nothing is drawn again when it is what was drawn.
     pub fn set(&mut self, rows: Vec<CommandRow>, cx: &mut Context<Self>) {
+        if !std::mem::replace(&mut self.known, true) && self.rows == rows {
+            // Nothing to list: the skeleton gives way to the empty section.
+            cx.notify();
+            return;
+        }
         if self.rows == rows {
             return;
         }
@@ -931,7 +939,36 @@ impl Render for CommandList {
                     .test_support()
             }))
             .test_support();
-        presence("rail-runs-presence", present, section)
+        // Before the first listing the section is a skeleton: a run's row, which folds away when
+        // the session ran nothing.
+        let waiting = div()
+            .id("rail-runs-skeleton")
+            .flex()
+            .flex_col()
+            .border_t_1()
+            .border_color(p.line)
+            .pt(space::SM)
+            .pb(space::MD)
+            .child(
+                div().h(px(32.)).flex().items_center().child(
+                    Skeleton::new("rail-runs-skeleton-title")
+                        .w(px(40.))
+                        .h(px(10.)),
+                ),
+            )
+            .child(
+                div()
+                    .px(space::SM)
+                    .py(space::XS)
+                    .child(Skeleton::new("rail-runs-skeleton-row").h(px(40.))),
+            )
+            .test_support();
+        awaiting(
+            "rail-runs-wait",
+            !self.known,
+            waiting,
+            presence("rail-runs-presence", present, section),
+        )
     }
 }
 
