@@ -19,7 +19,9 @@ use crate::motion::{Motion, PANEL};
 use crate::reveal::PULSE;
 use crate::theme::palette;
 
-const PULSE_FRAME: Duration = Duration::from_millis(66);
+/// Ten draws a second: a pulse of nearly two seconds is smooth with no more, and a forge that
+/// hangs keeps the skeleton drawn for as long as it hangs.
+const PULSE_FRAME: Duration = Duration::from_millis(100);
 /// How faint a skeleton gets at the bottom of its pulse, and how bright at the top.
 const FAINTEST: f32 = 0.35;
 const BRIGHTEST: f32 = 0.85;

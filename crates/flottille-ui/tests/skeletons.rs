@@ -62,6 +62,20 @@ fn a_skeleton_keeps_pulsing_while_it_is_drawn(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_skeleton_is_drawn_at_the_pace_of_a_slow_pulse_and_no_faster(cx: &mut TestAppContext) {
+    init(cx, Desktop::new(false).env());
+    let (_, cx) = cx.add_window_view(|_, _| Bare);
+    cx.update(|window, cx| window.render_frame(cx));
+    let first = blocks_drawn();
+    advance(cx, Duration::from_millis(1000));
+    let drawn = blocks_drawn() - first;
+    assert!(
+        (8..=11).contains(&drawn),
+        "a pulse of nearly two seconds needs ten draws a second, not more: {drawn}"
+    );
+}
+
+#[gpui_kit::test]
 fn with_reduced_motion_a_skeleton_is_still(cx: &mut TestAppContext) {
     init(cx, Desktop::new(false).env());
     cx.update(|cx| cx.set_reduce_motion(true));
@@ -114,6 +128,22 @@ fn ready(view: &gpui_kit::Entity<Waiting>, cx: &mut VisualTestContext) {
         })
     });
     cx.update(|window, cx| window.render_frame(cx));
+}
+
+#[gpui_kit::test]
+fn the_pulse_stops_once_nothing_waits(cx: &mut TestAppContext) {
+    let (view, cx) = waiting(true, 40., cx);
+    advance(cx, Duration::from_millis(300));
+    ready(&view, cx);
+    advance(cx, PANEL * 2);
+    let drawn = blocks_drawn();
+    advance(cx, Duration::from_millis(1000));
+    assert_eq!(
+        blocks_drawn(),
+        drawn,
+        "no block is drawn again once no skeleton is"
+    );
+    assert_eq!(pending_frames(cx), 0);
 }
 
 #[gpui_kit::test]
