@@ -2303,6 +2303,14 @@ pub async fn workspace_remove(
             used.join("; ")
         ));
     }
+    // Where the agent goes on, known before anything is touched: the move cannot fail after.
+    let main = match own {
+        true => match projects::load_project(daemon, &place.project) {
+            Ok(project) => Some(Place::main(&project, workspace.project_folder.clone())),
+            Err(failure) => return Outcome::Failed(failure.message),
+        },
+        false => None,
+    };
     if own {
         // Its commands are not stopped for a removal that cannot start.
         if daemon.preparing.lock().unwrap().contains(&workspace.id) {
@@ -2347,12 +2355,8 @@ pub async fn workspace_remove(
         said.push_str(" The user said to discard what would be lost: it was discarded.");
     }
     said.push_str(&branches_said(&workspace.branch, &removed["branches"]));
-    if own {
-        let main = projects::load_project(daemon, &place.project)
-            .map(|project| Place::main(&project, workspace.project_folder.clone()));
-        if let Ok(main) = main {
-            daemon.mcp.move_place(agent, main);
-        }
+    if let Some(main) = main {
+        daemon.mcp.move_place(agent, main);
         said.push_str(&format!(
             " The workspace {} is removed; you now work in the project's folder (main), {}: your \
              paths and commands start there.",
