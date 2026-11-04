@@ -1110,7 +1110,8 @@ an agent that has ended (or is gone) restarts as a run of the user's, with no ag
 says so; otherwise `notice` is `null`. `not-found` when there is no such run; `refused` when its
 line cannot be started again (the task is gone, or the line holds a secret its stored form masks),
 or when the run is already being restarted (`run R is being restarted`): the command is then left as
-it was. Emits `run.ended` for the first, if it ran, then `run.started` (`docs/events.md`).
+it was. A start that fails after the stop (the program cannot be spawned) is refused too, but then
+the command is stopped; its agent is told so. Emits `run.ended` for the first, if it ran, then `run.started` (`docs/events.md`).
 
 #### `run.dismiss`
 
