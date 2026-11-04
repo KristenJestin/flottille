@@ -742,6 +742,13 @@ impl ProjectTasks {
         self.problem.as_deref()
     }
 
+    /// Opens a run's address with the system's default handler.
+    pub fn open_link(&self, url: &str, cx: &App) {
+        if let Some(shell) = self.shell.upgrade() {
+            shell.read(cx).open_link(url);
+        }
+    }
+
     pub fn commands(&self) -> &Entity<CommandList> {
         &self.commands
     }
@@ -984,7 +991,7 @@ impl ProjectTasks {
         icon.clone()
     }
 
-    fn runs_section(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn runs_section(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let rows = self.commands.read(cx).rows().to_vec();
         let arranged = arrange(&rows);
         let running = arranged.running.len();
@@ -1011,13 +1018,27 @@ impl ProjectTasks {
         let mut card = ListCard::new("project-runs-list");
         for (key, row, placement) in listed {
             let mark = self.mark(&row, cx);
+            let mark = match row.readiness() {
+                Some(ready) => crate::runs::ready_mark(
+                    ElementId::Name(format!("project-run-mark-{}", row.run).into()),
+                    ElementId::Name(format!("project-run-dot-{}", row.run).into()),
+                    ready == "ready",
+                    Some(mark.into_any_element()),
+                    &p,
+                    window,
+                    cx,
+                ),
+                None => mark.into_any_element(),
+            };
             let who = match row.agent.as_str() {
                 "" => "by you".to_owned(),
                 agent => format!("by agent {agent}"),
             };
-            let detail = match &row.name {
-                Some(task) => format!("task {task} · {who} · {}", seconds(row.elapsed_ms(now))),
-                None => format!("{who} · {}", seconds(row.elapsed_ms(now))),
+            let time = seconds(row.elapsed_ms(now));
+            let detail = match (&row.name, row.readiness()) {
+                (Some(task), Some(ready)) => format!("task {task} · {ready} · {time}"),
+                (Some(task), None) => format!("task {task} · {who} · {time}"),
+                (None, _) => format!("{who} · {time}"),
             };
             let page = cx.entity().downgrade();
             let open = row.run.clone();
@@ -1061,7 +1082,22 @@ impl ProjectTasks {
                     .ok();
             });
             let last = flottille_core::ansi::strip(&row.last_line);
-            if !last.is_empty() {
+            // A server's address takes the place of its last line, which its output still shows.
+            if let Some(url) = row.address() {
+                let page = cx.entity().downgrade();
+                list_row = list_row.below(crate::runs::address_link(
+                    ElementId::Name(format!("project-run-link-{}", row.run).into()),
+                    url,
+                    11.5,
+                    move |url, cx| {
+                        if let Some(page) = page.upgrade() {
+                            page.read(cx).open_link(url, cx);
+                        }
+                    },
+                    window,
+                    cx,
+                ));
+            } else if !last.is_empty() {
                 list_row = list_row.line(SharedString::from(last));
             }
             card = card.item(
@@ -1084,9 +1120,9 @@ impl ProjectTasks {
 }
 
 impl Render for ProjectTasks {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
-        let runs = self.runs_section(cx);
+        let runs = self.runs_section(window, cx);
         let tasks = self.listed.clone().unwrap_or_default();
         let at = cx.background_executor().now();
         self.rows.sync(
