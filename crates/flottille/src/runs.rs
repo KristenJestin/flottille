@@ -33,7 +33,7 @@ use crate::daemon::Daemon;
 use crate::deliveries;
 use crate::gate::{self, Verdict};
 use crate::mcp::{Outcome, arguments, masked};
-use crate::place::{Place, Resolved};
+use crate::place::{Folder, Place, Resolved};
 use crate::projects;
 use crate::ready::{self, Probe};
 
@@ -219,7 +219,7 @@ fn request(daemon: &Daemon, place: &Place, args: RunArguments) -> Result<Request
         }
     };
     let words = split_line(&line).map_err(Outcome::Refused)?;
-    let (repository, base) = match place.base(repository.as_deref()) {
+    let (repository, base) = match place.base_for(repository.as_deref(), Folder::Line) {
         Ok((repository, base)) => (repository.to_owned(), base.to_owned()),
         Err(refusal) => return Err(Outcome::Refused(refusal)),
     };
@@ -482,7 +482,7 @@ pub async fn run_for_user(
     }
     let place = Place::main(project, project.folder.clone());
     let words = split_line(&task.line)?;
-    let (repository, base) = place.base(task.repository.as_deref())?;
+    let (repository, base) = place.base_for(task.repository.as_deref(), Folder::Task)?;
     let folder = place.resolve(base, ".");
     let env = environment(daemon, &place, repository, false)?;
     let secret_values = place.secret_values();

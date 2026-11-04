@@ -119,21 +119,41 @@ footer (Jira) is shown the same way, without it.
 
 ### Jira's text
 
-Jira Cloud's descriptions and comments are Atlassian Document Format (ADF), a JSON tree. They are
-turned into plain text simply: the text of paragraphs, headings and code blocks, one block per
-line (an empty line between blocks), list items as `- ` or `1. ` lines, table rows as `a | b`, a
-mention as its text, a link card as its address, a hard break as a line break. Anything else
-(images, attachments, status lozenges) is left out. **Nothing is ever rendered as HTML**; a
-description that is already a string is taken as it is.
+Jira Cloud's descriptions and comments are Atlassian Document Format (ADF), a JSON tree. **An
+agent writes Markdown, as on every forge**, and Flottille converts it on each Jira write (below);
+the tree it reads is turned back into the Markdown it came from (`crates/flottille/src/adf.rs`), so
+what an agent reads is what it wrote, and an edit keeps the formatting it did not touch. A
+description that is already a string is taken as it is. **Nothing is ever rendered as HTML.**
 
-**What an agent posts is found again by its words, and Jira may rewrite them.** The record of a
-Jira comment is a hash of its text (`forges.md`, "What Flottille posts is recorded"): the match
-relies on `acli` keeping the words of the markdown it was given. A tree turned back into text
-keeps no code fence, no `**` emphasis, no code mark, no heading mark and draws its own list
-bullets, so the hash leaves those out on both sides (the text of an agent and the text read back
-are normalised the same way). Anything else Jira rewrites (a link `[text](url)` kept as its text,
-a table, a mention) breaks the match: that comment is then shown as a person's and `from:
-people` delivers it. The maintainer checks one real Jira comment, as for the shapes below.
+| Markdown | ADF |
+|---|---|
+| `#` to `######` | `heading` (level 1 to 6) |
+| paragraphs; a line break inside one | `paragraph`; `hardBreak` |
+| `**bold**`, `*italic*`, `~~strike~~`, `` `code` `` | the marks `strong`, `em`, `strike`, `code` |
+| a fenced block, with its language | `codeBlock` (`attrs.language`) |
+| `-` and `1.` lists, nested | `bulletList`, `orderedList` with `listItem` |
+| `[text](url)`, a bare address | the `link` mark |
+| `> quote`, `---` | `blockquote`, `rule` |
+| a table, as wide in every row as its header | `table` with `tableHeader` and `tableCell` |
+
+**Nothing is dropped.** Raw HTML, an image (`![alt](url)`), and a table Jira would not take stay in
+the document as the text they were written as. Inside a quote or a list item, where ADF takes only
+paragraphs, lists and code blocks, a heading becomes a bold paragraph and a table or a rule stays
+text. A code mark goes beside a link and no other mark, as Jira holds it. A text with no Markdown
+in it is paragraphs, a line break staying a line break.
+
+**Reading** gives, for the same nodes, the Markdown above (a table is `| a | b |` rows under a
+`| --- |` line), a mention as its text, a link card as its address, a hard break as a line break.
+Anything else (images, attachments, status lozenges) is left out. A character that Markdown would
+take for markup (`*`, `` ` ``, `[`, `<`, `~`, `_` at a word's edge, a line starting with `#`, `>`,
+`-` or `1.`) is written with a backslash, so that it comes back as the text it was.
+
+**What an agent posts is found again by its words.** The record of a Jira comment is a hash of its
+text (`forges.md`, "What Flottille posts is recorded"). What is recorded is the text after the
+round trip (Markdown, ADF, Markdown), the text a read gives, so the match does not rely on Jira
+keeping anything but the tree. What Jira rewrites on its own (a mention, a smart link) still
+breaks the match: that comment is then shown as a person's and `from: people` delivers it. The
+maintainer checks one real Jira comment, as for the shapes below.
 
 ### What `acli` prints is assumed, and the maintainer checks it
 
@@ -266,13 +286,19 @@ are written (a text holding what looks like a secret is base for the gate, as on
 
 | Write | `acli` |
 |---|---|
-| `create` | `jira workitem create --project <P> --summary <title> [--description <body>] [--assignee <who>] [--type <type>] [--label a,b] --json`, `P` one of the tracker's projects (the only one when it has one); with no type, the project's default |
-| `comment` | `jira workitem comment create --key <K> --body <body>` |
-| `edit` | `jira workitem edit --key <K> [--summary <title>] [--description <body>] [--assignee <who> \| --remove-assignee] --yes` |
+| `create` | `jira workitem create --project <P> --summary <title> [--description-file <file>] [--assignee <who>] [--type <type>] [--label a,b] --json`, `P` one of the tracker's projects (the only one when it has one); with no type, the project's default |
+| `comment` | `jira workitem comment create --key <K> --body-file <file>` |
+| `edit` | `jira workitem edit --key <K> [--summary <title>] [--description-file <file>] [--assignee <who> \| --remove-assignee] --yes` |
 | `close`, `reopen`, `status` | `jira workitem transition --key <K> --status <name> --yes` |
 
-**The summary, the description and the assignee of `create` and `edit` are built in one place**
-(`work_item_fields`), where the conversion of a text to Atlassian's format (#404) will go.
+**The text of a description and of a comment is Markdown converted to ADF** (above), and passed
+to `acli` through a file (`--description-file`, `--body-file`; `acli` takes "plain text or Atlassian
+Document Format" in both), never on the command line: the file is in a folder of the daemon's
+runtime folder that only the user can open (`0700`, the file `0600`), and both are removed once
+`acli` has answered. The conversion is of the text the gate judged, as it was shown (one that looks like a secret is
+base for the gate, and nothing is masked in what is sent); the Markdown parser is the `markdown` crate,
+already in the tree for the window. **The summary, the description and the assignee of `create`
+and `edit` are built in one place** (`work_item_fields`).
 
 ### Types and assignment
 
@@ -383,7 +409,9 @@ follow-up. The maintainer checks the Tickets tab of a Jira project on their mach
 Tests never call GitHub or Jira nor use anyone's sign-in: a fake `gh` (`crates/flottille-fake-gh`,
 which answers `issue view`, `issue list`, the issue writes, the `gh project` calls of a status and the
 missing `project` scope too) and a fake `acli`
-(`crates/flottille-fake-acli`, `workitem view`, `workitem search` and the writes), first on the
+(`crates/flottille-fake-acli`, `workitem view`, `workitem search` and the writes; it reads the
+files of `--description-file` and `--body-file` and ends with 1 on a document that is not valid
+ADF, so that a test catches one), first on the
 `PATH` of the test's daemon, answer from a script and record every call; the repositories are
 throwaway ones whose `origin` is set to a GitHub URL after their workspace is made, and whose
 forge and tracker are declared with `project.set_settings`

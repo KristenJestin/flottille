@@ -175,20 +175,29 @@ Turns it off: nothing more is written. The log stays where it is.
 
 ### `flottille update`
 
-Replaces Flottille with the latest build of a channel (`docs/releases.md`): `--channel stable`,
-`beta` or `alpha` (by default the channel this build is on; a local build takes stable), and with
-`--channel alpha`, `--branch <name>` (by default the branch this build came from). The archive's
-SHA-256 sum is checked before anything is replaced. It refuses while the daemon runs: stop it
-first with `flottille daemon stop`. The same version is not installed again and an older one is
-refused, unless `--force`. `flottille --version` says the channel installed. It also writes the
-launcher entry and the icon again when they changed, and points the entry at the binary it ran from
-(`docs/releases.md`, "The launcher entry").
+Replaces Flottille with the latest build of a channel (`docs/releases.md`): the one published
+last, not the highest version. `--channel stable`, `beta` or `alpha` moves to that channel, and with
+`--channel alpha`, `--branch <name>` names the branch (by default the one last chosen, else the
+one this build came from); the channel last chosen is remembered, so a plain `flottille update`
+stays on it (by default the channel this build is on; a local build takes stable).
+`--version <X.Y.Z[-pre]>` installs that release exactly, of any channel (not with `--channel`
+or `--branch`), and is refused with the nearest published versions when it does not exist. The
+archive's SHA-256 sum is checked before anything is replaced. It refuses while the daemon runs:
+stop it first with `flottille daemon stop`. The same version is not installed again and an older
+one is refused, unless `--force`, which says that the store is not migrated down.
+`flottille --version` says the channel installed. It also writes the launcher entry and the icon
+again when they changed, and points the entry at the binary it ran from (`docs/releases.md`, "The
+launcher entry").
 
 ```
 $ flottille update --channel beta
 ~/.local/bin/flottille is now 0.3.0-beta.12.
 $ flottille --version
 flottille 0.3.0-beta.12 (beta, 3f2a9c1d7b44)
+$ flottille update --version 0.3.0-beta.11
+0.3.0-beta.11 is older than this 0.3.0-beta.12: --force goes back to it (the store is not migrated down, and an older build refuses a store a newer one migrated).
+$ flottille update --channel alpha --branch feat/specs
+~/.local/bin/flottille is now 0.3.1-alpha.feat-specs.4.
 ```
 
 ## Projects

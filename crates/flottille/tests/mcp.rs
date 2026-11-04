@@ -598,7 +598,48 @@ fn dot_dot_notes_is_inside_and_dot_dot_slash_x_is_outside() {
     held(mcp.call("fs_write", json!({"path": "../y", "content": "y"})));
     assert!(!folder.parent().unwrap().join("y").exists());
     let text = refused(mcp.call("fs_read", json!({"path": "README.md", "repository": "web"})));
-    assert_eq!(text, "refused: the project has no repository web: it has .");
+    assert_eq!(
+        text,
+        "refused: the project has no repository web: it has `.` (the project folder itself)"
+    );
+}
+
+#[test]
+fn a_folder_given_as_repository_is_refused_with_the_field_to_use() {
+    let user = User::with_fake_agent();
+    let (mcp, folder) = session(&user);
+    std::fs::create_dir_all(folder.join("apps/front")).unwrap();
+    let said = |field: &str| {
+        format!(
+            "refused: apps/front is a folder of the repository `.` (the project folder itself), \
+             not a repository: give {field}"
+        )
+    };
+
+    let text = refused(mcp.call("fs_list", json!({"path": ".", "repository": "apps/front"})));
+    assert_eq!(text, said("`path: \"apps/front\"`"));
+    let text = refused(mcp.call(
+        "search",
+        json!({"pattern": "x", "repository": "apps/front"}),
+    ));
+    assert_eq!(text, said("`glob: \"apps/front/**\"`"));
+    let text = refused(mcp.call("run", json!({"line": "true", "repository": "apps/front"})));
+    assert_eq!(
+        text,
+        said("the folder in the command line, as an argument of the program")
+    );
+}
+
+#[test]
+fn a_place_with_one_repository_needs_no_repository_argument() {
+    let user = User::with_fake_agent();
+    let (mcp, folder) = session(&user);
+    std::fs::write(folder.join("a.rs"), "fn needle() {}\n").unwrap();
+
+    assert!(ok(mcp.call("fs_list", json!({"path": "."}))).contains("a.rs"));
+    assert!(ok(mcp.call("search", json!({"pattern": "needle"}))).contains("a.rs:1"));
+    let run = run_id(&ok(mcp.call("run", json!({"line": "true"}))));
+    assert!(!run.is_empty());
 }
 
 #[test]
@@ -770,19 +811,51 @@ fn shell_syntax_is_refused_with_the_sentence() {
     let user = User::with_fake_agent();
     let (mcp, folder) = session(&user);
 
-    for (line, token) in [
-        ("echo a | cat", "|"),
-        ("true && false", "&&"),
-        ("echo $(x)", "$("),
-        ("echo a > f", ">"),
-        ("ls *", "*"),
+    let script = "or put the line in a script of the repository and run the script.";
+    for (line, token, instead) in [
+        (
+            "echo a | cat",
+            "|",
+            format!(
+                "run starts one program and hands its output to no other: read a file with \
+                 fs_read, search the project with search, {script}"
+            ),
+        ),
+        (
+            "true && false",
+            "&&",
+            format!("run starts one program: run each one with its own call, {script}"),
+        ),
+        (
+            "echo $(x)",
+            "$(",
+            format!(
+                "a shell would run a command there and none does here: run that command with \
+                 its own call to run and write its result in the line, {script}"
+            ),
+        ),
+        (
+            "echo a > f",
+            ">",
+            format!(
+                "run starts one program and keeps its output for you to read with run_status: \
+                 write a file with fs_write, read one with fs_read, {script}"
+            ),
+        ),
+        (
+            "ls *",
+            "*",
+            "put the word in single quotes, so that the program receives it as it is: no shell \
+             expands it here. This line passes: ls '*'"
+                .into(),
+        ),
     ] {
         let text = refused(mcp.call("run", json!({"line": line})));
         assert_eq!(
             text,
             format!(
-                "Flottille runs a command without a shell, and “{token}” is shell syntax: put it \
-                 in a script of the repository and run the script."
+                "Flottille runs a command without a shell, and “{token}” is shell syntax: \
+                 {instead}"
             ),
             "{line}"
         );

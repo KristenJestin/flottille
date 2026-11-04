@@ -1,5 +1,6 @@
 mod acp;
 mod actions;
+mod adf;
 mod agent_command;
 mod agents;
 mod appearance;
@@ -190,13 +191,17 @@ enum Command {
     Window,
     /// Replace Flottille with the latest build of a channel, its sum checked first
     Update {
-        /// stable, beta or alpha; the channel of this build by default
+        /// stable, beta or alpha; the one last chosen, or this build's, by default
         #[arg(long, value_parser = ["stable", "beta", "alpha"])]
         channel: Option<String>,
-        /// The branch whose alpha to take (`feat/46-packages`), with `--channel alpha`; this
-        /// build's by default
+        /// The branch whose alpha to take (`feat/46-packages`), with `--channel alpha`; by default
+        /// the branch last chosen with alpha, else this build's
         #[arg(long)]
         branch: Option<String>,
+        /// Install this release exactly (`0.3.0-beta.12`), of any channel; the channel
+        /// remembered stays as it is
+        #[arg(long, value_name = "X.Y.Z[-PRE]", conflicts_with_all = ["channel", "branch"])]
+        version: Option<String>,
         /// Install it even when it is this version, or an older one
         #[arg(long)]
         force: bool,
@@ -367,8 +372,9 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Update {
             channel,
             branch,
+            version,
             force,
-        } => return update::run(&paths, channel, branch, force),
+        } => return update::run(&paths, channel, branch, version, force),
         Command::Bridge {
             agent: BridgeAgent::Claude,
         } => return bridge::run(&paths),

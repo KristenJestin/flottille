@@ -178,8 +178,13 @@ and refuse it with `refused: X is outside this agent's place: …`, unless the u
 A path is resolved this way:
 
 - relative to the place's top, or to a repository's folder when the call names `repository`
-  (one of the project's repositories by its path, else
-  `refused: the project has no repository X: it has …`); `~` is the home folder;
+  (one of the project's repositories by its path, never a folder inside one; `.` is the project
+  folder itself, and the only repository of a place needs no `repository` at all). A name that is
+  none is refused with the repositories (``refused: the project has no repository X: it has `.`
+  (the project folder itself), api``), and a folder of one with the field that takes a folder
+  (``refused: apps/front is a folder of the repository `.` (the project folder itself), not a
+  repository: give `path: "apps/front"` ``; `glob: "apps/front/**"` for `search`, the folder in
+  the command line for `run`, which have no `path`); `~` is the home folder;
 - then the real path, on the disk, in the order the kernel takes it: every link is followed (at
   most 40, as Linux does), and each `..` steps up from where the links before it led, so
   `src/cfg/../x` is beside where `src/cfg` leads, never `src/x` when `src/cfg` is a link. A
@@ -308,10 +313,19 @@ pending requests.
   single quotes; `|`, `&`, `;`, a redirection, `*`, `?`, a leading `~` or `[…]` only outside any
   quotes, inside them they are the argument's text (`git commit -m "fix: a -> b"`). A backslash
   before a quote (`\"`, `\'`) is refused anywhere: a shell reads it as an escaped quote, so the
-  line a shell runs with `-c` would not split as the gate reads it. Each is refused with:
-  `Flottille runs a command without a shell, and “T” is shell syntax: put it in a script of the
-  repository and run the script.` A line naming a shell as its program is split like any other; the gate judges the
-  line a shell runs with `-c` (below).
+  line a shell runs with `-c` would not split as the gate reads it. Each is refused with
+  `Flottille runs a command without a shell, and “T” is shell syntax: ` and how to write it
+  instead. A glob, `~` or `[…]` meant for the program, `%VAR%` and `\"` (a `"` needs no backslash
+  there) are written in single quotes, where nothing is expanded; a `\'`, in double quotes.
+  A pipe, a list (`&&`, `;`…), a redirection, a substitution or a variable is never quoted
+  around: the refusal says what to use instead (one call to `run` per program, `run_status` for
+  the output, `fs_read`, `fs_write`, `search`), or a script of the repository. When the words a
+  shell would give the program are certain, the refusal ends with the same line written so that
+  it passes, `This line passes: <line>` (`git log --format="%h%x20%s"` gives
+  `git log '--format=%h%x20%s'`, `grep --include=*.ts x` gives `grep '--include=*.ts' x`); a word
+  that would need single quotes but holds one cannot be one word, and the refusal says to split
+  it. A line naming a shell as its program is split like any other; the gate judges the line a
+  shell runs with `-c` (below).
 - **Waiting**: the call waits `timeout` seconds (30 by default) for the end. A task
   that keeps running (`serve`) answers at once, and one already running for the agent is joined.
   A call stopped by its client stops its run.
@@ -462,14 +476,20 @@ pending requests.
   subscription. A pull request merged or closed, a repository with no forge or no pull request,
   and `number` are refused. **`unsubscribe {workspace?, repository?}`** cancels the agent's
   subscriptions to them, every one when it names none.
-- **`create`, `merge`, `checks` `{workspace?, repository, …}`**: opens the pull request of a
+- **`create`, `merge`, `checks` `{workspace?, repository?, …}`** (`repository` is needed when the
+  workspace has several, and the refusal lists them): opens the pull request of a
   workspace's branch (`title`, `body`, `draft`, with the project's reviewers), merges it by
   `method`, `squash` (the default), `merge` or `rebase` (refused when no check ran on it or all were skipped, while its
   checks fail or run or a review asks for changes, unless `waive` gives the
   user's words, which holds the merge for their approval), or re-runs the failed jobs of its last
   commit's pipelines (`docs/commands.md`, "`forge`"). The branch is the one the repository's
   worktree is on now (`docs/workspaces.md`, "The branch"); `create` on a detached HEAD is refused
-  (`refused: api is on no branch (detached at 1a2b3c4): switch to a branch first`).
+  (`refused: api is on no branch (detached at 1a2b3c4): switch to a branch first`). `create`
+  never pushes: it reads, without fetching, whether the remote-tracking ref of the branch
+  (`refs/remotes/<remote>/<branch>`, which a push leaves, with or without `-u`) exists and holds
+  the branch's last commit, and refuses otherwise (`refused: app/login is not on origin yet: push
+  the branch first: git push -u origin app/login`, or `… is 2 commit(s) ahead of origin: …`); the
+  agent's `run` of `git push` goes through the gate as any push.
 - **`comment {number, repository?, body}`** posts a comment on a pull request of a repository of
   the place; **`edit {number, repository?, title?, body?}`** changes its title or description, at
   least one of them (`gh pr comment`, `gh pr edit`; `bkt pr comment --text`, `bkt pr edit --title
