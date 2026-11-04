@@ -818,3 +818,31 @@ fn a_ready_command_cannot_use_the_url_placeholder() {
     assert!(!probed.contains("ready once"), "{probed}");
     assert_eq!(user.escalations(), Vec::<String>::new(), "a call ran");
 }
+
+#[test]
+fn moving_a_task_judges_its_ready_and_url_commands_again() {
+    let user = user();
+    project(&user);
+    // The user's own lines: an agent's edit leaves them to run in the folder it says.
+    user.call(
+        "task.add",
+        json!({"project": "app", "name": "web", "line": "./say.sh", "serve": true,
+            "ready": {"command": "sudo true"}, "url": {"command": "sudo cat /etc/x"}}),
+    )
+    .unwrap();
+    let (_, mcp) = root(&user);
+
+    let number = held(mcp.call(
+        "tasks",
+        json!({"action": "edit", "name": "web", "serve": false}),
+    ));
+
+    let asked = request(&user, number);
+    assert_eq!(asked["class"], "base", "{asked}");
+    let reasons = asked["reasons"].to_string();
+    assert!(reasons.contains("the line it sets, sudo true"), "{reasons}");
+    assert!(
+        reasons.contains("the line it sets, sudo cat /etc/x"),
+        "{reasons}"
+    );
+}

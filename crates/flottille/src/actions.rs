@@ -636,18 +636,6 @@ fn edited(task: &Task, call: &TasksCall) -> Task {
     task
 }
 
-/// The lines besides the task's own a call of `tasks` sets, which run later without the gate:
-/// its ready's and its address's commands. For the gate, which judges each as a run of it.
-pub fn other_lines(tool: &str, args: &Value) -> Vec<String> {
-    match (tool, args["action"].as_str()) {
-        ("tasks", Some("add" | "edit")) => [&args["ready"]["command"], &args["url"]["command"]]
-            .into_iter()
-            .filter_map(|line| line.as_str().map(str::to_owned))
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
 const SETUP_ACTIONS: &str = "list, add, edit, remove and move";
 
 /// A setup step in words: what it does and where.

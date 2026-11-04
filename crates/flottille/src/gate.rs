@@ -345,13 +345,19 @@ pub fn decide(call: &Call) -> Verdict {
                 return denied;
             }
         }
-        for line in crate::actions::other_lines(call.tool, call.args) {
-            let words = match flottille_core::command::split_line(&line) {
+        // The task as the write leaves it: a line it already held runs in the folder the write
+        // may move it to.
+        let other_lines = match (call.tool, call.command) {
+            ("tasks", Some((_, task))) => task.other_lines(),
+            _ => Vec::new(),
+        };
+        for line in other_lines {
+            let words = match flottille_core::command::split_line(line) {
                 Ok(words) => words,
                 Err(why) => return Verdict::Deny(why),
             };
             let args = serde_json::json!({"line": line});
-            if let Err(denied) = judge_set(call, &args, &words, None, &line, &mut found) {
+            if let Err(denied) = judge_set(call, &args, &words, None, line, &mut found) {
                 return denied;
             }
         }
