@@ -635,6 +635,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         created_at: now,
         updated_at: now,
         active_at: None,
+        exchanged_at: None,
         ended_at: None,
         chosen,
         taken: Choices::default(),

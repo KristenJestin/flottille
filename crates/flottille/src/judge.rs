@@ -869,6 +869,7 @@ fn as_agent(folder: &Path, instructions: &str) -> Agent {
         created_at: 0,
         updated_at: 0,
         active_at: None,
+        exchanged_at: None,
         ended_at: None,
         chosen: Choices::default(),
         taken: Choices::default(),

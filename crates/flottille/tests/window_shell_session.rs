@@ -18,7 +18,7 @@ use flottille_window::conversation::Block;
 use flottille_window::link::Connect;
 use flottille_window::runs::KEPT_ENDED;
 use flottille_window::session::SessionPage;
-use flottille_window::tree::{ended_id, place_id, session_id};
+use flottille_window::tree::{ended_id, session_id, session_place_id};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Bounds, Entity, Pixels, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
@@ -808,7 +808,9 @@ fn docs_session(user: &User, lead: &str) -> String {
 }
 
 #[gpui_kit::test]
-fn a_session_an_agent_started_is_listed_under_its_workspace(cx: &mut TestAppContext) {
+fn a_session_an_agent_started_is_listed_in_its_project_and_says_its_workspace(
+    cx: &mut TestAppContext,
+) {
     let user = user();
     let (lead, _) = lead(&user);
     let docs = docs_session(&user, &lead);
@@ -819,11 +821,12 @@ fn a_session_an_agent_started_is_listed_under_its_workspace(cx: &mut TestAppCont
     settle(cx);
 
     let listed: Vec<String> = shell.read_with(cx, |s, cx| {
-        s.place("app", &Some("w".to_owned()))
+        s.project("app")
             .map(|node| {
                 node.read(cx)
                     .sessions(cx)
                     .iter()
+                    .filter(|row| row.read(cx).place().as_deref() == Some("w"))
                     .map(|row| row.read(cx).id().to_owned())
                     .collect()
             })
@@ -831,11 +834,9 @@ fn a_session_an_agent_started_is_listed_under_its_workspace(cx: &mut TestAppCont
     });
     assert!(
         listed.contains(&docs) && listed.contains(&lead),
-        "both under w: {listed:?}"
+        "both in w: {listed:?}"
     );
-    let place = rect(place_id("app", &Some("w".to_owned())), cx);
-    let row = rect(session_id(&docs), cx);
-    assert!(row.origin.y > place.origin.y, "under its workspace's row");
+    assert_eq!(label(session_place_id(&docs), cx).as_deref(), Some("w"));
 }
 
 #[gpui_kit::test]
