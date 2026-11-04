@@ -418,6 +418,11 @@ fn a_pull_request_opened_by_a_session_marks_its_row_and_notifies(cx: &mut TestAp
     open_session(&shell, &other, cx);
     assert!(!has(session_unread_id(&lead), cx), "nothing changed yet");
 
+    // `forge create` needs the branch on its remote: as if it had been pushed.
+    user.git(
+        &user.path("data/flottille/workspaces/app/login"),
+        &["update-ref", "refs/remotes/origin/app/login", "HEAD"],
+    );
     let create = json!({"action": "create", "repository": ".", "title": "Add the login page",
         "body": "What it does"});
     let number = held_number(mcp.call("forge", create));
@@ -542,6 +547,11 @@ fn lead_with_news(
     mcp: &Mcp,
     cx: &mut VisualTestContext,
 ) {
+    // `forge create` needs the branch on its remote: as if it had been pushed.
+    user.git(
+        &user.path("data/flottille/workspaces/app/login"),
+        &["update-ref", "refs/remotes/origin/app/login", "HEAD"],
+    );
     let create = json!({"action": "create", "repository": ".", "title": "Add the login page",
         "body": "What it does"});
     let number = held_number(mcp.call("forge", create));
