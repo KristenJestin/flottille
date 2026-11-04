@@ -726,6 +726,18 @@ its id.
 | `name` | The task, `null` for a line of the agent's. |
 | `line` | The line run, masked of secrets like a call's arguments. |
 | `folder` | Where it runs. |
+| `ready` | `starting` for a task that says when it is ready, else `null`. |
+| `url`, `url_error` | Its address, or why it has none (`docs/projects.md`, "Tasks"). |
+
+#### `run.ready`
+
+A run of a task that says when it is ready is: its probe passed. Once per run, never after it
+ended.
+
+| Field | |
+|---|---|
+| `agent`, `run` | |
+| `url` | Its address, `null` without one. |
 
 #### `run.ended`
 

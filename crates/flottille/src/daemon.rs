@@ -640,7 +640,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                 } else if request.method == "project.ticket" {
                     tickets::preview(daemon, request.params).await
                 } else if request.method == "task.run" {
-                    tasks::run(&daemon, request.params)
+                    tasks::run(&daemon, request.params).await
                 } else if extensions::answers(&request.method) {
                     extensions::call(&daemon, &request.method, request.params)
                 } else {

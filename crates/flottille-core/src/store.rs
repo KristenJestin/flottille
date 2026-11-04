@@ -14,7 +14,7 @@ use crate::agent::{Agent, AgentState, Choices, GateMode};
 use crate::approval::{Decision, Delivery, Forward, Judgement, Kind, Request, RequestState};
 use crate::item::{Check, Cursor, Filter, Item, Post};
 use crate::protocol::Event;
-use crate::run::{Run, RunState};
+use crate::run::{Readiness, Run, RunState};
 use crate::subscription::Subscription;
 use crate::workspace::{Action, Failure, Step, StepState, Workspace};
 use crate::{Error, Result};
@@ -586,6 +586,13 @@ const MIGRATIONS: &[&str] = &[
     );
 ",
     "
+    -- A task's run says when it is ready and where it answers (`docs/projects.md`, \"Tasks\"):
+    -- `ready` is NULL for a task that does not say, else starting, ready or missed.
+    ALTER TABLE runs ADD COLUMN ready TEXT;
+    ALTER TABLE runs ADD COLUMN url TEXT;
+    ALTER TABLE runs ADD COLUMN url_error TEXT;
+",
+    "
     -- How many of each extension's own migrations were applied (`docs/extensions.md`, \"Data\"):
     -- its tables, `ext_<name>_…`, are brought up to date as the store's are, and kept when it is
     -- turned off.
@@ -600,7 +607,7 @@ const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, 
     identity, held_by, forwards, state, decision, created_at, decided_at, kind, says, judgement, place";
 
 const RUN_COLUMNS: &str = "id, agent, name, line, folder, state, exit_code, signal, started_at, \
-    ended_at, output, dismissed, project";
+    ended_at, output, dismissed, project, ready, url, url_error";
 
 const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, state, state_reason, \
     created_at, updated_at, active_at, ended_at, chosen_model, chosen_effort, chosen_mode, \
@@ -1356,7 +1363,7 @@ impl Store {
         transaction.execute(
             &format!(
                 "INSERT INTO runs ({RUN_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, \
-                 ?10, ?11, ?12, ?13)"
+                 ?10, ?11, ?12, ?13, ?14, ?15, ?16)"
             ),
             params![
                 run.id,
@@ -1372,6 +1379,9 @@ impl Store {
                 run.output,
                 run.dismissed,
                 run.project,
+                run.ready.map(Readiness::as_str),
+                run.url,
+                run.url_error,
             ],
         )?;
         let event = append_event(&transaction, event.0, event.1)?;
@@ -1392,9 +1402,27 @@ impl Store {
     ) -> Result<Option<Event>> {
         let transaction = self.connection.transaction()?;
         let changed = transaction.execute(
-            "UPDATE runs SET state = ?2, exit_code = ?3, signal = ?4, output = ?5, ended_at = ?6 \
+            "UPDATE runs SET state = ?2, exit_code = ?3, signal = ?4, output = ?5, ended_at = ?6, \
+             ready = CASE ready WHEN 'starting' THEN 'missed' ELSE ready END \
              WHERE id = ?1 AND state = 'running'",
             params![id, state.as_str(), exit_code, signal, output, now_ms()],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let event = append_event(&transaction, event.0, event.1)?;
+        transaction.commit()?;
+        Ok(Some(event))
+    }
+
+    /// Marks a starting run ready, with its event, in one transaction; `None` when it was not
+    /// starting (ready already, ended, or with no ready state).
+    pub fn ready_run(&mut self, id: &str, event: (&str, Value)) -> Result<Option<Event>> {
+        let transaction = self.connection.transaction()?;
+        let changed = transaction.execute(
+            "UPDATE runs SET ready = 'ready' WHERE id = ?1 AND state = 'running' \
+             AND ready = 'starting'",
+            params![id],
         )?;
         if changed == 0 {
             return Ok(None);
@@ -1445,7 +1473,7 @@ impl Store {
     pub fn ended_runs_of(&self, agents: &[String], limit: usize, tail: usize) -> Result<Vec<Run>> {
         let mut statement = self.connection.prepare_cached(&format!(
             "SELECT id, agent, name, line, folder, state, exit_code, signal, started_at, \
-             ended_at, substr(output, -{tail}), dismissed, project FROM runs \
+             ended_at, substr(output, -{tail}), dismissed, project, ready, url, url_error FROM runs \
              WHERE agent = ?1 AND state != 'running' AND dismissed = 0 \
              ORDER BY ended_at DESC, id DESC LIMIT ?2"
         ))?;
@@ -1467,7 +1495,7 @@ impl Store {
     pub fn user_runs_of(&self, project: &str, limit: usize, tail: usize) -> Result<Vec<Run>> {
         let mut statement = self.connection.prepare_cached(&format!(
             "SELECT id, agent, name, line, folder, state, exit_code, signal, started_at, \
-             ended_at, substr(output, -{tail}), dismissed, project FROM runs \
+             ended_at, substr(output, -{tail}), dismissed, project, ready, url, url_error FROM runs \
              WHERE agent IS NULL AND project = ?1 AND (state = 'running' OR (dismissed = 0 \
              AND id IN (SELECT id FROM runs WHERE agent IS NULL AND project = ?1 \
              AND state != 'running' AND dismissed = 0 ORDER BY ended_at DESC, id DESC LIMIT ?2))) \
@@ -2933,6 +2961,11 @@ fn run_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Run>> {
         output: row.get(10)?,
         dismissed: row.get(11)?,
         project: row.get(12)?,
+        ready: row
+            .get::<_, Option<String>>(13)?
+            .and_then(|ready| Readiness::parse(&ready)),
+        url: row.get(14)?,
+        url_error: row.get(15)?,
     }))
 }
 
@@ -4359,6 +4392,9 @@ mod tests {
             output: String::new(),
             dismissed: false,
             project: project.into(),
+            ready: None,
+            url: None,
+            url_error: None,
         };
         for (id, project, at) in [("r1", "app", 5), ("r2", "app", 6), ("r3", "other", 7)] {
             store
@@ -5125,6 +5161,9 @@ mod tests {
             output: String::new(),
             dismissed: false,
             project: "app".into(),
+            ready: None,
+            url: None,
+            url_error: None,
         };
         store.create_run(&run, ("run.started", json!({}))).unwrap();
         assert_eq!(store.run("r1").unwrap().unwrap(), run);
@@ -5164,6 +5203,69 @@ mod tests {
     }
 
     #[test]
+    fn a_run_keeps_whether_it_is_ready_and_its_address() {
+        let mut store = Store::open_in_memory().unwrap();
+        let run = |id: &str| Run {
+            id: id.into(),
+            agent: None,
+            name: Some("web".into()),
+            line: "npm run dev".into(),
+            folder: "/w".into(),
+            state: RunState::Running,
+            exit_code: None,
+            signal: None,
+            started_at: 5,
+            ended_at: None,
+            output: String::new(),
+            dismissed: false,
+            project: "app".into(),
+            ready: Some(Readiness::Starting),
+            url: Some("https://w.app.localhost".into()),
+            url_error: None,
+        };
+        for id in ["r1", "r2"] {
+            store
+                .create_run(&run(id), ("run.started", json!({})))
+                .unwrap();
+        }
+        assert_eq!(store.run("r1").unwrap().unwrap(), run("r1"));
+
+        let ready = store.ready_run("r1", ("run.ready", json!({}))).unwrap();
+        let again = store.ready_run("r1", ("run.ready", json!({}))).unwrap();
+        let end = |store: &mut Store, id| {
+            store
+                .end_run(
+                    id,
+                    RunState::Exited,
+                    Some(1),
+                    None,
+                    "",
+                    ("run.ended", json!({})),
+                )
+                .unwrap()
+        };
+        end(&mut store, "r1");
+        end(&mut store, "r2");
+
+        assert!(ready.is_some() && again.is_none());
+        let r1 = store.run("r1").unwrap().unwrap();
+        assert_eq!(r1.ready, Some(Readiness::Ready), "ready stays once ended");
+        assert_eq!(r1.url.as_deref(), Some("https://w.app.localhost"));
+        let r2 = store.run("r2").unwrap().unwrap();
+        assert_eq!(
+            r2.ready,
+            Some(Readiness::Missed),
+            "it ended before it was ready"
+        );
+        assert!(
+            store
+                .ready_run("r2", ("run.ready", json!({})))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn a_run_that_ended_is_dismissed_once_and_a_running_one_is_not() {
         let mut store = Store::open_in_memory().unwrap();
         store
@@ -5185,6 +5287,9 @@ mod tests {
                 output: String::new(),
                 dismissed: false,
                 project: "app".into(),
+                ready: None,
+                url: None,
+                url_error: None,
             };
             store.create_run(&run, ("run.started", json!({}))).unwrap();
         }
@@ -5243,6 +5348,9 @@ mod tests {
                 output: (*output).into(),
                 dismissed: false,
                 project: "app".into(),
+                ready: None,
+                url: None,
+                url_error: None,
             };
             store.create_run(&run, ("run.started", json!({}))).unwrap();
         }

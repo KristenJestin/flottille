@@ -268,6 +268,45 @@ impl Found {
     }
 }
 
+/// Judges a line a write sets as a run of it in each folder the write's run would start in, its
+/// reasons added to `found`; `Err` with the refusal when one is refused.
+fn judge_set(
+    call: &Call,
+    args: &Value,
+    words: &[String],
+    command: Option<(&str, &Task)>,
+    shown: &str,
+    found: &mut Found,
+) -> Result<(), Verdict> {
+    let folders: Vec<&[Resolved]> = match call.paths {
+        [] => vec![&[]],
+        paths => paths.iter().map(std::slice::from_ref).collect(),
+    };
+    for paths in folders {
+        match run(&Call {
+            tool: "run",
+            args,
+            words,
+            paths,
+            command,
+            ..*call
+        }) {
+            Verdict::Deny(why) => return Err(Verdict::Deny(why)),
+            Verdict::Ask(ask) => {
+                for reason in ask.reasons {
+                    let reason = format!("the line it sets, {shown}: {reason}");
+                    match ask.class {
+                        Class::Base => found.base(reason),
+                        Class::Judge => found.judge(reason),
+                    }
+                }
+            }
+            Verdict::Allow => {}
+        }
+    }
+    Ok(())
+}
+
 /// The verdict on a call: refused when it cannot be made as it is, else its class.
 pub fn decide(call: &Call) -> Verdict {
     if let Some(family) = crate::actions::family(call.tool, call.args) {
@@ -278,10 +317,12 @@ pub fn decide(call: &Call) -> Verdict {
                 "it changes the project's tracker, which nothing checks against the project".into(),
             );
         } else if family == "rules" {
-            found.base(
-                "it replaces the project's rules, the instructions of every agent created after it"
-                    .into(),
-            );
+            let what = if call.args.get("text").is_some() {
+                "it sets the project's rules, the instructions of every agent created after it"
+            } else {
+                "it only switches whether the project's agents also get the global rules"
+            };
+            found.base(what.into());
         } else {
             found.judge(crate::actions::asked(family));
         }
@@ -292,36 +333,34 @@ pub fn decide(call: &Call) -> Verdict {
         }
         // A line a task or a setup step holds runs later without this gate (a task in a
         // workspace is harmless, a workspace's setup runs on its own): setting it is judged as
-        // running it, in each folder it would start in, base when that would be.
+        // running it, in each folder it would start in, base when that would be. So are the lines
+        // a task runs to tell when it is ready and where it answers.
         if !call.words.is_empty() {
             let args = match call.command {
                 Some((name, _)) => serde_json::json!({"task": name}),
                 None => serde_json::json!({"line": shown_words(call.words)}),
             };
-            let folders: Vec<&[Resolved]> = match call.paths {
-                [] => vec![&[]],
-                paths => paths.iter().map(std::slice::from_ref).collect(),
+            let shown = shown_words(call.words);
+            if let Err(denied) =
+                judge_set(call, &args, call.words, call.command, &shown, &mut found)
+            {
+                return denied;
+            }
+        }
+        // The task as the write leaves it: a line it already held runs in the folder the write
+        // may move it to.
+        let other_lines = match (call.tool, call.command) {
+            ("tasks", Some((_, task))) => task.other_lines(),
+            _ => Vec::new(),
+        };
+        for line in other_lines {
+            let words = match flottille_core::command::split_line(line) {
+                Ok(words) => words,
+                Err(why) => return Verdict::Deny(why),
             };
-            for paths in folders {
-                match run(&Call {
-                    tool: "run",
-                    args: &args,
-                    paths,
-                    ..*call
-                }) {
-                    Verdict::Deny(why) => return Verdict::Deny(why),
-                    Verdict::Ask(ask) => {
-                        for reason in ask.reasons {
-                            let reason =
-                                format!("the line it sets, {}: {reason}", shown_words(call.words));
-                            match ask.class {
-                                Class::Base => found.base(reason),
-                                Class::Judge => found.judge(reason),
-                            }
-                        }
-                    }
-                    Verdict::Allow => {}
-                }
+            let args = serde_json::json!({"line": line});
+            if let Err(denied) = judge_set(call, &args, &words, None, line, &mut found) {
+                return denied;
             }
         }
         for why in later(call) {
@@ -3728,6 +3767,8 @@ mod tests {
                 read_only: false,
                 ask_before_running: false,
                 added_by: None,
+                ready: None,
+                url: None,
             };
             set(&mut command);
             self.commands.insert(name.into(), command);

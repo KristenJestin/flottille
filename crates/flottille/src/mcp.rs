@@ -223,7 +223,14 @@ const SERVED: [Definition; 28] = [
                 "serve": {"type": "boolean", "description": "It keeps running."},
                 "check": {"type": "boolean", "description": "Tests, lint."},
                 "read_only": {"type": "boolean", "description": "It changes nothing."},
-                "ask_before_running": {"type": "boolean", "description": "Judged each time it runs."}
+                "ask_before_running": {"type": "boolean", "description": "Judged each time it runs."},
+                "ready": {"type": ["object", "null"], "description": "add, edit: when a run of it is ready, one of {\"line\": text its output prints}, {\"url\": an address that answers}, {\"command\": a line that exits 0}; templated ({workspace}, {url}…); null removes it.", "properties": {
+                    "line": {"type": "string"}, "url": {"type": "string"}, "command": {"type": "string"}
+                }, "minProperties": 1, "maxProperties": 1, "additionalProperties": false},
+                "url": {"description": "add, edit: where a run of it answers: an address (templated, \"https://{workspace}.app.localhost\") or {\"command\": a line that prints it}; null removes it.", "anyOf": [
+                    {"type": "string"}, {"type": "null"},
+                    {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"], "additionalProperties": false}
+                ]}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -234,9 +241,12 @@ const SERVED: [Definition; 28] = [
             unquoted pipe, redirection, glob or &&, and a variable or $( even in double quotes, \
             is refused, put them in a script of the repository; quoted, the others are text. \
             Waits up to timeout seconds (30 by default, 600 at most) and answers \
-            with the end of the output; a longer run keeps going under its run id. Give task or \
-            line: {\"task\": \"test\"}, or {\"line\": \"cargo test -p core\", \
-            \"repository\": \"api\", \"timeout\": 120}.",
+            with the end of the output; a longer run keeps going under its run id, and you are \
+            told when it ends. A server task (serve) answers at once with whether it is starting \
+            or ready and its address; for a task that says when it is ready, notify \"ready\" \
+            has you told when it is, instead of reading run_status again and again. Give task or \
+            line: {\"task\": \"test\"}, {\"task\": \"dev\", \"notify\": \"ready\"}, or \
+            {\"line\": \"cargo test -p core\", \"repository\": \"api\", \"timeout\": 120}.",
         read_only: false,
         idempotent: false,
         destructive: true,
@@ -246,6 +256,7 @@ const SERVED: [Definition; 28] = [
                 "line": {"type": "string", "description": "One command line, split on spaces, quotes kept whole."},
                 "repository": {"type": "string", "description": "Where it runs; the place's top by default."},
                 "timeout": {"type": "integer", "minimum": 1, "maximum": 600},
+                "notify": {"type": "string", "enum": ["ready"], "description": "A task that says when it is ready: you are told when it is, or when it ends before."},
                 "why": {"type": "string", "description": "One sentence: why this run."}
             }, "additionalProperties": false})
         },
@@ -259,7 +270,9 @@ const SERVED: [Definition; 28] = [
             after; only the last 64 KiB of an output are kept. action stop: ends it with \
             everything it started, asked to end, then killed 5 seconds later, and answers once \
             it ended; a run that already ended is left as it is. {\"run\": \"a1b2c3\", \
-            \"action\": \"stop\"} The same call reads a cut result whole: a long result is \
+            \"action\": \"stop\"} action notify with when ready: you are told when a run of \
+            a task that says when it is ready is, rather than reading it again and again: \
+            {\"run\": \"a1b2c3\", \"action\": \"notify\", \"when\": \"ready\"}. The same call reads a cut result whole: a long result is \
             returned as its beginning and its end with a line naming an id (res_...) and the \
             call that reads the lines left out, from start, a page at a time; stop does not \
             apply to it.",
@@ -269,7 +282,8 @@ const SERVED: [Definition; 28] = [
         schema: || {
             json!({"type": "object", "properties": {
                 "run": {"type": "string", "description": "The run id run gave, or the id of a cut result (res_...)."},
-                "action": {"type": "string", "enum": ["output", "stop"], "description": "output by default."},
+                "action": {"type": "string", "enum": ["output", "stop", "notify"], "description": "output by default."},
+                "when": {"type": "string", "enum": ["ready"], "description": "notify: what to be told of."},
                 "tail": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "output: the last lines."},
                 "start": {"type": "integer", "minimum": 1, "description": "output: the first line to show."}
             }, "required": ["run"], "additionalProperties": false})
@@ -455,8 +469,9 @@ const SERVED: [Definition; 28] = [
         description: "This project's settings. settings reads each repository's forge and the \
             tracker; set_settings declares them (null removes one; a tracker left out is kept), \
             and a repository's base branches and dependencies; what is left out is kept, a \
-            refused change saves nothing. rules reads how agents are told to work; set_rules \
-            replaces them, for the agents created after. A change is done once the judge or the \
+            refused change saves nothing. rules reads how agents are told to work (the global \
+            rules, then the project's); set_rules replaces the project's text and sets \
+            rules_alone, for the agents created after. A change is done once the judge or the \
             user allows it, of the tracker or of the rules only once the user does: you are \
             answered at once, the result may come later. {\"action\": \"set_settings\", \
             \"repositories\": [{\"path\": \"api\", \"base\": [\"develop\", \"main\"], \
@@ -474,7 +489,8 @@ const SERVED: [Definition; 28] = [
                     "depends_on": {"type": "array", "items": {"type": "string"}, "description": "Repository paths, [] for none; no cycle."}
                 }, "required": ["path"], "additionalProperties": false}},
                 "tracker": {"type": ["object", "null"], "description": "{kind: github, repository: <path>} or {kind: jira, site, projects}."},
-                "text": {"type": "string", "description": "set_rules: the rules, whole, at most 8000 characters; they replace the project's current ones."}
+                "text": {"type": "string", "description": "set_rules: the project's rules, whole, at most 8000 characters; they replace its current ones and come after the global ones."},
+                "rules_alone": {"type": "boolean", "description": "set_rules: true to give the project's agents its rules alone, without the global ones; false for both. Text or rules_alone, at least one."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },

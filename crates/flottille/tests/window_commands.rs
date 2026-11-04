@@ -23,7 +23,7 @@ use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
 
-const SCRIPTS: [(&str, &str); 7] = [
+const SCRIPTS: [(&str, &str); 8] = [
     // A server: prints a line a second.
     (
         "server.sh",
@@ -50,6 +50,11 @@ const SCRIPTS: [(&str, &str); 7] = [
         "listener.sh",
         "#!/bin/sh\necho listening on 8080\nwhile [ ! -e release ]; do sleep 0.1; done\ni=0\nwhile true; do sleep 1; i=$((i+1)); echo tick $i; done\n",
     ),
+    // A server that says it is ready once the test has created `go`.
+    (
+        "booting.sh",
+        "#!/bin/sh\necho booting\nwhile [ ! -e go ]; do sleep 0.1; done\necho 'ready in 12 ms'\nexec sleep 300\n",
+    ),
 ];
 
 const CATALOGUE: &str = "\n[commands.server]\nline = \"./server.sh\"\nserve = true\n\
@@ -57,7 +62,9 @@ const CATALOGUE: &str = "\n[commands.server]\nline = \"./server.sh\"\nserve = tr
     [commands.fails]\nline = \"./fails.sh\"\n\
     [commands.colours]\nline = \"./colours.sh\"\n\
     [commands.blip]\nline = \"./blip.sh\"\n\
-    [commands.many]\nline = \"./many.sh\"\n";
+    [commands.many]\nline = \"./many.sh\"\n\
+    [tasks.web]\nline = \"./booting.sh\"\nserve = true\nready = { line = \"ready in\" }\n\
+    url = \"https://{workspace}.app.localhost/login\"\n";
 
 fn user() -> User {
     let user = User::with_fake_agent();
@@ -211,6 +218,13 @@ fn open_session<'a>(
     cx: &'a mut TestAppContext,
 ) -> (Entity<Shell>, &'a mut VisualTestContext) {
     let (shell, cx) = window(user, 1280., cx);
+    open_session_in(&shell, lead, cx);
+    (shell, cx)
+}
+
+/// Opens the lead's session in a window already there.
+fn open_session_in(shell: &Entity<Shell>, lead: &str, cx: &mut VisualTestContext) {
+    let shell = shell.clone();
     until(&shell, cx, "the session is in the tree", |cx| {
         cx.update(|window, _| window.try_find(session_id(lead)).is_some())
     });
@@ -225,7 +239,6 @@ fn open_session<'a>(
             })
         },
     );
-    (shell, cx)
 }
 
 fn session_page(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<SessionPage> {
@@ -1332,4 +1345,299 @@ fn restarting_an_ended_agent_s_command_says_it_is_now_the_user_s(cx: &mut TestAp
     });
     let new = panel.read_with(cx, |panel, _| panel.run().unwrap().to_owned());
     user.call("run.stop", json!({"run": new})).unwrap();
+}
+
+// A server that says when it is ready and where it answers (#389).
+
+#[gpui_kit::test]
+fn a_starting_server_shows_its_spinner_then_a_live_dot_once_ready(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp, workspace) = lead(&user);
+    let run = start(&mcp, "web");
+    let (shell, cx) = open_session(&user, &lead, cx);
+    let who = format!("command-who-{run}");
+    until(&shell, cx, "the row says it is starting", |cx| {
+        label(cx, &who).is_some_and(|who| who == "task web · starting")
+    });
+    settle(cx);
+
+    assert_eq!(
+        label(cx, &format!("command-mark-{run}")).unwrap(),
+        "starting"
+    );
+    assert!(
+        cx.update(|window, _| window.try_find(format!("command-dot-{run}")).is_none()),
+        "no dot while it starts"
+    );
+    std::fs::write(workspace.join("go"), "").unwrap();
+    until(&shell, cx, "the row says it is ready", |cx| {
+        label(cx, &who).is_some_and(|who| who == "task web · ready")
+    });
+    settle(cx);
+
+    assert_eq!(label(cx, &format!("command-mark-{run}")).unwrap(), "ready");
+    assert!(
+        cx.update(|window, _| window.try_find(format!("command-dot-{run}")).is_some()),
+        "the live dot"
+    );
+    ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
+}
+
+#[gpui_kit::test]
+fn a_server_s_address_replaces_its_last_line_without_its_scheme(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp, _) = lead(&user);
+    let run = start(&mcp, "web");
+    let (shell, cx) = open_session(&user, &lead, cx);
+    let link = format!("command-link-{run}");
+    until(&shell, cx, "the row shows the address", |cx| {
+        label(cx, &link).is_some()
+    });
+    settle(cx);
+
+    assert_eq!(label(cx, &link).unwrap(), "w.app.localhost/login");
+    assert!(
+        label(cx, &format!("command-last-{run}")).is_none(),
+        "the address takes the last line's place"
+    );
+    ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
+}
+
+#[gpui_kit::test]
+fn clicking_a_server_s_address_opens_it_and_not_its_output(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp, _) = lead(&user);
+    let run = start(&mcp, "web");
+    let (shell, cx) = window(&user, 1280., cx);
+    let opened: Arc<std::sync::Mutex<Vec<PathBuf>>> = Arc::default();
+    let given = opened.clone();
+    shell.update(cx, |s, _| {
+        s.set_opener(Arc::new(move |path: &std::path::Path| {
+            given.lock().unwrap().push(path.to_owned())
+        }))
+    });
+    open_session_in(&shell, &lead, cx);
+    let page = session_page(&shell, cx);
+    let link = format!("command-link-{run}");
+    until(&shell, cx, "the row shows the address", |cx| {
+        label(cx, &link).is_some()
+    });
+    settle(cx);
+
+    cx.update(|window, cx| window.click(link.clone(), cx));
+    settle(cx);
+
+    assert_eq!(
+        *opened.lock().unwrap(),
+        [PathBuf::from("https://w.app.localhost/login")]
+    );
+    let panel = page.read_with(cx, |page, _| page.command_panel().clone());
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel.run().map(str::to_owned)),
+        None
+    );
+    ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
+}
+
+#[gpui_kit::test]
+fn the_drawer_of_a_ready_server_says_ready_and_links_its_address(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp, workspace) = lead(&user);
+    let run = start(&mcp, "web");
+    std::fs::write(workspace.join("go"), "").unwrap();
+    let (shell, cx) = open_session(&user, &lead, cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the row says it is ready", |cx| {
+        label(cx, &format!("command-who-{run}")).is_some_and(|who| who == "task web · ready")
+    });
+    settle(cx);
+
+    cx.update(|window, cx| window.click(format!("command-{run}"), cx));
+    let panel = page.read_with(cx, |page, _| page.command_panel().clone());
+    until(&shell, cx, "the drawer is open", |cx| {
+        panel.read_with(cx, |panel, _| panel.shown().is_some())
+    });
+    settle(cx);
+
+    assert!(
+        label(cx, "run-drawer-sub")
+            .unwrap()
+            .starts_with("Task web · ready · "),
+        "{:?}",
+        label(cx, "run-drawer-sub")
+    );
+    assert_eq!(label(cx, "run-drawer-mark").unwrap(), "ready");
+    assert_eq!(
+        label(cx, "run-drawer-link").unwrap(),
+        "w.app.localhost/login"
+    );
+    ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
+}
+
+#[gpui_kit::test]
+fn a_server_the_user_ran_on_the_project_page_shows_its_dot_and_its_address(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    lead(&user);
+    let folder = user.path("work/app");
+    let script = folder.join("booting.sh");
+    std::fs::write(&script, SCRIPTS[7].1).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(folder.join("go"), "").unwrap();
+    let run = user
+        .call("task.run", json!({"project": "app", "name": "web"}))
+        .unwrap()["run"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (shell, cx) = window(&user, 1280., cx);
+    // The runs come last on the page: tall enough to hold them.
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    let opened: Arc<std::sync::Mutex<Vec<PathBuf>>> = Arc::default();
+    let given = opened.clone();
+    shell.update(cx, |s, _| {
+        s.set_opener(Arc::new(move |path: &std::path::Path| {
+            given.lock().unwrap().push(path.to_owned())
+        }))
+    });
+    shell.update_in(cx, |s, window, cx| {
+        s.open(
+            flottille_window::shell::Selection::Project("app".into()),
+            window,
+            cx,
+        )
+    });
+    let link = format!("project-run-link-{run}");
+    until(&shell, cx, "the project page shows the run ready", |cx| {
+        label(cx, &format!("project-run-mark-{run}")).as_deref() == Some("ready")
+    });
+    settle(cx);
+
+    assert_eq!(label(cx, &link).unwrap(), "main.app.localhost/login");
+    assert!(
+        cx.update(|window, _| window.try_find(format!("project-run-dot-{run}")).is_some()),
+        "the live dot"
+    );
+    cx.update(|window, cx| window.click(link.clone(), cx));
+    settle(cx);
+    assert_eq!(
+        *opened.lock().unwrap(),
+        [PathBuf::from("https://main.app.localhost/login")]
+    );
+    user.call("run.stop", json!({"run": run})).unwrap();
+}
+
+/// The bounds of an element, if it is drawn.
+fn bounds_of(cx: &mut VisualTestContext, id: &str) -> Option<gpui_kit::Bounds<gpui_kit::Pixels>> {
+    let id = id.to_owned();
+    cx.update(|window, _| window.try_find(id).map(|found| found.bounds()))
+}
+
+#[gpui_kit::test]
+fn the_rail_s_last_line_and_the_address_fold_into_each_other(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp, _) = lead(&user);
+    let run = start(&mcp, "web");
+    let (shell, cx) = open_session(&user, &lead, cx);
+    let link = format!("command-link-{run}");
+    let last = format!("command-last-{run}");
+    until(&shell, cx, "the row shows the address", |cx| {
+        label(cx, &link).is_some()
+    });
+    settle(cx);
+
+    ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
+    // No clock moves while the window takes the end: the fold stands at its first frame.
+    until(&shell, cx, "the row shows its last line", |cx| {
+        label(cx, &last).is_some()
+    });
+
+    let unfolding = bounds_of(cx, &format!("command-last-presence-{run}"));
+    assert!(
+        unfolding.is_some_and(|b| b.size.height < px(1.)),
+        "the last line unfolds, it does not jump in: {unfolding:?}"
+    );
+    assert!(
+        label(cx, &link).is_some(),
+        "the address is still drawn while it folds away"
+    );
+    settle(cx);
+    let unfolded = bounds_of(cx, &format!("command-last-presence-{run}"));
+    assert!(
+        unfolded.is_some_and(|b| b.size.height > px(8.)),
+        "{unfolded:?}"
+    );
+    assert!(label(cx, &link).is_none(), "and gone once folded");
+}
+
+/// Opens the drawer of a running `web`: the run, and what drives the window.
+fn drawer_of_web<'a>(
+    user: &User,
+    lead: &str,
+    mcp: &Mcp,
+    cx: &'a mut TestAppContext,
+) -> (String, Entity<Shell>, &'a mut VisualTestContext) {
+    let run = start(mcp, "web");
+    let (shell, cx) = open_session(user, lead, cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the row shows the address", |cx| {
+        label(cx, &format!("command-link-{run}")).is_some()
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click(format!("command-{run}"), cx));
+    let panel = page.read_with(cx, |page, _| page.command_panel().clone());
+    until(&shell, cx, "the drawer is open", |cx| {
+        panel.read_with(cx, |panel, _| panel.shown().is_some())
+    });
+    settle(cx);
+    (run, shell, cx)
+}
+
+#[gpui_kit::test]
+fn the_drawer_s_address_folds_away_when_the_server_ends(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp, _) = lead(&user);
+    let (run, shell, cx) = drawer_of_web(&user, &lead, &mcp, cx);
+    assert!(label(cx, "run-drawer-link").is_some());
+
+    ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
+    until(&shell, cx, "the drawer says it ended", |cx| {
+        label(cx, "run-drawer-sub").is_some_and(|sub| sub.contains(" after "))
+    });
+
+    assert!(
+        label(cx, "run-drawer-link").is_some(),
+        "the address is still drawn while it folds away"
+    );
+    settle(cx);
+    assert!(
+        label(cx, "run-drawer-link").is_none(),
+        "and gone once folded"
+    );
+}
+
+#[gpui_kit::test]
+fn the_modal_s_address_folds_away_when_the_server_ends(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp, _) = lead(&user);
+    let (run, shell, cx) = drawer_of_web(&user, &lead, &mcp, cx);
+    cx.update(|window, cx| window.click("run-drawer-expand", cx));
+    settle(cx);
+    assert!(label(cx, "run-modal-link").is_some());
+
+    ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
+    until(&shell, cx, "the drawer says it ended", |cx| {
+        label(cx, "run-drawer-sub").is_some_and(|sub| sub.contains(" after "))
+    });
+
+    assert!(
+        label(cx, "run-modal-link").is_some(),
+        "the address is still drawn while it folds away"
+    );
+    settle(cx);
+    assert!(
+        label(cx, "run-modal-link").is_none(),
+        "and gone once folded"
+    );
 }

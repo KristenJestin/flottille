@@ -269,11 +269,20 @@ and whatever else they want.
 | All projects | `rules.md` in Flottille's configuration folder (`$XDG_CONFIG_HOME/flottille/`), absent while the default holds | the window's Settings, "Rules"; by hand |
 | One project | the `rules` key of its file | the project's Settings, "Rules"; by hand; `project {action: "set_rules"}` of an agent, held |
 
-The project's rules **replace** the global ones, they do not extend them: a project that wants
-both copies the global text and adds to it. A project without its own follows the global rules,
-or the default when there are none. Rules are at most 8,000 characters; an empty text is no rules. A `rules.md` or a `rules` key
+The project's rules **add to** the global ones: an agent gets the global rules (the user's, else the
+default), then the project's under their own heading, "This project's rules", in that order, so a
+project's rule can narrow a global one. A project without its own gets the global rules alone. A
+project that does not want the global rules at all says `rules_alone = true` in its file (default
+false; the project's Settings, "Use only this project's rules"; `set_rules {rules_alone}`): then its
+rules replace the global ones, and a project with that switch and no rules gets none. Rules are at
+most 8,000 characters, each text on its own; an empty text is no rules. A `rules.md` or a `rules` key
 edited by hand past the limit is cut to it: agents get the first 8,000 characters, and the
 daemon's log, `rules.show`, `project {action: "rules"}` and the editor say why.
+
+A project written before rules added up may hold a copy of the global text, as this page once
+advised, to keep both. When its text starts with the global text, the copy is left out for the
+agent, which gets the global text once and the rest of the project's; the project's Settings says
+so ("these rules repeat the global ones; you can remove that part"). No file is rewritten.
 
 ```toml
 rules = """
@@ -282,13 +291,16 @@ Commit only when asked.
 """
 ```
 
-Reset to default removes the file (global) or the key (project), and the level below shows again.
+Reset to default removes the file (global) or the keys `rules` and `rules_alone` (project), and the
+level below shows again. The project's Settings shows the global rules above its editor, read-only
+and folded, with a link to edit them in Settings.
 
 The text is read when an agent is created and frozen in its instructions (`docs/design.md` §8),
 so a change reaches the agents created after it, and no agent created before. The global rules sit
 before the cache boundary, where every project shares them, so editing them changes the shared
 part once for everyone. A project's own rules would make that part differ from one project to
-the next, so they sit after the boundary. An agent reads the rules the agents created next will get with
+the next, so they sit after the boundary (a project with `rules_alone` leaves the global ones out
+of its agents, and has its own there as well). An agent reads the rules the agents created next will get with
 `project {action: "rules"}` and proposes a change with `set_rules {text}`, a base call that only
 the user allows, since it rewrites the instructions of every agent created after it
 (`docs/tools.md`, "The project").
@@ -303,6 +315,51 @@ approval each time an agent runs it). A setup step runs one with `task = "<name>
 runs cannot be removed. The Tasks section of the project's Settings adds, edits and removes them
 (`task.*`, `docs/protocol.md`), and so does a root agent with `tasks`, each write judged
 (`docs/tools.md`).
+
+A task may also say when a run of it is ready and where it answers; nothing is guessed:
+
+| Key | |
+|---|---|
+| `ready = { line = "<text>" }` | Ready once a line of its output holds the text (plain text, no pattern). |
+| `ready = { url = "<url>" }` | Ready once a request to the address is answered, whatever the status, tried every second. |
+| `ready = { command = "<line>" }` | Ready once that line exits with 0, run every second in the task's folder with the run's environment, its output dropped. |
+| `url = "<url>"` | Where it answers: an `http://` or `https://` address. |
+| `url = { command = "<line>" }` | A line that prints the address, run once in the task's folder with the run's environment as the run starts: its first line with something on it, which must be an `http(s)://` address. For a tool that gives each worktree its own address (`portless get api`). |
+
+Each is a template: the names of the variables (`{workspace}`, `{workspace.path}`, `{branch}`,
+`{project}`, `{repository}`) and, in `ready`'s `url` and `line`, `{url}`, the run's address. A
+line (`ready`'s `command`, `url`'s `command`) never takes `{url}`: the address is known only once
+the run starts, after the line was judged, and the line would run what nobody judged. A
+line is a task's line: split and refused as one, never run by a shell. A probe takes 5 seconds at
+most and never two run at once for one run; probing stops once the run is ready or ended. An
+HTTP probe of a host of this machine (`localhost`, a name under `.localhost`, a loopback address)
+takes its certificate as it is, since a local development server serves one of its own
+authority; any other host's is checked against the system's.
+
+Without `ready`, a run has no ready state: it runs, as before. With it, a run is `starting`, then
+`ready` (`run.ready`), or ends before it was ready, which it says. A line for the address that
+fails, or prints anything but an `http(s)://` address with a host, leaves the run without one and
+says why on it (`url_error`, masked, as the address itself is); a `ready` that asks for `{url}`
+then cannot be told, and the run says so and keeps running without a ready state. The lines a
+probe or the address start are killed with every process they started once they end, pass their
+limit or the run ends. The window draws a starting
+run with its spinner, a ready one with a solid dot, and its address as a link.
+
+In a monorepo, one task per server reads best, each with its own `ready` and `url`:
+
+```toml
+[tasks."web:dev"]
+line = "pnpm --filter web dev"
+serve = true
+url = { command = "portless get web" }
+ready = { url = "{url}" }
+
+[tasks."api:dev"]
+line = "pnpm --filter api dev"
+serve = true
+url = "http://{workspace}.api.localhost:8080"
+ready = { line = "listening on" }
+```
 
 ## Skills
 
