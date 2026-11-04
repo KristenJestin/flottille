@@ -899,6 +899,24 @@ impl Store {
         Ok(event)
     }
 
+    /// Records the branch the workspace's worktrees are on now, with its event, in one
+    /// transaction.
+    pub fn set_workspace_branch(
+        &mut self,
+        workspace: i64,
+        branch: &str,
+        event: (&str, Value),
+    ) -> Result<Event> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "UPDATE workspaces SET branch = ?2 WHERE id = ?1",
+            params![workspace, branch],
+        )?;
+        let event = append_event(&transaction, event.0, event.1)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
     /// Forgets a workspace and its steps, with its event, in one transaction.
     pub fn remove_workspace(&mut self, workspace: i64, event: (&str, Value)) -> Result<Event> {
         let transaction = self.connection.transaction()?;
@@ -2780,6 +2798,7 @@ mod tests {
                     fetched_at: Some(1_792_843_730_000),
                     note: None,
                 },
+                resumed: false,
             }],
             steps: vec![
                 Step {
@@ -2828,6 +2847,25 @@ mod tests {
         assert_eq!(store.workspaces(None).unwrap(), [read]);
         assert!(store.workspaces(Some("other")).unwrap().is_empty());
         assert_eq!(store.workspace("app", "other").unwrap(), None);
+    }
+
+    #[test]
+    fn a_workspace_s_branch_follows_with_its_event() {
+        let mut store = Store::open_in_memory().unwrap();
+        let (id, _) = store
+            .create_workspace(&a_workspace(), ("workspace.created", json!({})))
+            .unwrap();
+
+        let event = store
+            .set_workspace_branch(
+                id,
+                "feature/x",
+                ("workspace.changed", json!({"branch": "feature/x"})),
+            )
+            .unwrap();
+
+        assert_eq!(event.name, "workspace.changed");
+        assert_eq!(store.workspace_by_id(id).unwrap().branch, "feature/x");
     }
 
     #[test]
