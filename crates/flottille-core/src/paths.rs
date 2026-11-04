@@ -55,6 +55,11 @@ impl Paths {
         })
     }
 
+    /// The user's default place for workspaces (`docs/projects.md`, "Where the workspaces go").
+    pub fn workspaces_place(&self) -> PathBuf {
+        self.config.join("workspaces.toml")
+    }
+
     pub fn socket(&self) -> PathBuf {
         self.runtime.join("daemon.sock")
     }

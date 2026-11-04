@@ -131,6 +131,15 @@ The user chose the limit above which a tool result is cut (`tool_results.set`,
 |---|---|
 | `limit` | The limit in characters, or `"off"` for no cut. |
 
+### `workspaces_folder.changed`
+
+The user chose where workspaces go (`workspaces_folder.set`, `docs/projects.md`, "Where the
+workspaces go"); only the workspaces made afterwards follow it.
+
+| Field | |
+|---|---|
+| `project` | The project whose own folder changed, `null` for the default of every project. |
+
 ### `workspace.created`
 
 A workspace was written, before anything is made on disk (`docs/workspaces.md`). Every event of a
@@ -245,7 +254,7 @@ than stored.
 
 | Field | |
 |---|---|
-| `comments` (`item.commented`), `reviews` (`item.reviewed`) | The newest, five at most: `{author, bot, by_agent, state, excerpt}`, `by_agent` when an agent of Flottille posted it (`forges.md`, "What Flottille posts is marked"). |
+| `comments` (`item.commented`), `reviews` (`item.reviewed`) | The newest, five at most: `{author, bot, by_agent, state, excerpt}`, `by_agent` when an agent of Flottille posted it (`forges.md`, "What Flottille posts is recorded"). |
 | `review`, `reviewers` (`item.reviewed`) | The decision now; Bitbucket's reviewers and their verdicts. |
 | `verdicts` (`item.reviewed`, Bitbucket) | The reviewers whose verdict is new, `{name, state}`, none `pending`: what a subscription to `review` is told. |
 

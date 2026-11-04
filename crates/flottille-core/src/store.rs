@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use crate::agent::{Agent, AgentState, Choices, GateMode};
 use crate::approval::{Decision, Delivery, Forward, Judgement, Kind, Request, RequestState};
-use crate::item::{Check, Cursor, Filter, Item};
+use crate::item::{Check, Cursor, Filter, Item, Post};
 use crate::protocol::Event;
 use crate::run::{Readiness, Run, RunState};
 use crate::subscription::Subscription;
@@ -550,6 +550,22 @@ const MIGRATIONS: &[&str] = &[
     -- Where the agent worked when it asked (`main`, or `workspace <name>`): a request is done
     -- only there (`docs/workspaces.md`, \"Its own workspace\"). NULL before it was kept.
     ALTER TABLE approval_requests ADD COLUMN place TEXT;
+",
+    "
+    -- What Flottille posted for an agent on a forge or a tracker (`docs/forges.md`, \"What Flottille
+    -- posts is recorded\"): the text carries no mark, so the daemon knows its posts by this.
+    CREATE TABLE posts (
+        id          INTEGER PRIMARY KEY,
+        project     TEXT NOT NULL,
+        source      TEXT NOT NULL,
+        repository  TEXT NOT NULL,
+        key         TEXT NOT NULL,
+        kind        TEXT NOT NULL,
+        comment_id  TEXT,
+        fingerprint TEXT,
+        posted_at   INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX posts_item ON posts (project, source, repository, key);
 ",
     "
     -- A task's run says when it is ready and where it answers (`docs/projects.md`, \"Tasks\"):
@@ -2234,6 +2250,60 @@ impl Store {
         Ok(())
     }
 
+    /// Records a post that succeeded. An item's own text (`body`) is recorded once: a later post
+    /// of it replaces the earlier.
+    pub fn add_post(&self, post: &Post) -> Result<()> {
+        if post.kind == "body" {
+            self.connection.execute(
+                "DELETE FROM posts WHERE project = ?1 AND source = ?2 AND repository = ?3 \
+                 AND key = ?4 AND kind = 'body'",
+                params![post.project, post.source, post.repository, post.key],
+            )?;
+        }
+        self.connection.execute(
+            "INSERT INTO posts (project, source, repository, key, kind, comment_id, \
+             fingerprint, posted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                post.project,
+                post.source,
+                post.repository,
+                post.key,
+                post.kind,
+                post.comment_id,
+                post.fingerprint,
+                post.posted_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// What was posted on one item, oldest first.
+    pub fn posts(
+        &self,
+        project: &str,
+        source: &str,
+        repository: &str,
+        key: &str,
+    ) -> Result<Vec<Post>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT kind, comment_id, fingerprint, posted_at FROM posts WHERE project = ?1 \
+             AND source = ?2 AND repository = ?3 AND key = ?4 ORDER BY id",
+        )?;
+        let rows = statement.query_map(params![project, source, repository, key], |row| {
+            Ok(Post {
+                project: project.to_owned(),
+                source: source.to_owned(),
+                repository: repository.to_owned(),
+                key: key.to_owned(),
+                kind: row.get(0)?,
+                comment_id: row.get(1)?,
+                fingerprint: row.get(2)?,
+                posted_at: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// The agent's deliveries `sending` become `sent`: the turn that held them ended.
     pub fn deliveries_taken(&self, agent: &str) -> Result<()> {
         self.connection.execute(
@@ -2866,6 +2936,76 @@ mod tests {
         let error = Store::open(&path).err().unwrap();
 
         assert!(error.to_string().contains("newer Flottille"), "{error}");
+    }
+
+    fn a_post(kind: &str, comment_id: Option<&str>, fingerprint: Option<&str>) -> Post {
+        Post {
+            project: "app".into(),
+            source: "github".into(),
+            repository: "acme/app".into(),
+            key: "12".into(),
+            kind: kind.into(),
+            comment_id: comment_id.map(str::to_owned),
+            fingerprint: fingerprint.map(str::to_owned),
+            posted_at: 7,
+        }
+    }
+
+    #[test]
+    fn the_posts_of_an_item_are_kept_across_a_restart_and_a_body_is_kept_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let store = Store::open(&path).unwrap();
+        let comment = a_post("comment", Some("issuecomment-501"), None);
+        let by_text = a_post("comment", None, Some("abc"));
+        store.add_post(&comment).unwrap();
+        store.add_post(&by_text).unwrap();
+        store.add_post(&a_post("body", None, Some("one"))).unwrap();
+        store.add_post(&a_post("body", None, Some("two"))).unwrap();
+        drop(store);
+
+        let store = Store::open(&path).unwrap();
+
+        let posts = store.posts("app", "github", "acme/app", "12").unwrap();
+        assert_eq!(posts.len(), 3, "{posts:?}");
+        assert_eq!(posts[0], comment);
+        assert_eq!(posts[1], by_text);
+        assert_eq!(posts[2].fingerprint.as_deref(), Some("two"));
+        assert!(
+            store
+                .posts("app", "github", "acme/app", "13")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .posts("other", "github", "acme/app", "12")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_store_before_the_posts_gains_their_table_and_keeps_its_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let old = Connection::open(&path).unwrap();
+        let previous = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("CREATE TABLE posts"))
+            .unwrap();
+        for migration in &MIGRATIONS[..previous] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.pragma_update(None, "user_version", previous).unwrap();
+        append_event(&old, "test.one", json!({})).unwrap();
+        drop(old);
+
+        let store = Store::open(&path).unwrap();
+
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len());
+        assert_eq!(store.last_seq().unwrap(), 1);
+        store.add_post(&a_post("comment", Some("1"), None)).unwrap();
     }
 
     fn a_workspace() -> Workspace {

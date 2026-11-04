@@ -12,6 +12,7 @@ pub mod error;
 pub mod glob;
 pub mod item;
 pub mod paths;
+pub mod place;
 pub mod project;
 pub mod protocol;
 pub mod provider;

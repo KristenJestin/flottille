@@ -346,9 +346,13 @@ fn an_action_is_done_when_chosen(cx: &mut TestAppContext) {
             shell.main().read(cx).settings_page().cloned()
         })
         .expect("Settings is open");
+    let appearance = flottille_window::settings::SECTIONS
+        .iter()
+        .position(|(key, _)| *key == "appearance")
+        .unwrap();
     assert_eq!(
         page.read_with(cx, |page, _| page.tab()),
-        3,
+        appearance,
         "the Appearance tab"
     );
 }

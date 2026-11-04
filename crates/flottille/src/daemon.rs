@@ -733,6 +733,13 @@ fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) 
             },
             None,
         ),
+        method if method.starts_with("workspaces_folder.") => (
+            match crate::workspaces_folder::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+            },
+            None,
+        ),
         method if method.starts_with("developer.") => (
             match developer::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),

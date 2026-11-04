@@ -275,6 +275,11 @@ fn show_text(project: &Value) -> String {
     ] {
         shown.push_str(&format!("  {label}: {value}\n"));
     }
+    if let Some(why) = project["workspaces_default_error"].as_str() {
+        shown.push_str(&format!(
+            "  workspaces.toml is not followed, the data folder is used: {why}\n"
+        ));
+    }
     let never: Vec<String> = project["never"]
         .as_array()
         .into_iter()
