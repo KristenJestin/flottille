@@ -1154,3 +1154,115 @@ fn the_modal_shows_the_new_run_after_restart(cx: &mut TestAppContext) {
     let new = panel.read_with(cx, |panel, _| panel.run().unwrap().to_owned());
     ok(mcp.call("run_status", json!({"run": new, "action": "stop"})));
 }
+
+#[gpui_kit::test]
+fn restarting_from_the_modal_keeps_it_open_without_a_gap(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp, _) = lead(&user);
+    let (run, shell, page, cx) = panel_of_server(&user, &lead, &mcp, cx);
+    let panel = page.read_with(cx, |page, _| page.command_panel().clone());
+    cx.update(|window, cx| window.click("run-drawer-expand", cx));
+    settle(cx);
+
+    cx.update(|window, cx| window.click("run-modal-restart", cx));
+
+    // Every frame between the click and the new run: the modal is drawn, with the command's line
+    // and its output, and the drawer never goes back to "Reading…".
+    until(&shell, cx, "the modal shows the new run", |cx| {
+        assert!(modal_is_open(cx), "the modal vanished");
+        assert!(label(cx, "run-modal-title").is_some(), "the modal is empty");
+        assert!(
+            label(cx, "run-drawer-line").is_some(),
+            "the drawer went back to Reading…"
+        );
+        panel.read_with(cx, |panel, _| {
+            panel
+                .shown()
+                .is_some_and(|s| s.row.run != run && !s.lines.is_empty())
+        })
+    });
+    settle(cx);
+    assert!(modal_is_open(cx));
+    let new = panel.read_with(cx, |panel, _| panel.run().unwrap().to_owned());
+    ok(mcp.call("run_status", json!({"run": new, "action": "stop"})));
+}
+
+#[gpui_kit::test]
+fn a_double_restart_starts_one_run(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp, _) = lead(&user);
+    let (run, shell, page, cx) = panel_of_server(&user, &lead, &mcp, cx);
+    let panel = page.read_with(cx, |page, _| page.command_panel().clone());
+
+    cx.update(|window, cx| window.click("run-drawer-restart", cx));
+    cx.update(|window, cx| window.click("run-drawer-restart", cx));
+
+    until(&shell, cx, "the panel follows the new run", |cx| {
+        panel.read_with(cx, |panel, _| {
+            panel.shown().is_some_and(|s| s.row.run != run)
+        })
+    });
+    // A second run would show in the list a moment after.
+    let deadline = Instant::now() + Duration::from_millis(2500);
+    while Instant::now() < deadline {
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let servers = commands(&page, cx)
+        .iter()
+        .filter(|row| row.line == "./server.sh")
+        .count();
+    assert_eq!(servers, 2, "the first run and one new run");
+    let new = panel.read_with(cx, |panel, _| panel.run().unwrap().to_owned());
+    ok(mcp.call("run_status", json!({"run": new, "action": "stop"})));
+}
+
+#[gpui_kit::test]
+fn a_refused_restart_is_said_once_by_a_toast(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp, _) = lead(&user);
+    let (run, shell, page, cx) = panel_of_server(&user, &lead, &mcp, cx);
+    // The task is gone from the project: the daemon cannot start it again.
+    let file = user.project_file("app");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(
+        &file,
+        text.replace(
+            "[commands.server]\nline = \"./server.sh\"\nserve = true\n",
+            "",
+        ),
+    )
+    .unwrap();
+
+    cx.update(|window, cx| window.click("run-drawer-restart", cx));
+
+    until(&shell, cx, "a toast says it was not restarted", |cx| {
+        toasts(&shell, cx) == ["The command was not restarted"]
+    });
+    settle(cx);
+    assert_eq!(
+        page.read_with(cx, |page, cx| page
+            .commands(cx)
+            .read(cx)
+            .error()
+            .map(str::to_owned)),
+        None,
+        "not also a failed state in the list"
+    );
+    // The command was left running, and Restart is back.
+    let rows = commands(&page, cx);
+    assert!(rows.iter().any(|r| r.run == run && r.state == "running"));
+    ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
+}
+
+/// The titles of the toasts shown.
+fn toasts(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
+    shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .map(|toast| toast.title().to_owned())
+            .collect()
+    })
+}

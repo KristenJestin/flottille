@@ -881,12 +881,26 @@ impl ProjectTasks {
         );
     }
 
+    /// The new run of a restart replaces the open command, its row and its output staying drawn
+    /// until its own arrive.
+    fn follow_command(&mut self, run: &str, cx: &mut Context<Self>) {
+        self.open_watch_as(Watch::Run(run.to_owned()), true, cx);
+    }
+
     fn open_watch(&mut self, watch: Watch, cx: &mut Context<Self>) {
+        self.open_watch_as(watch, false, cx);
+    }
+
+    fn open_watch_as(&mut self, watch: Watch, in_place: bool, cx: &mut Context<Self>) {
         let key = watch.key();
         self.watching = Some(watch);
         let rows = self.commands.read(cx).rows().to_vec();
         self.panel.update(cx, |panel, cx| {
-            panel.open(&key, cx);
+            if in_place {
+                panel.follow(&key, cx);
+            } else {
+                panel.open(&key, cx);
+            }
             panel.set_rows(&rows, cx);
         });
         self.drawer.update(cx, |drawer, cx| drawer.open(cx));
@@ -934,9 +948,10 @@ impl ProjectTasks {
                 _ => "The run was not stopped",
             };
             toast(Toast::failure(title).detail(why), cx);
+            self.panel.update(cx, |panel, cx| panel.restart_refused(cx));
         }
         if let Some(run) = restarted {
-            self.open_command(&run, cx);
+            self.follow_command(&run, cx);
         }
         self.read_runs(cx);
     }

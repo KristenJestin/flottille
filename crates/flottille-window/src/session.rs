@@ -734,7 +734,8 @@ impl SessionPage {
     }
 
     /// What the daemon answered to a stop, a restart or a dismissal: why, when it refused, and the
-    /// new run when it restarted one, which the panel then shows.
+    /// new run when it restarted one, which takes the open command's place. A refused restart is
+    /// said by its toast alone.
     pub fn command_answered(
         &mut self,
         act: RunAct,
@@ -742,17 +743,36 @@ impl SessionPage {
         restarted: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        let mut listed = refused.clone();
         if let (RunAct::Restart, Some(why)) = (act, &refused) {
             toast(
                 Toast::failure("The command was not restarted").detail(why.clone()),
                 cx,
             );
+            listed = None;
+            self.command_panel
+                .update(cx, |panel, cx| panel.restart_refused(cx));
         }
         if let Some(run) = restarted {
-            self.open_command(&run, cx);
+            self.follow_command(&run, cx);
         }
         let list = self.commands(cx);
-        list.update(cx, |list, cx| list.failed(refused, cx));
+        list.update(cx, |list, cx| list.failed(listed, cx));
+    }
+
+    /// The new run of a restart replaces the open command, its row and its output staying drawn
+    /// until its own arrive.
+    fn follow_command(&mut self, run: &str, cx: &mut Context<Self>) {
+        self.watching = Some(run.to_owned());
+        if let Some(link) = &self.link {
+            link.watch(Some(run.to_owned()));
+        }
+        let rows = self.commands(cx).read(cx).rows().to_vec();
+        self.command_panel.update(cx, |panel, cx| {
+            panel.follow(run, cx);
+            panel.set_rows(&rows, cx);
+        });
+        self.run_drawer.update(cx, |drawer, cx| drawer.open(cx));
     }
 
     /// Reads one more page of the shown agent's conversation, before those shown.

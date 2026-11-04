@@ -773,6 +773,9 @@ pub struct CommandPanel {
     modal: Feed,
     /// When the modal was closed: it still draws its content while it fades out.
     collapsed_at: Option<Instant>,
+    /// The run whose restart was asked, until the new run has taken its place: Stop and Restart
+    /// wait, so that a second click starts nothing.
+    restarting: Option<String>,
 }
 
 /// An output drawn in a scrolling box: the lines there when it was first read are drawn as they
@@ -811,6 +814,7 @@ impl CommandPanel {
             expanded: false,
             modal: Feed::new(None),
             collapsed_at: None,
+            restarting: None,
         }
     }
 
@@ -863,14 +867,39 @@ impl CommandPanel {
             self.feed = Feed::new(None);
             self.modal = Feed::new(None);
             self.first = 0;
+            self.restarting = None;
         }
         self.run = Some(run.to_owned());
         self.focused = false;
         cx.notify();
     }
 
+    /// A restart was asked: Stop and Restart wait for the new run.
+    pub fn restart_asked(&mut self, run: &str, cx: &mut Context<Self>) {
+        self.restarting = Some(run.to_owned());
+        cx.notify();
+    }
+
+    /// The restart was refused: the buttons are back.
+    pub fn restart_refused(&mut self, cx: &mut Context<Self>) {
+        self.restarting = None;
+        cx.notify();
+    }
+
+    /// The new run of a restart takes the open command's place: its row and its output stay
+    /// drawn, the modal too, until the new run's own arrive and replace them in place.
+    pub fn follow(&mut self, run: &str, cx: &mut Context<Self>) {
+        if self.run.is_none() {
+            self.open(run, cx);
+            return;
+        }
+        self.run = Some(run.to_owned());
+        cx.notify();
+    }
+
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.run = None;
+        self.restarting = None;
         self.focused = false;
         self.collapse(cx);
         cx.notify();
@@ -883,6 +912,24 @@ impl CommandPanel {
         {
             return;
         }
+        if self
+            .shown
+            .as_ref()
+            .is_some_and(|before| before.row.run != output.row.run)
+        {
+            // The new run of a restart: its output replaces the old one's from its first line.
+            self.shown = None;
+            self.first = 0;
+            self.feed = Feed::new(None);
+            self.modal = Feed::new(None);
+        }
+        if self
+            .row
+            .as_ref()
+            .is_some_and(|row| row.run != output.row.run)
+        {
+            self.row = None;
+        }
         if let Some(before) = &self.shown {
             self.first += slid(&before.lines, &output.lines);
         }
@@ -890,6 +937,9 @@ impl CommandPanel {
         for feed in [&mut self.feed, &mut self.modal] {
             feed.base.get_or_insert(end);
             feed.scroll.scroll_to_bottom();
+        }
+        if self.restarting.as_ref() != Some(&output.row.run) {
+            self.restarting = None;
         }
         self.shown = Some(output);
         cx.notify();
@@ -903,6 +953,9 @@ impl CommandPanel {
             .and_then(|run| rows.iter().find(|row| &row.run == run))
             .cloned();
         if row.is_some() && self.row != row {
+            if self.restarting.as_ref() != row.as_ref().map(|row| &row.run) {
+                self.restarting = None;
+            }
             self.row = row;
             cx.notify();
         }
@@ -1185,17 +1238,27 @@ impl Render for CommandPanel {
         let owner = self.page.clone();
         // Stop and Restart, in the drawer's header and in the modal's: a step of a setup is the
         // daemon's, nobody runs it again from here.
+        // They wait, faded, while a restart is on its way.
+        let waiting = self.restarting.is_some();
+        let panel = cx.entity().downgrade();
         let actions = |prefix: &str| {
             let restart = (!row.step).then(|| {
-                let (page, run) = (owner.clone(), row.run.clone());
+                let (page, run, panel) = (owner.clone(), row.run.clone(), panel.clone());
                 Button::secondary(format!("{prefix}-restart"), "Restart")
                     .leading(Icon::Restart)
-                    .on_click(move |_, _, cx| page.restart(&run, cx))
+                    .disabled(waiting)
+                    .on_click(move |_, _, cx| {
+                        panel
+                            .update(cx, |panel, cx| panel.restart_asked(&run, cx))
+                            .ok();
+                        page.restart(&run, cx)
+                    })
             });
             let stop = (running && !row.step).then(|| {
                 let (page, run) = (owner.clone(), row.run.clone());
                 Button::secondary(format!("{prefix}-stop"), "Stop")
                     .leading(Icon::Stop)
+                    .disabled(waiting)
                     .on_click(move |_, _, cx| page.stop(&run, cx))
             });
             (restart, stop)
