@@ -250,6 +250,7 @@ impl RenderOnce for LabelledLine {
                     .gap(px(6.))
                     .overflow_hidden()
                     .whitespace_nowrap()
+                    .text_ellipsis()
                     .mono(12.)
                     .children(self.value),
             );

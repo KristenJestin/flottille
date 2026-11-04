@@ -13,7 +13,7 @@ use gpui_kit::{
     RenderOnce, SharedString, StatefulInteractiveElement, Styled, TestSupportExt, Window, div, px,
 };
 
-use crate::button::Button;
+use crate::button::{Button, tipped};
 use crate::icons::{Icon, icon};
 use crate::menu::Menu;
 use crate::theme::palette;
@@ -114,7 +114,7 @@ impl PageHeader {
 }
 
 impl RenderOnce for PageHeader {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let p = palette(cx);
         let actions = self.actions.into_iter().map(|action| {
             let on_click = action.on_click.clone();
@@ -125,15 +125,20 @@ impl RenderOnce for PageHeader {
                 None => button,
             }
         });
+        let whole = self.title.clone();
         let title = div()
             .id(part(&self.id, "title"))
             .aria_label(self.title.clone())
             .text_size(px(22.))
             .line_height(px(30.))
             .font_weight(FontWeight::SEMIBOLD)
+            .min_w_0()
+            .overflow_hidden()
             .whitespace_nowrap()
-            .child(self.title)
-            .test_support();
+            .text_ellipsis()
+            .child(self.title);
+        // A title cut with an ellipsis says itself whole under the pointer.
+        let title = tipped(title, whole, 30., window, cx);
         let path = self.path.map(|path| {
             div()
                 .id(part(&self.id, "path"))

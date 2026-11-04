@@ -137,6 +137,7 @@ impl RenderOnce for Card {
         let p = palette(cx);
         let has_header = self.title.is_some() || self.meta.is_some();
         let card = self.id.clone();
+        let named = self.id.clone();
         let mut drawn = 0;
         let mut separator = move || {
             let line = div().flex_none().h(px(1.)).bg(p.line);
@@ -164,16 +165,34 @@ impl RenderOnce for Card {
                     .py(px(10.))
                     .text_size(px(13.))
                     .font_weight(FontWeight::MEDIUM)
-                    .children(self.title)
+                    // The title gives way to the meta: it is cut with an ellipsis, never the
+                    // meta pushed out of the card.
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .children(self.title),
+                    )
                     .when_some(self.meta, |d, meta| {
-                        d.child(
-                            div()
-                                .ml_auto()
-                                .mono(11.)
-                                .font_weight(FontWeight::NORMAL)
-                                .text_color(p.faint)
-                                .child(meta),
-                        )
+                        let meta = div()
+                            .flex_none()
+                            .ml_auto()
+                            .mono(11.)
+                            .font_weight(FontWeight::NORMAL)
+                            .text_color(p.faint)
+                            .child(meta);
+                        d.child(match &named {
+                            Some(ElementId::Name(name)) => meta
+                                .id(ElementId::Name(format!("{name}-meta").into()))
+                                .test_support()
+                                .into_any_element(),
+                            _ => meta.into_any_element(),
+                        })
                     })
                     .into_any_element(),
             );
