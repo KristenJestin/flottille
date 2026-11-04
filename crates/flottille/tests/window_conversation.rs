@@ -595,6 +595,13 @@ fn send_now_stops_the_turn_and_the_root_receives_that_message_next_before_the_ot
             && row_of(&page, cx, |b| is_message(b, "and update the docs")).is_some()
             && row_of(&page, cx, |b| is_message(b, "then fix the tests")).is_some()
     });
+    // The window shows a message as read once its turn is recorded, before the prompt has reached
+    // the agent: what the agent received is waited for, not assumed.
+    eventually("the root to receive the first message", || {
+        prompts(&user)
+            .iter()
+            .any(|p| p.contains("and update the docs"))
+    });
     let sent = prompts(&user);
     let next = sent.len() - 2;
     assert!(sent[next].contains("then fix the tests") && !sent[next].contains("update the docs"));
