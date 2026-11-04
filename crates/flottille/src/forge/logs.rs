@@ -239,7 +239,7 @@ fn github_part(lines: &[String]) -> Option<Vec<String>> {
 /// One line of `gh run view --log-failed` (`<job>\t<step>\t<timestamp> <text>`) as its text: without
 /// the names and the timestamp that start every line, nor the colours and the carriage returns of
 /// a terminal's progress.
-fn clean(line: &str) -> String {
+pub(super) fn clean(line: &str) -> String {
     let line = line.trim_start_matches('\u{feff}');
     let mut parts = line.splitn(3, '\t');
     let text = match (parts.next(), parts.next(), parts.next()) {

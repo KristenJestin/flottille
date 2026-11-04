@@ -38,6 +38,7 @@ mod ci;
 mod closing;
 mod events;
 mod logs;
+mod pipelines;
 
 pub(crate) use events::offer;
 pub use events::{EVENTS, target_named};
@@ -1053,6 +1054,17 @@ pub(crate) struct ForgeCall {
     from: Option<String>,
     /// subscribe: how long it waits at most.
     minutes: Option<u64>,
+    /// run: what to run, as `pipelines` lists it.
+    pipeline: Option<String>,
+    /// run: the pipeline's variables, the workflow's inputs.
+    variables: Option<Vec<pipelines::Variable>>,
+    /// run_view, run_logs, stop, step: the run's number.
+    run: Option<u64>,
+    /// run_logs, step: a step's (a job's) name or id.
+    step: Option<String>,
+    /// step: `start` or `rerun`.
+    #[serde(rename = "do")]
+    verb: Option<String>,
 }
 
 impl ForgeCall {
@@ -1119,6 +1131,9 @@ pub async fn forge(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Value
         ("create" | "merge" | "checks", _) => forge_write(daemon, place, asked).await,
         ("comment" | "edit", _) => forge_note(daemon, place, asked).await,
         ("close" | "reopen", _) => forge_close(daemon, place, asked).await,
+        (action, _) if pipelines::ACTIONS.contains(&action) => {
+            pipelines::call(daemon, place, asked).await
+        }
         (action, _) => Outcome::Refused(format!(
             "refused: forge has no action {action:?}: its actions are {}",
             crate::gate::FORGE_ACTIONS

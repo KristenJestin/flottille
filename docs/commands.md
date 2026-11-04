@@ -173,6 +173,11 @@ act on a pull request by its number, and are in `docs/tools.md`:
 
 It is run by the daemon with the user's own `gh`, as `forge` `show` is: the agent never gets a token.
 
+Beside them, the CI family (`pipelines`, `runs`, `run_view`, `run_logs`, and the writes `run`,
+`stop` and `step`) runs any pipeline of any branch of the place's repositories with any variables,
+each write to judge like the others: what each runs is in [`forges.md`](forges.md), "The CI
+family".
+
 **On Bitbucket** (`bkt`, Cloud and Data Center) the same three actions run under the same classes and
 the same checks (the remote kept, the workspace's own pull request, not a fork's, into the recorded
 base), through `bkt pr create`, `bkt pr merge --strategy <the method's>` and, on Cloud only, `bkt pipeline

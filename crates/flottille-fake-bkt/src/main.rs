@@ -45,6 +45,12 @@
 //! `pipeline_fail` makes `pipeline list` alone fail that way, and `checks_fail`
 //! (`{"acme/api": {"12": "Error: 404 Not Found"}}`) `pr checks` of that pull request alone.
 //!
+//! `bkt api <path> --method POST [--input <json>]` starts a run of a Cloud repository
+//! (`/repositories/<w>/<r>/pipelines/`, answering the new pipeline numbered `triggered`, 1 by
+//! default) or stops one of `pipelines` (`…/pipelines/<uuid>/stopPipeline`, answering nothing);
+//! `pipeline view` gives the run its `uuid` when `pipelines` holds it. `pipeline run` takes
+//! `--var KEY=VALUE` as the real one does.
+//!
 //! The writes answer as `bkt` does when they work: `pr create` prints `✓ Created pull request #N`
 //! (N is `created`, 1 by default), `pr merge` prints `✓ Merged pull request #N` and `pipeline run`
 //! `✓ Triggered pipeline …`. `pr comment <id> --text T` prints `✓ Commented on pull request #N`
@@ -177,7 +183,13 @@ fn answer(script: &Value, args: &[String]) -> i32 {
         .collect();
     let (Some(owner), Some(repo)) = (option(owner_flag), option("--repo")) else {
         if is_api {
-            return api(script, positional[1], &params);
+            return api(
+                script,
+                positional[1],
+                &params,
+                option("--method"),
+                option("--input"),
+            );
         }
         eprintln!(
             "Error: context must supply workspace and repo; use --workspace/--repo if needed"
@@ -248,7 +260,18 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 eprintln!("Error: 404 Not Found: pipeline {build}");
                 return 1;
             };
-            payload["pipeline"] = json!({"build_number": build.parse::<u64>().unwrap_or(0)});
+            let number = build.parse::<u64>().unwrap_or(0);
+            payload["pipeline"] = json!({"build_number": number});
+            // Its uuid, when the script's pipelines hold the run.
+            if let Some(uuid) = script["pipelines"][&key]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|pipeline| pipeline["build_number"] == number)
+                .and_then(|pipeline| pipeline.get("uuid"))
+            {
+                payload["pipeline"]["uuid"] = uuid.clone();
+            }
             payload["steps"] = steps.clone();
         }
         ["pipeline", "logs", build] => {
@@ -348,7 +371,13 @@ fn body_of(script: &Value, path: &str) -> Option<Value> {
 
 /// `bkt api <path>`: the script's body for that path, as the server answers it. A `next` link is
 /// followed as `bkt` does: an absolute URL has its host and the `/2.0` of the base path cut.
-fn api(script: &Value, path: &str, params: &[(&str, &str)]) -> i32 {
+fn api(
+    script: &Value,
+    path: &str,
+    params: &[(&str, &str)],
+    method: Option<&str>,
+    input: Option<&str>,
+) -> i32 {
     let relative = path
         .strip_prefix("https://api.bitbucket.org")
         .unwrap_or(path)
@@ -366,6 +395,9 @@ fn api(script: &Value, path: &str, params: &[(&str, &str)]) -> i32 {
             .find(|(key, _)| *key == name)
             .and_then(|(_, value)| value.parse::<usize>().ok())
     };
+    if let Some(method) = method.filter(|method| *method != "GET") {
+        return posted(script, method, path, input);
+    }
     let Some(mut body) = body_of(script, path) else {
         eprintln!("Error: 404 Not Found: {path}");
         return 1;
@@ -429,4 +461,52 @@ fn api(script: &Value, path: &str, params: &[(&str, &str)]) -> i32 {
     }
     println!("{body}");
     0
+}
+
+/// A `bkt api --method POST` of Pipelines: `/repositories/<w>/<r>/pipelines/` starts a run, whose
+/// body must name a branch's target, and answers it numbered `triggered` (1 by default);
+/// `…/pipelines/<uuid>/stopPipeline` stops a run of the script's `pipelines`, answering nothing, as
+/// the server's 204 does. Anything else is not a call Flottille makes.
+fn posted(script: &Value, method: &str, path: &str, input: Option<&str>) -> i32 {
+    let Some(rest) = path.strip_prefix("/repositories/") else {
+        eprintln!("fake bkt: not a call Flottille makes: {method} {path}");
+        return 2;
+    };
+    let parts: Vec<&str> = rest.split('/').collect();
+    match (method, parts.as_slice()) {
+        ("POST", [owner, repo, "pipelines", ""]) => {
+            let body: Value = input
+                .and_then(|input| serde_json::from_str(input).ok())
+                .unwrap_or(Value::Null);
+            let target = &body["target"];
+            if target["type"] != "pipeline_ref_target" || target["ref_name"].as_str().is_none() {
+                eprintln!("Error: 400 Bad Request: a pipeline needs a target");
+                return 1;
+            }
+            let number = script["triggered"].as_u64().unwrap_or(1);
+            println!(
+                "{}",
+                json!({"type": "pipeline", "uuid": format!("{{{number}}}"),
+                    "build_number": number, "state": {"name": "PENDING"}, "target": target,
+                    "repository": {"full_name": format!("{owner}/{repo}")}})
+            );
+            0
+        }
+        ("POST", [owner, repo, "pipelines", uuid, "stopPipeline"]) => {
+            let known = script["pipelines"][format!("{owner}/{repo}")]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|pipeline| pipeline["uuid"].as_str() == Some(*uuid));
+            if !known {
+                eprintln!("Error: 404 Not Found: pipeline {uuid}");
+                return 1;
+            }
+            0
+        }
+        _ => {
+            eprintln!("fake bkt: not a call Flottille makes: {method} {path}");
+            2
+        }
+    }
 }
