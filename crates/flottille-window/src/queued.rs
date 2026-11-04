@@ -207,7 +207,7 @@ impl Render for QueuedMessages {
                             .on_click(on(|this, delivery, cx| this.send_now(delivery, cx))),
                     )
                     .child(
-                        button("edit", EDIT, Icon::Text)
+                        button("edit", EDIT, Icon::Edit)
                             .on_click(on(|this, delivery, cx| this.unqueue(delivery, true, cx))),
                     )
                     .child(

@@ -3,7 +3,7 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::{SharedString, Styled, Svg, px, svg};
 
-gpui_kit::assets::icon_assets!(pub Icons, [Folder, GitBranch, Book, ChevronDown, Plus, Search, Bell, ExternalLink, Network, Menu, ArrowUp, ChevronsUpDown, Settings, Ellipsis, CircleStop, Terminal, ChevronUp, TriangleAlert, Check, X, File, FileText, Slash, Play, GitPullRequest, Ticket, GripVertical, Copy, Clock, Square, Minus, CircleDot]);
+gpui_kit::assets::icon_assets!(pub Icons, [Folder, GitBranch, Book, ChevronDown, Plus, Search, Bell, ExternalLink, Network, Menu, ArrowUp, ChevronsUpDown, Settings, Ellipsis, CircleStop, Terminal, ChevronUp, TriangleAlert, Check, X, File, FileText, Slash, Play, GitPullRequest, Ticket, GripVertical, Copy, Clock, Square, Minus, CircleDot, Pencil]);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
@@ -61,10 +61,12 @@ pub enum Icon {
     Interrupted,
     /// Under way: a command that runs, checks that are pending.
     Running,
+    /// Changes what was written.
+    Edit,
 }
 
 impl Icon {
-    pub const ALL: [Self; 32] = [
+    pub const ALL: [Self; 33] = [
         Self::Folder,
         Self::Branch,
         Self::Repository,
@@ -97,6 +99,7 @@ impl Icon {
         Self::Stopped,
         Self::Interrupted,
         Self::Running,
+        Self::Edit,
     ];
 
     pub fn path(self) -> SharedString {
@@ -133,6 +136,7 @@ impl Icon {
             Self::Stopped => IconName::Square,
             Self::Interrupted => IconName::Minus,
             Self::Running => IconName::CircleDot,
+            Self::Edit => IconName::Pencil,
         }
         .path()
     }
