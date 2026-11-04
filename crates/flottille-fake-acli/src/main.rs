@@ -54,6 +54,13 @@
 //! The writes change nothing but the status a transition moves and the comments a `comment
 //! create` adds: the test reads them in the record.
 //!
+//! A text may come in a file (`--description-file`, `--body-file`), as `acli` takes it, plain or
+//! as Atlassian Document Format. The fake reads the file when it is called, since Flottille
+//! removes it after, and records it under `files` (`{flag, path, mode, dir_mode, adf | text}`: the
+//! modes of the file and of its folder, so that a test sees they are private). A document that
+//! is not valid ADF (the shape of its nodes and marks, as Jira holds them) ends with 1, saying
+//! why: `✗ Error: invalid ADF: …`.
+//!
 //! - `acli jira workitem create --project P --summary S … --json` prints `{"key": …}`, the
 //!   script's `created` (`P-1` without it); without `--project` or `--summary` it ends with 2.
 //! - `acli jira workitem comment create --key K --body B` and `acli jira workitem edit --key K …
@@ -93,12 +100,17 @@ fn main() {
         .expect("the record");
     // One `write` of the whole line: `writeln!` on a `File` writes the JSON piece by piece, and
     // the pieces of two processes appending together would mix (#325).
-    let line = format!("{}\n", json!({"args": args, "env": env}));
+    let files = files_of(&args);
+    let line = format!("{}\n", json!({"args": args, "env": env, "files": files}));
     record.write_all(line.as_bytes()).expect("the record");
     let script: Value = std::fs::read_to_string(dir.join("script.json"))
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_else(|| json!({}));
+    if let Some(why) = files.iter().find_map(|file| file["invalid"].as_str()) {
+        eprintln!("✗ Error: invalid ADF: {why}");
+        std::process::exit(1);
+    }
     std::process::exit(answer(&dir, &script, &args));
 }
 
@@ -229,10 +241,15 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
             println!("{}", json!({"key": project, "issueTypes": types}));
             0
         }
-        ["jira", "workitem", "comment", "create", rest @ ..] if rest.contains(&"--body") => {
+        ["jira", "workitem", "comment", "create", rest @ ..]
+            if rest.contains(&"--body") || rest.contains(&"--body-file") =>
+        {
             let done = known(script, rest);
-            if let (0, Some(key), Some(body)) = (done, value(rest, "--key"), value(rest, "--body"))
-            {
+            let body = match value(rest, "--body") {
+                Some(text) => Some(Value::from(text)),
+                None => value(rest, "--body-file").and_then(file_text),
+            };
+            if let (0, Some(key), Some(body)) = (done, value(rest, "--key"), body) {
                 post(dir, key, body);
             }
             done
@@ -288,6 +305,136 @@ fn types_of(script: &Value, project: &str) -> Option<Vec<(String, bool)>> {
     )
 }
 
+/// The texts the call passes in files, as the record holds them (see the top of this file).
+fn files_of(args: &[String]) -> Vec<Value> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut files = Vec::new();
+    for (at, flag) in args.iter().enumerate() {
+        if flag != "--description-file" && flag != "--body-file" {
+            continue;
+        }
+        let Some(path) = args.get(at + 1) else {
+            continue;
+        };
+        let mode = |path: &Path| {
+            std::fs::metadata(path)
+                .map(|meta| meta.permissions().mode() & 0o777)
+                .unwrap_or_default()
+        };
+        let mut file = json!({"flag": flag, "path": path, "mode": mode(Path::new(path)),
+            "dir_mode": Path::new(path).parent().map(mode)});
+        match std::fs::read_to_string(path) {
+            Ok(text) => match serde_json::from_str::<Value>(&text) {
+                Ok(adf) => match check(&adf) {
+                    Ok(()) => file["adf"] = adf,
+                    Err(why) => file["invalid"] = Value::from(why),
+                },
+                Err(_) => file["text"] = Value::from(text),
+            },
+            Err(error) => file["invalid"] = Value::from(format!("{path}: {error}")),
+        }
+        files.push(file);
+    }
+    files
+}
+
+/// The text a file holds: its document when it is one, else its words.
+fn file_text(path: &str) -> Option<Value> {
+    let text = std::fs::read_to_string(path).ok()?;
+    Some(serde_json::from_str(&text).unwrap_or(Value::from(text)))
+}
+
+/// Whether `doc` is Atlassian Document Format as Jira holds it: a `doc` of version 1 whose
+/// nodes are known, each in a parent that takes it, its marks known too. Not all of ADF: the
+/// nodes Flottille writes and Jira's own that it reads.
+fn check(doc: &Value) -> Result<(), String> {
+    if doc["type"] != "doc" || doc["version"] != 1 {
+        return Err("the document is not {\"type\": \"doc\", \"version\": 1}".into());
+    }
+    let content = doc["content"].as_array().filter(|c| !c.is_empty());
+    let content = content.ok_or("a doc holds at least one block")?;
+    content.iter().try_for_each(|node| node_in(node, "doc"))
+}
+
+/// What a node of each type may hold.
+fn children_of(kind: &str) -> Option<&'static [&'static str]> {
+    const INLINE: &[&str] = &["text", "hardBreak", "mention", "emoji", "inlineCard"];
+    Some(match kind {
+        "doc" => &[
+            "paragraph",
+            "heading",
+            "blockquote",
+            "codeBlock",
+            "bulletList",
+            "orderedList",
+            "rule",
+            "table",
+        ],
+        "paragraph" | "heading" => INLINE,
+        "blockquote" => &["paragraph", "bulletList", "orderedList", "codeBlock"],
+        "codeBlock" => &["text"],
+        "bulletList" | "orderedList" => &["listItem"],
+        "listItem" => &["paragraph", "bulletList", "orderedList", "codeBlock"],
+        "table" => &["tableRow"],
+        "tableRow" => &["tableHeader", "tableCell"],
+        "tableHeader" | "tableCell" => &["paragraph"],
+        "rule" => &[],
+        _ => return None,
+    })
+}
+
+fn node_in(node: &Value, parent: &str) -> Result<(), String> {
+    let kind = node["type"].as_str().unwrap_or_default();
+    if !children_of(parent).is_some_and(|allowed| allowed.contains(&kind)) {
+        return Err(format!("{kind:?} is not a node a {parent} takes"));
+    }
+    match kind {
+        "text" => return text_node(node),
+        "hardBreak" | "mention" | "emoji" | "inlineCard" => return Ok(()),
+        "heading" => match node["attrs"]["level"].as_u64() {
+            Some(1..=6) => {}
+            _ => return Err("a heading has a level from 1 to 6".into()),
+        },
+        _ => {}
+    }
+    let content = node["content"].as_array();
+    // These hold at least one child; a paragraph, a heading and a code block may be empty.
+    let needs = !matches!(kind, "paragraph" | "heading" | "codeBlock" | "rule");
+    if needs && content.is_none_or(|c| c.is_empty()) {
+        return Err(format!("a {kind} holds at least one node"));
+    }
+    if node.get("marks").is_some() {
+        return Err(format!("a {kind} has no marks"));
+    }
+    content
+        .into_iter()
+        .flatten()
+        .try_for_each(|child| node_in(child, kind))
+}
+
+fn text_node(node: &Value) -> Result<(), String> {
+    if node["text"].as_str().is_none_or(str::is_empty) {
+        return Err("a text node is not empty".into());
+    }
+    let marks: Vec<&str> = node["marks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|mark| mark["type"].as_str().unwrap_or_default())
+        .collect();
+    for mark in node["marks"].as_array().into_iter().flatten() {
+        match mark["type"].as_str().unwrap_or_default() {
+            "strong" | "em" | "strike" | "code" | "underline" => {}
+            "link" if mark["attrs"]["href"].as_str().is_some() => {}
+            other => return Err(format!("the mark {other:?} is not one Jira knows here")),
+        }
+    }
+    if marks.contains(&"code") && marks.iter().any(|m| !matches!(*m, "code" | "link")) {
+        return Err("a code mark goes with a link only".into());
+    }
+    Ok(())
+}
+
 /// Where the transitions that took left the work items: `moved.json`, written by the fake.
 fn moved(dir: &Path) -> Map<String, Value> {
     std::fs::read_to_string(dir.join("moved.json"))
@@ -304,15 +451,15 @@ fn posted(dir: &Path) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
-/// Keeps a comment created on `key`, its text as it was passed.
-fn post(dir: &Path, key: &str, body: &str) {
+/// Keeps a comment created on `key`, its text or document as it was passed.
+fn post(dir: &Path, key: &str, body: Value) {
     let mut all = posted(dir);
     let mut comments = all
         .get(key)
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    comments.push(Value::from(body));
+    comments.push(body);
     all.insert(key.to_owned(), Value::from(comments));
     std::fs::write(dir.join("posted.json"), Value::from(all).to_string()).expect("the comments");
 }
