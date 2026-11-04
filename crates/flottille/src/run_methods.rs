@@ -218,10 +218,10 @@ async fn stop(daemon: &Arc<Daemon>, id: &str) -> Answer {
 /// Stops the run if it runs and starts its line again in its place; answers with the new run.
 async fn restart(daemon: &Arc<Daemon>, id: &str) -> Answer {
     let view = runs::view(daemon, id).ok_or_else(|| not_found(id))?;
-    let run = runs::restart_by_user(daemon, &view.run)
+    let (run, notice) = runs::restart_by_user(daemon, &view.run)
         .await
         .map_err(Failure::refused)?;
-    Ok(json!({"run": run_json(&run)}))
+    Ok(json!({"run": run_json(&run), "notice": notice}))
 }
 
 fn dismiss(daemon: &Daemon, id: &str) -> Answer {

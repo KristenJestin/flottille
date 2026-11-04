@@ -16,9 +16,10 @@ use serde_json::{Value, json};
 const CATALOGUE: &str = "\n[commands.ends]\nline = \"./ends.sh\"\n\
     [commands.quick]\nline = \"./quick.sh\"\n\
     [commands.server]\nline = \"./server.sh\"\nserve = true\n\
+    [commands.stubborn]\nline = \"./stubborn.sh\"\nserve = true\n\
     [commands.leak]\nline = \"./leak.sh\"\n";
 
-const SCRIPTS: [(&str, &str); 4] = [
+const SCRIPTS: [(&str, &str); 5] = [
     // Outlives a call that waits 1 s, then fails with a coloured last line.
     (
         "ends.sh",
@@ -30,6 +31,11 @@ const SCRIPTS: [(&str, &str); 4] = [
         "server.sh",
         "#!/bin/sh\necho listening on 8080\nsleep 300 &\necho $! > child.pid\nwait\n",
     ),
+    // Ignores the stop's first signal: stopping it takes the whole grace period.
+    (
+        "stubborn.sh",
+        "#!/bin/sh\ntrap '' TERM\necho stubborn\nwhile :; do sleep 1; done\n",
+    ),
     (
         "leak.sh",
         "#!/bin/sh\nsleep 2\necho token ghp_fakefakefakefakefakefakefake0002\n",
@@ -39,9 +45,23 @@ const SCRIPTS: [(&str, &str); 4] = [
 /// A project `app` over a throwaway repository, its workspace `w` with the scripts, and the
 /// session of an agent working there: the agent's id, its MCP session, the workspace's folder.
 fn session(user: &User) -> (String, Mcp, PathBuf) {
+    session_of(user, false)
+}
+
+/// `session`, the project holding a second repository `web` when `with_web`.
+fn session_of(user: &User, with_web: bool) -> (String, Mcp, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
     let folder = user.path("work/app");
     user.git_init(&folder);
+    if with_web {
+        let web = folder.join("web");
+        user.git_init(&web);
+        std::fs::write(web.join("README.md"), "web\n").unwrap();
+        user.git(&web, &["add", "."]);
+        user.git(&web, &["commit", "--quiet", "-m", "start"]);
+        std::fs::write(folder.join(".gitignore"), "web/\n").unwrap();
+        user.git(&folder, &["add", ".gitignore"]);
+    }
     std::fs::write(folder.join("README.md"), "app\n").unwrap();
     user.git(&folder, &["add", "."]);
     user.git(&folder, &["commit", "--quiet", "-m", "start"]);
@@ -585,4 +605,138 @@ fn the_command_line_restarts_a_run() {
     let all = listed(&user, &agent);
     let new = all.iter().find(|c| c["run"] != first.as_str()).unwrap();
     assert!(said.contains(new["run"].as_str().unwrap()), "{said}");
+}
+
+#[test]
+fn an_agent_is_told_when_its_ended_command_is_restarted() {
+    let user = User::with_fake_agent().with_fake_escalation();
+    let (_, mcp, _) = session(&user);
+    let first = start(&mcp, "server");
+    // The agent was already told of the end of this very run.
+    user.call("run.stop", json!({"run": first})).unwrap();
+    prompted(
+        &user,
+        &["[flottille:command-ended]", &first, "stopped by the user"],
+    );
+
+    let new = restarted(&user, &first);
+
+    let second = new["run"].as_str().unwrap().to_owned();
+    let prompt = prompted(&user, &["[flottille:command-ended]", &second]);
+    assert!(prompt.contains("restarted by the user"), "{prompt}");
+    user.call("run.stop", json!({"run": second})).unwrap();
+}
+
+#[test]
+fn a_second_restart_of_the_same_run_is_told_too() {
+    let user = User::with_fake_agent().with_fake_escalation();
+    let (_, mcp, _) = session(&user);
+    let first = start(&mcp, "server");
+
+    let once = restarted(&user, &first)["run"].as_str().unwrap().to_owned();
+    let twice = restarted(&user, &first)["run"].as_str().unwrap().to_owned();
+
+    assert_ne!(once, twice);
+    for second in [&once, &twice] {
+        let prompt = prompted(&user, &["[flottille:command-ended]", &first, second]);
+        assert!(prompt.contains("restarted by the user"), "{prompt}");
+    }
+    for second in [once, twice] {
+        user.call("run.stop", json!({"run": second})).unwrap();
+    }
+}
+
+#[test]
+fn a_task_run_in_a_repository_restarts_in_that_repository() {
+    use std::os::unix::fs::PermissionsExt;
+    let user = User::with_fake_agent().with_fake_escalation();
+    let (_, mcp, workspace) = session_of(&user, true);
+    let script = workspace.join("web/quick.sh");
+    std::fs::write(&script, "#!/bin/sh\necho in web\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let first = run_id(&ok(
+        mcp.call("run", json!({"task": "quick", "repository": "web"}))
+    ));
+
+    let new = restarted(&user, &first);
+
+    assert_eq!(new["name"], "quick");
+    assert_eq!(
+        PathBuf::from(new["folder"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        workspace.join("web").canonicalize().unwrap(),
+        "in the repository it ran in"
+    );
+    let second = new["run"].as_str().unwrap().to_owned();
+    eventually("its output", || {
+        user.call("run.output", json!({"run": second})).unwrap()["output"] == "in web"
+    });
+}
+
+#[test]
+fn a_double_restart_starts_one_run() {
+    let user = User::with_fake_agent().with_fake_escalation();
+    let (agent, mcp, _) = session(&user);
+    let first = start(&mcp, "stubborn");
+
+    let (one, other) = std::thread::scope(|scope| {
+        let one = scope.spawn(|| user.call("run.restart", json!({"run": first})));
+        // The first restart waits for the stop's grace period: the second comes during it.
+        std::thread::sleep(Duration::from_millis(700));
+        let other = user.call("run.restart", json!({"run": first}));
+        (one.join().unwrap(), other)
+    });
+
+    let refused = other.unwrap_err();
+    assert_eq!(refused.0, "refused", "{refused:?}");
+    assert!(refused.1.contains("is being restarted"), "{refused:?}");
+    let new = one.unwrap()["run"].clone();
+    let all = listed(&user, &agent);
+    assert_eq!(all.len(), 2, "the first and one new run: {all:?}");
+    user.call("run.stop", json!({"run": new["run"]})).unwrap();
+}
+
+#[test]
+fn a_restart_that_fails_after_the_stop_tells_the_agent() {
+    let user = User::with_fake_agent().with_fake_escalation();
+    let (_, mcp, workspace) = session(&user);
+    let first = start(&mcp, "server");
+    std::fs::remove_file(workspace.join("server.sh")).unwrap();
+
+    let failed = user.call("run.restart", json!({"run": first})).unwrap_err();
+
+    assert_eq!(failed.0, "refused", "{failed:?}");
+    let before = user.call("run.output", json!({"run": first})).unwrap();
+    assert_eq!(before["state"], "stopped", "the stop happened: {before}");
+    let prompt = prompted(&user, &["[flottille:command-ended]", &first, "restart"]);
+    assert!(prompt.contains("stopped by the user"), "{prompt}");
+    assert!(prompt.contains("could not"), "{prompt}");
+    assert!(prompt.contains("./server.sh"), "{prompt}");
+}
+
+#[test]
+fn a_command_of_an_ended_agent_restarts_as_the_user_s() {
+    let user = User::with_fake_agent().with_fake_escalation();
+    let (agent, mcp, workspace) = session(&user);
+    let first = run_id(&ok(mcp.call("run", json!({"task": "quick"}))));
+    user.call("agent.stop", json!({"agent": agent})).unwrap();
+
+    let answer = user.call("run.restart", json!({"run": first})).unwrap();
+
+    let new = &answer["run"];
+    assert_eq!(new["agent"], Value::Null, "it is the user's now");
+    assert_eq!(new["name"], "quick");
+    assert_eq!(
+        PathBuf::from(new["folder"].as_str().unwrap())
+            .canonicalize()
+            .unwrap(),
+        workspace.canonicalize().unwrap()
+    );
+    let said = answer["notice"].as_str().unwrap_or_default();
+    assert!(said.contains(&agent) && said.contains("ended"), "{answer}");
+    let second = new["run"].as_str().unwrap().to_owned();
+    eventually("its output", || {
+        user.call("run.output", json!({"run": second})).unwrap()["output"] == "quick"
+    });
 }

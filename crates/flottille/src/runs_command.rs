@@ -51,6 +51,9 @@ pub fn run(paths: &Paths, action: RunsAction) -> Result<()> {
                 Some(_) => println!("Run {run} restarted as {new}; its agent is told."),
                 None => println!("Run {run} restarted as {new}."),
             }
+            if let Some(notice) = restarted["notice"].as_str() {
+                println!("{notice}.");
+            }
         }
     }
     Ok(())
