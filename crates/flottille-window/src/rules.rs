@@ -9,22 +9,29 @@
 //! The same editor holds the Auto judge's guidance in Settings (`judge.show`, `judge.set`,
 //! `judge.reset`), read at each judgement: a change reaches the next one.
 
-use flottille_ui::{Button, Section, Toast, palette, presence_of, space, toast};
+use flottille_ui::{
+    Button, Icon, Section, Switch, Toast, hoverable, icon, palette, presence, presence_of, space,
+    toast, turning,
+};
 use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::{
     AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement,
     Render, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
-    TestSupportExt as _, WeakEntity, Window, div, px,
+    TestSupportExt as _, Transformation, WeakEntity, Window, div, px, radians,
 };
 use serde_json::Value;
 
 use crate::actions::Command;
 use crate::commands::{editor_style, perform_later};
+use crate::settings::Reveal;
 use crate::shell::Shell;
 
 /// What the editor says of when a change takes effect.
 pub const REACH: &str = "A change reaches the agents created from now on; an agent already \
                          created keeps the rules it was created with.";
+
+/// What a project's editor says when its text starts with the global one.
+pub const REPEATS: &str = "These rules repeat the global ones; you can remove that part.";
 
 /// What the judge's editor says of when a change takes effect.
 pub const JUDGE_REACH: &str = "A change reaches the next judgement. Calls that always come to you \
@@ -44,8 +51,17 @@ pub enum Source {
 /// The rules as the daemon says them (`rules.show`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Shown {
+    /// What the editor holds: for a project, its own rules, empty when it has none.
     pub text: String,
     pub source: Source,
+    /// What every project shares: the user's rules, else Flottille's default (`Source::Global`
+    /// or `Source::Default`).
+    pub global: String,
+    pub global_source: Source,
+    /// The project gets its own rules alone.
+    pub alone: bool,
+    /// The project's text starts with the global one, which its agents get once.
+    pub repeats: bool,
     /// Why the stored text was cut to the limit: edited by hand past it.
     pub cut: Option<String>,
     /// Why the judge cannot follow the stored guidance (`judge.show`): every judgement fails,
@@ -62,6 +78,13 @@ impl Shown {
                 Some("global") => Source::Global,
                 _ => Source::Default,
             },
+            global: value["global"].as_str().unwrap_or_default().to_owned(),
+            global_source: match value["global_source"].as_str() {
+                Some("global") => Source::Global,
+                _ => Source::Default,
+            },
+            alone: value["alone"].as_bool().unwrap_or(false),
+            repeats: value["repeats"].as_bool().unwrap_or(false),
             cut: value["cut"].as_str().map(str::to_owned),
             error: value["error"].as_str().map(str::to_owned),
         }
@@ -81,6 +104,8 @@ pub struct RulesEditor {
     waiting: bool,
     /// What waits is a reset.
     resetting: bool,
+    /// The global rules above a project's editor are unfolded.
+    global_open: bool,
     problem: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
 }
@@ -95,6 +120,7 @@ impl RulesEditor {
             shown: None,
             waiting: false,
             resetting: false,
+            global_open: false,
             problem: None,
             _subscriptions: Vec::new(),
         }
@@ -165,27 +191,60 @@ impl RulesEditor {
         }
     }
 
-    /// Whether Save has something to write: the text differs from what this level stores, not
-    /// from what is shown. A project that follows the user's rules stores none, so their very
-    /// text can be saved as its own; a text cut to the limit differs from what is stored too.
+    /// Whether Save has something to write: the text differs from what this level stores. The
+    /// user's rules can be saved as they are over the default they show; a text cut to the limit
+    /// differs from what is stored too. A project stores nothing until it is given a text, which
+    /// the editor shows empty.
     pub fn savable(&self, cx: &gpui_kit::App) -> bool {
         let Some(shown) = &self.shown else {
             return false;
         };
         self.typed(cx).is_some()
             && (self.is_edited(cx)
-                || !self.is_own()
+                || (self.project.is_none() && !self.is_own())
                 || shown.cut.is_some()
                 || shown.error.is_some())
     }
 
-    /// Whether Reset to default has something to remove: rules of its own at this level.
+    /// Whether Reset to default has something to remove: rules of its own at this level, or a
+    /// project's `rules_alone`.
     pub fn is_own(&self) -> bool {
         let own = match self.project {
             Some(_) => Source::Project,
             None => Source::Global,
         };
-        self.shown.as_ref().is_some_and(|shown| shown.source == own)
+        self.shown
+            .as_ref()
+            .is_some_and(|shown| shown.source == own || shown.alone)
+    }
+
+    /// Whether the project's agents get its rules alone.
+    pub fn is_alone(&self) -> bool {
+        self.shown.as_ref().is_some_and(|shown| shown.alone)
+    }
+
+    /// Whether the global rules above a project's editor are unfolded.
+    pub fn is_global_open(&self) -> bool {
+        self.global_open
+    }
+
+    pub fn toggle_global(&mut self, cx: &mut Context<Self>) {
+        self.global_open = !self.global_open;
+        cx.notify();
+    }
+
+    /// Makes the project's agents get its rules alone, or the global ones too.
+    pub fn set_alone(&mut self, alone: bool, cx: &mut Context<Self>) {
+        let Some(project) = self.project.clone() else {
+            return;
+        };
+        if self.waiting || self.is_alone() == alone {
+            return;
+        }
+        self.waiting = true;
+        self.problem = None;
+        perform_later(&self.shell, Command::RulesAlone { project, alone }, cx);
+        cx.notify();
     }
 
     fn make_field(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<TextareaState> {
@@ -195,6 +254,8 @@ impl RulesEditor {
                     .auto_grow(8, 18)
                     .placeholder(if self.judge {
                         "how the judge should weigh a call"
+                    } else if self.project.is_some() {
+                        "what is particular to this project"
                     } else {
                         "how your agents should work"
                     });
@@ -303,8 +364,7 @@ impl RulesEditor {
             (false, None, Some(Source::Global)) => "your own",
             (false, None, Some(_)) => "Flottille's default",
             (false, Some(_), Some(Source::Project)) => "this project's own",
-            (false, Some(_), Some(Source::Global)) => "your rules for every project",
-            (false, Some(_), Some(Source::Default)) => "Flottille's default",
+            (false, Some(_), Some(_)) => "none of its own",
         }
     }
 
@@ -313,7 +373,9 @@ impl RulesEditor {
     fn footer(&self) -> &'static str {
         match (self.judge, &self.project, self.is_own()) {
             (true, _, _) => JUDGE_REACH,
-            (false, Some(_), false) => "Edit the text to give the project rules of its own.",
+            (false, Some(_), false) => {
+                "Write the project's rules: they come after the global ones."
+            }
             (false, _, _) => REACH,
         }
     }
@@ -398,7 +460,8 @@ impl Render for RulesEditor {
             ),
             (false, Some(_)) => (
                 "Rules",
-                "How the project's agents work. A change reaches the agents created from now on.",
+                "How the project's agents work, after your rules for every project. A change \
+                 reaches the agents created from now on.",
                 "rules",
             ),
             (false, None) => (
@@ -407,10 +470,117 @@ impl Render for RulesEditor {
                 "rules",
             ),
         };
+        let project_part = self.project.is_some().then(|| {
+            let shown = self.shown.clone();
+            let alone = shown.as_ref().is_some_and(|shown| shown.alone);
+            let global = shown.as_ref().map(|shown| {
+                let name = match shown.global_source {
+                    Source::Global => "Your rules for every project",
+                    _ => "Flottille's default rules",
+                };
+                (name, shown.global.clone())
+            });
+            let open = self.global_open;
+            let turned = turning(id("global-chevron"), open, window, cx);
+            let toggle = hoverable(
+                div()
+                    .id(id("global-toggle"))
+                    .aria_label(match &global {
+                        Some((name, _)) => format!("{name}, read only"),
+                        None => "Global rules".to_owned(),
+                    })
+                    .flex()
+                    .items_center()
+                    .gap(space::XS)
+                    .cursor_pointer()
+                    .text_size(px(12.5))
+                    .child(icon(Icon::Chevron).size(px(12.)).with_transformation(
+                        Transformation::rotate(radians(-std::f32::consts::FRAC_PI_2 * turned)),
+                    ))
+                    .child(match &global {
+                        Some((name, _)) => SharedString::from(*name),
+                        None => SharedString::from("Global rules"),
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_global(cx))),
+                move |d, t| d.text_color(flottille_ui::color::mix(p.faint, p.text, t)),
+            );
+            let shell = self.shell.clone();
+            let body = div()
+                .flex()
+                .flex_col()
+                .gap(space::SM)
+                .pl(space::LG)
+                .child(
+                    div()
+                        .id(id("global-text"))
+                        .px(space::MD)
+                        .py(space::SM)
+                        .rounded(px(10.))
+                        .bg(p.field)
+                        .border_1()
+                        .border_color(p.line)
+                        .text_size(px(12.5))
+                        .line_height(px(19.))
+                        .text_color(p.mute)
+                        .child(global.map(|(_, text)| text).unwrap_or_default())
+                        .test_support(),
+                )
+                .child(div().flex().child(
+                    Button::quiet(id("global-edit"), "Edit them in Settings").on_click(
+                        move |_, window, cx| {
+                            shell
+                                .update(cx, |shell, cx| {
+                                    shell.open_settings_at(Reveal::Rules, window, cx)
+                                })
+                                .ok();
+                        },
+                    ),
+                ));
+            let waiting = self.waiting || shown.is_none();
+            let switch = Switch::new(id("alone"), alone, "Use only this project's rules")
+                .hint("Your rules for every project are left out for this project's agents.")
+                .disabled(waiting)
+                .on_click(cx.listener(move |this, _, _, cx| this.set_alone(!alone, cx)));
+            (
+                toggle,
+                presence(id("global-block"), open, body).gap(space::MD),
+                switch,
+            )
+        });
+        let (global_toggle, global_body, alone_switch) = match project_part {
+            Some((toggle, body, switch)) => (Some(toggle), Some(body), Some(switch)),
+            None => (None, None, None),
+        };
+        let note = move |id: ElementId| {
+            move |said: SharedString| {
+                div()
+                    .id(id.clone())
+                    .aria_label(said.clone())
+                    .text_size(px(12.5))
+                    .text_color(p.mute)
+                    .child(said)
+                    .test_support()
+                    .into_any_element()
+            }
+        };
         Section::new(section, title)
             .tag(self.origin())
             .sentence(sentence)
+            .children(global_toggle)
+            .children(global_body)
+            .children(alone_switch)
             .child(text)
+            .child(
+                presence_of(
+                    id("repeats-block"),
+                    self.shown
+                        .as_ref()
+                        .filter(|shown| shown.repeats)
+                        .map(|_| SharedString::from(REPEATS)),
+                    note(id("repeats")),
+                )
+                .gap(space::MD),
+            )
             .child(
                 presence_of(
                     id("cut-block"),

@@ -688,6 +688,17 @@ impl Shell {
                 }
             }
             Update::TextChanged { project, .. } => {
+                // A project's editor shows the global rules above its own.
+                if project.is_none()
+                    && let Some(open) = self
+                        .project_settings
+                        .as_ref()
+                        .map(|page| page.read(cx).name().to_owned())
+                {
+                    self.actions.send(Command::RulesRead {
+                        project: Some(open),
+                    });
+                }
                 self.actions.send(Command::RulesRead { project })
             }
             // Only the open page's link is listened to: what an older one sends is dropped.
