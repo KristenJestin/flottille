@@ -178,8 +178,13 @@ and refuse it with `refused: X is outside this agent's place: …`, unless the u
 A path is resolved this way:
 
 - relative to the place's top, or to a repository's folder when the call names `repository`
-  (one of the project's repositories by its path, else
-  `refused: the project has no repository X: it has …`); `~` is the home folder;
+  (one of the project's repositories by its path, never a folder inside one; `.` is the project
+  folder itself, and the only repository of a place needs no `repository` at all). A name that is
+  none is refused with the repositories (``refused: the project has no repository X: it has `.`
+  (the project folder itself), api``), and a folder of one with the field that takes a folder
+  (``refused: apps/front is a folder of the repository `.` (the project folder itself), not a
+  repository: give `path: "apps/front"` ``; `glob: "apps/front/**"` for `search`, the folder in
+  the command line for `run`, which have no `path`); `~` is the home folder;
 - then the real path, on the disk, in the order the kernel takes it: every link is followed (at
   most 40, as Linux does), and each `..` steps up from where the links before it led, so
   `src/cfg/../x` is beside where `src/cfg` leads, never `src/x` when `src/cfg` is a link. A
@@ -462,14 +467,20 @@ pending requests.
   subscription. A pull request merged or closed, a repository with no forge or no pull request,
   and `number` are refused. **`unsubscribe {workspace?, repository?}`** cancels the agent's
   subscriptions to them, every one when it names none.
-- **`create`, `merge`, `checks` `{workspace?, repository, …}`**: opens the pull request of a
+- **`create`, `merge`, `checks` `{workspace?, repository?, …}`** (`repository` is needed when the
+  workspace has several, and the refusal lists them): opens the pull request of a
   workspace's branch (`title`, `body`, `draft`, with the project's reviewers), merges it by
   `method`, `squash` (the default), `merge` or `rebase` (refused when no check ran on it or all were skipped, while its
   checks fail or run or a review asks for changes, unless `waive` gives the
   user's words, which holds the merge for their approval), or re-runs the failed jobs of its last
   commit's pipelines (`docs/commands.md`, "`forge`"). The branch is the one the repository's
   worktree is on now (`docs/workspaces.md`, "The branch"); `create` on a detached HEAD is refused
-  (`refused: api is on no branch (detached at 1a2b3c4): switch to a branch first`).
+  (`refused: api is on no branch (detached at 1a2b3c4): switch to a branch first`). `create`
+  never pushes: it reads, without fetching, whether the remote-tracking ref of the branch
+  (`refs/remotes/<remote>/<branch>`, which a push leaves, with or without `-u`) exists and holds
+  the branch's last commit, and refuses otherwise (`refused: app/login is not on origin yet: push
+  the branch first: git push -u origin app/login`, or `… is 2 commit(s) ahead of origin: …`); the
+  agent's `run` of `git push` goes through the gate as any push.
 - **`comment {number, repository?, body}`** posts a comment on a pull request of a repository of
   the place; **`edit {number, repository?, title?, body?}`** changes its title or description, at
   least one of them (`gh pr comment`, `gh pr edit`; `bkt pr comment --text`, `bkt pr edit --title
