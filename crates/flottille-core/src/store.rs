@@ -1,5 +1,6 @@
 //! The store: one SQLite file, its schema brought up to date by numbered migrations.
 
+use std::cell::RefCell;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -2601,6 +2602,7 @@ impl Store {
     /// already applied never twice, as the store's own are. A migration is never edited once
     /// released.
     pub fn migrate_extension(&mut self, name: &str, migrations: &[&str]) -> Result<()> {
+        let prefix = format!("ext_{name}_");
         let transaction = self
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -2620,10 +2622,11 @@ impl Store {
             )));
         }
         {
-            let _confinement = Confinement::enter(&transaction, &self.confined, name);
+            let confinement = Confinement::enter(&transaction, &self.confined, prefix)?;
             for migration in &migrations[applied..] {
                 transaction.execute_batch(migration)?;
             }
+            confinement.check(&transaction)?;
         }
         transaction.execute(
             "INSERT INTO extension_schemas (name, applied) VALUES (?1, ?2) \
@@ -2637,9 +2640,10 @@ impl Store {
     /// The space of the extension `name`: one transaction over its own tables, in which its events
     /// are stored with the change they say. Nothing is kept unless it is committed.
     pub fn space(&mut self, name: &str) -> Result<Space<'_>> {
+        let prefix = format!("ext_{name}_");
         let transaction = self.connection.transaction()?;
         Ok(Space {
-            confinement: Confinement::enter(&transaction, &self.confined, name),
+            confinement: Confinement::enter(&transaction, &self.confined, prefix)?,
             transaction,
         })
     }
@@ -2654,14 +2658,20 @@ fn within(prefix: &str, context: &AuthContext<'_>) -> Authorization {
     // Making or dropping a table reads and writes the schema's table, which holds no data and
     // which SQLite never lets a statement write by itself while `writable_schema` is off; pragmas
     // are refused.
-    let own_or_schema = |name: &str| own(name) || name == "sqlite_master";
+    // Renaming one rewrites the temporary schema's table as well.
+    let own_or_schema =
+        |name: &str| own(name) || name == "sqlite_master" || name == "sqlite_temp_master";
+    // Renaming or dropping a table with `AUTOINCREMENT` finds and writes its row of
+    // `sqlite_sequence`, which also holds the core's counters: those are checked unchanged before anything is kept
+    // (`Confinement::check`).
+    let own_or_internal = |name: &str| own_or_schema(name) || name == "sqlite_sequence";
     let allowed = match context.action {
         AuthAction::CreateTable { table_name }
         | AuthAction::DropTable { table_name }
         | AuthAction::AlterTable { table_name, .. } => own(table_name),
         // `ALTER TABLE` checks the table it changed with `pragma_quick_check`.
         AuthAction::Read { table_name, .. } => {
-            own_or_schema(table_name) || table_name == "pragma_quick_check"
+            own_or_internal(table_name) || table_name == "pragma_quick_check"
         }
         AuthAction::Pragma {
             pragma_name: "quick_check",
@@ -2669,7 +2679,7 @@ fn within(prefix: &str, context: &AuthContext<'_>) -> Authorization {
         } => own(table_name),
         AuthAction::Insert { table_name }
         | AuthAction::Update { table_name, .. }
-        | AuthAction::Delete { table_name } => own_or_schema(table_name),
+        | AuthAction::Delete { table_name } => own_or_internal(table_name),
         // The index SQLite makes for a table's own `PRIMARY KEY` or `UNIQUE` is named by it.
         AuthAction::CreateIndex {
             index_name,
@@ -2691,6 +2701,8 @@ fn within(prefix: &str, context: &AuthContext<'_>) -> Authorization {
             trigger_name: name,
             table_name,
         } => own(name) && own(table_name),
+        // Renaming a table rebuilds its indexes, all of them the space's.
+        AuthAction::Reindex { index_name } => own(index_name),
         AuthAction::Select | AuthAction::Function { .. } | AuthAction::Recursive => true,
         _ => false,
     };
@@ -2705,32 +2717,96 @@ fn within(prefix: &str, context: &AuthContext<'_>) -> Authorization {
 struct Confinement {
     confined: Confined,
     prefix: String,
+    /// What is not the extension's, as it was when the core last let go: the schema of every
+    /// other table and the counters of `sqlite_sequence`.
+    outside: RefCell<Vec<String>>,
 }
 
 impl Confinement {
-    fn enter(connection: &Connection, confined: &Confined, name: &str) -> Confinement {
+    fn enter(connection: &Connection, confined: &Confined, prefix: String) -> Result<Confinement> {
         // A statement is authorized when it is prepared: none prepared outside the space is kept
         // for it to run.
         connection.flush_prepared_statement_cache();
+        let outside = RefCell::new(outside(connection, &prefix)?);
         let confinement = Confinement {
             confined: Arc::clone(confined),
-            prefix: format!("ext_{name}_"),
+            prefix,
+            outside,
         };
         confinement.set(Some(confinement.prefix.clone()));
-        confinement
+        Ok(confinement)
     }
 
     fn set(&self, prefix: Option<String>) {
         *self.confined.lock().unwrap_or_else(PoisonError::into_inner) = prefix;
     }
 
-    /// Runs `f` as the core, outside the confinement.
-    fn lifted<T>(&self, f: impl FnOnce() -> T) -> T {
+    /// Refuses what the authorizer cannot see: a table renamed out of the space (it is told the old
+    /// name alone), a core counter written, and a table of the space that references one outside
+    /// it, which a deletion of the core would cascade into, running its triggers unconfined.
+    fn check(&self, connection: &Connection) -> Result<()> {
         self.set(None);
-        let result = f();
+        let found = self.found(connection);
+        self.set(Some(self.prefix.clone()));
+        found
+    }
+
+    fn found(&self, connection: &Connection) -> Result<()> {
+        if outside(connection, &self.prefix)? != *self.outside.borrow() {
+            return Err(Error::Refused(format!(
+                "an extension changed what is not its own: only tables {}… are its",
+                self.prefix
+            )));
+        }
+        let references: Vec<(String, String)> = connection
+            .prepare(
+                "SELECT t.name, f.\"table\" FROM sqlite_master t, pragma_foreign_key_list(t.name) f \
+                 WHERE t.type = 'table'",
+            )?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let own = |name: &str| name.to_ascii_lowercase().starts_with(&self.prefix);
+        if let Some((table, target)) = references
+            .iter()
+            .find(|(table, target)| own(table) && !own(target))
+        {
+            return Err(Error::Refused(format!(
+                "{table} references {target}: a table of an extension references its own alone"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Runs `f` as the core, outside the confinement, once what the extension did is checked; what
+    /// the core changes there is the new state to check against.
+    fn lifted<T>(&self, connection: &Connection, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.check(connection)?;
+        self.set(None);
+        let result = f().and_then(|value| {
+            *self.outside.borrow_mut() = outside(connection, &self.prefix)?;
+            Ok(value)
+        });
         self.set(Some(self.prefix.clone()));
         result
     }
+}
+
+/// The schema of every table that is not the space's, its indexes and triggers, and the counters
+/// of `sqlite_sequence` that are not the space's, read as the core.
+fn outside(connection: &Connection, prefix: &str) -> Result<Vec<String>> {
+    let rows: Vec<(String, String)> = connection
+        .prepare(
+            "SELECT tbl_name, type || ' ' || name || ' ' || ifnull(sql, '') FROM sqlite_master \
+             UNION ALL SELECT name, 'sequence ' || name || ' ' || seq FROM sqlite_sequence \
+             ORDER BY 2",
+        )?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows
+        .into_iter()
+        .filter(|(table, _)| !table.to_ascii_lowercase().starts_with(prefix))
+        .map(|(_, row)| row)
+        .collect())
 }
 
 impl Drop for Confinement {
@@ -2753,8 +2829,9 @@ impl Space<'_> {
     }
 
     pub fn append_event(&self, name: &str, data: Value) -> Result<Event> {
-        self.confinement
-            .lifted(|| append_event(&self.transaction, name, data))
+        self.confinement.lifted(&self.transaction, || {
+            append_event(&self.transaction, name, data)
+        })
     }
 
     pub fn commit(self) -> Result<()> {
@@ -2762,7 +2839,10 @@ impl Space<'_> {
             confinement,
             transaction,
         } = self;
+        let checked = confinement.check(&transaction);
+        // Before the transaction, kept or rolled back outside the confinement.
         drop(confinement);
+        checked?;
         Ok(transaction.commit()?)
     }
 }
@@ -5555,6 +5635,114 @@ mod tests {
 
         assert_eq!(notes(&mut store), ["kept"]);
         assert_eq!(store.last_seq().unwrap(), 1);
+    }
+
+    #[test]
+    fn an_extension_can_drop_and_rename_its_own_tables() {
+        let mut store = Store::open_in_memory().unwrap();
+        let log =
+            "CREATE TABLE ext_test_log (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT) STRICT;
+                   CREATE INDEX ext_test_log_text ON ext_test_log (text);
+                   INSERT INTO ext_test_log (text) VALUES ('kept');";
+        // The rebuild SQLite's documentation gives for a change `ALTER TABLE` cannot make.
+        let rebuild = "CREATE TABLE ext_test_log_new (
+                           id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, at INTEGER
+                       ) STRICT;
+                       INSERT INTO ext_test_log_new (id, text) SELECT id, text FROM ext_test_log;
+                       DROP TABLE ext_test_log;
+                       ALTER TABLE ext_test_log_new RENAME TO ext_test_log;
+                       CREATE INDEX ext_test_log_text ON ext_test_log (text);";
+        let gone = "CREATE TABLE ext_test_gone (id INTEGER PRIMARY KEY AUTOINCREMENT) STRICT;
+                    INSERT INTO ext_test_gone DEFAULT VALUES;
+                    DROP TABLE ext_test_gone;";
+
+        store
+            .migrate_extension("test", &[log, rebuild, gone])
+            .unwrap();
+
+        let space = store.space("test").unwrap();
+        space
+            .tables()
+            .execute("INSERT INTO ext_test_log (text, at) VALUES ('new', 1)", [])
+            .unwrap();
+        let texts: Vec<String> = space
+            .tables()
+            .prepare("SELECT text FROM ext_test_log ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(texts, ["kept", "new"]);
+    }
+
+    #[test]
+    fn an_extension_cannot_rename_a_table_out_of_its_space() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.migrate_extension("test", &[TABLE]).unwrap();
+        let before = schema(&store);
+
+        for name in ["notes", "ext_other_notes"] {
+            let rename = format!("ALTER TABLE ext_test_notes RENAME TO {name};");
+            let error = store
+                .migrate_extension("test", &[TABLE, &rename])
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("not its own"),
+                "{rename}: {error}"
+            );
+
+            let space = store.space("test").unwrap();
+            space.tables().execute_batch(&rename).unwrap();
+            let error = space.commit().unwrap_err();
+            assert!(
+                error.to_string().contains("not its own"),
+                "{rename}: {error}"
+            );
+        }
+
+        assert_eq!(schema(&store), before);
+    }
+
+    #[test]
+    fn an_extension_cannot_reset_a_core_counter() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.append_event("test.one", json!({})).unwrap();
+        store.migrate_extension("test", &[TABLE]).unwrap();
+        let reset = "UPDATE sqlite_sequence SET seq = 0 WHERE name = 'events'";
+
+        let space = store.space("test").unwrap();
+        space.tables().execute_batch(reset).unwrap();
+        assert!(space.append_event("test.noted", json!({})).is_err());
+        drop(space);
+        let space = store.space("test").unwrap();
+        space.tables().execute_batch(reset).unwrap();
+        assert!(space.commit().is_err());
+
+        assert_eq!(store.append_event("test.two", json!({})).unwrap().seq, 2);
+    }
+
+    #[test]
+    fn an_extension_s_table_cannot_reference_a_core_table() {
+        let mut store = Store::open_in_memory().unwrap();
+
+        let result = store.migrate_extension(
+            "test",
+            &["CREATE TABLE ext_test_owned (
+                   id INTEGER PRIMARY KEY, agent TEXT REFERENCES agents (id) ON DELETE CASCADE
+               ) STRICT;"],
+        );
+
+        assert!(result.is_err());
+        store
+            .migrate_extension(
+                "test",
+                &[
+                    TABLE,
+                    "CREATE TABLE ext_test_tags (note INTEGER REFERENCES ext_test_notes (id)) STRICT;",
+                ],
+            )
+            .unwrap();
     }
 
     #[test]
