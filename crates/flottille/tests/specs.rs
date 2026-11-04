@@ -587,6 +587,35 @@ fn each_of_the_three_modes_is_stored_with_the_spec() {
 }
 
 #[test]
+fn a_null_inside_a_setting_s_value_is_refused_by_extension_set() {
+    let user = User::new();
+    project(&user, "app");
+    turn(&user, true, None);
+    let before = std::fs::read_to_string(extensions_file(&user)).unwrap();
+    let project_before = std::fs::read_to_string(user.project_file("app")).unwrap();
+
+    for project in [None, Some("app")] {
+        let (code, message) = user
+            .call(
+                "extension.set",
+                json!({"name": "specs", "project": project, "settings": {"language": ["fr", null]}}),
+            )
+            .unwrap_err();
+        assert_eq!(code, "refused");
+        assert!(message.contains("language: "), "{message}");
+    }
+
+    assert_eq!(
+        std::fs::read_to_string(extensions_file(&user)).unwrap(),
+        before
+    );
+    assert_eq!(
+        std::fs::read_to_string(user.project_file("app")).unwrap(),
+        project_before
+    );
+}
+
+#[test]
 fn a_spec_is_written_in_the_project_s_language_or_the_user_s() {
     let user = User::new()
         .with_env("LC_ALL", "")
