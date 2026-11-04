@@ -777,3 +777,24 @@ fn spec_commands_are_refused_where_specs_is_off() {
         "{said}"
     );
 }
+
+#[test]
+fn an_array_of_tables_in_extensions_toml_is_refused() {
+    let user = User::new();
+    project(&user, "app");
+    std::fs::create_dir_all(user.path("config/flottille")).unwrap();
+    std::fs::write(
+        extensions_file(&user),
+        "[specs]\nenabled = true\n\n[[specs.language]]\nvalue = \"fr\"\n",
+    )
+    .unwrap();
+
+    let listed = user.call("extension.list", json!({})).unwrap();
+
+    let error = specs(&listed)["error"].as_str().unwrap();
+    assert!(
+        error.starts_with("extensions.toml: specs.language: "),
+        "{error}"
+    );
+    assert_eq!(specs(&listed)["enabled"], false);
+}

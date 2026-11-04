@@ -202,16 +202,18 @@ fn values(extension: &Extension, table: &Map<String, Value>, at: &str) -> Result
 }
 
 /// `extensions.toml` as a TOML item turned into JSON, for the checks every table goes through.
-fn json_of(item: &toml_edit::Item) -> Option<Value> {
+/// `at` is how the item is named in an error.
+fn json_of(item: &toml_edit::Item, at: &str) -> Result<Value, String> {
     match item {
-        toml_edit::Item::Value(value) => Some(json_of_value(value)),
-        toml_edit::Item::Table(table) => Some(Value::Object(
-            table
-                .iter()
-                .filter_map(|(key, item)| Some((key.to_owned(), json_of(item)?)))
-                .collect(),
-        )),
-        toml_edit::Item::ArrayOfTables(_) | toml_edit::Item::None => None,
+        toml_edit::Item::Value(value) => Ok(json_of_value(value)),
+        toml_edit::Item::Table(table) => table
+            .iter()
+            .map(|(key, item)| Ok((key.to_owned(), json_of(item, &format!("{at}.{key}"))?)))
+            .collect::<Result<Map<_, _>, String>>()
+            .map(Value::Object),
+        toml_edit::Item::ArrayOfTables(_) | toml_edit::Item::None => {
+            Err(format!("{at}: an array of tables is not taken"))
+        }
     }
 }
 
@@ -242,7 +244,7 @@ fn parse(text: &str) -> Result<BTreeMap<&'static str, Values>, String> {
     let mut all = BTreeMap::new();
     for (name, item) in document.iter() {
         let extension = find(name).map_err(refuse)?;
-        let Some(Value::Object(table)) = json_of(item) else {
+        let Value::Object(table) = json_of(item, name).map_err(refuse)? else {
             return Err(refuse(format!("{name}: must be a table")));
         };
         all.insert(
