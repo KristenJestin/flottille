@@ -3451,23 +3451,30 @@ enum AgentFolder {
 }
 
 /// The agent's folder a path is in, if any. The home's is found where the path leads too (every
-/// link and `..` followed), the place's own folder being the home included; any other is found
-/// by its name. When the home is not known, every one is taken for the home's.
+/// link and `..` followed), the place's own folder being the home included, and where a link it
+/// is leads (dotfiles); any other is found by its name. When the home is not known, or the path
+/// goes through a process's folder in `/proc`, which leads anywhere, every one is the home's.
 fn agent_folder(home: Option<&Path>, path: &Resolved) -> Option<AgentFolder> {
     let seen = seen(path);
-    let homes: Vec<PathBuf> = home
-        .into_iter()
-        .flat_map(|home| [Some(home.to_owned()), place::real_path(home).ok()])
-        .flatten()
-        .collect();
     for entry in AGENT_FOLDERS {
+        let homes: Vec<PathBuf> = home
+            .into_iter()
+            .flat_map(|home| [Some(home.to_owned()), place::real_path(home).ok()])
+            .flatten()
+            .flat_map(|home| {
+                let folder = home.join(entry);
+                [place::real_path(&folder).ok(), Some(folder)]
+            })
+            .flatten()
+            .collect();
         if seen
             .iter()
-            .any(|path| homes.iter().any(|home| path.starts_with(home.join(entry))))
+            .any(|path| homes.iter().any(|folder| path.starts_with(folder)))
         {
             return Some(AgentFolder::Login(format!("~/{entry}")));
         }
     }
+    let anywhere = matches!(path.unfollowed, Some(Unfollowed::Through(_)));
     let named = if path.inside {
         vec![PathBuf::from(&path.shown)]
     } else {
@@ -3479,7 +3486,7 @@ fn agent_folder(home: Option<&Path>, path: &Resolved) -> Option<AgentFolder> {
             .iter()
             .position(|part| AGENT_FOLDERS.contains(&part.as_str()))?;
         let entry = &parts[at];
-        if home.is_none() {
+        if home.is_none() || anywhere {
             return Some(AgentFolder::Login(format!("~/{entry}")));
         }
         Some(
@@ -4482,6 +4489,69 @@ mod tests {
             fixture.run("cat src/.claude/settings.json"),
         ] {
             assert!(denied(&verdict), "{verdict:?}");
+        }
+    }
+
+    #[test]
+    fn a_proc_cwd_path_to_the_home_s_claude_json_is_refused() {
+        let fixture = Fixture::workspace();
+        let process = std::process::id();
+        for verdict in [
+            fixture.run(&format!("cat /proc/{process}/cwd/.claude.json")),
+            fixture.run("cat /proc/self/cwd/.claude.json"),
+            fixture.file("fs_read", &format!("/proc/{process}/cwd/.claude.json")),
+        ] {
+            assert!(
+                matches!(&verdict, Verdict::Deny(why) if why.contains("login")),
+                "{verdict:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_proc_cwd_path_to_the_home_s_claude_folder_is_refused() {
+        let fixture = Fixture::workspace();
+        let process = std::process::id();
+        for verdict in [
+            fixture.run(&format!("cat /proc/{process}/cwd/.claude/settings.json")),
+            fixture.run(&format!("cat /proc/{process}/root/.codex/config.toml")),
+            fixture.file(
+                "fs_read",
+                &format!("/proc/{process}/cwd/.claude/settings.json"),
+            ),
+        ] {
+            assert!(
+                matches!(&verdict, Verdict::Deny(why) if why.contains("login")),
+                "{verdict:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_target_of_a_linked_home_claude_folder_is_refused() {
+        let fixture = Fixture::workspace();
+        let home = fixture.grant.place.home.clone().unwrap();
+        made(&home.join("dotfiles/.claude/settings.json"));
+        made(&home.join("dotfiles/codex/config.toml"));
+        made(&home.join("dotfiles/claude.json"));
+        std::os::unix::fs::symlink(home.join("dotfiles/.claude"), home.join(".claude")).unwrap();
+        std::os::unix::fs::symlink(home.join("dotfiles/codex"), home.join(".codex")).unwrap();
+        std::os::unix::fs::symlink(home.join("dotfiles/claude.json"), home.join(".claude.json"))
+            .unwrap();
+        for path in [
+            "dotfiles/.claude/settings.json",
+            "dotfiles/codex/config.toml",
+            "dotfiles/claude.json",
+        ] {
+            for verdict in [
+                fixture.file("fs_read", &format!("../../home/{path}")),
+                fixture.run(&format!("cat ../../home/{path}")),
+            ] {
+                assert!(
+                    matches!(&verdict, Verdict::Deny(why) if why.contains("login")),
+                    "{path}: {verdict:?}"
+                );
+            }
         }
     }
 
