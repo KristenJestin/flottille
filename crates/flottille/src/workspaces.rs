@@ -2303,11 +2303,14 @@ struct Removing<'a> {
 
 impl<'a> Removing<'a> {
     fn new(daemon: &'a Daemon, agent: &str, workspace: &str) -> Self {
+        // Counted: a second removal refused early leaves the first one guarded.
         daemon
             .removing
             .lock()
             .unwrap()
-            .insert(agent.to_owned(), workspace.to_owned());
+            .entry(agent.to_owned())
+            .or_insert_with(|| (workspace.to_owned(), 0))
+            .1 += 1;
         Removing {
             daemon,
             agent: agent.to_owned(),
@@ -2317,7 +2320,13 @@ impl<'a> Removing<'a> {
 
 impl Drop for Removing<'_> {
     fn drop(&mut self) {
-        self.daemon.removing.lock().unwrap().remove(&self.agent);
+        let mut removing = self.daemon.removing.lock().unwrap();
+        if let Some((_, count)) = removing.get_mut(&self.agent) {
+            *count -= 1;
+            if *count == 0 {
+                removing.remove(&self.agent);
+            }
+        }
     }
 }
 
@@ -2329,7 +2338,7 @@ pub fn being_removed(daemon: &Daemon, agent: &str, tool: &str) -> Option<String>
         return None;
     }
     let removing = daemon.removing.lock().unwrap();
-    let workspace = removing.get(agent)?;
+    let (workspace, _) = removing.get(agent)?;
     Some(format!(
         "the workspace {workspace} is being removed: wait for the removal's answer"
     ))

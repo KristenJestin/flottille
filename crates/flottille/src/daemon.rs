@@ -144,9 +144,9 @@ pub struct Daemon {
     pub projects: Mutex<Projects>,
     /// The workspaces being prepared or removed: one at a time for each.
     pub preparing: Mutex<HashSet<i64>>,
-    /// The agents removing their own workspace, with its name: meanwhile they start nothing in
-    /// it (`workspaces::being_removed`).
-    pub removing: Mutex<HashMap<String, String>>,
+    /// The agents removing their own workspace, with its name and how many removals of it are
+    /// under way: meanwhile they start nothing in it (`workspaces::being_removed`).
+    pub removing: Mutex<HashMap<String, (String, usize)>>,
     /// What the setup steps running write, by workspace and step: they are read while they run
     /// and kept in the store once they ended.
     pub step_outputs: Mutex<HashMap<(i64, u32), Arc<workspaces::StepLive>>>,
