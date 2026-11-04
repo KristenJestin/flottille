@@ -767,7 +767,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   agent says only what it runs on, the others their name over what they run on and do; the composer's bar does not say
   it; under the composer's field, the provider is named and not changeable, and the model and
   effort pickers are the start composer's own: a change chosen while a turn runs waits for its end,
-  and a mark says it until the agent took it), its workspace (labelled lines: each repository with its changes, branch, commits ahead,
+  and a dot on its picker says it until the agent took it, its menu saying when it applies,
+  nothing under the bar), its workspace (labelled lines: each repository with its changes, branch, commits ahead,
   files not committed and setup steps played, its pull request, its ticket; one sentence for the
   repositories with no forge; its actions in a "⋯" menu, the same as the workspace's card, with
   Link a ticket… and Unlink the ticket) and facts, its runs, then, pinned at the very bottom and
@@ -866,6 +867,10 @@ The plan is cut into GitHub milestones; each ends on something the user can use.
    [`tickets.md`](tickets.md); every pull request and ticket of a project, kept up to date by the
    daemon, in [`items.md`](items.md).
 5. **Remote**: network transport, phone, other machines.
+
+Flottille's own features beyond its core (the Auto judge, the compaction, later specs, review and a
+handbook) are proposed to become extensions, declared and turned on by the user: a proposal,
+nothing built, in [`extensions.md`](extensions.md).
 
 ## 14. Defaults taken, to confirm
 

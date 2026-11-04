@@ -1,14 +1,15 @@
 //! What the session's root runs on, under its field: the provider (shown, never changed here: a
 //! provider change needs a new session of another CLI), and the model and effort pickers, the
 //! start composer's own (`composer::Pickers`). A change applies between turns: chosen while a turn
-//! runs it is held by the daemon and set before the next prompt, and a mark beside the pickers
-//! says so until the agent took it (`agent.options`, `docs/agents.md`, "The options").
+//! runs it is held by the daemon and set before the next prompt: the picker of what changes carries
+//! a dot until the agent took it, and its menu says when it applies (`agent.options`,
+//! `docs/agents.md`, "The options"). Nothing under the bar, so the composer keeps its height.
 
-use flottille_ui::motion::PANEL;
-use flottille_ui::{Align, Dropdown, MenuItem, fade, palette, space};
+use flottille_ui::motion::{HOVER, PANEL};
+use flottille_ui::{Align, Dropdown, MenuItem, fade, palette, section_label, space};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, Context, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
+    AnyElement, App, Context, InteractiveElement, IntoElement, ParentElement, Render, SharedString,
     StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, Window, div, px,
 };
 
@@ -29,9 +30,12 @@ pub struct Runs {
     pub working: bool,
 }
 
-/// What the mark says of a change waiting.
+/// What the picker's menu says of a change waiting.
 pub const AFTER_TURN: &str = "Applies after this turn";
 pub const WITH_NEXT: &str = "Applies with your next message";
+
+/// The id of the menu's line that says it.
+const APPLIES: &str = "session-options-applies";
 
 pub struct SessionOptions {
     shell: WeakEntity<Shell>,
@@ -156,14 +160,33 @@ impl SessionOptions {
         })
     }
 
+    /// The menu's rows: when a change of what it picks waits, a line that says when it applies
+    /// first.
     pub fn entries(&self, menu: Menu) -> Vec<Entry> {
         let pick = self.pick();
-        Pickers {
+        let rows = Pickers {
             providers: &self.providers,
             pick: &pick,
             project: (None, None),
         }
-        .entries(menu)
+        .entries(menu);
+        let when = self.waiting().filter(|_| self.waits(menu));
+        let applies = when.map(|when| Entry {
+            id: APPLIES.into(),
+            label: when.into(),
+            note: None,
+            on: false,
+            pick: None,
+        });
+        applies.into_iter().chain(rows).collect()
+    }
+
+    /// Whether a change of the model, or of the effort, waits.
+    fn waits(&self, menu: Menu) -> bool {
+        match menu {
+            Menu::Model => self.asked.model.is_some() || self.runs.pending.model.is_some(),
+            _ => self.asked.effort.is_some() || self.runs.pending.effort.is_some(),
+        }
     }
 
     /// Whether the model has efforts to choose among, once a session said them.
@@ -271,10 +294,19 @@ impl SessionOptions {
         }
     }
 
-    fn items(&self, menu: Menu, cx: &mut Context<Self>) -> Vec<MenuItem> {
+    fn items(&self, menu: Menu, cx: &mut Context<Self>) -> Vec<AnyElement> {
         self.entries(menu)
             .into_iter()
             .map(|entry| {
+                // When a change applies is a heading of the menu, not a choice: nothing to hover
+                // or press.
+                if entry.id == APPLIES {
+                    return div()
+                        .id(APPLIES)
+                        .test_support()
+                        .child(section_label(&entry.label, cx))
+                        .into_any_element();
+                }
                 let item = MenuItem::new(entry.id, entry.label).selected(entry.on);
                 let item = match entry.note {
                     Some(note) => item.note(note),
@@ -286,19 +318,23 @@ impl SessionOptions {
                     })),
                     None => item,
                 }
+                .into_any_element()
             })
             .collect()
     }
 
+    /// A picker, with the dot of a change waiting over its corner: it fades in and out over
+    /// `HOVER` and takes no room, so nothing around it moves.
     fn picker(
         &self,
         id: &'static str,
         menu: Menu,
         label: String,
+        window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Dropdown {
+    ) -> impl IntoElement + use<> {
         let items = self.items(menu, cx);
-        Dropdown::new(id, label)
+        let dropdown = Dropdown::new(id, label)
             .mono()
             .align(Align::Start)
             .width(px(280.))
@@ -306,7 +342,28 @@ impl SessionOptions {
             .on_toggle(Self::handler(cx, move |this, _, cx| {
                 this.toggle_menu(menu, cx)
             }))
-            .items(items)
+            .items(items);
+        let mark = match menu {
+            Menu::Model => "session-model-pending",
+            _ => "session-effort-pending",
+        };
+        let shown = fade(mark, self.waits(menu), HOVER, window, cx);
+        let acc = palette(cx).acc;
+        div().relative().child(dropdown).when(shown > 0.0, |d| {
+            d.child(
+                div()
+                    .id(mark)
+                    .absolute()
+                    .top(px(4.))
+                    .right(px(2.))
+                    .size(px(6.))
+                    .rounded_full()
+                    .bg(acc)
+                    .opacity(shown)
+                    .aria_label(SharedString::from("A change waits"))
+                    .test_support(),
+            )
+        })
     }
 }
 
@@ -317,7 +374,13 @@ impl Render for SessionOptions {
             .provider()
             .map(|provider| provider.title.clone())
             .unwrap_or_else(|| self.runs.provider.clone());
-        let model = self.picker("session-model-picker", Menu::Model, self.model_shown(), cx);
+        let model = self.picker(
+            "session-model-picker",
+            Menu::Model,
+            self.model_shown(),
+            window,
+            cx,
+        );
         // The effort picker comes and goes with the model's efforts: its room opens and it fades
         // in, folds and fades out; at rest it is its natural width.
         let efforts = fade(
@@ -330,7 +393,7 @@ impl Render for SessionOptions {
         let effort = (efforts > 0.0).then(|| {
             let label = self.effort_shown();
             let wide = px(EFFORT_FRAME + EFFORT_CHAR * label.chars().count() as f32);
-            let picker = self.picker("session-effort-picker", Menu::Effort, label, cx);
+            let picker = self.picker("session-effort-picker", Menu::Effort, label, window, cx);
             div()
                 .flex_none()
                 .opacity(efforts)

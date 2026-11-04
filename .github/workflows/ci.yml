@@ -186,6 +186,7 @@ jobs:
           name: release
           path: release
       - name: Publish
+        id: publish
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -212,6 +213,8 @@ jobs:
           fi
           case "$CHANNEL" in
             stable | beta)
+              # A stable release run again still records itself in dev's history, the step after.
+              if [ "$CHANNEL" = stable ]; then echo "record=true" >> "$GITHUB_OUTPUT"; fi
               if [ "$state" = published ]; then echo "::notice::$TAG is already published."; exit 0; fi
               if [ "$CHANNEL" = stable ]; then
                 # The mark the next betas count from: the head of dev this release squashed. The
@@ -242,3 +245,38 @@ jobs:
               fi
               ;;
           esac
+      # The squash on main never reaches dev: without a common base, the next release pull
+      # request conflicts on every file. A merge of the squash that keeps dev's tree (what
+      # `git merge -s ours` makes) gives it one, and changes no file. Made through the API, as
+      # this job runs no git; on dev's current head, which is still right if it moved, since
+      # dev's files are kept. Pushed with this job's token, it starts no run.
+      - name: Record the release in dev's history
+        if: steps.publish.outputs.record == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.build.outputs.version }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          message="chore(repo): record the $VERSION release in dev's history"
+          for attempt in 1 2 3; do
+            dev=$(gh api "repos/$GH_REPO/git/ref/heads/dev" --jq .object.sha)
+            # Recorded already (a run run again): the squash is in dev's history.
+            status=$(gh api "repos/$GH_REPO/compare/$GITHUB_SHA...$dev" --jq .status)
+            if [ "$status" = ahead ] || [ "$status" = identical ]; then
+              echo "::notice::$GITHUB_SHA is already in dev's history."; exit 0
+            fi
+            tree=$(gh api "repos/$GH_REPO/git/commits/$dev" --jq .tree.sha)
+            merge=$(gh api "repos/$GH_REPO/git/commits" -f message="$message" -f tree="$tree" \
+              -f "parents[]=$dev" -f "parents[]=$GITHUB_SHA" \
+              -f "author[name]=github-actions[bot]" \
+              -f "author[email]=41898282+github-actions[bot]@users.noreply.github.com" --jq .sha)
+            # Not forced: a dev that moved meanwhile refuses it, and the merge is made again.
+            if gh api -X PATCH "repos/$GH_REPO/git/refs/heads/dev" -f sha="$merge" -F force=false > /dev/null 2> "$RUNNER_TEMP/record.err"; then
+              echo "::notice::$VERSION recorded in dev's history: $merge."; exit 0
+            fi
+            cat "$RUNNER_TEMP/record.err" >&2
+          done
+          # The commands are in docs/releases.md: this job holds no git command line, not even in a message.
+          echo "::error::$TAG is published, but dev does not hold it, and the next release pull request will conflict on every file. Record it by hand on dev, as docs/releases.md says (\"If the record fails\"): a merge -s ours of $GITHUB_SHA with the message \"$message\", pushed to dev."
+          exit 1
