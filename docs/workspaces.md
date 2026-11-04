@@ -237,15 +237,41 @@ deleted**, nor anything asked of the forge but the pull request's state. Work th
 not merged is not lost by the removal: the workspace is removed and its branch kept.
 
 A root agent removes a workspace the same way, with `workspace` `remove`, always held for the
-user, its card saying what would be lost (`docs/tools.md`, "The workspace"); never the one it
-works in. What would be lost refuses it unless the user's answer said to discard it: then nothing
+user, its card saying what would be lost (`docs/tools.md`, "The workspace"); the one it works in
+too, once its work is done ("Its own workspace", below). What would be lost refuses it unless the user's answer said to discard it: then nothing
 is checked for loss, each worktree is removed with `git worktree remove --force`, and the folder
 with what it held. Its landed branches are then deleted as above, and the others kept, which its
 answer says. It is refused, nothing touched, while the
 workspace is in use outside the agent's tree (`docs/design.md` §5.1): an agent of another tree not
 ended that works in it, or a command run of another tree still running in it, each named; the
-tree's own agents and command runs are no obstacle. The user's `flottille workspace remove` does not check
-this.
+tree's own command runs are no obstacle, nor its agents that ended; its other agents not ended
+are. The user's `flottille workspace remove` does not check this.
+
+### Its own workspace
+
+A root removes the workspace it works in when its work is done (a child removes none), held for
+the user whatever the mode, Full included. Its card says, besides what would be lost, the commands
+of its tree running in it that are stopped (`Stop the commands of this session running in it:
+pnpm dev:api, pnpm dev:front`) and that the session then goes on in the project's folder. Once
+the user allows it, in this order:
+
+1. what the removal of any workspace refuses, nothing touched: another agent not ended works in
+   it, of the tree or not, or a command run of another tree runs there; it is being prepared;
+2. the tree's command runs in it are stopped, as `run.stop` stops one;
+3. the checks and the removal above: refused while something would be lost, unless the answer
+   said to discard it;
+4. in the one store write that forgets the workspace, the agent's place becomes the project's
+   folder (`main`), its instructions saying so for its next process, with `workspace.removed`
+   and `agent.moved` (`docs/events.md`); then its running session's grant works in `main`;
+5. the answer tells the agent: `The workspace login is removed; you now work in the project's
+   folder (main), <folder>`.
+
+A refusal at 1 or 3 leaves the session in its workspace (its commands stopped at 2 stay stopped).
+A removal that fails halfway (a worktree git cannot remove) keeps the workspace's record, and the
+agent in it, as it keeps it for the user's removal; the agent is moved only by the write that
+forgets the workspace, so it is never left with no place. Its process goes on: its folder is gone
+from under it, but it reaches nothing but through Flottille's tools, which work in `main`; the
+next one starts in the project's folder.
 
 ## Git
 

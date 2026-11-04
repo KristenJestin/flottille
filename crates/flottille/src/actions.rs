@@ -18,7 +18,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
-use crate::mcp::{Grant, Outcome, arguments};
+use crate::mcp::{Grant, Outcome, arguments, workspace_named};
 use crate::place::{Place, Resolved};
 use crate::projects::{self, Failure};
 
@@ -346,17 +346,38 @@ pub async fn prepared(
     }
 }
 
-/// The workspace a removal names and what removing it would lose.
+/// What a removal names and does: the workspace, what removing it would lose and, when it is the
+/// agent's own, the lines of its tree's commands running in it, which are stopped first.
+struct Removal {
+    name: String,
+    losses: Vec<String>,
+    own: Option<Vec<String>>,
+}
+
 async fn removal_losses(
     daemon: &Daemon,
     grant: &Grant,
     call: &WorkspaceCall,
-) -> Result<(String, Vec<String>), Outcome> {
-    let name = crate::workspaces::removed_named(daemon, &grant.place, call.name.as_deref())?;
-    let losses = crate::workspaces::losses(daemon, &grant.place.project, &name)
+) -> Result<Removal, Outcome> {
+    let place = &grant.place;
+    let name = workspace_named(daemon, place, call.name.as_deref(), "workspace remove")?;
+    let losses = crate::workspaces::losses(daemon, &place.project, &name)
         .await
         .map_err(refusal)?;
-    Ok((name, losses))
+    let own = match place.workspace.as_deref() == Some(name.as_str()) {
+        true => {
+            let workspace = daemon
+                .read(|store| store.workspace(&place.project, &name))
+                .map_err(|error| Outcome::Failed(error.to_string()))?
+                .ok_or_else(|| Outcome::Failed(format!("no workspace {name}")))?;
+            let ours = crate::tree::root_of(daemon, &grant.agent);
+            let runs =
+                crate::workspaces::runs_of_tree(daemon, &workspace, &ours).map_err(refusal)?;
+            Some(runs.into_iter().map(|run| run.line).collect())
+        }
+        false => None,
+    };
+    Ok(Removal { name, losses, own })
 }
 
 /// What removing a workspace does, in words: what would be lost, which the user's answer says to
@@ -366,15 +387,23 @@ async fn removal_says(
     grant: &Grant,
     call: &WorkspaceCall,
 ) -> Result<Vec<String>, Outcome> {
-    let (name, losses) = removal_losses(daemon, grant, call).await?;
-    Ok(removal_words(&name, losses))
+    Ok(removal_words(removal_losses(daemon, grant, call).await?))
 }
 
-fn removal_words(name: &str, losses: Vec<String>) -> Vec<String> {
+fn removal_words(removal: Removal) -> Vec<String> {
+    let Removal { name, losses, own } = removal;
     let mut says = vec![format!(
         "Remove the workspace {name}: its worktrees and its folder, and its branch in each \
          repository where it holds no commit of its own"
     )];
+    if let Some(lines) = &own
+        && !lines.is_empty()
+    {
+        says.push(format!(
+            "Stop the commands of this session running in it: {}",
+            lines.join(", ")
+        ));
+    }
     if losses.is_empty() {
         says.push("Nothing would be lost".into());
     } else {
@@ -384,6 +413,9 @@ fn removal_words(name: &str, losses: Vec<String>) -> Vec<String> {
                 .into(),
         );
         says.extend(losses);
+    }
+    if own.is_some() {
+        says.push("This session then goes on in the project's folder (main)".into());
     }
     says
 }
@@ -398,8 +430,9 @@ pub async fn approved_losses(
     card: &[String],
 ) -> Result<Vec<String>, Outcome> {
     let call: WorkspaceCall = arguments("workspace", args.clone())?;
-    let (name, losses) = removal_losses(daemon, grant, &call).await?;
-    let says: Vec<String> = removal_words(&name, losses.clone())
+    let removal = removal_losses(daemon, grant, &call).await?;
+    let losses = removal.losses.clone();
+    let says: Vec<String> = removal_words(removal)
         .iter()
         .map(|said| crate::mcp::masked(said, &grant.place))
         .collect();
@@ -984,7 +1017,7 @@ pub async fn remove_losing(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> 
         Err(refused) => return refused,
     };
     let losses = match removal_losses(daemon, grant, &call).await {
-        Ok((_, losses)) => losses,
+        Ok(removal) => removal.losses,
         Err(refused) => return refused,
     };
     crate::workspaces::workspace_remove(

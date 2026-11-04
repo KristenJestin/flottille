@@ -297,6 +297,19 @@ An agent was written, before its process starts.
 | `depth` | 0 for a root, its parent's plus one for a child. |
 | `title` | Its task's title, `null` for a root. |
 
+#### `agent.moved`
+
+The agent removed its own workspace and works in the project folder (`main`) now: the same
+session, written with `workspace.removed` in one transaction, just after it
+([`tools.md`](tools.md), "The workspace").
+
+| Field | |
+|---|---|
+| `agent`, `project` | |
+| `from` | The workspace it worked in. |
+| `to` | `null`: the project folder. |
+| `folder` | Where it works now. |
+
 #### `agent.started`
 
 Its process runs and its session is open, its options set.

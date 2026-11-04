@@ -926,6 +926,32 @@ impl Store {
         Ok(event)
     }
 
+    /// Forgets a workspace and moves the agent that worked in it to the project's `folder`
+    /// (`main`), its instructions now saying so, with their events, in one transaction: the agent
+    /// is never left in a workspace that is gone.
+    pub fn remove_workspace_moving(
+        &mut self,
+        workspace: i64,
+        agent: &str,
+        folder: &Path,
+        instructions: &str,
+        events: [(&str, Value); 2],
+    ) -> Result<Vec<Event>> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute("DELETE FROM workspaces WHERE id = ?1", params![workspace])?;
+        transaction.execute(
+            "UPDATE agents SET workspace = NULL, folder = ?2, instructions = ?3, updated_at = ?4 \
+             WHERE id = ?1",
+            params![agent, path_text(folder)?, instructions, now_ms()],
+        )?;
+        let mut written = Vec::new();
+        for (name, data) in events {
+            written.push(append_event(&transaction, name, data)?);
+        }
+        transaction.commit()?;
+        Ok(written)
+    }
+
     /// Writes a new agent with its event, in one transaction.
     pub fn create_agent(&mut self, agent: &Agent, event: (&str, Value)) -> Result<Event> {
         let transaction = self.connection.transaction()?;
