@@ -392,6 +392,21 @@ fn a_subscription_that_delivers_leaves_the_rail_and_the_delivery_says_what_woke_
     );
 }
 
+/// Unfolds the group that holds the row `at`, when it is folded: its rows are drawn.
+fn unfold(page: &Entity<SessionPage>, at: usize, cx: &mut VisualTestContext) {
+    let groups = page.read_with(cx, |page, cx| page.conversation().read(cx).groups());
+    let Some(group) = groups.into_iter().find(|group| group.contains(&at)) else {
+        return;
+    };
+    let line = page
+        .read_with(cx, |page, cx| page.conversation().read(cx).group_id(&group))
+        .expect("a group's line");
+    if cx.update(|window, _| window.find(line.clone()).expanded()) == Some(false) {
+        cx.update(|window, cx| window.click(line, cx));
+        settle(cx);
+    }
+}
+
 /// The row of the conversation that shows the delivery, as the page numbers it.
 fn woken_row(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Option<usize> {
     blocks(page, cx)
@@ -416,6 +431,7 @@ fn the_delivery_is_a_folded_step_that_says_what_woke_the_agent_and_a_click_unfol
     });
     settle(cx);
     let at = woken_row(&page, cx).unwrap();
+    unfold(&page, at, cx);
 
     assert_eq!(
         label(cx, &format!("row-{at}-notice-summary")).unwrap(),

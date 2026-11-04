@@ -595,6 +595,30 @@ fn card_of(
 }
 
 /// Lets the page's entrance and every other motion end, then draws.
+/// Unfolds the group that holds the row `at`, when it is folded: its rows are drawn.
+fn unfold(page: &Entity<SessionPage>, at: usize, cx: &mut VisualTestContext) {
+    let groups = page.read_with(cx, |page, cx| page.conversation().read(cx).groups());
+    let Some(group) = groups.into_iter().find(|group| group.contains(&at)) else {
+        return;
+    };
+    let line = page
+        .read_with(cx, |page, cx| page.conversation().read(cx).group_id(&group))
+        .expect("a group's line");
+    if cx.update(|window, _| window.find(line.clone()).expanded()) == Some(false) {
+        cx.update(|window, cx| window.click(line, cx));
+        settle(cx);
+    }
+}
+
+/// Unfolds the group that holds the line of the request `number`.
+fn unfold_request(shell: &Entity<Shell>, number: u64, cx: &mut VisualTestContext) {
+    let page = session_page(shell, cx);
+    let line = Block::Approval { number };
+    if let Some(at) = blocks(&page, cx).iter().position(|b| *b == line) {
+        unfold(&page, at, cx);
+    }
+}
+
 fn settle(cx: &mut VisualTestContext) {
     for _ in 0..90 {
         cx.executor().advance_clock(Duration::from_millis(16));
@@ -2006,15 +2030,18 @@ fn approving_once_from_the_card_performs_the_call_and_leaves_the_record(cx: &mut
     settle(cx);
 
     cx.update(|window, cx| window.click(format!("allow-{number}"), cx));
-    until(&shell, cx, "the card folds into its record", |cx| {
+    until(&shell, cx, "the card leaves", |cx| {
         moving(cx);
-        cx.update(|window, _| {
-            window
-                .try_find(format!("approval-record-{number}"))
-                .is_some()
-                && window.try_find(format!("allow-{number}")).is_none()
-        })
+        cx.update(|window, _| window.try_find(format!("allow-{number}")).is_none())
     });
+    // Answered, it folds into the group of the work, where its record is.
+    settle(cx);
+    unfold_request(&shell, number, cx);
+    assert!(cx.update(|window, _| {
+        window
+            .try_find(format!("approval-record-{number}"))
+            .is_some()
+    }));
     let record = session_page(&shell, cx).read_with(cx, |p, cx| {
         p.conversation()
             .read(cx)
@@ -2756,9 +2783,17 @@ fn a_child_appearing_adds_its_row_to_the_rail_and_the_sub_agents_list(cx: &mut T
         "the child is in the rail and in the list",
         |cx| {
             rail_ids(&page, cx) == [lead.clone(), child.clone()]
-                && cx.update(|window, _| window.try_find(format!("sub-agent-{child}")).is_some())
+                && blocks(&page, cx).contains(&Block::SubAgents)
         },
     );
+    // The list is a step of the lead's work, in its group.
+    settle(cx);
+    let at = blocks(&page, cx)
+        .iter()
+        .position(|b| *b == Block::SubAgents)
+        .unwrap();
+    unfold(&page, at, cx);
+    assert!(cx.update(|window, _| window.try_find(format!("sub-agent-{child}")).is_some()));
     let listed = page.read_with(cx, |p, cx| {
         p.conversation()
             .read(cx)
@@ -3219,6 +3254,7 @@ fn a_call_left_running_shows_interrupted_when_the_conversation_is_read(cx: &mut 
         p.conversation().read(cx).rows()[1].read(cx).marks(cx)
     });
     assert_eq!(marks, [AgentState::Stopped], "no spinner at rest");
+    unfold(&page, 1, cx);
     cx.update(|window, cx| {
         assert_eq!(
             window.find("row-1-steps-toggle").label(),
@@ -3249,13 +3285,28 @@ fn an_answered_request_keeps_its_record_when_the_page_is_opened_again(cx: &mut T
         .unwrap();
 
     let (shell, cx) = open_session(&user, &lead, 1280., cx);
-    until(&shell, cx, "both records are shown", |cx| {
-        cx.update(|window, _| {
+    let recorded = |cx: &mut VisualTestContext| {
+        session_page(&shell, cx).read_with(cx, |p, cx| {
+            p.conversation()
+                .read(cx)
+                .rows()
+                .iter()
+                .filter(|row| row.read(cx).card().and_then(|c| c.record()).is_some())
+                .count()
+        })
+    };
+    until(&shell, cx, "both records are read", |cx| recorded(cx) == 2);
+    settle(cx);
+    // Answered, they are steps of the work, in its group.
+    unfold_request(&shell, forwarded, cx);
+    unfold_request(&shell, own, cx);
+    cx.update(|window, _| {
+        assert!(
             window
                 .try_find(format!("approval-record-{forwarded}"))
                 .is_some()
-                && window.try_find(format!("approval-record-{own}")).is_some()
-        })
+        );
+        assert!(window.try_find(format!("approval-record-{own}")).is_some());
     });
     let records = session_page(&shell, cx).read_with(cx, |p, cx| {
         p.conversation()
@@ -3308,6 +3359,11 @@ fn a_long_conversation_shows_its_last_page_and_earlier_ones_on_demand(cx: &mut T
         Block::SubAgents,
         "launched before the page read: first, not where the tree came"
     );
+    let groups = page.read_with(cx, |p, cx| p.conversation().read(cx).groups());
+    assert!(
+        !groups.iter().any(|group| group.contains(&0)),
+        "the list stays in sight: {groups:?}"
+    );
     assert!(
         !shown.contains(&Block::Message {
             from: "you".into(),
@@ -3333,6 +3389,10 @@ fn a_long_conversation_shows_its_last_page_and_earlier_ones_on_demand(cx: &mut T
         });
         settle(cx);
     }
+    assert!(
+        cx.update(|window, _| window.try_find("row-0-sub-agents").is_some()),
+        "drawn, not folded under a group"
+    );
     cx.update(|window, cx| window.click("show-earlier", cx));
     until(&shell, cx, "the earlier page", |cx| {
         blocks(&page, cx)[0]
@@ -3388,6 +3448,13 @@ fn an_answer_given_on_one_session_s_page_is_not_applied_to_another(cx: &mut Test
     );
 
     cx.update(|window, cx| window.click(session_id(&lead), cx));
+    until(&shell, cx, "the decision on its own page", |cx| {
+        session_page(&shell, cx)
+            .read_with(cx, |p, _| p.id() == lead && p.decision(number).is_some())
+    });
+    // Answered, it is a step of the work, in its group.
+    settle(cx);
+    unfold_request(&shell, number, cx);
     until(&shell, cx, "the record on its own page", |cx| {
         cx.update(|window, _| {
             window
@@ -5178,6 +5245,7 @@ fn a_report_is_folded_until_clicked(cx: &mut TestAppContext) {
     frame(cx);
 
     assert_eq!(labels(&page, cx), ["Report from a sub-agent"]);
+    unfold(&page, 0, cx);
     cx.update(|window, _| {
         assert!(window.try_find("row-0-report-toggle").is_some());
         assert!(window.try_find("row-0-report-text").is_none(), "folded");
@@ -5223,6 +5291,7 @@ fn drawn_report(
         cx,
     );
     frame(cx);
+    unfold(&page, 0, cx);
     cx.update(|window, cx| window.click("row-0-report-toggle", cx));
     frame(cx);
     settle(cx);
@@ -5316,6 +5385,7 @@ fn an_edit_s_diff_is_folded_until_clicked(cx: &mut TestAppContext) {
         .iter()
         .position(|b| matches!(b, Block::Diff { .. }))
         .expect("the edit's diff is a block");
+    unfold(&page, at, cx);
     let (toggle, lines) = (
         format!("row-{at}-diff-toggle"),
         format!("row-{at}-diff-lines"),
@@ -5447,6 +5517,7 @@ fn a_thought_s_text_reaches_the_window_and_one_claude_sent_without_text_shows_no
     let (at, text) = &thoughts[0];
     assert_eq!(text, "weighing **two** options");
 
+    unfold(&page, *at, cx);
     cx.update(|window, cx| window.click(format!("row-{at}-thought-toggle"), cx));
     frame(cx);
     cx.update(|window, _| assert!(window.try_find(format!("row-{at}-thought-text")).is_some()));
@@ -5475,6 +5546,7 @@ fn a_thought_with_no_text_shows_its_duration_and_opens_on_nothing(cx: &mut TestA
         blocks(&page, cx)[0],
         Block::Thought { until: Some(_), .. }
     ));
+    unfold(&page, 0, cx);
     cx.update(|window, _| {
         assert!(window.try_find("row-0-thought").is_some(), "its duration");
         assert!(
@@ -9018,6 +9090,7 @@ fn agent_steps_are_folded_until_clicked_and_stay_open_while_the_session_is_shown
         cx,
     );
     frame(cx);
+    unfold(&page, 0, cx);
 
     cx.update(|window, _| {
         assert_eq!(
@@ -10183,6 +10256,7 @@ fn an_answered_request_leaves_the_rail_and_its_line_in_the_conversation_says_the
         cx.update(|window, _| window.try_find("rail-waiting".to_owned()).is_none()),
         "no section is left"
     );
+    unfold_request(&shell, number, cx);
     assert_eq!(
         text_of(&format!("approval-record-{number}"), cx).as_deref(),
         Some("Denied · Read .env · the conversation")
