@@ -770,19 +770,51 @@ fn shell_syntax_is_refused_with_the_sentence() {
     let user = User::with_fake_agent();
     let (mcp, folder) = session(&user);
 
-    for (line, token) in [
-        ("echo a | cat", "|"),
-        ("true && false", "&&"),
-        ("echo $(x)", "$("),
-        ("echo a > f", ">"),
-        ("ls *", "*"),
+    let script = "or put the line in a script of the repository and run the script.";
+    for (line, token, instead) in [
+        (
+            "echo a | cat",
+            "|",
+            format!(
+                "run starts one program and hands its output to no other: read a file with \
+                 fs_read, search the project with search, {script}"
+            ),
+        ),
+        (
+            "true && false",
+            "&&",
+            format!("run starts one program: run each one with its own call, {script}"),
+        ),
+        (
+            "echo $(x)",
+            "$(",
+            format!(
+                "a shell would run a command there and none does here: run that command with \
+                 its own call to run and write its result in the line, {script}"
+            ),
+        ),
+        (
+            "echo a > f",
+            ">",
+            format!(
+                "run starts one program and keeps its output for you to read with run_status: \
+                 write a file with fs_write, read one with fs_read, {script}"
+            ),
+        ),
+        (
+            "ls *",
+            "*",
+            "put the word in single quotes, so that the program receives it as it is: no shell \
+             expands it here. This line passes: ls '*'"
+                .into(),
+        ),
     ] {
         let text = refused(mcp.call("run", json!({"line": line})));
         assert_eq!(
             text,
             format!(
-                "Flottille runs a command without a shell, and “{token}” is shell syntax: put it \
-                 in a script of the repository and run the script."
+                "Flottille runs a command without a shell, and “{token}” is shell syntax: \
+                 {instead}"
             ),
             "{line}"
         );

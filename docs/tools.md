@@ -308,10 +308,19 @@ pending requests.
   single quotes; `|`, `&`, `;`, a redirection, `*`, `?`, a leading `~` or `[…]` only outside any
   quotes, inside them they are the argument's text (`git commit -m "fix: a -> b"`). A backslash
   before a quote (`\"`, `\'`) is refused anywhere: a shell reads it as an escaped quote, so the
-  line a shell runs with `-c` would not split as the gate reads it. Each is refused with:
-  `Flottille runs a command without a shell, and “T” is shell syntax: put it in a script of the
-  repository and run the script.` A line naming a shell as its program is split like any other; the gate judges the
-  line a shell runs with `-c` (below).
+  line a shell runs with `-c` would not split as the gate reads it. Each is refused with
+  `Flottille runs a command without a shell, and “T” is shell syntax: ` and how to write it
+  instead. A glob, `~` or `[…]` meant for the program, `%VAR%` and `\"` (a `"` needs no backslash
+  there) are written in single quotes, where nothing is expanded; a `\'`, in double quotes.
+  A pipe, a list (`&&`, `;`…), a redirection, a substitution or a variable is never quoted
+  around: the refusal says what to use instead (one call to `run` per program, `run_status` for
+  the output, `fs_read`, `fs_write`, `search`), or a script of the repository. When the words a
+  shell would give the program are certain, the refusal ends with the same line written so that
+  it passes, `This line passes: <line>` (`git log --format="%h%x20%s"` gives
+  `git log '--format=%h%x20%s'`, `grep --include=*.ts x` gives `grep '--include=*.ts' x`); a word
+  that would need single quotes but holds one cannot be one word, and the refusal says to split
+  it. A line naming a shell as its program is split like any other; the gate judges the line a
+  shell runs with `-c` (below).
 - **Waiting**: the call waits `timeout` seconds (30 by default) for the end. A task
   that keeps running (`serve`) answers at once, and one already running for the agent is joined.
   A call stopped by its client stops its run.
