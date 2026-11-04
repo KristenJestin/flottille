@@ -5909,6 +5909,60 @@ mod tests {
     }
 
     #[test]
+    fn an_extension_s_column_cannot_reference_a_core_table_from_its_space() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.migrate_extension("test", &[TABLE]).unwrap();
+        let before = schema(&store);
+
+        let space = store.space("test").unwrap();
+        space
+            .tables()
+            .execute_batch(
+                "ALTER TABLE ext_test_notes ADD COLUMN agent TEXT REFERENCES agents (id);",
+            )
+            .unwrap();
+        let error = space.commit().unwrap_err();
+
+        assert!(error.to_string().contains("references agents"), "{error}");
+        assert_eq!(schema(&store), before);
+    }
+
+    #[test]
+    fn renaming_an_extension_s_table_carries_its_trigger_and_stays_in_its_space() {
+        let mut store = Store::open_in_memory().unwrap();
+        let counted = "CREATE TABLE ext_test_count (n INTEGER NOT NULL) STRICT;
+                       INSERT INTO ext_test_count VALUES (0);
+                       CREATE TRIGGER ext_test_counted AFTER INSERT ON ext_test_notes
+                           BEGIN UPDATE ext_test_count SET n = n + 1; END;";
+        let rename = "ALTER TABLE ext_test_notes RENAME TO ext_test_kept;";
+
+        store
+            .migrate_extension("test", &[TABLE, counted, rename])
+            .unwrap();
+
+        let space = store.space("test").unwrap();
+        space
+            .tables()
+            .execute("INSERT INTO ext_test_kept (text) VALUES ('one')", [])
+            .unwrap();
+        let n: i64 = space
+            .tables()
+            .query_row("SELECT n FROM ext_test_count", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+        space.commit().unwrap();
+        let on: String = store
+            .connection
+            .query_row(
+                "SELECT tbl_name FROM sqlite_master WHERE name = 'ext_test_counted'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(on, "ext_test_kept");
+    }
+
+    #[test]
     fn an_extension_whose_name_holds_an_underscore_is_refused() {
         let mut store = Store::open_in_memory().unwrap();
 
@@ -5916,6 +5970,21 @@ mod tests {
 
         assert!(error.to_string().contains("a_b"), "{error}");
         assert!(store.space("a_b").is_err());
+    }
+
+    #[test]
+    fn an_extension_whose_name_is_empty_upper_case_or_dashed_is_refused() {
+        let mut store = Store::open_in_memory().unwrap();
+
+        for name in ["", "Test", "a-b"] {
+            let error = store.migrate_extension(name, &[]).unwrap_err();
+            assert!(
+                error.to_string().contains("letters and digits"),
+                "{name}: {error}"
+            );
+            assert!(store.space(name).is_err(), "{name}");
+        }
+        store.migrate_extension("test2", &[]).unwrap();
     }
 
     #[test]
