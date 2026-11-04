@@ -125,12 +125,23 @@ pub fn own(project: &Project) -> (String, Option<String>) {
 }
 
 /// What the project's text adds to the global one when it starts with it (a copy made by hand,
-/// as the doc once advised); none when it does not.
+/// as the doc once advised); none when it does not. Line endings and trailing spaces do not
+/// count: a copy made on another system or in another editor still matches.
 fn without(global: &str, own: &str) -> Option<String> {
+    let global = plain(global);
     let global = global.trim();
+    let own = plain(own);
     let rest = own.trim_start().strip_prefix(global)?;
     (!global.is_empty() && rest.chars().next().is_none_or(char::is_whitespace))
         .then(|| rest.trim().to_owned())
+}
+
+/// A text with LF line endings and no trailing spaces on its lines, to compare copies.
+fn plain(text: &str) -> String {
+    text.lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The rules a project without its own follows: the user's, else the default.
@@ -371,5 +382,36 @@ mod tests {
         assert_eq!(without("Be brief", "Be briefer than that."), None);
         assert_eq!(without("Be brief.", "Name branches."), None);
         assert_eq!(without("  \n", "Name branches."), None);
+    }
+
+    #[test]
+    fn a_copy_made_with_other_line_endings_is_left_out() {
+        // CRLF in the user's file, LF in the project's, and the other way round.
+        assert_eq!(
+            without(
+                "Be brief.\r\nName commits.\r\n",
+                "Be brief.\nName commits.\n\nName branches."
+            ),
+            Some("Name branches.".to_owned())
+        );
+        assert_eq!(
+            without("Be brief.\n", "Be brief.\r\n\r\nName branches.\r\n"),
+            Some("Name branches.".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_copy_with_trailing_spaces_is_left_out() {
+        assert_eq!(
+            without(
+                "Be brief.  \nName commits.\n",
+                "Be brief.\nName commits.\n\nName branches."
+            ),
+            Some("Name branches.".to_owned())
+        );
+        assert_eq!(
+            without("Be brief.\n", "Be brief.   \n\nName branches."),
+            Some("Name branches.".to_owned())
+        );
     }
 }
