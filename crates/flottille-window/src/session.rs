@@ -3613,15 +3613,6 @@ struct EndedFold {
     height: Rc<Cell<Pixels>>,
 }
 
-/// The context gauge of one agent's row: its bar unfolds and fades in once the window's size is
-/// known, and its fill follows the use.
-struct Gauge {
-    /// How far the bar is shown: 0 while only the tokens used are known.
-    bar: Motion,
-    /// The use, in percent.
-    fill: Motion,
-}
-
 /// A count of tokens as the row says it: `812`, `45k`, `1.2M`.
 fn tokens(count: u64) -> String {
     match count {
@@ -3640,8 +3631,8 @@ pub struct SessionRail {
     open_ended: HashSet<String>,
     /// How far each "ended" row's children are unfolded: they stay drawn until a fold ends.
     ended_folds: HashMap<String, EndedFold>,
-    /// The context gauge of each agent's row, moving as the use changes.
-    gauges: HashMap<String, Gauge>,
+    /// How far the bar of each agent's gauge is filled, following the use.
+    gauges: HashMap<String, Motion>,
     selected: String,
     workspace: Option<String>,
     project: String,
@@ -3869,28 +3860,22 @@ impl SessionRail {
         }
         let now = cx.background_executor().now();
         let reduce = cx.reduce_motion();
+        // The gauges of the agents that left the rail go with them.
+        self.gauges
+            .retain(|id, _| agents.iter().any(|agent| &agent.id == id));
         for agent in &agents {
-            let bar = f32::from(agent.context.is_some());
             let fill = agent.context.unwrap_or(0) as f32;
+            let had_bar = self
+                .agents
+                .iter()
+                .any(|before| before.id == agent.id && before.context.is_some());
             match self.gauges.get_mut(&agent.id) {
-                // An agent first seen shows its gauge at once: only a change moves.
+                // The fill follows a change of the use; a bar that unfolds is already at its
+                // share, and an agent first seen shows its gauge at once.
+                Some(motion) if had_bar => motion.animate(fill, PANEL, now, reduce),
+                Some(motion) => *motion = Motion::settled(fill),
                 None => {
-                    self.gauges.insert(
-                        agent.id.clone(),
-                        Gauge {
-                            bar: Motion::settled(bar),
-                            fill: Motion::settled(fill),
-                        },
-                    );
-                }
-                Some(gauge) => {
-                    if gauge.bar.target() != bar {
-                        gauge.bar.animate(bar, PANEL, now, reduce);
-                        // The bar unfolds already at its share.
-                        gauge.fill = Motion::settled(fill);
-                    } else {
-                        gauge.fill.animate(fill, PANEL, now, reduce);
-                    }
+                    self.gauges.insert(agent.id.clone(), Motion::settled(fill));
                 }
             }
         }
@@ -3929,13 +3914,11 @@ impl Render for SessionRail {
                 fold.motion.settle(now);
             }
         }
-        for gauge in self.gauges.values_mut() {
-            for motion in [&mut gauge.bar, &mut gauge.fill] {
-                if motion.is_running(now) {
-                    window.request_animation_frame();
-                } else {
-                    motion.settle(now);
-                }
+        for motion in self.gauges.values_mut() {
+            if motion.is_running(now) {
+                window.request_animation_frame();
+            } else {
+                motion.settle(now);
             }
         }
         // The root alone is ended (the daemon refuses a child), and only while it is not ended.
@@ -3970,6 +3953,21 @@ impl Render for SessionRail {
             .filter(|row| row.wake)
             .map(|row| (row.agent.clone(), row.expires_at))
             .collect();
+        // The bar of a gauge unfolds, its gap with it, once the window's size is known.
+        let bars: HashMap<String, f32> = self
+            .agents
+            .iter()
+            .map(|agent| {
+                let bar = fade(
+                    format!("rail-context-bar-{}", agent.id),
+                    agent.context.is_some(),
+                    PANEL,
+                    window,
+                    cx,
+                );
+                (agent.id.clone(), bar)
+            })
+            .collect();
         let agent_row = |agent: &RailAgent| {
             let mark = self.marks[&agent.id].clone();
             let page = self.page.clone();
@@ -4001,9 +3999,8 @@ impl Render for SessionRail {
                     None => agent.doing.clone(),
                 })
             });
-            let shown = self.gauges.get(&agent.id);
-            let bar = shown.map_or(f32::from(agent.context.is_some()), |g| g.bar.value(now));
-            let fill = shown.map_or(0., |g| g.fill.value(now));
+            let bar = bars.get(&agent.id).copied().unwrap_or_default();
+            let fill = self.gauges.get(&agent.id).map_or(0., |m| m.value(now));
             let gauge_text = match (agent.context, agent.context_tokens) {
                 (Some(used), _) => Some((
                     format!("{}%", used.min(100)),
@@ -4015,43 +4012,62 @@ impl Render for SessionRail {
                 )),
                 (None, None) => None,
             };
-            let gauge = gauge_text.map(|(text, label)| {
-                // The share (or the tokens used) and its bar on one line, the share before it.
-                div()
-                    .id(ElementId::Name(format!("rail-context-{}", agent.id).into()))
-                    .flex()
-                    .items_center()
-                    .gap(space::XS)
-                    .mono(10.5)
-                    .text_color(p.faint)
-                    .aria_label(SharedString::from(label))
-                    .child(SharedString::from(text))
-                    // Drawn while it unfolds and while it folds away, too.
-                    .when(agent.context.is_some() || bar > 0., |d| {
-                        d.child(
+            let has_gauge = gauge_text.is_some();
+            let gauge = match gauge_text {
+                Some((text, label)) => {
+                    // The share (or the tokens used) and its bar on one line, the share before it.
+                    div()
+                        .id(ElementId::Name(format!("rail-context-{}", agent.id).into()))
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .mono(10.5)
+                        .text_color(p.faint)
+                        .aria_label(SharedString::from(label))
+                        .child(
                             div()
                                 .id(ElementId::Name(
-                                    format!("rail-context-bar-{}", agent.id).into(),
+                                    format!("rail-context-text-{}", agent.id).into(),
                                 ))
-                                .w(px(32.) * bar)
-                                .h(px(3.))
-                                .flex_none()
-                                .rounded(px(2.))
-                                .bg(p.line2)
-                                .opacity(bar)
-                                .overflow_hidden()
-                                .child(
-                                    div()
-                                        .h_full()
-                                        .w(px(32. * fill.clamp(0., 100.) / 100.) * bar)
-                                        .rounded(px(2.))
-                                        .bg(p.mute),
-                                )
+                                .child(SharedString::from(text))
                                 .test_support(),
                         )
-                    })
-                    .test_support()
-            });
+                        // Drawn while it unfolds and while it folds away, too.
+                        .when(agent.context.is_some() || bar > 0., |d| {
+                            d.child(
+                                div()
+                                    .id(ElementId::Name(
+                                        format!("rail-context-bar-{}", agent.id).into(),
+                                    ))
+                                    .ml(space::XS * bar)
+                                    .w(px(32.) * bar)
+                                    .h(px(3.))
+                                    .flex_none()
+                                    .rounded(px(2.))
+                                    .bg(p.line2)
+                                    .opacity(bar)
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .w(px(32. * fill.clamp(0., 100.) / 100.) * bar)
+                                            .rounded(px(2.))
+                                            .bg(p.mute),
+                                    )
+                                    .test_support(),
+                            )
+                        })
+                        .test_support()
+                        .into_any_element()
+                }
+                None => div().into_any_element(),
+            };
+            // The whole gauge unfolds and fades in when the first usage arrives.
+            let gauge = presence(
+                ElementId::Name(format!("rail-context-{}-block", agent.id).into()),
+                has_gauge,
+                gauge,
+            );
             let row = div()
                 .id(ElementId::Name(format!("rail-row-{}", agent.id).into()))
                 .flex_1()
@@ -4131,7 +4147,7 @@ impl Render for SessionRail {
                         .flex_none()
                         .flex()
                         .justify_end()
-                        .children(gauge),
+                        .child(gauge),
                 )
                 .map(|d| match !kid && endable {
                     true => d.child(agent_menu.clone()),

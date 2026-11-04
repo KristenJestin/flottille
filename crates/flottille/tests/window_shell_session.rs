@@ -635,6 +635,53 @@ fn before_the_window_is_known_the_row_shows_tokens_used(cx: &mut TestAppContext)
     );
 }
 
+/// A few frames, enough to be on the way and not yet there.
+fn a_few_frames(cx: &mut VisualTestContext) {
+    for _ in 0..3 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    }
+}
+
+#[gpui_kit::test]
+fn the_gauge_unfolds_as_a_whole_when_the_first_usage_arrives(cx: &mut TestAppContext) {
+    let user = user_with(json!([
+        {"when": "lead the work", "do": [{"say": "On it."}]},
+        {"when": "go on", "do": [{"usage": {"used": 45_000, "size": 0}}, {"say": "Done."}]}
+    ]));
+    let (lead, _) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, 1440., cx);
+    let block = format!("rail-context-{lead}-block");
+    assert!(
+        !has(format!("rail-context-{lead}"), cx),
+        "no usage yet, no gauge"
+    );
+
+    user.call("agent.send", json!({"agent": lead, "message": "go on"}))
+        .unwrap();
+    until(&shell, cx, "the gauge begins to unfold", |cx| {
+        has(format!("rail-context-{lead}"), cx)
+    });
+
+    // On the frame after the first usage: the gauge is a block that unfolds, not at its end.
+    assert!(has(block.clone(), cx), "the gauge is not a presence");
+    let start = rect(block.clone(), cx).size.height;
+    a_few_frames(cx);
+    let midway = rect(block.clone(), cx).size.height;
+    settle(cx);
+    let end = rect(block.clone(), cx).size.height;
+    assert!(end > px(0.), "the gauge has a height once unfolded");
+    assert!(
+        start < end,
+        "in flight at the first frame: {start:?} < {end:?}"
+    );
+    assert!(
+        midway > start && midway < end,
+        "unfolding: {start:?} < {midway:?} < {end:?}"
+    );
+}
+
 #[gpui_kit::test]
 fn the_bar_appears_once_the_window_is_known(cx: &mut TestAppContext) {
     let user = user_with(json!([
@@ -653,8 +700,31 @@ fn the_bar_appears_once_the_window_is_known(cx: &mut TestAppContext) {
     until(&shell, cx, "the bar", |cx| {
         has(format!("rail-context-bar-{lead}"), cx)
     });
+    // It unfolds, its gap with it: on the way, not at its width at once.
+    let start = rect(format!("rail-context-bar-{lead}"), cx).size.width;
+    // The tokens stay where they were: the bar's gap is not there before the bar is.
+    let gap = |cx: &mut VisualTestContext| {
+        rect(format!("rail-context-{lead}"), cx).right()
+            - rect(format!("rail-context-text-{lead}"), cx).right()
+    };
+    assert!(
+        gap(cx) < px(0.5),
+        "the gap jumps in with the bar: {:?}",
+        gap(cx)
+    );
+    a_few_frames(cx);
+    let midway = rect(format!("rail-context-bar-{lead}"), cx).size.width;
+    assert!(
+        start < midway && midway < px(32.),
+        "unfolding: {start:?} < {midway:?} < 32px"
+    );
     settle(cx);
 
+    assert!(
+        (gap(cx) - px(32. + 4.)).abs() < px(0.5),
+        "the bar and the gap once unfolded: {:?}",
+        gap(cx)
+    );
     assert_eq!(
         label(format!("rail-context-{lead}"), cx).as_deref(),
         Some("25% of the context used")
