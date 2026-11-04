@@ -250,8 +250,9 @@ fn says_no_ready(name: Option<&str>) -> Outcome {
     })
 }
 
-/// The run's address, or why it has none (masked), and its probe: `Err` when the task's
-/// `ready` cannot be filled or split.
+/// The run's address, or why it has none, both masked, and its probe: `Err` when the task's
+/// `ready` cannot be filled or split. A `ready` that asks the address it has not got has no
+/// probe: the run cannot be told ready, which its reason says, rather than waiting forever.
 async fn readied(
     daemon: &Daemon,
     ready: Option<&Ready>,
@@ -264,9 +265,22 @@ async fn readied(
     let (url, url_error) = match url {
         None => (None, None),
         Some(url) => match ready::address(daemon, url, names, env, folder).await {
-            Ok(address) => (Some(address), None),
+            Ok(address) => (Some(secrets::mask_also(&address, env, secret_values)), None),
             Err(why) => (None, Some(secrets::mask_also(&why, env, secret_values))),
         },
+    };
+    let asks_url = |template: &str| variables::check(template).is_err();
+    let ready = match (ready, &url_error) {
+        (
+            Some(Ready::Url(template) | Ready::Line(template) | Ready::Command(template)),
+            Some(why),
+        ) if asks_url(template) => {
+            let why = format!(
+                "{why}; its ready asks for the address, so Flottille cannot tell when it is ready"
+            );
+            return Ok((None, Some(why), None));
+        }
+        (ready, _) => ready,
     };
     let probe = ready
         .map(|ready| ready::probe(ready, names, url.as_deref()))
@@ -410,7 +424,7 @@ pub async fn run(
         output: String::new(),
         dismissed: false,
         project: place.project.clone(),
-        ready: ready.map(|_| Readiness::Starting),
+        ready: probe.as_ref().map(|_| Readiness::Starting),
         url,
         url_error,
     };
@@ -497,7 +511,7 @@ pub async fn run_for_user(
         output: String::new(),
         dismissed: false,
         project: project.name.clone(),
-        ready: task.ready.as_ref().map(|_| Readiness::Starting),
+        ready: probe.as_ref().map(|_| Readiness::Starting),
         url,
         url_error,
     };
@@ -1219,7 +1233,7 @@ pub async fn restart_by_user(
         output: String::new(),
         dismissed: false,
         project: old.project.clone(),
-        ready: ready.map(|_| Readiness::Starting),
+        ready: probe.as_ref().map(|_| Readiness::Starting),
         url,
         url_error,
     };

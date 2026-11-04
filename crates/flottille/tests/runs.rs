@@ -1093,6 +1093,66 @@ fn run_status_notify_on_a_started_run() {
 }
 
 #[test]
+fn a_failed_address_stops_a_ready_url_that_uses_it() {
+    let user = User::with_fake_agent();
+    let (agent, mcp, workspace) = session(&user);
+    with_tasks(
+        &user,
+        &workspace,
+        "\n[tasks.api]\nline = \"./booting.sh\"\nserve = true\nurl = { command = \"./where.sh\" }\n\
+         ready = { url = \"{url}/health\" }\n",
+        &[
+            BOOTING,
+            (
+                "where.sh",
+                "#!/bin/sh\necho 'no route for TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789' >&2\nexit 1\n",
+            ),
+        ],
+    );
+
+    let answer = ok(mcp.call("run", json!({"task": "api"})));
+
+    let run = run_id(&answer);
+    let listed = listed_run(&user, &agent, &run);
+    assert_eq!(listed["ready"], Value::Null, "{listed}");
+    assert_eq!(listed["state"], "running");
+    let why = listed["url_error"].as_str().unwrap();
+    assert!(why.contains("cannot tell when it is ready"), "{why}");
+    assert!(why.contains("no route"), "{why}");
+    assert!(!why.contains("ghp_abcdef"), "{why}");
+    assert!(answer.contains("cannot tell when it is ready"), "{answer}");
+    assert!(!answer.contains("starting"), "{answer}");
+}
+
+#[test]
+fn the_address_is_masked() {
+    let user = User::with_fake_agent();
+    let (agent, mcp, workspace) = session(&user);
+    with_tasks(
+        &user,
+        &workspace,
+        "\n[tasks.web]\nline = \"./booting.sh\"\nserve = true\nurl = { command = \"./where.sh\" }\n",
+        &[
+            BOOTING,
+            (
+                "where.sh",
+                "#!/bin/sh\necho 'https://dev:hunter2pass@w.localhost/?t=ghp_abcdefghijklmnopqrstuvwxyz0123456789'\n",
+            ),
+        ],
+    );
+
+    let answer = ok(mcp.call("run", json!({"task": "web"})));
+
+    let run = run_id(&answer);
+    let url = listed_run(&user, &agent, &run)["url"].to_string();
+    for shown in [&url, &answer] {
+        assert!(shown.contains("w.localhost"), "{shown}");
+        assert!(!shown.contains("hunter2pass"), "{shown}");
+        assert!(!shown.contains("ghp_abcdef"), "{shown}");
+    }
+}
+
+#[test]
 fn a_probe_s_children_are_killed_when_the_run_ends() {
     let user = User::with_fake_agent();
     let (_, mcp, workspace) = session(&user);
