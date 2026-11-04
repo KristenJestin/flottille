@@ -799,7 +799,8 @@ that you did (`run.stop`).
 ### `flottille runs restart <run>`
 
 Stops the command if it runs and starts the same line again in the same place, as a new run that
-stays the agent's, if an agent started it; the agent is told (`run.restart`).
+stays the agent's, if an agent started it; the agent is told (`run.restart`). A command of an agent
+that ended restarts as yours, which the command says.
 
 ### `flottille approvals`
 

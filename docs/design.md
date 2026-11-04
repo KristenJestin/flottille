@@ -795,8 +795,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   how they ended; a click opens the run's drawer (the same on the project page): its command, its
   task, where it runs, who started it (a link to the agent in its session), since when or how it
   ended, its output, live and following its end, Copy, Restart (the daemon's `run.restart`: it
-  stops the command if it runs and starts the same line again in the same place, and the drawer
-  then shows the new run) and Stop while it runs; who started it is cut to two lines there; its
+  stops the command if it runs and starts the same line again in the same place; the drawer, and
+  the modal if it is open, keep the old command drawn, Stop and Restart faded, until the new run's
+  row and output arrive and replace it in place; a refusal is one toast) and Stop while it runs; who started it is cut to two lines there; its
   **Expand** button opens the same command in a large modal over the window (the rest darkened; a
   click outside, `Escape` or its close button close it and leave the drawer as it was): the
   header with Restart and Stop, the facts on one or two lines, and the output taking all the

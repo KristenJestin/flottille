@@ -1095,17 +1095,22 @@ already ended is answered as it is. `not-found` when there is no such run.
 
 #### `run.restart`
 
-`{"run"}`. `{"run": {...}}`, the new run: stops the command if it runs (as `run.stop` does, and waits for
-its end), then starts the same line again in the same place (the same project, workspace and
-folder, the same task if it was one, with the environment of a command started the same way, no
-shell) and answers with the new run, which keeps who started the first: a command of an agent stays
-that agent's, and the agent reads it with `run_status` and is woken when it ends; a task the user
-ran stays the user's. The agent is told once (`command-ended`, `docs/tools.md`) that the user restarted
-it and what the new run's id is. It is the user's act, so the gate is not asked. A command that
-already ended is started again too. `not-found` when there is no such run; `refused` when its line
-cannot be started again (the task is gone, or the line holds a secret its stored form masks): the
-command is then left as it was. Emits `run.ended` for the first, if it ran, then `run.started`
-(`docs/events.md`).
+`{"run"}`. `{"run": {...}, "notice"}`, the new run: stops the command if it runs (as `run.stop` does,
+and waits for its end), then starts the same line again in the same place (the same project,
+workspace, repository and folder, the same task if it was one, with the environment of a command
+started the same way, no shell) and answers with the new run, which keeps who started the first: a
+command of an agent stays that agent's, and the agent reads it with `run_status` and is woken when it
+ends; a task the user ran stays the user's. The agent is told (`command-ended`, `docs/tools.md`)
+that the user restarted it and what the new run's id is, each time a restart happens, also when the
+agent was already told that the first run ended; if the command was stopped and the new run could
+not start, it is told that too and why. It is the user's act, so the gate is not asked, and a
+restart never carries a push approval: the new run starts unlifted, as a command of the user's does,
+whatever the first one was let to do. A command that already ended is started again too. A command of
+an agent that has ended (or is gone) restarts as a run of the user's, with no agent, and `notice`
+says so; otherwise `notice` is `null`. `not-found` when there is no such run; `refused` when its
+line cannot be started again (the task is gone, or the line holds a secret its stored form masks),
+or when the run is already being restarted (`run R is being restarted`): the command is then left as
+it was. Emits `run.ended` for the first, if it ran, then `run.started` (`docs/events.md`).
 
 #### `run.dismiss`
 
