@@ -444,20 +444,28 @@ impl Render for WorkspacesFolder {
                  folder of its own.",
             )
         };
-        let section = Section::new(format!("workspaces-folder-{scope}"), title)
-            .sentence(format!("{sentence} {REACH}"))
-            .child(presence(
-                id("asking"),
-                !known && self.problem.is_none(),
-                div()
-                    .text_size(px(12.5))
-                    .text_color(p.faint)
-                    .child("Asking the daemon…"),
-            ))
-            .child(Field::new(id("choice-field"), "Workspaces folder", kinds))
-            .child(path)
-            .child(problem)
-            .child(unread);
+        let section = Section::new(
+            // The global page's tab is "workspaces", and its section is named by its tab.
+            if project {
+                format!("workspaces-section-{scope}")
+            } else {
+                "workspaces".to_owned()
+            },
+            title,
+        )
+        .sentence(format!("{sentence} {REACH}"))
+        .child(presence(
+            id("asking"),
+            !known && self.problem.is_none(),
+            div()
+                .text_size(px(12.5))
+                .text_color(p.faint)
+                .child("Asking the daemon…"),
+        ))
+        .child(Field::new(id("choice-field"), "Workspaces folder", kinds))
+        .child(path)
+        .child(problem)
+        .child(unread);
         if project {
             section.child(resulting)
         } else {
