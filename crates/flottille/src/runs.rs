@@ -7,7 +7,7 @@
 //! for its end a while, then answers that it keeps going; its output is kept (its end), masked
 //! when shown or stored.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::Stdio;
@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use flottille_core::agent::new_id;
+use flottille_core::agent::{AgentState, new_id};
 use flottille_core::approval;
 use flottille_core::command::split_line;
 use flottille_core::run::{Run, RunState};
@@ -72,6 +72,8 @@ const FORGE_CONFIGS: [&str; 3] = ["GH_CONFIG_DIR", "GLAB_CONFIG_DIR", "BKT_CONFI
 #[derive(Default)]
 pub struct Live {
     runs: Mutex<HashMap<String, Arc<Going>>>,
+    /// The runs a `run.restart` is working on.
+    restarting: Mutex<HashSet<String>>,
 }
 
 /// A run going on.
@@ -92,6 +94,9 @@ struct Going {
     phase: Mutex<Phase>,
     /// The user stopped it (`run.stop`), which the agent is told.
     stopped_by_user: AtomicBool,
+    /// The user stopped it to start it again (`run.restart`), which tells the agent once, with
+    /// the new run's id, and not by its end.
+    restarted: AtomicBool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -304,7 +309,14 @@ pub async fn run(
         dismissed: false,
         project: place.project.clone(),
     };
-    if let Err(why) = start(daemon, run, words, env, place.secret_values()) {
+    if let Err(why) = start(
+        daemon,
+        run,
+        words,
+        env,
+        place.secret_values(),
+        Phase::Waited,
+    ) {
         return Outcome::Failed(why);
     }
     if serve {
@@ -369,7 +381,14 @@ pub fn run_for_user(
         dismissed: false,
         project: project.name.clone(),
     };
-    start(daemon, run, words, env, place.secret_values())?;
+    start(
+        daemon,
+        run,
+        words,
+        env,
+        place.secret_values(),
+        Phase::Waited,
+    )?;
     Ok(id)
 }
 
@@ -520,13 +539,16 @@ async fn remote_kept(
     crate::forge::remote_kept(folder, base).await
 }
 
-/// Spawns the run, records it, and leaves a task of its own to follow it to its end.
+/// Spawns the run, records it, and leaves a task of its own to follow it to its end. `phase` is
+/// what it is in from the start: a run that ends at once must find it already detached to have
+/// its end delivered.
 fn start(
     daemon: &Arc<Daemon>,
     run: Run,
     words: Vec<String>,
     env: BTreeMap<OsString, OsString>,
     secrets: Vec<String>,
+    phase: Phase,
 ) -> Result<(), String> {
     let (reader, writer) = std::io::pipe().map_err(|e| format!("cannot run it: {e}"))?;
     let mut command = tokio::process::Command::new(&words[0]);
@@ -571,8 +593,9 @@ fn start(
         env,
         secrets,
         pid,
-        phase: Mutex::new(Phase::Waited),
+        phase: Mutex::new(phase),
         stopped_by_user: AtomicBool::new(false),
+        restarted: AtomicBool::new(false),
     });
     daemon
         .mcp
@@ -663,10 +686,10 @@ async fn follow(
         std::mem::replace(&mut *going.phase.lock().unwrap(), Phase::Over) == Phase::Detached;
     let by_user = going.stopped_by_user.load(Ordering::SeqCst);
     // Told to the agent only when no call was left to answer, and only for an end that is news
-    // to it: not its own stop, nor the daemon's or its own end.
+    // to it: not its own stop, nor the daemon's or its own end, nor a restart, which says more.
     let told = match end.state {
         RunState::Exited => true,
-        RunState::Stopped => by_user,
+        RunState::Stopped => by_user && !going.restarted.load(Ordering::SeqCst),
         RunState::Running | RunState::Interrupted => false,
     };
     if detached
@@ -803,6 +826,173 @@ pub async fn stop_by_user(daemon: &Daemon, id: &str) {
         going.stopped_by_user.store(true, Ordering::SeqCst);
     }
     stop(daemon, id, RunState::Stopped).await;
+}
+
+/// A run being restarted (`run.restart`), until the guard is dropped.
+struct Restarting<'a> {
+    live: &'a Live,
+    id: String,
+}
+
+impl<'a> Restarting<'a> {
+    fn begin(live: &'a Live, id: &str) -> Result<Self, String> {
+        if !live.restarting.lock().unwrap().insert(id.to_owned()) {
+            return Err(format!("run {id} is being restarted"));
+        }
+        Ok(Restarting {
+            live,
+            id: id.to_owned(),
+        })
+    }
+}
+
+impl Drop for Restarting<'_> {
+    fn drop(&mut self) {
+        self.live.restarting.lock().unwrap().remove(&self.id);
+    }
+}
+
+/// The user runs the run again: its line in its place, as a new run of the same owner and the
+/// same task if it is one. The run stops first if it runs, and its agent is told once, with the
+/// new run's id; it is told too when the restart fails after the stop. A command of an agent that
+/// ended becomes the user's, which the notice says. It is the user's act on the user's socket, so
+/// the gate is not asked, and it never carries a push approval: it starts unlifted.
+pub async fn restart_by_user(
+    daemon: &Arc<Daemon>,
+    old: &Run,
+) -> Result<(Run, Option<String>), String> {
+    let _restarting = Restarting::begin(&daemon.mcp.runs, &old.id)?;
+    // All is read before the run is stopped: a refusal leaves it running.
+    let project = projects::load_project(daemon, &old.project).map_err(|f| f.message)?;
+    let owner = old
+        .agent
+        .as_ref()
+        .and_then(|id| daemon.read(|store| store.agent(id)).ok().flatten());
+    let alive = owner
+        .as_ref()
+        .filter(|agent| !matches!(agent.state, AgentState::Ended | AgentState::Failed));
+    let place = match owner
+        .as_ref()
+        .map(|agent| crate::mcp::grant_of(daemon, agent))
+    {
+        Some(Ok(grant)) => grant.place,
+        Some(Err(why)) if alive.is_some() => return Err(why),
+        _ => Place::main(&project, project.folder.clone()),
+    };
+    let notice = old.agent.as_ref().filter(|_| alive.is_none()).map(|agent| {
+        format!("agent {agent} has ended: the command now runs as yours, with no agent to tell")
+    });
+    let here = |folder: &Path| std::fs::canonicalize(folder).ok();
+    let repository = place
+        .repositories
+        .iter()
+        .find(|(_, folder)| here(folder) == here(&old.folder))
+        .map(|(path, _)| path.clone());
+    let (name, line, words, repository) = match &old.name {
+        Some(name) => {
+            let args = RunArguments {
+                task: Some(name.clone()),
+                line: None,
+                repository,
+                timeout: None,
+                why: None,
+            };
+            match request(daemon, &place, args) {
+                Ok(r) => (r.name, r.line, r.words, r.repository),
+                Err(Outcome::Refused(why) | Outcome::Failed(why) | Outcome::Held(why)) => {
+                    return Err(why);
+                }
+                Err(Outcome::Done(_)) => unreachable!("a request is refused or it fits"),
+            }
+        }
+        None => {
+            // The stored line is masked: what was masked is not known any more.
+            if old.line.contains(secrets::MASK) {
+                return Err(format!(
+                    "run {} holds a secret its line masks: run it again from its owner",
+                    old.id
+                ));
+            }
+            let words = split_line(&old.line)?;
+            (
+                None,
+                old.line.clone(),
+                words,
+                repository.unwrap_or_else(|| ".".into()),
+            )
+        }
+    };
+    let env = environment(daemon, &place, &repository, false)?;
+    let id = new_id().map_err(|error| error.to_string())?;
+    let going = daemon.mcp.runs.runs.lock().unwrap().get(&old.id).cloned();
+    let stopped = going.is_some();
+    if let Some(going) = &going {
+        going.restarted.store(true, Ordering::SeqCst);
+        stop_by_user(daemon, &old.id).await;
+    }
+    let owner = alive.map(|agent| agent.id.clone());
+    let run = Run {
+        id: id.clone(),
+        agent: owner.clone(),
+        name,
+        line: masked(&line, &place),
+        // Where it ran: a repository of the place, or a folder the task's line named.
+        folder: old.folder.clone(),
+        state: RunState::Running,
+        exit_code: None,
+        signal: None,
+        started_at: now_ms(),
+        ended_at: None,
+        output: String::new(),
+        dismissed: false,
+        project: old.project.clone(),
+    };
+    // An agent's run is detached from the start: its end wakes the agent, as its call's would
+    // have, even when it comes before this function goes on.
+    let phase = if owner.is_some() {
+        Phase::Detached
+    } else {
+        Phase::Waited
+    };
+    if let Err(why) = start(daemon, run, words, env, place.secret_values(), phase) {
+        // The stop was the user's and its end was not told: the agent hears of both.
+        if stopped && let Some(agent) = &owner {
+            let body = format!(
+                "Your command `{}` (run {}) was stopped by the user, who restarted it, but it \
+                 could not start again: {why}. Nothing runs it now.",
+                old.line, old.id
+            );
+            deliveries::deliver(
+                daemon,
+                agent,
+                "command-ended",
+                Some(format!("command-restart-failed-{id}")),
+                &body,
+                approval::URGENT,
+            );
+        }
+        return Err(why);
+    }
+    if let Some(agent) = &owner {
+        let body = format!(
+            "Your command `{}` (run {}) was restarted by the user: it now runs as run {id}, \
+             still yours (read it with run_status {{\"run\": \"{id}\"}}).",
+            old.line, old.id
+        );
+        // Its own id: the first run's end may already have been delivered, or a second restart
+        // of it told.
+        deliveries::deliver(
+            daemon,
+            agent,
+            "command-ended",
+            Some(format!("command-restarted-{id}")),
+            &body,
+            approval::URGENT,
+        );
+    }
+    view(daemon, &id)
+        .map(|view| (view.run, notice))
+        .ok_or_else(|| "the run ended at once".to_owned())
 }
 
 // Reading and stopping.
