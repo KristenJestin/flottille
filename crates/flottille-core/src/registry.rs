@@ -4,12 +4,17 @@ use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use crate::paths::Paths;
-use crate::project::{ConfigError, Project, valid_name};
+use crate::place::{self, Place};
+use crate::project::{ConfigError, Places, Project, valid_name};
 use crate::{Error, Result};
 
 pub struct Registry {
     dir: PathBuf,
     data: PathBuf,
+    /// The user's default place for workspaces, read at every load so that a change applies at
+    /// once.
+    default: PathBuf,
+    home: Option<PathBuf>,
 }
 
 /// Every file of the folder, read.
@@ -26,7 +31,18 @@ impl Registry {
         Registry {
             dir: paths.projects(),
             data: paths.data.clone(),
+            default: paths.workspaces_place(),
+            home: std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .filter(|home| home.is_absolute()),
         }
+    }
+
+    /// Where the workspaces of a project that names no folder go now. A default that cannot be
+    /// read is Flottille's data folder, since one broken file must not hide every project: the
+    /// window says why it is not followed (`workspaces_folder.show`).
+    fn place(&self) -> Place {
+        place::read(&self.default).unwrap_or_default()
     }
 
     pub fn load_all(&self) -> Result<Loaded> {
@@ -75,7 +91,13 @@ impl Registry {
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        Project::parse(name, &text, &self.data)
+        let default = self.place();
+        let places = Places {
+            data: &self.data,
+            home: self.home.as_deref(),
+            default: &default,
+        };
+        Project::parse_in(name, &text, &places)
             .map(Some)
             .map_err(Error::Config)
     }
@@ -118,6 +140,8 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     const TEXT: &str = "folder = \"/work/app\"\n[[repositories]]\npath = \".\"\n";
@@ -140,12 +164,30 @@ mod tests {
 
     #[test]
     fn a_created_project_is_loaded_back() {
-        let (_dir, registry) = registry();
-        let app = project("app");
+        let (dir, registry) = registry();
+        // The file names no folder for the workspaces: they follow the data folder of the day.
+        let app = Project::parse("app", TEXT, &dir.path().join("data")).unwrap();
 
         registry.create(&app).unwrap();
 
         assert_eq!(registry.load("app").unwrap(), Some(app));
+    }
+
+    #[test]
+    fn the_default_in_workspaces_toml_is_followed_at_once_by_a_project_with_no_folder() {
+        let (dir, registry) = registry();
+        registry.create(&project("app")).unwrap();
+        let root = |registry: &Registry| registry.load("app").unwrap().unwrap().workspaces_root;
+        assert_eq!(root(&registry), dir.path().join("data/workspaces/app"));
+
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        let file = dir.path().join("config/workspaces.toml");
+        std::fs::write(&file, "place = \"beside\"\n").unwrap();
+        assert_eq!(root(&registry), Path::new("/work/app-work"));
+
+        // A file that cannot be read hides no project: the data folder is followed.
+        std::fs::write(&file, "place = \"elsewhere\"\n").unwrap();
+        assert_eq!(root(&registry), dir.path().join("data/workspaces/app"));
     }
 
     #[test]
