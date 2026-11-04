@@ -833,3 +833,58 @@ fn the_own_workspace_removal_is_held_in_ask_and_auto() {
         assert!(folder.exists(), "removed without the user");
     }
 }
+
+#[test]
+fn a_request_asked_while_its_agent_leaves_is_not_run_in_main() {
+    // A judge that answers "ask" only once the file `go` of its folder exists: the call it judges
+    // is decided after its agent moved.
+    let user = User::with_fake_agent()
+        .with_fake_escalation()
+        .with_judge(json!([
+            {"hold": "go"},
+            {"say": "{\"verdict\": \"ask\", \"reason\": \"The user decides.\"}"}
+        ]));
+    let main = project(&user);
+    let folder = login(&user);
+    let opened = user.received_requests("session/new").len();
+    user.call(
+        "agent.run",
+        json!({"project": "app", "workspace": "login", "message": "hello"}),
+    )
+    .unwrap();
+    let (url, authorization) = server_of(&user, opened);
+    let mcp = Mcp::initialize(&url, &authorization);
+    let removal = held(mcp.call("workspace", json!({"action": "remove"})));
+    let writing = std::thread::spawn(move || {
+        let other = Mcp::initialize(&url, &authorization);
+        other.call("run", json!({"line": "touch made.txt"}))
+    });
+    eventually("the judgement", || !judge_prompts(&user).is_empty());
+
+    let body = answer(&user, "approve", removal).body;
+    assert!(body.contains("has now done it"), "{body}");
+    std::fs::write(user.path("fake-judge/go"), "").unwrap();
+    let written = writing.join().unwrap();
+
+    // Refused when it is asked, or not run when it is allowed: never written from main.
+    if written.text.starts_with("Waiting for") {
+        let number = held(written);
+        let output = user.run(&["approve", &number.to_string()]);
+        if output.status.success() {
+            let body = answer_of(&user, number).body;
+            assert!(
+                body.contains("asked in the workspace login, which you have left"),
+                "{body}"
+            );
+        }
+    } else {
+        let text = refused(written);
+        assert!(
+            text.contains("asked in the workspace login, which you have left"),
+            "{text}"
+        );
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!main.join("made.txt").exists(), "run in main");
+    assert!(!folder.exists());
+}

@@ -274,7 +274,10 @@ the user allows it, in this order:
 
 From 1 to its end, the session starts nothing in the workspace: its `run`, `agent_launch`,
 `fs_write` and `fs_edit` are refused (`refused: the workspace login is being removed: wait for the
-removal's answer`), and a request of these the user allows meanwhile is not executed. The user's
+removal's answer`), and a request of these the user allows meanwhile is not executed. A request keeps the place its agent asked it in (`main`, or
+`workspace <name>`): one that a slow judgement brings back after the move is refused, and one
+allowed once its agent works elsewhere is not run (`not run: asked in the workspace login, which
+you have left; ask again if it is still needed`). The user's
 answer holds to what the card said would be lost, not to the commands it named: one that ended,
 or started, between the card and the answer loses nothing, and is no reason to ask again.
 

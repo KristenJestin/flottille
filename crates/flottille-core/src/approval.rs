@@ -39,6 +39,9 @@ pub struct Request {
     pub decision: Option<Decision>,
     pub created_at: u64,
     pub decided_at: Option<u64>,
+    /// Where its agent worked when it asked: `main`, or `workspace <name>`; `None` when it was
+    /// stored before this was kept. A request is done only where it was asked.
+    pub place: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

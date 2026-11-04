@@ -546,10 +546,15 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT;
     CREATE INDEX tool_results_agent ON tool_results (agent);
 ",
+    "
+    -- Where the agent worked when it asked (`main`, or `workspace <name>`): a request is done
+    -- only there (`docs/workspaces.md`, \"Its own workspace\"). NULL before it was kept.
+    ALTER TABLE approval_requests ADD COLUMN place TEXT;
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
-    identity, held_by, forwards, state, decision, created_at, decided_at, kind, says, judgement";
+    identity, held_by, forwards, state, decision, created_at, decided_at, kind, says, judgement, place";
 
 const RUN_COLUMNS: &str = "id, agent, name, line, folder, state, exit_code, signal, started_at, \
     ended_at, output, dismissed, project";
@@ -1533,8 +1538,9 @@ impl Store {
         let created_at = now_ms();
         let number: u64 = transaction.query_row(
             "INSERT INTO approval_requests (agent, call_key, tool, arguments, shown, reasons, \
-             sensitive, identity, held_by, forwards, state, created_at, kind, says, judgement) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', ?8, ?9, 'pending', ?10, ?11, ?12, ?13) \
+             sensitive, identity, held_by, forwards, state, created_at, kind, says, judgement, \
+             place) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', ?8, ?9, 'pending', ?10, ?11, ?12, ?13, ?14) \
              RETURNING number",
             params![
                 asked.agent,
@@ -1554,6 +1560,7 @@ impl Store {
                     .as_ref()
                     .map(serde_json::to_string)
                     .transpose()?,
+                asked.place,
             ],
             |row| row.get(0),
         )?;
@@ -2601,6 +2608,7 @@ fn request_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Request>> {
         decision: decision.flatten(),
         created_at: row.get(13)?,
         decided_at: row.get(14)?,
+        place: row.get(18)?,
     }))
 }
 
@@ -4331,6 +4339,7 @@ mod tests {
             decision: Some(Decision::Once),
             created_at: 0,
             decided_at: None,
+            place: None,
         }
     }
 

@@ -67,6 +67,17 @@ pub fn ask(
     says: Vec<String>,
     judgement: Option<Judgement>,
 ) -> (Outcome, Option<u64>) {
+    let place = place_of(grant.place.workspace.as_deref());
+    // A call decided slowly (the judge) may come back after its agent left the place it was
+    // decided in: it is not asked of the user for a place the agent no longer works in.
+    let now = daemon
+        .read(|store| store.agent(&grant.agent))
+        .ok()
+        .flatten()
+        .map(|agent| place_of(agent.workspace.as_deref()));
+    if now.is_some_and(|now| now != place) {
+        return (Outcome::Refused(format!("refused: {}", left(&place))), None);
+    }
     let asked = Request {
         number: 0,
         agent: grant.agent.clone(),
@@ -92,6 +103,7 @@ pub fn ask(
         decision: None,
         created_at: 0,
         decided_at: None,
+        place: Some(place),
     };
     match daemon.write(|store| store.ask(&asked)) {
         Ok(request) if request.held_by == approval::USER => {
@@ -119,6 +131,19 @@ pub fn ask(
             )
         }
     }
+}
+
+/// An agent's place as a request keeps it: `main`, or `workspace <name>`.
+fn place_of(workspace: Option<&str>) -> String {
+    match workspace {
+        Some(name) => format!("workspace {name}"),
+        None => "main".into(),
+    }
+}
+
+/// Why a request asked in `place` is not done once its agent works elsewhere.
+fn left(place: &str) -> String {
+    format!("not run: asked in the {place}, which you have left; ask again if it is still needed")
 }
 
 #[derive(Deserialize)]
@@ -263,6 +288,11 @@ async fn performed(
     };
     if agent.state.is_final() {
         return not_executed("the agent that asked has ended.".into());
+    }
+    if let Some(place) = &request.place
+        && *place != place_of(agent.workspace.as_deref())
+    {
+        return not_executed(format!("{}.", left(place)));
     }
     if let Some(why) = crate::workspaces::being_removed(daemon, &agent.id, tool) {
         return not_executed(format!("{why}."));
