@@ -80,12 +80,12 @@ pub struct Developer {
 /// own, shown as one more option.
 pub const LIMITS: [usize; 4] = [4_000, 8_000, 16_000, 32_000];
 
-/// What the developer mode's switch logs, under its label.
 /// What the Tool results section says under its title.
 const TOOL_RESULTS_SENTENCE: &str = "A tool result longer than this reaches the agent as its beginning and its end, \
      with the number of characters left out; the agent reads the rest by ranges, and only that \
      session can. It saves the agent's context. For every project and every agent.";
 
+/// What the developer mode's switch logs, under its label.
 pub const DEVELOPER_HINT: &str = "Each gate decision with its reasons, the judge's input and \
      answer, requests, deliveries and agent processes, one JSON object per line, every secret \
      masked.";
