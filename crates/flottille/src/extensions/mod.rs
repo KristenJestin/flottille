@@ -173,14 +173,8 @@ fn default_of(kind: Kind) -> Value {
 }
 
 /// One extension's table checked key by key against its declaration: `enabled` and its settings.
-/// `at` is how the table is named in an error (`specs`, `extensions.specs`); `project` whether it
-/// is a project's.
-fn values(
-    extension: &Extension,
-    table: &Map<String, Value>,
-    at: &str,
-    project: bool,
-) -> Result<Values, String> {
+/// `at` is how the table is named in an error (`specs`, `extensions.specs`).
+fn values(extension: &Extension, table: &Map<String, Value>, at: &str) -> Result<Values, String> {
     let mut values = Values::default();
     for (key, value) in table {
         if key == "enabled" {
@@ -201,11 +195,6 @@ fn values(
                     .collect();
                 format!("{at}.{key}: unknown key: the keys are {}", keys.join(", "))
             })?;
-        if project && !setting.per_project {
-            return Err(format!(
-                "{at}.{key}: is set for all projects, never for one"
-            ));
-        }
         let value = checked(setting.kind, value).map_err(|why| format!("{at}.{key}: {why}"))?;
         values.settings.insert(key.clone(), value);
     }
@@ -258,7 +247,7 @@ fn parse(text: &str) -> Result<BTreeMap<&'static str, Values>, String> {
         };
         all.insert(
             extension.name,
-            values(extension, &table, name, false).map_err(refuse)?,
+            values(extension, &table, name).map_err(refuse)?,
         );
     }
     Ok(all)
@@ -278,7 +267,7 @@ fn of_project(extension: &Extension, project: &Project) -> Result<Values, String
     let at = format!("extensions.{}", extension.name);
     match project.extensions.get(extension.name) {
         None => Ok(Values::default()),
-        Some(table) => values(extension, table, &at, true)
+        Some(table) => values(extension, table, &at)
             .map_err(|why| format!("projects/{}.toml: {why}", project.name)),
     }
 }
@@ -478,7 +467,7 @@ fn set(daemon: &Daemon, asked: Set) -> Result<Value, Failure> {
         .filter(|(_, value)| !value.is_null())
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect();
-    values(extension, &given, &at, asked.project.is_some()).map_err(Failure::refused)?;
+    values(extension, &given, &at).map_err(Failure::refused)?;
     for key in asked.settings.keys() {
         if !extension.settings.iter().any(|setting| setting.key == key) {
             return Err(Failure::refused(format!("{at}.{key}: unknown key")));
