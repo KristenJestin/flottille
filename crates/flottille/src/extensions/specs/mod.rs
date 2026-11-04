@@ -302,7 +302,7 @@ fn not_found(id: u64) -> Failure {
 /// The spec, read in a space of its own; `None` when there is none of that number.
 fn read(daemon: &Daemon, id: u64) -> Result<Option<Spec>> {
     daemon.write(|store| {
-        let space = store.space()?;
+        let space = store.space(EXTENSION.name)?;
         Ok((spec_of(&space, id)?, None::<Event>))
     })
 }
@@ -362,7 +362,7 @@ fn write_draft(
 ) -> std::result::Result<Value, Failure> {
     active_spec(daemon, id)?;
     let spec = daemon.write(|store| {
-        let space = store.space()?;
+        let space = store.space(EXTENSION.name)?;
         let mut spec =
             spec_of(&space, id)?.ok_or_else(|| Error::Refused(format!("no spec {id}")))?;
         if spec.status != Status::Draft {
@@ -400,7 +400,7 @@ fn write_draft(
 fn set_status(daemon: &Daemon, id: u64, to: Status) -> std::result::Result<Value, Failure> {
     active_spec(daemon, id)?;
     let spec = daemon.write(|store| {
-        let space = store.space()?;
+        let space = store.space(EXTENSION.name)?;
         let mut spec =
             spec_of(&space, id)?.ok_or_else(|| Error::Refused(format!("no spec {id}")))?;
         let from = match to {
@@ -717,7 +717,7 @@ fn call(daemon: &Daemon, method: &str, params: Value) -> std::result::Result<Val
                 }
             };
             let specs = daemon.write(|store| {
-                let space = store.space()?;
+                let space = store.space(EXTENSION.name)?;
                 Ok((specs_where(&space, "", &[])?, None::<Event>))
             })?;
             let listed: Vec<Value> = specs
@@ -835,7 +835,7 @@ fn new(daemon: &Daemon, asked: New) -> std::result::Result<Value, Failure> {
         .to_owned();
     let at = now_ms();
     let spec = daemon.write(|store| {
-        let space = store.space()?;
+        let space = store.space(EXTENSION.name)?;
         space.tables().execute(
             "INSERT INTO ext_specs_specs (project, title, mode, status, language, content, \
              last_c, last_d, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 0, ?7, ?7)",
