@@ -2602,7 +2602,7 @@ impl Store {
     /// already applied never twice, as the store's own are. A migration is never edited once
     /// released.
     pub fn migrate_extension(&mut self, name: &str, migrations: &[&str]) -> Result<()> {
-        let prefix = format!("ext_{name}_");
+        let prefix = prefix_of(name)?;
         let transaction = self
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -2640,13 +2640,28 @@ impl Store {
     /// The space of the extension `name`: one transaction over its own tables, in which its events
     /// are stored with the change they say. Nothing is kept unless it is committed.
     pub fn space(&mut self, name: &str) -> Result<Space<'_>> {
-        let prefix = format!("ext_{name}_");
+        let prefix = prefix_of(name)?;
         let transaction = self.connection.transaction()?;
         Ok(Space {
             confinement: Confinement::enter(&transaction, &self.confined, prefix)?,
             transaction,
         })
     }
+}
+
+/// The prefix of the tables of the extension `name`. A name is letters and digits only: were `a`
+/// and `a_b` both names, `ext_a_b_notes` would be in the space of each.
+fn prefix_of(name: &str) -> Result<String> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    {
+        return Err(Error::Refused(format!(
+            "{name:?}: an extension's name is lower-case letters and digits only"
+        )));
+    }
+    Ok(format!("ext_{name}_"))
 }
 
 /// What an extension may do while it is confined (`docs/extensions.md`, "Data"): make, change,
@@ -5743,6 +5758,16 @@ mod tests {
                 ],
             )
             .unwrap();
+    }
+
+    #[test]
+    fn an_extension_whose_name_holds_an_underscore_is_refused() {
+        let mut store = Store::open_in_memory().unwrap();
+
+        let error = store.migrate_extension("a_b", &[]).unwrap_err();
+
+        assert!(error.to_string().contains("a_b"), "{error}");
+        assert!(store.space("a_b").is_err());
     }
 
     #[test]

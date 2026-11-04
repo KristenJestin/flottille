@@ -638,6 +638,12 @@ mod tests {
     #[test]
     fn each_extension_keeps_its_tables_in_its_own_space() {
         for extension in ALL {
+            let name = extension.name;
+            assert!(
+                name.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+                "{name}: the store takes letters and digits alone"
+            );
             let own = format!("ext_{}_", extension.name);
             for migration in extension.migrations {
                 for word in migration.split_whitespace() {
