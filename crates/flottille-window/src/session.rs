@@ -1617,9 +1617,10 @@ struct Read<'a> {
 }
 
 /// The conversation: one row view per block, in a list that lays out and draws only the items in
-/// view, and follows its end unless the user scrolled up to read. What the agent said and the
-/// messages it was sent are items of their own; everything between two of them is one group,
-/// one item, folded to a line by default.
+/// view, and follows its end unless the user scrolled up to read. What the agent said, the
+/// messages it was sent and the children it launched are items of their own; everything between
+/// two of them is one group, folded to a line by default: the line is one item, and each of its
+/// rows is one more while it is unfolded, so that a long group draws only the rows in view.
 pub struct ConversationView {
     page: WeakEntity<SessionPage>,
     id: String,
@@ -1632,6 +1633,9 @@ pub struct ConversationView {
     earlier: bool,
     /// How many times a row was looked at or changed, for the cost of an update.
     touched: usize,
+    /// How many rows of a group were walked to say its line or what stays out of its fold: only
+    /// when the group changes, never to draw it.
+    walked: usize,
     /// The list's items: "Show earlier" first when older events remain, then the segments, a
     /// long reply as one item per Markdown piece: the list draws only the pieces in view.
     list: ListState,
@@ -1643,17 +1647,48 @@ pub struct ConversationView {
     segment_of: Vec<usize>,
     /// The button back to the end, over the list.
     to_end: Entity<ToEnd>,
+    /// Takes the rows that folded away out of the list once their fold has ended.
+    sweep: Option<Task<()>>,
     renders: usize,
 }
 
-/// A stretch of the conversation: a row in sight, or a group of the agent's work, whose line
-/// is kept with it so that a frame never walks the rows it holds to say it.
+/// A stretch of the conversation: a row in sight, or a group of the agent's work.
 enum Segment {
     Row(usize),
-    Group {
-        rows: Range<usize>,
-        summary: Summary,
-    },
+    Group(Group),
+}
+
+/// A group of the agent's work. What its line says and which of its rows stay out of the fold
+/// are kept with it, so that a frame never walks the rows it holds.
+struct Group {
+    rows: Range<usize>,
+    summary: Summary,
+    /// The rows that stay in sight while it is folded: a call held for the user, a command still
+    /// running, a question asked to the user.
+    needs: Vec<usize>,
+    /// Older events of it are on an earlier page: its line counts only the part read.
+    cut: bool,
+    open: bool,
+    /// Its rows that are items of the list now, in order: unfolding, shown, or folding away
+    /// until the sweep takes them out.
+    items: Vec<Shown>,
+}
+
+/// A row of a group that is an item of the list, with its fold.
+struct Shown {
+    at: usize,
+    motion: Motion,
+    height: Rc<Cell<Pixels>>,
+}
+
+/// What a group's fold is kept by, the same whatever page of the history was read first: the
+/// event that made its first block or, while older events of it are on an earlier page, the one
+/// that made the block after it (`Cut` when none came yet).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Key {
+    First(u64),
+    Before(u64),
+    Cut,
 }
 
 /// The space between two items of the conversation, kept between the rows of a group.
@@ -1661,10 +1696,9 @@ fn row_gap() -> Pixels {
     px(18.)
 }
 
-/// The groups the user unfolded, by agent, each by when its first block came: kept while the
-/// window is open, never stored.
+/// The groups the user unfolded, by agent: kept while the window is open, never stored.
 #[derive(Default)]
-struct Unfolded(HashMap<String, HashSet<u64>>);
+struct Unfolded(HashMap<String, HashSet<Key>>);
 
 impl gpui_kit::Global for Unfolded {}
 
@@ -1686,11 +1720,13 @@ impl ConversationView {
             specials: Vec::new(),
             earlier: false,
             touched: 0,
+            walked: 0,
             list,
             more: Vec::new(),
             segments: Vec::new(),
             segment_of: Vec::new(),
             to_end,
+            sweep: None,
             renders: 0,
         };
         this.watch(cx);
@@ -1714,7 +1750,7 @@ impl ConversationView {
     fn items_of(&self, segment: &Segment) -> usize {
         match segment {
             Segment::Row(at) => 1 + self.more[*at],
-            Segment::Group { .. } => 1,
+            Segment::Group(group) => 1 + group.items.len(),
         }
     }
 
@@ -1727,11 +1763,19 @@ impl ConversationView {
                 .sum::<usize>()
     }
 
-    /// The list's first item of a row's segment.
+    /// The list's first item of a row: its own, or its group's line while it is folded in.
     fn item(&self, at: usize) -> usize {
-        match self.segment_of.get(at) {
-            Some(&segment) => self.item_of(segment),
-            None => self.item_of(self.segments.len()),
+        let Some(&segment) = self.segment_of.get(at) else {
+            return self.item_of(self.segments.len());
+        };
+        let first = self.item_of(segment);
+        match &self.segments[segment] {
+            Segment::Group(group) => group
+                .items
+                .iter()
+                .position(|shown| shown.at == at)
+                .map_or(first, |n| first + 1 + n),
+            Segment::Row(_) => first,
         }
     }
 
@@ -1749,7 +1793,7 @@ impl ConversationView {
     }
 
     /// Gives the row `at` one item per piece of its reply, and measures again its last; a row
-    /// of a group measures its group again.
+    /// of a group is measured again.
     fn fit(&mut self, at: usize, cx: &gpui_kit::App) {
         let first = self.item(at);
         if !matches!(self.segments[self.segment_of[at]], Segment::Row(_)) {
@@ -1768,44 +1812,204 @@ impl ConversationView {
     }
 
     /// Places the row `at`, just added at the end: a row of its own, or the last group grows
-    /// by it. Whether a new item was made.
+    /// by it. Whether a new segment was made.
     fn place(&mut self, at: usize) -> bool {
         let prose = in_sight(&self.model.blocks()[at]);
         if !prose
-            && let Some(Segment::Group { rows, .. }) = self.segments.last_mut()
-            && rows.end == at
+            && let Some(Segment::Group(group)) = self.segments.last_mut()
+            && group.rows.end == at
         {
-            rows.end = at + 1;
+            group.rows.end = at + 1;
             self.segment_of.push(self.segments.len() - 1);
-            self.summarise(self.segments.len() - 1);
             return false;
         }
+        // Only rows made before the events read stand before it: its start may be on an
+        // earlier page.
+        let cut = !prose
+            && self.earlier
+            && self.segments.iter().all(
+                |segment| matches!(segment, Segment::Row(row) if self.model.seq_of(*row) == 0),
+            );
         self.segment_of.push(self.segments.len());
         self.segments.push(match prose {
             true => Segment::Row(at),
-            false => Segment::Group {
+            false => Segment::Group(Group {
                 rows: at..at + 1,
                 summary: Summary::default(),
-            },
+                needs: Vec::new(),
+                cut,
+                open: false,
+                items: Vec::new(),
+            }),
         });
-        if !prose {
-            self.summarise(self.segments.len() - 1);
-        }
         true
     }
 
     /// Says the line of a group again, from its rows alone. Whether it changed.
     fn summarise(&mut self, segment: usize) -> bool {
-        let Some(Segment::Group { rows, summary }) = self.segments.get_mut(segment) else {
+        let Some(Segment::Group(group)) = self.segments.get_mut(segment) else {
             return false;
         };
+        let rows = group.rows.clone();
+        self.walked += rows.len();
         let said = Summary::of(
             &self.model.blocks()[rows.clone()],
-            &self.model.times()[rows.clone()],
+            &self.model.times()[rows],
         );
-        let changed = *summary != said;
-        *summary = said;
+        let changed = group.summary != said;
+        group.summary = said;
         changed
+    }
+
+    /// Finds again the rows of a group that stay out of its fold. Whether they changed.
+    fn find_needs(&mut self, segment: usize, cx: &gpui_kit::App) -> bool {
+        let last = segment + 1 == self.segments.len();
+        let Some(Segment::Group(group)) = self.segments.get(segment) else {
+            return false;
+        };
+        let rows = group.rows.clone();
+        self.walked += rows.len();
+        let needs: Vec<usize> = rows
+            .filter(|&at| self.needs_the_user(at, last, cx))
+            .collect();
+        let Some(Segment::Group(group)) = self.segments.get_mut(segment) else {
+            return false;
+        };
+        let changed = group.needs != needs;
+        group.needs = needs;
+        changed
+    }
+
+    /// The rows of a group that are to be items of the list: all of them unfolded (but a
+    /// request answered by a card below it, which shows nothing), else those that stay out of
+    /// the fold.
+    fn wanted(&self, group: &Group) -> Vec<usize> {
+        match group.open {
+            true => group
+                .rows
+                .clone()
+                .filter(|&at| !matches!(self.model.blocks()[at], Block::Answered { .. }))
+                .collect(),
+            false => group.needs.clone(),
+        }
+    }
+
+    /// Makes the items of a group's rows what its fold wants: a row that comes unfolds, one
+    /// that goes folds away first, both over [`PANEL`], and the list follows.
+    fn reconcile(&mut self, segment: usize, cx: &mut Context<Self>) {
+        let Some(Segment::Group(group)) = self.segments.get(segment) else {
+            return;
+        };
+        let wanted = self.wanted(group);
+        let mut ix = self.item_of(segment) + 1;
+        let now = cx.background_executor().now();
+        let reduce = cx.reduce_motion();
+        let Some(Segment::Group(group)) = self.segments.get_mut(segment) else {
+            return;
+        };
+        let mut old = std::mem::take(&mut group.items).into_iter().peekable();
+        let mut wanted = wanted.into_iter().peekable();
+        let mut leaving = false;
+        enum Step {
+            Keep,
+            Come(usize),
+            Leave,
+        }
+        loop {
+            let step = match (old.peek().map(|shown| shown.at), wanted.peek().copied()) {
+                (None, None) => break,
+                (Some(o), Some(w)) if o == w => Step::Keep,
+                (Some(o), Some(w)) if w < o => Step::Come(w),
+                (None, Some(w)) => Step::Come(w),
+                (Some(_), _) => Step::Leave,
+            };
+            match step {
+                Step::Keep => {
+                    let mut shown = old.next().expect("peeked");
+                    wanted.next();
+                    if shown.motion.target() != 1.0 {
+                        shown.motion.animate(1.0, PANEL, now, reduce);
+                    }
+                    group.items.push(shown);
+                    ix += 1;
+                }
+                Step::Come(at) => {
+                    wanted.next();
+                    let mut motion = Motion::settled(0.0);
+                    motion.animate(1.0, PANEL, now, reduce);
+                    self.list.splice(ix..ix, 1);
+                    group.items.push(Shown {
+                        at,
+                        motion,
+                        height: Rc::default(),
+                    });
+                    ix += 1;
+                }
+                Step::Leave => {
+                    let mut shown = old.next().expect("peeked");
+                    if shown.motion.target() != 0.0 {
+                        shown.motion.animate(0.0, PANEL, now, reduce);
+                    }
+                    group.items.push(shown);
+                    leaving = true;
+                    ix += 1;
+                }
+            }
+        }
+        self.mark_asks(segment, cx);
+        if leaving {
+            self.sweep = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(PANEL + FRAME).await;
+                this.update(cx, |this, cx| this.swept(cx)).ok();
+            }));
+        }
+    }
+
+    /// A question to the user that stays out of a folded group shows alone, without the calls
+    /// merged with it.
+    fn mark_asks(&self, segment: usize, cx: &mut gpui_kit::App) {
+        let Some(Segment::Group(group)) = self.segments.get(segment) else {
+            return;
+        };
+        let only = !group.open;
+        for &at in &group.needs {
+            if asks_the_user(&self.model.blocks()[at]) {
+                self.rows[at].update(cx, |row, cx| row.set_asks_only(only, cx));
+            }
+        }
+    }
+
+    /// Takes out of the list the rows of groups whose fold away has ended.
+    fn swept(&mut self, cx: &mut Context<Self>) {
+        let now = cx.background_executor().now();
+        let mut ix = usize::from(self.earlier);
+        let mut again = false;
+        for segment in 0..self.segments.len() {
+            let items = self.items_of(&self.segments[segment]);
+            let Segment::Group(group) = &mut self.segments[segment] else {
+                ix += items;
+                continue;
+            };
+            ix += 1;
+            let list = &self.list;
+            group.items.retain(|shown| {
+                let leaving = shown.motion.target() == 0.0;
+                let gone = leaving && !shown.motion.is_running(now);
+                again |= leaving && !gone;
+                match gone {
+                    true => list.splice(ix..ix + 1, 0),
+                    false => ix += 1,
+                }
+                !gone
+            });
+        }
+        self.sweep = again.then(|| {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(FRAME).await;
+                this.update(cx, |this, cx| this.swept(cx)).ok();
+            })
+        });
+        cx.notify();
     }
 
     pub fn rows(&self) -> &[Entity<Row>] {
@@ -1830,6 +2034,27 @@ impl ConversationView {
         self.touched
     }
 
+    /// How many rows of groups were walked so far to say their lines and what stays out of
+    /// their folds.
+    pub fn walked(&self) -> usize {
+        self.walked
+    }
+
+    /// How many items the list holds.
+    pub fn item_count(&self) -> usize {
+        self.list.item_count()
+    }
+
+    /// How far the conversation is scrolled from its top.
+    pub fn scroll_offset(&self) -> Pixels {
+        -self.list.scroll_px_offset_for_scrollbar().y
+    }
+
+    /// The button back to the end.
+    pub fn to_end(&self) -> &Entity<ToEnd> {
+        &self.to_end
+    }
+
     /// Whether older events than those shown remain.
     pub fn has_earlier(&self) -> bool {
         self.earlier
@@ -1840,10 +2065,16 @@ impl ConversationView {
         self.segments
             .iter()
             .filter_map(|segment| match segment {
-                Segment::Group { rows, .. } => Some(rows.clone()),
+                Segment::Group(group) => Some(group.rows.clone()),
                 Segment::Row(_) => None,
             })
             .collect()
+    }
+
+    /// The id of the line of the group that holds these rows.
+    pub fn group_id(&self, rows: &Range<usize>) -> Option<String> {
+        let segment = *self.segment_of.get(rows.start)?;
+        matches!(self.segments[segment], Segment::Group(_)).then(|| self.line_id(segment))
     }
 
     /// Whether the conversation follows its end.
@@ -1851,34 +2082,68 @@ impl ConversationView {
         self.list.is_following_tail()
     }
 
-    /// The key a group's fold is kept by: when its first block came.
-    fn key(&self, rows: &Range<usize>) -> u64 {
-        self.model.at(rows.start).unwrap_or_default()
+    /// The keys a group's fold is kept by, the first naming it.
+    fn keys(&self, segment: usize) -> Vec<Key> {
+        let Some(Segment::Group(group)) = self.segments.get(segment) else {
+            return Vec::new();
+        };
+        let next = (group.rows.end < self.model.blocks().len())
+            .then(|| Key::Before(self.model.seq_of(group.rows.end)));
+        match group.cut {
+            true => vec![next.unwrap_or(Key::Cut)],
+            false => std::iter::once(Key::First(self.model.seq_of(group.rows.start)))
+                .chain(next)
+                .collect(),
+        }
     }
 
-    fn is_unfolded(&self, rows: &Range<usize>, cx: &gpui_kit::App) -> bool {
-        let key = self.key(rows);
-        cx.try_global::<Unfolded>()
+    /// The id of a group's line, which its other ids derive from: stable while earlier history
+    /// loads.
+    fn line_id(&self, segment: usize) -> String {
+        match self.keys(segment).first() {
+            Some(Key::First(seq)) => format!("group-{seq}"),
+            Some(Key::Before(seq)) => format!("group-before-{seq}"),
+            _ => "group-cut".into(),
+        }
+    }
+
+    fn is_unfolded(&self, segment: usize, cx: &gpui_kit::App) -> bool {
+        let Some(keys) = cx
+            .try_global::<Unfolded>()
             .and_then(|unfolded| unfolded.0.get(&self.id))
-            .is_some_and(|keys| keys.contains(&key))
+        else {
+            return false;
+        };
+        self.keys(segment).iter().any(|key| keys.contains(key))
     }
 
-    /// The user folds or unfolds the group of `segment`.
-    fn toggle(&mut self, segment: usize, cx: &mut Context<Self>) {
-        let Some(Segment::Group { rows, .. }) = self.segments.get(segment) else {
+    /// Keeps whether a group is unfolded, by each of its keys.
+    fn keep(&self, segment: usize, cx: &mut gpui_kit::App) {
+        let Some(Segment::Group(group)) = self.segments.get(segment) else {
             return;
         };
-        let key = self.key(rows);
-        let keys = cx
+        let (open, keys) = (group.open, self.keys(segment));
+        let kept = cx
             .default_global::<Unfolded>()
             .0
             .entry(self.id.clone())
             .or_default();
-        if !keys.remove(&key) {
-            keys.insert(key);
+        for key in keys {
+            match open {
+                true => kept.insert(key),
+                false => kept.remove(&key),
+            };
         }
-        let item = self.item_of(segment);
-        self.list.remeasure_items(item..item + 1);
+    }
+
+    /// The user folds or unfolds the group of `segment`.
+    fn toggle(&mut self, segment: usize, cx: &mut Context<Self>) {
+        let Some(Segment::Group(group)) = self.segments.get_mut(segment) else {
+            return;
+        };
+        group.open = !group.open;
+        self.keep(segment, cx);
+        self.reconcile(segment, cx);
         cx.notify();
     }
 
@@ -1899,10 +2164,38 @@ impl ConversationView {
         self.more.clear();
         self.segments.clear();
         self.segment_of.clear();
+        self.sweep = None;
         for at in 0..self.model.blocks().len() {
             self.add_row(at, page, cx);
             self.more[at] = self.rows[at].read(cx).more_pieces().len();
             self.place(at);
+        }
+        // Each group is said once, whole, and shows what the user left unfolded, at rest.
+        for segment in 0..self.segments.len() {
+            if !matches!(self.segments[segment], Segment::Group(_)) {
+                continue;
+            }
+            self.summarise(segment);
+            self.find_needs(segment, cx);
+            let open = self.is_unfolded(segment, cx);
+            if let Segment::Group(group) = &mut self.segments[segment] {
+                group.open = open;
+            }
+            let Segment::Group(group) = &self.segments[segment] else {
+                continue;
+            };
+            let wanted = self.wanted(group);
+            if let Segment::Group(group) = &mut self.segments[segment] {
+                group.items = wanted
+                    .into_iter()
+                    .map(|at| Shown {
+                        at,
+                        motion: Motion::settled(1.0),
+                        height: Rc::default(),
+                    })
+                    .collect();
+            }
+            self.mark_asks(segment, cx);
         }
         let items = self.item_of(self.segments.len());
         match read.follow {
@@ -1932,6 +2225,17 @@ impl ConversationView {
         self.touched += 1;
     }
 
+    /// A group changed: its line is said again, and the rows that stay out of its fold follow.
+    /// Whether it is to be drawn again.
+    fn group_changed(&mut self, segment: usize, cx: &mut Context<Self>) -> bool {
+        let said = self.summarise(segment);
+        let needs = self.find_needs(segment, cx);
+        if needs || said {
+            self.reconcile(segment, cx);
+        }
+        needs || said
+    }
+
     /// Adds a row for each block added, and draws again each row whose block changed; a group
     /// whose line changed is drawn again with it.
     fn changed(&mut self, changes: &[Change], page: &SessionPage, cx: &mut Context<Self>) {
@@ -1944,8 +2248,28 @@ impl ConversationView {
                     let item = self.item_of(self.segments.len());
                     if self.place(at) {
                         self.list.splice(item..item, 1);
+                        // The group before is no longer the last: its question folds in, and
+                        // its fold is kept by the block after it too.
+                        let segment = self.segments.len() - 1;
+                        if segment > 0 && matches!(self.segments[segment - 1], Segment::Group(_)) {
+                            self.keep(segment - 1, cx);
+                            self.group_changed(segment - 1, cx);
+                        }
                     }
-                    self.fit(at, cx);
+                    let segment = self.segment_of[at];
+                    if let Segment::Group(group) = &self.segments[segment] {
+                        if group.rows.len() == 1 {
+                            let open = self.is_unfolded(segment, cx);
+                            if let Segment::Group(group) = &mut self.segments[segment] {
+                                group.open = open;
+                            }
+                        }
+                        self.summarise(segment);
+                        self.find_needs(segment, cx);
+                        self.reconcile(segment, cx);
+                    } else {
+                        self.fit(at, cx);
+                    }
                     if matches!(self.model.blocks()[at], Block::Text { .. }) {
                         self.to_end.update(cx, |to_end, cx| to_end.wrote(cx));
                     }
@@ -1963,9 +2287,10 @@ impl ConversationView {
                         let item = self.item(*at);
                         self.list.remeasure_items(item..item + 1);
                         self.fit(*at, cx);
-                        redraw |= self.summarise(self.segment_of[*at]);
-                        // A command that ended leaves the group's line.
-                        redraw |= matches!(self.model.blocks()[*at], Block::Command(_));
+                        let segment = self.segment_of[*at];
+                        if matches!(self.segments[segment], Segment::Group(_)) {
+                            redraw |= self.group_changed(segment, cx);
+                        }
                     }
                 }
                 Change::Appended(at, piece) => {
@@ -1982,9 +2307,14 @@ impl ConversationView {
         }
     }
 
-    /// A row's card was brought up to date: its group, which may show it outside the fold, is
-    /// drawn again.
+    /// A row's card was brought up to date: a request answered folds into its group.
     fn card_changed(&mut self, at: usize, cx: &mut Context<Self>) {
+        if let Some(&segment) = self.segment_of.get(at)
+            && matches!(self.segments[segment], Segment::Group(_))
+            && self.find_needs(segment, cx)
+        {
+            self.reconcile(segment, cx);
+        }
         let item = self.item(at);
         self.list.remeasure_items(item..item + 1);
         cx.notify();
@@ -2004,12 +2334,6 @@ impl ConversationView {
         }
     }
 
-    /// Whether the row `at` of a group may show under its line: its fold is its own.
-    fn may_need_the_user(&self, at: usize) -> bool {
-        let block = &self.model.blocks()[at];
-        matches!(block, Block::Approval { .. } | Block::Command(_)) || asks_the_user(block)
-    }
-
     /// A row of the conversation as the list draws it, entering when it first shows.
     fn row_element(&self, at: usize) -> AnyElement {
         enter(
@@ -2020,27 +2344,25 @@ impl ConversationView {
         .into_any_element()
     }
 
-    /// A group: its line, then its rows, folded away until a click unfolds them; a row that
-    /// needs the user stays in sight under the line, in its place.
-    fn render_group(
+    /// A group's line: how many steps, their kinds, how many failed and how long it took, or
+    /// the step running now; a click unfolds its rows.
+    fn render_group_line(
         &mut self,
         segment: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some(Segment::Group { rows, summary }) = self.segments.get(segment) else {
+        let Some(Segment::Group(group)) = self.segments.get(segment) else {
             return div().into_any_element();
         };
-        let (rows, summary) = (rows.clone(), summary.clone());
-        let open = self.is_unfolded(&rows, cx);
-        let last = segment + 1 == self.segments.len();
+        let (open, pieces) = (group.open, group_line(&group.summary, group.cut));
+        let failed = (group.summary.failed > 0).then(|| format!("{} failed", group.summary.failed));
+        let line_id = self.line_id(segment);
         let p = palette(cx);
-        let id = |part: &str| ElementId::Name(format!("group-{}{part}", rows.start).into());
-        let pieces = group_line(&summary);
+        let id = |part: &str| ElementId::Name(format!("{line_id}{part}").into());
         let said = SharedString::from(pieces.join(" · "));
-        let failed = (summary.failed > 0).then(|| format!("{} failed", summary.failed));
         let turn = turning(id("-chevron"), open, window, cx);
-        let line = hoverable(
+        hoverable(
             div()
                 .id(id(""))
                 .flex()
@@ -2092,59 +2414,12 @@ impl ConversationView {
                 }))
                 .on_click(cx.listener(move |this, _, _, cx| this.toggle(segment, cx))),
             move |d, t| d.text_color(mix(p.faint, p.mute, t)),
-        );
-        // The rows that fold run between those that may stay in sight, each run one fold.
-        let mut parts: Vec<AnyElement> = Vec::new();
-        let mut run: Vec<usize> = Vec::new();
-        let fold = |run: &mut Vec<usize>, parts: &mut Vec<AnyElement>, this: &Self| {
-            let Some(&first) = run.first() else {
-                return;
-            };
-            parts.push(
-                presence(
-                    id(&format!("-fold-{first}")),
-                    open,
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(row_gap())
-                        .children(run.drain(..).map(|at| this.row_element(at))),
-                )
-                .gap(row_gap())
-                .into_any_element(),
-            );
-        };
-        for at in rows.clone() {
-            // A request answered by a card below it: no row, not even the gap between two.
-            if matches!(self.model.blocks()[at], Block::Answered { .. }) {
-                continue;
-            }
-            if !self.may_need_the_user(at) {
-                run.push(at);
-                continue;
-            }
-            fold(&mut run, &mut parts, self);
-            let shown = open || self.needs_the_user(at, last, cx);
-            parts.push(
-                presence(id(&format!("-row-{at}")), shown, self.row_element(at))
-                    .gap(row_gap())
-                    .into_any_element(),
-            );
-        }
-        fold(&mut run, &mut parts, self);
-        div()
-            .id(id("-group"))
-            .flex()
-            .flex_col()
-            .gap(row_gap())
-            .child(line)
-            .children(parts)
-            .test_support()
-            .into_any_element()
+        )
+        .into_any_element()
     }
 
-    /// The list's item `ix`: "Show earlier", a row, a piece of a row's long reply, or a group,
-    /// in the conversation's column.
+    /// The list's item `ix`: "Show earlier", a row, a piece of a row's long reply, a group's
+    /// line or one of its rows, in the conversation's column.
     fn render_item(
         &mut self,
         ix: usize,
@@ -2153,59 +2428,90 @@ impl ConversationView {
     ) -> AnyElement {
         let narrow = window.viewport_size().width < px(crate::shell::NARROW);
         let (segment, piece) = self.segment_at(ix).unwrap_or((usize::MAX, 0));
-        let at = match self.segments.get(segment) {
-            Some(Segment::Row(at)) => Some(*at),
-            _ => None,
+        let last = ix + 1 == self.item_of(self.segments.len());
+        let column = |below: Pixels| {
+            div()
+                .max_w(px(780.))
+                .w_full()
+                .mx_auto()
+                .px(if narrow { space::LG } else { space::XXL })
+                .when(ix == 0, |d| {
+                    d.pt(if narrow { space::XL } else { space::XXL })
+                })
+                .pb(below)
         };
-        let more = at.and_then(|at| self.more.get(at).copied()).unwrap_or(0);
-        // Between the pieces of one reply, the gap of its paragraphs.
-        let below = match () {
-            _ if piece < more => TextViewStyle::default()
-                .paragraph_gap()
-                .to_pixels(window.rem_size()),
-            _ if ix + 1 == self.item_of(self.segments.len()) => px(20.),
-            _ => row_gap(),
-        };
-        let column = div()
-            .max_w(px(780.))
-            .w_full()
-            .mx_auto()
-            .px(if narrow { space::LG } else { space::XXL })
-            .when(ix == 0, |d| {
-                d.pt(if narrow { space::XL } else { space::XXL })
-            })
-            .pb(below);
+        let gap = if last { px(20.) } else { row_gap() };
         // A list's item is not stretched to its width: the column is centred in a full one.
-        let centred = |column| div().w_full().child(column).into_any_element();
+        let centred = |column: Div| div().w_full().child(column).into_any_element();
         if self.earlier && ix == 0 {
             let page = self.page.clone();
-            return centred(column.flex().justify_center().child(
+            return centred(column(gap).flex().justify_center().child(
                 Button::quiet("show-earlier", "Show earlier").on_click(move |_, _, cx| {
                     page.update(cx, |page, cx| page.show_earlier(cx)).ok();
                 }),
             ));
         }
-        if segment < self.segments.len() && at.is_none() {
-            let group = self.render_group(segment, window, cx);
-            return centred(column.child(group));
-        }
-        let Some(row) = at.and_then(|at| self.rows.get(at)) else {
-            return div().into_any_element();
-        };
-        if piece > 0 {
-            let row = row.read(cx);
-            let shown = row.more_pieces().get(piece - 1).cloned();
-            // The last piece of a long reply carries its time and Copy.
-            if piece == more {
-                let p = palette(cx);
-                let said = row.said_text(div().children(shown), p);
-                return centred(column.child(said));
+        match self.segments.get(segment) {
+            Some(Segment::Group(_)) if piece == 0 => {
+                let line = self.render_group_line(segment, window, cx);
+                centred(column(gap).child(line))
             }
-            return centred(column.children(shown));
+            Some(Segment::Group(group)) => {
+                let Some(shown) = group.items.get(piece - 1) else {
+                    return div().into_any_element();
+                };
+                let (at, motion, height) = (shown.at, shown.motion, shown.height.clone());
+                let now = cx.background_executor().now();
+                let running = motion.is_running(now);
+                let open = motion.target() == 1.0;
+                if !open && !running {
+                    return div().into_any_element();
+                }
+                if running {
+                    window.request_animation_frame();
+                }
+                let t = motion.value(now);
+                let id = ElementId::Name(format!("{}-row-{at}", self.line_id(segment)).into());
+                let row = fold_frame(id, open, running, t, &height, self.rows[at].clone());
+                // The gap under it folds with it.
+                centred(column(gap * t).child(row))
+            }
+            Some(Segment::Row(at)) => {
+                let (at, more) = (*at, self.more[*at]);
+                let row = &self.rows[at];
+                if piece == 0 {
+                    // Between the pieces of one reply, the gap of its paragraphs.
+                    let below = match more {
+                        0 => gap,
+                        _ => TextViewStyle::default()
+                            .paragraph_gap()
+                            .to_pixels(window.rem_size()),
+                    };
+                    return centred(column(below).child(self.row_element(at)));
+                }
+                let below = match piece < more {
+                    true => TextViewStyle::default()
+                        .paragraph_gap()
+                        .to_pixels(window.rem_size()),
+                    false => gap,
+                };
+                let row = row.read(cx);
+                let shown = row.more_pieces().get(piece - 1).cloned();
+                // The last piece of a long reply carries its time and Copy.
+                if piece == more {
+                    let p = palette(cx);
+                    let said = row.said_text(div().children(shown), p);
+                    return centred(column(below).child(said));
+                }
+                centred(column(below).children(shown))
+            }
+            None => div().into_any_element(),
         }
-        centred(column.child(self.row_element(at.unwrap_or_default())))
     }
 }
+
+/// How often a motion the conversation drives itself moves: one frame.
+const FRAME: Duration = Duration::from_millis(16);
 
 /// Whether a notice is a delivery the agent was sent, folded to one line, rather than the
 /// agent's own end or resumption, or a session it started, said whole.
@@ -2213,13 +2519,14 @@ fn is_delivery(kind: &str) -> bool {
     !matches!(kind, "failed" | "ended" | "resumed" | STARTED_SESSION_KIND)
 }
 
-/// The pieces of a group's line: how many steps, their kinds, how many failed, how long it took
-/// or the step running now.
-pub fn group_line(summary: &Summary) -> Vec<String> {
+/// The pieces of a group's line: how many steps (of the part read, when its start is on an
+/// earlier page), their kinds, how many failed, how long it took or the step running now.
+pub fn group_line(summary: &Summary, cut: bool) -> Vec<String> {
     let mut pieces = vec![format!(
-        "{} {}",
+        "{} {}{}",
         summary.steps,
-        if summary.steps == 1 { "step" } else { "steps" }
+        if summary.steps == 1 { "step" } else { "steps" },
+        if cut { " loaded" } else { "" }
     )];
     if !summary.kinds.is_empty() {
         pieces.push(summary.kinds.join(", "));
@@ -2351,6 +2658,9 @@ pub struct Row {
     card: Option<ApprovalCard>,
     icons: HashMap<String, Entity<StateIcon>>,
     pills: HashMap<String, Entity<Pill>>,
+    /// Its steps show only the question asked to the user: they stay out of a folded group
+    /// for it alone.
+    asks_only: bool,
     renders: usize,
 }
 
@@ -2393,6 +2703,7 @@ impl Row {
                 card,
                 icons: HashMap::new(),
                 pills: HashMap::new(),
+                asks_only: false,
                 renders: 0,
             };
             row.set_block(block, cx);
@@ -2402,6 +2713,14 @@ impl Row {
 
     pub fn block(&self) -> &Block {
         &self.block
+    }
+
+    /// Shows only the question its steps ask the user, or all of them again.
+    fn set_asks_only(&mut self, only: bool, cx: &mut Context<Self>) {
+        if self.asks_only != only {
+            self.asks_only = only;
+            cx.notify();
+        }
     }
 
     /// The line drawn over the row, when it has one: who sent a message (none for the user's:
@@ -3332,7 +3651,8 @@ impl Render for Row {
                         .zip(&self.calls)
                         .enumerate()
                         .map(|(at, (call, (_, mark)))| {
-                            div()
+                            let shown = !self.asks_only || call.name == "ask_user";
+                            let step = div()
                                 .id(ElementId::Name(format!("step-{}-{at}", self.at).into()))
                                 .flex()
                                 .gap(space::MD)
@@ -3406,7 +3726,12 @@ impl Render for Row {
                                         call.duration_ms().map_or("…".into(), seconds),
                                     ),
                                 ))
-                                .test_support()
+                                .test_support();
+                            presence(
+                                ElementId::Name(format!("step-{}-{at}-shown", self.at).into()),
+                                shown,
+                                step,
+                            )
                         });
                 let toggle = || {
                     cx.listener(|this, _, _, cx| {
@@ -3422,8 +3747,12 @@ impl Render for Row {
                 };
                 // Folded to one discreet line until a click opens it: a long run of calls
                 // would push the conversation down. The line and the card fold into each other.
-                let last = calls.last().expect("a block of steps holds a call");
-                let count = calls.len();
+                let said: Vec<&Call> = calls
+                    .iter()
+                    .filter(|call| !self.asks_only || call.name == "ask_user")
+                    .collect();
+                let last = said.last().expect("a block of steps holds a call");
+                let count = said.len();
                 let line = SharedString::from(format!(
                     "{count} {} · {}{}",
                     if count == 1 { "step" } else { "steps" },
@@ -3441,7 +3770,9 @@ impl Render for Row {
                         .mono(12.)
                         .child(chevron(1.))
                         .aria_label(line.clone())
-                        .child(line)
+                        .child(changing(id("steps-said"), line, |line| {
+                            div().child(line).into_any_element()
+                        }))
                         .on_click(toggle()),
                     move |d, t| d.text_color(mix(p.faint, p.mute, t)),
                 );

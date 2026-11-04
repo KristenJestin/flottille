@@ -398,7 +398,9 @@ fn unfold(page: &Entity<SessionPage>, at: usize, cx: &mut VisualTestContext) {
     let Some(group) = groups.into_iter().find(|group| group.contains(&at)) else {
         return;
     };
-    let line = format!("group-{}", group.start);
+    let line = page
+        .read_with(cx, |page, cx| page.conversation().read(cx).group_id(&group))
+        .expect("a group's line");
     if cx.update(|window, _| window.find(line.clone()).expanded()) == Some(false) {
         cx.update(|window, cx| window.click(line, cx));
         settle(cx);

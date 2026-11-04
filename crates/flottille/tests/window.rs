@@ -601,7 +601,9 @@ fn unfold(page: &Entity<SessionPage>, at: usize, cx: &mut VisualTestContext) {
     let Some(group) = groups.into_iter().find(|group| group.contains(&at)) else {
         return;
     };
-    let line = format!("group-{}", group.start);
+    let line = page
+        .read_with(cx, |page, cx| page.conversation().read(cx).group_id(&group))
+        .expect("a group's line");
     if cx.update(|window, _| window.find(line.clone()).expanded()) == Some(false) {
         cx.update(|window, cx| window.click(line, cx));
         settle(cx);
@@ -3357,6 +3359,11 @@ fn a_long_conversation_shows_its_last_page_and_earlier_ones_on_demand(cx: &mut T
         Block::SubAgents,
         "launched before the page read: first, not where the tree came"
     );
+    let groups = page.read_with(cx, |p, cx| p.conversation().read(cx).groups());
+    assert!(
+        !groups.iter().any(|group| group.contains(&0)),
+        "the list stays in sight: {groups:?}"
+    );
     assert!(
         !shown.contains(&Block::Message {
             from: "you".into(),
@@ -3382,6 +3389,10 @@ fn a_long_conversation_shows_its_last_page_and_earlier_ones_on_demand(cx: &mut T
         });
         settle(cx);
     }
+    assert!(
+        cx.update(|window, _| window.try_find("row-0-sub-agents").is_some()),
+        "drawn, not folded under a group"
+    );
     cx.update(|window, cx| window.click("show-earlier", cx));
     until(&shell, cx, "the earlier page", |cx| {
         blocks(&page, cx)[0]

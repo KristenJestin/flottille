@@ -161,11 +161,13 @@ impl Call {
 }
 
 /// Whether a block stays in sight between the groups: what the agent said, the messages it was
-/// sent, and why it ended or came back. Everything else folds into the group between two of
-/// them.
+/// sent, the children it launched (where one that needs the user shows), and why it ended or
+/// came back. Everything else folds into the group between two of them.
 pub fn in_sight(block: &Block) -> bool {
     match block {
-        Block::Text { .. } | Block::Message { .. } | Block::Relayed { .. } => true,
+        Block::Text { .. } | Block::Message { .. } | Block::Relayed { .. } | Block::SubAgents => {
+            true
+        }
         Block::Notice { kind, .. } => matches!(kind.as_str(), "failed" | "ended" | "resumed"),
         _ => false,
     }
@@ -297,6 +299,8 @@ pub struct Conversation {
     blocks: Vec<Block>,
     /// When each block came: the event that made it.
     times: Vec<u64>,
+    /// The number of the event that made each block, 0 for one made before the events read.
+    seqs: Vec<u64>,
     /// When the event being folded came.
     now: u64,
     /// The number of the last event applied: an event read twice (history, then live) is applied
@@ -355,6 +359,7 @@ impl Conversation {
         Self {
             blocks: Vec::new(),
             times: Vec::new(),
+            seqs: Vec::new(),
             now: 0,
             last_seq: 0,
             last_at: None,
@@ -399,6 +404,12 @@ impl Conversation {
     /// When each block came.
     pub fn times(&self) -> &[u64] {
         &self.times
+    }
+
+    /// The number of the event that made the block at this index: the same whatever page of the
+    /// history was read first; 0 for a block made before the events read.
+    pub fn seq_of(&self, index: usize) -> u64 {
+        self.seqs.get(index).copied().unwrap_or_default()
     }
 
     /// The agent shown, as the page names it.
@@ -478,6 +489,7 @@ impl Conversation {
         self.blocks.insert(0, Block::SubAgents);
         self.times
             .insert(0, self.times.first().copied().unwrap_or(self.now));
+        self.seqs.insert(0, 0);
         let shift = |at: &mut usize| *at += 1;
         self.calls.values_mut().for_each(shift);
         self.running = self.running.iter().map(|at| at + 1).collect();
@@ -718,6 +730,7 @@ impl Conversation {
     fn push(&mut self, block: Block) -> Vec<Change> {
         self.blocks.push(block);
         self.times.push(self.now);
+        self.seqs.push(self.last_seq);
         vec![Change::Added]
     }
 
