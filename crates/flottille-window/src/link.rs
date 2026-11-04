@@ -359,6 +359,8 @@ fn matters(event: &Event) -> bool {
                 | "agent.resumed"
                 | "agent.reported"
                 | "agent.asked"
+                // A session that removed its own workspace goes on under main.
+                | "agent.moved"
         ),
         _ => false,
     }
@@ -699,6 +701,7 @@ mod tests {
             "a session at rest or waiting"
         );
         assert!(matters(&event("workspace.created", json!({}))));
+        assert!(matters(&event("agent.moved", json!({}))), "the rail");
         assert!(
             matters(&event("workspace.step_done", json!({}))),
             "a card shows the preparation"
