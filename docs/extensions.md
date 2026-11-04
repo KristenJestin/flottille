@@ -167,7 +167,9 @@ Decide and Before a prompt, which hold what they decide on and nothing else.
 An extension that keeps anything keeps it in **its own space of the store**: tables named
 `ext_<name>_…`, created by migrations the extension declares and the store runs in order with its
 own. Only the extension reads and writes them; the core and the other extensions never do. They
-are kept when the extension is turned off.
+are kept when the extension is turned off. The store holds it: while an extension's migration or
+its space runs, SQLite refuses every statement that makes, changes, reads or writes a table outside
+`ext_<name>_…`, and views, pragmas, attachments and the end of the transaction.
 
 An extension may also add facts to what the core says of an agent, under its own name
 (`agent.tree`'s `extensions.<name>`): the spec a session writes or develops, the compaction's
