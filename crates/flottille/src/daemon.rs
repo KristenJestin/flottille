@@ -603,6 +603,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                 "task.run",
             ]
             .contains(&request.method.as_str())
+            || extensions::answers(&request.method)
         {
             let (daemon, out) = (daemon.clone(), out.clone());
             tokio::spawn(async move {
@@ -636,6 +637,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     tickets::preview(daemon, request.params).await
                 } else if request.method == "task.run" {
                     tasks::run(&daemon, request.params)
+                } else if extensions::answers(&request.method) {
+                    extensions::call(&daemon, &request.method, request.params)
                 } else {
                     workspaces::call(daemon, &request.method, request.params).await
                 };
@@ -782,13 +785,6 @@ fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) 
         ),
         method if method.starts_with("setup.") => (
             match setup::call(daemon, method, request.params) {
-                Ok(result) => Message::result(id, result),
-                Err(failure) => Message::error(Some(id), failure.code, failure.message),
-            },
-            None,
-        ),
-        method if extensions::answers(method) => (
-            match extensions::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => Message::error(Some(id), failure.code, failure.message),
             },
