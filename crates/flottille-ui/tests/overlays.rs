@@ -638,3 +638,126 @@ fn a_select_opened_in_a_modal_hangs_from_its_field_and_its_options_can_be_chosen
         assert_eq!(f.scrim_closed, 0, "and the dialog is still open");
     });
 }
+
+/// A large modal: a header with its own button, and a body that wants all the height left.
+struct Large {
+    open: bool,
+    closed: usize,
+    under: usize,
+}
+
+impl Render for Large {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .child(
+                div()
+                    .id("under")
+                    .size_full()
+                    .on_click(cx.listener(|this, _, _, _| this.under += 1))
+                    .test_support(),
+            )
+            .child(
+                Modal::new("large", "pnpm dev:api")
+                    .sentence("Running for 3 s")
+                    .large()
+                    .takes_focus()
+                    .open(self.open)
+                    .action(div().id("large-action").child("Stop").test_support())
+                    .child(div().id("large-body").flex_1().min_h_0().test_support())
+                    .on_close({
+                        let this = cx.entity().downgrade();
+                        move |_, cx| {
+                            this.update(cx, |d, cx| {
+                                d.open = false;
+                                d.closed += 1;
+                                cx.notify();
+                            })
+                            .ok();
+                        }
+                    }),
+            )
+    }
+}
+
+fn large(cx: &mut TestAppContext) -> (Entity<Large>, &mut VisualTestContext) {
+    init(cx, Desktop::new(false).env());
+    let (large, cx) = cx.add_window_view(|_, _| Large {
+        open: false,
+        closed: 0,
+        under: 0,
+    });
+    cx.simulate_resize(size(px(1000.), px(700.)));
+    cx.update(|window, cx| {
+        large.update(cx, |d, cx| {
+            d.open = true;
+            cx.notify();
+        });
+        window.render_frame(cx);
+    });
+    advance(cx, MODAL * 2);
+    (large, cx)
+}
+
+#[gpui_kit::test]
+fn a_large_modal_fills_the_window_but_a_margin_and_gives_its_body_the_height_left(
+    cx: &mut TestAppContext,
+) {
+    let (_, cx) = large(cx);
+
+    let (panel, body, viewport) = cx.update(|window, _| {
+        (
+            window.find("large").bounds(),
+            window.find("large-body").bounds(),
+            window.viewport_size(),
+        )
+    });
+
+    assert!(panel.size.width > viewport.width * 0.9, "{panel:?}");
+    assert!(panel.size.height > viewport.height * 0.9, "{panel:?}");
+    assert!(
+        panel.origin.x >= px(16.) && panel.origin.y >= px(16.),
+        "{panel:?}"
+    );
+    assert!(
+        panel.bottom() - body.bottom() < px(40.) && body.size.height > px(400.),
+        "the body takes the height left: {body:?} in {panel:?}"
+    );
+    cx.update(|window, _| {
+        assert!(window.try_find("large-cancel").is_none(), "no Cancel");
+        assert!(
+            window.try_find("large-action").is_some(),
+            "its action is in the header"
+        );
+        assert!(
+            window.try_find("large-close").is_some(),
+            "its own close button"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn a_large_modal_closes_on_its_button_on_escape_and_on_a_click_outside(cx: &mut TestAppContext) {
+    let (large, cx) = large(cx);
+    cx.update(|window, cx| window.click("large-close", cx));
+    assert_eq!(large.read_with(cx, |d, _| d.closed), 1);
+
+    large.update(cx, |d, cx| {
+        d.open = true;
+        cx.notify();
+    });
+    advance(cx, MODAL * 2);
+    cx.update(|window, cx| window.press("escape", cx));
+    assert_eq!(large.read_with(cx, |d, _| d.closed), 2);
+
+    large.update(cx, |d, cx| {
+        d.open = true;
+        cx.notify();
+    });
+    advance(cx, MODAL * 2);
+    cx.update(|window, cx| window.click_at("large-scrim", gpui_kit::point(px(3.), px(3.)), cx));
+    large.read_with(cx, |d, _| {
+        assert_eq!(d.closed, 3);
+        assert_eq!(d.under, 0, "the page under the scrim never saw the click");
+    });
+}
