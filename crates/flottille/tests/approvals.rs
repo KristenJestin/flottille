@@ -311,6 +311,7 @@ fn a_request_held_by_an_agent_is_not_the_user_s_until_it_is_forwarded_to_them() 
             decision: None,
             created_at: 0,
             decided_at: None,
+            place: None,
         })
         .unwrap();
     let number = request.number.to_string();

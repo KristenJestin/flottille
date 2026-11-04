@@ -485,8 +485,8 @@ const SERVED: [Definition; 28] = [
             judged: create makes one (worktrees, then setup, judged as a run of each step; to \
             resume a branch, name it), prepare resumes a failed setup, link_ticket links a \
             ticket (null unlinks); remove, always held for the user, its request saying what \
-            would be lost, never the workspace you work in. name: yours when left out, but for \
-            create and remove. To work on another branch in this workspace, switch with git: the \
+            would be lost: yours too once its work is done, your commands in it stopped, and you \
+            go on in main. name: yours when left out, but for create. To work on another branch in this workspace, switch with git: the \
             workspace follows the branch its worktrees are on. {\"action\": \"create\", \
             \"name\": \"login\"}",
         read_only: false,
@@ -986,6 +986,24 @@ impl Server {
             self.changes.send_modify(|n| *n += 1);
         }
         outdated
+    }
+
+    /// The agent's running session now works in `place`: its next calls are decided and
+    /// performed there. Nothing when no process of the agent runs.
+    pub fn move_place(&self, agent: &str, place: Place) {
+        let mut tokens = self.tokens.lock().unwrap();
+        let Tokens {
+            grants, by_agent, ..
+        } = &mut *tokens;
+        if let Some(grant) = by_agent
+            .get(agent)
+            .and_then(|digest| grants.get_mut(digest))
+        {
+            *grant = Arc::new(Grant {
+                place,
+                ..Grant::clone(grant)
+            });
+        }
     }
 
     /// Whether the agent's running session runs an older list of tools than its role has now.
@@ -1790,6 +1808,8 @@ async fn played(
         .is_some_and(|agent| agent.epoch != grant.epoch);
     let outcome = if replaced {
         Outcome::Refused(REPLACED.into())
+    } else if let Some(why) = crate::workspaces::being_removed(daemon, &grant.agent, tool) {
+        Outcome::Refused(format!("refused: {why}"))
     } else if grant.tools.contains(&tool) {
         // A write of the project shows what it changes; one that cannot be done is refused
         // before the user is asked anything.
@@ -1842,7 +1862,10 @@ async fn played(
                         match judged {
                             // In Full, what the gate holds passes, base included: what it
                             // refuses was refused above.
-                            _ if mode == GateMode::Full => {
+                            // Its own workspace is removed only with the user's word.
+                            _ if mode == GateMode::Full
+                                && !removes_own_workspace(grant, tool, &args) =>
+                            {
                                 verdict = Some("full");
                                 if removes_a_workspace(tool, &args) {
                                     crate::actions::remove_losing(daemon, grant, args).await
@@ -2156,6 +2179,12 @@ fn pushed(place: &Place, folder: Option<&Resolved>) -> bool {
         // What cannot be told is taken for pushed: the safer class.
         Err(_) => true,
     }
+}
+
+/// `workspace` `remove` of the workspace the agent works in: the only one an agent in a
+/// workspace may name.
+fn removes_own_workspace(grant: &Grant, tool: &str, args: &Value) -> bool {
+    removes_a_workspace(tool, args) && grant.place.workspace.is_some()
 }
 
 /// Performs a call the user allowed, of its class, recorded as the agent's: the request's answer.

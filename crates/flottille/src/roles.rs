@@ -59,6 +59,30 @@ pub struct Session<'a> {
     pub rules: &'a Rules,
 }
 
+/// What the instructions say of the agent's place: `place` is `main`, or `workspace <name>`.
+fn place_sentence(project: &str, place: &str, folder: &Path) -> String {
+    format!(
+        "You work for the project {project}, in {place}: the folder {}.",
+        folder.display()
+    )
+}
+
+/// The instructions of an agent that worked in the workspace `workspace`, in `from`, now saying
+/// it works in `main`, in `to`: what its next process is told of its place.
+pub fn moved_to_main(
+    instructions: &str,
+    project: &str,
+    workspace: &str,
+    from: &Path,
+    to: &Path,
+) -> String {
+    instructions.replacen(
+        &place_sentence(project, &format!("workspace {workspace}"), from),
+        &place_sentence(project, "main", to),
+        1,
+    )
+}
+
 /// One instruction file found for the project layer: its heading and its text.
 pub struct File {
     pub heading: String,
@@ -79,11 +103,10 @@ pub fn instructions(role: &Role, session: &Session, files: &[File]) -> String {
         shared.push_str(&format!("\n\n---\n\n# How to work\n\n{rules}"));
     }
     let shared = format!("{shared}\n\n---\n\n{}", role.template.trim_end());
-    let mut part = vec![format!(
-        "You work for the project {}, in {}: the folder {}.",
+    let mut part = vec![place_sentence(
         session.project,
         session.place,
-        session.folder.display()
+        session.folder,
     )];
     part.push(match session.title {
         None => "You are the root agent of this session: the user started you and writes to \
@@ -207,6 +230,18 @@ mod tests {
         assert!(at("# How to work") < at("# Your role: worker"));
         assert!(before.contains("Commit only when your brief or the user asks for it"));
         assert!(!after.contains("How to work"));
+    }
+
+    #[test]
+    fn an_agent_moved_to_main_is_told_it_works_there() {
+        let folder = Path::new("/work/zebra-login");
+        let text = instructions(role(WORKER).unwrap(), &session(folder), &[]);
+
+        let moved = moved_to_main(&text, "zebra", "login", folder, Path::new("/work/zebra"));
+
+        assert_ne!(moved, text);
+        assert!(moved.contains("You work for the project zebra, in main: the folder /work/zebra."));
+        assert!(!moved.contains("workspace login"));
     }
 
     #[test]

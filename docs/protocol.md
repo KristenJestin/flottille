@@ -146,7 +146,9 @@ result is the object of its file with every default filled in:
 ```
 
 `workspaces_root` is an absolute path in a real answer: `$XDG_DATA_HOME` stands for the user's data
-folder here. `default_repositories` is `"all"` or a list of repository paths; `variables` and
+folder here. It is where the project's workspaces are made now (`docs/projects.md`, "Where the
+workspaces go"); `workspaces_root_own` is added, as the file says it (`~` and `<project>` not yet
+filled in), when the project names a folder of its own. `default_repositories` is `"all"` or a list of repository paths; `variables` and
 `commands` are left out when empty. The files are the user's to edit: before it answers any `project.*` request, the
 daemon reads them again and announces what changed in them since the last such request as events
 (`docs/events.md`).
@@ -163,7 +165,10 @@ message starts with the key at fault). A file with an error does not hide the ot
 
 `{"name"}`. The result is the project, each repository with `branch`: the branch its checkout in
 the project folder is on now, `null` when it is on none (a detached checkout, a folder git cannot
-read, or one that is not a repository of its own yet). `project.list` leaves it out: it runs no git. `not-found` when there is none,
+read, or one that is not a repository of its own yet). `project.list` leaves it out: it runs no git.
+When the project follows a default that cannot be followed (`workspaces.toml` is invalid, see
+`workspaces_folder.show`), the result also holds `workspaces_default_error`, the reason; the data
+folder is what `workspaces_root` then is. `not-found` when there is none,
 `invalid-config` when its file cannot be used.
 
 #### `project.detect`
@@ -377,6 +382,34 @@ Flottille's configuration folder.
 The daemon reads the file at every tool call: a change applies to the next result of every
 running session. `tool_results.set` emits `tool_results.changed` with what it answers. The user's
 door alone reaches them: no tool of an agent does.
+
+### The workspaces folder methods
+
+`workspaces_folder.show` and `workspaces_folder.set` read and keep where workspaces go
+(`docs/projects.md`, "Where the workspaces go"): the user's default for every project
+(`workspaces.toml` of Flottille's configuration folder), or, with a `project`, that project's own
+`workspaces_root`.
+
+- `workspaces_folder.show {}` answers `{"place", "path", "error", "data"}`: `place` is `data`,
+  `beside` or `own`; `path` is the folder as typed with `own`, else `null`; `error` says why the
+  file cannot be followed (the data folder is), else `null`; `data` is Flottille's data folder.
+- `workspaces_folder.show {project}` answers `{"project", "own", "folder", "default_folder",
+  "fallback"}`: its own folder as typed (`null` when it follows the default), the folder its
+  workspaces are made in now, the one the default would give it, and `fallback`, why the default
+  is not followed when the project follows it (else `null`). `not-found` for an unknown project.
+- `workspaces_folder.set {place, path?}` keeps the default (`path` with `own` only, and needed
+  then). `workspaces_folder.set {project, own}` writes the project's key where it stands, the
+  file's comments kept, and removes it when `own` is left out or `null`. Both answer as `show`.
+  `invalid-params` for a `place` that is not one of the three and for a folder that is not
+  absolute once `~` is expanded, with the key at fault first (`path: must be absolute, not "x"`),
+  and for a folder `docs/projects.md` forbids (inside a repository of the project, Flottille's
+  configuration or data folder, the home folder itself, or a default without `<project>`), the
+  reason first; a project's refusal is `invalid-config` and names `workspaces_root`. Nothing is
+  written then.
+
+Only the workspaces made afterwards follow a change; none is moved. `workspaces_folder.set` emits
+`workspaces_folder.changed` with `{"project"}` (`null` for the default). The user's door alone
+reaches them: no tool of an agent does.
 
 ### The skill methods
 

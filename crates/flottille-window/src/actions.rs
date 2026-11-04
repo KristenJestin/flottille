@@ -326,6 +326,18 @@ pub enum Command {
         project: Option<String>,
         text: Option<String>,
     },
+    /// Where workspaces go: the default for every project, or a project's own
+    /// (`workspaces_folder.show`).
+    WorkspacesFolderRead {
+        project: Option<String>,
+    },
+    /// Keeps it (`workspaces_folder.set`): the default's `place` and `path`, or a project's own
+    /// folder in `path` (none follows the default).
+    WorkspacesFolderSet {
+        project: Option<String>,
+        place: Option<String>,
+        path: Option<String>,
+    },
     /// A message to a session's root agent: the only agent the window writes to.
     Reply {
         session: String,
@@ -698,6 +710,12 @@ pub enum Outcome {
         project: Option<String>,
         written: bool,
         shown: Result<Shown, String>,
+    },
+    /// Where workspaces go as the daemon says it, after a read (`written` false) or a choice.
+    WorkspacesFolder {
+        project: Option<String>,
+        written: bool,
+        shown: Result<crate::workspaces_folder::Shown, String>,
     },
     /// What `.claude` holds of a kind, each file with its state, or why it cannot be read.
     ClaudeFound {
@@ -1343,6 +1361,39 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             Outcome::Rules {
                 shown: shown.and_then(|shown| shown).map(|shown| Shown::of(&shown)),
                 written: false,
+                project,
+            }
+        }
+        Command::WorkspacesFolderRead { project } => {
+            let shown = ask_alone(
+                connect,
+                "workspaces_folder.show",
+                json!({"project": project}),
+                bounds.quick,
+            );
+            Outcome::WorkspacesFolder {
+                shown: shown
+                    .and_then(|shown| shown)
+                    .map(|shown| crate::workspaces_folder::Shown::of(&shown, project.is_some())),
+                written: false,
+                project,
+            }
+        }
+        Command::WorkspacesFolderSet {
+            project,
+            place,
+            path,
+        } => {
+            let params = match &project {
+                Some(project) => json!({"project": project, "own": path}),
+                None => json!({"place": place, "path": path}),
+            };
+            let shown = ask_alone(connect, "workspaces_folder.set", params, bounds.quick);
+            Outcome::WorkspacesFolder {
+                shown: shown
+                    .and_then(|shown| shown)
+                    .map(|shown| crate::workspaces_folder::Shown::of(&shown, project.is_some())),
+                written: true,
                 project,
             }
         }
