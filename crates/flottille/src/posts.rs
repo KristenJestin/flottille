@@ -23,16 +23,48 @@ const COUNTED_CHARS: usize = 500;
 /// daemon's. A comment older than the post cannot be it.
 const SKEW_MS: u64 = 5 * 60_000;
 
-/// A hash of a text, as the same words read back give it: whitespace is one space, the old mark
-/// of Flottille is no part of it, and only the first [`COUNTED_CHARS`] characters count.
+/// A hash of a text, as the same words read back give it: masked (a read masks what it reads,
+/// and a record hashes what was posted), the old mark of Flottille no part of it, the markup a
+/// tracker rewrites (see [`plain`]) gone, whitespace one space, and only the first
+/// [`COUNTED_CHARS`] characters counting.
 pub(crate) fn fingerprint(text: &str) -> String {
-    let (text, _) = forge::unmarked(text);
-    let words: Vec<&str> = text.split_whitespace().collect();
+    let masked = forge::masked(text);
+    let (text, _) = forge::unmarked(&masked);
+    let plain = plain(text);
+    let words: Vec<&str> = plain.split_whitespace().collect();
     let counted: String = words.join(" ").chars().take(COUNTED_CHARS).collect();
     Sha256::digest(counted.as_bytes())
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// The words of a text without the markdown a tracker turns into its own format: Jira keeps the
+/// words of what `acli` was given (`tickets::document_text`), not the fences, the emphasis, the
+/// code marks, the heading marks nor the list bullets, which it draws again as it likes.
+fn plain(text: &str) -> String {
+    let mut out = String::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with("```") {
+            continue;
+        }
+        let line = line.trim_start_matches('#').trim_start();
+        let line = line.strip_prefix('>').unwrap_or(line).trim_start();
+        let digits = line.trim_start_matches(|c: char| c.is_ascii_digit());
+        let line = match digits.strip_prefix(['.', ')']) {
+            Some(rest) if digits.len() < line.len() && rest.starts_with(' ') => rest,
+            _ => line,
+        };
+        let line = ["- ", "* ", "+ "]
+            .iter()
+            .find_map(|bullet| line.strip_prefix(bullet))
+            .unwrap_or(line);
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.retain(|c| !matches!(c, '*' | '`'));
+    out
 }
 
 /// The id of a comment as a forge's link says it: GitHub's `…#issuecomment-123` gives
@@ -48,6 +80,13 @@ pub(crate) fn comment_id(link: &str) -> Option<String> {
 /// The id of the comment `gh` printed the link of, among what it printed.
 pub(crate) fn comment_id_in(said: &str) -> Option<String> {
     said.split_whitespace().find_map(comment_id)
+}
+
+/// A comment as a read gives it, to be told from the record.
+pub(crate) struct Heard<'a> {
+    pub(crate) id: Option<&'a str>,
+    pub(crate) at: Option<u64>,
+    pub(crate) text: &'a str,
 }
 
 /// What was posted on one item.
@@ -70,51 +109,141 @@ impl Known {
         Known(posts)
     }
 
-    /// Whether a comment read back is one an agent posted. With an id it is known by the id: the
-    /// same words under another id are a person's. Without one (the forge gave none then or now)
-    /// it is known by its text, and by its time where it has one: it was written after the post.
-    pub(crate) fn comment(&self, id: Option<&str>, at: Option<u64>, text: &str) -> bool {
-        if self.0.is_empty() {
-            return false;
+    /// Which of the comments read back are ones an agent posted. A record with an id is claimed by
+    /// the comment of that id: the same words under another id are a person's. A record without
+    /// one (the forge gave none) is claimed by one comment only, the first of its words that was
+    /// not written before the post, so that a person's same words, earlier or later, stay a
+    /// person's.
+    pub(crate) fn marks(&self, read: &[Heard]) -> Vec<bool> {
+        let mut marked = vec![false; read.len()];
+        let mut posts: Vec<&Post> = self
+            .0
+            .iter()
+            .filter(|post| post.kind == "comment")
+            .collect();
+        if posts.is_empty() {
+            return marked;
         }
+        posts.sort_by_key(|post| post.posted_at);
+        let mut by_text = Vec::new();
+        for post in posts {
+            let found = post.comment_id.as_deref().and_then(|posted| {
+                read.iter()
+                    .enumerate()
+                    .position(|(at, heard)| !marked[at] && heard.id == Some(posted))
+            });
+            match found {
+                Some(at) => marked[at] = true,
+                None => by_text.push(post),
+            }
+        }
+        if by_text.is_empty() {
+            return marked;
+        }
+        // The time says which comes first, not the order the forge lists them in.
+        let mut order: Vec<usize> = (0..read.len()).collect();
+        order.sort_by_key(|&at| read[at].at.unwrap_or(u64::MAX));
+        let prints: Vec<String> = read.iter().map(|heard| fingerprint(heard.text)).collect();
+        for post in by_text {
+            let claimed = order.iter().copied().find(|&at| {
+                let heard = &read[at];
+                // A comment of another id is that comment's, not this post's.
+                let same_id = post.comment_id.is_none() || heard.id.is_none();
+                !marked[at]
+                    && same_id
+                    && post.fingerprint.as_deref() == Some(prints[at].as_str())
+                    && heard.at.is_none_or(|at| at + SKEW_MS >= post.posted_at)
+            });
+            if let Some(at) = claimed {
+                marked[at] = true;
+            }
+        }
+        marked
+    }
+
+    /// Whether the item's own text, as it reads now, is one an agent posted: the user may have
+    /// edited it since.
+    pub(crate) fn body(&self, text: &str) -> bool {
         let print = fingerprint(text);
         self.0
             .iter()
-            .filter(|post| post.kind == "comment")
-            .any(|post| match (&post.comment_id, id) {
-                (Some(posted), Some(read)) => posted == read,
-                _ => {
-                    post.fingerprint.as_deref() == Some(print.as_str())
-                        && at.is_none_or(|at| at + SKEW_MS >= post.posted_at)
-                }
-            })
+            .any(|post| post.kind == "body" && post.fingerprint.as_deref() == Some(print.as_str()))
     }
 
-    /// Whether the item's own text is one an agent posted.
-    pub(crate) fn body(&self) -> bool {
-        self.0.iter().any(|post| post.kind == "body")
-    }
-
-    /// Marks the comments of a pull request an agent posted.
+    /// Marks the comments of a pull request an agent posted, and the one it was closed with:
+    /// Bitbucket gives that one apart, from the same record.
     pub(crate) fn mark_pull(&self, pull: &mut forge::Pull) {
-        for comment in &mut pull.comments {
-            comment.recorded |= self.comment(comment.id.as_deref(), comment.at, &comment.body);
+        fn heard(comment: &forge::Comment) -> Heard<'_> {
+            Heard {
+                id: comment.id.as_deref(),
+                at: comment.at,
+                text: comment.body.as_str(),
+            }
+        }
+        // Data Center's closing comment is one of the comments: it is that one.
+        let copy_of = pull
+            .closing
+            .as_ref()
+            .and_then(|closing| closing.id.as_deref())
+            .and_then(|id| {
+                pull.comments
+                    .iter()
+                    .position(|comment| comment.id.as_deref() == Some(id))
+            });
+        let mut read: Vec<Heard> = pull.comments.iter().map(heard).collect();
+        if let (Some(closing), None) = (&pull.closing, copy_of) {
+            read.push(heard(closing));
+        }
+        let marks = self.marks(&read);
+        let last = read.len().saturating_sub(1);
+        for (comment, mark) in pull.comments.iter_mut().zip(&marks) {
+            comment.recorded |= mark;
+        }
+        if let Some(closing) = &mut pull.closing {
+            closing.recorded |= match copy_of {
+                Some(at) => marks[at],
+                None => marks[last],
+            };
         }
     }
 
     /// Marks the comments and the description of a ticket an agent posted.
     pub(crate) fn mark_ticket(&self, ticket: &mut Ticket) {
-        ticket.description_by_agent |= self.body();
-        for comment in &mut ticket.comments {
-            let at = comment.at.as_deref().and_then(crate::session_read::form);
-            comment.agent |= self.comment(comment.id.as_deref(), at, &comment.body);
+        ticket.description_by_agent |= self.body(&ticket.description);
+        let times: Vec<Option<u64>> = ticket
+            .comments
+            .iter()
+            .map(|comment| comment.at.as_deref().and_then(crate::session_read::form))
+            .collect();
+        let read: Vec<Heard> = ticket
+            .comments
+            .iter()
+            .zip(times)
+            .map(|(comment, at)| Heard {
+                id: comment.id.as_deref(),
+                at,
+                text: comment.body.as_str(),
+            })
+            .collect();
+        let marks = self.marks(&read);
+        for (comment, mark) in ticket.comments.iter_mut().zip(marks) {
+            comment.agent |= mark;
         }
     }
 
     /// Marks the comments an agent posted among those a round or a live read stores.
     pub(crate) fn mark_said(&self, said: &mut [Said]) {
-        for comment in said {
-            comment.by_agent |= self.comment(comment.id.as_deref(), comment.at, &comment.body);
+        let read: Vec<Heard> = said
+            .iter()
+            .map(|comment| Heard {
+                id: comment.id.as_deref(),
+                at: comment.at,
+                text: comment.body.as_str(),
+            })
+            .collect();
+        let marks = self.marks(&read);
+        for (comment, mark) in said.iter_mut().zip(marks) {
+            comment.by_agent |= mark;
         }
     }
 }
@@ -226,32 +355,130 @@ mod tests {
         assert_eq!(comment_id(""), None);
     }
 
+    fn heard<'a>(id: Option<&'a str>, at: Option<u64>, text: &'a str) -> Heard<'a> {
+        Heard { id, at, text }
+    }
+
     #[test]
     fn a_comment_with_an_id_is_known_by_the_id_alone() {
         let known = known(vec![posted(Some("issuecomment-501"), "Rebased", 1_000)]);
 
-        assert!(known.comment(Some("issuecomment-501"), None, "Whatever it says now"));
-        assert!(!known.comment(Some("issuecomment-502"), None, "Rebased"));
+        let marks = known.marks(&[
+            heard(Some("issuecomment-501"), None, "Whatever it says now"),
+            heard(Some("issuecomment-502"), None, "Rebased"),
+        ]);
+
+        assert_eq!(marks, [true, false]);
     }
 
     #[test]
     fn a_comment_without_an_id_is_known_by_its_text_and_not_earlier_than_its_post() {
         let known = known(vec![posted(None, "Ready for review", 10_000_000)]);
 
-        assert!(known.comment(None, None, "Ready  for review\n"));
-        assert!(known.comment(None, Some(10_000_000 - 60_000), "Ready for review"));
-        assert!(!known.comment(None, Some(10_000_000 - SKEW_MS - 1), "Ready for review"));
-        assert!(!known.comment(None, None, "Ready for review, please"));
+        let one = |at, text| known.marks(&[heard(None, at, text)])[0];
+
+        assert!(one(None, "Ready  for review\n"));
+        assert!(one(Some(10_000_000 - 60_000), "Ready for review"));
+        assert!(!one(Some(10_000_000 - SKEW_MS - 1), "Ready for review"));
+        assert!(!one(None, "Ready for review, please"));
         // The record has an id, the read none: the text says.
         let with_id = self::known(vec![posted(Some("issuecomment-1"), "Ready", 1)]);
-        assert!(with_id.comment(None, None, "Ready"));
+        assert!(with_id.marks(&[heard(None, None, "Ready")])[0]);
+    }
+
+    #[test]
+    fn a_hash_record_matches_one_comment_only_the_first_at_or_after_the_post() {
+        let known = known(vec![posted(None, "Ready", 10_000_000)]);
+
+        // Newest first, as Data Center lists them: the order is not the time.
+        let marks = known.marks(&[
+            heard(Some("3"), Some(10_000_000 + 2_000), "Ready"),
+            heard(Some("2"), Some(10_000_000 - 1_000), "Ready"),
+            heard(Some("1"), Some(10_000_000 - SKEW_MS - 1), "Ready"),
+        ]);
+
+        assert_eq!(marks, [false, true, false]);
+        // Two posts of the same words claim two comments.
+        let twice = self::known(vec![
+            posted(None, "Ready", 10_000_000),
+            posted(None, "Ready", 11_000_000),
+        ]);
+        let marks = twice.marks(&[
+            heard(Some("1"), Some(10_000_500), "Ready"),
+            heard(Some("2"), Some(11_000_500), "Ready"),
+            heard(Some("3"), Some(12_000_000), "Ready"),
+        ]);
+        assert_eq!(marks, [true, true, false]);
+    }
+
+    #[test]
+    fn an_id_the_record_holds_never_gives_its_words_to_another_id() {
+        let known = known(vec![posted(Some("issuecomment-501"), "Rebased", 1_000)]);
+
+        // The agent's comment was deleted: a person's under another id is still a person's.
+        let marks = known.marks(&[heard(Some("issuecomment-502"), None, "Rebased")]);
+
+        assert_eq!(marks, [false]);
+    }
+
+    #[test]
+    fn a_hash_is_of_the_masked_text_on_both_sides() {
+        let token = "ghp_0123456789abcdefghijklmnopqrstuvwxyz";
+        let raw = format!("The key {token} was rotated");
+
+        assert_eq!(
+            fingerprint(&raw),
+            fingerprint(&forge::masked(&raw)),
+            "a read masks what it reads, a record hashes what was posted"
+        );
+        assert_ne!(fingerprint(&raw), fingerprint("The key was rotated"));
+    }
+
+    #[test]
+    fn an_agent_comment_holding_a_token_shape_is_still_the_agent_s() {
+        let token = "ghp_0123456789abcdefghijklmnopqrstuvwxyz";
+        let posted_text = format!("The key {token} was rotated");
+        let known = known(vec![posted(None, &posted_text, 1_000)]);
+
+        let read = forge::masked(&posted_text);
+
+        assert!(!read.contains(token));
+        assert_eq!(known.marks(&[heard(None, None, &read)]), [true]);
+    }
+
+    #[test]
+    fn a_body_the_user_edited_is_the_user_s() {
+        let known = known(vec![Post {
+            kind: "body".into(),
+            ..post("app", "jira", "", "ABC-1", "body", None, "Users stay in")
+        }]);
+
+        assert!(known.body("Users stay in"));
+        assert!(known.body("Users  stay\nin"));
+        assert!(!known.body("Users stay in, and out"));
+        assert!(!known.body(""));
+    }
+
+    #[test]
+    fn jira_s_rewriting_of_markdown_does_not_change_a_hash() {
+        // `document_text` keeps the words of a Jira document: no fence, no emphasis, no code
+        // mark, no heading mark, and its own list bullets.
+        let posted = "## Plan\n\n**Fixed** the `login` form:\n\n```rust\nlet x = 1;\n```\n\n\
+                      * first\n* second\n1) third";
+        let read = "Plan\n\nFixed the login form:\n\nlet x = 1;\n\n- first\n- second\n1. third";
+
+        assert_eq!(fingerprint(posted), fingerprint(read));
+        assert_ne!(fingerprint(posted), fingerprint("Fixed the login form"));
     }
 
     #[test]
     fn nothing_is_known_of_an_item_nothing_was_posted_on() {
         let known = known(Vec::new());
 
-        assert!(!known.comment(Some("issuecomment-1"), None, "Rebased"));
-        assert!(!known.body());
+        assert_eq!(
+            known.marks(&[heard(Some("issuecomment-1"), None, "Rebased")]),
+            [false]
+        );
+        assert!(!known.body("Rebased"));
     }
 }

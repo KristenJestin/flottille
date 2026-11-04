@@ -346,10 +346,10 @@ pub struct Comment {
     pub body: String,
     /// Written by a bot (an app), as far as the forge says it.
     pub bot: bool,
-    /// When it was written, in milliseconds, where a closing comment is told from the others
-    /// (GitHub's); none elsewhere.
+    /// When it was written, in milliseconds, where the forge says it: a GitHub closing comment is
+    /// told from the others by it, and a comment of the record's words by it too (`posts`).
     pub at: Option<u64>,
-    /// The id the forge gives it, where it gives one (GitHub's link names it).
+    /// The id the forge gives it, where it gives one (GitHub's link names it, Bitbucket's number).
     pub id: Option<String>,
     /// Flottille's record says an agent posted it (`posts`).
     pub recorded: bool,

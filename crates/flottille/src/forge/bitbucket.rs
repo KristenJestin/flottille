@@ -1217,11 +1217,16 @@ fn cloud_comments(comments: &[Value]) -> Vec<Comment> {
             body: masked(c["content"]["raw"].as_str().unwrap_or_default()),
             // What says a Bitbucket bot is not read: every author is taken for a person.
             bot: false,
-            at: None,
-            id: None,
+            at: c["created_on"].as_str().and_then(crate::session_read::form),
+            id: id_of(&c["id"]),
             recorded: false,
         })
         .collect()
+}
+
+/// A comment's number, as Bitbucket gives it, to tell it from another of the same words.
+fn id_of(id: &Value) -> Option<String> {
+    id.as_u64().map(|id| id.to_string())
 }
 
 /// What a merged or declined Cloud pull request was closed with, from its own page: the reason it
@@ -1276,8 +1281,9 @@ fn dc_closing(state: &str, activities: &[Value]) -> Option<Comment> {
             state: None,
             body: masked(a["comment"]["text"].as_str().unwrap_or_default()),
             bot: false,
-            at: None,
-            id: None,
+            at: a["comment"]["createdDate"].as_u64(),
+            // The same comment as the one among the comments: it is told by its id.
+            id: id_of(&a["comment"]["id"]),
             recorded: false,
         })
 }
@@ -1290,8 +1296,8 @@ fn dc_comments(activities: &[Value]) -> Vec<Comment> {
             state: None,
             body: masked(comment["text"].as_str().unwrap_or_default()),
             bot: false,
-            at: None,
-            id: None,
+            at: comment["createdDate"].as_u64(),
+            id: id_of(&comment["id"]),
             recorded: false,
         });
         for reply in comment["comments"].as_array().into_iter().flatten() {

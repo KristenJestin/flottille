@@ -3995,6 +3995,282 @@ fn what_an_agent_posted_is_still_known_after_a_daemon_restart() {
     );
 }
 
+/// A Cloud comment of the pull request #3 as `bkt api` reads it: its id and the time it was
+/// written, which tell it from another of the same words.
+fn cloud_said(id: u64, at: &str, author: &str, text: &str) -> Value {
+    json!({"id": id, "created_on": at, "content": {"raw": text},
+        "user": {"display_name": author}, "deleted": false})
+}
+
+/// A comment before the agent's post, and one after it, whatever the clock of the test.
+const BEFORE: &str = "2020-01-01T00:00:00.000000+00:00";
+const AFTER: &str = "2999-01-01T00:00:00.000000+00:00";
+
+/// The pull request #3 of `acme/app` on Bitbucket Cloud, `state`, as `forge show` reads it: its
+/// reason when declined, its comments.
+fn cloud_pull_three(user: &User, state: &str, reason: Option<&str>, comments: Vec<Value>) {
+    let mut page = json!({"participants": []});
+    if let Some(reason) = reason {
+        page["reason"] = json!(reason);
+        page["closed_by"] = json!({"display_name": "Kris"});
+    }
+    // On the branch of the workspace `login`, whose pull request a subscription waits on; a round
+    // reads its comments again when its count or its time changed.
+    static CHANGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = CHANGES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let mut pull = cloud_pull(3, state);
+    pull["source"]["branch"]["name"] = json!("app/login");
+    pull["comment_count"] = json!(comments.len());
+    pull["updated_on"] = json!(format!(
+        "2999-02-01T{:02}:{:02}:00+00:00",
+        n / 60 % 24,
+        n % 60
+    ));
+    user.bkt_script(json!({
+        "pulls": {"acme/app": [pull.clone()]},
+        "checks": {"acme/app": {}},
+        "api": {
+            "/repositories/acme/app/pullrequests": {"values": [pull]},
+            "/repositories/acme/app/pullrequests/3": page,
+            "/repositories/acme/app/pullrequests/3/comments": {"values": comments},
+            "/repositories/acme/app/pullrequests/3/diffstat": {"values": []}
+        }
+    }));
+}
+
+/// The agent comments `body` on the Bitbucket pull request #3 (held, then allowed).
+fn comment_on_bitbucket(user: &User, mcp: &Mcp, body: &str) {
+    cloud_pull_three(user, "OPEN", None, Vec::new());
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "comment", "number": 3, "body": body}),
+    );
+    judged_then_done(user, answer, || words(user.bkt_received()), "pr comment");
+}
+
+fn show_bitbucket_three(user: &User, mcp: &Mcp) -> String {
+    read(
+        user,
+        mcp.call(
+            "forge",
+            json!({"action": "show", "number": 3, "detail": "full"}),
+        ),
+    )
+}
+
+#[test]
+fn an_agent_s_bitbucket_decline_comment_is_shown_as_the_agent_s() {
+    let user = user();
+    on_bitbucket(&user);
+    cloud_pull_three(&user, "OPEN", None, Vec::new());
+    let (_, mcp) = root_in(&user, None);
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "close", "number": 3, "comment": "Superseded, see https://example.com/new"}),
+    );
+    judged_then_done(&user, answer, || words(user.bkt_received()), "pr decline");
+
+    // Cloud keeps the reason a pull request was declined with, and says who declined it.
+    cloud_pull_three(
+        &user,
+        "DECLINED",
+        Some("Superseded, see https://example.com/new"),
+        Vec::new(),
+    );
+    let shown = show_bitbucket_three(&user, &mcp);
+
+    assert!(
+        shown.contains(
+            "closing comment (Kris, posted by an agent): Superseded, see https://example.com/new"
+        ),
+        "{shown}"
+    );
+}
+
+#[test]
+fn show_says_a_bitbucket_comment_was_posted_by_an_agent() {
+    let user = user();
+    on_bitbucket(&user);
+    let (_, mcp) = root_in(&user, None);
+    comment_on_bitbucket(&user, &mcp, "Ready for review");
+
+    cloud_pull_three(
+        &user,
+        "OPEN",
+        None,
+        vec![cloud_said(11, AFTER, "Kris", "Ready for review")],
+    );
+    let shown = show_bitbucket_three(&user, &mcp);
+
+    assert!(
+        shown.contains("- Kris (posted by an agent): Ready for review\n"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn a_person_s_same_words_on_bitbucket_stay_a_person_s() {
+    let user = user();
+    on_bitbucket(&user);
+    let (_, mcp) = root_in(&user, None);
+    comment_on_bitbucket(&user, &mcp, "Ready for review");
+
+    // The user said it before, then the agent (12), then the user again (13): the record is one
+    // post, so it is one comment.
+    cloud_pull_three(
+        &user,
+        "OPEN",
+        None,
+        vec![
+            cloud_said(10, BEFORE, "Kris", "Ready for review"),
+            cloud_said(12, AFTER, "Kris", "Ready for review"),
+            cloud_said(
+                13,
+                "2999-01-02T00:00:00.000000+00:00",
+                "Kris",
+                "Ready for review",
+            ),
+        ],
+    );
+    let shown = show_bitbucket_three(&user, &mcp);
+
+    assert_eq!(
+        shown
+            .matches("(posted by an agent): Ready for review")
+            .count(),
+        1,
+        "{shown}"
+    );
+    assert_eq!(
+        shown.matches("- Kris: Ready for review").count(),
+        2,
+        "{shown}"
+    );
+    assert!(
+        shown.find("- Kris: Ready for review") < shown.find("(posted by an agent)"),
+        "the older one is the user's: {shown}"
+    );
+}
+
+#[test]
+fn an_agent_comment_holding_a_token_shape_is_still_the_agent_s() {
+    let user = user();
+    on_bitbucket(&user);
+    let (_, mcp) = root_in(&user, None);
+    let token = "ghp_0123456789abcdefghijklmnopqrstuvwxyz";
+    comment_on_bitbucket(&user, &mcp, &format!("The key {token} was rotated"));
+
+    // The read masks what it reads before it is matched.
+    cloud_pull_three(
+        &user,
+        "OPEN",
+        None,
+        vec![cloud_said(
+            11,
+            AFTER,
+            "Kris",
+            &format!("The key {token} was rotated"),
+        )],
+    );
+    let shown = show_bitbucket_three(&user, &mcp);
+
+    assert!(
+        shown.contains("- Kris (posted by an agent): The key"),
+        "{shown}"
+    );
+    assert!(!shown.contains(token), "{shown}");
+}
+
+#[test]
+fn from_people_leaves_out_the_agent_s_bitbucket_comment() {
+    let user = user();
+    on_bitbucket(&user);
+    cloud_pull_three(&user, "OPEN", None, Vec::new());
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
+    let (_, mcp) = root_in(&user, Some("login"));
+    let subscribed = mcp.call(
+        "forge",
+        json!({"action": "subscribe", "events": ["comment"], "from": "people"}),
+    );
+    assert!(!subscribed.error, "{}", subscribed.text);
+    comment_on_bitbucket(&user, &mcp, "Rebased on main");
+
+    cloud_pull_three(
+        &user,
+        "OPEN",
+        None,
+        vec![
+            cloud_said(11, AFTER, "Kris", "Rebased on main"),
+            cloud_said(
+                12,
+                "2999-01-02T00:00:00.000000+00:00",
+                "Kris",
+                "Why a new form?",
+            ),
+        ],
+    );
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
+
+    eventually("the user's comment is delivered", || {
+        !deliveries(&user).is_empty()
+    });
+    let all = deliveries(&user);
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert!(all[0].contains("Why a new form?"), "{}", all[0]);
+    assert!(!all[0].contains("Rebased"), "{}", all[0]);
+}
+
+#[test]
+fn from_people_leaves_out_the_agent_s_jira_comment() {
+    let user = user();
+    on_jira(&user);
+    jira_items(&user);
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
+    let (_, mcp) = root_in(&user, None);
+    let subscribed = mcp.call(
+        "tickets",
+        json!({"action": "subscribe", "ticket": "ABC-1", "events": ["commented"], "from": "people"}),
+    );
+    assert!(!subscribed.error, "{}", subscribed.text);
+    let answer = mcp.call(
+        "tickets",
+        json!({"action": "comment", "ticket": "ABC-1", "body": "Fixed on app/login"}),
+    );
+    judged_then_done(
+        &user,
+        answer,
+        || words(user.acli_received()),
+        "jira workitem comment",
+    );
+
+    let site = "example.atlassian.net";
+    let mut item = in_status(work_item("ABC-1", "The login fails", site), "To Do", "new");
+    let said = |at: &str, text: &str| {
+        json!({"author": {"displayName": "Kris"}, "created": at,
+            "body": {"type": "doc", "version": 1, "content": [
+                {"type": "paragraph", "content": [{"type": "text", "text": text}]}]}})
+    };
+    item["fields"]["updated"] = json!("2999-01-02T00:00:00.000+0000");
+    // The fake adds the comment the agent created, by its signed-in user, to what it holds.
+    item["fields"]["comment"] = json!({"comments": [
+        said("2999-01-02T00:00:00.000+0000", "Which commit?")
+    ]});
+    user.acli_script(json!({"items": {"ABC-1": item.clone()}, "search": [item]}));
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
+
+    eventually("the user's comment is delivered", || {
+        !deliveries(&user).is_empty()
+    });
+    let all = deliveries(&user);
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert!(all[0].contains("Which commit?"), "{}", all[0]);
+    assert!(!all[0].contains("Fixed on app/login"), "{}", all[0]);
+}
+
 /// What the store recorded as posted on an item, as (kind, id of the comment).
 fn recorded(
     user: &User,
