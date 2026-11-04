@@ -26,6 +26,7 @@ pub mod reveal;
 pub mod rows;
 pub mod segmented;
 pub mod select;
+pub mod skeleton;
 pub mod space;
 pub mod state;
 pub mod switch;
@@ -66,6 +67,7 @@ pub use rows::{
 };
 pub use segmented::Segmented;
 pub use select::{Select, SelectOption};
+pub use skeleton::{Awaiting, Skeleton, awaiting};
 pub use state::{AgentState, Pill, StateIcon, Status};
 pub use switch::Switch;
 pub use tabs::Tabs;
