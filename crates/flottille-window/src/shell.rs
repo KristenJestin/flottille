@@ -650,6 +650,7 @@ impl Shell {
             Update::Providers(read, providers) => self.set_providers(read, providers, cx),
             Update::TextChanged { judge: true, .. } => self.actions.send(Command::JudgeRead),
             Update::DeveloperChanged => self.actions.send(Command::DeveloperRead),
+            Update::ToolResultsChanged => self.actions.send(Command::ToolResultsRead),
             Update::AppearanceChanged => self.ask_appearance(None),
             Update::Forged(forged) => self.forged(forged, cx),
             Update::News(news) => self.news(news, cx),
@@ -998,6 +999,11 @@ impl Shell {
             Outcome::Developer { written, shown } => {
                 self.settings
                     .update(cx, |page, cx| page.developer_answered(shown, written, cx));
+            }
+            Outcome::ToolResults { written, shown } => {
+                self.settings.update(cx, |page, cx| {
+                    page.tool_results_answered(shown, written, cx)
+                });
             }
             // Only the answer to the latest request counts: an older one would take the window
             // back to a choice the user has since changed.
@@ -1834,6 +1840,7 @@ impl Shell {
             self.actions.send(Command::RulesRead { project: None });
             self.actions.send(Command::JudgeRead);
             self.actions.send(Command::DeveloperRead);
+            self.actions.send(Command::ToolResultsRead);
             self.ask_appearance(None);
         }
         let page = self.page_of(&selection, cx);

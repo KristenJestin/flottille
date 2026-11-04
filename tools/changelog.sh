@@ -17,6 +17,8 @@ fi
 
 ANGULAR='^([a-z]+)(\(([a-z0-9-]+)\))?(!)?: (.*)$'
 FOOTER=$'(^|\n)BREAKING[ -]CHANGE: '
+# First parents only: the release squash a record on dev reaches through its second parent is
+# main's, not dev's (docs/releases.md).
 breaking= features= fixes= performance= other=
 while IFS= read -r -d '' message; do
   subject=${message%%$'\n'*}
@@ -31,7 +33,7 @@ while IFS= read -r -d '' message; do
     perf) performance+="$line"$'\n' ;;
     *) other+="$line"$'\n' ;;
   esac
-done < <(git log -z --no-merges --reverse --format=%B "$range")
+done < <(git log -z --first-parent --no-merges --reverse --format=%B "$range")
 
 first=1
 section() { # <title> <lines>

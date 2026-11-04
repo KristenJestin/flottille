@@ -2178,6 +2178,24 @@ impl Row {
     }
 }
 
+/// The line of a step whose result Flottille cut at the source (`docs/tools.md`, "Long
+/// results"): how many characters were left out. Empty, and unlabelled, while none was.
+fn cut_said(id: ElementId, cut: Option<u64>, ink: gpui_kit::Hsla) -> impl IntoElement {
+    let said = cut.map(|left_out| {
+        SharedString::from(format!(
+            "cut at the source · {} characters left out",
+            crate::settings::grouped(left_out as usize)
+        ))
+    });
+    div()
+        .id(id)
+        .mono(11.5)
+        .text_color(ink)
+        .when_some(said.clone(), |d, said| d.aria_label(said))
+        .children(said)
+        .test_support()
+}
+
 /// What the folded line of a block of steps says of who let them through: each of the Auto judge
 /// and Full mode, with how many when not all of them.
 fn allowed_said(calls: &[Call]) -> String {
@@ -2938,7 +2956,20 @@ impl Render for Row {
                                                 .whitespace_nowrap()
                                                 .text_ellipsis()
                                                 .child(SharedString::from(call.args.clone())),
-                                        ),
+                                        )
+                                        .child(presence(
+                                            ElementId::Name(
+                                                format!("step-{}-{at}-cut-line", self.at).into(),
+                                            ),
+                                            call.cut.is_some(),
+                                            cut_said(
+                                                ElementId::Name(
+                                                    format!("step-{}-{at}-cut", self.at).into(),
+                                                ),
+                                                call.cut,
+                                                p.faint,
+                                            ),
+                                        )),
                                 )
                                 .child(div().flex_none().mono(11.).text_color(p.faint).child(
                                     SharedString::from(
@@ -5481,23 +5512,6 @@ impl Render for Reply {
                             .test_support(),
                     ),
             )
-            // A change of model or effort that waits for the turn's end, until the agent took it.
-            .child(presence_of(
-                "session-options-pending",
-                self.options.read(cx).waiting().map(SharedString::from),
-                move |line| {
-                    div()
-                        .id("session-options-pending-line")
-                        .aria_label(line.clone())
-                        .px(space::MD)
-                        .pt(space::SM)
-                        .text_size(px(12.5))
-                        .text_color(p.mute)
-                        .child(line)
-                        .test_support()
-                        .into_any_element()
-                },
-            ))
             .child(presence_of(
                 "reply-error-line",
                 self.error.clone(),
@@ -5614,6 +5628,7 @@ mod tests {
             since: 0,
             until: Some(1),
             allowed_by: by.map(str::to_owned),
+            cut: None,
         }
     }
 

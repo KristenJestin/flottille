@@ -122,6 +122,15 @@ The user chose the window's appearance (`appearance.set`): every window takes it
 | `theme` | `omarchy` or `flottille`. |
 | `shade` | `light` or `dark`. |
 
+### `tool_results.changed`
+
+The user chose the limit above which a tool result is cut (`tool_results.set`,
+`docs/tools.md`, "Long results").
+
+| Field | |
+|---|---|
+| `limit` | The limit in characters, or `"off"` for no cut. |
+
 ### `extension.changed`
 
 The user switched an extension or changed its settings (`extension.set`), globally or in a
@@ -409,6 +418,7 @@ activity.
 | `outcome` | `ok`, `refused`, `failed`, or `held` for a call the gate held (`docs/tools.md`, "The gate"). |
 | `duration_ms` | How long it took. |
 | `request` | For a call the user allowed, performed once they did: the request's number; else `null`. |
+| `cut` | Only when the result was cut at the source (`docs/tools.md`, "Long results"): `{"result", "chars", "left_out"}`, the id the whole text is read by, its length and how many characters the agent was not shown. |
 
 #### `agent.tools_changed`
 

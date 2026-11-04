@@ -94,6 +94,14 @@ impl Repo {
         self.git(&["checkout", "--quiet", "dev"]);
     }
 
+    /// The release recorded in dev's history as CI records it once published: a merge of the
+    /// squash on main that keeps dev's files (`-s ours`), so the next pull request `dev → main`
+    /// shares it as a base. On dev.
+    fn record_release_in_dev(&self, version: &str) {
+        let message = format!("chore(repo): record the {version} release in dev's history");
+        self.git(&["merge", "--quiet", "-s", "ours", "-m", &message, "main"]);
+    }
+
     /// `tools/changelog.sh` in this repository.
     fn changelog(&self, args: &[&str]) -> String {
         let output = Command::new(tool("tools/changelog.sh"))
@@ -381,6 +389,75 @@ fn the_changelog_of_a_stable_release_lists_the_dev_commits_between_the_two_marks
         "### Features\n\n- **gui**: add a page (#14)\n\n\
          ### Other changes\n\n- **repo**: say more (#15)\n"
     );
+}
+
+#[test]
+fn two_releases_in_a_row_the_second_merges_its_version_is_the_next_and_its_changelog_is_dev_s() {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.tag("v0.3.0");
+    repo.git(&["checkout", "--quiet", "-b", "dev"]);
+    repo.commit("feat(gui): add a page (#14)");
+    // The squash's title is the release pull request's, an Angular one.
+    let dev = repo.head();
+    repo.git(&["checkout", "--quiet", "main"]);
+    repo.git(&["merge", "--quiet", "--squash", "dev"]);
+    repo.git(&[
+        "commit",
+        "--quiet",
+        "-m",
+        "chore(repo): release 0.4.0 (#20)",
+    ]);
+    repo.tag("v0.4.0");
+    repo.git(&["tag", "released/v0.4.0", &dev]);
+    repo.git(&["checkout", "--quiet", "dev"]);
+    repo.record_release_in_dev("0.4.0");
+    // Both sides change the same file: without the record, the base is the first commit.
+    repo.commit("fix(cli): a typo (#21)");
+    std::fs::write(repo.dir.path().join("file-1"), "changed again").unwrap();
+    repo.git(&[
+        "commit",
+        "--quiet",
+        "--all",
+        "-m",
+        "docs(repo): say more (#22)",
+    ]);
+    let dev = repo.head();
+
+    // The second pull request dev → main merges without a conflict.
+    let merged = repo
+        .git_command(&["merge-tree", "--write-tree", "main", "dev"])
+        .output()
+        .unwrap();
+    assert!(merged.status.success(), "{merged:?}");
+    assert_eq!(repo.next(&["stable", "--at", &dev]), "0.4.1");
+    assert_eq!(
+        repo.changelog(&["--at", &dev]),
+        "### Fixes\n\n- **cli**: a typo (#21)\n\n\
+         ### Other changes\n\n- **repo**: say more (#22)\n"
+    );
+}
+
+#[test]
+fn the_release_recorded_in_dev_changes_no_file() {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.tag("v0.3.0");
+    repo.git(&["checkout", "--quiet", "-b", "dev"]);
+    repo.commit("feat(gui): add a page (#14)");
+    repo.release("0.4.0");
+    let dev = repo.head();
+    let squash = repo.git(&["rev-parse", "main"]);
+
+    repo.record_release_in_dev("0.4.0");
+
+    assert_eq!(
+        repo.git(&["rev-parse", "HEAD^1", "HEAD^2"]),
+        format!("{dev}\n{squash}")
+    );
+    assert_eq!(repo.git(&["diff", "--stat", &dev, "HEAD"]), "");
+    // The record is a commit of dev's own line: it counts once, as any merge.
+    assert_eq!(repo.next(&["beta"]), "0.4.1-beta.1");
 }
 
 // The archive.

@@ -90,15 +90,17 @@ fn read(
             Err(_) => file,
         };
         let file = Resolved::real_inside(name.to_owned(), file);
-        return files::read_page(None, &file, offset, length).or_else(|error| {
-            Ok(match error.kind() {
-                std::io::ErrorKind::NotFound => Outcome::Refused(format!(
-                    "refused: the text of the skill {name} is not there any more: the user \
+        return files::read_page(None, &file, offset, length, files::BODY_BUDGET).or_else(
+            |error| {
+                Ok(match error.kind() {
+                    std::io::ErrorKind::NotFound => Outcome::Refused(format!(
+                        "refused: the text of the skill {name} is not there any more: the user \
                      writes it again or removes the skill"
-                )),
-                _ => files::failed(&file, error),
-            })
-        });
+                    )),
+                    _ => files::failed(&file, error),
+                })
+            },
+        );
     };
     let root = root_of(project, name, path)?;
     let folder = project.folder.canonicalize().unwrap_or_default();
@@ -247,7 +249,8 @@ fn read_file(
             "refused: the skill {name} is a file of secrets, which a skill never serves"
         )));
     }
-    files::read_page(None, &file, offset, length).or_else(|error| Ok(files::failed(&file, error)))
+    files::read_page(None, &file, offset, length, files::BODY_BUDGET)
+        .or_else(|error| Ok(files::failed(&file, error)))
 }
 
 /// The regular files of a folder, sorted, with their sizes: what to name in `path`. Links, `.git`,

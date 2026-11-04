@@ -148,6 +148,9 @@ pub struct Call {
     pub until: Option<u64>,
     /// Who allowed it when it was not harmless: the Auto judge, or Full mode.
     pub allowed_by: Option<String>,
+    /// How many characters of its result Flottille left out when it cut it at the source
+    /// (`docs/tools.md`, "Long results").
+    pub cut: Option<u64>,
 }
 
 impl Call {
@@ -235,6 +238,9 @@ pub struct Conversation {
     pending_approvals: VecDeque<(u64, u64)>,
     /// The calls the Auto judge or Full mode let through, by their id: who did.
     judged: HashMap<String, &'static str>,
+    /// The calls whose result was cut at the source, by their id: how many characters were left
+    /// out.
+    cuts: HashMap<String, u64>,
     /// The text of each `session_send` call, by its id, then, once held, by its request.
     sends: HashMap<String, String>,
     held_sends: HashMap<u64, String>,
@@ -268,6 +274,7 @@ impl Conversation {
             approvals: HashSet::new(),
             pending_approvals: VecDeque::new(),
             judged: HashMap::new(),
+            cuts: HashMap::new(),
             sends: HashMap::new(),
             held_sends: HashMap::new(),
             ended_lines: HashSet::new(),
@@ -462,6 +469,7 @@ impl Conversation {
                     since: event.at,
                     until: None,
                     allowed_by: self.judged.get(&text("id")).map(|by| (*by).into()),
+                    cut: self.cuts.get(&text("id")).copied(),
                 };
                 let call = Call {
                     until: (call.state != CallState::Running).then_some(event.at),
@@ -519,15 +527,25 @@ impl Conversation {
             }
             "agent.tool_served" => {
                 let by = match data["gate"].as_str() {
-                    Some("judged") => JUDGE,
-                    Some("full") => FULL,
-                    _ => return Vec::new(),
+                    Some("judged") => Some(JUDGE),
+                    Some("full") => Some(FULL),
+                    _ => None,
                 };
+                let cut = data["cut"]["left_out"].as_u64();
                 let Some(key) = data["call_key"].as_str() else {
                     return Vec::new();
                 };
-                self.judged.insert(key.to_owned(), by);
-                // The call is shown already: its step says who let it through.
+                if by.is_none() && cut.is_none() {
+                    return Vec::new();
+                }
+                if let Some(by) = by {
+                    self.judged.insert(key.to_owned(), by);
+                }
+                if let Some(left_out) = cut {
+                    self.cuts.insert(key.to_owned(), left_out);
+                }
+                // The call is shown already: its step says who let it through and that its
+                // result was cut.
                 let Some(&at) = self.calls.get(key) else {
                     return Vec::new();
                 };
@@ -536,7 +554,10 @@ impl Conversation {
                 };
                 match calls.iter_mut().find(|call| call.id == key) {
                     Some(call) => {
-                        call.allowed_by = Some(by.into());
+                        if let Some(by) = by {
+                            call.allowed_by = Some(by.into());
+                        }
+                        call.cut = cut.or(call.cut);
                         vec![Change::Changed(at)]
                     }
                     None => Vec::new(),
@@ -2437,6 +2458,75 @@ mod tests {
         let allowed: Vec<Option<&str>> = calls.iter().map(|c| c.allowed_by.as_deref()).collect();
         assert_eq!(allowed, [Some(FULL), Some(JUDGE), None]);
         assert_eq!(FULL, "Full mode");
+    }
+
+    #[test]
+    fn a_step_whose_result_was_cut_says_how_many_characters_were_left_out() {
+        let mut c = root();
+        let mut changes = Vec::new();
+        for step in [
+            event(
+                1,
+                "agent.tool_call",
+                json!({"id": "r", "title": "mcp__flottille__fs_read",
+                    "status": "in_progress", "raw_input": {"path": "big.txt"}}),
+            ),
+            event(
+                2,
+                "agent.tool_served",
+                json!({"tool": "fs_read", "call_key": "r", "gate": "allow",
+                    "cut": {"result": "res_0123456789ab", "chars": 14_400, "left_out": 9_400}}),
+            ),
+            event(
+                3,
+                "agent.tool_call",
+                json!({"id": "r", "update": true, "status": "completed"}),
+            ),
+        ] {
+            changes.extend(c.apply(&step));
+        }
+
+        let Block::Steps { calls } = &c.blocks()[0] else {
+            panic!("{:?}", c.blocks())
+        };
+        assert_eq!(calls[0].cut, Some(9_400));
+        assert_eq!(calls[0].allowed_by, None);
+        assert!(changes.contains(&Change::Changed(0)), "{changes:?}");
+    }
+
+    #[test]
+    fn a_cut_served_before_its_call_is_shown_is_kept_for_it() {
+        let mut c = root();
+        c.apply(&event(
+            1,
+            "agent.tool_served",
+            json!({"tool": "run", "call_key": "x", "gate": "allow",
+                "cut": {"result": "res_0123456789ab", "chars": 20_000, "left_out": 15_000}}),
+        ));
+        c.apply(&event(
+            2,
+            "agent.tool_call",
+            json!({"id": "x", "title": "mcp__flottille__fs_read",
+                "status": "completed", "raw_input": {}}),
+        ));
+
+        let Block::Steps { calls } = &c.blocks()[0] else {
+            panic!("{:?}", c.blocks())
+        };
+        assert_eq!(calls[0].cut, Some(15_000));
+    }
+
+    #[test]
+    fn a_step_whose_result_was_not_cut_says_nothing() {
+        let mut c = root();
+        for step in judged_step(1, "r", "fs_read", "allow") {
+            c.apply(&step);
+        }
+
+        let Block::Steps { calls } = &c.blocks()[0] else {
+            panic!("{:?}", c.blocks())
+        };
+        assert_eq!(calls[0].cut, None);
     }
 
     #[test]

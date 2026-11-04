@@ -46,6 +46,8 @@ pub enum Update {
     DeveloperChanged,
     /// The window's appearance was chosen, from any client: the window reads it again.
     AppearanceChanged,
+    /// The limit of tool results was chosen, from any client: the settings page reads it again.
+    ToolResultsChanged,
     /// An agent created or changed a ticket or a pull request.
     Forged(model::Forged),
     /// An agent said something, reported, or was woken: news for its session.
@@ -167,6 +169,9 @@ fn follow(
         }
         if event.name == "appearance.changed" {
             let _ = updates.unbounded_send(Update::AppearanceChanged);
+        }
+        if event.name == "tool_results.changed" {
+            let _ = updates.unbounded_send(Update::ToolResultsChanged);
         }
         if let Some(forged) = model::Forged::of(event) {
             let _ = updates.unbounded_send(Update::Forged(forged));

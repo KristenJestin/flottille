@@ -7,7 +7,7 @@ mod common;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use common::User;
+use common::{User, names_in};
 use serde_json::{Value, json};
 
 /// A project `app` over a throwaway repository with one commit.
@@ -1093,16 +1093,6 @@ fn a_providers_toml_behind_a_symbolic_link_is_still_a_link_after_a_switch_its_mo
         );
     }
     assert_eq!(listed(&user, "opencode")["enabled"], false);
-}
-
-/// The names in a folder.
-fn names_in(dir: &std::path::Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(dir)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
-    names
 }
 
 #[test]

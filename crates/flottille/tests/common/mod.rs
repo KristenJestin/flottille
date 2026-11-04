@@ -79,6 +79,22 @@ const SIGN_INS: [&str; 7] = [
     "OPENAI_API_KEY",
 ];
 
+/// The file `User::new` writes in the daemon's configuration folder, which no test's own folder
+/// listing counts (`names_in`).
+const HARNESS_FILE: &str = "tool-results.toml";
+
+/// The names in a folder, without the file the harness itself wrote there: what a test asks is
+/// what the daemon left, not what `User::new` put.
+pub fn names_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name != HARNESS_FILE)
+        .collect();
+    names.sort();
+    names
+}
+
 /// A throwaway user: its own home and XDG folders, and the daemon it starts, stopped on drop.
 pub struct User {
     dir: TempDir,
@@ -103,11 +119,28 @@ impl User {
                 .create(dir.path().join(sub))
                 .unwrap();
         }
-        User {
+        let user = User {
             dir,
             env: Vec::new(),
             closed: Arc::new(Mutex::new(false)),
-        }
+        };
+        // Long tool results are cut by default (`docs/tools.md`, "Long results"): only the tests
+        // of that opt in, so that no other test's result is cut under it. The user's own setting,
+        // in the daemon's temporary configuration folder: no switch of the daemon's environment.
+        let file = user.dir.path().join("config/flottille");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&file)
+            .unwrap();
+        std::fs::write(file.join(HARNESS_FILE), "limit = \"off\"\n").unwrap();
+        user
+    }
+
+    /// This user's daemon cuts long tool results as it does for everyone: every other test's
+    /// daemon does not.
+    pub fn with_cut_results(self) -> User {
+        std::fs::remove_file(self.dir.path().join("config/flottille").join(HARNESS_FILE)).unwrap();
+        self
     }
 
     /// A variable for every command of this user, and so for its daemon.

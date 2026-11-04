@@ -259,13 +259,16 @@ const SERVED: [Definition; 28] = [
             after; only the last 64 KiB of an output are kept. action stop: ends it with \
             everything it started, asked to end, then killed 5 seconds later, and answers once \
             it ended; a run that already ended is left as it is. {\"run\": \"a1b2c3\", \
-            \"action\": \"stop\"}",
+            \"action\": \"stop\"} The same call reads a cut result whole: a long result is \
+            returned as its beginning and its end with a line naming an id (res_...) and the \
+            call that reads the lines left out, from start, a page at a time; stop does not \
+            apply to it.",
         read_only: false,
         idempotent: true,
         destructive: true,
         schema: || {
             json!({"type": "object", "properties": {
-                "run": {"type": "string", "description": "The run id run gave."},
+                "run": {"type": "string", "description": "The run id run gave, or the id of a cut result (res_...)."},
                 "action": {"type": "string", "enum": ["output", "stop"], "description": "output by default."},
                 "tail": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "output: the last lines."},
                 "start": {"type": "integer", "minimum": 1, "description": "output: the first line to show."}
@@ -1726,6 +1729,31 @@ async fn call(
     }
 }
 
+/// Whether a call reads the pages of a cut result: they are built to fit under the limit, so they
+/// are never cut again.
+fn reads_a_result(tool: &str, args: &Value) -> bool {
+    tool == "run_status" && args["run"].as_str().is_some_and(crate::results::is_id)
+}
+
+/// A result over the user's limit goes as its beginning and its end (`docs/tools.md`, "Long
+/// results"); the whole text is kept, masked, for this agent. A call held for approval is cut the
+/// same way when it is performed, since its result is delivered to the same agent.
+fn cut_long(
+    daemon: &Daemon,
+    grant: &Grant,
+    tool: &str,
+    reads_a_result: bool,
+    outcome: Outcome,
+) -> (Outcome, Option<crate::results::Cut>) {
+    match outcome {
+        Outcome::Done(text) if !reads_a_result => {
+            let (text, cut) = crate::results::cut_done(daemon, grant, tool, text);
+            (Outcome::Done(text), cut)
+        }
+        outcome => (outcome, None),
+    }
+}
+
 async fn played(
     daemon: &Arc<Daemon>,
     grant: &Arc<Grant>,
@@ -1736,6 +1764,7 @@ async fn played(
 ) -> (String, bool) {
     let started = Instant::now();
     let recorded = record_of(&args, &grant.place);
+    let reads_a_result = reads_a_result(tool, &args);
     let mut verdict = None;
     let mut judgement = None;
     // What the developer log says of the call, gathered only while it is on.
@@ -1836,6 +1865,7 @@ async fn played(
             grant.tools.join(", ")
         ))
     };
+    let (outcome, cut) = cut_long(daemon, grant, tool, reads_a_result, outcome);
     if logging {
         log_call(
             daemon, grant, tool, key, &recorded, verdict, held, judged_log, &outcome, request,
@@ -1853,6 +1883,7 @@ async fn played(
         &outcome,
         started,
         None,
+        cut.as_ref(),
     );
     let error = matches!(outcome, Outcome::Refused(_) | Outcome::Failed(_));
     let (text, limit) = shown(outcome, &grant.place);
@@ -2130,11 +2161,13 @@ pub async fn performed(
 ) -> Outcome {
     let started = Instant::now();
     let recorded = record_of(&args, &grant.place);
+    let reads_a_result = reads_a_result(tool, &args);
     let cancelled = CancellationToken::new();
     let outcome = match discarding {
         Some(losses) => crate::actions::remove_discarding(daemon, grant, args, &losses).await,
         None => perform(daemon, grant, tool, args, cancelled, Some(class)).await,
     };
+    let (outcome, cut) = cut_long(daemon, grant, tool, reads_a_result, outcome);
     let verdict = Some("allow");
     record(
         daemon,
@@ -2147,6 +2180,7 @@ pub async fn performed(
         &outcome,
         started,
         Some(request),
+        cut.as_ref(),
     );
     outcome
 }
@@ -2164,11 +2198,15 @@ fn record(
     outcome: &Outcome,
     started: Instant,
     request: Option<u64>,
+    cut: Option<&crate::results::Cut>,
 ) {
     let duration = started.elapsed().as_millis() as u64;
-    let data = json!({"agent": grant.agent, "tool": tool, "call_key": key,
+    let mut data = json!({"agent": grant.agent, "tool": tool, "call_key": key,
         "arguments": recorded, "gate": verdict, "judgement": judgement, "outcome": outcome.word(),
         "duration_ms": duration, "request": request});
+    if let Some(cut) = cut {
+        data["cut"] = cut.to_json();
+    }
     if let Err(error) = daemon.write(|store| {
         let event = store.append_agent_event(&grant.agent, "agent.tool_served", data, true)?;
         Ok(((), Some(event)))
