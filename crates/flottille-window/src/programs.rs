@@ -7,7 +7,7 @@
 
 use flottille_ui::motion::PANEL;
 use flottille_ui::{
-    Button, Icon, Palette, Toast, Type, hoverable, palette, presence_of, space, tint, toast,
+    Button, Icon, Palette, Toast, Type, hoverable, icon, palette, presence_of, space, tint, toast,
 };
 use gpui_kit::{
     AnyElement, App, ClickEvent, Context, ElementId, InteractiveElement, IntoElement,
@@ -306,7 +306,11 @@ impl RenderOnce for StateLine {
         div().flex().flex_col().children(Phase::ALL.map(|at| {
             let line_id = self.id.clone();
             // Each line keeps its own mark while it folds away.
-            let mark = if at == Phase::Ready { "✓" } else { "✗" };
+            let mark = if at == Phase::Ready {
+                Icon::Check
+            } else {
+                Icon::Close
+            };
             let shown = said.clone().filter(|_| phase == Some(at));
             presence_of(
                 format!("{}-{}", self.id, at.name()),
@@ -315,9 +319,13 @@ impl RenderOnce for StateLine {
                     div()
                         .id(ElementId::Name(line_id.into()))
                         .aria_label(said.clone())
+                        .flex()
+                        .items_center()
+                        .gap(space::XS)
                         .text_size(px(12.))
                         .text_color(ink)
-                        .child(SharedString::from(format!("{mark} {said}")))
+                        .child(icon(mark).size(px(12.)).text_color(ink))
+                        .child(said)
                         .test_support()
                         .into_any_element()
                 },

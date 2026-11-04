@@ -4661,11 +4661,11 @@ pub fn workspace_menu(id: &str, actions: WorkspaceActions, cx: &mut Context<Menu
 /// colour. The place card draws the same.
 pub(crate) fn pull_row(id: ElementId, pull: &PullRequest, cx: &App) -> Stateful<Div> {
     let p = palette(cx);
-    let (glyph, color, said) = match pull.mark.as_deref() {
-        Some("passing") => ("✓", p.ok, "checks passing"),
-        Some("failing") => ("✗", p.fail, "checks failing"),
-        Some(_) => ("●", p.run, "checks pending"),
-        None => ("", p.faint, "no checks"),
+    let (mark, color, said) = match pull.mark.as_deref() {
+        Some("passing") => (Some(Icon::Check), p.ok, "checks passing"),
+        Some("failing") => (Some(Icon::Close), p.fail, "checks failing"),
+        Some(_) => (Some(Icon::Running), p.run, "checks pending"),
+        None => (None, p.faint, "no checks"),
     };
     div()
         .id(id)
@@ -4676,7 +4676,7 @@ pub(crate) fn pull_row(id: ElementId, pull: &PullRequest, cx: &App) -> Stateful<
         .mono(FACT_SIZE)
         .aria_label(SharedString::from(format!("{}, {said}", pull.label())))
         .child(SharedString::from(pull.label()))
-        .child(div().text_color(color).child(glyph))
+        .children(mark.map(|mark| icon(mark).size(px(12.)).text_color(color)))
 }
 
 /// A [`pull_row`] once its handlers and children are on: its hover fades in.
@@ -5353,14 +5353,16 @@ impl Render for Reply {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_size(px(12.))
                             .cursor_pointer()
                             .aria_label("Remove the picture")
-                            .child("×")
                             .on_click(cx.listener(move |this, _, _, cx| this.detach(at, cx))),
+                        // An icon does not inherit the ink: it is drawn here, in the ink this frame.
                         move |d, t| {
-                            d.text_color(mix(p.mute, p.text, t))
-                                .bg(mix(p.card2, p.hover, t))
+                            d.bg(mix(p.card2, p.hover, t)).child(
+                                icon(Icon::Close)
+                                    .size(px(12.))
+                                    .text_color(mix(p.mute, p.text, t)),
+                            )
                         },
                     ))
                     .test_support()

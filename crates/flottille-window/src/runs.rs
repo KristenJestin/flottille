@@ -250,17 +250,17 @@ impl CommandOutput {
     }
 }
 
-/// What a command's ending is drawn with: a glyph, its ink and its words. The shape says it as
+/// What a command's ending is drawn with: an icon, its ink and its words. The shape says it as
 /// well as the colour.
-pub fn mark_of(ending: Ending, p: &Palette) -> (&'static str, Hsla, String) {
-    let (glyph, ink) = match ending {
-        Ending::Running => ("●", p.run),
-        Ending::Exited(0) => ("✓", p.ok),
-        Ending::Exited(_) | Ending::Killed(_) => ("✗", p.fail),
-        Ending::Stopped => ("■", p.faint),
-        Ending::Interrupted => ("–", p.faint),
+pub fn mark_of(ending: Ending, p: &Palette) -> (Icon, Hsla, String) {
+    let (mark, ink) = match ending {
+        Ending::Running => (Icon::Running, p.run),
+        Ending::Exited(0) => (Icon::Check, p.ok),
+        Ending::Exited(_) | Ending::Killed(_) => (Icon::Close, p.fail),
+        Ending::Stopped => (Icon::Stopped, p.faint),
+        Ending::Interrupted => (Icon::Interrupted, p.faint),
     };
-    (glyph, ink, ending.said())
+    (mark, ink, ending.said())
 }
 
 /// A colour of a program's output, in the palette: the ink of the state it stands for.
@@ -313,7 +313,7 @@ pub fn card(
     cx: &App,
 ) -> AnyElement {
     let p = palette(cx);
-    let (glyph, color, said) = mark_of(card.ending, &p);
+    let (mark, color, said) = mark_of(card.ending, &p);
     let id = |part: &str| ElementId::Name(format!("command-{part}-{at}").into());
     let line = div()
         .id(id("card"))
@@ -354,10 +354,14 @@ pub fn card(
             div()
                 .id(id("exit"))
                 .flex_none()
+                .flex()
+                .items_center()
+                .gap(space::XS)
                 .mono(11.5)
                 .text_color(color)
                 .aria_label(SharedString::from(said.clone()))
-                .child(SharedString::from(format!("{glyph} {said}")))
+                .child(icon(mark).size(px(12.)).text_color(color))
+                .child(SharedString::from(said))
                 .test_support(),
         )
         .children(card.seconds.map(|seconds_taken| {
@@ -415,14 +419,14 @@ fn who(row: &CommandRow, names: &HashMap<String, String>) -> Option<String> {
     }
 }
 
-/// A command's mark: a spinner while it runs, else the glyph of how it ended, in a 16 px box.
+/// A command's mark: a spinner while it runs, else the icon of how it ended, in a 16 px box.
 fn run_mark(
     id: ElementId,
     row: &CommandRow,
     spinner: Option<Entity<StateIcon>>,
     p: &Palette,
 ) -> AnyElement {
-    let (glyph, color, said) = mark_of(row.ending(), p);
+    let (mark, color, said) = mark_of(row.ending(), p);
     div()
         .id(id)
         .flex_none()
@@ -434,7 +438,7 @@ fn run_mark(
         .aria_label(SharedString::from(said))
         .map(|d| match spinner.filter(|_| row.running()) {
             Some(spinner) => d.child(spinner),
-            None => d.mono(12.).text_color(color).child(glyph),
+            None => d.child(icon(mark).size(px(12.)).text_color(color)),
         })
         .test_support()
         .into_any_element()
