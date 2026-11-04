@@ -1,6 +1,9 @@
 # Extensions
 
-**Status: a proposal, nothing built.** Written from a discussion with the maintainer
+**Status: a proposal, S1 built.** S1 (#332) built the declaration and the registry, activation
+global and per project, `extensions.toml`, `extension.list`/`set`, the data space and the scan that
+the core names no extension, and Specs in the store with its statuses, lock, three modes and
+tickets, from the command line; the rest is a proposal. Written from a discussion with the maintainer
 (November 2026), and settled with their answers of 2026-11-03 ("Decisions taken"). No question is
 left open but the one in "Open questions".
 
@@ -164,7 +167,9 @@ Decide and Before a prompt, which hold what they decide on and nothing else.
 An extension that keeps anything keeps it in **its own space of the store**: tables named
 `ext_<name>_…`, created by migrations the extension declares and the store runs in order with its
 own. Only the extension reads and writes them; the core and the other extensions never do. They
-are kept when the extension is turned off.
+are kept when the extension is turned off. The store holds it: while an extension's migration or
+its space runs, SQLite refuses every statement that makes, changes, reads or writes a table outside
+`ext_<name>_…`, and views, pragmas, attachments and the end of the transaction.
 
 An extension may also add facts to what the core says of an agent, under its own name
 (`agent.tree`'s `extensions.<name>`): the spec a session writes or develops, the compaction's
@@ -427,7 +432,7 @@ development on its own at Ready.
 
 | Issue | What of Specs | What of the frame |
 |---|---|---|
-| S1 | the spec in the store, statuses, the lock, the three modes, the link to 0..n tickets, the CLI | the declaration and the registry, activation global and per project, `extensions.toml`, `extension.list`/`set`, the data space, the scan that the core names no extension |
+| S1 (built) | the spec in the store, statuses, the lock, the three modes, the link to 0..n tickets, the CLI | the declaration and the registry, activation global and per project, `extensions.toml`, `extension.list`/`set`, the data space, the scan that the core names no extension |
 | S2 | the `spec` tool for a root, "New spec" and "Write the spec", questions and answers, Ready and Draft | tools given by an extension, the Action trigger |
 | S3 | the project's Specs tab, a spec's page, its settings tab | screens: a project tab, a page, an action on a ticket's row, the renderer of an extension's tab and of its project section |
 | S4 | the ticket side of the modes | Core event triggers (a ticket changed) |

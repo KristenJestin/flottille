@@ -25,6 +25,8 @@ rmcp = { version = "3.7.0", default-features = false, features = ["server", "tra
 # Already built for the window; its `openat2` and `*at` calls open the file tools' paths by descriptors.
 rustix = { version = "1.1.5", features = ["fs"] }
 rustls-native-certs = "0.8.5"
+# The store's own, for the extensions' tables (`docs/extensions.md`, "Data").
+rusqlite = { version = "0.41.0", features = ["bundled", "fallible_uint"] }
 # Firecracker's seccomp filter compiler, pure Rust over libc: the page reader's allowlist.
 seccompiler = "0.5.0"
 semver = "1.0.28"

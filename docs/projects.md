@@ -111,6 +111,10 @@ instructions = "Push the branch, then open one pull request per repository."
 [pull_requests]                       # how its pull requests are opened (docs/commands.md)
 title = "type(TICKET): subject"       # the title's format, told to the agent that writes it
 reviewers = ["alice", "bob"]          # asked to review each pull request Flottille opens
+
+[extensions.specs]                    # an extension's switch and values here (docs/extensions.md)
+enabled = false                       # off in this project; on when left out, once on for all
+language = "fr"                       # its own value of a setting a project may set
 ```
 
 The repositories are put in dependency order (a repository after those it depends on; among those
@@ -153,6 +157,15 @@ The `[forges]` table of earlier versions (Bitbucket Data Center hosts by name) i
 a file that still has it is accepted, the table is ignored and said (`project show` lists it under
 "Not read", the window under the settings), and its repositories have no forge until one is set.
 Nothing is converted on its own.
+
+`[extensions.<name>]` holds an extension's switch and its own values for the project
+(`docs/extensions.md`, "Activation"): `enabled`, and the settings the extension lets a project
+set (Specs: `language`, the language its specs are written in). Once an extension is on for all
+projects (`extensions.toml`), it is on in every project whose `enabled` is not `false`; off for
+all, it is off everywhere and this switch stays. The extension checks the table against its
+declaration: an unknown key or a value of the wrong kind makes it unusable in the project, said
+by `extension.list` and by its commands, naming the key; `extension.set` and `flottille extension
+on|off --project` write it where it stands.
 
 A command's keys and what sending it does are in [`commands.md`](commands.md), a skill's in
 [`skills.md`](skills.md); `flottille command` and `flottille skill` (`add`, `edit`, `remove`)

@@ -131,6 +131,45 @@ The user chose the limit above which a tool result is cut (`tool_results.set`,
 |---|---|
 | `limit` | The limit in characters, or `"off"` for no cut. |
 
+### `extension.changed`
+
+The user switched an extension or changed its settings (`extension.set`), globally or in a
+project: `extension.list` says what it is now.
+
+| Field | |
+|---|---|
+| `name` | The extension's (`specs`). |
+| `project` | The project whose file changed; `null` for `extensions.toml`. |
+
+### `spec.created`
+
+A spec was started (`spec.new`).
+
+| Field | |
+|---|---|
+| `spec` | Its number, never given again. |
+| `project` | |
+| `title` | |
+| `mode` | `alone`, `internal` or `ticket`. |
+| `tickets` | The tickets it covers, as the tracker writes them. |
+
+### `spec.changed`
+
+A Draft was written: a section, or its tickets.
+
+| Field | |
+|---|---|
+| `spec`, `project` | |
+| `what` | The section written (`problem`, `behaviour`, `decisions`, `out_of_scope`, `notes`, `verification`, `questions`), or `tickets`. |
+
+### `spec.status_changed`
+
+| Field | |
+|---|---|
+| `spec`, `project` | |
+| `status` | What it is now: `draft`, `ready` (the user's gestures), later `in_progress`, `review`, `done`. |
+| `was` | What it was. |
+
 ### `workspace.created`
 
 A workspace was written, before anything is made on disk (`docs/workspaces.md`). Every event of a

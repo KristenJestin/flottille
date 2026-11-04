@@ -24,6 +24,7 @@ use crate::approvals;
 use crate::commands;
 use crate::deliveries;
 use crate::developer;
+use crate::extensions;
 use crate::forge;
 use crate::inbox;
 use crate::items;
@@ -71,7 +72,8 @@ pub fn run(paths: &Paths) -> Result<()> {
     ensure_private_dir(&paths.state)?;
     let _lock = take_lock(paths)?;
     let _store_lock = hold_store(paths)?;
-    let store = Store::open(&paths.database())?;
+    let mut store = Store::open(&paths.database())?;
+    extensions::migrate(&mut store)?;
     // Before anything starts an agent: what a daemon that died left running is its own to kill.
     agents::kill_orphans(&store);
     crate::claude::forget_bridges(paths);
@@ -601,6 +603,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                 "task.run",
             ]
             .contains(&request.method.as_str())
+            || extensions::answers(&request.method)
         {
             let (daemon, out) = (daemon.clone(), out.clone());
             tokio::spawn(async move {
@@ -634,6 +637,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     tickets::preview(daemon, request.params).await
                 } else if request.method == "task.run" {
                     tasks::run(&daemon, request.params)
+                } else if extensions::answers(&request.method) {
+                    extensions::call(&daemon, &request.method, request.params)
                 } else {
                     workspaces::call(daemon, &request.method, request.params).await
                 };

@@ -344,6 +344,71 @@ configuration folder.
 `developer.set` emits `developer.changed`. The user's door alone reaches them: no tool of an agent
 does.
 
+### The extension methods
+
+`extension.list` and `extension.set` read and switch the extensions (`docs/extensions.md`):
+`[<name>]` of `extensions.toml` in Flottille's configuration folder, with `enabled` and the
+extension's settings, and a project's own switch and values under `[extensions.<name>]` of its
+file. Both files are refused key by key: an unknown extension, an unknown key, a value of the wrong
+kind, naming the key at fault. An extension is off by default; once on, a project-scoped one is on
+in every project, off in a project whose switch says `enabled = false`, and off everywhere while it
+is off globally, the projects' switches kept.
+
+- `extension.list` answers `{"extensions", "errors"}`: for each extension `{"name", "title",
+  "sentence", "scope", "on_by_default", "place", "enabled", "error", "settings", "projects"}`,
+  `enabled` being the global switch, `error` why `extensions.toml` cannot be used (`null` when it
+  can; the extension is then off), `settings` each `{"key", "label", "hint", "kind",
+  "per_project", "value", "set"}` with its global value (its default when not `set`), and
+  `projects` each `{"project", "enabled", "switch", "settings", "error"}`: whether it is active
+  there, the project's own switch (`null` when its file says none) and values. `errors` names the
+  projects' `[extensions.<name>]` of an extension Flottille does not know.
+- `extension.set {name, project?, enabled?, settings?}` writes the switch and the settings
+  (a setting `null` goes back to its default), globally or in the project's file, the rest of the
+  file kept; answers the extension as `extension.list` does. `not-found` for an unknown extension,
+  `refused` for a key or a value the declaration does not take, `invalid-config` while the file
+  cannot be read.
+
+`extension.set` emits `extension.changed`. The user's door alone reaches them: no tool of an agent
+does.
+
+### The spec methods
+
+Specs' own (`docs/extensions.md`, "Specs"), each refused while Specs is not active in the spec's
+project, naming the switch. A spec is answered as `{"spec", "project", "title", "mode", "status",
+"language", "tickets", "created_at", "updated_at", "problem", "behaviour", "decisions",
+"out_of_scope", "notes", "verification", "questions"}`: `mode` is `alone`, `internal` or `ticket`;
+`status` `draft`, `ready`, `in_progress`, `review` or `done`; `behaviour` a list of `{"id", "text"}`
+(`C1`…), `decisions` of `{"id", "question", "decision", "set_aside"}` (`D1`…), `out_of_scope` of
+`{"text", "reason", "ticket"}`, `verification` of `{"id", "text"}` for a `C`, `questions` of texts.
+
+- `spec.new {project, title, mode?, tickets?}`: a Draft in the project's `language` (its own,
+  else the one of `extensions.toml`, else the user's locale), kept with it. `alone` takes no
+  ticket, `internal` and `ticket` one at least; the mode is `alone` without tickets and
+  `internal` with unless given. A ticket is written as the project's tracker takes it
+  (`docs/tickets.md`); one another spec covers is refused, naming that spec.
+- `spec.list {project?, status?}` answers `{"specs"}`, each `{"spec", "project", "title", "mode",
+  "status", "tickets", "questions", "updated_at"}` (`questions` counts the open ones), of the
+  projects where Specs is active.
+- `spec.show {spec}` answers the spec.
+- `spec.write {spec, section, content}` writes one section whole and answers the spec:
+  `problem` and `notes` take a text, `behaviour` a list of `{"id"?, "text"}`, `decisions` of
+  `{"id"?, "question", "decision", "set_aside"?}`, `out_of_scope` of `{"text", "reason"?,
+  "ticket"?}` (one of the two at least), `verification` of `{"id", "text"}` naming a `C` the spec
+  has, `questions` a list of texts. An item without `id` gets the next number; one with an `id`
+  names one the spec has now; an identifier removed is never given again, and a `C` removed takes
+  its verification with it.
+- `spec.link {spec, ticket}` and `spec.unlink {spec, ticket}` cover one more ticket, or one no
+  more; the last ticket of a spec `internal` or `ticket` stays.
+- `spec.ready {spec}` moves a Draft to Ready: `refused` while a question is open or `behaviour`
+  is empty. `spec.draft {spec}` moves a Ready spec back to Draft.
+
+**The lock.** Past Draft, every write to a spec (`spec.write`, `spec.link`, `spec.unlink`) is
+refused, whoever asks, the user's door included: `spec 3 is Ready: it is locked; send it back to
+Draft first`. Every write passes one check, in the same transaction as the write.
+
+`spec.new` emits `spec.created`; a write `spec.changed`; `spec.ready` and `spec.draft`
+`spec.status_changed`. The user's door alone reaches them: no tool of an agent does yet.
+
 ### The appearance methods
 
 `appearance.show` and `appearance.set` read and keep the window's appearance (`docs/design.md`

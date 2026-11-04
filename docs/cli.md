@@ -191,6 +191,93 @@ $ flottille --version
 flottille 0.3.0-beta.12 (beta, 3f2a9c1d7b44)
 ```
 
+## Extensions and specs
+
+Parts of Flottille that can be turned off with Flottille still working (`docs/extensions.md`).
+Specs is the first: off until you turn it on.
+
+### `flottille extension list [--json]`
+
+Each extension, whether it is on, and in which projects (`extension.list`; `--json` prints its
+answer). A file that cannot be used is said, and the extension is off until it is fixed.
+
+```
+$ flottille extension list
+specs (Specs): on. Keeps a spec of each task to build: what an agent needs to build it without guessing. It runs no model on its own.
+  shop: on
+  site: off, by its switch
+```
+
+### `flottille extension on <name> [--project P]`
+
+Turns it on for all projects: `enabled = true` under `[<name>]` of `extensions.toml`, the rest of
+the file kept as you wrote it. Once on, a project-scoped extension is on in every project. With
+`--project P`, turns it back on in that project (`enabled = true` under `[extensions.<name>]` of
+its file); it stays off there while it is off for all projects.
+
+```
+$ flottille extension on specs
+Specs is on.
+```
+
+### `flottille extension off <name> [--project P]`
+
+Turns it off for all projects, or with `--project P` in that project alone. What it keeps (its
+settings, its data) stays, and the projects' switches stay as they are: turned on again, it comes
+back as it was.
+
+### `flottille spec new <project> --title T [--mode alone|internal|ticket] [--ticket K]...`
+
+Starts a spec, a Draft, in the project's language (`docs/extensions.md`, "Specs"). The mode is
+`alone` (no ticket) without `--ticket` and `internal` (tickets read, never written) with;
+`ticket` (the ticket is the spec) is chosen. `internal` and `ticket` cover one ticket at least,
+each written as the project's tracker takes it (`docs/tickets.md`); a ticket that another spec
+covers is refused, naming that spec. `--json` prints the spec.
+
+Every `spec` command is refused while Specs is not active in the project, naming the switch:
+`Specs is off in project shop: turn it on there with flottille extension on specs --project shop …`.
+
+### `flottille spec list [--project P] [--status S]`
+
+The specs of the projects where Specs is on, or of one, with a status (`draft`, `ready`,
+`in_progress`, `review`, `done`) or all. `--json` prints `spec.list`'s answer.
+
+```
+$ flottille spec list
+spec 3 (shop) draft: Sign in with a passkey [internal, ABC-12]
+```
+
+### `flottille spec show <spec> [--json]`
+
+The spec whole: its sections in their order (Problem, the expected behaviour `C1`…, the decisions
+`D1`… with their question and the options set aside, out of scope, the technical notes, the
+verification of each `C`, the open questions).
+
+### `flottille spec write <spec> <section> --file F`
+
+Writes one section of a Draft whole, from a file: a text for `problem` and `notes`, JSON for the
+others (`spec.write`, `docs/protocol.md`). A `C` or a `D` that keeps its identifier names it
+(`{"id": "C2", "text": …}`); a new one is written without, and gets the next number. An identifier
+removed is never given again. Refused once the spec is past Draft.
+
+### `flottille spec link <spec> <ticket>`
+
+Covers one more ticket of the project's tracker. Refused for a spec `alone`, for a ticket another
+spec covers, and past Draft.
+
+### `flottille spec unlink <spec> <ticket>`
+
+Covers it no more; the last ticket of a spec `internal` or `ticket` stays.
+
+### `flottille spec ready <spec>`
+
+Says the spec is Ready: refused while it has an open question or no expected behaviour. A Ready
+spec is locked: every write to it is refused, whoever asks.
+
+### `flottille spec draft <spec>`
+
+Sends a Ready spec back to Draft, so that it can be written again.
+
 ## Projects
 
 A project is a folder registered with its configuration (`docs/projects.md`).
