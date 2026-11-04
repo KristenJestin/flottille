@@ -312,6 +312,20 @@ own (the `rules` key of its file, where it stands, what is around it kept).
 A change to the user's rules emits `rules.changed {project: null}`; a project's emits
 `project.changed` like any edit of its file.
 
+### The instructions methods
+
+`instructions.show` and `instructions.set` read and write the user's own instructions for every
+agent (`docs/agents.md`, "Roles"): `instructions.md` in Flottille's configuration folder. No tool
+of an agent reaches them.
+
+- `instructions.show {}` answers `{"path", "text", "cut"}`: the file, the text agents created from
+  now on get (empty while the file is absent), and why it was cut to the limit (`null` when it was
+  not).
+- `instructions.set {text}` writes the text and answers as `instructions.show`. `refused` above
+  8,000 characters, the file left as it was. An empty text removes the file.
+
+A change emits `instructions.changed {}`.
+
 ### The judge methods
 
 `judge.show`, `judge.set` and `judge.reset` read, write and reset the Auto judge's guidance

@@ -131,6 +131,11 @@ The user chose the limit above which a tool result is cut (`tool_results.set`,
 |---|---|
 | `limit` | The limit in characters, or `"off"` for no cut. |
 
+### `instructions.changed`
+
+The user's instructions for every agent were written (`instructions.set`, `docs/agents.md`,
+"Roles"); only the agents created afterwards get them. It has no field.
+
 ### `workspaces_folder.changed`
 
 The user chose where workspaces go (`workspaces_folder.set`, `docs/projects.md`, "Where the

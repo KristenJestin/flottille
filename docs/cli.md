@@ -173,6 +173,26 @@ Developer mode is on. Its log: ~/.local/state/flottille/developer.log
 
 Turns it off: nothing more is written. The log stays where it is.
 
+### `flottille config instructions [--show | --edit | --file <path>] [--json]`
+
+The user's own instructions for every agent in every project: `instructions.md` in Flottille's
+configuration folder (`docs/agents.md`, "Roles"). `--show` (the default) prints them and the file's
+path, `--file <path>` replaces them with that file's text (an empty file removes them), `--edit`
+opens `$VISUAL`, else `$EDITOR`, on a private copy and keeps what the editor leaves (the program is
+started without a shell: the variable is split at spaces and the copy's path is its last argument;
+an editor that fails, or leaves the text as it was, changes nothing). The text is at most 8,000
+characters; a longer one is refused and the file stays as it was. A change reaches the agents
+started after it. `--json` prints `instructions.show`'s answer (`docs/protocol.md`).
+
+```
+$ flottille config instructions --file ~/notes/my-rules.md
+Saved ~/.config/flottille/instructions.md: agents created from now on get it.
+$ flottille config instructions
+~/.config/flottille/instructions.md:
+
+Name branches after the issue.
+```
+
 ### `flottille update`
 
 Replaces Flottille with the latest build of a channel (`docs/releases.md`): `--channel stable`,

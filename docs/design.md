@@ -617,7 +617,8 @@ a command grants nothing, each call the session makes goes through its mode like
 ## 8. Instructions
 
 Built as in `reference/hemera.md` §7: a shared base, the role template, a cache boundary, the
-per-session part, then the project layer, frozen per session. The base has two parts. **What
+per-session part, then **the user's own instructions** (`instructions.md`, for every project;
+`agents.md`, "Roles"), then the project layer, frozen per session. The base has two parts. **What
 Flottille enforces** is fixed text that states what the gate does, so that an agent does not take
 it for its own discipline. **How to work** is the user's: a default text, the user's own for all
 projects, or a project's own (`projects.md`, "Rules"). The global rules sit in the base, before the
@@ -719,13 +720,16 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   edited, removed and reordered, each with its kind, where it is done and its time limit), then
   its Rules (a text editor, Reset to default, and a line saying a change reaches the agents
   created from now on);
-- Settings, in tabs (Judge, Providers, Rules, Appearance, Developer mode: one tab shown at a time, as in a project's settings; the first, the Judge, is
+- Settings, in tabs (Judge, Providers, Rules, Instructions, Workspaces, Appearance, Developer mode: one tab shown at a time, as in a project's settings; the first, the Judge, is
   the one it opens on, and a link to a section opens its tab): the Judge tab holds the Auto judge (two lines on Auto: the rules pass what is known to be harmless, a
   small model on the user's own quota decides the rest, base calls always come to the user; "No
   judge (Auto asks like Ask)" among its choices) and, under it with its own heading, the Judge
   guidance (its editor, Reset to default, Save and its line on when a change applies; a link to the
   guidance opens this tab with the guidance in view), then the providers, the
-  Rules for every project, edited the same way as the guidance, the Appearance (the window's colours: Omarchy
+  Rules for every project, edited the same way as the guidance, the Instructions (the user's own
+  instructions for every agent in every project, `instructions.md`: a multiline field saved on
+  demand with Save, a line on when a change applies, a toast for the result and a line when the
+  file was cut to its limit; no Reset, an empty text saved removes the file), the Appearance (the window's colours: Omarchy
   or Flottille, and for Flottille Light or Dark, each a segmented choice; off an Omarchy desktop
   the Omarchy choice is shown disabled with one line saying why), and last the Developer mode, a
   switch with the path of its log (`developer.md`: what the daemon decides and why, off by default); a judge

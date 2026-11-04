@@ -786,10 +786,25 @@ starts; the agent that started it and the session write to each other with `sess
   `approval_answer`. A launch above a cap is refused with a sentence; it is never queued.
 - **Roles**: `lead` (by default for a root) and `worker` (by default for a child). An agent's
   instructions are Flottille's base, its role's template, the cache boundary, then what is its
-  own: its project, its place, and either "you are the root agent" or its task's title; then the
-  project's own instruction files (`CLAUDE.md` else `AGENTS.md`, and `CLAUDE.local.md` else
-  `AGENTS.local.md`), read in the agent's place, else in the project's main checkout. The
-  templates are in `crates/flottille/roles/`.
+  own: its project, its place, and either "you are the root agent" or its task's title; then **the
+  user's own instructions**, then the project's own instruction files (`CLAUDE.md` else
+  `AGENTS.md`, and `CLAUDE.local.md` else `AGENTS.local.md`), read in the agent's place, else in
+  the project's main checkout. The templates are in `crates/flottille/roles/`.
+  - **The user's instructions** are `instructions.md` in Flottille's configuration folder
+    (`$XDG_CONFIG_HOME/flottille/`), for every agent in every project, under the heading "The
+    user's instructions, for every project". They come after the cache boundary and before the
+    project's files, so that a project's rule can narrow them, and the shared part stays the same
+    for every project. A missing file, or one holding only blanks, adds nothing. The text is read
+    when the agent is created and frozen in it, as the project's files are, so a change reaches the
+    agents started after it and none already running. It is at most 8,000 characters, the rules'
+    limit: a file edited by hand past it is cut to it, which the daemon's log, `instructions.show`
+    and the window say. A token in it is masked like anything else frozen in the instructions.
+    It is edited in the window (Settings, "Instructions") or with `flottille config
+    instructions`, and by hand. There is no per-project variant: `AGENTS.local.md` is that. It is
+    Flottille's own file: no provider's global instructions (`~/.claude/CLAUDE.md`, Codex's,
+    OpenCode's) are read, bare mode keeps them out. It is not the rules (`projects.md`, "Rules"):
+    those are how to work, before the boundary, replaced by a project's own; these are added to
+    whatever the agent is told.
 - **Stopping** an agent stops its tree, deepest first: each ends (`agent.ended`, or
   `agent.failed` when it is a failure that spreads), what was queued for it is superseded, the
   pending requests it made or held are cancelled (`approval.cancelled`: the user never sees them),

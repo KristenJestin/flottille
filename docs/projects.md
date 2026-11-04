@@ -280,6 +280,9 @@ the next, so they sit after the boundary. An agent reads the rules the agents cr
 the user allows, since it rewrites the instructions of every agent created after it
 (`docs/tools.md`, "The project").
 
+The rules are not the user's instructions (`docs/agents.md`, "Roles"): those are `instructions.md`,
+added to every agent's after the boundary whatever the rules say, and never replaced by a project.
+
 ## Tasks
 
 `[tasks.<name>]` lists the project's command lines its agents run by name with `run`
