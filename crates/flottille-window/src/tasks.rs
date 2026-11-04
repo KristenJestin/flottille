@@ -22,7 +22,7 @@ use gpui_kit::{
 };
 use serde_json::{Value, json};
 
-use crate::actions::Command;
+use crate::actions::{Command, RunAct};
 use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line};
 use crate::conversation::Ending;
 use crate::project::repository_label;
@@ -901,22 +901,42 @@ impl ProjectTasks {
     }
 
     pub fn stop_command(&mut self, run: &str, cx: &mut Context<Self>) {
-        self.answer_run(run, false, cx);
+        self.answer_run(run, RunAct::Stop, cx);
     }
 
-    fn answer_run(&mut self, run: &str, dismiss: bool, cx: &mut Context<Self>) {
+    /// The user runs a command again, in the same place: the panel shows the new run once the
+    /// daemon answers.
+    pub fn restart_command(&mut self, run: &str, cx: &mut Context<Self>) {
+        self.answer_run(run, RunAct::Restart, cx);
+    }
+
+    fn answer_run(&mut self, run: &str, act: RunAct, cx: &mut Context<Self>) {
         let command = Command::ProjectRun {
             project: self.project.clone(),
             run: run.to_owned(),
-            dismiss,
+            act,
         };
         perform_later(&self.shell, command, cx);
     }
 
-    /// What the daemon answered to a stop or a dismissal: a refusal is a toast.
-    pub fn run_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
+    /// What the daemon answered to a stop, a restart or a dismissal: a refusal is a toast, and the
+    /// panel shows the new run of a restart.
+    pub fn run_answered(
+        &mut self,
+        act: RunAct,
+        refused: Option<String>,
+        restarted: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(why) = refused {
-            toast(Toast::failure("The run was not stopped").detail(why), cx);
+            let title = match act {
+                RunAct::Restart => "The run was not restarted",
+                _ => "The run was not stopped",
+            };
+            toast(Toast::failure(title).detail(why), cx);
+        }
+        if let Some(run) = restarted {
+            self.open_command(&run, cx);
         }
         self.read_runs(cx);
     }

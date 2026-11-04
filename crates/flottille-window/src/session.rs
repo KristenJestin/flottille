@@ -44,7 +44,7 @@ use gpui_kit::{
     canvas, div, list, point, px, radians,
 };
 
-use crate::actions::{Answer, Command, Picture, RepositoryStatus};
+use crate::actions::{Answer, Command, Picture, RepositoryStatus, RunAct};
 use crate::commands::CommandInfo;
 use crate::conversation::{
     Activity, Block, Call, CallState, Change, Conversation, DiffLine, USER, WOKEN_BY_KIND,
@@ -693,7 +693,22 @@ impl SessionPage {
             Command::Run {
                 session: self.opened.id.clone(),
                 run: run.to_owned(),
-                dismiss: false,
+                act: RunAct::Stop,
+            },
+            cx,
+        );
+    }
+
+    /// The user runs a command again, in the same place: the daemon stops it if it runs, and
+    /// the panel shows the new run once it answers.
+    pub fn restart_command(&mut self, run: &str, cx: &mut Context<Self>) {
+        let list = self.commands(cx);
+        list.update(cx, |list, cx| list.failed(None, cx));
+        self.perform(
+            Command::Run {
+                session: self.opened.id.clone(),
+                run: run.to_owned(),
+                act: RunAct::Restart,
             },
             cx,
         );
@@ -718,8 +733,24 @@ impl SessionPage {
         list.update(cx, |list, cx| list.failed(refused, cx));
     }
 
-    /// What the daemon answered to a stop or a dismissal: why, when it refused.
-    pub fn command_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
+    /// What the daemon answered to a stop, a restart or a dismissal: why, when it refused, and the
+    /// new run when it restarted one, which the panel then shows.
+    pub fn command_answered(
+        &mut self,
+        act: RunAct,
+        refused: Option<String>,
+        restarted: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let (RunAct::Restart, Some(why)) = (act, &refused) {
+            toast(
+                Toast::failure("The command was not restarted").detail(why.clone()),
+                cx,
+            );
+        }
+        if let Some(run) = restarted {
+            self.open_command(&run, cx);
+        }
         let list = self.commands(cx);
         list.update(cx, |list, cx| list.failed(refused, cx));
     }

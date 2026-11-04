@@ -66,6 +66,27 @@ impl Picture {
     }
 }
 
+/// What the user does to a command, as the daemon's `run.*` methods have it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunAct {
+    /// Stops it and everything it started.
+    Stop,
+    /// Stops it if it runs, then runs its line again in the same place.
+    Restart,
+    /// Takes one that ended off the list.
+    Dismiss,
+}
+
+impl RunAct {
+    fn method(self) -> &'static str {
+        match self {
+            RunAct::Stop => "run.stop",
+            RunAct::Restart => "run.restart",
+            RunAct::Dismiss => "run.dismiss",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     /// What the project page shows beyond the shell's read: branches and lines changed.
@@ -242,11 +263,12 @@ pub enum Command {
         project: String,
         output: Option<Watch>,
     },
-    /// Stops a task the user ran and everything it started, or dismisses one that ended.
+    /// Stops a task the user ran and everything it started, runs it again, or dismisses one that
+    /// ended.
     ProjectRun {
         project: String,
         run: String,
-        dismiss: bool,
+        act: RunAct,
     },
     /// The project's setup.
     Setup {
@@ -338,11 +360,12 @@ pub enum Command {
         model: Option<String>,
         effort: Option<String>,
     },
-    /// Stops a command of the session and everything it started, or dismisses one that ended.
+    /// Stops a command of the session and everything it started, runs it again, or dismisses one
+    /// that ended.
     Run {
         session: String,
         run: String,
-        dismiss: bool,
+        act: RunAct,
     },
     /// Ends a subscription of the session's agents, as the agent's own `unsubscribe` does.
     CancelSubscription {
@@ -714,10 +737,13 @@ pub enum Outcome {
         listed: Result<Vec<CommandRow>, String>,
         output: Option<Box<CommandOutput>>,
     },
-    /// A task the user ran was stopped or dismissed, or the daemon refused with why.
+    /// A task the user ran was stopped, restarted (as the run `restarted`) or dismissed, or the
+    /// daemon refused with why.
     ProjectRunAnswered {
         project: String,
+        act: RunAct,
         refused: Option<String>,
+        restarted: Option<String>,
     },
     Setup {
         project: String,
@@ -779,10 +805,13 @@ pub enum Outcome {
         session: String,
         refused: Option<String>,
     },
-    /// A command was stopped or dismissed as asked, or the daemon refused with why.
+    /// A command was stopped, restarted (as the run `restarted`) or dismissed as asked, or the
+    /// daemon refused with why.
     RunAnswered {
         session: String,
+        act: RunAct,
         refused: Option<String>,
+        restarted: Option<String>,
     },
     /// A subscription was cancelled as asked, or the daemon refused with why.
     SubscriptionCancelled {
@@ -955,6 +984,25 @@ fn ask_alone(
     bound: Duration,
 ) -> Result<Result<Value, String>, String> {
     connected(connect)?.ask_within(method, params, bound)
+}
+
+/// What the user does to a command: why the daemon refused, and the new run's id when it ran the
+/// command again.
+fn ask_run(
+    connect: &Connect,
+    act: RunAct,
+    run: &str,
+    bound: Duration,
+) -> (Option<String>, Option<String>) {
+    match ask_alone(connect, act.method(), json!({"run": run}), bound) {
+        Ok(Ok(answer)) => (
+            None,
+            (act == RunAct::Restart)
+                .then(|| answer["run"]["run"].as_str().map(str::to_owned))
+                .flatten(),
+        ),
+        Ok(Err(why)) | Err(why) => (Some(why), None),
+    }
 }
 
 fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
@@ -1487,17 +1535,14 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 output,
             }
         }
-        Command::ProjectRun {
-            project,
-            run,
-            dismiss,
-        } => {
-            let method = if dismiss { "run.dismiss" } else { "run.stop" };
-            let refused = match ask_alone(connect, method, json!({"run": run}), bounds.quick) {
-                Ok(Ok(_)) => None,
-                Ok(Err(why)) | Err(why) => Some(why),
-            };
-            Outcome::ProjectRunAnswered { project, refused }
+        Command::ProjectRun { project, run, act } => {
+            let (refused, restarted) = ask_run(connect, act, &run, bounds.quick);
+            Outcome::ProjectRunAnswered {
+                project,
+                act,
+                refused,
+                restarted,
+            }
         }
         Command::Setup { project } => {
             let listed = ask_alone(
@@ -1674,17 +1719,14 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             };
             Outcome::Interrupted { session, refused }
         }
-        Command::Run {
-            session,
-            run,
-            dismiss,
-        } => {
-            let method = if dismiss { "run.dismiss" } else { "run.stop" };
-            let refused = match ask_alone(connect, method, json!({"run": run}), bounds.quick) {
-                Ok(Ok(_)) => None,
-                Ok(Err(why)) | Err(why) => Some(why),
-            };
-            Outcome::RunAnswered { session, refused }
+        Command::Run { session, run, act } => {
+            let (refused, restarted) = ask_run(connect, act, &run, bounds.quick);
+            Outcome::RunAnswered {
+                session,
+                act,
+                refused,
+                restarted,
+            }
         }
         Command::CancelSubscription {
             session,

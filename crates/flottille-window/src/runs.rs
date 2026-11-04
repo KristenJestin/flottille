@@ -8,13 +8,14 @@
 //! output is untouched.
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use flottille_core::ansi;
 use flottille_ui::color::mix;
+use flottille_ui::motion::MODAL;
 use flottille_ui::{
-    AgentState, Button, Icon, Item, Listing, Palette, StateIcon, Status, Toast, Type, hoverable,
-    icon, palette, presence, section_label, space, toast,
+    AgentState, Button, Icon, Item, Listing, Modal, Palette, StateIcon, Status, Toast, Type,
+    hoverable, icon, palette, presence, section_label, space, toast,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -71,6 +72,17 @@ impl Owner {
             Owner::Session(page) => page.update(cx, |page, cx| page.stop_command(run, cx)).ok(),
             Owner::Project(tasks) => tasks
                 .update(cx, |tasks, cx| tasks.stop_command(run, cx))
+                .ok(),
+        };
+    }
+
+    fn restart(&self, run: &str, cx: &mut App) {
+        match self {
+            Owner::Session(page) => page
+                .update(cx, |page, cx| page.restart_command(run, cx))
+                .ok(),
+            Owner::Project(tasks) => tasks
+                .update(cx, |tasks, cx| tasks.restart_command(run, cx))
                 .ok(),
         };
     }
@@ -744,19 +756,42 @@ pub struct CommandPanel {
     /// How the session's tree names each agent, and the session's title.
     names: HashMap<String, String>,
     session: Option<String>,
-    scroll: ScrollHandle,
     /// Where the focus rests while it is open, so that Escape reaches the drawer.
     focus: Option<FocusHandle>,
     focused: bool,
     renders: usize,
-    /// How many lines the output had when it was first read, counted from the first line read
-    /// (the daemon does not say how many it left out before it): they are there as the drawer
-    /// opens, the ones that follow unfold as they arrive.
-    base: Option<usize>,
-    /// The number of the first line of `shown`, counted the same way: the daemon gives the last
-    /// lines only, so it moves on as the output grows past what it gives.
+    /// The output as the drawer draws it.
+    feed: Feed,
+    /// The number of the first line of `shown`, counted from the first line read (the daemon does
+    /// not say how many it left out before it): it gives the last lines only, so it moves on as
+    /// the output grows past what it gives.
     first: usize,
+    /// The command seen large, in a modal over the window.
+    expanded: bool,
+    /// The output as the modal draws it: its own, since it opens when the drawer has long been
+    /// open.
+    modal: Feed,
+    /// When the modal was closed: it still draws its content while it fades out.
+    collapsed_at: Option<Instant>,
+}
+
+/// An output drawn in a scrolling box: the lines there when it was first read are drawn as they
+/// are, the ones that follow unfold as they arrive.
+struct Feed {
+    scroll: ScrollHandle,
+    /// How many lines the output had when it was first read, counted from the first line read.
+    base: Option<usize>,
     arrivals: Listing<String>,
+}
+
+impl Feed {
+    fn new(base: Option<usize>) -> Self {
+        Feed {
+            scroll: ScrollHandle::new(),
+            base,
+            arrivals: Listing::default(),
+        }
+    }
 }
 
 impl CommandPanel {
@@ -768,13 +803,43 @@ impl CommandPanel {
             shown: None,
             names: HashMap::new(),
             session: None,
-            scroll: ScrollHandle::new(),
             focus: None,
             focused: false,
             renders: 0,
-            base: None,
+            feed: Feed::new(None),
             first: 0,
-            arrivals: Listing::default(),
+            expanded: false,
+            modal: Feed::new(None),
+            collapsed_at: None,
+        }
+    }
+
+    /// Whether the command is seen large.
+    pub fn expanded(&self) -> bool {
+        self.expanded
+    }
+
+    /// Shows the command large, in a modal over the window: what is already written is drawn as
+    /// it is, the lines that follow unfold.
+    pub fn expand(&mut self, cx: &mut Context<Self>) {
+        let base = self
+            .shown
+            .as_ref()
+            .map(|shown| self.first + shown.lines.len());
+        self.modal = Feed::new(base);
+        self.expanded = true;
+        self.collapsed_at = None;
+        cx.notify();
+    }
+
+    /// Closes the modal and leaves the drawer as it was.
+    pub fn collapse(&mut self, cx: &mut Context<Self>) {
+        if self.expanded {
+            self.expanded = false;
+            self.collapsed_at = Some(cx.background_executor().now());
+            // The focus goes back to the drawer, so that Escape reaches it.
+            self.focused = false;
+            cx.notify();
         }
     }
 
@@ -795,9 +860,9 @@ impl CommandPanel {
         if self.run.as_deref() != Some(run) {
             self.shown = None;
             self.row = None;
-            self.base = None;
+            self.feed = Feed::new(None);
+            self.modal = Feed::new(None);
             self.first = 0;
-            self.arrivals = Listing::default();
         }
         self.run = Some(run.to_owned());
         self.focused = false;
@@ -807,6 +872,7 @@ impl CommandPanel {
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.run = None;
         self.focused = false;
+        self.collapse(cx);
         cx.notify();
     }
 
@@ -817,14 +883,15 @@ impl CommandPanel {
         {
             return;
         }
-        if self.base.is_none() {
-            self.base = Some(output.lines.len());
-        }
         if let Some(before) = &self.shown {
             self.first += slid(&before.lines, &output.lines);
         }
+        let end = self.first + output.lines.len();
+        for feed in [&mut self.feed, &mut self.modal] {
+            feed.base.get_or_insert(end);
+            feed.scroll.scroll_to_bottom();
+        }
         self.shown = Some(output);
-        self.scroll.scroll_to_bottom();
         cx.notify();
     }
 
@@ -866,8 +933,22 @@ impl CommandPanel {
     }
 }
 
-/// A label and its value, on one line of the drawer's facts.
-fn fact(id: &str, key: &str, value: impl IntoElement, said: String, p: &Palette) -> AnyElement {
+/// What the drawer says of a command, one line each.
+struct Fact {
+    id: &'static str,
+    key: &'static str,
+    value: String,
+}
+
+/// A fact of the drawer: a label and its value, the value cut to `lines` lines when it has a
+/// limit.
+fn fact(
+    prefix: &str,
+    fact: &Fact,
+    value: impl IntoElement,
+    lines: Option<usize>,
+    p: &Palette,
+) -> AnyElement {
     div()
         .flex()
         .items_start()
@@ -878,19 +959,180 @@ fn fact(id: &str, key: &str, value: impl IntoElement, said: String, p: &Palette)
                 .w(px(96.))
                 .flex_none()
                 .text_color(p.faint)
-                .child(key.to_owned()),
+                .child(fact.key),
         )
         .child(
             div()
-                .id(ElementId::Name(format!("run-fact-{id}").into()))
+                .id(ElementId::Name(format!("{prefix}-{}", fact.id).into()))
                 .flex_1()
                 .min_w_0()
                 .mono(12.)
-                .aria_label(SharedString::from(said))
+                .when_some(lines, |d, lines| d.line_clamp(lines).text_ellipsis())
+                .aria_label(SharedString::from(fact.value.clone()))
                 .child(value)
                 .test_support(),
         )
         .into_any_element()
+}
+
+/// A fact of the modal, which has the room: the label and the whole value, side by side, several
+/// to a line.
+fn inline_fact(fact: &Fact, p: &Palette) -> AnyElement {
+    div()
+        .id(ElementId::Name(
+            format!("run-modal-fact-{}", fact.id).into(),
+        ))
+        .flex()
+        .gap(space::SM)
+        .min_w_0()
+        .max_w_full()
+        .text_size(px(12.5))
+        .aria_label(SharedString::from(fact.value.clone()))
+        .child(div().flex_none().text_color(p.faint).child(fact.key))
+        .child(
+            div()
+                .min_w_0()
+                .mono(12.)
+                .child(SharedString::from(fact.value.clone())),
+        )
+        .test_support()
+        .into_any_element()
+}
+
+impl CommandPanel {
+    /// The output in its box, with its title and Copy: `modal` draws the modal's, which has its
+    /// own ids and its own scroll.
+    fn output_box(
+        &mut self,
+        modal: bool,
+        at: Instant,
+        reduce: bool,
+        p: &Palette,
+        copy: AnyElement,
+    ) -> gpui_kit::Div {
+        let name = if modal {
+            "command-modal"
+        } else {
+            "command-panel"
+        };
+        let (feed, shown, first) = (
+            if modal {
+                &mut self.modal
+            } else {
+                &mut self.feed
+            },
+            &self.shown,
+            self.first,
+        );
+        let base = feed.base.unwrap_or(0);
+        // The lines of `shown` before this index were there when it opened (or are gone).
+        let opened = match shown {
+            Some(shown) => base.saturating_sub(first).min(shown.lines.len()),
+            None => 0,
+        };
+        if let Some(shown) = shown {
+            feed.arrivals.sync(
+                shown
+                    .lines
+                    .iter()
+                    .enumerate()
+                    .skip(opened)
+                    .map(|(i, line)| ((first + i).to_string(), line.clone())),
+                at,
+                reduce,
+            );
+        }
+        let arrived: Vec<AnyElement> = feed
+            .arrivals
+            .rows()
+            .map(|row| {
+                let i = row.key;
+                Item::new(
+                    ElementId::Name(format!("{name}-item-{i}").into()),
+                    row.placement,
+                    coloured_line(
+                        ElementId::Name(format!("{name}-line-{i}").into()),
+                        row.value,
+                        p.mute,
+                        p,
+                    ),
+                )
+                .into_any_element()
+            })
+            .collect();
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap(space::SM)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(space::SM)
+                    .child(div().text_size(px(12.5)).medium().child("Output"))
+                    .child(
+                        div()
+                            .flex_1()
+                            .mono(11.)
+                            .text_color(p.faint)
+                            .child("follows the end"),
+                    )
+                    .child(copy),
+            )
+            .child(
+                div()
+                    .id(ElementId::Name(format!("{name}-output").into()))
+                    .flex_1()
+                    .min_h_0()
+                    .py(space::SM)
+                    .px(space::MD)
+                    .rounded(px(8.))
+                    .bg(p.field)
+                    .border_1()
+                    .border_color(p.line)
+                    .overflow_y_scroll()
+                    .track_scroll(&feed.scroll)
+                    .flex()
+                    .flex_col()
+                    .when_some(shown.as_ref(), |d, shown| {
+                        d.when(shown.earlier, |d| {
+                            d.child(
+                                div()
+                                    .mono(11.)
+                                    .text_color(p.faint)
+                                    .child("(earlier lines are left out)"),
+                            )
+                        })
+                        .children(
+                            shown
+                                .lines
+                                .iter()
+                                .enumerate()
+                                .take(opened)
+                                .map(|(i, line)| {
+                                    coloured_line(
+                                        ElementId::Name(
+                                            format!("{name}-line-{}", first + i).into(),
+                                        ),
+                                        line,
+                                        p.mute,
+                                        p,
+                                    )
+                                }),
+                        )
+                        .children(arrived)
+                    })
+                    .when(shown.as_ref().is_none_or(|s| s.lines.is_empty()), |d| {
+                        d.child(div().mono(11.5).text_color(p.faint).child(match shown {
+                            Some(_) => "(no output yet)",
+                            None => "Reading…",
+                        }))
+                    })
+                    .test_support(),
+            )
+    }
 }
 
 impl Render for CommandPanel {
@@ -898,7 +1140,7 @@ impl Render for CommandPanel {
         self.renders += 1;
         let p = palette(cx);
         let focus = self.focus.get_or_insert_with(|| cx.focus_handle()).clone();
-        if self.run.is_some() && !self.focused {
+        if self.run.is_some() && !self.focused && !self.expanded {
             self.focused = true;
             window.focus(&focus, cx);
         }
@@ -940,57 +1182,81 @@ impl Render for CommandPanel {
             (None, false) => format!("{} after {time}", capitalized(&said)),
         };
         let page = self.page.clone();
-        let header = div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap(space::MD)
-            .pl(space::XL)
-            .pr(space::MD)
-            .py(space::MD)
-            .border_b_1()
-            .border_color(p.line)
-            .child(run_mark("run-drawer-mark".into(), &row, None, &p))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .id("run-drawer-line")
-                            .mono(14.)
-                            .medium()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .aria_label(SharedString::from(row.line.clone()))
-                            .child(SharedString::from(row.line.clone()))
-                            .test_support(),
-                    )
-                    .child(
-                        div()
-                            .id("run-drawer-sub")
-                            .text_size(px(12.))
-                            .text_color(if running { p.faint } else { color })
-                            .aria_label(SharedString::from(sub.clone()))
-                            .child(SharedString::from(sub))
-                            .test_support(),
-                    ),
-            )
-            .when(running && !row.step, |d| {
-                let (page, run) = (self.page.clone(), row.run.clone());
-                d.child(
-                    Button::secondary("run-drawer-stop", "Stop")
-                        .leading(Icon::Stop)
-                        .on_click(move |_, _, cx| page.stop(&run, cx)),
+        let owner = self.page.clone();
+        // Stop and Restart, in the drawer's header and in the modal's: a step of a setup is the
+        // daemon's, nobody runs it again from here.
+        let actions = |prefix: &str| {
+            let restart = (!row.step).then(|| {
+                let (page, run) = (owner.clone(), row.run.clone());
+                Button::secondary(format!("{prefix}-restart"), "Restart")
+                    .leading(Icon::Restart)
+                    .on_click(move |_, _, cx| page.restart(&run, cx))
+            });
+            let stop = (running && !row.step).then(|| {
+                let (page, run) = (owner.clone(), row.run.clone());
+                Button::secondary(format!("{prefix}-stop"), "Stop")
+                    .leading(Icon::Stop)
+                    .on_click(move |_, _, cx| page.stop(&run, cx))
+            });
+            (restart, stop)
+        };
+        let header = {
+            let (restart, stop) = actions("run-drawer");
+            let expand = {
+                let panel = cx.entity().downgrade();
+                Button::icon("run-drawer-expand", Icon::Expand, "Expand").on_click(
+                    move |_, _, cx| {
+                        panel.update(cx, |panel, cx| panel.expand(cx)).ok();
+                    },
                 )
-            })
-            .child(
-                Button::icon("run-drawer-close", Icon::Close, "Close (Esc)")
-                    .on_click(move |_, _, cx| page.close(cx)),
-            );
+            };
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(space::MD)
+                .pl(space::XL)
+                .pr(space::MD)
+                .py(space::MD)
+                .border_b_1()
+                .border_color(p.line)
+                .child(run_mark("run-drawer-mark".into(), &row, None, &p))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .id("run-drawer-line")
+                                .mono(14.)
+                                .medium()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .aria_label(SharedString::from(row.line.clone()))
+                                .child(SharedString::from(row.line.clone()))
+                                .test_support(),
+                        )
+                        .child(
+                            div()
+                                .id("run-drawer-sub")
+                                .text_size(px(12.))
+                                .text_color(if running { p.faint } else { color })
+                                .aria_label(SharedString::from(sub.clone()))
+                                .child(SharedString::from(sub.clone()))
+                                .test_support(),
+                        ),
+                )
+                .children(restart)
+                .children(stop)
+                .child(expand)
+                .child(
+                    Button::icon("run-drawer-close", Icon::Close, "Close (Esc)")
+                        .on_click(move |_, _, cx| page.close(cx)),
+                )
+        };
         let by = match row.agent.as_str() {
             _ if row.step => "the workspace's setup".to_owned(),
             "" => "you".to_owned(),
@@ -1006,7 +1272,7 @@ impl Render for CommandPanel {
                 }
             }
         };
-        let by_link = {
+        let mut by_link = Some({
             let (page, agent) = (self.page.clone(), row.agent.clone());
             let link = div()
                 .id("run-fact-by-link")
@@ -1016,7 +1282,7 @@ impl Render for CommandPanel {
             hoverable(link, move |d, t| {
                 d.underline().text_color(mix(p.mute, p.text, t))
             })
-        };
+        });
         let place = row.workspace.clone().unwrap_or_else(|| "main".to_owned());
         let when = match running {
             true => format!("{time} ago"),
@@ -1025,49 +1291,68 @@ impl Render for CommandPanel {
                 seconds(now.saturating_sub(row.ended_at.unwrap_or(row.started_at)))
             ),
         };
-        let mut facts: Vec<AnyElement> = vec![fact(
-            "command",
-            "Command",
+        // What the drawer and the modal both say, after the command itself. Runs are the daemon's,
+        // on this machine, until a remote one runs them (design §12).
+        let mut facts: Vec<Fact> = Vec::new();
+        if let Some(task) = &row.name {
+            facts.push(Fact {
+                id: "task",
+                key: "Task",
+                value: task.clone(),
+            });
+        }
+        facts.push(Fact {
+            id: "where",
+            key: "Where",
+            value: place,
+        });
+        facts.push(Fact {
+            id: "by",
+            key: "Started by",
+            value: by.clone(),
+        });
+        facts.push(Fact {
+            id: "since",
+            key: if running { "Started" } else { "Ended" },
+            value: when,
+        });
+        facts.push(Fact {
+            id: "machine",
+            key: "Machine",
+            value: "this PC".to_owned(),
+        });
+        let command = Fact {
+            id: "command",
+            key: "Command",
+            value: row.line.clone(),
+        };
+        let mut shown_facts: Vec<AnyElement> = vec![fact(
+            "run-fact",
+            &command,
             SharedString::from(row.line.clone()),
-            row.line.clone(),
+            None,
             &p,
         )];
-        if let Some(task) = &row.name {
-            facts.push(fact(
-                "task",
-                "Task",
-                SharedString::from(task.clone()),
-                task.clone(),
-                &p,
-            ));
+        for entry in &facts {
+            // Who started it can be a whole first message: two lines in the drawer, which has the
+            // room of a column; the modal says it whole.
+            let (lines, element) = match (entry.id, row.agent.is_empty()) {
+                ("by", true) => (Some(2), SharedString::from(by.clone()).into_any_element()),
+                ("by", false) => (
+                    Some(2),
+                    by_link
+                        .take()
+                        .expect("the facts hold one \"by\"")
+                        .into_any_element(),
+                ),
+                _ => (
+                    None,
+                    SharedString::from(entry.value.clone()).into_any_element(),
+                ),
+            };
+            shown_facts.push(fact("run-fact", entry, element, lines, &p));
         }
-        facts.push(fact(
-            "where",
-            "Where",
-            SharedString::from(place.clone()),
-            place,
-            &p,
-        ));
-        facts.push(match row.agent.is_empty() {
-            true => fact("by", "Started by", SharedString::from(by.clone()), by, &p),
-            false => fact("by", "Started by", by_link, by, &p),
-        });
-        facts.push(fact(
-            "since",
-            if running { "Started" } else { "Ended" },
-            SharedString::from(when.clone()),
-            when,
-            &p,
-        ));
-        // Runs are the daemon's, on this machine, until a remote one runs them (design §12).
-        facts.push(fact(
-            "machine",
-            "Machine",
-            SharedString::from("this PC"),
-            "this PC".to_owned(),
-            &p,
-        ));
-        let facts = div()
+        let facts_view = div()
             .id("run-drawer-facts")
             .flex_none()
             .flex()
@@ -1077,134 +1362,67 @@ impl Render for CommandPanel {
             .py(space::MD)
             .border_b_1()
             .border_color(p.line)
-            .children(facts);
-        let copy = {
-            let text = self.text();
-            Button::quiet("run-drawer-copy", "Copy").on_click(move |_, _, cx| {
-                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text.clone()));
-                toast(
-                    Toast::success("Output copied").detail("What the drawer shows of it."),
-                    cx,
-                );
-            })
-        };
-        // The lines there when it was first read are drawn as they are; each one that follows
-        // unfolds as it arrives.
+            .children(shown_facts);
         let (at, reduce) = (cx.background_executor().now(), cx.reduce_motion());
-        let (first, base) = (self.first, self.base.unwrap_or(0));
-        // The lines of `shown` before this index were there when it opened (or are gone).
-        let opened = match &self.shown {
-            Some(shown) => base.saturating_sub(first).min(shown.lines.len()),
-            None => 0,
-        };
-        if let Some(shown) = &self.shown {
-            self.arrivals.sync(
-                shown
-                    .lines
-                    .iter()
-                    .enumerate()
-                    .skip(opened)
-                    .map(|(i, line)| ((first + i).to_string(), line.clone())),
-                at,
-                reduce,
-            );
-        }
-        let arrived: Vec<AnyElement> = self
-            .arrivals
-            .rows()
-            .map(|row| {
-                let i = row.key;
-                Item::new(
-                    ElementId::Name(format!("command-panel-item-{i}").into()),
-                    row.placement,
-                    coloured_line(
-                        ElementId::Name(format!("command-panel-line-{i}").into()),
-                        row.value,
-                        p.mute,
-                        &p,
-                    ),
-                )
+        let written = self.text();
+        let copy = |id: &'static str| {
+            let text = written.clone();
+            Button::quiet(id, "Copy")
+                .on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text.clone()));
+                    toast(
+                        Toast::success("Output copied").detail("What the drawer shows of it."),
+                        cx,
+                    );
+                })
                 .into_any_element()
-            })
-            .collect();
-        let output =
-            div()
-                .flex_1()
-                .min_h_0()
-                .flex()
-                .flex_col()
-                .gap(space::SM)
-                .pl(space::XL)
-                .pr(space::MD)
-                .pt(space::SM)
-                .pb(space::LG)
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(space::SM)
-                        .child(div().text_size(px(12.5)).medium().child("Output"))
-                        .child(
-                            div()
-                                .flex_1()
-                                .mono(11.)
-                                .text_color(p.faint)
-                                .child("follows the end"),
-                        )
-                        .child(copy),
-                )
-                .child(
-                    div()
-                        .id("command-panel-output")
-                        .flex_1()
-                        .min_h_0()
-                        .py(space::SM)
-                        .px(space::MD)
-                        .rounded(px(8.))
-                        .bg(p.field)
-                        .border_1()
-                        .border_color(p.line)
-                        .overflow_y_scroll()
-                        .track_scroll(&self.scroll)
-                        .flex()
-                        .flex_col()
-                        .when_some(self.shown.as_ref(), |d, shown| {
-                            d.when(shown.earlier, |d| {
-                                d.child(
-                                    div()
-                                        .mono(11.)
-                                        .text_color(p.faint)
-                                        .child("(earlier lines are left out)"),
-                                )
-                            })
-                            .children(shown.lines.iter().enumerate().take(opened).map(
-                                |(i, line)| {
-                                    coloured_line(
-                                        ElementId::Name(
-                                            format!("command-panel-line-{}", first + i).into(),
-                                        ),
-                                        line,
-                                        p.mute,
-                                        &p,
-                                    )
-                                },
-                            ))
-                            .children(arrived)
-                        })
-                        .when(
-                            self.shown.as_ref().is_none_or(|s| s.lines.is_empty()),
-                            |d| {
-                                d.child(div().mono(11.5).text_color(p.faint).child(
-                                    match self.shown {
-                                        Some(_) => "(no output yet)",
-                                        None => "Reading…",
-                                    },
-                                ))
-                            },
-                        )
-                        .test_support(),
-                );
-        root.child(header).child(facts).child(output)
+        };
+        let output = self
+            .output_box(false, at, reduce, &p, copy("run-drawer-copy"))
+            .pl(space::XL)
+            .pr(space::MD)
+            .pt(space::SM)
+            .pb(space::LG);
+        // The modal draws its content while it is open and while it fades out.
+        let showing = self.expanded
+            || self
+                .collapsed_at
+                .is_some_and(|at_close| at.saturating_duration_since(at_close) < MODAL * 2);
+        let modal = {
+            let panel = cx.entity().downgrade();
+            let mut modal = Modal::new("run-modal", SharedString::from(row.line.clone()))
+                .sentence(sub)
+                .large()
+                .takes_focus()
+                .open(self.expanded)
+                .on_close(move |_, cx| {
+                    panel.update(cx, |panel, cx| panel.collapse(cx)).ok();
+                });
+            if showing {
+                let (restart, stop) = actions("run-modal");
+                let output = self.output_box(true, at, reduce, &p, copy("run-modal-copy"));
+                for button in [restart, stop].into_iter().flatten() {
+                    modal = modal.action(button);
+                }
+                modal = modal
+                    .child(
+                        div()
+                            .id("run-modal-facts")
+                            .flex_none()
+                            .flex()
+                            .flex_wrap()
+                            .gap_x(space::XL)
+                            .gap_y(space::XS)
+                            .children(facts.iter().map(|entry| inline_fact(entry, &p))),
+                    )
+                    .child(output);
+            }
+            modal
+        };
+        root.child(header)
+            .child(facts_view)
+            .child(output)
+            .child(modal)
     }
 }
 
