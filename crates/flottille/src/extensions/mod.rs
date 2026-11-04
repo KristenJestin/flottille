@@ -217,6 +217,27 @@ fn json_of(item: &toml_edit::Item, at: &str) -> Result<Value, String> {
     }
 }
 
+/// A setting's value as `extensions.toml` writes it; `None` for `null`, its default.
+fn toml_of(value: &Value) -> Option<toml_edit::Value> {
+    Some(match value {
+        Value::Null => return None,
+        Value::Bool(flag) => (*flag).into(),
+        Value::Number(number) => match number.as_i64() {
+            Some(integer) => integer.into(),
+            None => number.as_f64()?.into(),
+        },
+        Value::String(text) => text.as_str().into(),
+        Value::Array(values) => {
+            toml_edit::Value::Array(values.iter().filter_map(toml_of).collect())
+        }
+        Value::Object(map) => toml_edit::Value::InlineTable(
+            map.iter()
+                .filter_map(|(key, value)| Some((key.as_str(), toml_of(value)?)))
+                .collect(),
+        ),
+    })
+}
+
 fn json_of_value(value: &toml_edit::Value) -> Value {
     match value {
         toml_edit::Value::String(text) => json!(text.value()),
@@ -480,9 +501,9 @@ fn set(daemon: &Daemon, asked: Set) -> Result<Value, Failure> {
             table.insert("enabled", toml_edit::value(enabled));
         }
         for (key, value) in &asked.settings {
-            match value.as_str() {
-                Some(text) => {
-                    table.insert(key, toml_edit::value(text));
+            match toml_of(value) {
+                Some(value) => {
+                    table.insert(key, toml_edit::value(value));
                 }
                 None => {
                     table.remove(key);
