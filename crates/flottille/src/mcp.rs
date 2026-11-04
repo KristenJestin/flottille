@@ -372,9 +372,9 @@ const SERVED: [Definition; 28] = [
             is refused. Writes, judged, answered at once, the result maybe later: create, \
             comment, edit, close, reopen, status. Nothing is assigned unless you ask, and a \
             tracker may assign a new work item itself: assignee \"@me\" gives it to the user \
-            (Jira create, edit; null on edit removes it; GitHub edit: assignees). subscribe: \
-            the next events of a ticket wake you once (from people: no bot nor agent; minutes: \
-            60 by default); unsubscribe. {\"action\": \"comment\", \"ticket\": \"#12\", \"body\": \"...\"}",
+            (Jira create, edit; null on edit removes it; GitHub edit: assignees). Markdown body, \
+            converted for Jira. subscribe: the next events of a ticket wake you once (from \
+            people: no bot nor agent; minutes: 60 by default); unsubscribe. {\"action\": \"comment\", \"ticket\": \"#12\", \"body\": \"...\"}",
         read_only: false,
         idempotent: false,
         destructive: false,
