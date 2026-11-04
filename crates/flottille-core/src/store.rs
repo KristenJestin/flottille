@@ -546,10 +546,15 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT;
     CREATE INDEX tool_results_agent ON tool_results (agent);
 ",
+    "
+    -- Where the agent worked when it asked (`main`, or `workspace <name>`): a request is done
+    -- only there (`docs/workspaces.md`, \"Its own workspace\"). NULL before it was kept.
+    ALTER TABLE approval_requests ADD COLUMN place TEXT;
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
-    identity, held_by, forwards, state, decision, created_at, decided_at, kind, says, judgement";
+    identity, held_by, forwards, state, decision, created_at, decided_at, kind, says, judgement, place";
 
 const RUN_COLUMNS: &str = "id, agent, name, line, folder, state, exit_code, signal, started_at, \
     ended_at, output, dismissed, project";
@@ -924,6 +929,57 @@ impl Store {
         let event = append_event(&transaction, event.0, event.1)?;
         transaction.commit()?;
         Ok(event)
+    }
+
+    /// Forgets a workspace and moves the agent that worked in it to the project's `folder`
+    /// (`main`), its instructions now saying so, with their events, in one transaction: the agent
+    /// is never left in a workspace that is gone. The pending requests the agent made are
+    /// cancelled in it (`why`): they were asked in the workspace, and would otherwise be performed
+    /// in `main`. The events, then the requests cancelled.
+    pub fn remove_workspace_moving(
+        &mut self,
+        workspace: i64,
+        agent: &str,
+        folder: &Path,
+        instructions: &str,
+        events: [(&str, Value); 2],
+        why: &str,
+    ) -> Result<(Vec<Event>, Vec<Request>)> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute("DELETE FROM workspaces WHERE id = ?1", params![workspace])?;
+        transaction.execute(
+            "UPDATE agents SET workspace = NULL, folder = ?2, instructions = ?3, updated_at = ?4 \
+             WHERE id = ?1",
+            params![agent, path_text(folder)?, instructions, now_ms()],
+        )?;
+        let mut written = Vec::new();
+        for (name, data) in events {
+            written.push(append_event(&transaction, name, data)?);
+        }
+        let pending: Vec<Request> = {
+            let mut statement = transaction.prepare_cached(&format!(
+                "SELECT {REQUEST_COLUMNS} FROM approval_requests \
+                 WHERE agent = ?1 AND state = 'pending' ORDER BY number"
+            ))?;
+            let rows = statement.query_map(params![agent], request_row)?;
+            rows.map(|row| row?).collect::<Result<_>>()?
+        };
+        for request in &pending {
+            transaction.execute(
+                "UPDATE approval_requests SET state = 'cancelled', decided_at = ?2 \
+                 WHERE number = ?1",
+                params![request.number, now_ms()],
+            )?;
+            written.push(append_agent_event(
+                &transaction,
+                agent,
+                "approval.cancelled",
+                json!({"number": request.number, "agent": agent, "held_by": request.held_by,
+                    "why": why}),
+            )?);
+        }
+        transaction.commit()?;
+        Ok((written, pending))
     }
 
     /// Writes a new agent with its event, in one transaction.
@@ -1482,8 +1538,9 @@ impl Store {
         let created_at = now_ms();
         let number: u64 = transaction.query_row(
             "INSERT INTO approval_requests (agent, call_key, tool, arguments, shown, reasons, \
-             sensitive, identity, held_by, forwards, state, created_at, kind, says, judgement) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', ?8, ?9, 'pending', ?10, ?11, ?12, ?13) \
+             sensitive, identity, held_by, forwards, state, created_at, kind, says, judgement, \
+             place) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', ?8, ?9, 'pending', ?10, ?11, ?12, ?13, ?14) \
              RETURNING number",
             params![
                 asked.agent,
@@ -1503,6 +1560,7 @@ impl Store {
                     .as_ref()
                     .map(serde_json::to_string)
                     .transpose()?,
+                asked.place,
             ],
             |row| row.get(0),
         )?;
@@ -2550,6 +2608,7 @@ fn request_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Request>> {
         decision: decision.flatten(),
         created_at: row.get(13)?,
         decided_at: row.get(14)?,
+        place: row.get(18)?,
     }))
 }
 
@@ -4280,6 +4339,7 @@ mod tests {
             decision: Some(Decision::Once),
             created_at: 0,
             decided_at: None,
+            place: None,
         }
     }
 

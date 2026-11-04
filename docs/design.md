@@ -179,8 +179,9 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
   their checks (`forges.md`), and opens, comments, edits or merges them or re-runs a failed
   pipeline, each write a call to judge (§7); in `main` it names the workspace;
 - the workspace (every agent): `workspace`, which lists and reads the workspaces, and, for a root,
-  creates and prepares them, and removes one it does not work in, always held for the user, its
-  card saying what would be lost;
+  creates and prepares them, and removes one, always held for the user, its card saying what
+  would be lost: the one it works in too, once its work is done, which stops its commands there
+  and moves the session to `main`;
 - skills: `skill_read`, one of the project's skills, texts read when relevant (`skills.md`);
 - the web (every agent): `web`, which reads a page (its main content as Markdown, a PDF's text)
   or searches through DuckDuckGo, never this machine nor a private network; a URL the agent was
