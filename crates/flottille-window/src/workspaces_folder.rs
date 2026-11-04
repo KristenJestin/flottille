@@ -6,8 +6,8 @@
 //! Only the workspaces made after a change follow it: the section says so.
 
 use flottille_ui::{
-    Button, Field, RadioChoices, Section, Type as _, changing, palette, presence, presence_of,
-    space,
+    Button, Field, RadioChoices, Section, Toast, Type as _, changing, palette, presence,
+    presence_of, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
@@ -57,6 +57,11 @@ pub struct Shown {
     pub folder: Option<String>,
     /// A project's: the folder the default gives it.
     pub default_folder: Option<String>,
+    /// A project's: why the default is not followed (the data folder is), when it is the default
+    /// the project follows.
+    pub fallback: Option<String>,
+    /// The default's: Flottille's data folder, where "data" puts workspaces.
+    pub data: Option<String>,
 }
 
 impl Shown {
@@ -81,6 +86,8 @@ impl Shown {
             error: text("error"),
             folder: text("folder"),
             default_folder: text("default_folder"),
+            fallback: text("fallback"),
+            data: text("data"),
         }
     }
 }
@@ -97,6 +104,9 @@ pub struct WorkspacesFolder {
     chosen: Option<Place>,
     /// A write waits for the daemon.
     waiting: bool,
+    /// The kind being written, until the daemon answers: a refusal of a path is said under its
+    /// field, any other is a toast.
+    writing: Option<Place>,
     /// Why the last write was refused, under the field.
     problem: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
@@ -111,6 +121,7 @@ impl WorkspacesFolder {
             shown: None,
             chosen: None,
             waiting: false,
+            writing: None,
             problem: None,
             _subscriptions: Vec::new(),
         }
@@ -164,6 +175,7 @@ impl WorkspacesFolder {
             return;
         }
         self.waiting = true;
+        self.writing = Some(place);
         self.problem = None;
         let command = match &self.project {
             // A project follows the default, or has its own folder.
@@ -215,8 +227,9 @@ impl WorkspacesFolder {
         self.write(Place::Own, path, cx);
     }
 
-    /// The daemon's answer to a read or a write: what it keeps now, or why not. A refusal is
-    /// said under the field and the choice goes back to what is kept.
+    /// The daemon's answer to a read or a write: what it keeps now, or why not. A path refused is
+    /// said under the field, any other refusal and a save are toasts; the choice goes back to what
+    /// is kept.
     pub fn answered(
         &mut self,
         said: Result<Shown, String>,
@@ -224,11 +237,21 @@ impl WorkspacesFolder {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if written {
+        let writing = if written {
             self.waiting = false;
-        }
+            self.writing.take()
+        } else {
+            None
+        };
         match said {
             Ok(shown) => {
+                if written {
+                    toast(
+                        Toast::success("Workspaces folder saved")
+                            .detail("It applies to the workspaces made from now on."),
+                        cx,
+                    );
+                }
                 self.problem = None;
                 // A kind chosen but not yet saved ("my own", its path to type) is kept on a read.
                 if written || self.chosen != Some(Place::Own) || shown.place == Place::Own {
@@ -243,7 +266,15 @@ impl WorkspacesFolder {
                 self.shown = Some(shown);
             }
             Err(why) if written => {
-                self.problem = Some(why.into());
+                // A path is typed in a field and is said under it; the other kinds have no field.
+                if writing == Some(Place::Own) {
+                    self.problem = Some(why.into());
+                } else {
+                    toast(
+                        Toast::failure("The workspaces folder was not kept").detail(why),
+                        cx,
+                    );
+                }
                 // The kind goes back, unless a folder of one's own is being typed.
                 if self.chosen != Some(Place::Own) {
                     self.chosen = None;
@@ -300,7 +331,7 @@ impl Render for WorkspacesFolder {
         let place = self.place();
 
         let this = cx.entity().downgrade();
-        let mut kinds = RadioChoices::new(id("choice"), "Workspaces folder");
+        let mut kinds = RadioChoices::new(id("choice"), "Place");
         let order: &[Place] = if project {
             &[Place::Data, Place::Own]
         } else {
@@ -316,7 +347,14 @@ impl Render for WorkspacesFolder {
                 (Place::Data, false) => kinds.choice(
                     "data",
                     "Flottille's data folder",
-                    "~/.local/share/flottille/workspaces/<project>, where they are made today.",
+                    // The real folder, which XDG_DATA_HOME may have moved.
+                    match self.shown.as_ref().and_then(|shown| shown.data.as_deref()) {
+                        Some(data) => {
+                            format!("{data}/workspaces/<project>, where they are made today.")
+                        }
+                        None => "<data folder>/workspaces/<project>, where they are made today."
+                            .to_owned(),
+                    },
                 ),
                 (Place::Beside, _) => kinds.choice(
                     "beside",
@@ -412,9 +450,17 @@ impl Render for WorkspacesFolder {
         .gap(space::MD);
 
         // The folder that results, for a project: its line fades when it changes.
-        let resulting = self
-            .folder()
-            .map(|folder| SharedString::from(format!("Its workspaces are made in {folder}")));
+        let resulting = self.folder().map(|folder| {
+            let fallback = self
+                .shown
+                .as_ref()
+                .and_then(|shown| shown.fallback.as_deref())
+                .map(|why| {
+                    format!(". The default cannot be followed, so the data folder is used: {why}")
+                })
+                .unwrap_or_default();
+            SharedString::from(format!("Its workspaces are made in {folder}{fallback}"))
+        });
         let resulting = presence_of(id("folder-block"), resulting, move |line| {
             changing(folder_change_id(), line, move |line| {
                 div()

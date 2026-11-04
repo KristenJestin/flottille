@@ -54,8 +54,8 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
     }
 }
 
-/// The default: `{"place", "path", "error"}`, `path` being what the user typed and `error` why the
-/// file cannot be followed (the data folder is). A project: `{"project", "own", "folder",
+/// The default: `{"place", "path", "error", "data"}`, `path` being what the user typed, `error` why
+/// the file cannot be followed (the data folder is) and `data` Flottille's data folder. A project: `{"project", "own", "folder",
 /// "default_folder", "fallback"}`: its own folder as typed (`null` when it follows the default),
 /// the folder its workspaces are made in, the one the default would give it, and why the default
 /// is not followed (`null` when it is, or when the project has a folder of its own).
@@ -70,7 +70,12 @@ fn show(daemon: &Daemon, project: Option<&str>) -> Result<Value, Failure> {
             Place::Own(path) => Some(path.clone()),
             _ => None,
         };
-        return Ok(json!({"place": place.word(), "path": path, "error": error}));
+        return Ok(json!({
+            "place": place.word(),
+            "path": path,
+            "error": error,
+            "data": daemon.paths.data,
+        }));
     };
     let loaded = projects::load_project(daemon, name)?;
     let fallback = read

@@ -10825,3 +10825,108 @@ fn a_relative_folder_is_refused_under_its_field_and_nothing_is_written(cx: &mut 
     assert!(section.read_with(cx, |s, _| s.problem().is_none()));
     cx.update(|window, _| assert!(window.try_find("workspaces-problem-default").is_none()));
 }
+
+#[gpui_kit::test]
+fn a_saved_workspaces_folder_says_so_in_a_toast_and_the_data_line_shows_the_real_folder(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let settings = open_settings(&shell, cx);
+    choose_settings_tab("workspaces", cx);
+    let section = settings.read_with(cx, |page, _| page.workspaces_folder().clone());
+    until(&shell, cx, "the default is read", |cx| {
+        section.read_with(cx, |section, _| section.shown().is_some())
+    });
+    settle(cx);
+    // The XDG folder of this user, not a path written in the window's code.
+    let said = text_of("workspaces-choice-default-data-line", cx).expect("the line is shown");
+    let data = user.path("data/flottille");
+    assert!(
+        said.starts_with(&format!("{}/workspaces/<project>", data.display())),
+        "{said}"
+    );
+    assert!(!said.contains(".local/share"), "{said}");
+
+    cx.update(|window, cx| window.click("workspaces-choice-default-beside", cx));
+
+    toast_said(&shell, "Workspaces folder saved", cx);
+}
+
+#[gpui_kit::test]
+fn a_refused_beside_is_a_failure_toast_and_not_a_line_under_the_field(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    // A folder where the file goes: the daemon cannot keep the choice.
+    std::fs::create_dir_all(user.path("config/flottille/workspaces.toml")).unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let settings = open_settings(&shell, cx);
+    choose_settings_tab("workspaces", cx);
+    let section = settings.read_with(cx, |page, _| page.workspaces_folder().clone());
+    until(&shell, cx, "the default is read", |cx| {
+        section.read_with(cx, |section, _| section.shown().is_some())
+    });
+
+    cx.update(|window, cx| window.click("workspaces-choice-default-beside", cx));
+
+    toast_said(&shell, "The workspaces folder was not kept", cx);
+    settle(cx);
+    assert!(section.read_with(cx, |s, _| s.problem().is_none()));
+    cx.update(|window, _| assert!(window.try_find("workspaces-problem-default").is_none()));
+    assert!(
+        !toasts(&shell, cx)
+            .iter()
+            .any(|title| title.contains("saved")),
+        "no success"
+    );
+}
+
+#[gpui_kit::test]
+fn a_refused_path_stays_under_its_field_without_a_toast(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let settings = open_settings(&shell, cx);
+    choose_settings_tab("workspaces", cx);
+    let section = settings.read_with(cx, |page, _| page.workspaces_folder().clone());
+    until(&shell, cx, "the default is read", |cx| {
+        section.read_with(cx, |section, _| section.shown().is_some())
+    });
+    cx.update(|window, cx| window.click("workspaces-choice-default-own", cx));
+    settle(cx);
+    type_folder(&section, "~/Worktrees", cx);
+    cx.update(|window, cx| window.click("workspaces-save-default", cx));
+    until(&shell, cx, "the refusal is shown", |cx| {
+        section.read_with(cx, |s, _| s.problem().is_some())
+    });
+    settle(cx);
+
+    let said = text_of("workspaces-problem-default", cx).expect("said under the field");
+    assert!(said.contains("must hold <project>"), "{said}");
+    assert_eq!(toasts(&shell, cx), Vec::<String>::new());
+}
+
+#[gpui_kit::test]
+fn the_project_page_says_when_the_default_cannot_be_followed(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let file = user.path("config/flottille/workspaces.toml");
+    std::fs::write(&file, "place = \"own\"\npath = \"relative\"\n").unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_project_settings(&shell, "atlas", cx);
+    choose_tab("setup", cx);
+    let own = page.read_with(cx, |page, _| page.workspaces_folder().clone());
+    until(&shell, cx, "the project's folder is read", |cx| {
+        own.read_with(cx, |s, _| s.folder().is_some())
+    });
+    settle(cx);
+
+    let line = text_of("workspaces-folder-atlas", cx).expect("the folder line");
+
+    assert!(
+        line.contains("The default cannot be followed, so the data folder is used"),
+        "{line}"
+    );
+    assert!(line.contains("path: must be absolute"), "{line}");
+}
