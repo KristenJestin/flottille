@@ -365,8 +365,13 @@ impl Seen {
 /// it`); with an `outwardIssue`, `K` reads the inward one (`K is blocked by it`).
 async fn seen_on(site: &str, key: &str) -> Result<Vec<Seen>, String> {
     let item = super::viewed(key, site, "issuelinks").await?;
+    Ok(seen_in(&item))
+}
+
+/// The links of a work item `view` answered with `issuelinks` among its fields.
+fn seen_in(item: &Value) -> Vec<Seen> {
     let text = |value: &Value| value.as_str().map(masked).unwrap_or_default();
-    Ok(item["fields"]["issuelinks"]
+    item["fields"]["issuelinks"]
         .as_array()
         .into_iter()
         .flatten()
@@ -400,26 +405,13 @@ async fn seen_on(site: &str, key: &str) -> Result<Vec<Seen>, String> {
                 status: text(&issue["fields"]["status"]["name"]),
             })
         })
-        .collect())
+        .collect()
 }
 
-/// What `tickets show` adds of a Jira work item: its links, one line each. Nothing for a GitHub
-/// issue and for an item with none; a read that failed is said, since the rest is shown.
-pub(super) async fn section(project: &Project, key: &Key) -> String {
-    let (Some(ProjectTracker::Jira { site, .. }), Key::Jira(key)) = (&project.tracker, key) else {
-        return String::new();
-    };
-    match seen_on(site, key).await {
-        Ok(links) if links.is_empty() => String::new(),
-        Ok(links) => {
-            let lines: Vec<String> = links
-                .iter()
-                .map(|link| format!("- {}\n", link.said()))
-                .collect();
-            format!("\nLinks ({}):\n{}", links.len(), lines.concat())
-        }
-        Err(why) => format!("\nLinks: could not be read: {why}\n"),
-    }
+/// The links of a work item read together with the ticket (`ACLI_FIELDS` asks for them), one line
+/// each, kept with the ticket in the cache; none for an item with none.
+pub(super) fn said_in(item: &Value) -> Vec<String> {
+    seen_in(item).iter().map(Seen::said).collect()
 }
 
 /// `tickets link` and `unlink`.

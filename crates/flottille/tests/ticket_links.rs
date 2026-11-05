@@ -369,13 +369,52 @@ fn show_lists_an_item_s_links() {
         shown.contains("- relates to ABC-3 (Done): Shipped"),
         "{shown}"
     );
-    // `link list` names no other item when this one is the outward one: `view` gives both ends.
+    // `link list` names no other item when this one is the outward one: `view` gives both ends,
+    // asked with the ticket's own fields so that one read serves both.
     assert!(
-        acli_calls(&user)
-            .contains(&"jira workitem view ABC-1 --json --fields issuelinks".to_owned()),
+        acli_calls(&user).contains(
+            &"jira workitem view ABC-1 --json --fields summary,status,description,comment,issuelinks"
+                .to_owned()
+        ),
         "{:?}",
         acli_calls(&user)
     );
+}
+
+#[test]
+fn a_cached_show_still_shows_the_links() {
+    let user = user();
+    on_jira(&user);
+    jira_script(&user, json!({}));
+    let mcp = root_in(&user);
+    written(
+        &user,
+        &mcp,
+        json!({"action": "link", "ticket": "ABC-2", "kind": "blocks", "other": "ABC-1"}),
+    );
+    let before = acli_calls(&user).len();
+
+    let first = read(&user, &mcp, json!({"action": "show", "ticket": "ABC-1"}));
+    let after_first = acli_calls(&user).len();
+    let second = read(&user, &mcp, json!({"action": "show", "ticket": "ABC-1"}));
+
+    // One read for the ticket and its links; the second show runs no command line.
+    assert_eq!(acli_calls(&user).len(), after_first);
+    let reads: Vec<String> = acli_calls(&user)
+        .split_off(before)
+        .into_iter()
+        .filter(|call| call.starts_with("jira workitem view ABC-1"))
+        .collect();
+    assert_eq!(reads.len(), 1, "{reads:?}");
+    assert!(reads[0].contains("issuelinks"), "{reads:?}");
+    assert!(!first.contains("as read"), "{first}");
+    assert!(second.contains("as read"), "{second}");
+    for shown in [&first, &second] {
+        assert!(
+            shown.contains("- is blocked by ABC-2 (In Progress): Add search"),
+            "{shown}"
+        );
+    }
 }
 
 #[test]

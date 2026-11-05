@@ -353,15 +353,17 @@ ticket itself.
   request closes an issue with `Closes #n` in its description, which is `forge edit`): the other
   kinds are refused, naming that.
 - **`show` lists the links** of a Jira work item, after its comments: `Links (2):` and a line each,
-  `- is blocked by ABC-2 (In Progress): Add search`. They are read with `acli jira workitem view
-  <KEY> --json --fields issuelinks`: `link list --key <KEY> --json` gives only `{"issueLinks":
-  [{"id", "outwardIssueKey", "typeName"}]}`, the key `null` when the item is the outward one, so it
+  `- is blocked by ABC-2 (In Progress): Add search`. They are read in the same `acli jira workitem view
+  <KEY> --json --fields summary,status,description,comment,issuelinks` as the ticket and kept with it in
+  the 30 s cache, so a cached `show` runs nothing and still lists them; a write drops the cache. A
+  write that names a link (`unlink`) reads `--fields issuelinks` alone. `link list --key <KEY> --json`
+  is not used: it gives only `{"issueLinks": [{"id", "outwardIssueKey", "typeName"}]}`, the key `null`
+  when the item is the outward one, so it
   cannot name the other item. Each of `issuelinks` is `{id, type: {name, inward, outward},
   inwardIssue, outwardIssue}`, one of the two null, and the field names the **other** item's side,
   as measured on a real site: a link made with `--out A --in B --type Blocks` is on A `inwardIssue:
   B` (A reads it `blocks B`, the outward wording) and on B `outwardIssue: A` (B `is blocked by A`,
-  the inward one). Web links are not among them and are not listed. A link read that fails is said
-  in its place and the rest is shown. GitHub's sub-issues are not listed yet.
+  the inward one). Web links are not among them and are not listed. GitHub's sub-issues are not listed yet.
 - **Comments**: `comment_edit` and `comment_delete` change only a comment Flottille recorded by its
   id as posted by an agent (`posts`, "What Flottille posts is recorded", `forges.md`; on Jira the id
   is read right after the post, never later by its words), found by the id that

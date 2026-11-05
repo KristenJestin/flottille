@@ -48,7 +48,7 @@ pub(crate) const COMMENTS: usize = 30;
 /// What `gh issue view` is asked for.
 const GH_FIELDS: &str = "number,title,state,body,comments,url";
 /// What `acli jira workitem view` is asked for.
-const ACLI_FIELDS: &str = "summary,status,description,comment";
+const ACLI_FIELDS: &str = "summary,status,description,comment,issuelinks";
 
 /// A ticket as its tracker said it, its texts masked.
 #[derive(Clone, Debug, PartialEq)]
@@ -72,6 +72,8 @@ pub struct Ticket {
     pub comments: Vec<Comment>,
     /// How many older comments are not kept.
     pub older: usize,
+    /// A Jira work item's links, one line each, read with it and kept with it; none for GitHub.
+    pub links: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -206,6 +208,12 @@ impl Ticket {
                     comment.by(),
                     comment.body.replace('\n', "\n    ")
                 ));
+            }
+        }
+        if !self.links.is_empty() {
+            text.push_str(&format!("\nLinks ({}):\n", self.links.len()));
+            for link in &self.links {
+                text.push_str(&format!("- {link}\n"));
             }
         }
         text
@@ -355,6 +363,7 @@ async fn read_issue(forge: &Forge, number: u64) -> Result<Ticket, String> {
         description_by_agent,
         older: comments.len().saturating_sub(COMMENTS),
         comments: newest(comments),
+        links: Vec::new(),
     })
 }
 
@@ -510,6 +519,7 @@ fn work_item(key: &str, item: &Value, site: &str) -> Ticket {
         description_by_agent,
         older: comments.len().saturating_sub(COMMENTS),
         comments: newest(comments),
+        links: links::said_in(item),
     }
 }
 
@@ -1459,8 +1469,7 @@ async fn show(
             if held.is_some() && age.is_none() {
                 events::remember(daemon, project, &key, &ticket);
             }
-            let links = links::section(project, &key).await;
-            Outcome::Done(ticket.text(full, asked.ticket.as_deref(), age) + &links)
+            Outcome::Done(ticket.text(full, asked.ticket.as_deref(), age))
         }
         Err(problem) => Outcome::Failed(format!(
             "the ticket {} could not be read: {problem}",
