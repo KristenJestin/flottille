@@ -125,7 +125,7 @@ pub fn ask(
             return (
                 Outcome::Refused(format!(
                     "refused: request #{number} already asks the user to let you write to \
-                     {named}; this message was not sent: send it once the user answered"
+                     {named}; this message was not sent: send it once its answer came"
                 )),
                 None,
             );
@@ -161,12 +161,14 @@ pub fn ask(
     }
 }
 
-/// The pending request that already asks the user's leave for the pair `asked` asks it for,
-/// other than the one its own call key made.
+/// The request that already asks the user's leave for the pair `asked` asks it for, other than
+/// the one its own call key made: pending, or allowed and still being performed, since the leave
+/// is kept only once its first message went.
 fn asking_leave(store: &Store, asked: &Request) -> flottille_core::Result<Option<u64>> {
     Ok(store
         .pending_requests(approval::USER)?
         .into_iter()
+        .chain(store.unsettled_requests()?)
         .find(|request| {
             request.agent == asked.agent
                 && request.tool == asked.tool
@@ -499,4 +501,97 @@ pub fn waiting_for_user(daemon: &Daemon) -> flottille_core::Result<usize> {
     agents.sort();
     agents.dedup();
     Ok(agents.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flottille_core::agent::{Agent, AgentState, Choices, GateMode};
+
+    fn a_session(id: &str) -> Agent {
+        Agent {
+            id: id.into(),
+            provider: "claude".into(),
+            role: "lead".into(),
+            project: "app".into(),
+            workspace: Some("login".into()),
+            folder: "/data/workspaces/app/login".into(),
+            state: AgentState::Starting,
+            state_reason: None,
+            created_at: 1_792_843_730_808,
+            updated_at: 1_792_843_730_808,
+            active_at: None,
+            exchanged_at: None,
+            ended_at: None,
+            chosen: Choices {
+                model: Some("haiku".into()),
+                ..Choices::default()
+            },
+            taken: Choices::default(),
+            pending: Choices::default(),
+            native_id: None,
+            agent_version: None,
+            instructions: "shared\n\n__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__\n\nsession".into(),
+            tools: vec!["mcp__flottille__fs_read".into()],
+            parent: None,
+            depth: 0,
+            epoch: 0,
+            title: None,
+            brief: Some("hello".into()),
+            reported_at: None,
+            quiet_turns: 0,
+            waiting_on_answer: false,
+            reopens: false,
+            images: None,
+            gate_mode: GateMode::Auto,
+            launched_by: None,
+        }
+    }
+
+    fn a_first_message(writer: &str, session: &str, key: &str) -> Request {
+        Request {
+            number: 0,
+            agent: writer.into(),
+            call_key: Some(key.into()),
+            tool: "session_send".into(),
+            arguments: json!({"session": session, "text": "Hello."}),
+            shown: json!({"session": session, "text": "Hello."}),
+            reasons: vec![gate::LEAVE.into(), gate::SESSION_SEND.into()],
+            base: true,
+            kind: Kind::Action,
+            says: Vec::new(),
+            judgement: None,
+            held_by: approval::USER.into(),
+            forwards: Vec::new(),
+            state: RequestState::Pending,
+            decision: None,
+            created_at: 0,
+            decided_at: None,
+            place: None,
+        }
+    }
+
+    #[test]
+    fn a_leave_allowed_and_being_performed_is_not_asked_twice() {
+        let mut store = Store::open_in_memory().unwrap();
+        for id in ["writer000000", "session00000"] {
+            store
+                .create_agent(&a_session(id), ("agent.created", json!({})))
+                .unwrap();
+        }
+        let (first, _) = store
+            .ask(&a_first_message("writer000000", "session00000", "toolu_01"))
+            .unwrap();
+        let again = a_first_message("writer000000", "session00000", "toolu_02");
+        assert_eq!(asking_leave(&store, &again).unwrap(), Some(first.number));
+
+        let (allowed, _) = store
+            .decide(first.number, Decision::Once, approval::USER)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(asking_leave(&store, &again).unwrap(), Some(first.number));
+        store.settle(&allowed, "done", "Sent.").unwrap();
+        assert_eq!(asking_leave(&store, &again).unwrap(), None);
+    }
 }
