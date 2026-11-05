@@ -1308,6 +1308,58 @@ fn a_grandchild_in_its_own_group_is_reaped() {
 }
 
 #[test]
+fn a_grandchild_left_outside_any_run_is_reaped() {
+    use std::os::unix::fs::PermissionsExt;
+    // A `gh --version` that leaves a shell behind through the launcher: started in a group of its own in
+    // the daemon's session, as every command line the daemon runs outside a run is, so the shell
+    // it leaves is in a group of its own in the daemon's session too.
+    let user = User::new();
+    let bin = user.path("left-bin");
+    let left = user.path("left");
+    std::fs::create_dir_all(&left).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        bin.join("gh"),
+        format!(
+            "#!/bin/sh\n[ \"$1\" = --version ] || exit 1\ncd '{}'\n\
+             {} \"grandchild.$$\" 'sleep 0.2'\necho 'gh version 2.60.0'\n",
+            left.display(),
+            fake_pnpm().display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("gh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let user = user.with_env("PATH", &path);
+    let folder = user.path("work/shop");
+    std::fs::create_dir_all(&folder).unwrap();
+    user.write_project_file(
+        "shop",
+        &format!(
+            "folder = \"{}\"\n\n[[repositories]]\npath = \"api\"\n\
+             forge = {{ kind = \"github\", repository = \"acme/api\" }}\n",
+            folder.display()
+        ),
+    );
+    let daemon = user.status()["pid"].as_u64().unwrap();
+
+    user.call("project.programs", json!({"name": "shop"}))
+        .unwrap();
+
+    let shells = grandchildren(&left, 1);
+    eventually("the left shell to be waited for", || {
+        let zombies = zombies_of(daemon);
+        shells
+            .iter()
+            .all(|pid| !alive(*pid) && !zombies.contains(pid))
+    });
+}
+
+#[test]
 fn a_grandchild_in_its_own_group_is_ended_with_its_run() {
     let user = User::with_fake_agent();
     let (_, mcp, workspace) = session(&user);
