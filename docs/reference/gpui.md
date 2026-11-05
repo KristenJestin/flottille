@@ -64,6 +64,7 @@ durations and the easing of `crates/flottille-ui/src/motion.rs` (`HOVER` 140 ms,
 | a state with no pointer: a focus ring, a highlight, a button enabled or not | `fade(id, on, duration, window, cx)` (`Button` fades its own enabled state) |
 | a choice among a few words (Ask \| Auto) | `Segmented`: its highlight slides to the one clicked, the inks fade along it |
 | words under the pointer on an element that is no button (a row's mark) | `tipped(element, text, height, window, cx)`: the button's anchored tooltip, `<id>-tooltip` |
+| a one-line text cut with an ellipsis (a title, a row's line, a fact, a diff line) | `tipped_when_cut(element, text, window, cx)`: the same tooltip, shown only when the text really is wider than its frame (a probe shapes the whole text in the element's font and compares it with the width less its padding; the answer comes one frame late), `<id>-tooltip`; the element needs an id, `overflow_hidden` and `text_ellipsis`. `ListRow`, `TreeRow`, `CardHead`, `FlatRow`, `LabelledLine`, `StepRow`, `PageHeader` and `path_line` do it for their own texts |
 | a chevron | `turning(id, open, window, cx)` |
 | a page's blocks, a card, anything that shows once | `enter(id, index, element)` |
 | a block that comes and goes while its view stays (an empty-list line, the fields a choice needs, a body that unfolds) | `presence(id, present, element).gap(..)`: build it on every frame, outside a `when`; `.gap` is the gap the parent flex puts between its children, which folds with the block |
@@ -204,6 +205,11 @@ The components that hold them:
   another included: a list nested in a dialog with a lower priority is drawn under the dialog. The
   window's priorities live in `flottille_ui::layer` (dialog, list, toast); a new floating layer
   takes one there, never a number of its own.
+- A path cut by its frame is copied whole by a "Copy the path" icon button beside it (the edit
+  card and the file steps), with a `Toast::success`: the click is the button's own
+  (`cx.stop_propagation()`), it neither opens the card nor folds the steps. GPUI wraps a long
+  unbroken word (a path, a hash) at any character by itself, so a toast keeps it inside; a
+  `whitespace_nowrap` text (a tooltip) must be broken by hand.
 - A text view sets the I-beam over its own lines only, so a pointer crossing the gap between two
   paragraphs (or two views) flickers between I-beam and arrow. A selectable text sits in a
   `text_region(id)`, one region that keeps the I-beam from its first line to its last.
