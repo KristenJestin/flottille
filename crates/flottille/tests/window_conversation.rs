@@ -33,6 +33,10 @@ fn script() -> Value {
         {"when": "start the docs session", "do": [{"mcp": {"tool": "agent_launch",
             "arguments": {"title": "Docs", "brief": "Write the docs", "follow": false, "root": true,
                 "workspace": "w"}}}]},
+        {"when": "start the long session", "do": [{"mcp": {"tool": "agent_launch",
+            "arguments": {"title": LONG_TITLE, "brief": "Write the docs", "follow": false,
+                "root": true,
+                "workspace": "w"}}}]},
         {"when": "write to the session", "do": [{"mcp": {"tool": "session_send",
             "arguments": {"session": "{prompt:agent}",
                 "text": "The tests pass now.\nAll 42 of them, on the branch app/w."}}}]},
@@ -65,6 +69,12 @@ fn script() -> Value {
             call("g3", "fs_read", "completed", json!({"path": "README.md"})),
             {"hold": "again"},
             {"say": "Found them."}]},
+        {"when": "run long", "do": [
+            call("r1", "fs_list", "completed", json!({"path": "."})),
+            call("r2", "run", "in_progress", json!({"line": LONG_LINE})),
+            {"hold": "release"},
+            {"update": {"sessionUpdate": "tool_call_update", "toolCallId": "r2",
+                "status": "completed"}}]},
         {"when": "ask through a child", "do": [{"mcp": {"tool": "agent_launch",
             "arguments": {"title": "curious", "brief": "ask your parent"}}}]},
         {"when": "ask your parent", "do": [{"mcp": {"tool": "ask_parent",
@@ -136,6 +146,14 @@ const LONG: &str = "One.\n\nTwo.\n\nThree.\n\nFour.\n\nFive.\n\nSix.\n\nSeven.\n
     Twenty-three.\n\nTwenty-four.\n\nTwenty-five.\n\nTwenty-six.\n\nTwenty-seven.\n\n\
     Twenty-eight.\n\nTwenty-nine.\n\nThirty.";
 
+/// What a user typed to start a session: its first words are the session's title.
+const LONG_TITLE: &str =
+    "lis mes 4 story en cours, ca me parait simple ? on peut voir pour les faires en meme temps ?";
+
+/// A command as long as a front-end test run's, as the steps summary names it.
+const LONG_LINE: &str = "pnpm --filter @app/front exec ng test --no-watch --include \
+    \"src/app/{pages/**/analytics,pages/**/reports,pages/**/settings,shared/**/charts}/**/*.spec.ts\"";
+
 fn user() -> User {
     let user = User::with_fake_agent();
     user.fake_script(script());
@@ -201,11 +219,16 @@ fn project(user: &User) -> PathBuf {
 
 /// A session the user started in the workspace, its first turn ended.
 fn lead(user: &User) -> String {
+    lead_saying(user, "lead the work")
+}
+
+/// [`lead`], started with `message`: its title is the message's first words.
+fn lead_saying(user: &User, message: &str) -> String {
     project(user);
     let answer = user
         .call(
             "agent.run",
-            json!({"project": "app", "workspace": "w", "message": "lead the work"}),
+            json!({"project": "app", "workspace": "w", "message": message}),
         )
         .unwrap();
     let id = answer["agent"]["id"].as_str().unwrap().to_owned();
@@ -230,11 +253,13 @@ fn allow_the_request(user: &User) {
 
 /// The session the lead started for the user, its first turn ended.
 fn docs_session(user: &User, lead: &str) -> String {
-    user.call(
-        "agent.send",
-        json!({"agent": lead, "message": "start the docs session"}),
-    )
-    .unwrap();
+    session_started_by(user, lead, "start the docs session")
+}
+
+/// The session the lead started when told `message`, its first turn ended.
+fn session_started_by(user: &User, lead: &str, message: &str) -> String {
+    user.call("agent.send", json!({"agent": lead, "message": message}))
+        .unwrap();
     allow_the_request(user);
     let launched = || {
         user.call("agent.list", json!({})).unwrap()["agents"]
@@ -2325,4 +2350,247 @@ fn a_queued_command_message_shows_what_the_user_typed(cx: &mut TestAppContext) {
     assert_eq!(waiting[0].text, "then /ship it");
     assert_eq!(waiting[0].commands, ["ship"]);
     assert!(has(format!("queued-{delivery}-text"), cx));
+}
+
+/// The bounds of an element, or `None` while it is not drawn.
+fn bounds_of(
+    id: impl Into<gpui_kit::ElementId>,
+    cx: &mut VisualTestContext,
+) -> Option<gpui_kit::Bounds<gpui_kit::Pixels>> {
+    let id = id.into();
+    cx.update(|window, _| window.try_find(id).map(|found| found.bounds()))
+}
+
+/// The lead's conversation once it sent a message to a session titled `title` (the lead's own
+/// title is `lead the work`).
+fn after_sending_to<'a>(
+    user: &User,
+    title_of: impl Fn(&User, &str) -> String,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, usize, &'a mut VisualTestContext) {
+    let lead = lead(user);
+    let session = title_of(user, &lead);
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": format!("write to the session {session}")}),
+    )
+    .unwrap();
+    allow_the_request(user);
+    let (shell, page, cx) = open_session(user, &lead, cx);
+    until(&shell, cx, "the lead shows what it sent", |cx| {
+        row_of(&page, cx, |b| {
+            matches!(b, Block::Relayed { sent: true, .. })
+        })
+        .is_some()
+    });
+    settle(cx);
+    let at = row_of(&page, cx, |b| {
+        matches!(b, Block::Relayed { sent: true, .. })
+    })
+    .unwrap();
+    (shell, at, cx)
+}
+
+/// The name in the header of the relayed card of row `at`, drawn inside the card.
+fn assert_inside_its_card(at: usize, cx: &mut VisualTestContext) {
+    let card = bounds_of(format!("row-{at}-relayed-card"), cx).expect("the card is drawn");
+    let name = bounds_of(format!("row-{at}-relayed-name"), cx).expect("the name is drawn");
+    assert!(
+        name.right() <= card.right() && name.origin.x >= card.origin.x,
+        "the name {name:?} runs out of its card {card:?}"
+    );
+    assert!(card.size.width <= px(541.), "the card grew: {card:?}");
+}
+
+#[gpui_kit::test]
+fn a_long_session_title_in_a_relayed_header_is_cut_inside_its_bubble(cx: &mut TestAppContext) {
+    let user = user();
+    let (_shell, at, cx) = after_sending_to(
+        &user,
+        |user, lead| session_started_by(user, lead, "start the long session"),
+        cx,
+    );
+    assert_eq!(
+        label(format!("row-{at}-relayed-peer"), cx).as_deref(),
+        Some(LONG_TITLE)
+    );
+    assert_inside_its_card(at, cx);
+    // The header keeps its one line, and the text below its width.
+    let from = bounds_of(format!("row-{at}-relayed-from"), cx).unwrap();
+    assert!(from.size.height < px(24.), "one line: {from:?}");
+    let card = bounds_of(format!("row-{at}-relayed-card"), cx).unwrap();
+    let text = bounds_of(format!("row-{at}-relayed-region"), cx).expect("the text is drawn");
+    assert!(text.right() <= card.right(), "{text:?} in {card:?}");
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn the_whole_title_of_a_cut_relayed_header_shows_on_hover(cx: &mut TestAppContext) {
+    let user = user();
+    let (_shell, at, cx) = after_sending_to(
+        &user,
+        |user, lead| session_started_by(user, lead, "start the long session"),
+        cx,
+    );
+    let name = format!("row-{at}-relayed-name");
+    assert!(!has(format!("{name}-tooltip"), cx), "no tooltip at rest");
+
+    cx.update(|window, cx| window.hover(name.clone(), cx));
+    settle(cx);
+    assert_eq!(
+        label(format!("{name}-tooltip"), cx).as_deref(),
+        Some(LONG_TITLE)
+    );
+
+    // The pointer leaves: it fades out and goes.
+    cx.simulate_mouse_move(
+        gpui_kit::point(px(1430.), px(790.)),
+        None,
+        Default::default(),
+    );
+    settle(cx);
+    assert!(!has(format!("{name}-tooltip"), cx), "the tooltip left");
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn a_short_relayed_header_is_not_cut(cx: &mut TestAppContext) {
+    let user = user();
+    let (_shell, at, cx) = after_sending_to(&user, docs_session, cx);
+    assert_inside_its_card(at, cx);
+    let name = format!("row-{at}-relayed-name");
+    cx.update(|window, cx| window.hover(name.clone(), cx));
+    settle(cx);
+    assert!(
+        !has(format!("{name}-tooltip"), cx),
+        "a title that fits has no tooltip"
+    );
+    assert_eq!(
+        label(format!("row-{at}-relayed-from"), cx).as_deref(),
+        Some("to Docs")
+    );
+    cx.simulate_mouse_move(
+        gpui_kit::point(px(1430.), px(790.)),
+        None,
+        Default::default(),
+    );
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn a_long_session_title_in_a_received_header_is_cut_inside_its_bubble(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead_saying(&user, LONG_TITLE);
+    let docs = docs_session(&user, &lead);
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": format!("write to the session {docs}")}),
+    )
+    .unwrap();
+    allow_the_request(&user);
+    let (shell, page, cx) = open_session(&user, &docs, cx);
+    until(&shell, cx, "the message reached the session", |cx| {
+        row_of(&page, cx, |b| {
+            matches!(b, Block::Relayed { sent: false, .. })
+        })
+        .is_some()
+    });
+    settle(cx);
+    let at = row_of(&page, cx, |b| {
+        matches!(b, Block::Relayed { sent: false, .. })
+    })
+    .unwrap();
+    assert_inside_its_card(at, cx);
+    // The chevron that unfolds it stays in the card, and the first line keeps its width.
+    let card = bounds_of(format!("row-{at}-relayed-card"), cx).unwrap();
+    let toggle = bounds_of(format!("row-{at}-relayed-toggle"), cx).unwrap();
+    assert!(toggle.right() <= card.right(), "{toggle:?} in {card:?}");
+    let first = bounds_of(format!("row-{at}-relayed-first"), cx).unwrap();
+    assert!(first.right() <= card.right(), "{first:?} in {card:?}");
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn a_long_steps_summary_is_cut_inside_the_conversation(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    worked(&user, &lead, "run long");
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    until(&shell, cx, "the long command runs", |cx| {
+        blocks(&page, cx)
+            .iter()
+            .any(|b| matches!(b, Block::Steps { calls } if calls.len() == 2))
+    });
+    settle(cx);
+    let group = group_of(&page, cx, |b| matches!(b, Block::Steps { .. }));
+    let id = line_of(&page, &group, cx);
+    let line = label(id.clone(), cx).unwrap();
+    assert!(
+        line.starts_with("2 steps · fs_list, run · running pnpm --filter"),
+        "{line}"
+    );
+    let row = bounds_of(id.clone(), cx).expect("the line is drawn");
+    let said = bounds_of(format!("{id}-said"), cx).expect("the summary is drawn");
+    assert!(
+        said.right() <= row.right(),
+        "the summary {said:?} runs out of its line {row:?}"
+    );
+    assert!(row.size.height < px(28.), "one line: {row:?}");
+
+    // The whole command shows on hover, and goes when the pointer leaves.
+    let running = format!("{id}-running");
+    assert!(!has(format!("{running}-tooltip"), cx));
+    cx.update(|window, cx| window.hover(running.clone(), cx));
+    settle(cx);
+    assert_eq!(
+        label(format!("{running}-tooltip"), cx).as_deref(),
+        Some(format!("running {LONG_LINE}").as_str())
+    );
+    cx.simulate_mouse_move(
+        gpui_kit::point(px(1430.), px(790.)),
+        None,
+        Default::default(),
+    );
+    settle(cx);
+    assert!(!has(format!("{running}-tooltip"), cx));
+    std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+#[gpui_kit::test]
+fn a_long_command_in_a_step_is_cut_and_whole_on_hover(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    worked(&user, &lead, "run long");
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    until(&shell, cx, "the long command runs", |cx| {
+        blocks(&page, cx)
+            .iter()
+            .any(|b| matches!(b, Block::Steps { calls } if calls.len() == 2))
+    });
+    settle(cx);
+    let at = row_of(&page, cx, |b| matches!(b, Block::Steps { .. })).unwrap();
+    unfold(&page, at, cx);
+    // Each step keeps its own fold.
+    cx.update(|window, cx| window.click(format!("row-{at}-steps-toggle"), cx));
+    settle(cx);
+    let args = format!("step-{at}-1-args");
+    let (row, line) = (
+        bounds_of(format!("step-{at}-1"), cx).expect("the step is drawn"),
+        bounds_of(args.clone(), cx).expect("its command is drawn"),
+    );
+    assert!(line.right() <= row.right(), "{line:?} runs out of {row:?}");
+    assert!(!has(format!("{args}-tooltip"), cx), "no tooltip at rest");
+
+    cx.update(|window, cx| window.hover(args.clone(), cx));
+    settle(cx);
+    let whole = label(format!("{args}-tooltip"), cx).expect("the whole command shows");
+    assert!(whole.contains("pnpm --filter @app/front"), "{whole}");
+    cx.simulate_mouse_move(
+        gpui_kit::point(px(1430.), px(790.)),
+        None,
+        Default::default(),
+    );
+    settle(cx);
+    assert!(!has(format!("{args}-tooltip"), cx), "the tooltip left");
+    std::fs::write(user.path("fake/release"), "").unwrap();
 }
