@@ -1053,6 +1053,8 @@ pub(crate) struct ForgeCall {
     from: Option<String>,
     /// subscribe: how long it waits at most.
     minutes: Option<u64>,
+    /// unsubscribe: a session the agent follows (`agent_launch` with `follow`), to stop following.
+    session: Option<String>,
     /// run: what to run, as `pipelines` lists it.
     pipeline: Option<String>,
     /// run: the pipeline's variables, the workflow's inputs.
@@ -1161,11 +1163,24 @@ fn subscriptions_text(daemon: &Daemon, agent: &str) -> String {
         .into_iter()
         .filter(|s| s.source == "forge")
         .collect();
-    if mine.is_empty() {
+    let following = crate::subscriptions::following(daemon, agent, None);
+    if mine.is_empty() && following.is_empty() {
         return String::new();
     }
     let now = now_ms();
     let mut text = "\nYour subscriptions:\n".to_owned();
+    for subscription in following {
+        text.push_str(&format!(
+            "- {}{}\n",
+            crate::subscriptions::named(&subscription),
+            if subscription.seen["paused"] == true {
+                " (paused: you two wrote to each other five times without the user; a message of \
+                 theirs to either resumes it)"
+            } else {
+                ""
+            }
+        ));
+    }
     for subscription in mine {
         let from = match subscription.from.as_str() {
             "people" => " (from people)",
@@ -1366,6 +1381,25 @@ fn remember(daemon: &Arc<Daemon>, project: &str, path: &str, forge: &Forge, pull
 /// `forge unsubscribe`: the agent's subscriptions to the workspace and repository it names, every
 /// one when it names none.
 fn forge_unsubscribe(daemon: &Daemon, agent: &str, asked: ForgeCall) -> Outcome {
+    if let Some(session) = &asked.session {
+        if asked.workspace.is_some() || asked.repository.is_some() {
+            return Outcome::Refused(
+                "refused: session goes alone: it names a session you follow, workspace and \
+                 repository a pull request"
+                    .into(),
+            );
+        }
+        let followed = crate::subscriptions::following(daemon, agent, Some(session));
+        if followed.is_empty() {
+            return Outcome::Refused(format!(
+                "refused: you do not follow {session}: forge show lists the sessions you follow"
+            ));
+        }
+        for subscription in &followed {
+            crate::subscriptions::end(daemon, subscription, "cancelled");
+        }
+        return Outcome::Done(format!("You no longer follow {session}."));
+    }
     let named =
         |s: &flottille_core::subscription::Subscription, key: &str, asked: &Option<String>| {
             asked.as_ref().is_none_or(|a| s.target[key] == a.as_str())

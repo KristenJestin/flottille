@@ -39,6 +39,9 @@ pub struct SubscriptionRow {
     pub expires_at: u64,
 }
 
+/// Past this (in ms), a subscription has no end of its own: the following of a session.
+const MAX_TIME: u64 = 1 << 60;
+
 impl SubscriptionRow {
     pub fn of(value: &Value) -> SubscriptionRow {
         let target = &value["target"];
@@ -49,6 +52,9 @@ impl SubscriptionRow {
             agent: text(&value["agent"]),
             pull: match (wake, value["source"] == "tickets") {
                 (true, _) => format!("Wake: {}", text(&target["why"])),
+                _ if value["source"] == "session" => {
+                    format!("Following {}", text(&target["title"]))
+                }
                 (false, true) => match text(&target["repository"]).as_str() {
                     "" => format!("Ticket {}", text(&target["key"])),
                     repository => format!(
@@ -88,6 +94,10 @@ impl SubscriptionRow {
         }
         let since = said_at(self.created_at);
         let since = since.rsplit(", ").next().unwrap_or(&since);
+        // A following has no end of its own.
+        if self.expires_at > MAX_TIME {
+            return format!("since {since}");
+        }
         let left = self.expires_at.saturating_sub(now).div_ceil(60_000);
         let left = match left {
             0..=119 => format!("{left} min"),

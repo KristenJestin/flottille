@@ -390,7 +390,7 @@ fn agent_launch_with_new_workspace_is_judged_the_same() {
     let launched = held(mcp.call(
         "agent_launch",
         json!({"title": "worker", "brief": "Write the tests.", "new_workspace": "a",
-            "root": true}),
+            "follow": false, "root": true}),
     ));
     let (created, launched) = (request(&user, created), request(&user, launched));
     assert_eq!(launched["class"], "base", "{launched}");

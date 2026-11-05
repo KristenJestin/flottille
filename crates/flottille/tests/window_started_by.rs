@@ -21,7 +21,7 @@ fn user() -> User {
     let user = User::with_fake_agent();
     user.fake_script(json!({"turns": [
         {"when": "begin the docs session", "do": [{"mcp": {"tool": "agent_launch",
-            "arguments": {"title": "Docs", "brief": "Write the docs", "root": true}}}]},
+            "arguments": {"title": "Docs", "brief": "Write the docs", "follow": false, "root": true}}}]},
         {"when": "Write the docs", "do": [
             {"mcp": {"tool": "fs_read", "arguments": {"path": ".env"}}}]}
     ]}));
