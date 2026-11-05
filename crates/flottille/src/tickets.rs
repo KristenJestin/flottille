@@ -1472,6 +1472,68 @@ async fn write(daemon: &Daemon, project: &Project, asked: &TicketsCall, key: &Ke
     }
 }
 
+/// A write another part of Flottille makes at the user's gesture (a spec written to its ticket, a
+/// comment the user posts): the same write as the agents' `tickets`, recorded the same way, so that
+/// there is one path to a tracker. What it answers, or why nothing was written.
+async fn written_for_user(
+    daemon: &Daemon,
+    project: &Project,
+    args: Value,
+) -> Result<String, String> {
+    if let Some(refusal) = unwritable(project, &args) {
+        return Err(refusal);
+    }
+    let asked: TicketsCall = serde_json::from_value(args).map_err(|error| error.to_string())?;
+    let outcome = match &asked.ticket {
+        None => create(daemon, project, &asked).await,
+        Some(ticket) => {
+            let key = accepted(project, ticket)?;
+            write(daemon, project, &asked, &key).await
+        }
+    };
+    match outcome {
+        Outcome::Done(said) => Ok(said),
+        Outcome::Refused(why) | Outcome::Failed(why) | Outcome::Held(why) => Err(why),
+    }
+}
+
+/// Writes `body` as the ticket's description.
+pub(crate) async fn edit_description(
+    daemon: &Daemon,
+    project: &Project,
+    key: &Key,
+    body: &str,
+) -> Result<(), String> {
+    let args = json!({"action": "edit", "ticket": key.text(), "body": body});
+    written_for_user(daemon, project, args).await.map(drop)
+}
+
+/// Posts `body` as a comment of the ticket.
+pub(crate) async fn post_comment(
+    daemon: &Daemon,
+    project: &Project,
+    key: &Key,
+    body: &str,
+) -> Result<(), String> {
+    let args = json!({"action": "comment", "ticket": key.text(), "body": body});
+    written_for_user(daemon, project, args).await.map(drop)
+}
+
+/// Creates a ticket of the tracker (its only Jira project), and says which.
+pub(crate) async fn create_ticket(
+    daemon: &Daemon,
+    project: &Project,
+    title: &str,
+    body: &str,
+) -> Result<Key, String> {
+    let args = json!({"action": "create", "title": title, "body": body});
+    let said = written_for_user(daemon, project, args).await?;
+    // Both trackers' answers end with the new ticket's link, whose last part is its key.
+    let last = said.trim().rsplit('/').next().unwrap_or_default();
+    accepted(project, last)
+        .map_err(|_| format!("the ticket was opened, and its key could not be read: {said}"))
+}
+
 /// `acli <args>` for a write, or a search a write needs: what it printed, or why it failed,
 /// masked.
 async fn acli_run(args: &[&str]) -> Result<String, String> {
