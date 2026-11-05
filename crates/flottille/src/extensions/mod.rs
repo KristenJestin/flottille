@@ -68,7 +68,14 @@ pub struct Extension {
     pub tools: &'static [Tool],
     /// Whether the agent is a session it started (`start_session`).
     pub started: fn(&Daemon, &str) -> bool,
+    /// The Core event trigger: the events of the core it hears (`item.changed`…), each with its
+    /// handler, called once the event is stored, off the request path. A handler wakes no agent
+    /// but through a delivery (`tell`).
+    pub heard: &'static [(&'static str, Handler)],
 }
+
+/// What hears an event of the core: its data, as `flottille watch` prints it.
+pub type Handler = fn(&Arc<Daemon>, &Value);
 
 /// A tool an extension gives (`docs/extensions.md`, "Tools"): served as the core's are, and
 /// through the gate like any other.
@@ -512,6 +519,20 @@ pub fn start_session(
 pub fn started(daemon: &Daemon, agent: &str) -> bool {
     ALL.iter()
         .any(|extension| (extension.started)(daemon, agent))
+}
+
+/// Hands events of the core, just stored, to the extensions that hear them (the Core event
+/// trigger). Each handler says for itself whether its extension is active where the event is.
+pub fn heard(daemon: &Arc<Daemon>, events: &[(&'static str, Value)]) {
+    for extension in ALL {
+        for (name, data) in events {
+            for (heard, handler) in extension.heard {
+                if heard == name {
+                    handler(daemon, data);
+                }
+            }
+        }
+    }
 }
 
 /// Tells an agent what happened, as a delivery of the extension's kind (`[flottille:<name>]`):

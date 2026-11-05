@@ -586,10 +586,16 @@ fn each_of_the_three_modes_is_stored_with_the_spec() {
     let (_, message) = user
         .call(
             "spec.new",
-            json!({"project": "app", "title": "No ticket", "mode": "ticket"}),
+            json!({"project": "app", "title": "No ticket", "mode": "internal"}),
         )
         .unwrap_err();
     assert!(message.contains("one ticket at least"), "{message}");
+    // The ticket is the spec: one with no ticket yet creates it at its first Ready (#335).
+    let created = new_spec(
+        &user,
+        json!({"project": "app", "title": "No ticket yet", "mode": "ticket"}),
+    );
+    assert_eq!(created["tickets"], json!([]));
     let (_, message) = user
         .call(
             "spec.unlink",

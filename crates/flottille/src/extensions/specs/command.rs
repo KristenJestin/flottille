@@ -94,6 +94,22 @@ pub enum SpecAction {
     Ready { spec: u64 },
     /// Send a ready spec back to Draft, so that it can be written again
     Draft { spec: u64 },
+    /// A ticket changed since Flottille last read it, in the mode ticket: take the change into
+    /// the spec (it goes back to Draft and its session is told), or overwrite the ticket with it
+    Ticket {
+        spec: u64,
+        #[arg(value_parser = ["take", "overwrite"])]
+        choice: String,
+    },
+    /// Where an internal spec departs from its tickets, offered at Done; --post posts it on them
+    /// as a comment, once
+    Departures {
+        spec: u64,
+        #[arg(long)]
+        post: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub fn run(paths: &Paths, action: SpecAction) -> Result<ExitCode> {
@@ -191,6 +207,19 @@ pub fn run(paths: &Paths, action: SpecAction) -> Result<ExitCode> {
         ),
         SpecAction::Ready { spec } => (client.request("spec.ready", json!({"spec": spec}))?, false),
         SpecAction::Draft { spec } => (client.request("spec.draft", json!({"spec": spec}))?, false),
+        SpecAction::Ticket { spec, choice } => (
+            client.request("spec.ticket", json!({"spec": spec, "choice": choice}))?,
+            false,
+        ),
+        SpecAction::Departures { spec, post, json } => {
+            let answer = client.request("spec.departures", json!({"spec": spec, "post": post}))?;
+            if json {
+                println!("{answer}");
+            } else {
+                print!("{}", departures(&answer));
+            }
+            return Ok(ExitCode::SUCCESS);
+        }
     };
     if json {
         println!("{answer}");
@@ -237,10 +266,49 @@ fn line(spec: &Value) -> String {
     )
 }
 
+/// What `spec.departures` answered, as a text.
+fn departures(answer: &Value) -> String {
+    let said = answer["departures"].as_str().unwrap_or_default();
+    let spec = &answer["spec"];
+    let tickets: Vec<&str> = answer["tickets"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let state = if said.trim().is_empty() {
+        format!("Spec {spec} departs from its tickets nowhere.")
+    } else if answer["posted_at"].is_u64() {
+        format!("Posted on {}.", tickets.join(", "))
+    } else if answer["offered"] == true {
+        format!(
+            "Not posted: post it on {} with `flottille spec departures {spec} --post`.",
+            tickets.join(", ")
+        )
+    } else {
+        "Offered at Done, to post or not.".to_owned()
+    };
+    match said.trim().is_empty() {
+        true => format!("{state}\n"),
+        false => format!("{said}\n\n{state}\n"),
+    }
+}
+
 /// A spec as a text, its sections in their order.
 fn text(spec: &Value) -> String {
     let field = |value: &Value, key: &str| value[key].as_str().unwrap_or_default().to_owned();
     let mut text = format!("{}\nLanguage: {}\n", line(spec), field(spec, "language"));
+    let write = &spec["ticket_write"];
+    let problem = field(write, "problem");
+    match write["state"].as_str() {
+        Some("written") => text.push_str(&format!("Ticket: {problem}\n")),
+        Some("changed") => text.push_str(&format!(
+            "Ticket: {problem} (`flottille spec ticket {} take` or `overwrite`)\n",
+            spec["spec"]
+        )),
+        Some("failed") => text.push_str(&format!("Not written to its ticket: {problem}\n")),
+        _ => {}
+    }
     let list = |key: &str| spec[key].as_array().cloned().unwrap_or_default();
     text.push_str(&format!("\nProblem\n{}\n", field(spec, "problem")));
     text.push_str("\nExpected behaviour\n");
@@ -279,6 +347,10 @@ fn text(spec: &Value) -> String {
     text.push_str("\nOpen questions\n");
     for question in list("questions") {
         text.push_str(&format!("- {}\n", question.as_str().unwrap_or_default()));
+    }
+    let departures = field(spec, "departures");
+    if !departures.is_empty() {
+        text.push_str(&format!("\nDepartures from the tickets\n{departures}\n"));
     }
     for question in list("asked") {
         let state = match question["decision"].as_str() {

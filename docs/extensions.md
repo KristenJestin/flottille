@@ -183,6 +183,15 @@ before the first message delivers it at its next start) and `tell` (a delivery o
 | **Composer command** | the user typed `/<word>` in a session's composer: run by Flottille, never sent to the agent | Review (`/review`) |
 | **Decide** | the gate holds a call to judge in a tree in Auto. Synchronous: the gate waits for the answer (`allow`, or no verdict, which asks), within the call's time limit. At most one active extension may decide | the judge |
 
+As built, the Core event trigger is the declaration's `heard`: each event name of the core with
+its handler, which the core calls with the event's data once a round of the items stored it
+(`extensions::heard`, from the items' `flush`); the handler checks that its extension is active
+where the event is. Specs hears `item.changed`, `item.commented` and `item.closed` of a ticket a
+spec covers, and tells the session writing that spec while it is a Draft (the development session
+comes with S5). The rounds keep no description (`docs/tickets.md`), so a description edited alone
+is no event: in the mode "the ticket is the spec", the next Ready finds it by reading the ticket
+again.
+
 A trigger never wakes an agent by itself: when an agent must be told, it is a delivery, as
 everything else (`design.md` §5.2). A handler runs off the daemon's request path except for
 Decide and Before a prompt, which hold what they decide on and nothing else.
@@ -475,6 +484,17 @@ marked "decided during development" with its date, the old text kept. A spec sen
 during its development: the development session is told, and `spec` refuses amendments while it is
 Draft.
 
+**The ticket side** (S4, built; `docs/tickets.md`, "What a spec writes"). What leaves Flottille
+carries nothing of it: the description written and the comment posted have no marker nor footer,
+and Flottille knows them by its record (the maintainer's rule of 2026-11-01, over "marked as
+Flottille's"). Ready reads the ticket again first; changed since the last read, nothing is written,
+the spec stays Ready and its page and `flottille spec ticket <spec> take|overwrite` give the user
+the choice: take the change (back to Draft, the writing session told the ticket's new text as
+data) or overwrite the ticket, after a confirmation in the window. A failed write says why, "Not
+written to its ticket", and the spec stays Ready. An internal spec's session keeps its departures
+with `spec` `write` `departures`; at Done the spec's page ("Post as a comment") and `flottille spec
+departures <spec> --post` offer them, and only the user posts them.
+
 **Not in v1**: splitting a spec found too large (split the ticket instead); starting the
 development on its own at Ready.
 
@@ -485,7 +505,7 @@ development on its own at Ready.
 | S1 (built) | the spec in the store, statuses, the lock, the three modes, the link to 0..n tickets, the CLI | the declaration and the registry, activation global and per project, `extensions.toml`, `extension.list`/`set`, the data space, the scan that the core names no extension |
 | S2 (built) | the `spec` tool for a root, "New spec" and "Write the spec", questions and answers, Ready and Draft | tools given by an extension, the Action trigger |
 | S3 (built) | the project's Specs tab, a spec's page, its settings tab | screens: a project tab, a page, an action on a ticket's row, the renderer of an extension's tab and of its project section |
-| S4 | the ticket side of the modes | Core event triggers (a ticket changed) |
+| S4 (built) | the ticket side of the modes | Core event triggers (a ticket changed) |
 | S5 | launching the development, the statuses read from what Flottille sees | Core event triggers (an agent ended, a pull request opened or merged) |
 | S6 | amendments | nothing new: actions of the tool given by who calls it |
 

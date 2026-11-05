@@ -731,6 +731,10 @@ change" says, and called through the gate as every other.
   that the session does not write, are refused by the gate itself, Full mode included. The rest
   passes in every mode: Specs declares its four actions harmless, since each reads or writes a
   spec in Flottille's store and nothing else.
+- **Departures.** The session writing an internal spec keeps, with `write` `departures` (a text),
+  where the spec departs from its tickets: a case left out, a rule decided otherwise. The user
+  reads it and, at Done, posts it or not; no action of `spec` posts anything, nor writes a ticket.
+  Of a spec of another mode, it is refused.
 - **Masked.** What `write` and `ask` hold (every text of a section, a question, its options and
   its reason) is masked of secrets before it is stored, as `ask_user` is.
 

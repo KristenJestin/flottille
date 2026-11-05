@@ -682,3 +682,246 @@ fn no_specs_screen_is_shown_where_specs_is_off(cx: &mut TestAppContext) {
         found(cx, &action)
     });
 }
+
+/// The sections Ready needs, written from the user's door.
+fn complete(user: &User, spec: u64) {
+    for (section, content) in [
+        ("problem", json!("Users forget their passwords.")),
+        (
+            "behaviour",
+            json!([{"text": "A link sent by mail signs the user in once."}]),
+        ),
+    ] {
+        user.call(
+            "spec.write",
+            json!({"spec": spec, "section": section, "content": content}),
+        )
+        .unwrap();
+    }
+}
+
+/// The calls of the fake `gh` that start with `words`.
+fn gh_calls(user: &User, words: &[&str]) -> usize {
+    user.gh_received()
+        .iter()
+        .filter(|call| {
+            let args = call["args"].as_array().unwrap();
+            words.iter().enumerate().all(|(at, word)| args[at] == *word)
+        })
+        .count()
+}
+
+#[gpui_kit::test]
+fn a_changed_ticket_offers_take_and_overwrite_on_the_spec_page(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    turn(&user, true, None);
+    // Never read by Flottille, the ticket is not known to be as it last read it: Ready writes
+    // nothing and the user chooses.
+    let spec = user
+        .call(
+            "spec.new",
+            json!({"project": "app", "title": "Sign in", "mode": "ticket", "tickets": ["#5"]}),
+        )
+        .unwrap()["spec"]
+        .as_u64()
+        .unwrap();
+    complete(&user, spec);
+    let ready = user.call("spec.ready", json!({"spec": spec})).unwrap();
+    assert_eq!(ready["ticket_write"]["state"], "changed", "{ready}");
+
+    let (shell, cx) = window(&user, cx);
+    open_spec(&shell, cx, spec);
+    at_rest(cx);
+    let said = label(cx, "spec-ticket-said").unwrap_or_default();
+    assert!(said.contains("has not read #5 yet"), "{said}");
+    assert!(found(cx, "spec-ticket-take") && found(cx, "spec-ticket-overwrite"));
+
+    // Overwrite asks first: a person's change is lost on the tracker.
+    click(cx, "spec-ticket-overwrite");
+    settle(cx);
+    assert!(found(cx, "spec-ticket-confirm-action"));
+    assert_eq!(gh_calls(&user, &["issue", "edit"]), 0);
+    click(cx, "spec-ticket-confirm-action");
+    until(&shell, cx, "the ticket is written", |_| {
+        gh_calls(&user, &["issue", "edit"]) == 1
+    });
+    until(&shell, cx, "the page says it", |cx| {
+        settle(cx);
+        label(cx, "spec-ticket-said").is_some_and(|said| said.contains("written to #5"))
+            && !found(cx, "spec-ticket-take")
+    });
+
+    // Take: another spec whose ticket changed goes back to Draft in one click.
+    let other = user
+        .call(
+            "spec.new",
+            json!({"project": "app", "title": "Typo", "mode": "ticket", "tickets": ["#6"]}),
+        )
+        .unwrap()["spec"]
+        .as_u64()
+        .unwrap();
+    complete(&user, other);
+    user.call("spec.ready", json!({"spec": other})).unwrap();
+    open_spec(&shell, cx, other);
+    settle(cx);
+    click(cx, "spec-ticket-take");
+    until(&shell, cx, "the spec is a Draft again", |_| {
+        show(&user, other)["status"] == "draft"
+    });
+    until(&shell, cx, "the choice folds away", |cx| {
+        settle(cx);
+        !found(cx, "spec-ticket-said") && label(cx, "spec-status").as_deref() == Some("Draft")
+    });
+    assert_eq!(gh_calls(&user, &["issue", "edit"]), 1);
+}
+
+#[gpui_kit::test]
+fn the_departures_are_offered_at_done_and_posted_with_one_click(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    turn(&user, true, None);
+    let spec = user
+        .call(
+            "spec.new",
+            json!({"project": "app", "title": "Typo", "mode": "internal", "tickets": ["#6"]}),
+        )
+        .unwrap()["spec"]
+        .as_u64()
+        .unwrap();
+    complete(&user, spec);
+    let departures = "The ticket asks for the footer too: left out.";
+    user.call(
+        "spec.write",
+        json!({"spec": spec, "section": "departures", "content": departures}),
+    )
+    .unwrap();
+    user.call("spec.ready", json!({"spec": spec})).unwrap();
+
+    let (shell, cx) = window(&user, cx);
+    open_spec(&shell, cx, spec);
+    at_rest(cx);
+    // Read before Done, and not offered to post.
+    assert_eq!(
+        label(cx, "spec-departures-text").as_deref(),
+        Some(departures)
+    );
+    assert!(!found(cx, "spec-departures-post"));
+
+    // Done is read from what Flottille sees (#336): set beside the daemon, then read again.
+    let connection = rusqlite::Connection::open(user.path("state/flottille/flottille.db")).unwrap();
+    connection.busy_timeout(Duration::from_secs(5)).unwrap();
+    connection
+        .execute(
+            "UPDATE ext_specs_specs SET status = 'done' WHERE id = ?1",
+            [spec],
+        )
+        .unwrap();
+    let page = spec_page(&shell, cx).unwrap();
+    page.update(cx, |page, cx| page.read(cx));
+    until(&shell, cx, "Post is offered", |cx| {
+        settle(cx);
+        found(cx, "spec-departures-post")
+    });
+    assert_eq!(
+        gh_calls(&user, &["issue", "comment"]),
+        0,
+        "nothing is posted on its own"
+    );
+
+    click(cx, "spec-departures-post");
+
+    until(&shell, cx, "the comment is posted", |_| {
+        gh_calls(&user, &["issue", "comment"]) == 1
+    });
+    until(&shell, cx, "the page says it", |cx| {
+        settle(cx);
+        label(cx, "spec-departures-posted").is_some_and(|said| said.contains("#6"))
+            && !found(cx, "spec-departures-post")
+    });
+}
+
+/// The toasts shown now, as `(is_failure, title, second line)`.
+fn toasts(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<(bool, String, String)> {
+    shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .map(|t| {
+                (
+                    t.is_failure(),
+                    t.title().to_owned(),
+                    t.second_line().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect()
+    })
+}
+
+#[gpui_kit::test]
+fn the_ready_toast_follows_what_became_of_the_ticket(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    turn(&user, true, None);
+    // Read at "Write the spec": Ready writes it.
+    let written = user
+        .call(
+            "spec.from_ticket",
+            json!({"project": "app", "ticket": "#5", "mode": "ticket"}),
+        )
+        .unwrap()["spec"]["spec"]
+        .as_u64()
+        .unwrap();
+    // Never read: Ready writes nothing and the user chooses.
+    let unread = user
+        .call(
+            "spec.new",
+            json!({"project": "app", "title": "Typo", "mode": "ticket", "tickets": ["#6"]}),
+        )
+        .unwrap()["spec"]
+        .as_u64()
+        .unwrap();
+    // Not on the tracker: its read fails.
+    let failing = user
+        .call(
+            "spec.new",
+            json!({"project": "app", "title": "Gone", "mode": "ticket", "tickets": ["#9"]}),
+        )
+        .unwrap()["spec"]
+        .as_u64()
+        .unwrap();
+    for spec in [written, unread, failing] {
+        complete(&user, spec);
+    }
+    let (shell, cx) = window(&user, cx);
+
+    for (spec, failure, title, said) in [
+        (written, false, "Spec ready", "written to #5"),
+        (
+            unread,
+            true,
+            "The ticket was not written",
+            "has not read #6",
+        ),
+        (
+            failing,
+            true,
+            "The ticket was not written",
+            "#9 could not be read",
+        ),
+    ] {
+        open_spec(&shell, cx, spec);
+        settle(cx);
+        click(cx, "spec-ready");
+        until(
+            &shell,
+            cx,
+            "the toast says what became of the ticket",
+            |cx| {
+                toasts(&shell, cx)
+                    .iter()
+                    .any(|(f, t, s)| *f == failure && t == title && s.contains(said))
+            },
+        );
+    }
+}
