@@ -2376,13 +2376,16 @@ fn pushed(place: &Place, folder: Option<&Resolved>) -> bool {
     let Some(folder) = folder else {
         return false;
     };
-    let listed = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&folder.path)
-        .args(["for-each-ref", "--format=%(refname)", "refs/remotes"])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output();
+    let listed = crate::children::spawn_std(
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&folder.path)
+            .args(["for-each-ref", "--format=%(refname)", "refs/remotes"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()),
+    )
+    .and_then(std::process::Child::wait_with_output);
     match listed {
         Ok(output) => String::from_utf8_lossy(&output.stdout)
             .lines()

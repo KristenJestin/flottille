@@ -170,16 +170,17 @@ fn locate(name: &str) -> Option<PathBuf> {
 
 /// `<program> --version`: the first dotted number it prints, none when it prints none.
 async fn version_of(program: &Path) -> Option<String> {
-    let child = tokio::process::Command::new(program)
-        .arg("--version")
-        .env("NO_COLOR", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .kill_on_drop(true)
-        .spawn()
-        .ok()?;
+    let child = crate::children::spawn(
+        tokio::process::Command::new(program)
+            .arg("--version")
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .kill_on_drop(true),
+    )
+    .ok()?;
     let output = tokio::time::timeout(VERSION_TIME, child.wait_with_output())
         .await
         .ok()?
