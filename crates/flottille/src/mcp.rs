@@ -1801,7 +1801,33 @@ fn cut_long(
     }
 }
 
+tokio::task_local! {
+    /// The run the call in progress started, for the developer log's line of the call to name.
+    static RUN_STARTED: Mutex<Option<String>>;
+}
+
+/// Says that the call in progress started, or joined, this run.
+pub fn started_run(id: &str) {
+    let _ = RUN_STARTED.try_with(|run| *run.lock().unwrap() = Some(id.to_owned()));
+}
+
 async fn played(
+    daemon: &Arc<Daemon>,
+    grant: &Arc<Grant>,
+    tool: &str,
+    args: Value,
+    key: Option<&str>,
+    cancelled: CancellationToken,
+) -> (String, bool) {
+    RUN_STARTED
+        .scope(
+            Mutex::default(),
+            played_in(daemon, grant, tool, args, key, cancelled),
+        )
+        .await
+}
+
+async fn played_in(
     daemon: &Arc<Daemon>,
     grant: &Arc<Grant>,
     tool: &str,
@@ -1987,6 +2013,7 @@ fn log_call(
             "gate": verdict, "allowed_by": allowed_by(verdict), "class": class,
             "reasons": reasons, "judge": judge,
             "outcome": outcome.word(), "request": request, "error": error,
+            "run": RUN_STARTED.try_with(|run| run.lock().unwrap().clone()).ok().flatten(),
             "result_chars": text.chars().count(),
             "duration_ms": started.elapsed().as_millis() as u64}),
         &grant.place.secret_values(),
