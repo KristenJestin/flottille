@@ -994,14 +994,24 @@ agent never drives the user's desktop through a program (`run` has no graphical 
   `mailto:`; at most 2,000 characters; one that holds what the masking takes for a secret is
   refused), or a file inside the agent's place, its workspace or checkout, where it really leads
   once `..` and links are followed: a path outside is refused saying so (`refused: … is not inside
-  your place …; nothing was shown`), and so is one that is not a file. The URL and the path are
+  your place …; nothing was shown`). A shown file is only ever a document, since the system's
+  default handler runs a program it is given and an agent writes files in its place: it is a
+  regular file (no folder, device, fifo or socket), with no execute bit at all (owner, group or
+  others), and its extension, compared without case, is none a desktop runs or installs
+  (`.desktop`, `.sh`, `.bash`, `.zsh`, `.fish`, `.py`, `.pl`, `.rb`, `.js`, `.AppImage`, `.run`,
+  `.bin`, `.jar`, `.exe`, `.msi`, `.bat`, `.cmd`, `.ps1`, `.command`, `.app`, `.deb`, `.rpm`,
+  `.flatpakref`). Each refusal says why (`refused: run.sh: a .sh file is one a desktop runs, and
+  opening it would run it; show_link shows a document, never a program`). The URL and the path are
   exclusive, and a title is at most 120 characters. The tool's own address check is not `web
   read`'s: a link is for the user's eyes, so `localhost` (a dev server) is allowed.
 - **The gate lets it through in every mode**, with no card: like a read it changes nothing, and
   the user decides by clicking. A link that fails the checks above is refused in every mode.
 - **In the window**: a toast `The agent shares a link: <title or host>` with an Open button, and a
   small card in the agent's conversation (title, host or path, Open), so that a toast missed is
-  not lost.
+  not lost. Open checks the file again right before it opens it, by the same rules, since it may
+  have changed between the call and the click: if it no longer passes (made executable, replaced
+  by a link or a folder, removed), nothing opens and a failure toast says why (`Not opened: it is
+  executable, and opening it would run it`). An address opens unchanged.
 
 ## The gate
 
