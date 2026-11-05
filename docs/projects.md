@@ -307,15 +307,30 @@ can write, and would run outside the gate's sight. A repository's own checks on 
 `commit-msg` hook running a linter) are only words of its rules to an agent; declared here, they
 run.
 
-- **When**: before an agent's `git commit` (a line of `run`, or a task, at any of its layers:
-  `env git commit …`, `sh -c "git commit …"`), each check runs on the commit's message, taken from
-  its `-m` (several are paragraphs, as git joins them) or its `-F` file. Flottille makes no commit
-  of its own for an agent. A commit whose message cannot be known before it is made is refused
-  while checks are declared, saying why and to give it with `-m` or `-F`: an editor writes it
-  (no message, `-e`, `--edit`), git takes it from another commit (`-C`, `-c`, `--amend
-  --no-edit`), or writes it (`--fixup`, `--squash`), or it comes from the standard input (`-F -`).
-  `forge create` checks the pull request's title, and `forge merge` its squash `message`, the same
-  way, before anything is written to the forge (`docs/tools.md`, "The forge").
+- **When**: before an agent's commit (a line of `run`, or a task, at any of its layers:
+  `env git commit …`, `sh -c "git commit …"`), each check runs on the commit's message: a
+  `git commit`'s, taken from its `-m` (several are paragraphs, as git joins them) or its `-F`
+  file; a `git merge`'s that makes a commit (its `-m` or `-F`; none with `--ff-only`,
+  `--squash` or `--no-commit`); a `git commit-tree`'s (its `-m` or `-F`); and the same through
+  the user's own git alias of one of them (`alias.ci = commit` makes `git ci -m …` a commit;
+  an alias of a builtin is never followed, as git follows none). Options are read as git reads
+  them, an abbreviated long one too (`--m` is `--message`; one git finds ambiguous is
+  refused). Flottille makes no commit of its own for an agent. A commit whose message cannot be
+  known before it is made is refused while checks are declared, saying why and what to do
+  instead: an editor writes it (no message, `-e`, `--edit`), git takes it from another commit
+  (`-C`, `-c`, `--amend --no-edit`), or writes it (`--fixup`, `--squash`, a merge without `-m`,
+  `git merge --continue`, a `git revert` without `--no-commit`), it comes from the standard
+  input (`-F -`, a `git commit-tree` without `-m`), its `-F` is not a regular file (a FIFO, a
+  device), or the alias runs a shell command (`!…`). `forge create` checks the pull request's
+  title, `forge edit` the title it gives, and `forge merge` its squash `message`, the same way,
+  before anything is written to the forge (`docs/tools.md`, "The forge"), with the variables of
+  the workspace written for.
+- **What they do not see**: the commits `git cherry-pick`, `git am`, `git rebase` and `git pull`
+  make carry messages git takes or writes itself, and are not checked; nor is a commit a
+  program the line runs makes itself (a script calling git). The `-F` file is read once for
+  the checks, and git reads it again: a run that rewrites it in between commits what was not
+  checked. The checks see the message as given: what git adds or removes after them
+  (`--trailer`, `-s`/`--signoff`, `--cleanup`, a merge's `--log`) is not in the text they read.
 - **How**: each line is split without a shell as a run's line is (`{message}` replaced in its
   words by the file's path), and run by the daemon, not as a call of the agent, in the folder of
   the repository the commit or the pull request is in, with the environment of a run of the place
@@ -329,6 +344,7 @@ run.
   again. Its output: …`.
 - **A check that cannot run** never counts as passed: a program that is not found, or a check
   that takes longer than 60 s (its process group is then stopped), refuses with that reason.
+  A call the agent gives up stops its checks, their process group with them.
 
 ## Tasks
 

@@ -378,11 +378,17 @@ pending requests.
 - **A commit's message is checked as the project declares**: with `message_checks` in the
   project's file (`docs/projects.md`, "Message checks"), each `git commit` the line runs, at any of
   its layers, has its message (its `-m`, or its `-F` file) given to each check before the run
-  starts, and a check that fails or cannot run refuses the run: nothing is committed, and the
-  answer names the check, how it ended and the end of its output, masked. A commit whose message
-  cannot be known before it is made (an editor, `-C`, `--amend --no-edit`, `--fixup`) is refused
-  then, saying to give it with `-m` or `-F`. The checks are the user's lines, run by the daemon in
-  the run's folder and environment, never a hook of the repository: git still runs none.
+  starts, and so has a `git merge` that makes a commit, a `git commit-tree`, and the user's git
+  alias of one of them; a check that fails or cannot run refuses the run: nothing is committed,
+  and the answer names the check, how it ended and the end of its output, masked. A commit
+  whose message cannot be known before it is made (an editor, `-C`, `--amend --no-edit`,
+  `--fixup`, a merge without `-m`, a `git revert` without `--no-commit`) is refused then,
+  saying to give it with `-m` or `-F`, or to commit with `git commit -m`. The commits of
+  `git cherry-pick`, `git am`, `git rebase` and `git pull` are not checked, and what git adds
+  to a message after the checks (`--trailer`, `--signoff`, `--cleanup`) is not in what they
+  read; the `-F` file is read once for the checks and again by git. A call given up stops its
+  checks. The checks are the user's lines, run by the daemon in the run's folder and
+  environment, never a hook of the repository: git still runs none.
 - **A push is the gate's**: `git push` is a call to judge, a forced one base, and only the push
   the gate read and let through goes out. A harmless command (a task, a test run)
   cannot push from a script the gate never read. A push from a workspace is also refused, before
@@ -513,8 +519,9 @@ pending requests.
   the branch's last commit, and refuses otherwise (`refused: app/login is not on origin yet: push
   the branch first: git push -u origin app/login`, or `… is 2 commit(s) ahead of origin: …`); the
   agent's `run` of `git push` goes through the gate as any push. The project's message checks
-  (`docs/projects.md`, "Message checks") run on `create`'s title and on `merge`'s message, in the
-  repository's worktree, before anything is asked of the forge: one that fails or cannot run
+  (`docs/projects.md`, "Message checks") run on `create`'s title, on the title `edit` gives and
+  on `merge`'s message, in the repository's worktree with the variables of the workspace written
+  for, before anything is asked of the forge: one that fails or cannot run
   refuses the write (`… refused the pull request's title …; nothing was written to the forge`,
   `… refused the squash message …; nothing was merged`), naming the check and the end of its
   output.
