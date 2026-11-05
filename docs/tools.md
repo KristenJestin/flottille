@@ -714,8 +714,9 @@ reasons.
   --fields key,summary,status,assignee,labels --json --limit 200`, the JQL being the tracker's
   projects, the state as a status category (`statusCategory != Done`), each filter quoted, the
   words as `text ~`, `in_comments` as `comment ~`, `updated_within` as `updated >= "-<n>d"`, and the
-  agent's `jql` last. An item that says another site than the tracker's is left out, and counted;
-  one that says no site is kept.
+  agent's `jql` last. An item that says another site than the tracker's, or whose key is of another project than
+  its `projects`, is left out, and counted; one that says no site is kept. A `list` given `jql`
+  or `in_comments` is refused, naming `search`.
 - **`jql`** is confined to the tracker's projects: `project in (…) AND … AND (<the agent's JQL>)`,
   its `ORDER BY` kept at the end (`ORDER BY created DESC` without one); `state` applies to it as to
   any search (`all` to leave it out). Read outside its quoted texts, a JQL that closes a
@@ -723,7 +724,9 @@ reasons.
   anything but field names, commas, `ASC` and `DESC` after its `ORDER BY` is refused, saying which,
   and nothing is asked: it could leave the parentheses, and so the projects. A query `acli`
   refuses comes back with `acli`'s words. On GitHub `jql` and `in_comments` are refused, naming
-  `query`.
+  `query`. The answers stay in the tracker's projects; what a query may refer to is not checked
+  (`parent = XYZ-1`, a link function, an add-on's: it can tell that something exists elsewhere on
+  the same site).
   **A search stays in the tracker's repository**: on GitHub a `query` holding `repo:`, `org:`,
   `user:`, `is:pr` or `type:pr`, in any case, is refused (`refused: tickets search looks in the
   tracker's repository only: …`), and of what `gh` answers only the issues whose link is the

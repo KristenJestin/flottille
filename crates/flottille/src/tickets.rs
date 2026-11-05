@@ -1154,6 +1154,15 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
     fn given(search: bool, text: Option<&str>) -> Option<&str> {
         text.map(str::trim).filter(|t| search && !t.is_empty())
     }
+    // Silently ignored, they would let a list pass for a filtered one.
+    for (name, text) in [("jql", &asked.jql), ("in_comments", &asked.in_comments)] {
+        if !search && text.as_deref().is_some_and(|t| !t.trim().is_empty()) {
+            return Outcome::Refused(format!(
+                "refused: {name} is search's: ask a search, a list takes state, label, assignee \
+                 and updated_within"
+            ));
+        }
+    }
     let query = given(search, asked.query.as_deref());
     let in_comments = given(search, asked.in_comments.as_deref());
     let asked_jql = given(search, asked.jql.as_deref());
@@ -1313,7 +1322,7 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
     // Jira's filter is by site, not by hidden repositories.
     if left_out > 0 && matches!(tracker, ProjectTracker::Jira { .. }) {
         text.push_str(&format!(
-            "({left_out} answered from another site than the tracker's are left out)\n"
+            "({left_out} answered from another site or project than the tracker's are left out)\n"
         ));
     }
     if nulls > 0 {
@@ -1504,7 +1513,8 @@ fn confined(jql: &str) -> Result<Confined, String> {
             let fields = |c: char| c.is_alphanumeric() || " \t\n,._[]-".contains(c);
             if rest.is_empty() || !rest.chars().all(fields) {
                 return Err(
-                    "after its ORDER BY, the jql takes field names, commas, ASC and DESC only"
+                    "after its ORDER BY, the jql takes field names without quotes (cf[N] for a \
+                     custom field), commas, ASC and DESC only"
                         .into(),
                 );
             }
@@ -1702,6 +1712,15 @@ async fn list_work_items(
         let Some(key) = item["key"].as_str() else {
             continue;
         };
+        // The JQL is confined to the projects, but what is answered is checked too: a lexer
+        // that reads it otherwise than expected must not show another project.
+        if !key
+            .rsplit_once('-')
+            .is_some_and(|(project, _)| projects.iter().any(|p| p.eq_ignore_ascii_case(project)))
+        {
+            left_out += 1;
+            continue;
+        }
         tickets.push(Listed {
             reference: masked(key),
             state: said(&fields["status"]["name"]),

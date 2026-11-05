@@ -493,8 +493,8 @@ gives its flags (`--jql`, `--fields`, `--json`, `--limit`, `--paginate`) and no 
 reading takes an array of work items in the shape `view` prints, or Jira's REST search object
 (`{"issues": [...]}`), and reads `key`, `self`, `fields.summary`, `fields.status.name`,
 `fields.assignee.displayName` and `fields.labels`. An item whose `self` names another site (not
-the tracker's, nor an Atlassian host, as above) is left out and counted; one with no `self` is kept, since the search was of the signed-in site's
-projects. The maintainer checks it on their work machine
+the tracker's, nor an Atlassian host, as above) is left out and counted, as is one whose key is of a project the tracker does not declare; one
+with no `self` is kept, since the search was of the signed-in site's projects. The maintainer checks it on their work machine
 (`tickets list` from an agent of a Jira project); a different shape shows as an empty list.
 
 **Which fields `--fields` allows is not documented**: the page above gives the default

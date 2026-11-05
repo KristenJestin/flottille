@@ -1498,7 +1498,7 @@ fn a_jql_search_stays_in_the_tracker_s_projects() {
         ("summary ~ \"open) OR (project = XYZ", "leaves a quote open"),
         (
             "priority = High order by key) OR (project = XYZ",
-            "after its ORDER BY",
+            "field names without quotes (cf[N] for a custom field)",
         ),
         ("summary ~ a\\( OR x = 1) OR (project = XYZ", "backslash"),
     ] {
@@ -1576,4 +1576,57 @@ fn a_jql_acli_refuses_comes_back_with_its_words() {
         "{}",
         answer.text
     );
+}
+
+#[test]
+fn a_list_given_jql_or_in_comments_is_refused_naming_search() {
+    let user = User::with_fake_agent().with_fake_acli();
+    fixture(&user);
+    jira_text(&user);
+    track(&user, jira_abc());
+    let mcp = agent_in(&user, None);
+
+    for (field, value) in [("jql", "assignee = currentUser()"), ("in_comments", "x")] {
+        let refused = mcp.call("tickets", json!({"action": "list", field: value}));
+
+        assert!(refused.error, "{field}: {}", refused.text);
+        assert!(
+            refused
+                .text
+                .contains(&format!("{field} is search's: ask a search")),
+            "{field}: {}",
+            refused.text
+        );
+    }
+    assert!(jqls(&user).is_empty(), "{:?}", jqls(&user));
+}
+
+#[test]
+fn a_work_item_of_another_project_answered_by_acli_is_left_out_and_counted() {
+    let user = User::with_fake_agent().with_fake_acli();
+    fixture(&user);
+    user.acli_script(json!({"search": [
+        work_item("ABC-1", "Add the natures"),
+        work_item("XYZ-1", "Other project's secret"),
+    ]}));
+    track(&user, jira_abc());
+    let mcp = agent_in(&user, None);
+
+    for action in [
+        json!({"action": "search", "query": "natures"}),
+        json!({"action": "list", "updated_within": 30}),
+    ] {
+        let found = mcp.call("tickets", action.clone());
+
+        assert!(!found.error, "{action}: {}", found.text);
+        assert!(found.text.contains("- ABC-1 "), "{action}: {}", found.text);
+        assert!(!found.text.contains("XYZ-1"), "{action}: {}", found.text);
+        assert!(
+            found.text.contains(
+                "(1 answered from another site or project than the tracker's are left out)"
+            ),
+            "{action}: {}",
+            found.text
+        );
+    }
 }
