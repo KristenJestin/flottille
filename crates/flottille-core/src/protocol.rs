@@ -132,6 +132,9 @@ pub struct RepositorySetting {
     /// out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depends_on: Option<Vec<String>>,
+    /// "Delete the branch on merge"; what the file has when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delete_branch_on_merge: Option<bool>,
 }
 
 /// The parameters of `workspace.create`.

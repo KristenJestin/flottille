@@ -639,6 +639,16 @@ const MIGRATIONS: &[&str] = &[
             AND instr(substr(body, 13, instr(body, ' of project ') - 13), ' ') = 0;
 ",
     "
+    -- The agent that wrote each service of `services.toml` the daemon last wrote for an agent
+    -- (`docs/projects.md`, \"Services\"): its lines are judged again when another agent's call
+    -- starts it. No row: the user's own (written by hand, from the command line or the window).
+    -- Not in the file, which the user edits.
+    CREATE TABLE service_writers (
+        name   TEXT PRIMARY KEY,
+        agent  TEXT NOT NULL
+    ) STRICT;
+",
+    "
     -- The user's leave for a session to write to another it did not start, one way, given once
     -- for the pair (`docs/tools.md`, \"Sessions that talk to each other\"): it goes with the end
     -- of either session.
@@ -2568,6 +2578,33 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The agent that wrote the service; `None` writes it as the user's.
+    pub fn set_service_writer(&mut self, name: &str, by: Option<&str>) -> Result<()> {
+        match by {
+            Some(agent) => self.connection.execute(
+                "INSERT INTO service_writers (name, agent) VALUES (?1, ?2) \
+                 ON CONFLICT (name) DO UPDATE SET agent = ?2",
+                params![name, agent],
+            )?,
+            None => self
+                .connection
+                .execute("DELETE FROM service_writers WHERE name = ?1", params![name])?,
+        };
+        Ok(())
+    }
+
+    /// The agent that wrote the service; `None` when it is the user's.
+    pub fn service_writer(&self, name: &str) -> Result<Option<String>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT agent FROM service_writers WHERE name = ?1",
+                params![name],
+                |row| row.get(0),
+            )
+            .optional()?)
     }
 
     /// Records what a turn used, one row per model.
@@ -5887,5 +5924,25 @@ mod tests {
 
         assert_eq!(store.agent(&agent.id).unwrap(), None);
         assert_eq!(store.turn_usage().unwrap(), [row]);
+    }
+
+    #[test]
+    fn the_agent_that_wrote_a_service_is_kept_until_the_user_writes_it() {
+        let mut store = Store::open_in_memory().unwrap();
+        assert_eq!(store.service_writer("mongo").unwrap(), None);
+
+        store.set_service_writer("mongo", Some("a1b2c3")).unwrap();
+        assert_eq!(
+            store.service_writer("mongo").unwrap(),
+            Some("a1b2c3".to_owned())
+        );
+        store.set_service_writer("mongo", Some("d4e5f6")).unwrap();
+        assert_eq!(
+            store.service_writer("mongo").unwrap(),
+            Some("d4e5f6".to_owned())
+        );
+
+        store.set_service_writer("mongo", None).unwrap();
+        assert_eq!(store.service_writer("mongo").unwrap(), None);
     }
 }

@@ -156,6 +156,8 @@ pub struct Daemon {
     pub agents: Live,
     /// The agents' MCP server: its tokens, and what its tools keep (reads, runs).
     pub mcp: mcp::Server,
+    /// The services of the machine: their runs, and one start of each at a time.
+    pub services: crate::services::Live,
     /// The deliveries pinned as notes on agents' next tool results.
     pub notes: deliveries::Notes,
     /// The agents waiting on their provider (overloaded, rate-limited): not stuck.
@@ -341,6 +343,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         step_outputs: Mutex::new(HashMap::new()),
         agents: Live::default(),
         mcp: mcp::Server::new(tools.local_addr()?.port()),
+        services: crate::services::Live::default(),
         notes: deliveries::Notes::default(),
         waiting_provider: Mutex::new(HashSet::new()),
         judge_chose_none: Mutex::new(None),
@@ -578,6 +581,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
             "test.",
             "provider.",
             "run.",
+            "service.",
             "items.",
         ]
         .iter()
@@ -603,6 +607,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     approvals::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("run.") {
                     run_methods::call(daemon, &request.method, request.params).await
+                } else if request.method.starts_with("service.") {
+                    crate::services::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("items.") {
                     items::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("provider.") {

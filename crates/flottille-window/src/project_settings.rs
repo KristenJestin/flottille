@@ -206,6 +206,8 @@ pub struct RepositoryForm {
     pub base: Vec<String>,
     /// The paths of the repositories it depends on.
     pub depends_on: Vec<String>,
+    /// "Delete the branch on merge": its file says so.
+    pub delete_branch_on_merge: bool,
     /// Its remote's address, credentials taken out; none without that remote.
     pub url: Option<String>,
     /// What the project's file declares now.
@@ -390,6 +392,8 @@ pub struct ProjectSettingsPage {
     base_rows: Listing<String>,
     base_error: Option<SharedString>,
     depends: Vec<String>,
+    /// The dialog's "Delete the branch on merge", as edited and not yet saved.
+    delete_branch: bool,
     fields: Option<Fields>,
     dialog_error: Option<SharedString>,
     saving: Option<Saving>,
@@ -493,6 +497,7 @@ impl ProjectSettingsPage {
             base_rows: Listing::default(),
             base_error: None,
             depends: Vec::new(),
+            delete_branch: false,
             fields: None,
             dialog_error: None,
             saving: None,
@@ -741,6 +746,7 @@ impl ProjectSettingsPage {
                 remote: repository["remote"].as_str().unwrap_or("origin").to_owned(),
                 base: strings(&repository["base"]),
                 depends_on: strings(&repository["depends_on"]),
+                delete_branch_on_merge: repository["delete_branch_on_merge"] == true,
                 url: repository["url"].as_str().map(str::to_owned),
                 declared: forge(&repository["forge"]),
                 proposal: forge(&repository["proposal"]),
@@ -847,7 +853,7 @@ impl ProjectSettingsPage {
     fn params(
         &self,
         forge: Option<(&str, Option<RepositoryForge>)>,
-        lists: Option<(&str, &[String], &[String])>,
+        lists: Option<(&str, &[String], &[String], bool)>,
         tracker: Option<Option<ProjectTracker>>,
     ) -> Value {
         let repositories: Vec<Value> = self
@@ -859,9 +865,9 @@ impl ProjectSettingsPage {
                     _ => form.declared.clone(),
                 };
                 match lists {
-                    Some((path, base, depends_on)) if path == form.path => {
+                    Some((path, base, depends_on, delete_branch)) if path == form.path => {
                         json!({"path": form.path, "forge": declared, "base": base,
-                            "depends_on": depends_on})
+                            "depends_on": depends_on, "delete_branch_on_merge": delete_branch})
                     }
                     _ => json!({"path": form.path, "forge": declared}),
                 }
@@ -968,6 +974,7 @@ impl ProjectSettingsPage {
         self.forge_kind = shown.as_ref().map_or(ForgeKind::None, ForgeKind::of);
         self.bases = form.base.clone();
         self.depends = form.depends_on.clone();
+        self.delete_branch = form.delete_branch_on_merge;
         // The rows of another repository's dialog are not this one's to fold away.
         self.base_rows = Listing::default();
         self.base_error = None;
@@ -1025,6 +1032,18 @@ impl ProjectSettingsPage {
     /// The repositories the dialog's repository depends on.
     pub fn depends(&self) -> &[String] {
         &self.depends
+    }
+
+    /// Whether the dialog's repository deletes the branch of a pull request it merges.
+    pub fn deletes_branch_on_merge(&self) -> bool {
+        self.delete_branch
+    }
+
+    /// "Delete the branch on merge", flipped.
+    pub fn toggle_delete_branch(&mut self, cx: &mut Context<Self>) {
+        self.delete_branch = !self.delete_branch;
+        self.dialog_error = None;
+        cx.notify();
     }
 
     /// The branch field's refusal, under its field.
@@ -1139,7 +1158,12 @@ impl ProjectSettingsPage {
                     cx.notify();
                     return;
                 }
-                let lists = (&path[..], &self.bases[..], &self.depends[..]);
+                let lists = (
+                    &path[..],
+                    &self.bases[..],
+                    &self.depends[..],
+                    self.delete_branch,
+                );
                 let settings = self.params(Some((&path, forge)), Some(lists), None);
                 self.send(settings, Saving::Forge { path, used: false }, cx);
             }
@@ -1802,6 +1826,23 @@ impl ProjectSettingsPage {
         Field::new("depends-field", "Depends on", control).hint(hint)
     }
 
+    /// What a merge of this repository's pull requests does with their branch.
+    fn delete_branch_switch(&self, this: WeakEntity<Self>) -> Switch {
+        Switch::new(
+            "delete-branch-on-merge",
+            self.delete_branch,
+            "Delete the branch on merge",
+        )
+        .hint(
+            "A merge by an agent deletes the pull request's branch on the forge, unless the \
+             workspace resumed a branch that already existed.",
+        )
+        .on_click(move |_, _, cx| {
+            this.update(cx, |this, cx| this.toggle_delete_branch(cx))
+                .ok();
+        })
+    }
+
     fn dialog_modal(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let this = cx.entity().downgrade();
@@ -1846,7 +1887,12 @@ impl ProjectSettingsPage {
         let lists = match self.dialog.clone() {
             Some(Dialog::Repository(path)) => {
                 let bases = self.base_field(&fields.branch, cx);
-                Some((bases, self.depends_field(&path, cx.entity().downgrade())))
+                let this = cx.entity().downgrade();
+                Some((
+                    bases,
+                    self.depends_field(&path, this.clone()),
+                    self.delete_branch_switch(this),
+                ))
             }
             _ => None,
         };
@@ -1892,10 +1938,12 @@ impl ProjectSettingsPage {
                     format!("As {}.", self.forge_kind.shape())
                 };
                 let disagrees = form.as_ref().and_then(|form| form.disagrees.clone());
-                let (bases, depends) = lists.expect("made for a repository's dialog");
+                let (bases, depends, delete_branch) =
+                    lists.expect("made for a repository's dialog");
                 modal
                     .child(bases)
                     .child(depends)
+                    .child(delete_branch)
                     .child(Field::new("forge-kind-field", "Forge", select))
                     .child(
                         presence(
