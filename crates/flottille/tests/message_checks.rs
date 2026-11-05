@@ -819,3 +819,40 @@ fn a_squash_message_with_another_method_is_refused() {
             .is_empty()
     );
 }
+
+#[test]
+fn a_pull_request_title_is_checked_before_it_is_edited() {
+    let user = User::with_fake_agent().with_fake_gh();
+    let mcp = on_github(&user);
+    github_pull(&user);
+    let (passing, refusing) = two_checks(&user);
+    declare(&user, &[passing, refusing.clone()]);
+
+    let answer = allowed(
+        &user,
+        mcp.call(
+            "forge",
+            json!({"action": "edit", "repository": ".", "number": 12, "title": "bad title"}),
+        ),
+    );
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains(&refusing), "{}", answer.text);
+    assert!(
+        answer.text.contains("nothing was written to the forge"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(starting(&calls(user.gh_received()), "pr edit"), 0);
+
+    let answer = allowed(
+        &user,
+        mcp.call(
+            "forge",
+            json!({"action": "edit", "repository": ".", "number": 12,
+                "title": "feat: add the login"}),
+        ),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(starting(&calls(user.gh_received()), "pr edit"), 1);
+    assert_eq!(seen(&user), "bad title\nfeat: add the login\n");
+}

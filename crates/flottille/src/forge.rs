@@ -1804,6 +1804,19 @@ async fn forge_note(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
                  written: comment on it, or open a new pull request for the change"
             ));
         }
+        if let Some(title) = title {
+            let at = crate::message_checks::Where {
+                daemon,
+                place,
+                repository: &checkout.path,
+                folder: &checkout.folder,
+            };
+            let checked =
+                crate::message_checks::check(&at, crate::message_checks::Checked::Title, title);
+            if let Err(refusal) = checked.await {
+                return Outcome::Refused(refusal);
+            }
+        }
     }
     let number = number.to_string();
     // The id of the comment, where the forge answers one: `gh` prints its link, `bkt` none.
