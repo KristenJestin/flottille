@@ -38,6 +38,7 @@
 //! | `{"compaction": true}` | a `contextCompaction` item |
 //! | `{"retry": "text"}` | an `error` notification that Codex retries |
 //! | `{"request": "method"}` | a request of Codex's own to the client, its answer recorded |
+//! | `{"context": 45000}` | a `thread/tokenUsage/updated` mid-turn: that many tokens in the last request, the window 272000 |
 //! | `{"wait": 500}` | waits that many milliseconds; an interrupt ends the turn |
 //! | `{"hang": true}` | goes silent until an interrupt |
 //! | `{"die": 3}` | exits at once with that code |
@@ -433,6 +434,14 @@ impl Fake {
                 }
             };
             self.record.write(json!({"answered": answer}));
+        } else if let Some(tokens) = step["context"].as_u64() {
+            let usage = json!({"totalTokens": tokens, "inputTokens": tokens, "cachedInputTokens": 0,
+                "cacheWriteInputTokens": 0, "outputTokens": 0, "reasoningOutputTokens": 0});
+            self.notify(
+                "thread/tokenUsage/updated",
+                json!({"threadId": thread, "turnId": turn, "tokenUsage": {"total": usage,
+                    "last": usage, "modelContextWindow": 272000}}),
+            );
         } else if let Some(ms) = step["wait"].as_u64() {
             let deadline = Instant::now() + Duration::from_millis(ms);
             while Instant::now() < deadline && !self.is_interrupted() {

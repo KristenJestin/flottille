@@ -4,7 +4,7 @@
 //! cleaned of what makes a log unreadable, and masked before it is kept.
 
 use super::bitbucket::{self, Contexts};
-use super::{Forge, Job, Log, Pull, gh_text};
+use super::{Forge, Job, Log, gh_text};
 
 /// The lines of a log that are given, counted from its end.
 const LINES: usize = 40;
@@ -17,77 +17,110 @@ const JOBS: usize = 5;
 /// The characters of a line that says why a job failed, in a wake.
 const ERROR_CHARS: usize = 160;
 
-/// Reads the log of each failed job of `pull` that the forge gives, within the bounds above; a job
-/// whose log is not given says why. Only `forge show` asks for it: the state a window watches is
-/// never made of logs.
-pub(super) async fn attach(forge: &Forge, pull: &mut Pull) {
-    let mut left = TOTAL_BYTES;
-    let mut asked = 0;
+/// Reads the log of each failed job of a pull request that the forge gives, within the bounds
+/// above, all at once; a job whose log is not given says why. Only `forge show` asks for it: the
+/// state a window watches is never made of logs.
+pub(super) async fn attach(forge: &Forge, jobs: &mut [Job]) {
     // Only Bitbucket Cloud has logs to read, and a context to name for them.
     let context = match forge {
-        Forge::Bitbucket { .. } if bitbucket::cloud(forge) && !pull.jobs.is_empty() => {
+        Forge::Bitbucket { .. } if bitbucket::cloud(forge) && !jobs.is_empty() => {
             Contexts::default().of(forge).await
         }
         _ => Err(String::new()),
     };
-    for job in &mut pull.jobs {
-        job.log = Some(match forge {
+    // What each job needs is decided before anything is read, from the bounds that do not depend
+    // on a log's size, so that the logs can be read together.
+    let mut asked = 0;
+    let mut plans = Vec::new();
+    for job in jobs.iter() {
+        plans.push(match forge {
             Forge::Bitbucket { .. } if !bitbucket::cloud(forge) => {
-                Err("bkt gives no job logs, read it on Bitbucket".into())
+                Plan::Said(Err("bkt gives no job logs, read it on Bitbucket".into()))
             }
             Forge::Bitbucket { .. } => match bitbucket::build_of(forge, job.details.as_deref()) {
-                None => Err(match &job.details {
+                None => Plan::Said(Err(match &job.details {
                     Some(link) => format!("it is not a Bitbucket Pipelines build, see {link}"),
                     None => "it is not a Bitbucket Pipelines build".into(),
-                }),
-                Some(_) if asked == JOBS || left == 0 => Err(format!(
-                    "at most {JOBS} logs and {TOTAL_BYTES} bytes are given"
-                )),
+                })),
+                Some(_) if asked == JOBS => Plan::Said(Err(too_many())),
                 Some(build) => match &context {
-                    Err(why) => Err(why.clone()),
+                    Err(why) => Plan::Said(Err(why.clone())),
                     Ok(context) => {
                         asked += 1;
-                        let log = bitbucket::failed_step_log(forge, context, build)
-                            .await
-                            .and_then(|raw| {
-                                tail_with(&raw, JOB_BYTES.min(left), plain, bitbucket_part)
-                            });
-                        if let Ok(log) = &log {
-                            left -= log.text.len().min(left);
-                        }
-                        log
+                        Plan::Read(Source::Bitbucket(context.clone(), build))
                     }
                 },
             },
             Forge::GitHub { .. } => match actions_job(job.details.as_deref()) {
-                None => Err(match &job.details {
+                None => Plan::Said(Err(match &job.details {
                     Some(link) => format!("it is not a GitHub Actions job, see {link}"),
                     None => "it is not a GitHub Actions job".into(),
-                }),
-                Some(_) if asked == JOBS || left == 0 => Err(format!(
-                    "at most {JOBS} logs and {TOTAL_BYTES} bytes are given"
-                )),
+                })),
+                Some(_) if asked == JOBS => Plan::Said(Err(too_many())),
                 Some(id) => {
                     asked += 1;
-                    let log = gh_text(&[
-                        "run",
-                        "view",
-                        "--job",
-                        &id.to_string(),
-                        "--log-failed",
-                        "-R",
-                        &forge.gh_repository(),
-                    ])
-                    .await
-                    .and_then(|raw| tail_with(&raw, JOB_BYTES.min(left), clean, github_part));
-                    if let Ok(log) = &log {
-                        left -= log.text.len().min(left);
-                    }
-                    log
+                    Plan::Read(Source::GitHub(id))
                 }
             },
         });
     }
+    let raws = futures::future::join_all(plans.iter().map(|plan| async move {
+        match plan {
+            Plan::Said(_) => None,
+            Plan::Read(Source::Bitbucket(context, build)) => {
+                Some(bitbucket::failed_step_log(forge, context, *build).await)
+            }
+            Plan::Read(Source::GitHub(id)) => Some(
+                gh_text(&[
+                    "run",
+                    "view",
+                    "--job",
+                    &id.to_string(),
+                    "--log-failed",
+                    "-R",
+                    &forge.gh_repository(),
+                ])
+                .await,
+            ),
+        }
+    }))
+    .await;
+    // The total is shared out in the jobs' order, as it is when they are read one after the other.
+    let mut left = TOTAL_BYTES;
+    for ((job, plan), raw) in jobs.iter_mut().zip(plans).zip(raws) {
+        let log = match (plan, raw) {
+            (Plan::Said(said), _) => said,
+            (Plan::Read(_), _) if left == 0 => Err(too_many()),
+            (Plan::Read(Source::Bitbucket(..)), Some(raw)) => {
+                raw.and_then(|raw| tail_with(&raw, JOB_BYTES.min(left), plain, bitbucket_part))
+            }
+            (Plan::Read(Source::GitHub(_)), Some(raw)) => {
+                raw.and_then(|raw| tail_with(&raw, JOB_BYTES.min(left), clean, github_part))
+            }
+            (Plan::Read(_), None) => unreachable!("a log to read was read"),
+        };
+        if let Ok(log) = &log {
+            left -= log.text.len().min(left);
+        }
+        job.log = Some(log);
+    }
+}
+
+/// What a job's log needs: it is said already, or it is read from here.
+enum Plan {
+    Said(Result<Log, String>),
+    Read(Source),
+}
+
+enum Source {
+    /// The context to name and the build.
+    Bitbucket(String, u64),
+    /// The job's id.
+    GitHub(u64),
+}
+
+fn too_many() -> String {
+    format!("at most {JOBS} logs and {TOTAL_BYTES} bytes are given")
 }
 
 /// The job a check's link names: `…/actions/runs/<run>/job/<job>`.

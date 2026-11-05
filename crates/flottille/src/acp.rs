@@ -24,7 +24,7 @@ use agent_client_protocol::schema::v1::{
     SetSessionConfigOptionRequest, TextContent,
 };
 use agent_client_protocol::{Agent as AcpAgent, Client, ConnectionTo, ErrorCode, Lines};
-use flottille_core::agent::{Agent, Choices};
+use flottille_core::agent::{Agent, Choices, Used};
 use flottille_core::provider;
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -101,11 +101,34 @@ pub trait Events: Send + Sync + 'static {
     fn pump(&self) -> Option<Prompt>;
     /// An image a prompt carries, as its MIME type and its bytes in base64.
     fn image(&self, name: &str) -> Option<(&'static str, String)>;
-    fn turn_started(&self, text: &str, images: &[String]);
-    fn turn_ended(&self, stop_reason: &str, usage: Value);
+    /// `typed`: the prompt's `Prompt::typed`.
+    fn turn_started(&self, text: &str, images: &[String], typed: &Value);
+    /// The end of a turn, with what it used, one entry per model.
+    fn turn_ended(&self, stop_reason: &str, usage: Value, used: Vec<Used>);
     /// The agent's tools as they are now: its role may have gained some since the session began
     /// (`docs/tools.md`, "When the tools change").
     fn tools(&self) -> Vec<String>;
+}
+
+/// What a turn used, from the prompt's answer (`docs/reference/acp.md`, "What a turn used"):
+/// Flottille's bridges say it per model in `_meta.flottille.usage`, another agent may give ACP's
+/// `usage`, and an agent that says nothing gives one entry without counts.
+fn used(answer: &Value) -> Vec<Used> {
+    let of = |usage: &Value| Used {
+        model: usage["model"].as_str().map(str::to_owned),
+        input: usage["inputTokens"].as_u64(),
+        output: usage["outputTokens"].as_u64(),
+        cache_read: usage["cachedReadTokens"].as_u64(),
+        cache_write: usage["cachedWriteTokens"].as_u64(),
+        reasoning: usage["thoughtTokens"].as_u64(),
+        cost_usd: (usage["cost"]["currency"] == "USD")
+            .then(|| usage["cost"]["amount"].as_f64())
+            .flatten(),
+    };
+    match answer["_meta"]["flottille"]["usage"].as_array() {
+        Some(models) if !models.is_empty() => models.iter().map(of).collect(),
+        _ => vec![of(&answer["usage"])],
+    }
 }
 
 /// Flottille's MCP server as the agent's session gets it: its address and the process's token.
@@ -405,7 +428,7 @@ async fn drive(
                 text.push_str(&note);
             }
             let names: Vec<String> = sent.iter().map(|(name, ..)| name.clone()).collect();
-            events.turn_started(&text, &names);
+            events.turn_started(&text, &names, &prompt.typed);
             turns.running = true;
             let mut blocks = vec![ContentBlock::Text(TextContent::new(text))];
             blocks.extend(
@@ -431,7 +454,11 @@ async fn drive(
                 turns.running = false;
                 let answer = serde_json::to_value(&answer).unwrap_or_default();
                 let stop = answer["stopReason"].as_str().unwrap_or("end_turn");
-                events.turn_ended(stop, answer.get("usage").cloned().unwrap_or(Value::Null));
+                events.turn_ended(
+                    stop,
+                    answer.get("usage").cloned().unwrap_or(Value::Null),
+                    used(&answer),
+                );
             }
             order = orders.recv() => match order {
                 None | Some(Order::Stop) => return Ok(Exit::Stopped),
@@ -724,7 +751,10 @@ fn event_of(update: &Value) -> Option<(&'static str, Map<String, Value>)> {
         "plan" => ("agent.plan", json!({"entries": update["entries"]})),
         "usage_update" => (
             "agent.usage",
-            json!({"used": update["used"], "size": update["size"], "cost": update["cost"]}),
+            // A size of 0 is how an agent that does not know its window yet says so (ACP wants
+            // a number): the event says `null`.
+            json!({"used": update["used"], "size": update["size"].as_u64().filter(|s| *s > 0),
+                "cost": update["cost"]}),
         ),
         "current_mode_update" => (
             "agent.mode_changed",

@@ -350,8 +350,8 @@ fn a_jira_site_other_than_acli_s_sign_in_is_refused_with_its_reason() {
         "{problem}"
     );
     assert_eq!(read["title"], Value::Null);
-    // The work item is never asked of the wrong site.
-    assert_eq!(calls(user.acli_received()), ["jira auth status"]);
+    // The work item is asked together with the check, and nothing of it is shown.
+    assert!(calls(user.acli_received()).contains(&"jira auth status".to_owned()));
 }
 
 #[test]
@@ -463,9 +463,8 @@ fn a_github_issue_is_read_with_its_title_state_description_and_comments() {
     track(&user, github_issues());
     issues(&user, json!({"12": issue(12, "The login fails")}));
     link(&user, Some("#12")).unwrap();
-    // Linking answers with the ticket read: that is one read, the next one is another.
-    let linked = user.gh_received().len();
 
+    // Linking answered with the ticket read; the page asking next is given that read (kept 30 s).
     let read = ticket(&user);
 
     assert_eq!(read["problem"], Value::Null, "{read}");
@@ -478,12 +477,15 @@ fn a_github_issue_is_read_with_its_title_state_description_and_comments() {
     assert_eq!(read["description"], "Users cannot sign in.\nSee the form.");
     assert_eq!(read["comments"][0]["author"], "alice");
     assert_eq!(read["comments"][1]["body"], "Fixed on a branch");
+    let mut asked = calls(user.gh_received());
+    asked.sort();
     assert_eq!(
-        calls(user.gh_received())[linked..],
+        asked,
         [
             "auth status --hostname github.com",
             "issue view 12 -R github.com/acme/api --json number,title,state,body,comments,url"
-        ]
+        ],
+        "one read, for the link and the page both"
     );
 }
 
@@ -497,8 +499,8 @@ fn a_jira_work_item_is_read_through_acli_and_its_description_comes_as_plain_text
         json!({"ABC-123": work_item("ABC-123", "Add the login page")}),
     );
     link(&user, Some("ABC-123")).unwrap();
-    let linked = user.acli_received().len();
 
+    // Linking answered with the work item read; the page asking next is given that read.
     let read = ticket(&user);
 
     assert_eq!(read["problem"], Value::Null, "{read}");
@@ -513,12 +515,15 @@ fn a_jira_work_item_is_read_through_acli_and_its_description_comes_as_plain_text
     );
     assert_eq!(read["comments"][0]["author"], "Alice");
     assert_eq!(read["comments"][0]["body"], "Started");
+    let mut asked = calls(user.acli_received());
+    asked.sort();
     assert_eq!(
-        calls(user.acli_received())[linked..],
+        asked,
         [
             "jira auth status",
-            "jira workitem view ABC-123 --json --fields summary,status,description,comment"
-        ]
+            "jira workitem view ABC-123 --json --fields summary,status,description,comment,issuelinks"
+        ],
+        "one read, for the link and the page both"
     );
 }
 
@@ -629,7 +634,7 @@ fn a_missing_or_signed_out_cli_is_said_with_what_to_do_and_nothing_else_breaks()
     );
     assert!(shown.contains("Steps:"), "{shown}");
 
-    // Signed out: `acli jira auth status` ends with 1, and the work item is never asked.
+    // Signed out: `acli jira auth status` ends with 1, and nothing of the work item is shown.
     let user = User::new().with_fake_gh().with_fake_acli();
     fixture(&user);
     user.acli_script(json!({"signed_in": false}));
@@ -644,17 +649,16 @@ fn a_missing_or_signed_out_cli_is_said_with_what_to_do_and_nothing_else_breaks()
             .unwrap()
             .contains("acli jira auth login")
     );
-    assert_eq!(calls(user.acli_received()), ["jira auth status"]);
+    assert_eq!(jira["title"], Value::Null, "{jira}");
+    assert!(calls(user.acli_received()).contains(&"jira auth status".to_owned()));
     assert!(
         github["problem"]
             .as_str()
             .unwrap()
             .contains("gh auth login")
     );
-    assert_eq!(
-        calls(user.gh_received()),
-        ["auth status --hostname github.com"]
-    );
+    assert_eq!(github["title"], Value::Null, "{github}");
+    assert!(calls(user.gh_received()).contains(&"auth status --hostname github.com".to_owned()));
 }
 
 #[test]
@@ -902,7 +906,9 @@ fn ticket_read_returns_the_workspace_s_ticket_or_another_of_its_tracker_and_neve
     // Read only: every call either CLI got is one of the reads, and the gate held nothing.
     for call in calls(user.acli_received()) {
         assert!(
-            call == "jira auth status" || call.starts_with("jira workitem view "),
+            call == "jira auth status"
+                || call.starts_with("jira workitem view ")
+                || call.starts_with("jira workitem link list "),
             "{call}"
         );
     }
@@ -1020,4 +1026,173 @@ fn tickets_list_and_search_answer_from_the_store_with_its_age_and_show_reads_liv
         )
         .unwrap();
     assert_eq!(item["title"], "Renamed on GitHub", "{item}");
+}
+
+#[test]
+fn tickets_list_says_when_the_last_read_was_cut_at_its_bound() {
+    let user = User::with_fake_agent()
+        .with_fake_gh()
+        .with_env("FLOTTILLE_TEST_CLOCK", "1");
+    fixture(&user);
+    track(&user, github_issues());
+    let many: serde_json::Map<String, Value> = (1..=1000)
+        .map(|n| {
+            // Closed: a first read details none of them.
+            let mut issue = listed_issue(n, "An issue", "2026-10-01T10:00:00Z");
+            issue["state"] = json!("CLOSED");
+            (n.to_string(), issue)
+        })
+        .collect();
+    issues(&user, Value::Object(many));
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
+    let mcp = agent_in(&user, None);
+
+    let listed = mcp.call("tickets", json!({"action": "list"}));
+    assert!(!listed.error, "{}", listed.text);
+    let head = listed.text.lines().next().unwrap_or_default();
+    assert!(
+        head.contains("only the newest 1000 issues are listed"),
+        "{head}"
+    );
+}
+
+// The reads of `tickets show` (`docs/tickets.md`, "How fast it is read"): the sign-in check and
+// the work item are read together, and what was read is kept for 30 s.
+
+/// How long the fake `acli` takes over each of the reads of the tests below.
+const SLOW: u64 = 1000;
+
+/// An agent of the project folder and its id.
+fn agent_with_id(user: &User) -> (String, Mcp) {
+    let opened = user.received_requests("session/new").len();
+    let answer = user
+        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let (url, authorization) = server_of(user, opened);
+    (
+        answer["agent"]["id"].as_str().unwrap().to_owned(),
+        Mcp::initialize(&url, &authorization),
+    )
+}
+
+/// Jira's ABC-123, which the fake `acli` takes `delay` ms to check the sign-in of and to view.
+fn slow_jira(user: &User, delay: u64) {
+    fixture(user);
+    track(user, jira_abc());
+    user.acli_script(json!({
+        "items": {"ABC-123": work_item("ABC-123", "Add the login page")},
+        "delay_ms": delay,
+        "view_delay_ms": delay
+    }));
+}
+
+fn show_abc() -> Value {
+    json!({"action": "show", "ticket": "ABC-123"})
+}
+
+#[test]
+fn tickets_show_reads_its_parts_at_once() {
+    let user = User::with_fake_agent().with_fake_acli();
+    slow_jira(&user, SLOW);
+    let (_, mcp) = agent_with_id(&user);
+
+    let started = std::time::Instant::now();
+    let answer = mcp.call("tickets", show_abc());
+    let took = started.elapsed();
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("Add the login page"),
+        "{}",
+        answer.text
+    );
+    // The sign-in check and the view: two reads, taking two delays one after the other.
+    assert!(user.acli_received().len() >= 2);
+    assert!(
+        took < std::time::Duration::from_millis(SLOW * 17 / 10),
+        "{took:?} for two reads of {SLOW} ms"
+    );
+}
+
+#[test]
+fn an_issue_is_read_with_its_sign_in_check_at_once() {
+    let user = User::with_fake_agent().with_fake_gh();
+    fixture(&user);
+    track(&user, github_issues());
+    user.gh_script(json!({
+        "issues": {"acme/api": {"12": issue(12, "The login fails")}},
+        "delay_ms": SLOW,
+        "read_delay_ms": SLOW
+    }));
+    let (_, mcp) = agent_with_id(&user);
+
+    let started = std::time::Instant::now();
+    let answer = mcp.call("tickets", json!({"action": "show", "ticket": "#12"}));
+    let took = started.elapsed();
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(answer.text.contains("The login fails"), "{}", answer.text);
+    assert!(
+        took < std::time::Duration::from_millis(SLOW * 17 / 10),
+        "{took:?} for two reads of {SLOW} ms"
+    );
+}
+
+#[test]
+fn a_second_tickets_show_within_the_cache_time_reads_nothing_again() {
+    let user = User::with_fake_agent().with_fake_acli();
+    slow_jira(&user, 0);
+    let (_, mcp) = agent_with_id(&user);
+    let first = mcp.call("tickets", show_abc());
+    assert!(!first.error, "{}", first.text);
+    assert!(!first.text.contains("as read"), "{}", first.text);
+    let before = user.acli_received().len();
+
+    let second = mcp.call("tickets", show_abc());
+
+    assert!(!second.error, "{}", second.text);
+    assert_eq!(user.acli_received().len(), before);
+    assert!(second.text.contains("as read 0 s ago"), "{}", second.text);
+    assert!(
+        second.text.contains("Add the login page"),
+        "{}",
+        second.text
+    );
+    // Asked again, or in full, it reads again.
+    let mut fresh = show_abc();
+    fresh["fresh"] = json!(true);
+    let read = mcp.call("tickets", fresh);
+    assert!(!read.error, "{}", read.text);
+    assert!(user.acli_received().len() > before);
+    assert!(!read.text.contains("as read"), "{}", read.text);
+}
+
+#[test]
+fn a_comment_through_flottille_drops_the_cached_ticket() {
+    let user = User::with_fake_agent().with_fake_acli();
+    slow_jira(&user, 0);
+    let (id, mcp) = agent_with_id(&user);
+    let output = user.run(&["agent", "mode", &id, "full"]);
+    assert!(output.status.success(), "{output:?}");
+    mcp.call("tickets", show_abc());
+    let cached = user.acli_received().len();
+    mcp.call("tickets", show_abc());
+    assert_eq!(
+        user.acli_received().len(),
+        cached,
+        "cached before the write"
+    );
+
+    let written = mcp.call(
+        "tickets",
+        json!({"action": "comment", "ticket": "ABC-123", "body": "Fixed"}),
+    );
+    assert!(!written.error, "{}", written.text);
+    let after_write = user.acli_received().len();
+    let shown = mcp.call("tickets", show_abc());
+
+    assert!(!shown.error, "{}", shown.text);
+    assert!(user.acli_received().len() > after_write);
+    assert!(!shown.text.contains("as read"), "{}", shown.text);
 }

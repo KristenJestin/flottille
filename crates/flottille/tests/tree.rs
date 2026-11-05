@@ -659,7 +659,8 @@ fn an_agent_sends_a_command_to_its_child_with_agent_send() {
         seen.contains("Push the branch.")
     });
     assert!(seen.contains("The command ship of project app"), "{seen}");
-    assert!(seen.contains("Push the branch.\n\nthe login fix"), "{seen}");
+    assert!(seen.contains("Push the branch.\n"), "{seen}");
+    assert!(seen.contains("\n\n[command ship] the login fix"), "{seen}");
 }
 
 #[test]
@@ -761,7 +762,7 @@ fn a_sub_agent_has_no_agent_launching_tool_whatever_its_role() {
         );
         let text = refused(child.call(
             "agent_launch",
-            json!({"title": "deeper", "brief": "no", "root": true, "workspace": "w"}),
+            json!({"title": "deeper", "brief": "no", "follow": false, "root": true, "workspace": "w"}),
         ));
         assert!(text.contains("has no tool agent_launch"), "{role}: {text}");
         let text = refused(child.call("agent_launch", json!({"title": "e", "brief": "deep"})));
@@ -1065,7 +1066,7 @@ fn a_daemon_restarted_while_a_new_workspace_prepares_still_delivers_the_brief() 
     let answer = ok(lead.call(
         "agent_launch",
         json!({"title": "slow", "brief": "HANG once the workspace is ready", "new_workspace": "slow",
-            "root": true}),
+            "follow": false, "root": true}),
     ));
     let number = answer
         .strip_prefix("Waiting for the user's approval, request #")
@@ -1209,7 +1210,7 @@ fn agent_launch_refuses_a_mixed_workspace_with_a_sentence_naming_the_field() {
     // once the user allows it.
     let text = ok(lead.call(
         "agent_launch",
-        json!({"title": "fresh", "brief": "HANG two", "new_workspace": "fresh", "root": true}),
+        json!({"title": "fresh", "brief": "HANG two", "new_workspace": "fresh", "follow": false, "root": true}),
     ));
     let number = text
         .strip_prefix("Waiting for the user's approval, request #")

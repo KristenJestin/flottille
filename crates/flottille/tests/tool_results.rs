@@ -67,7 +67,8 @@ fn read(mcp: &Mcp, path: &str) -> String {
 
 /// A run whose output is every line of `big.txt`, by the id the run gave.
 fn long_run(mcp: &Mcp) -> String {
-    let answer = ok(mcp.call("run", json!({"line": "cat big.txt"})));
+    // Not `cat`, which a page of `fs_read` answers when the file fits one.
+    let answer = ok(mcp.call("run", json!({"line": "tail -n +1 big.txt"})));
     answer
         .strip_prefix("run ")
         .and_then(|rest| rest.split(':').next())

@@ -29,7 +29,8 @@
 //! ```
 //!
 //! `site` (`example.atlassian.net` by default) is the `Site:` line `acli jira auth status` prints, none
-//! with `site_line: false`; `delay_ms` makes that command slow, as one waiting on a network.
+//! with `site_line: false`; `delay_ms` makes that command slow, as one waiting on a network, and
+//! `view_delay_ms` does the same for `workitem view`.
 //! `signed_in: false` makes `acli jira auth status` end with 1. `items` gives, by key, what
 //! `acli jira workitem view KEY --json` prints; a key with none ends with 1. `fail` makes the view
 //! of that key end with 1, saying its text. With `--fields a,b`, the view prints the work item's
@@ -44,12 +45,30 @@
 //! `--jql` (or `--filter`) or `--json` it ends with 2, as a call Flottille never makes.
 //!
 //! A JQL that names `currentUser()` is answered with the script's `mine_search`, none without:
-//! the work items of the signed-in user.
+//! the work items of the signed-in user. A search whose `--fields` is `key` alone prints `null`
+//! for each work item it finds, as the real one was seen to: `key` is no field of `fields`.
+//! Otherwise each work item is Jira's REST issue as a real site printed it: `key`, `id` and `self`
+//! at the top, the other parts (`changelog`, `names`, …) `null`; its `fields` are those of the
+//! script that `--fields` asks (all of them without it). With `--count` it prints `✓ Number of work items in the search: N` instead. The
+//! script's `page` is how many a search prints at most without `--paginate`, none by default.
+//!
+//! `acli jira project view --key P --json` prints `{"key": P, "issueTypes": [{"name": …, "subtask":
+//! …}]}` (assumed, as Jira's REST project is: the page of the command gives no output), from the
+//! script's `types` (`{"ABC": ["Task", "Bug", {"name": "Sub-task", "subtask": true}]}`); a project
+//! with none ends with 1. With a `types` for the project, a `workitem create --type T` of a type
+//! it does not hold ends with 1, as Jira refuses it.
 //!
 //! The writes change nothing but the status a transition moves and the comments a `comment
 //! create` adds: the test reads them in the record. One more script key, `links_lose_their_url:
 //! true`, makes an `edit --description` change what the next views show, as Jira's document format
 //! does: the text written, each Markdown link `[text](url)` kept as its `text` alone.
+//!
+//! A text may come in a file (`--description-file`, `--body-file`), as `acli` takes it, plain or
+//! as Atlassian Document Format. The fake reads the file when it is called, since Flottille
+//! removes it after, and records it under `files` (`{flag, path, mode, dir_mode, adf | text}`: the
+//! modes of the file and of its folder, so that a test sees they are private). A document that
+//! is not valid ADF (the shape of its nodes and marks, as Jira holds them) ends with 1, saying
+//! why: `✗ Error: invalid ADF: …`.
 //!
 //! - `acli jira workitem create --project P --summary S … --json` prints `{"key": …}`, the
 //!   script's `created` (`P-1` without it); without `--project` or `--summary` it ends with 2.
@@ -60,6 +79,26 @@
 //!   script's `transitions` of K (`{"ABC-1": ["In Progress", "Done"]}`), in any case, and with 1
 //!   saying so otherwise. These are the work item's transitions as Jira would answer them: the
 //!   fake is the only place they are known, since the real `acli` lists none.
+//!
+//! The links (#365, `docs/tickets.md`, "Links and comments"), in the shapes a real Jira Cloud
+//! site was seen to answer: `acli jira workitem link type --json` prints the names of the
+//! script's `link_types` only (`{"issueLinkTypes": [{"name": "Blocks"}]}`; the script gives each
+//! its `inward` and `outward` wordings too, which `view` shows). `link create --out A --in B
+//! --type T --yes` (A blocks B) ends with 0 for two work items of `items` and a type whose name or
+//! outward wording is T, printing `✓ A Blocks B`, with 1 saying why otherwise, and keeps the link
+//! in `linked.json` numbered from 10000. `view K --json` gives K's links in `fields.issuelinks`,
+//! those of the script's `links` (`[{"id": "500", "type": "Blocks", "out": "ABC-2", "in":
+//! "ABC-1"}]`) and those created, as `{"id", "type": {name, inward, outward}, "inwardIssue",
+//! "outwardIssue"}`, one of the two `null`: on the outward item (`out`) the other is the
+//! `inwardIssue`, on the inward one the `outwardIssue`, each `{"key", "fields": {summary,
+//! status}}`. `link list --key K --json` prints `{"issueLinks": [{"id", "outwardIssueKey",
+//! "typeName"}]}`, the key `null` when K is the outward item. `link delete --id N --yes` ends with
+//! 0 for a link that is there, 1 otherwise, and keeps the ids deleted in `unlinked.json`.
+//!
+//! `comment update --key K --id I (--body | --body-file | --body-adf)` (the first two plain text,
+//! the last a document, refused when it is none) and `comment delete --key K --id I`
+//! change the comments a `comment create` added, which are numbered from 10100 (`id`, in the
+//! views); the script's own comments take an `id` of their own.
 //!
 //! A transition that ends with 0 moves the work item: a later `view` shows the status as the
 //! script spells it in `transitions` (kept in `moved.json`). Three more script keys, each a list
@@ -90,12 +129,17 @@ fn main() {
         .expect("the record");
     // One `write` of the whole line: `writeln!` on a `File` writes the JSON piece by piece, and
     // the pieces of two processes appending together would mix (#325).
-    let line = format!("{}\n", json!({"args": args, "env": env}));
+    let files = files_of(&args);
+    let line = format!("{}\n", json!({"args": args, "env": env, "files": files}));
     record.write_all(line.as_bytes()).expect("the record");
     let script: Value = std::fs::read_to_string(dir.join("script.json"))
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_else(|| json!({}));
+    if let Some(why) = files.iter().find_map(|file| file["invalid"].as_str()) {
+        eprintln!("✗ Error: invalid ADF: {why}");
+        std::process::exit(1);
+    }
     std::process::exit(answer(&dir, &script, &args));
 }
 
@@ -128,6 +172,9 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
             0
         }
         ["jira", "workitem", "view", key, rest @ ..] if rest.contains(&"--json") => {
+            if let Some(ms) = script["view_delay_ms"].as_u64() {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+            }
             if let Some(failure) = script["fail"][*key].as_str() {
                 eprintln!("{failure}");
                 return 1;
@@ -149,6 +196,14 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
                                 "content": [{"type": "text", "text": text}]}]});
                     }
                     add_posted(dir, script, key, &mut item);
+                    // As a real site: the links come only when asked, never with the default fields.
+                    if asks_links(rest) {
+                        let links: Vec<Value> = live_links(dir, script)
+                            .iter()
+                            .filter_map(|link| link_of(script, link, key))
+                            .collect();
+                        item["fields"]["issuelinks"] = Value::from(links);
+                    }
                     only_asked(rest, &mut item);
                     println!("{item}");
                     0
@@ -190,7 +245,28 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
                     .flat_map(|items| items.values().cloned())
                     .collect(),
             };
+            // A page at most, unless `--paginate` reads them all.
+            if let Some(page) = script["page"].as_u64()
+                && !rest.contains(&"--paginate")
+            {
+                found.truncate(page as usize);
+            }
             found.truncate(limit);
+            if rest.contains(&"--count") {
+                println!("✓ Number of work items in the search: {}", found.len());
+                return 0;
+            }
+            // As the real one does: `key` is no field of `fields`, so asked alone it prints
+            // nothing of each work item but `null`.
+            if value(rest, "--fields") == Some("key") {
+                found = vec![Value::Null; found.len()];
+            }
+            // The real one prints only the fields asked, and `updated` is never among them
+            // (refused): a round learns a change from the search's window, not from a date.
+            for item in found.iter_mut().filter(|item| item.is_object()) {
+                only_asked(rest, item);
+                enveloped(item);
+            }
             println!("{}", Value::from(found));
             0
         }
@@ -200,16 +276,160 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
             let Some(project) = value(rest, "--project") else {
                 return not_run(&words);
             };
+            if let (Some(kind), Some(types)) = (value(rest, "--type"), types_of(script, project))
+                && !types.iter().any(|t| t.0.eq_ignore_ascii_case(kind))
+            {
+                eprintln!(
+                    "✗ Error: the work item type {kind:?} is not valid for project {project}"
+                );
+                return 1;
+            }
             let key = script["created"]
                 .as_str()
                 .map_or_else(|| format!("{project}-1"), str::to_owned);
             println!("{}", json!({"key": key}));
             0
         }
-        ["jira", "workitem", "comment", "create", rest @ ..] if rest.contains(&"--body") => {
+        ["jira", "project", "view", rest @ ..] if rest.contains(&"--json") => {
+            let Some(project) = value(rest, "--key") else {
+                return not_run(&words);
+            };
+            let Some(types) = types_of(script, project) else {
+                eprintln!(
+                    "✗ Error: project {project} does not exist or you do not have permission to see it"
+                );
+                return 1;
+            };
+            let types: Vec<Value> = types
+                .into_iter()
+                .map(|(name, subtask)| json!({"name": name, "subtask": subtask}))
+                .collect();
+            println!("{}", json!({"key": project, "issueTypes": types}));
+            0
+        }
+        ["jira", "workitem", "link", "type", rest @ ..] if rest.contains(&"--json") => {
+            // Names only, as a real site answers: the wordings come with each link of a `view`.
+            let types: Vec<Value> = link_types(script)
+                .iter()
+                .map(|kind| json!({"name": kind["name"]}))
+                .collect();
+            println!("{}", json!({"issueLinkTypes": types}));
+            0
+        }
+        ["jira", "workitem", "link", "create", rest @ ..] if rest.contains(&"--yes") => {
+            let (Some(out), Some(inward), Some(kind)) = (
+                value(rest, "--out"),
+                value(rest, "--in"),
+                value(rest, "--type"),
+            ) else {
+                return not_run(&words);
+            };
+            for key in [out, inward] {
+                if script["items"].get(key).is_none() {
+                    eprintln!("✗ Error: work item {key} does not exist");
+                    return 1;
+                }
+            }
+            let Some(found) = link_types(script).into_iter().find(|t| {
+                [&t["name"], &t["outward"]]
+                    .iter()
+                    .any(|word| word.as_str().is_some_and(|w| w.eq_ignore_ascii_case(kind)))
+            }) else {
+                eprintln!("✗ Error: link type {kind:?} not found");
+                return 1;
+            };
+            let mut made = links_file(dir, "linked.json");
+            let id = (10000 + made.len()).to_string();
+            made.push(json!({"id": id, "type": found["name"], "out": out, "in": inward}));
+            std::fs::write(dir.join("linked.json"), Value::from(made).to_string())
+                .expect("the links");
+            println!(
+                "✓ {out} {} {inward}",
+                found["name"].as_str().unwrap_or_default()
+            );
+            0
+        }
+        ["jira", "workitem", "link", "list", rest @ ..] if rest.contains(&"--json") => {
+            let Some(key) = value(rest, "--key") else {
+                return not_run(&words);
+            };
+            // As a real site answers: the outward item's key alone, none when K is that item.
+            let entries: Vec<Value> = live_links(dir, script)
+                .into_iter()
+                .filter(|link| link["out"] == key || link["in"] == key)
+                .map(|link| {
+                    let outward = (link["out"] != key).then(|| link["out"].clone());
+                    json!({"id": link["id"], "outwardIssueKey": outward, "typeName": link["type"]})
+                })
+                .collect();
+            println!("{}", json!({"issueLinks": entries}));
+            0
+        }
+        ["jira", "workitem", "link", "delete", rest @ ..] if rest.contains(&"--yes") => {
+            let Some(id) = value(rest, "--id") else {
+                return not_run(&words);
+            };
+            let mut gone = links_file(dir, "unlinked.json");
+            let there = live_links(dir, script).iter().any(|link| link["id"] == id);
+            if !there {
+                eprintln!("✗ Error: link {id} does not exist");
+                return 1;
+            }
+            gone.push(Value::from(id));
+            std::fs::write(dir.join("unlinked.json"), Value::from(gone).to_string())
+                .expect("the links");
+            println!("✓ Link {id} deleted");
+            0
+        }
+        ["jira", "workitem", "comment", "update", rest @ ..]
+            if ["--body", "--body-file", "--body-adf"]
+                .iter()
+                .any(|flag| rest.contains(flag)) =>
+        {
+            // `--body` and `--body-file` are plain text, `--body-adf` a document, as its page says.
+            let body = match (
+                value(rest, "--body"),
+                value(rest, "--body-file"),
+                value(rest, "--body-adf"),
+            ) {
+                (Some(text), _, _) => Some(Value::from(text)),
+                (_, Some(path), _) => std::fs::read_to_string(path).ok().map(Value::from),
+                (_, _, Some(path)) => match file_text(path) {
+                    Some(doc) if check(&doc).is_ok() => Some(doc),
+                    _ => {
+                        eprintln!("✗ Error: --body-adf holds no Atlassian Document Format");
+                        return 1;
+                    }
+                },
+                _ => None,
+            };
             let done = known(script, rest);
-            if let (0, Some(key), Some(body)) = (done, value(rest, "--key"), value(rest, "--body"))
+            if let (0, Some(key), Some(id), Some(body)) =
+                (done, value(rest, "--key"), value(rest, "--id"), body)
+                && let Some(at) = posted_at(id)
             {
+                change_post(dir, key, at, Some(body));
+            }
+            done
+        }
+        ["jira", "workitem", "comment", "delete", rest @ ..] => {
+            let done = known(script, rest);
+            if let (0, Some(key), Some(id)) = (done, value(rest, "--key"), value(rest, "--id"))
+                && let Some(at) = posted_at(id)
+            {
+                change_post(dir, key, at, None);
+            }
+            done
+        }
+        ["jira", "workitem", "comment", "create", rest @ ..]
+            if rest.contains(&"--body") || rest.contains(&"--body-file") =>
+        {
+            let done = known(script, rest);
+            let body = match value(rest, "--body") {
+                Some(text) => Some(Value::from(text)),
+                None => value(rest, "--body-file").and_then(file_text),
+            };
+            if let (0, Some(key), Some(body)) = (done, value(rest, "--key"), body) {
                 post(dir, key, body);
             }
             done
@@ -264,6 +484,151 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
     }
 }
 
+/// The work item types the script gives `project`: each one's name and whether it is a sub-task;
+/// none when the script says nothing of the project.
+fn types_of(script: &Value, project: &str) -> Option<Vec<(String, bool)>> {
+    let types = script["types"][project].as_array()?;
+    Some(
+        types
+            .iter()
+            .filter_map(|kind| match kind.as_str() {
+                Some(name) => Some((name.to_owned(), false)),
+                None => Some((kind["name"].as_str()?.to_owned(), kind["subtask"] == true)),
+            })
+            .collect(),
+    )
+}
+
+/// The texts the call passes in files, as the record holds them (see the top of this file).
+fn files_of(args: &[String]) -> Vec<Value> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut files = Vec::new();
+    for (at, flag) in args.iter().enumerate() {
+        if flag != "--description-file" && flag != "--body-file" {
+            continue;
+        }
+        let Some(path) = args.get(at + 1) else {
+            continue;
+        };
+        let mode = |path: &Path| {
+            std::fs::metadata(path)
+                .map(|meta| meta.permissions().mode() & 0o777)
+                .unwrap_or_default()
+        };
+        let mut file = json!({"flag": flag, "path": path, "mode": mode(Path::new(path)),
+            "dir_mode": Path::new(path).parent().map(mode)});
+        match std::fs::read_to_string(path) {
+            Ok(text) => match serde_json::from_str::<Value>(&text) {
+                Ok(adf) => match check(&adf) {
+                    Ok(()) => file["adf"] = adf,
+                    Err(why) => file["invalid"] = Value::from(why),
+                },
+                Err(_) => file["text"] = Value::from(text),
+            },
+            Err(error) => file["invalid"] = Value::from(format!("{path}: {error}")),
+        }
+        files.push(file);
+    }
+    files
+}
+
+/// The text a file holds: its document when it is one, else its words.
+fn file_text(path: &str) -> Option<Value> {
+    let text = std::fs::read_to_string(path).ok()?;
+    Some(serde_json::from_str(&text).unwrap_or(Value::from(text)))
+}
+
+/// Whether `doc` is Atlassian Document Format as Jira holds it: a `doc` of version 1 whose
+/// nodes are known, each in a parent that takes it, its marks known too. Not all of ADF: the
+/// nodes Flottille writes and Jira's own that it reads.
+fn check(doc: &Value) -> Result<(), String> {
+    if doc["type"] != "doc" || doc["version"] != 1 {
+        return Err("the document is not {\"type\": \"doc\", \"version\": 1}".into());
+    }
+    let content = doc["content"].as_array().filter(|c| !c.is_empty());
+    let content = content.ok_or("a doc holds at least one block")?;
+    content.iter().try_for_each(|node| node_in(node, "doc"))
+}
+
+/// What a node of each type may hold.
+fn children_of(kind: &str) -> Option<&'static [&'static str]> {
+    const INLINE: &[&str] = &["text", "hardBreak", "mention", "emoji", "inlineCard"];
+    Some(match kind {
+        "doc" => &[
+            "paragraph",
+            "heading",
+            "blockquote",
+            "codeBlock",
+            "bulletList",
+            "orderedList",
+            "rule",
+            "table",
+        ],
+        "paragraph" | "heading" => INLINE,
+        "blockquote" => &["paragraph", "bulletList", "orderedList", "codeBlock"],
+        "codeBlock" => &["text"],
+        "bulletList" | "orderedList" => &["listItem"],
+        "listItem" => &["paragraph", "bulletList", "orderedList", "codeBlock"],
+        "table" => &["tableRow"],
+        "tableRow" => &["tableHeader", "tableCell"],
+        "tableHeader" | "tableCell" => &["paragraph"],
+        "rule" => &[],
+        _ => return None,
+    })
+}
+
+fn node_in(node: &Value, parent: &str) -> Result<(), String> {
+    let kind = node["type"].as_str().unwrap_or_default();
+    if !children_of(parent).is_some_and(|allowed| allowed.contains(&kind)) {
+        return Err(format!("{kind:?} is not a node a {parent} takes"));
+    }
+    match kind {
+        "text" => return text_node(node),
+        "hardBreak" | "mention" | "emoji" | "inlineCard" => return Ok(()),
+        "heading" => match node["attrs"]["level"].as_u64() {
+            Some(1..=6) => {}
+            _ => return Err("a heading has a level from 1 to 6".into()),
+        },
+        _ => {}
+    }
+    let content = node["content"].as_array();
+    // These hold at least one child; a paragraph, a heading and a code block may be empty.
+    let needs = !matches!(kind, "paragraph" | "heading" | "codeBlock" | "rule");
+    if needs && content.is_none_or(|c| c.is_empty()) {
+        return Err(format!("a {kind} holds at least one node"));
+    }
+    if node.get("marks").is_some() {
+        return Err(format!("a {kind} has no marks"));
+    }
+    content
+        .into_iter()
+        .flatten()
+        .try_for_each(|child| node_in(child, kind))
+}
+
+fn text_node(node: &Value) -> Result<(), String> {
+    if node["text"].as_str().is_none_or(str::is_empty) {
+        return Err("a text node is not empty".into());
+    }
+    let marks: Vec<&str> = node["marks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|mark| mark["type"].as_str().unwrap_or_default())
+        .collect();
+    for mark in node["marks"].as_array().into_iter().flatten() {
+        match mark["type"].as_str().unwrap_or_default() {
+            "strong" | "em" | "strike" | "code" | "underline" => {}
+            "link" if mark["attrs"]["href"].as_str().is_some() => {}
+            other => return Err(format!("the mark {other:?} is not one Jira knows here")),
+        }
+    }
+    if marks.contains(&"code") && marks.iter().any(|m| !matches!(*m, "code" | "link")) {
+        return Err("a code mark goes with a link only".into());
+    }
+    Ok(())
+}
+
 /// Where the transitions that took left the work items: `moved.json`, written by the fake.
 fn moved(dir: &Path) -> Map<String, Value> {
     std::fs::read_to_string(dir.join("moved.json"))
@@ -310,15 +675,99 @@ fn posted(dir: &Path) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
-/// Keeps a comment created on `key`, its text as it was passed.
-fn post(dir: &Path, key: &str, body: &str) {
+/// Keeps a comment created on `key`, its text or document as it was passed.
+fn post(dir: &Path, key: &str, body: Value) {
     let mut all = posted(dir);
     let mut comments = all
         .get(key)
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    comments.push(Value::from(body));
+    comments.push(body);
+    all.insert(key.to_owned(), Value::from(comments));
+    std::fs::write(dir.join("posted.json"), Value::from(all).to_string()).expect("the comments");
+}
+
+/// The types the script gives for links.
+fn link_types(script: &Value) -> Vec<Value> {
+    script["link_types"].as_array().cloned().unwrap_or_default()
+}
+
+/// A list of links kept in `name` of the fake's folder.
+fn links_file(dir: &Path, name: &str) -> Vec<Value> {
+    std::fs::read_to_string(dir.join(name))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// The links there: the script's and those created, less those deleted.
+fn live_links(dir: &Path, script: &Value) -> Vec<Value> {
+    let gone = links_file(dir, "unlinked.json");
+    script["links"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .cloned()
+        .chain(links_file(dir, "linked.json"))
+        .filter(|link| !gone.contains(&link["id"]))
+        .collect()
+}
+
+/// Whether `--fields` asks a view for the links (`issuelinks`, or every field with `*all`).
+fn asks_links(rest: &[&str]) -> bool {
+    rest.iter()
+        .position(|word| *word == "--fields" || *word == "-f")
+        .and_then(|at| rest.get(at + 1))
+        .is_some_and(|fields| {
+            fields
+                .split(',')
+                .any(|field| matches!(field.trim(), "issuelinks" | "*all"))
+        })
+}
+
+/// One link of `view`'s `issuelinks` on K, none when K is not on it. As a real site gives it, the
+/// field names the other item's side: on the outward item (the one that blocks) the other is an
+/// `inwardIssue`, on the inward one an `outwardIssue`.
+fn link_of(script: &Value, link: &Value, key: &str) -> Option<Value> {
+    let kind = link_types(script)
+        .into_iter()
+        .find(|t| t["name"] == link["type"])?;
+    let issue = |other: &Value| {
+        let item = &script["items"][other.as_str().unwrap_or_default()];
+        json!({"key": other, "fields": {"summary": item["fields"]["summary"],
+            "status": item["fields"]["status"]}})
+    };
+    let kind = json!({"name": kind["name"], "inward": kind["inward"], "outward": kind["outward"]});
+    if link["out"] == key {
+        Some(
+            json!({"id": link["id"], "type": kind, "inwardIssue": issue(&link["in"]),
+            "outwardIssue": null}),
+        )
+    } else if link["in"] == key {
+        Some(json!({"id": link["id"], "type": kind, "inwardIssue": null,
+            "outwardIssue": issue(&link["out"])}))
+    } else {
+        None
+    }
+}
+
+/// The place in `posted.json` of a comment id handed out by the views (10100, 10101, …).
+fn posted_at(id: &str) -> Option<usize> {
+    id.parse::<usize>().ok()?.checked_sub(10100)
+}
+
+/// Replaces (or, for none, deletes) the comment created at `at` on `key`.
+fn change_post(dir: &Path, key: &str, at: usize, body: Option<Value>) {
+    let mut all = posted(dir);
+    let mut comments = all
+        .get(key)
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(slot) = comments.get_mut(at) {
+        *slot = body.unwrap_or(Value::Null);
+    }
     all.insert(key.to_owned(), Value::from(comments));
     std::fs::write(dir.join("posted.json"), Value::from(all).to_string()).expect("the comments");
 }
@@ -333,11 +782,46 @@ fn add_posted(dir: &Path, script: &Value, key: &str, item: &mut Value) {
     if !comments.is_array() {
         *comments = json!([]);
     }
-    for body in created {
+    for (at, body) in created.into_iter().enumerate() {
+        if body.is_null() {
+            continue;
+        }
         comments.as_array_mut().expect("an array").push(
-            json!({"author": {"displayName": user}, "created": "2026-10-01T12:00:00.000+0000",
-                "body": body}),
+            json!({"id": (10100 + at).to_string(), "author": {"displayName": user},
+                "created": "2026-10-01T12:00:00.000+0000", "body": body}),
         );
+    }
+}
+
+/// What the real search prints around a work item, as a real site was seen to: Jira's REST
+/// issue, its parts not asked for `null`.
+fn enveloped(item: &mut Value) {
+    let Some(item) = item.as_object_mut() else {
+        return;
+    };
+    let id = item
+        .get("self")
+        .and_then(Value::as_str)
+        .and_then(|link| link.rsplit('/').next())
+        .unwrap_or("10000")
+        .to_owned();
+    item.entry("id").or_insert(id.into());
+    item.entry("expand").or_insert(
+        "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations".into(),
+    );
+    for part in [
+        "changelog",
+        "editmeta",
+        "fieldsToInclude",
+        "names",
+        "operations",
+        "properties",
+        "renderedFields",
+        "schema",
+        "transitions",
+        "versionedRepresentations",
+    ] {
+        item.entry(part).or_insert(Value::Null);
     }
 }
 

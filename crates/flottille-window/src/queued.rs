@@ -7,21 +7,27 @@
 //! Edit takes it back into the composer, Send now stops the root's turn and hands it this one next.
 //! The daemon decides each, in one transaction; the window only asks.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
-use flottille_ui::{Button, Icon, Item, Listing, Placement, Type, icon, palette, space};
+use flottille_ui::{
+    Button, Icon, Item, Listing, Placement, commanded_text, icon, palette, space, tipped,
+};
 use gpui_kit::{
     AnyElement, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Render,
-    SharedString, StatefulInteractiveElement as _, Styled, TestSupportExt as _, WeakEntity, Window,
-    div, px,
+    SharedString, StatefulInteractiveElement as _, Styled, StyledImage as _, TestSupportExt as _,
+    WeakEntity, Window, div, px,
 };
 
 use crate::actions::Command;
+use crate::session::command_chips;
 use crate::session_link::Queued;
 use crate::shell::Shell;
 
-/// What a waiting message says of itself.
-pub const WAITS: &str = "Sent when the agent finishes its step";
+/// What a waiting message says of itself, in one short line; the whole sentence is its tooltip.
+/// A message waits only while the root's turn runs, so it is always "after this step".
+pub const WAITS: &str = "Queued · after this step";
+pub const WAITS_FULL: &str = "Sent when the agent finishes its step";
 
 pub struct QueuedMessages {
     shell: WeakEntity<Shell>,
@@ -31,6 +37,8 @@ pub struct QueuedMessages {
     list: Listing<Queued>,
     /// The messages a request was sent for and not answered yet: their buttons wait.
     asked: HashSet<String>,
+    /// The pictures of the waiting messages, read back from the daemon by name.
+    pictures: HashMap<String, Arc<gpui_kit::Image>>,
 }
 
 impl QueuedMessages {
@@ -41,7 +49,33 @@ impl QueuedMessages {
             messages: Vec::new(),
             list: Listing::default(),
             asked: HashSet::new(),
+            pictures: HashMap::new(),
         }
+    }
+
+    /// The root the messages wait for.
+    pub fn session(&self) -> &str {
+        &self.session
+    }
+
+    /// A picture of a waiting message, read back: its thumbnail shows.
+    pub fn picture_read(
+        &mut self,
+        name: &str,
+        picture: Arc<gpui_kit::Image>,
+        cx: &mut Context<Self>,
+    ) {
+        self.pictures.insert(name.to_owned(), picture);
+        cx.notify();
+    }
+
+    /// How many pictures of the waiting messages are read.
+    pub fn pictures_read(&self) -> usize {
+        self.messages
+            .iter()
+            .flat_map(|m| &m.pictures)
+            .filter(|name| self.pictures.contains_key(*name))
+            .count()
     }
 
     pub fn messages(&self) -> &[Queued] {
@@ -121,7 +155,7 @@ pub fn queued_id(delivery: &str) -> ElementId {
 }
 
 impl Render for QueuedMessages {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let now = cx.background_executor().now();
         self.list.sync(
             self.messages
@@ -139,16 +173,64 @@ impl Render for QueuedMessages {
         let items: Vec<AnyElement> = listed
             .into_iter()
             .map(|(key, message, placement)| {
-                let pictures = match message.images {
-                    0 => None,
-                    1 => Some("1 picture".to_owned()),
-                    n => Some(format!("{n} pictures")),
-                };
-                let waits = SharedString::from(match pictures {
-                    Some(pictures) => format!("{pictures} · {WAITS}"),
-                    None => WAITS.to_owned(),
-                });
                 let text = SharedString::from(message.text.clone());
+                let thumbs = (!message.pictures.is_empty()).then(|| {
+                    div()
+                        .id(ElementId::Name(format!("queued-{key}-images").into()))
+                        .flex()
+                        .flex_wrap()
+                        .justify_end()
+                        .gap(space::SM)
+                        .children(message.pictures.iter().enumerate().map(|(n, name)| {
+                            let thumb = div()
+                                .id(ElementId::Name(format!("queued-{key}-image-{n}").into()))
+                                .flex_none()
+                                .size(px(40.))
+                                .rounded(px(6.))
+                                .border_1()
+                                .border_color(p.line2)
+                                .bg(p.card)
+                                .overflow_hidden();
+                            match self.pictures.get(name) {
+                                Some(picture) => thumb.child(
+                                    gpui_kit::img(picture.clone())
+                                        .size_full()
+                                        .rounded(px(6.))
+                                        .object_fit(gpui_kit::ObjectFit::Cover),
+                                ),
+                                None => thumb,
+                            }
+                            .test_support()
+                        }))
+                });
+                // What the user typed, each command a chip in it.
+                let shown = match message.commands.is_empty() {
+                    true => text.clone().into_any_element(),
+                    false => commanded_text(
+                        &message.text,
+                        &command_chips(&message.text, &message.commands),
+                        cx,
+                    )
+                    .into_any_element(),
+                };
+                let waits_id = ElementId::Name(format!("queued-{key}-waits").into());
+                let waits = tipped(
+                    div()
+                        .id(waits_id)
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .gap(space::XS)
+                        .text_size(px(11.5))
+                        .text_color(p.faint)
+                        .aria_label(SharedString::from(WAITS))
+                        .child(icon(Icon::Clock).size(px(11.)).text_color(p.faint))
+                        .child(WAITS),
+                    WAITS_FULL,
+                    16.,
+                    window,
+                    cx,
+                );
                 let bubble = div()
                     .id(queued_id(&key))
                     .max_w(px(540.))
@@ -164,28 +246,18 @@ impl Render for QueuedMessages {
                     .px(space::MD)
                     .py(space::SM)
                     .aria_label(text.clone())
+                    .children(thumbs)
                     .child(
                         div()
+                            .id(ElementId::Name(format!("queued-{key}-text").into()))
                             .max_h(px(60.))
                             .overflow_hidden()
                             .text_size(px(13.5))
                             .text_color(p.mute)
-                            .child(text),
-                    )
-                    .child(
-                        div()
-                            .id(ElementId::Name(format!("queued-{key}-waits").into()))
-                            .flex()
-                            .items_center()
-                            .justify_end()
-                            .gap(space::XS)
-                            .mono(11.)
-                            .text_color(p.faint)
-                            .aria_label(waits.clone())
-                            .child(icon(Icon::Clock).size(px(11.)).text_color(p.faint))
-                            .child(waits)
+                            .child(shown)
                             .test_support(),
                     )
+                    .child(waits)
                     .test_support();
                 let waiting = self.asked.contains(&key);
                 let button = |which: &str, label: &str, glyph: Icon| {

@@ -120,6 +120,39 @@ pub struct Choices {
     pub mode: Option<String>,
 }
 
+/// What one model used in one turn, as the agent said it: a count it did not give is `None`,
+/// never zero (`docs/reference/acp.md`, "What a turn used").
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Used {
+    pub model: Option<String>,
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    pub cache_read: Option<u64>,
+    pub cache_write: Option<u64>,
+    pub reasoning: Option<u64>,
+    pub cost_usd: Option<f64>,
+}
+
+/// One row of the turns' usage: history, kept when the agent, its session, its workspace or its
+/// project goes, so it names them by id and by name as they were.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TurnUsage {
+    pub agent: String,
+    /// The agent's title then; `None` for a root.
+    pub title: Option<String>,
+    /// The id of the session's root agent.
+    pub session: String,
+    pub project: String,
+    pub workspace: Option<String>,
+    /// The kind of agent: `claude`, `codex`, `opencode`…
+    pub provider: String,
+    pub role: String,
+    pub started_at: u64,
+    pub ended_at: u64,
+    pub stop_reason: String,
+    pub used: Used,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentState {

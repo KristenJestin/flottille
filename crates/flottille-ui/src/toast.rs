@@ -206,17 +206,21 @@ impl ToastStack {
             .flex_col()
             .child(
                 div()
+                    .id(ElementId::Name(format!("toast-{number}-title").into()))
                     .text_size(px(13.))
                     .line_height(px(19.5))
                     .font_weight(FontWeight::MEDIUM)
-                    .child(toast.title.clone()),
+                    .child(toast.title.clone())
+                    .test_support(),
             )
             .children(toast.detail.clone().map(|detail| {
                 div()
+                    .id(ElementId::Name(format!("toast-{number}-detail").into()))
                     .text_size(px(12.5))
                     .line_height(px(19.))
                     .text_color(p.mute)
                     .child(detail)
+                    .test_support()
             }));
         let dismiss = div()
             .id(ElementId::Name(format!("toast-{number}-dismiss").into()))

@@ -131,6 +131,15 @@ The user chose the limit above which a tool result is cut (`tool_results.set`,
 |---|---|
 | `limit` | The limit in characters, or `"off"` for no cut. |
 
+### `sessions.changed`
+
+The user chose after how many days an inactive session is ended, or switched that off
+(`sessions.set`, `docs/design.md` §5.7).
+
+| Field | |
+|---|---|
+| `days` | The days, 1 to 90, or `"off"`. |
+
 ### `workspaces_folder.changed`
 
 The user chose where workspaces go (`workspaces_folder.set`, `docs/projects.md`, "Where the
@@ -249,7 +258,8 @@ The workspace was linked to a ticket, or unlinked ([`tickets.md`](tickets.md)).
 ### `workspace.changed`
 
 Every worktree made of the workspace is on one branch other than the recorded one (a `git switch`
-in it), and the record took it ([`workspaces.md`](workspaces.md), "The branch").
+in it, or `workspace.rename_branch`), and the record took it ([`workspaces.md`](workspaces.md),
+"The branch").
 
 | Field | |
 |---|---|
@@ -381,6 +391,7 @@ A turn starts with this message.
 | `agent` | |
 | `text` | The message. |
 | `images` | The names of the images that went with it, when some did (`agent.image` gives each back). An image that did not go is said in `text` instead. |
+| `typed` | When a delivery of the message used commands (`docs/commands.md`): one entry per delivery of `text`, in order, `{"text", "commands"}` for one that used commands (what was typed, masked, and the names of the commands in the order of their first use), `null` for the others. Left out when none did; an event written before it was kept has none. |
 
 #### `agent.user_message`, `agent.message`, `agent.thought`
 
@@ -419,6 +430,14 @@ The agent compacted its context.
 The agent's plan (`entries`), its context use (`used` and `size` in tokens, `cost`), its mode
 (`mode`), its options (`options`, as ACP gives them: the agent's own announcement; a change of
 model or effort the user asked is `agent.options_taken`). Each with `agent` and `replay`.
+
+`agent.usage` comes during a turn, after an answer of the agent and at most once a second, and at
+its end. Its `used` is always a number; `size` is `null` while no one knows the context window yet
+(Claude Code gives it with the end of a turn only: before the session's first `result` the update
+carries `used` alone; the bridge's `usage_update` says a `size` of 0, which the event turns into `null`). The daemon fills in the last `size` the agent reported when its process
+says none, so a process started again after a release keeps the window, as long as the model is
+the same: `agent.usage` carries the `model` the agent's process runs, and a window reported for
+another model is not carried over.
 
 #### `agent.provider_wait`, `agent.provider_limit`, `agent.provider_error`
 
@@ -589,12 +608,14 @@ superseded. A root's failure is for the user to look at: `flottille inbox` lists
 #### `agent.ended`
 
 The agent was stopped (by the user, its parent, or its parent's end), or it was a child that
-reported. Its process and its runs are stopped; what was queued for it is superseded.
+reported, or it was a root left alone for the days the user set (`inactive for 7 days`,
+`docs/design.md` §5.7). Its process and its runs are stopped; what was queued for it is
+superseded.
 
 | Field | |
 |---|---|
 | `agent` | |
-| `reason` | A sentence. |
+| `reason` | A sentence: `stopped by the user`, `its parent stopped`, `it reported`, `inactive for N days`… |
 
 #### `agent.gate_mode_changed`
 
@@ -774,9 +795,24 @@ ends first, `cancelled`.
 | Field | |
 |---|---|
 | `agent`, `subscription` | |
-| `source` | What produces its events: `forge`, or `timer` for a wake. |
+| `source` | What produces its events: `forge`, `tickets`, `timer` for a wake, or `session` for the following of a session the agent started for the user. |
 | `named` | What it watches in a few words, as the agent reads it (`pull request #12 of api, workspace login`; `wake: <why>`). |
 | `events` | The events it waits for. |
+
+#### `session.following_paused`, `session.following_resumed`
+
+The two sessions of a following (`docs/tools.md`, "Sessions that talk to each other") wrote to each
+other five times with no message of the user's in either: the following pauses, and wakes nobody
+until it resumes, and the `session_send` between the two are refused. A message of the user's to
+either session, or the window's Resume (`subscription.resume`), resumes it.
+
+| Field | |
+|---|---|
+| `agent` | The session that is followed, a root: the user's. |
+| `follower` | The agent that started it and follows it. |
+| `exchanges` | (`paused` only) How many were written: 5. |
+
+`flottille inbox` lists a pause as an entry of kind `paused` (`docs/protocol.md`, `inbox.list`).
 
 #### `subscription.ended`
 
@@ -785,5 +821,5 @@ A subscription is over, once.
 | Field | |
 |---|---|
 | `agent`, `subscription` | |
-| `why` | `delivered` (an event it waited for, or the end of its target, or a wake's time, was delivered), `expired` (its time was up, said to the agent), `cancelled` (the agent's `unsubscribe`, the user's `subscription.cancel`, or a new subscription to the same target), `agent-ended` (its agent ended), `unavailable` (until #257, when a subscription held a watch of its own: the daemon could not watch its target again after a restart). Only the first two wake the agent. |
+| `why` | `delivered` (an event it waited for, or the end of its target, or a wake's time, was delivered), `expired` (its time was up, said to the agent), `cancelled` (the agent's `unsubscribe`, the user's `subscription.cancel`, or a new subscription to the same target), `agent-ended` (its agent ended), `session-ended` (the session it followed ended or failed, said to the agent), `unavailable` (until #257, when a subscription held a watch of its own: the daemon could not watch its target again after a restart). Only the first two wake the agent. |
 

@@ -19,6 +19,7 @@ use flottille_core::store::{AgentChange, now_ms};
 use serde_json::{Value, json};
 
 use crate::agents::{self, Order};
+use crate::commands::Message;
 use crate::daemon::Daemon;
 use crate::projects::Failure;
 
@@ -197,20 +198,29 @@ pub fn deliver(
     body: &str,
     urgency: &str,
 ) -> Option<String> {
-    deliver_with_images(daemon, agent, kind, id, body, urgency, Vec::new())
+    deliver_message(
+        daemon,
+        agent,
+        kind,
+        id,
+        &Message::plain(body),
+        urgency,
+        Vec::new(),
+    )
 }
 
-/// `deliver`, with the images of the message: names of files of the agent's folder of images.
-pub fn deliver_with_images(
+/// `deliver`, for a message that may have used commands (its typed text and their names are
+/// kept with it), with its images: names of files of the agent's folder of images.
+pub fn deliver_message(
     daemon: &Arc<Daemon>,
     agent: &str,
     kind: &str,
     id: Option<String>,
-    body: &str,
+    message: &Message,
     urgency: &str,
     images: Vec<String>,
 ) -> Option<String> {
-    let id = store(daemon, agent, kind, id, body, urgency, images)?;
+    let id = store(daemon, agent, kind, id, message, urgency, images)?;
     ring(daemon, agent);
     Some(id)
 }
@@ -228,7 +238,7 @@ pub fn queue(
         agent,
         kind,
         id,
-        body,
+        &Message::plain(body),
         approval::BETWEEN_TURNS,
         Vec::new(),
     )
@@ -239,16 +249,22 @@ fn store(
     agent: &str,
     kind: &str,
     id: Option<String>,
-    body: &str,
+    message: &Message,
     urgency: &str,
     images: Vec<String>,
 ) -> Option<String> {
     let id = id.unwrap_or_else(|| format!("{kind}-{}", new_id().unwrap_or_default()));
+    let env = std::env::vars_os().collect();
     let delivery = Delivery {
         id: id.clone(),
         agent: agent.to_owned(),
         kind: kind.to_owned(),
-        body: secrets::mask(body, &std::env::vars_os().collect()),
+        body: secrets::mask(&message.text, &env),
+        typed: message
+            .typed
+            .as_deref()
+            .map(|typed| secrets::mask(typed, &env)),
+        commands: message.commands.clone(),
         urgency: urgency.to_owned(),
         state: "queued".into(),
         created_at: 0,
@@ -323,7 +339,9 @@ pub fn withdraw(daemon: &Daemon, agent: &str, id: &str, images: bool) -> Result<
         Vec::new()
     };
     discard_images(&daemon.paths, agent, &delivery.images);
-    Ok(json!({"agent": agent, "delivery": id, "text": delivery.body, "images": pictures}))
+    // What the user wrote comes back, not the commands' text it was sent with.
+    let text = delivery.typed.unwrap_or(delivery.body);
+    Ok(json!({"agent": agent, "delivery": id, "text": text, "images": pictures}))
 }
 
 /// Hands the root a message that waits, at once: its turn is cancelled (the ACP cancel, as the
@@ -343,6 +361,9 @@ pub struct Prompt {
     pub text: String,
     /// Names of files of the agent's folder of images.
     pub images: Vec<String>,
+    /// For each delivery taken, in order, what was typed and the commands it used (`null` for one
+    /// sent as written); `null` when none used a command. The window shows the typed text.
+    pub typed: Value,
 }
 
 /// The agent's queued deliveries as one prompt, taken: those that start a session first, then the
@@ -382,8 +403,20 @@ pub fn pump(daemon: &Daemon, agent: &str) -> Option<Prompt> {
     }
     let kinds: Vec<String> = taken.iter().map(|d| d.kind.clone()).collect();
     took(daemon, agent, &kinds);
+    let typed = if taken.iter().any(|d| d.typed.is_some()) {
+        taken
+            .iter()
+            .map(|d| match &d.typed {
+                Some(typed) => json!({"text": typed, "commands": d.commands}),
+                None => Value::Null,
+            })
+            .collect()
+    } else {
+        Value::Null
+    };
     Some(Prompt {
         images: taken.iter().flat_map(|d| d.images.clone()).collect(),
+        typed,
         text: taken
             .into_iter()
             .map(render)
@@ -392,9 +425,9 @@ pub fn pump(daemon: &Daemon, agent: &str) -> Option<Prompt> {
     })
 }
 
-/// Most images one message carries, and the biggest one (the least any agent takes).
-pub const MAX_IMAGES: usize = 4;
-pub const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+/// Most images one message carries, and the biggest one: `flottille_core::images` says, so that
+/// the window and the daemon agree.
+pub use flottille_core::images::{MAX_IMAGE_BYTES, MAX_IMAGES};
 /// The most bytes of images one prompt carries once the queued messages are merged: 10 MiB, which is about
 /// 14 MB in base64, well under the 32 MB a request to the Claude API may weigh, and that request
 /// also holds the history. A message is never split, and the first one is always taken whole
@@ -548,6 +581,8 @@ mod tests {
             created_at: 0,
             sent_at: None,
             images: Vec::new(),
+            typed: None,
+            commands: Vec::new(),
         }
     }
 

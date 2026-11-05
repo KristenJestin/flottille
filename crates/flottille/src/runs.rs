@@ -33,7 +33,7 @@ use crate::daemon::Daemon;
 use crate::deliveries;
 use crate::gate::{self, Verdict};
 use crate::mcp::{Outcome, arguments, masked};
-use crate::place::{Place, Resolved};
+use crate::place::{Folder, Place, Resolved};
 use crate::projects;
 use crate::ready::{self, Probe};
 
@@ -123,6 +123,12 @@ enum Phase {
     Detached,
     /// It ended.
     Over,
+}
+
+/// Whether a run is a line the agent's call waits for: the call's line in the developer log says
+/// its start (`docs/developer.md`). A task, the user's run and a restart are not.
+fn from_a_call(run: &Run, phase: Phase) -> bool {
+    run.agent.is_some() && run.name.is_none() && phase == Phase::Waited
 }
 
 /// What a program wrote, bounded to its end from a line's start: a run's, and a setup step's.
@@ -219,7 +225,7 @@ fn request(daemon: &Daemon, place: &Place, args: RunArguments) -> Result<Request
         }
     };
     let words = split_line(&line).map_err(Outcome::Refused)?;
-    let (repository, base) = match place.base(repository.as_deref()) {
+    let (repository, base) = match place.base_for(repository.as_deref(), Folder::Line) {
         Ok((repository, base)) => (repository.to_owned(), base.to_owned()),
         Err(refusal) => return Err(Outcome::Refused(refusal)),
     };
@@ -382,7 +388,25 @@ pub async fn run(
         if notify {
             going.notify.store(true, Ordering::SeqCst);
         }
+        crate::mcp::started_run(&going.run.id);
         return Outcome::Done(describe(daemon, &going.run.id, None, None, true, false));
+    }
+    // The project's checks of a commit's message, before git makes it.
+    let at = crate::message_checks::Where {
+        daemon,
+        place,
+        repository: &repository,
+        folder: &folder.path,
+    };
+    tokio::select! {
+        checked = crate::message_checks::commits(&at, &words) => {
+            if let Err(refusal) = checked {
+                return Outcome::Refused(refusal);
+            }
+        }
+        () = cancelled.cancelled() => {
+            return Outcome::Failed("the call was stopped before it ended".into());
+        }
     }
     // Only a push the gate read, and that the user or the judge let through, goes out.
     let lift = approved && gate::is_push(&words);
@@ -439,6 +463,7 @@ pub async fn run(
     ) {
         return Outcome::Failed(why);
     }
+    crate::mcp::started_run(&id);
     if serve {
         detach(daemon, &id);
         return Outcome::Done(describe(daemon, &id, None, None, true, false));
@@ -482,7 +507,7 @@ pub async fn run_for_user(
     }
     let place = Place::main(project, project.folder.clone());
     let words = split_line(&task.line)?;
-    let (repository, base) = place.base(task.repository.as_deref())?;
+    let (repository, base) = place.base_for(task.repository.as_deref(), Folder::Task)?;
     let folder = place.resolve(base, ".");
     let env = environment(daemon, &place, repository, false)?;
     let secret_values = place.secret_values();
@@ -561,7 +586,7 @@ fn wait_for_end(daemon: &Daemon, id: &str) -> impl Future<Output = ()> + use<> {
 
 /// The environment of a run in the place: the daemon's, the place's variables filled, the forges
 /// and the daemon kept out of reach, and pushes too unless `lift`.
-fn environment(
+pub(crate) fn environment(
     daemon: &Daemon,
     place: &Place,
     repository: &str,
@@ -715,15 +740,19 @@ fn start(
     let event = json!({"agent": run.agent, "project": run.project, "run": run.id,
         "name": run.name, "line": run.line, "folder": run.folder,
         "ready": run.ready.map(Readiness::as_str), "url": run.url, "url_error": run.url_error});
-    daemon
-        .write(|store| {
-            let event = store.create_run(&run, ("run.started", event))?;
-            if let Some(started) = start_time(pid) {
-                store.add_run_process(pid, started, &run.id)?;
-            }
-            Ok(((), event))
-        })
-        .map_err(|e| e.to_string())?;
+    let store = |store: &mut Store| {
+        let event = store.create_run(&run, ("run.started", event))?;
+        if let Some(started) = start_time(pid) {
+            store.add_run_process(pid, started, &run.id)?;
+        }
+        Ok(((), event))
+    };
+    if from_a_call(&run, phase) {
+        daemon.write_unlogged(store)
+    } else {
+        daemon.write(store)
+    }
+    .map_err(|e| e.to_string())?;
     let run_ready = run.ready;
     let going = Arc::new(Going {
         run,
@@ -936,7 +965,7 @@ async fn follow(
     let run = &going.run;
     let event = json!({"agent": run.agent, "project": run.project, "run": run.id,
         "state": end.state.as_str(), "exit_code": end.exit_code, "signal": end.signal});
-    let result = daemon.write(|store| {
+    let store = |store: &mut Store| {
         store.remove_run_process(pid)?;
         let event = store.end_run(
             &run.id,
@@ -947,7 +976,16 @@ async fn follow(
             ("run.ended", event),
         )?;
         Ok(((), event))
-    });
+    };
+    // A run of a call that waited for it and ended well is all in the call's line.
+    let result = if from_a_call(run, *going.phase.lock().unwrap())
+        && end.state == RunState::Exited
+        && end.exit_code == Some(0)
+    {
+        daemon.write_unlogged(store)
+    } else {
+        daemon.write(store)
+    };
     if let Err(error) = result {
         eprintln!("flottille daemon: run {}: {error}", run.id);
     }

@@ -8,17 +8,19 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use flottille_ui::fuzzy;
 use flottille_ui::motion::PANEL;
 use flottille_ui::{
-    AgentState, Block, Button, Card, EmptyLine, FlatRow, Icon, LINE_GAP, LabelledLine, ListCard,
-    ListRow, Listing, Modal, Section, Segmented, Select, SelectOption, StateIcon, Status, Switch,
-    Tabs, Type, enter, fade, icon, palette, presence, presence_of, space,
+    AgentState, Block, Button, Card, EmptyLine, Field, FlatRow, Icon, LINE_GAP, LabelledLine,
+    ListCard, ListRow, Listing, Modal, Section, Segmented, Select, SelectOption, StateIcon, Status,
+    Switch, Tabs, Type, changing, enter, fade, icon, palette, presence, presence_of, space, tipped,
 };
+use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Task,
-    TestSupportExt as _, WeakEntity, Window, div, px,
+    ParentElement, Pixels, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
+    Subscription, Task, TestSupportExt as _, WeakEntity, Window, div, point, px,
 };
 use serde_json::Value;
 
@@ -27,7 +29,7 @@ use crate::commands::perform_later;
 use crate::extensions::specs::{self, SpecsTab, WriteSpec};
 use crate::model::ago;
 use crate::project::repository_label;
-use crate::project_settings::Reveal;
+use crate::project_settings::{Reveal, field_frame, styled_input};
 use crate::session::MarkdownText;
 use crate::shell::{Shell, now_ms};
 
@@ -68,6 +70,9 @@ const SHOWN: [(&str, &str); 3] = [("open", "Open"), ("closed", "Closed"), ("all"
 /// How long the `item.*` events must stop before the items are read again: a round says many at
 /// once, and one read answers them all.
 const QUIET: Duration = Duration::from_millis(300);
+
+/// The most the list of a section is tall: about ten rows. A longer one scrolls inside itself.
+pub const LIST_HEIGHT: Pixels = px(560.);
 
 /// An item an event names.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -147,6 +152,11 @@ impl ItemRow {
 
     fn closed(&self) -> bool {
         matches!(self.state.as_str(), "merged" | "closed")
+    }
+
+    /// What a search finds beside the title: the number with its hash, as it is typed or said.
+    fn context(&self) -> String {
+        format!("{} {}", self.label(), self.key)
     }
 
     /// Its state in words: a Jira status when it has one.
@@ -273,6 +283,8 @@ pub struct Source {
     pub target: String,
     /// Why its last round failed.
     pub problem: Option<String>,
+    /// Why it cannot tell which of its items are the user's.
+    pub mine_unknown: Option<String>,
 }
 
 /// What a read of the project's items gave: the items, their sources, and what the project
@@ -305,6 +317,7 @@ impl Read {
                     kind: source["kind"].as_str().unwrap_or_default().to_owned(),
                     target: source["target"].as_str().unwrap_or_default().to_owned(),
                     problem: source["problem"].as_str().map(str::to_owned),
+                    mine_unknown: source["mine_unknown"].as_str().map(str::to_owned),
                 })
                 .collect(),
             forges: settings["repositories"]
@@ -466,6 +479,10 @@ pub struct ProjectItems {
     tab: Kind,
     shown: Shown,
     mine: bool,
+    /// What the search field holds: the rows whose key or title do not match it are not listed.
+    query: String,
+    /// The search field, made on the first frame (a text field needs the window).
+    search: Option<Entity<Search>>,
     /// The repository whose pull requests alone are listed.
     repository: Option<String>,
     /// The rows as drawn, one list per tab: a row that leaves folds away before it is gone.
@@ -474,6 +491,8 @@ pub struct ProjectItems {
     /// so a spinner turning redraws it alone; kept while the row is, so it fades out when its
     /// checks go.
     marks: HashMap<String, CiMark>,
+    /// The list's scroll, which a read keeps and a change of tab or filter takes back to the top.
+    scroll: ScrollHandle,
     detail: Option<Detail>,
     detail_open: bool,
     /// The Specs tab is the one chosen, while Specs is on in the project.
@@ -512,9 +531,12 @@ impl ProjectItems {
             tab: Kind::Pulls,
             shown: Shown::Open,
             mine: false,
+            query: String::new(),
+            search: None,
             repository: None,
             lists: [Listing::default(), Listing::default()],
             marks: HashMap::new(),
+            scroll: ScrollHandle::new(),
             detail: None,
             detail_open: false,
             specs_chosen: false,
@@ -531,6 +553,16 @@ impl ProjectItems {
 
     pub fn project(&self) -> &str {
         &self.project
+    }
+
+    /// The scroll of the list.
+    pub fn list_scroll(&self) -> &ScrollHandle {
+        &self.scroll
+    }
+
+    /// The search field, once the section has been drawn.
+    pub fn search_field(&self, cx: &App) -> Option<Entity<InputState>> {
+        Some(self.search.as_ref()?.read(cx).field.clone())
     }
 
     /// Asks the daemon for the items.
@@ -654,9 +686,15 @@ impl ProjectItems {
         self.tab
     }
 
+    /// Another list is read: from its top.
+    fn to_the_top(&self) {
+        self.scroll.set_offset(point(px(0.), px(0.)));
+    }
+
     pub fn choose(&mut self, tab: Kind, cx: &mut Context<Self>) {
         self.tab = tab;
         self.specs_chosen = false;
+        self.to_the_top();
         cx.notify();
     }
 
@@ -692,40 +730,86 @@ impl ProjectItems {
 
     pub fn show(&mut self, shown: Shown, cx: &mut Context<Self>) {
         self.shown = shown;
+        self.to_the_top();
         cx.notify();
     }
 
     pub fn toggle_mine(&mut self, cx: &mut Context<Self>) {
         self.mine = !self.mine;
+        self.to_the_top();
         cx.notify();
     }
 
     pub fn filter_repository(&mut self, repository: Option<String>, cx: &mut Context<Self>) {
         self.repository = repository;
+        self.to_the_top();
         cx.notify();
     }
 
-    /// The rows of `kind` the filters keep, the most recently changed first.
-    fn kept(&self, kind: Kind) -> Vec<ItemRow> {
+    /// Why "Mine only" means nothing on the tab of `kind`: none of its sources can tell the
+    /// user's items, each saying why. None while one of them can, or none was read yet.
+    pub fn mine_unknown(&self, kind: Kind) -> Option<String> {
         let Some(Ok(read)) = &self.read else {
-            return Vec::new();
+            return None;
         };
-        read.items
+        let sources: Vec<&Source> = read
+            .sources
             .iter()
-            .filter(|row| row.kind == kind.word())
+            .filter(|source| source.kind == kind.word())
+            .collect();
+        let mut why: Vec<&str> = Vec::new();
+        for source in &sources {
+            let reason = source.mine_unknown.as_deref()?;
+            if !why.contains(&reason) {
+                why.push(reason);
+            }
+        }
+        (!why.is_empty()).then(|| format!("Who you are is not known: {}", why.join("; ")))
+    }
+
+    /// The search field says `query`: only the rows whose key or title match it are listed.
+    fn search(&mut self, query: String, cx: &mut Context<Self>) {
+        if self.query == query {
+            return;
+        }
+        self.query = query;
+        self.to_the_top();
+        cx.notify();
+    }
+
+    /// The rows of `kind` the filters keep, before the search, the most recently changed first.
+    fn narrowed(&self, kind: Kind) -> impl Iterator<Item = &ItemRow> {
+        let read = match &self.read {
+            Some(Ok(read)) => Some(read),
+            _ => None,
+        };
+        read.into_iter()
+            .flat_map(|read| read.items.iter())
+            .filter(move |row| row.kind == kind.word())
             .filter(|row| match self.shown {
                 Shown::Open => !row.closed(),
                 Shown::Closed => row.closed(),
                 Shown::All => true,
             })
-            .filter(|row| !self.mine || row.mine)
-            .filter(|row| {
+            .filter(move |row| !self.mine || self.mine_unknown(kind).is_some() || row.mine)
+            .filter(move |row| {
                 kind == Kind::Tickets
                     || self
                         .repository
                         .as_ref()
                         .is_none_or(|path| &row.repository == path)
             })
+    }
+
+    /// What the search found of `row`: nothing when it does not match.
+    fn found(&self, row: &ItemRow) -> Option<fuzzy::Match> {
+        fuzzy::find(&self.query, &row.title, &row.context())
+    }
+
+    /// The rows of `kind` the filters and the search keep.
+    fn kept(&self, kind: Kind) -> Vec<ItemRow> {
+        self.narrowed(kind)
+            .filter(|row| self.found(row).is_some())
             .cloned()
             .collect()
     }
@@ -901,10 +985,12 @@ impl ProjectItems {
                 cx,
             )
         });
+        let found = self.found(row).filter(|_| !self.query.trim().is_empty());
         ListRow::new(ElementId::Name(id.into()), row.title.clone())
             .leading(leading)
             .below(below)
-            .when_some(action, |row, action| row.trailing(action))
+            .when_some(action, |r, action| r.trailing(action))
+            .when_some(found, |r, found| r.pieces(found.pieces(&row.title)))
             .on_click(move |_, _, cx| {
                 this.update(cx, |this, cx| this.open_detail(clicked.clone(), cx))
                     .ok();
@@ -913,7 +999,12 @@ impl ProjectItems {
 
     /// The filters of the chosen tab: the states, the user's own, and a repository for the pull
     /// requests of a project of several.
-    fn filters(&self, forges: &[String], cx: &mut Context<Self>) -> AnyElement {
+    fn filters(
+        &self,
+        forges: &[String],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let p = palette(cx);
         let this = cx.weak_entity();
         let chosen = SHOWN
@@ -933,12 +1024,24 @@ impl ProjectItems {
                 this.update(cx, |this, cx| this.show(shown, cx)).ok();
             }
         });
-        let mine = Switch::new("project-items-mine", self.mine, "Mine only").on_click({
+        let unknown = self.mine_unknown(self.tab);
+        let mine = Switch::new(
+            "project-items-mine",
+            self.mine && unknown.is_none(),
+            "Mine only",
+        )
+        .disabled(unknown.is_some())
+        .on_click({
             let this = this.clone();
             move |_, _, cx| {
                 this.update(cx, |this, cx| this.toggle_mine(cx)).ok();
             }
         });
+        let mine = div().id("project-items-mine-switch").child(mine);
+        let mine = match unknown {
+            Some(why) => tipped(mine, why, 32., window, cx).into_any_element(),
+            None => mine.into_any_element(),
+        };
         let repository = (self.tab == Kind::Pulls && forges.len() > 1).then(|| {
             let options = std::iter::once(SelectOption::new("all", "All repositories")).chain(
                 forges.iter().map(|path| {
@@ -1260,6 +1363,50 @@ impl ProjectItems {
     }
 }
 
+/// The search field of the section, in its own view: a text input notifies on every caret blink,
+/// and only this view should be drawn again for it.
+pub struct Search {
+    field: Entity<InputState>,
+    _subscription: Subscription,
+}
+
+impl Search {
+    fn new(items: WeakEntity<ProjectItems>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let field = cx.new(|cx| styled_input("a title, a number or a key", window, cx));
+        let subscription = cx.subscribe_in(&field, window, move |_, field, event, _, cx| {
+            if matches!(event, InputEvent::Change) {
+                let query = field.read(cx).value().to_string();
+                items.update(cx, |items, cx| items.search(query, cx)).ok();
+            }
+        });
+        Self {
+            field,
+            _subscription: subscription,
+        }
+    }
+}
+
+impl Render for Search {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .w_full()
+            .child(field_frame("project-items-search-field", &self.field, cx))
+    }
+}
+
+/// How many rows are listed: `128 open`, and `3 of 128 open` when a search leaves only some.
+fn count_said(shown: Shown, total: usize, listed: usize, searching: bool) -> String {
+    let word = match shown {
+        Shown::Open => "open",
+        Shown::Closed => "closed",
+        Shown::All => "listed",
+    };
+    match searching {
+        true => format!("{listed} of {total} {word}"),
+        false => format!("{total} {word}"),
+    }
+}
+
 impl Render for ProjectItems {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
@@ -1267,6 +1414,15 @@ impl Render for ProjectItems {
         let at = cx.background_executor().now();
         let reduce = cx.reduce_motion();
         let tab = self.tab;
+        let search = match &self.search {
+            Some(search) => search.clone(),
+            None => {
+                let items = cx.weak_entity();
+                let search = cx.new(|cx| Search::new(items, window, cx));
+                self.search = Some(search.clone());
+                search
+            }
+        };
         let mut counts = [0; 2];
         // The hidden tab's list too: shown again, it holds what it lists now, not rows that left
         // while it was hidden folding away then.
@@ -1327,8 +1483,13 @@ impl Render for ProjectItems {
             })
             .collect();
         let present = !self.lists[tab.index()].is_empty();
+        // The list crossfades into the one a tab or a filter chooses; a search narrows it in place.
+        let list_key = format!(
+            "{tab:?}-{:?}-{}-{:?}",
+            self.shown, self.mine, self.repository
+        );
         let card = listed.into_iter().fold(
-            ListCard::new("project-items-list"),
+            ListCard::new("project-items-list").scrolling(&self.scroll, LIST_HEIGHT),
             |card, (key, row, placement)| {
                 let drawn = self.row(&row, forges.len(), now, window, cx);
                 card.item(
@@ -1402,6 +1563,30 @@ impl Render for ProjectItems {
                 ),
             )
         };
+        let searching = !self.query.trim().is_empty();
+        let total = self.narrowed(tab).count();
+        let count = count_said(self.shown, total, counts[tab.index()], searching);
+        let finder = div()
+            .flex()
+            .items_end()
+            .justify_between()
+            .gap(space::LG)
+            .child(div().w(px(320.)).child(Field::new(
+                "project-items-search",
+                "Search",
+                search.clone(),
+            )))
+            .child(changing("project-items-count-fade", count, move |count| {
+                div()
+                    .id("project-items-count")
+                    .aria_label(count.clone())
+                    .pb(space::SM)
+                    .text_size(px(13.))
+                    .text_color(p.mute)
+                    .child(count)
+                    .test_support()
+                    .into_any_element()
+            }));
         let empty_said = match (tab, self.shown) {
             (Kind::Pulls, Shown::Open) => "No open pull request.",
             (Kind::Pulls, Shown::Closed) => "No closed or merged pull request.",
@@ -1409,6 +1594,11 @@ impl Render for ProjectItems {
             (Kind::Tickets, Shown::Open) => "No open ticket.",
             (Kind::Tickets, Shown::Closed) => "No closed ticket.",
             (Kind::Tickets, Shown::All) => "No ticket.",
+        };
+        let empty_said = if searching {
+            "Nothing matches the search."
+        } else {
+            empty_said
         };
         let empty = set == Some(true) && !present;
         let body = div()
@@ -1418,8 +1608,14 @@ impl Render for ProjectItems {
                 "project-items-filters-block",
                 set == Some(true),
                 {
-                    let filters = self.filters(&forges, cx);
-                    div().pb(space::MD).child(filters)
+                    let filters = self.filters(&forges, window, cx);
+                    div()
+                        .pb(space::MD)
+                        .flex()
+                        .flex_col()
+                        .gap(space::MD)
+                        .child(filters)
+                        .child(finder)
                 },
             ))
             .child(presence_of(
@@ -1458,7 +1654,13 @@ impl Render for ProjectItems {
                     empty_said,
                 ),
             ))
-            .child(presence("project-items-list-block", present, card));
+            .child(presence(
+                "project-items-list-block",
+                present,
+                changing("project-items-list-fade", list_key, move |_| {
+                    card.into_any_element()
+                }),
+            ));
         let shown_key = match tab {
             _ if specs_shown => "specs",
             Kind::Pulls => "pulls",

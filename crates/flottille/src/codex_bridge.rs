@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::{ExitCode, ExitStatus, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use flottille_core::paths::Paths;
 use serde_json::{Value, json};
@@ -27,6 +27,8 @@ use tokio::sync::mpsc;
 use crate::providers::{self, MCP_SERVER};
 use crate::{VERSION, claude, codex};
 
+/// The least time between two usage updates of a turn.
+const USAGE_EVERY: Duration = Duration::from_secs(1);
 const NOT_FOUND: i64 = -32601;
 const INVALID: i64 = -32602;
 const INTERNAL: i64 = -32603;
@@ -111,6 +113,8 @@ struct Turn {
     breach: Option<String>,
     /// The context in use and the model's context window, as Codex last said.
     used: Option<(u64, u64)>,
+    /// When, and what, the context in use was last said to the client.
+    usage_sent: Option<(Instant, (u64, u64))>,
     total: Value,
 }
 
@@ -403,6 +407,7 @@ impl Bridge {
             cancelled: false,
             breach: None,
             used: None,
+            usage_sent: None,
             total: codex.total.clone(),
         });
         self.request("turn/start", turn, Waiting::Turn(id.clone()))
@@ -508,13 +513,26 @@ impl Bridge {
             }
             "thread/tokenUsage/updated" => {
                 let usage = &params["tokenUsage"];
+                let mut said = None;
                 if let Some(turn) = &mut self.turn {
                     turn.used = usage["last"]["totalTokens"]
                         .as_u64()
                         .zip(usage["modelContextWindow"].as_u64());
+                    // The context in use follows the turn, at most once a second.
+                    if let Some((used, size)) = turn.used.filter(|_| {
+                        turn.usage_sent
+                            .is_none_or(|(at, _)| at.elapsed() >= USAGE_EVERY)
+                    }) {
+                        turn.usage_sent = Some((Instant::now(), (used, size)));
+                        said = Some(json!({"sessionUpdate": "usage_update", "used": used,
+                            "size": size}));
+                    }
                 }
                 if let Some(codex) = &mut self.codex {
                     codex.total = usage["total"].clone();
+                }
+                if let Some(update) = said {
+                    self.update(update).await;
                 }
             }
             "error" if params["willRetry"] == true => {
@@ -655,7 +673,10 @@ impl Bridge {
         if let Some(breach) = turn.breach {
             return self.fail(turn.id, (INTERNAL, breach)).await;
         }
-        if let Some((used, size)) = turn.used {
+        if let Some((used, size)) = turn
+            .used
+            .filter(|used| turn.usage_sent.is_none_or(|(_, sent)| sent != *used))
+        {
             self.update(json!({"sessionUpdate": "usage_update", "used": used, "size": size}))
                 .await;
         }
@@ -696,11 +717,42 @@ impl Bridge {
             count("inputTokens"),
             count("outputTokens"),
         );
+        // What the turn used (`docs/reference/acp.md`, "What a turn used"): what Codex's totals
+        // grew by, a count Codex does not give left out. Its input counts the cached tokens.
+        let grew = |key: &str| {
+            now[key]
+                .as_u64()
+                .map(|n| n.saturating_sub(turn.total[key].as_u64().unwrap_or(0)))
+        };
+        let mut used = json!({});
+        if let Some(model) = self
+            .codex
+            .as_ref()
+            .map(|c| &c.model)
+            .filter(|m| !m.is_empty())
+        {
+            used["model"] = model.as_str().into();
+        }
+        for (key, name) in [
+            ("inputTokens", "inputTokens"),
+            ("cachedInputTokens", "cachedReadTokens"),
+            ("cacheWriteInputTokens", "cachedWriteTokens"),
+            ("outputTokens", "outputTokens"),
+            ("reasoningOutputTokens", "thoughtTokens"),
+        ] {
+            if let Some(count) = grew(key) {
+                used[name] = count.into();
+            }
+        }
+        if let (Some(input), Some(cached)) = (grew("inputTokens"), grew("cachedInputTokens")) {
+            used["inputTokens"] = input.saturating_sub(cached).into();
+        }
         self.answer(
             turn.id,
             json!({"stopReason": stop_reason, "usage": {"inputTokens": input.saturating_sub(cached),
                 "outputTokens": output, "cachedReadTokens": cached,
-                "totalTokens": input + output}}),
+                "totalTokens": input + output},
+                "_meta": {"flottille": {"usage": [used]}}}),
         )
         .await;
     }

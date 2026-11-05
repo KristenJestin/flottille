@@ -22,7 +22,7 @@ use crate::daemon::Daemon;
 use crate::gate::{self, Class, Verdict};
 use crate::mcp::{Outcome, arguments};
 use crate::nofollow::{self, Entry};
-use crate::place::{Place, Resolved, Unfollowed};
+use crate::place::{Folder, Place, Resolved, Unfollowed};
 
 /// A page of `fs_read`, at most.
 pub const READ_PAGE_BYTES: u64 = 32 * 1024;
@@ -90,7 +90,21 @@ impl Context<'_> {
         named: &str,
         write: bool,
     ) -> Result<Resolved, Outcome> {
-        let (_, base) = self.place.base(repository).map_err(Outcome::Refused)?;
+        self.path_in(repository, Folder::Path, named, write)
+    }
+
+    /// `path`, for a tool that takes a folder as `field` says.
+    fn path_in(
+        &self,
+        repository: Option<&str>,
+        field: Folder,
+        named: &str,
+        write: bool,
+    ) -> Result<Resolved, Outcome> {
+        let (_, base) = self
+            .place
+            .base_for(repository, field)
+            .map_err(Outcome::Refused)?;
         let resolved = self.place.resolve(base, named);
         if let Some(refusal) = never_opened(&resolved) {
             return Err(refusal);
@@ -342,10 +356,109 @@ pub fn fs_read(cx: &Context, args: Value) -> Outcome {
     // A page is sized so that its result is not cut (`docs/tools.md`, "Long results"): the
     // session knows the file's fingerprint once it read a page, and a page it was shown only in
     // part would let it write over text it never saw.
-    let budget = crate::results::page_room(&cx.daemon.paths).min(BODY_BUDGET);
+    let budget = page_budget(cx.daemon);
     match read_page(Some(cx), &path, offset, length, budget) {
         Ok(outcome) => outcome,
         Err(error) => failed(&path, error),
+    }
+}
+
+/// The lines of a file a command that only prints some of it asks for.
+pub enum Lines {
+    /// From line `first` to line `last`, the end of the file without one.
+    From { first: u64, last: Option<u64> },
+    /// The last `n` lines.
+    Last(u64),
+}
+
+/// How far into a file the start of a range of lines is looked for.
+const SCAN_BYTES: u64 = 8 * 1024 * 1024;
+
+/// The room `fs_read` has for the text of a page now, the line numbers it adds included.
+pub fn page_budget(daemon: &Daemon) -> usize {
+    crate::results::page_room(&daemon.paths).min(BODY_BUDGET)
+}
+
+/// What the number of a line and its tab add to the line in a page.
+fn numbered(number: u64) -> u64 {
+    number.to_string().len().max(6) as u64 + 1
+}
+
+/// Where `lines` are in the file `path`, as the offset and the length of a page of `fs_read`;
+/// `None` when the file has no such lines or a page of `budget` bytes, line numbers counted, does
+/// not show them whole, which is for the caller to leave to something else. Nothing is returned
+/// of the file itself.
+pub fn line_span(
+    path: &Resolved,
+    lines: Lines,
+    budget: usize,
+) -> std::io::Result<Option<(u64, u64)>> {
+    let budget = budget as u64;
+    let mut file = open_regular(&path.path)?;
+    let size = file.metadata()?.len();
+    let span = |start: u64, end: u64, numbers: u64| {
+        (start < end && end - start + numbers <= budget).then_some((start, end - start))
+    };
+    let (first, last) = match lines {
+        Lines::From { first, last } => (first, last),
+        Lines::Last(count) => {
+            let from = size.saturating_sub(budget + 1);
+            file.seek(SeekFrom::Start(from))?;
+            let mut window = Vec::new();
+            file.by_ref().take(size - from).read_to_end(&mut window)?;
+            let body = window.strip_suffix(b"\n").unwrap_or(&window);
+            let ends = body.iter().rev().enumerate();
+            let start = match ends
+                .filter(|(_, byte)| **byte == b'\n')
+                .nth(count as usize - 1)
+            {
+                Some((back, _)) => from + (body.len() - back) as u64,
+                None if from == 0 => 0,
+                None => return Ok(None),
+            };
+            // The number of the first line is not known without counting up to it: no more than
+            // the size of the file, which is the widest it can be.
+            let wanted = &window[(start - from) as usize..];
+            let shown = wanted.iter().filter(|byte| **byte == b'\n').count()
+                + usize::from(!wanted.ends_with(b"\n"));
+            return Ok(span(start, size, shown as u64 * numbered(size + 1)));
+        }
+    };
+    let mut start = (first == 1).then_some(0);
+    let mut line = 1;
+    let mut position = 0;
+    let mut after = 0;
+    let mut numbers = 0;
+    let mut buffer = vec![0; CHUNK];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            // A last line with no newline is a line too.
+            let unended = size > after && start.is_some();
+            let numbers = numbers + if unended { numbered(line) } else { 0 };
+            return Ok(start.and_then(|start| span(start, size, numbers)));
+        }
+        for (at, byte) in buffer[..read].iter().enumerate() {
+            if *byte != b'\n' {
+                continue;
+            }
+            after = position + at as u64 + 1;
+            if let Some(start) = start {
+                numbers += numbered(line);
+                if last == Some(line) {
+                    return Ok(span(start, after, numbers));
+                }
+            }
+            line += 1;
+            if line == first {
+                start = Some(after);
+            }
+        }
+        position += read as u64;
+        let too_long = start.is_some_and(|start| position - start > budget);
+        if too_long || (start.is_none() && position > SCAN_BYTES) {
+            return Ok(None);
+        }
     }
 }
 
@@ -632,7 +745,7 @@ pub fn search(cx: &Context, args: Value) -> Outcome {
     if args.pattern.is_empty() {
         return Outcome::Refused("refused: the pattern is empty: name the text to find".into());
     }
-    match cx.path(args.repository.as_deref(), ".", false) {
+    match cx.path_in(args.repository.as_deref(), Folder::Glob, ".", false) {
         Ok(base) => search_in(cx.place, &cx.own(), &base, &args),
         Err(refusal) => refusal,
     }

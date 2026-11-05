@@ -390,7 +390,7 @@ fn agent_launch_with_new_workspace_is_judged_the_same() {
     let launched = held(mcp.call(
         "agent_launch",
         json!({"title": "worker", "brief": "Write the tests.", "new_workspace": "a",
-            "root": true}),
+            "follow": false, "root": true}),
     ));
     let (created, launched) = (request(&user, created), request(&user, launched));
     assert_eq!(launched["class"], "base", "{launched}");
@@ -787,6 +787,13 @@ fn a_run_started_while_the_workspace_is_removed_is_refused() {
         text.contains("the workspace login is being removed"),
         "{text}"
     );
+    // A line that only prints a file is a run until the checks are made, not a read that
+    // slips past them.
+    let text = refused(mcp.call("run", json!({"line": "cat stubborn.sh"})));
+    assert!(
+        text.contains("the workspace login is being removed"),
+        "{text}"
+    );
     let text = refused(mcp.call("fs_write", json!({"path": "x", "content": "x"})));
     assert!(
         text.contains("the workspace login is being removed"),
@@ -887,4 +894,102 @@ fn a_request_asked_while_its_agent_leaves_is_not_run_in_main() {
     std::thread::sleep(Duration::from_millis(500));
     assert!(!main.join("made.txt").exists(), "run in main");
     assert!(!folder.exists());
+}
+
+/// The branch of the workspace `login`, as the daemon shows it.
+fn branch_of(user: &User) -> String {
+    workspace(user, "login").unwrap()["branch"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn ready_workspace(user: &User) {
+    user.call(
+        "workspace.create",
+        json!({"project": "app", "name": "login"}),
+    )
+    .unwrap();
+    eventually("the setup's end", || {
+        workspace(user, "login").unwrap()["state"] == "ready"
+    });
+}
+
+#[test]
+fn rename_branch_is_held_in_ask_done_on_approval_and_not_on_refusal() {
+    let user = user();
+    project(&user);
+    ready_workspace(&user);
+    let (_, mcp) = root(&user);
+    let rename = json!({"action": "rename_branch", "name": "login", "branch": "fix/ABC-12-login"});
+
+    let number = held(mcp.call("workspace", rename.clone()));
+    let asked = request(&user, number);
+    assert_eq!(asked["kind"], "action", "{asked}");
+    let says = asked["says"].to_string();
+    assert!(
+        says.contains(
+            "Rename the branch of the workspace login from app/login to fix/ABC-12-login in ."
+        ),
+        "{says}"
+    );
+    assert_eq!(branch_of(&user), "app/login", "renamed before the answer");
+    answer(&user, "deny", number);
+    assert_eq!(branch_of(&user), "app/login", "renamed on a refusal");
+
+    let number = held(mcp.call("workspace", rename));
+    let body = answer(&user, "approve", number).body;
+    assert!(body.contains("has now done it"), "{body}");
+    assert!(body.contains("fix/ABC-12-login"), "{body}");
+    assert_eq!(branch_of(&user), "fix/ABC-12-login");
+}
+
+#[test]
+fn rename_branch_is_judged_in_auto() {
+    let user = judged_user();
+    project(&user);
+    ready_workspace(&user);
+    let (_, mcp) = root(&user);
+
+    let text = done(mcp.call(
+        "workspace",
+        json!({"action": "rename_branch", "name": "login", "branch": "fix/ABC-12-login"}),
+    ));
+
+    assert!(text.contains("fix/ABC-12-login"), "{text}");
+    assert_eq!(branch_of(&user), "fix/ABC-12-login");
+    let prompts = judge_prompts(&user);
+    let prompt = prompts.last().expect("the judge was asked");
+    assert!(
+        prompt.contains("it renames the branch of a workspace"),
+        "{prompt}"
+    );
+    assert!(no_request(&user));
+}
+
+#[test]
+fn a_rename_that_cannot_be_done_is_refused_before_anything_is_asked() {
+    let user = user();
+    let folder = project(&user);
+    ready_workspace(&user);
+    let made = workspace(&user, "login").unwrap()["folder"].clone();
+    user.git(
+        std::path::Path::new(made.as_str().unwrap()),
+        &["push", "--quiet", "origin", "app/login"],
+    );
+    let (_, mcp) = root(&user);
+
+    let pushed = refused(mcp.call(
+        "workspace",
+        json!({"action": "rename_branch", "name": "login", "branch": "fix/ABC-12-login"}),
+    ));
+    assert!(pushed.contains("is on origin in ."), "{pushed}");
+    let missing = refused(mcp.call(
+        "workspace",
+        json!({"action": "rename_branch", "name": "login"}),
+    ));
+    assert!(missing.contains("needs branch"), "{missing}");
+    assert!(no_request(&user));
+    assert_eq!(branch_of(&user), "app/login");
+    assert!(folder.exists());
 }

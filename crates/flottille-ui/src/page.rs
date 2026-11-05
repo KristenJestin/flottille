@@ -14,6 +14,7 @@ use gpui_kit::{
 };
 
 use crate::button::Button;
+use crate::cut::tipped_when_cut;
 use crate::icons::{Icon, icon};
 use crate::menu::Menu;
 use crate::theme::palette;
@@ -114,7 +115,7 @@ impl PageHeader {
 }
 
 impl RenderOnce for PageHeader {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let p = palette(cx);
         let actions = self.actions.into_iter().map(|action| {
             let on_click = action.on_click.clone();
@@ -131,11 +132,15 @@ impl RenderOnce for PageHeader {
             .text_size(px(22.))
             .line_height(px(30.))
             .font_weight(FontWeight::SEMIBOLD)
+            .min_w_0()
+            .overflow_hidden()
             .whitespace_nowrap()
-            .child(self.title)
-            .test_support();
+            .text_ellipsis()
+            .child(self.title.clone());
+        // A title cut with an ellipsis says itself whole under the pointer.
+        let title = tipped_when_cut(title, self.title, window, cx);
         let path = self.path.map(|path| {
-            div()
+            let line = div()
                 .id(part(&self.id, "path"))
                 .aria_label(path.clone())
                 .mono(12.)
@@ -144,8 +149,8 @@ impl RenderOnce for PageHeader {
                 .overflow_hidden()
                 .text_ellipsis()
                 .min_w_0()
-                .child(path)
-                .test_support()
+                .child(path.clone());
+            tipped_when_cut(line, path, window, cx)
         });
         let line = div()
             .flex()

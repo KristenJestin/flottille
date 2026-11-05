@@ -1711,10 +1711,15 @@ fn acli_signed_in_to_another_site_reads_nothing_for_a_listing_a_search_or_a_show
             answer.text
         );
     }
+    // A list and a search ask nothing more; a show asks the work item with the check, and shows
+    // nothing of it.
     assert!(
-        user.acli_received()
-            .iter()
-            .all(|call| call["args"] == json!(["jira", "auth", "status"])),
+        user.acli_received().iter().all(|call| {
+            call["args"] == json!(["jira", "auth", "status"])
+                || call["args"].as_array().is_some_and(|args| {
+                    args.starts_with(&[json!("jira"), json!("workitem"), json!("view")])
+                })
+        }),
         "{:?}",
         user.acli_received()
     );
@@ -1743,24 +1748,49 @@ fn jira_items(user: &User) {
         "search": [todo, progress, done],
         "transitions": {"ABC-1": ["In Progress", "Done"], "ABC-3": ["To Do"]},
         "created": "DEF-7",
+        "types": {"ABC": ["Task", "Bug", "Story", {"name": "Sub-task", "subtask": true}],
+            "DEF": ["Task", "Story", "Epic"]},
     }));
 }
 
 /// A write of `tickets` on Jira, held for the user then done once allowed: what it answered, and
-/// the calls of `acli` that started with `verb`.
-fn jira_written(args: Value, verb: &str) -> (String, Vec<String>) {
+/// the calls of `acli` that started with `verb`, as the fake recorded them.
+fn jira_sent(args: Value, verb: &str) -> (String, Vec<Value>) {
     let user = user();
     on_jira(&user);
     jira_items(&user);
     let (_, mcp) = root_in(&user, None);
     let calls = || words(user.acli_received());
     let done = judged_then_done(&user, mcp.call("tickets", args), calls, verb);
-    let asked = calls()
+    let asked = user
+        .acli_received()
         .into_iter()
-        .filter(|c| c.starts_with(verb))
+        .filter(|call| words(vec![(*call).clone()])[0].starts_with(verb))
         .collect();
     // Every write is checked to go to the tracker's site first.
     assert_eq!(calls()[0], "jira auth status");
+    (done, asked)
+}
+
+/// A write of `tickets` on Jira: what it answered, and the calls of `acli` that started with
+/// `verb`, a file's path (which is a temporary one) written `<file>`.
+fn jira_written(args: Value, verb: &str) -> (String, Vec<String>) {
+    let (done, asked) = jira_sent(args, verb);
+    let asked = asked
+        .into_iter()
+        .map(|mut call| {
+            let args = call["args"].as_array_mut().unwrap();
+            for at in 1..args.len() {
+                if args[at - 1]
+                    .as_str()
+                    .is_some_and(|flag| flag.ends_with("-file"))
+                {
+                    args[at] = Value::from("<file>");
+                }
+            }
+            words(vec![call]).remove(0)
+        })
+        .collect();
     (done, asked)
 }
 
@@ -1787,10 +1817,217 @@ fn create_a_jira_work_item_in_a_tracker_s_project() {
     assert_eq!(
         asked,
         [
-            "jira workitem create --project DEF --summary Add a logout --description Users stay \
-             signed in --type Story --label feature,auth --json"
+            "jira workitem create --project DEF --summary Add a logout --description-file <file> \
+             --type Story --label feature,auth --json"
         ]
     );
+}
+
+/// The calls of `acli` that read a project's types.
+fn project_views(user: &User) -> Vec<String> {
+    words(user.acli_received())
+        .into_iter()
+        .filter(|call| call.starts_with("jira project view"))
+        .collect()
+}
+
+#[test]
+fn types_lists_a_jira_project_s_work_item_types() {
+    let user = user();
+    on_jira(&user);
+    jira_items(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    let first = read(
+        &user,
+        mcp.call("tickets", json!({"action": "types", "project": "abc"})),
+    );
+    let again = read(
+        &user,
+        mcp.call("tickets", json!({"action": "types", "project": "ABC"})),
+    );
+
+    assert!(
+        first.contains("The work item types of ABC on example.atlassian.net are Task, Bug, Story and Sub-task (a sub-task)"),
+        "{first}"
+    );
+    assert_eq!(again, first);
+    // Cached for a few minutes: the second answer asked Jira nothing.
+    assert_eq!(project_views(&user), ["jira project view --key ABC --json"]);
+    // The tracker has two projects: which one is not guessed.
+    let unsaid = mcp.call("tickets", json!({"action": "types"}));
+    assert!(unsaid.error, "{}", unsaid.text);
+    assert!(
+        unsaid
+            .text
+            .contains("need project, one of the tracker's: ABC, DEF"),
+        "{}",
+        unsaid.text
+    );
+    assert_eq!(project_views(&user).len(), 1);
+}
+
+#[test]
+fn types_on_github_says_issues_have_no_type_and_asks_nothing() {
+    let user = user();
+    on_github(&user);
+    many_issues(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    let said = read(&user, mcp.call("tickets", json!({"action": "types"})));
+
+    assert!(said.contains("GitHub issues have no type"), "{said}");
+    assert!(user.gh_received().is_empty(), "{:?}", user.gh_received());
+}
+
+#[test]
+fn a_create_refused_for_its_type_answers_with_the_types() {
+    let user = user();
+    on_jira(&user);
+    jira_items(&user);
+
+    let (answer, calls) = jira_asked(
+        &user,
+        json!({"action": "create", "project": "ABC", "title": "Add a logout", "type": "Tâche"}),
+    );
+
+    assert!(
+        answer.contains(
+            "\"Tâche\" is not a work item type of ABC: its types are Task, Bug, Story and Sub-task"
+        ),
+        "{answer}"
+    );
+    assert!(answer.contains("nothing was written"), "{answer}");
+    // One attempt, then one read of the types: no other type was tried.
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.starts_with("jira workitem create"))
+            .count(),
+        1
+    );
+    assert_eq!(calls.last().unwrap(), "jira project view --key ABC --json");
+}
+
+#[test]
+fn create_assigns_a_jira_work_item_to_the_user() {
+    let (done, asked) = jira_written(
+        json!({"action": "create", "project": "def", "title": "Add a logout", "type": "Story",
+            "assignee": "@me"}),
+        "jira workitem create",
+    );
+    assert!(
+        done.contains("The ticket DEF-7 was opened in DEF"),
+        "{done}"
+    );
+    assert_eq!(
+        asked,
+        [
+            "jira workitem create --project DEF --summary Add a logout --assignee @me --type Story \
+          --json"
+        ]
+    );
+    // Nobody is assigned unless the agent asks.
+    let (_, unasked) = jira_written(
+        json!({"action": "create", "project": "def", "title": "Add a logout"}),
+        "jira workitem create",
+    );
+    assert!(!unasked[0].contains("--assignee"), "{unasked:?}");
+}
+
+#[test]
+fn edit_assigns_and_unassigns_on_jira() {
+    let (done, asked) = jira_written(
+        json!({"action": "edit", "ticket": "ABC-1", "assignee": "ana@example.org"}),
+        "jira workitem edit",
+    );
+    assert!(done.contains("ABC-1 was changed."), "{done}");
+    assert_eq!(
+        asked,
+        ["jira workitem edit --key ABC-1 --assignee ana@example.org --yes"]
+    );
+    let (done, asked) = jira_written(
+        json!({"action": "edit", "ticket": "ABC-1", "assignee": null}),
+        "jira workitem edit",
+    );
+    assert!(done.contains("ABC-1 was changed."), "{done}");
+    assert_eq!(
+        asked,
+        ["jira workitem edit --key ABC-1 --remove-assignee --yes"]
+    );
+}
+
+#[test]
+fn github_accepts_at_me_as_an_assignee() {
+    let (done, asked) = ticket_written(
+        json!({"action": "edit", "ticket": "#2", "assignees": ["@me"]}),
+        "issue edit",
+    );
+    assert!(done.contains("#2 of acme/app was changed."), "{done}");
+    assert_eq!(
+        asked,
+        ["issue edit 2 -R github.com/acme/app --add-assignee @me"]
+    );
+}
+
+#[test]
+fn the_card_of_a_ticket_write_says_the_assignee() {
+    let user = user();
+    on_jira(&user);
+    jira_items(&user);
+    let (_, mcp) = root_in(&user, None);
+    let says = |args: Value| {
+        held(&mcp.call("tickets", args));
+        let requests = user.call("approval.list", json!({})).unwrap()["requests"].clone();
+        requests.as_array().unwrap().last().unwrap()["says"].clone()
+    };
+
+    let assigned = says(json!({"action": "edit", "ticket": "ABC-1", "assignee": "@me"}));
+    let removed = says(json!({"action": "edit", "ticket": "ABC-1", "assignee": null}));
+
+    assert!(
+        assigned.to_string().contains("Its assignee: @me"),
+        "{assigned}"
+    );
+    assert!(
+        removed.to_string().contains("It removes the assignee"),
+        "{removed}"
+    );
+}
+
+#[test]
+fn an_assignee_where_the_tracker_or_the_action_takes_none_is_refused_before_anything_is_asked() {
+    let jira = user();
+    on_jira(&jira);
+    jira_items(&jira);
+    let (_, mcp) = root_in(&jira, None);
+    let github = user();
+    on_github(&github);
+    many_issues(&github);
+    let (_, on_github) = root_in(&github, None);
+
+    for (mcp, args, refusal) in [
+        (
+            &mcp,
+            json!({"action": "close", "ticket": "ABC-1", "assignee": "@me"}),
+            "refused: tickets close takes no assignee: assignee is for create and edit",
+        ),
+        (
+            &on_github,
+            json!({"action": "edit", "ticket": "#1", "assignee": "ana"}),
+            "refused: tickets edit on GitHub takes assignees, a list of logins, not assignee",
+        ),
+    ] {
+        let refused = mcp.call("tickets", args.clone());
+        assert!(refused.error, "{args}: {}", refused.text);
+        assert!(
+            refused.text.starts_with(refusal),
+            "{args}: {}",
+            refused.text
+        );
+    }
+    assert!(no_request(&jira) && no_request(&github));
+    assert!(jira.acli_received().is_empty() && github.gh_received().is_empty());
 }
 
 #[test]
@@ -1802,7 +2039,7 @@ fn comment_on_a_jira_work_item() {
     assert!(done.contains("The comment was posted on ABC-1."), "{done}");
     assert_eq!(
         asked,
-        ["jira workitem comment create --key ABC-1 --body Fixed on app/login"]
+        ["jira workitem comment create --key ABC-1 --body-file <file>"]
     );
 }
 
@@ -1817,10 +2054,237 @@ fn edit_a_jira_work_item_s_summary_and_description() {
     assert_eq!(
         asked,
         [
-            "jira workitem edit --key ABC-1 --summary The logout fails --description It \
-             hangs --yes"
+            "jira workitem edit --key ABC-1 --summary The logout fails --description-file \
+             <file> --yes"
         ]
     );
+}
+
+/// A Markdown with a heading, marks, a list and a code block: what an agent writes.
+const MARKDOWN: &str = "## Goal\n\nLet users **log in** with `code`.\n\n- a form\n- a session\n\n```rust\nfn main() {}\n```";
+
+/// The types of the blocks of an ADF document.
+fn block_types(adf: &Value) -> Vec<&str> {
+    adf["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["type"].as_str().unwrap())
+        .collect()
+}
+
+/// The one file a call of the fake `acli` was handed: it is private, and gone once the call is
+/// done, the fake having read it (and checked it is valid ADF, ending with 1 if not).
+fn file_sent<'a>(call: &'a Value, flag: &str) -> &'a Value {
+    let args: Vec<&str> = call["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(args.contains(&flag), "{flag} not in {args:?}");
+    assert!(
+        !args
+            .iter()
+            .any(|a| matches!(*a, "--description" | "--body")),
+        "the text must not be on the command line: {args:?}"
+    );
+    let file = &call["files"][0];
+    assert_eq!(file["flag"], flag);
+    assert_eq!(file["mode"], 0o600, "{file}");
+    assert_eq!(file["dir_mode"].as_u64().unwrap() & 0o077, 0, "{file}");
+    assert!(
+        !Path::new(file["path"].as_str().unwrap()).exists(),
+        "{file}"
+    );
+    file
+}
+
+#[test]
+fn a_jira_description_written_in_markdown_is_sent_as_adf() {
+    let (done, asked) = jira_sent(
+        json!({"action": "create", "project": "def", "title": "Add a logout", "body": MARKDOWN}),
+        "jira workitem create",
+    );
+    assert!(
+        done.contains("The ticket DEF-7 was opened in DEF"),
+        "{done}"
+    );
+    let adf = &file_sent(&asked[0], "--description-file")["adf"];
+    assert_eq!(
+        block_types(adf),
+        ["heading", "paragraph", "bulletList", "codeBlock"]
+    );
+    assert_eq!(adf["content"][0]["attrs"]["level"], 2);
+    assert_eq!(
+        adf["content"][1]["content"][1],
+        json!({"type": "text", "text": "log in", "marks": [{"type": "strong"}]})
+    );
+    assert_eq!(adf["content"][3]["attrs"]["language"], "rust");
+}
+
+#[test]
+fn a_jira_edit_and_a_jira_comment_are_sent_as_adf() {
+    let (done, asked) = jira_sent(
+        json!({"action": "edit", "ticket": "ABC-1", "title": "The logout fails", "body": MARKDOWN}),
+        "jira workitem edit",
+    );
+    assert!(done.contains("ABC-1 was changed."), "{done}");
+    let adf = &file_sent(&asked[0], "--description-file")["adf"];
+    assert_eq!(
+        block_types(adf),
+        ["heading", "paragraph", "bulletList", "codeBlock"]
+    );
+
+    let (done, asked) = jira_sent(
+        json!({"action": "comment", "ticket": "ABC-1", "body": MARKDOWN}),
+        "jira workitem comment",
+    );
+    assert!(done.contains("The comment was posted on ABC-1."), "{done}");
+    let adf = &file_sent(&asked[0], "--body-file")["adf"];
+    assert_eq!(
+        block_types(adf),
+        ["heading", "paragraph", "bulletList", "codeBlock"]
+    );
+}
+
+#[test]
+fn plain_text_is_sent_as_one_paragraph_per_block() {
+    let (_, asked) = jira_sent(
+        json!({"action": "comment", "ticket": "ABC-1",
+            "body": "Fixed on app/login\nthen merged\n\nNothing else to do"}),
+        "jira workitem comment",
+    );
+    let adf = &file_sent(&asked[0], "--body-file")["adf"];
+    assert_eq!(
+        adf["content"],
+        json!([
+            {"type": "paragraph", "content": [
+                {"type": "text", "text": "Fixed on app/login"}, {"type": "hardBreak"},
+                {"type": "text", "text": "then merged"}]},
+            {"type": "paragraph", "content": [{"type": "text", "text": "Nothing else to do"}]},
+        ])
+    );
+}
+
+#[test]
+fn what_cannot_be_converted_is_kept_as_text() {
+    let (_, asked) = jira_sent(
+        json!({"action": "comment", "ticket": "ABC-1",
+            "body": "<div class=\"x\">raw</div>\n\nA logo ![logo](https://example.com/l.png) here"}),
+        "jira workitem comment",
+    );
+    let adf = &file_sent(&asked[0], "--body-file")["adf"];
+    assert_eq!(
+        adf["content"],
+        json!([
+            {"type": "paragraph", "content": [{"type": "text", "text": "<div class=\"x\">raw</div>"}]},
+            {"type": "paragraph", "content": [{"type": "text",
+                "text": "A logo ![logo](https://example.com/l.png) here"}]},
+        ])
+    );
+}
+
+/// A Markdown with one of each kind converted.
+const EVERYTHING: &str = "## Plan\n\nDo **this** and *that*, not ~~those~~, see \
+    [docs](https://example.com/a) and `code`.\nA second line.\n\n1. one\n2. two\n   - nested\n\n\
+    > quoted\n\n---\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n```rust\nfn main() {}\n```";
+
+#[test]
+fn a_jira_description_read_back_is_the_markdown_written() {
+    let user = user();
+    on_jira(&user);
+    jira_items(&user);
+    let (_, mcp) = root_in(&user, None);
+    let answer = mcp.call(
+        "tickets",
+        json!({"action": "comment", "ticket": "ABC-1", "body": EVERYTHING}),
+    );
+    judged_then_done(
+        &user,
+        answer,
+        || words(user.acli_received()),
+        "jira workitem comment",
+    );
+
+    let shown = read(
+        &user,
+        mcp.call(
+            "tickets",
+            json!({"action": "show", "ticket": "ABC-1", "detail": "full"}),
+        ),
+    );
+    // `show` indents the lines that follow a comment's first.
+    assert!(
+        shown.replace("\n    ", "\n").contains(EVERYTHING),
+        "{shown}"
+    );
+}
+
+#[test]
+fn a_post_flottille_wrote_on_jira_is_still_recognised() {
+    // The text of a comment that Jira keeps as a tree, with a link, a table and marks, is found
+    // by the record after the round trip, not by the Markdown typed.
+    let user = user();
+    on_jira(&user);
+    jira_items(&user);
+    let (_, mcp) = root_in(&user, None);
+    let answer = mcp.call(
+        "tickets",
+        json!({"action": "comment", "ticket": "ABC-1", "body": EVERYTHING}),
+    );
+    judged_then_done(
+        &user,
+        answer,
+        || words(user.acli_received()),
+        "jira workitem comment",
+    );
+
+    let shown = read(
+        &user,
+        mcp.call(
+            "tickets",
+            json!({"action": "show", "ticket": "ABC-1", "detail": "full"}),
+        ),
+    );
+    assert!(
+        shown.contains("Casey Example (posted by an agent)"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn github_and_bitbucket_writes_are_not_converted() {
+    let body = "## Done\n\n**Rebased** on `main`\n\n- a\n- b";
+    let user = user();
+    on_github(&user);
+    user.gh_script(pulls());
+    let (_, mcp) = root_in(&user, None);
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "comment", "number": 12, "body": body}),
+    );
+    judged_then_done(&user, answer, || words(user.gh_received()), "pr comment");
+    assert!(words(user.gh_received()).contains(&format!(
+        "pr comment 12 -R github.com/acme/app --body {body}"
+    )));
+
+    let user = self::user();
+    on_bitbucket(&user);
+    user.bkt_script(
+        json!({"pulls": {"acme/app": [{"id": 3, "title": "Work", "state": "OPEN",
+        "source": {"branch": {"name": "app/login"}, "repository": {"full_name": "acme/app"}},
+        "destination": {"branch": {"name": "main"}, "repository": {"full_name": "acme/app"}}}]}}),
+    );
+    let (_, mcp) = root_in(&user, None);
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "comment", "number": 3, "body": body}),
+    );
+    judged_then_done(&user, answer, || words(user.bkt_received()), "pr comment");
+    assert!(words(user.bkt_received()).contains(&format!(
+        "pr comment 3 --context cloud --workspace acme --repo app --text {body}"
+    )));
 }
 
 #[test]
@@ -2359,7 +2823,7 @@ fn a_write_to_a_key_of_a_project_outside_the_tracker_is_refused() {
         ),
         (
             json!({"action": "create", "title": "x"}),
-            "refused: tickets create on Jira needs project, one of the tracker's: ABC, DEF",
+            "refused: tickets create and types on Jira need project, one of the tracker's: ABC, DEF",
         ),
     ] {
         let refused = mcp.call("tickets", args.clone());
@@ -2428,7 +2892,7 @@ fn a_root_session_started_by_an_agent_appears_and_is_the_user_s() {
     let answer = mcp.call(
         "agent_launch",
         json!({"title": "Fix login", "brief": "The login fails: fix it.", "workspace": "login",
-            "root": true}),
+            "follow": false, "root": true}),
     );
     let number = held(&answer);
     assert_eq!(
@@ -2501,7 +2965,7 @@ fn a_root_session_in_auto_is_judged_by_the_judge_and_stays_in_auto() {
 
     let answer = mcp.call(
         "agent_launch",
-        json!({"title": "Docs", "brief": "Write the docs.", "root": true}),
+        json!({"title": "Docs", "brief": "Write the docs.", "follow": false, "root": true}),
     );
 
     assert!(
@@ -2541,7 +3005,7 @@ fn a_child_cannot_start_a_root_session() {
 
     let refused = child.call(
         "agent_launch",
-        json!({"title": "escape", "brief": "Work outside my tree.", "root": true}),
+        json!({"title": "escape", "brief": "Work outside my tree.", "follow": false, "root": true}),
     );
 
     assert!(refused.error, "{}", refused.text);
@@ -2602,7 +3066,7 @@ fn launched_root(user: &User, mode: &str, brief: &str) -> (String, String, Mcp) 
     let opened = user.received_requests("session/new").len();
     let answer = mcp.call(
         "agent_launch",
-        json!({"title": "Second", "brief": brief, "root": true}),
+        json!({"title": "Second", "brief": brief, "follow": false, "root": true}),
     );
     if mode == "ask" {
         allow(user, held(&answer));
@@ -2664,7 +3128,7 @@ fn a_root_started_by_an_agent_cannot_start_one_without_the_user() {
 
     let answer = mcp.call(
         "agent_launch",
-        json!({"title": "Third", "brief": "And the tests.", "root": true}),
+        json!({"title": "Third", "brief": "And the tests.", "follow": false, "root": true}),
     );
 
     held(&answer);
@@ -2690,7 +3154,7 @@ fn a_root_session_with_a_brief_longer_than_the_judge_sees_whole_is_refused() {
 
     let refused = mcp.call(
         "agent_launch",
-        json!({"title": "Long", "brief": "word ".repeat(2_000), "root": true}),
+        json!({"title": "Long", "brief": "word ".repeat(2_000), "follow": false, "root": true}),
     );
 
     assert!(refused.error, "{}", refused.text);
@@ -2719,7 +3183,7 @@ fn a_root_session_whose_brief_holds_a_secret_is_base() {
     let answer = mcp.call(
         "agent_launch",
         json!({"title": "Deploy", "brief": "Use ghp_abcdefghijklmnopqrstuvwxyz0123456789 to deploy.",
-            "root": true}),
+            "follow": false, "root": true}),
     );
 
     held(&answer);
@@ -2929,7 +3393,7 @@ fn a_session_in_a_new_workspace_with_a_brief_longer_than_the_judge_sees_whole_is
     let refused = lead.call(
         "agent_launch",
         json!({"title": "Long", "brief": "word ".repeat(2_000), "new_workspace": "long",
-            "root": true}),
+            "follow": false, "root": true}),
     );
 
     assert!(refused.error, "{}", refused.text);
@@ -3370,7 +3834,7 @@ fn lead_and_session(user: &User) -> (String, Mcp, String, Mcp) {
     let opened = user.received_requests("session/new").len();
     let answer = mcp.call(
         "agent_launch",
-        json!({"title": "Login", "brief": "Fix the login.", "workspace": "login", "root": true}),
+        json!({"title": "Login", "brief": "Fix the login.", "workspace": "login", "follow": false, "root": true}),
     );
     assert!(answer.text.contains("Started a session"), "{}", answer.text);
     let (url, authorization) = server_of(user, opened);
@@ -3608,7 +4072,7 @@ fn session_send_in_ask_is_a_card_that_shows_the_message_whole() {
         .unwrap();
     let launched = mcp.call(
         "agent_launch",
-        json!({"title": "Login", "brief": "Fix the login.", "workspace": "login", "root": true}),
+        json!({"title": "Login", "brief": "Fix the login.", "workspace": "login", "follow": false, "root": true}),
     );
     allow(&user, held(&launched));
     let session = agents(&user)
@@ -3769,7 +4233,7 @@ fn an_agent_s_comment_is_posted_without_a_marker() {
     );
     assert_eq!(
         asked,
-        ["jira workitem comment create --key ABC-1 --body Fixed on app/login"]
+        ["jira workitem comment create --key ABC-1 --body-file <file>"]
     );
 }
 
@@ -4388,7 +4852,7 @@ fn a_comment_that_closes_or_reopens_is_recorded_by_its_text_as_gh_and_bkt_give_n
 }
 
 #[test]
-fn every_post_of_an_agent_on_jira_is_recorded_by_its_text() {
+fn every_post_of_an_agent_on_jira_is_recorded_a_comment_by_the_id_read_after_it() {
     let user = user();
     on_jira(&user);
     jira_items(&user);
@@ -4415,6 +4879,167 @@ fn every_post_of_an_agent_on_jira_is_recorded_by_its_text() {
     assert_eq!(recorded(&user, "jira", "", "DEF-7"), [body_of(None)]);
     assert_eq!(
         recorded(&user, "jira", "", "ABC-1"),
-        [comment_of(None), body_of(None)]
+        [comment_of(Some("10100")), body_of(None)]
     );
+}
+
+// A root starts a session for the user in main (#408).
+
+/// The text of the one request held for the user.
+fn says_of_the_request(user: &User) -> String {
+    the_request(user)["says"].to_string()
+}
+
+#[test]
+fn a_root_in_a_workspace_starts_a_session_in_main() {
+    let user = user();
+    on_github(&user);
+    let (lead, mcp) = root_in(&user, Some("login"));
+    user.call("agent.mode", json!({"agent": lead, "mode": "ask"}))
+        .unwrap();
+
+    let number = held(&mcp.call(
+        "agent_launch",
+        json!({"title": "Study", "brief": "Read the code.", "workspace": "main", "root": true, "follow": false}),
+    ));
+    let done = allow(&user, number);
+
+    assert!(done.contains("Started a session for the user"), "{done}");
+    assert!(done.contains("main, the project folder"), "{done}");
+    let started = agents(&user)
+        .into_iter()
+        .find(|a| a["title"] == "Study")
+        .unwrap_or_else(|| panic!("no session started"));
+    let session = agent(&user, started["id"].as_str().unwrap());
+    assert_eq!(session.workspace, None, "the project folder is main");
+    assert_eq!(session.parent, None);
+    assert_eq!(session.launched_by.as_deref(), Some(lead.as_str()));
+    // No workspace was made for it.
+    assert!(!workspace_exists(&user, "main"));
+}
+
+#[test]
+fn the_gate_is_told_the_session_starts_in_main() {
+    let user = user();
+    on_github(&user);
+    let (lead, mcp) = root_in(&user, Some("login"));
+    user.call("agent.mode", json!({"agent": lead, "mode": "ask"}))
+        .unwrap();
+
+    held(&mcp.call(
+        "agent_launch",
+        json!({"title": "Study", "brief": "Read the code.", "workspace": "main", "root": true, "follow": false}),
+    ));
+
+    let says = says_of_the_request(&user);
+    assert!(
+        says.contains("Start a session for the user in main, the project folder: \\\"Study\\\""),
+        "{says}"
+    );
+    assert!(!says.contains("the workspace main"), "{says}");
+}
+
+#[test]
+fn a_workspace_cannot_be_named_main() {
+    let user = user();
+    on_github(&user);
+    let (lead, mcp) = root_in(&user, None);
+    user.call("agent.mode", json!({"agent": lead, "mode": "ask"}))
+        .unwrap();
+    let before = agents(&user).len();
+
+    // The agent's tool, and a launch that makes one: refused before the user is asked.
+    for (tool, call) in [
+        ("workspace", json!({"action": "create", "name": "main"})),
+        (
+            "agent_launch",
+            json!({"title": "Study", "brief": "Read.", "new_workspace": "main", "root": true, "follow": false}),
+        ),
+    ] {
+        let refused = mcp.call(tool, call);
+        assert!(refused.error, "{tool}: {}", refused.text);
+        assert!(
+            refused.text.contains("main is reserved")
+                && refused.text.contains("the project folder"),
+            "{tool}: {}",
+            refused.text
+        );
+    }
+    assert!(no_request(&user));
+    assert_eq!(agents(&user).len(), before);
+
+    // The protocol, which the window uses, and the command line.
+    let failure = user
+        .call(
+            "workspace.create",
+            json!({"project": "app", "name": "main"}),
+        )
+        .unwrap_err();
+    assert!(failure.1.contains("main is reserved"), "{failure:?}");
+    let output = user.run(&["workspace", "create", "app", "main"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("main is reserved"), "{stderr}");
+    assert!(!workspace_exists(&user, "main"));
+}
+
+#[test]
+fn a_project_with_an_old_workspace_named_main_keeps_it() {
+    let user = user();
+    on_github(&user);
+    // A workspace made before the name was reserved: the login one, under another name.
+    let mut old = store(&user).workspace("app", "login").unwrap().unwrap();
+    old.name = "main".into();
+    old.branch = "app/old-main".into();
+    old.steps.clear();
+    store(&user)
+        .create_workspace(&old, ("workspace.created", json!({"name": "main"})))
+        .unwrap();
+    let (lead, mcp) = root_in(&user, None);
+    user.call("agent.mode", json!({"agent": lead, "mode": "ask"}))
+        .unwrap();
+
+    let number = held(&mcp.call(
+        "agent_launch",
+        json!({"title": "Study", "brief": "Read the code.", "workspace": "main", "root": true, "follow": false}),
+    ));
+
+    let says = says_of_the_request(&user);
+    assert!(says.contains("the workspace main"), "{says}");
+    let done = allow(&user, number);
+    assert!(done.contains("Started a session"), "{done}");
+    let started = agents(&user)
+        .into_iter()
+        .find(|a| a["title"] == "Study")
+        .unwrap();
+    assert_eq!(
+        agent(&user, started["id"].as_str().unwrap())
+            .workspace
+            .as_deref(),
+        Some("main"),
+        "it names the workspace, not the project folder"
+    );
+}
+
+#[test]
+fn a_child_still_cannot_be_launched_in_main_from_a_workspace() {
+    let user = user();
+    on_github(&user);
+    let (_, lead) = root_in(&user, Some("login"));
+    let before = agents(&user).len();
+
+    let refused = lead.call(
+        "agent_launch",
+        json!({"title": "worker", "brief": "Read the code.", "workspace": "main"}),
+    );
+
+    assert!(refused.error, "{}", refused.text);
+    assert!(
+        refused
+            .text
+            .starts_with("refused: a child works where you work"),
+        "{}",
+        refused.text
+    );
+    assert_eq!(agents(&user).len(), before);
 }

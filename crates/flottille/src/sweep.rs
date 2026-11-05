@@ -46,11 +46,12 @@ pub fn sweep(daemon: &Arc<Daemon>) {
     crate::forge::poll(daemon);
     crate::items::poll(daemon);
     agents::forget_kept_sessions(daemon);
+    crate::inactive::check(daemon);
     crate::models::check(daemon);
     forget_runs(daemon);
-    let agents = daemon.read(Store::agents).unwrap_or_default();
+    let agents = daemon.read(Store::live_agents).unwrap_or_default();
     let now = now_ms();
-    for agent in agents.iter().filter(|a| !a.state.is_final()) {
+    for agent in &agents {
         match agent.state {
             AgentState::Working if agent.reported_at.is_none() => stuck(daemon, agent, now),
             AgentState::Idle => children_status(daemon, agent, now),
@@ -69,22 +70,27 @@ fn forget_runs(daemon: &Daemon) {
     if with_runs.is_empty() {
         return;
     }
-    let agents = daemon.read(Store::agents).unwrap_or_default();
-    let by_id: std::collections::HashMap<&str, &flottille_core::agent::Agent> =
-        agents.iter().map(|a| (a.id.as_str(), a)).collect();
-    let over: Vec<String> = with_runs
-        .into_iter()
-        .filter(|id| {
-            let mut at = by_id.get(id.as_str());
-            while let Some(agent) = at {
-                match &agent.parent {
-                    Some(parent) => at = by_id.get(parent.as_str()),
-                    None => return agent.state.is_final() && !tree::keeps_session(agent),
+    // Each agent with runs is looked up, and its parents: the whole history is not read.
+    let over: Vec<String> = daemon
+        .read(|store| {
+            let mut over = Vec::new();
+            for id in with_runs {
+                let mut at = store.agent(&id)?;
+                while let Some(agent) = at {
+                    match &agent.parent {
+                        Some(parent) => at = store.agent(parent)?,
+                        None => {
+                            if agent.state.is_final() && !tree::keeps_session(&agent) {
+                                over.push(id);
+                            }
+                            break;
+                        }
+                    }
                 }
             }
-            false
+            Ok(over)
         })
-        .collect();
+        .unwrap_or_default();
     if !over.is_empty()
         && let Err(error) = daemon.read(|store| store.forget_runs_of(&over))
     {

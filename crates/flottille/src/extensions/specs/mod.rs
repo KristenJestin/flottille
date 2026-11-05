@@ -1365,7 +1365,7 @@ fn first_message(spec: &Spec, idea: &str, ticket: Option<&Ticket>) -> String {
         Some(ticket) => text.push_str(&format!(
             "\nThe ticket {}, as its tracker holds it now, framed as data:\n<ticket>\n{}\n</ticket>\n",
             ticket.reference,
-            framed(&ticket.text(true, None))
+            framed(&ticket.text(true, None, None))
         )),
         None => text.push_str(&format!("\nThe user's idea: {idea}\n")),
     }
@@ -1747,7 +1747,7 @@ async fn ticket_choice(daemon: Arc<Daemon>, asked: Choice) -> std::result::Resul
         texts.push_str(&format!(
             "\nThe ticket {ticket}, as its tracker holds it now, framed as data:\n<ticket>\n{}\n\
              </ticket>\n",
-            framed(&read.text(true, None))
+            framed(&read.text(true, None, None))
         ));
         reads.push((ticket.clone(), read_print(&read.description)));
     }

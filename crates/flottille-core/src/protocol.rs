@@ -96,7 +96,7 @@ pub struct ProjectTicket {
 
 /// The parameters of `project.set_settings`: the forge declared for each repository named (none
 /// to declare none; a repository left out keeps its own), its base branches and dependencies
-/// when given, and the project's tracker (none for none).
+/// when given, the project's tracker (none for none) and its branch prefix when given.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectSettings {
@@ -105,6 +105,18 @@ pub struct ProjectSettings {
     pub repositories: Vec<RepositorySetting>,
     #[serde(default)]
     pub tracker: Option<crate::declared::ProjectTracker>,
+    /// The branch prefix of its workspaces, empty for none; the file's when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_prefix: Option<String>,
+}
+
+/// The parameters of `project.set_message_checks`: every check of the project, in order; none
+/// removes them.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MessageChecks {
+    pub name: String,
+    pub checks: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -162,6 +174,19 @@ pub struct WorkspaceTicket {
 pub struct WorkspaceName {
     pub project: String,
     pub name: String,
+}
+
+/// The parameters of `workspace.rename_branch`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceRenameBranch {
+    pub project: String,
+    pub name: String,
+    /// The new name of the branch.
+    pub branch: String,
+    /// Only this repository's; every repository of the workspace when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
 }
 
 /// The parameters of `workspace.forge`.

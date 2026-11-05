@@ -7,6 +7,7 @@ pub mod button;
 pub mod card;
 pub mod color;
 pub mod confirm;
+pub mod cut;
 pub mod drawer;
 pub mod dropdown;
 pub mod field;
@@ -21,11 +22,13 @@ pub mod modal;
 pub mod motion;
 pub mod omarchy;
 pub mod page;
+pub mod path;
 pub mod radio;
 pub mod reveal;
 pub mod rows;
 pub mod segmented;
 pub mod select;
+pub mod skeleton;
 pub mod space;
 pub mod state;
 pub mod switch;
@@ -39,6 +42,7 @@ use gpui_kit::App;
 pub use button::{Badge, Button, ButtonKind, Tooltip, tipped};
 pub use card::{Block, Card};
 pub use confirm::Confirm;
+pub use cut::tipped_when_cut;
 pub use drawer::{Drawer, Side};
 pub use dropdown::{Align, Dropdown, MenuItem};
 pub use field::Field;
@@ -49,13 +53,14 @@ pub use interact::{
 };
 pub use lines::{
     CardHead, Chip, FlatRow, FooterAction, LINE_GAP, LabelledLine, StepRow, StepTone, caption,
-    lines_block,
+    commanded_text, lines_block,
 };
 pub use listing::{Item, Listing, Placement};
 pub use menu::Menu;
 pub use modal::Modal;
 pub use omarchy::Environment;
 pub use page::{EmptyLine, PageHeader, Section};
+pub use path::path_line;
 pub use radio::RadioChoices;
 pub use reveal::{
     Changing, Fold, Growing, Presence, PresenceOf, PulsingLabel, changing, enter, fold_frame,
@@ -66,6 +71,7 @@ pub use rows::{
 };
 pub use segmented::Segmented;
 pub use select::{Select, SelectOption};
+pub use skeleton::{Awaiting, Skeleton, awaiting};
 pub use state::{AgentState, Pill, StateIcon, Status};
 pub use switch::Switch;
 pub use tabs::Tabs;

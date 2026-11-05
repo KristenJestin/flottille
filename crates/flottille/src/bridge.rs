@@ -14,11 +14,11 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{ExitCode, ExitStatus, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use flottille_core::paths::{Paths, ensure_private_dir};
 use flottille_core::secrets;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::signal::unix::{SignalKind, signal};
@@ -41,6 +41,8 @@ const OPTIONS: [&str; 6] = [
 /// A history past this size keeps its later half: a load replays what fits.
 const HISTORY_CAP: u64 = 4 << 20;
 
+/// The least time between two usage updates of a turn.
+const USAGE_EVERY: Duration = Duration::from_secs(1);
 const NOT_FOUND: i64 = -32601;
 const INVALID: i64 = -32602;
 const INTERNAL: i64 = -32603;
@@ -123,6 +125,79 @@ struct Claude {
     open: bool,
     /// The model's context window, once a result named it.
     window: Option<u64>,
+    /// What each model used in the session so far, as the last result said it; `None` while
+    /// unknown (a resumed session the bridge kept no totals of).
+    totals: Option<Map<String, Value>>,
+}
+
+impl Claude {
+    /// What the turn a result ends used, per model (`docs/reference/acp.md`, "What a turn
+    /// used"). `modelUsage` and `total_cost_usd` are the session's running totals, so a model's
+    /// share is what its totals grew by since the last result; a total that went down was reset,
+    /// and its whole value is the turn's. Without known totals, the turn's `usage`, which counts
+    /// the main loop alone and names no model.
+    fn turn_used(&mut self, message: &Value) -> Vec<Value> {
+        const COUNTS: [(&str, &str); 4] = [
+            ("inputTokens", "inputTokens"),
+            ("outputTokens", "outputTokens"),
+            ("cacheReadInputTokens", "cachedReadTokens"),
+            ("cacheCreationInputTokens", "cachedWriteTokens"),
+        ];
+        let now = message["modelUsage"].as_object().filter(|m| !m.is_empty());
+        let mut used = Vec::new();
+        if let (Some(now), Some(before)) = (now, &self.totals) {
+            for (model, total) in now {
+                let was = before.get(model).unwrap_or(&Value::Null);
+                let reset = COUNTS
+                    .iter()
+                    .any(|(key, _)| total[key].as_u64() < was[key].as_u64());
+                let was = if reset { &Value::Null } else { was };
+                let mut row = json!({"model": model});
+                let mut grew = false;
+                for (key, name) in COUNTS {
+                    if let Some(count) = total[key].as_u64() {
+                        let count = count.saturating_sub(was[key].as_u64().unwrap_or(0));
+                        grew |= count > 0;
+                        row[name] = count.into();
+                    }
+                }
+                if let Some(cost) = total["costUSD"].as_f64() {
+                    // Rounded, so that a difference of sums says the cost as it was summed.
+                    let cost = cost - was["costUSD"].as_f64().unwrap_or(0.0);
+                    let cost = (cost * 1e10).round() / 1e10;
+                    grew |= cost > 0.0;
+                    row["cost"] = json!({"amount": cost, "currency": "USD"});
+                }
+                // A model the session used before, not in this turn.
+                if grew {
+                    used.push(row);
+                }
+            }
+        }
+        if used.is_empty() {
+            let usage = &message["usage"];
+            let mut row = json!({});
+            // A session that used one model used it in the main loop.
+            if let Some(models) = now.filter(|m| m.len() == 1) {
+                row["model"] = models.keys().next().cloned().into();
+            }
+            for (key, name) in [
+                ("input_tokens", "inputTokens"),
+                ("output_tokens", "outputTokens"),
+                ("cache_read_input_tokens", "cachedReadTokens"),
+                ("cache_creation_input_tokens", "cachedWriteTokens"),
+            ] {
+                if let Some(count) = usage[key].as_u64() {
+                    row[name] = count.into();
+                }
+            }
+            used.push(row);
+        }
+        if let Some(now) = now {
+            self.totals = Some(now.clone());
+        }
+        used
+    }
 }
 
 impl Drop for Claude {
@@ -142,6 +217,8 @@ struct Turn {
     message: Option<String>,
     /// The context in use, as the last message or compaction said.
     used: Option<u64>,
+    /// When, and what, the context in use was last said during the turn.
+    usage_sent: Option<(Instant, u64)>,
     /// The provider refused the turn for a limit: a rate limit rejected, an error or a message
     /// of Claude Code's saying so.
     limited: bool,
@@ -383,6 +460,13 @@ impl Bridge {
             }
         });
         let history = claude::history(&self.paths, &session).expect("a session id names a file");
+        let totals = if new {
+            Some(Map::new())
+        } else {
+            claude::totals(&self.paths, &session)
+                .and_then(|path| std::fs::read_to_string(path).ok())
+                .and_then(|text| serde_json::from_str(&text).ok())
+        };
         self.claude = Some(Claude {
             child,
             stdin: Some(stdin),
@@ -394,6 +478,7 @@ impl Bridge {
             effort: "default".into(),
             open: false,
             window: None,
+            totals,
         });
         self.from_claude = Some(receiver);
         self.control(
@@ -477,6 +562,7 @@ impl Bridge {
             streamed: false,
             message: None,
             used: None,
+            usage_sent: None,
             limited: false,
             error: None,
         });
@@ -617,6 +703,8 @@ impl Bridge {
                     return;
                 };
                 claude.model = model;
+                // The window is the old model's: a result of the new one says its own.
+                claude.window = None;
                 // A level the new model does not have goes back to Claude Code's own.
                 let kept = effort_levels(&claude.models, &claude.model)
                     .is_some_and(|levels| levels.contains(&claude.effort));
@@ -809,6 +897,25 @@ impl Bridge {
                 );
             }
         }
+        self.usage_during_turn().await;
+    }
+
+    /// The context in use, said while the turn runs, at most once a second: the window's size
+    /// comes with it once a `result` of the session gave it. Before, `size` is 0, which ACP
+    /// requires a number for: the daemon reads it as unknown.
+    async fn usage_during_turn(&mut self) {
+        let Some(turn) = &mut self.turn else { return };
+        let Some(used) = turn.used else { return };
+        if turn
+            .usage_sent
+            .is_some_and(|(at, _)| at.elapsed() < USAGE_EVERY)
+        {
+            return;
+        }
+        turn.usage_sent = Some((Instant::now(), used));
+        let size = self.claude.as_ref().and_then(|c| c.window).unwrap_or(0);
+        self.update(json!({"sessionUpdate": "usage_update", "used": used, "size": size}))
+            .await;
     }
 
     async fn tool_results(&mut self, message: &Value) {
@@ -842,6 +949,7 @@ impl Bridge {
                 {
                     turn.used = Some(used);
                 }
+                self.usage_during_turn().await;
             }
             Some("api_retry") => {
                 let text = format!(
@@ -873,7 +981,10 @@ impl Bridge {
             claude.window = window.or(claude.window);
         }
         let window = self.claude.as_ref().and_then(|c| c.window);
-        if let (Some(used), Some(size)) = (turn.used, window) {
+        // Without a window the update is the last state the throttle held back, if it is one.
+        let unsaid = |used| turn.usage_sent.is_none_or(|(_, sent)| sent != used);
+        if let Some(used) = turn.used.filter(|used| window.is_some() || unsaid(*used)) {
+            let size = window.unwrap_or(0);
             let mut update = json!({"sessionUpdate": "usage_update", "used": used, "size": size});
             if let Some(cost) = message["total_cost_usd"].as_f64() {
                 update["cost"] = json!({"amount": cost, "currency": "USD"});
@@ -934,6 +1045,15 @@ impl Bridge {
         } else {
             "end_turn"
         };
+        let mut used = Vec::new();
+        if let Some(claude) = &mut self.claude {
+            used = claude.turn_used(message);
+            if let (Some(path), Some(totals)) =
+                (claude::totals(&self.paths, &claude.session), &claude.totals)
+            {
+                let _ = write_private(&path, &Value::Object(totals.clone()).to_string());
+            }
+        }
         let usage = &message["usage"];
         let count = |key: &str| usage[key].as_u64().unwrap_or(0);
         let (input, output, read, write) = (
@@ -946,7 +1066,8 @@ impl Bridge {
             turn.id,
             json!({"stopReason": stop_reason, "usage": {"inputTokens": input,
                 "outputTokens": output, "cachedReadTokens": read, "cachedWriteTokens": write,
-                "totalTokens": input + output + read + write}}),
+                "totalTokens": input + output + read + write},
+                "_meta": {"flottille": {"usage": used}}}),
         )
         .await;
     }

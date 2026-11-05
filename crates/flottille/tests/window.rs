@@ -30,7 +30,9 @@ use flottille_window::settings::SettingsPage;
 use flottille_window::shell::{Layout, Selection};
 use flottille_window::tree::{project_id, session_id};
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{Entity, Focusable as _, TestAppContext, VisualTestContext, px, size};
+use gpui_kit::{
+    Bounds, Entity, Focusable as _, Pixels, TestAppContext, VisualTestContext, px, size,
+};
 use serde_json::json;
 
 /// A user whose fake agent answers "ok", reads `.env` when asked to (a call the gate holds for
@@ -595,6 +597,36 @@ fn card_of(
 }
 
 /// Lets the page's entrance and every other motion end, then draws.
+/// Unfolds the group that holds the row `at`, when it is folded: its rows are drawn.
+fn unfold(page: &Entity<SessionPage>, at: usize, cx: &mut VisualTestContext) {
+    let groups = page.read_with(cx, |page, cx| page.conversation().read(cx).groups());
+    let Some(group) = groups.into_iter().find(|group| group.contains(&at)) else {
+        return;
+    };
+    let line = page
+        .read_with(cx, |page, cx| page.conversation().read(cx).group_id(&group))
+        .expect("a group's line");
+    if cx.update(|window, _| window.find(line.clone()).expanded()) == Some(false) {
+        cx.update(|window, cx| window.click(line, cx));
+        settle(cx);
+    }
+}
+
+/// Unfolds the group that holds the line of the request `number`, once the page has read the
+/// conversation that holds it: a page knows a decision (an answer taken) before its conversation.
+fn unfold_request(shell: &Entity<Shell>, number: u64, cx: &mut VisualTestContext) {
+    let page = session_page(shell, cx);
+    let line = Block::Approval { number };
+    until(
+        shell,
+        cx,
+        "the request's line is in the conversation",
+        |cx| blocks(&page, cx).contains(&line),
+    );
+    let at = blocks(&page, cx).iter().position(|b| *b == line).unwrap();
+    unfold(&page, at, cx);
+}
+
 fn settle(cx: &mut VisualTestContext) {
     for _ in 0..90 {
         cx.executor().advance_clock(Duration::from_millis(16));
@@ -1255,6 +1287,64 @@ fn slow_start(user: &User, delay: Duration, refuse: Option<&'static str>) -> Con
     })
 }
 
+/// The methods whose answers a relay of [`holding_answers`] keeps from the window.
+type Held = Arc<std::sync::Mutex<std::collections::HashSet<&'static str>>>;
+
+/// Connects to the user's daemon through a relay that keeps the answers to the `methods` from the
+/// window for as long as the test holds them: the daemon has answered, the window has not been
+/// told. All are held at first; the test lets a method through by removing it from the set.
+fn holding_answers(user: &User, methods: &[&'static str]) -> (Connect, Held) {
+    use std::collections::HashMap;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+    use std::sync::Mutex;
+    let connect = user.connector();
+    let held: Held = Arc::new(Mutex::new(methods.iter().copied().collect()));
+    let gates = held.clone();
+    let relay: Connect = Arc::new(move || {
+        let daemon = connect()?;
+        let (window_side, relay_side) = UnixStream::pair()?;
+        let asked: Arc<Mutex<HashMap<String, String>>> = Arc::default();
+        let (mut to_daemon, from_window) = (daemon.try_clone()?, relay_side.try_clone()?);
+        let marks = asked.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(from_window).lines() {
+                let Ok(line) = line else { return };
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+                if let Some(method) = request["method"].as_str() {
+                    marks
+                        .lock()
+                        .unwrap()
+                        .insert(request["id"].to_string(), method.to_owned());
+                }
+                if writeln!(to_daemon, "{line}").is_err() {
+                    return;
+                }
+            }
+        });
+        let (mut to_window, gates) = (relay_side, gates.clone());
+        std::thread::spawn(move || {
+            for line in BufReader::new(daemon).lines() {
+                let Ok(line) = line else { return };
+                let answer: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+                let method = asked.lock().unwrap().remove(&answer["id"].to_string());
+                let deadline = Instant::now() + Duration::from_secs(60);
+                while let Some(method) = &method
+                    && gates.lock().unwrap().contains(method.as_str())
+                    && Instant::now() < deadline
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                if writeln!(to_window, "{line}").is_err() {
+                    return;
+                }
+            }
+        });
+        Ok(window_side)
+    });
+    (relay, held)
+}
+
 /// Sends `task` from atlas's composer, to main.
 fn send_to_main(task: &str, cx: &mut VisualTestContext) {
     type_task(task, cx);
@@ -1596,7 +1686,18 @@ fn open_session<'a>(
     width: f32,
     cx: &'a mut TestAppContext,
 ) -> (Entity<Shell>, &'a mut VisualTestContext) {
-    let (shell, cx) = window(user, Arc::new(user.connector()), width, cx);
+    open_session_through(user, Arc::new(user.connector()), lead, width, cx)
+}
+
+/// [`open_session`], the window following the daemon through `connect`.
+fn open_session_through<'a>(
+    user: &User,
+    connect: Connect,
+    lead: &str,
+    width: f32,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    let (shell, cx) = window(user, connect, width, cx);
     until(&shell, cx, "the session is in the tree", |cx| {
         cx.update(|window, _| window.try_find(session_id(lead)).is_some())
     });
@@ -1799,6 +1900,7 @@ fn a_message_arriving_appends_without_rebuilding_other_rows(cx: &mut TestAppCont
             from: "you".into(),
             text: "and the changelog".into(),
             images: Vec::new(),
+            commands: None,
         }
     );
     assert_eq!(renders(cx), before, "no row already there is drawn again");
@@ -1826,8 +1928,9 @@ fn replying_delivers_to_the_lead(cx: &mut TestAppContext) {
         })
     });
     assert_eq!(
-        reply.read_with(cx, |r, _| r.error().map(str::to_owned)),
-        None
+        toasts(&shell, cx),
+        Vec::<String>::new(),
+        "nothing was refused"
     );
     let delivered = user
         .received_requests("session/prompt")
@@ -1844,6 +1947,7 @@ fn replying_delivers_to_the_lead(cx: &mut TestAppContext) {
             from: "you".into(),
             text: "Use the staging database\nand say when done".into(),
             images: Vec::new(),
+            commands: None,
         })
     });
 }
@@ -2006,15 +2110,18 @@ fn approving_once_from_the_card_performs_the_call_and_leaves_the_record(cx: &mut
     settle(cx);
 
     cx.update(|window, cx| window.click(format!("allow-{number}"), cx));
-    until(&shell, cx, "the card folds into its record", |cx| {
+    until(&shell, cx, "the card leaves", |cx| {
         moving(cx);
-        cx.update(|window, _| {
-            window
-                .try_find(format!("approval-record-{number}"))
-                .is_some()
-                && window.try_find(format!("allow-{number}")).is_none()
-        })
+        cx.update(|window, _| window.try_find(format!("allow-{number}")).is_none())
     });
+    // Answered, it folds into the group of the work, where its record is.
+    settle(cx);
+    unfold_request(&shell, number, cx);
+    assert!(cx.update(|window, _| {
+        window
+            .try_find(format!("approval-record-{number}"))
+            .is_some()
+    }));
     let record = session_page(&shell, cx).read_with(cx, |p, cx| {
         p.conversation()
             .read(cx)
@@ -2756,9 +2863,17 @@ fn a_child_appearing_adds_its_row_to_the_rail_and_the_sub_agents_list(cx: &mut T
         "the child is in the rail and in the list",
         |cx| {
             rail_ids(&page, cx) == [lead.clone(), child.clone()]
-                && cx.update(|window, _| window.try_find(format!("sub-agent-{child}")).is_some())
+                && blocks(&page, cx).contains(&Block::SubAgents)
         },
     );
+    // The list is a step of the lead's work, in its group.
+    settle(cx);
+    let at = blocks(&page, cx)
+        .iter()
+        .position(|b| *b == Block::SubAgents)
+        .unwrap();
+    unfold(&page, at, cx);
+    assert!(cx.update(|window, _| window.try_find(format!("sub-agent-{child}")).is_some()));
     let listed = page.read_with(cx, |p, cx| {
         p.conversation()
             .read(cx)
@@ -3219,6 +3334,7 @@ fn a_call_left_running_shows_interrupted_when_the_conversation_is_read(cx: &mut 
         p.conversation().read(cx).rows()[1].read(cx).marks(cx)
     });
     assert_eq!(marks, [AgentState::Stopped], "no spinner at rest");
+    unfold(&page, 1, cx);
     cx.update(|window, cx| {
         assert_eq!(
             window.find("row-1-steps-toggle").label(),
@@ -3249,13 +3365,28 @@ fn an_answered_request_keeps_its_record_when_the_page_is_opened_again(cx: &mut T
         .unwrap();
 
     let (shell, cx) = open_session(&user, &lead, 1280., cx);
-    until(&shell, cx, "both records are shown", |cx| {
-        cx.update(|window, _| {
+    let recorded = |cx: &mut VisualTestContext| {
+        session_page(&shell, cx).read_with(cx, |p, cx| {
+            p.conversation()
+                .read(cx)
+                .rows()
+                .iter()
+                .filter(|row| row.read(cx).card().and_then(|c| c.record()).is_some())
+                .count()
+        })
+    };
+    until(&shell, cx, "both records are read", |cx| recorded(cx) == 2);
+    settle(cx);
+    // Answered, they are steps of the work, in its group.
+    unfold_request(&shell, forwarded, cx);
+    unfold_request(&shell, own, cx);
+    cx.update(|window, _| {
+        assert!(
             window
                 .try_find(format!("approval-record-{forwarded}"))
                 .is_some()
-                && window.try_find(format!("approval-record-{own}")).is_some()
-        })
+        );
+        assert!(window.try_find(format!("approval-record-{own}")).is_some());
     });
     let records = session_page(&shell, cx).read_with(cx, |p, cx| {
         p.conversation()
@@ -3308,11 +3439,17 @@ fn a_long_conversation_shows_its_last_page_and_earlier_ones_on_demand(cx: &mut T
         Block::SubAgents,
         "launched before the page read: first, not where the tree came"
     );
+    let groups = page.read_with(cx, |p, cx| p.conversation().read(cx).groups());
+    assert!(
+        !groups.iter().any(|group| group.contains(&0)),
+        "the list stays in sight: {groups:?}"
+    );
     assert!(
         !shown.contains(&Block::Message {
             from: "you".into(),
             text: "lead the work".into(),
             images: Vec::new(),
+            commands: None,
         }),
         "the first message is on an earlier page"
     );
@@ -3333,6 +3470,10 @@ fn a_long_conversation_shows_its_last_page_and_earlier_ones_on_demand(cx: &mut T
         });
         settle(cx);
     }
+    assert!(
+        cx.update(|window, _| window.try_find("row-0-sub-agents").is_some()),
+        "drawn, not folded under a group"
+    );
     cx.update(|window, cx| window.click("show-earlier", cx));
     until(&shell, cx, "the earlier page", |cx| {
         blocks(&page, cx)[0]
@@ -3340,6 +3481,7 @@ fn a_long_conversation_shows_its_last_page_and_earlier_ones_on_demand(cx: &mut T
                 from: "you".into(),
                 text: "lead the work".into(),
                 images: Vec::new(),
+                commands: None,
             }
     });
     settle(cx);
@@ -3388,6 +3530,70 @@ fn an_answer_given_on_one_session_s_page_is_not_applied_to_another(cx: &mut Test
     );
 
     cx.update(|window, cx| window.click(session_id(&lead), cx));
+    until(&shell, cx, "the decision on its own page", |cx| {
+        session_page(&shell, cx)
+            .read_with(cx, |p, _| p.id() == lead && p.decision(number).is_some())
+    });
+    // Answered, it is a step of the work, in its group.
+    settle(cx);
+    unfold_request(&shell, number, cx);
+    until(&shell, cx, "the record on its own page", |cx| {
+        cx.update(|window, _| {
+            window
+                .try_find(format!("approval-record-{number}"))
+                .is_some()
+        })
+    });
+}
+
+#[gpui_kit::test]
+fn an_answer_taken_before_a_page_has_read_its_conversation_finds_the_request_in_it(
+    cx: &mut TestAppContext,
+) {
+    let user = team_user();
+    let (lead, mcp, _) = lead_in_w(&user);
+    let other = start(&user, "app", None, "another task");
+    // The daemon's answer to the click, and what a page reads of the conversation, reach the
+    // window when the test lets them.
+    let (connect, held) = holding_answers(&user, &["approval.approve", "agent.show"]);
+    held.lock().unwrap().remove("agent.show");
+    let (shell, cx) = open_session_through(&user, connect, &lead, 1280., cx);
+    let number = held_number(mcp.call("fs_read", json!({"path": ".env"})));
+    until(&shell, cx, "the card is shown", |cx| {
+        cx.update(|window, _| window.try_find(format!("allow-{number}")).is_some())
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click(format!("allow-{number}"), cx));
+    eventually("the request is decided", || {
+        user.call("approval.list", json!({})).unwrap()["requests"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    });
+
+    // The session's page is opened again, its conversation not read yet; then the daemon's answer
+    // to the click reaches the window.
+    cx.update(|window, cx| window.click(session_id(&other), cx));
+    until(&shell, cx, "the other session's page", |cx| {
+        session_page(&shell, cx).read_with(cx, |p, _| p.id() == other)
+    });
+    settle(cx);
+    held.lock().unwrap().insert("agent.show");
+    cx.update(|window, cx| window.click(session_id(&lead), cx));
+    until(&shell, cx, "the session's page, not read", |cx| {
+        session_page(&shell, cx).read_with(cx, |p, _| p.id() == lead)
+    });
+    held.lock().unwrap().remove("approval.approve");
+    until(&shell, cx, "the decision on its own page", |cx| {
+        session_page(&shell, cx).read_with(cx, |p, _| p.decision(number).is_some())
+    });
+    let page = session_page(&shell, cx);
+    assert!(blocks(&page, cx).is_empty(), "the conversation is not read");
+
+    // Its conversation arrives, and the request's line is a step of the work, in its group.
+    held.lock().unwrap().remove("agent.show");
+    settle(cx);
+    unfold_request(&shell, number, cx);
     until(&shell, cx, "the record on its own page", |cx| {
         cx.update(|window, _| {
             window
@@ -3519,7 +3725,7 @@ fn opening_settings_shows_the_judge_and_its_guidance_alone(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
-fn settings_has_six_tabs_in_order(cx: &mut TestAppContext) {
+fn settings_has_seven_tabs_in_order(cx: &mut TestAppContext) {
     assert_eq!(
         flottille_window::settings::SECTIONS[..],
         [
@@ -3527,6 +3733,7 @@ fn settings_has_six_tabs_in_order(cx: &mut TestAppContext) {
             ("providers", "Providers"),
             ("rules", "Rules"),
             ("workspaces", "Workspaces"),
+            ("sessions", "Sessions"),
             ("appearance", "Appearance"),
             ("developer", "Developer mode"),
         ]
@@ -3543,7 +3750,7 @@ fn settings_has_six_tabs_in_order(cx: &mut TestAppContext) {
             .iter()
             .map(|key| window.find(format!("settings-tabs-{key}")).bounds().left())
             .collect();
-        assert_eq!(lefts.len(), 6);
+        assert_eq!(lefts.len(), 7);
         assert!(lefts.windows(2).all(|pair| pair[0] < pair[1]), "{lefts:?}");
         assert!(
             window.try_find("settings-tabs-guidance").is_none(),
@@ -5144,6 +5351,7 @@ fn a_user_message_has_no_you_label(cx: &mut TestAppContext) {
             from: "you".into(),
             text: "lead the work".into(),
             images: Vec::new(),
+            commands: None,
         }
     );
     assert_eq!(
@@ -5178,6 +5386,7 @@ fn a_report_is_folded_until_clicked(cx: &mut TestAppContext) {
     frame(cx);
 
     assert_eq!(labels(&page, cx), ["Report from a sub-agent"]);
+    unfold(&page, 0, cx);
     cx.update(|window, _| {
         assert!(window.try_find("row-0-report-toggle").is_some());
         assert!(window.try_find("row-0-report-text").is_none(), "folded");
@@ -5223,6 +5432,7 @@ fn drawn_report(
         cx,
     );
     frame(cx);
+    unfold(&page, 0, cx);
     cx.update(|window, cx| window.click("row-0-report-toggle", cx));
     frame(cx);
     settle(cx);
@@ -5316,6 +5526,7 @@ fn an_edit_s_diff_is_folded_until_clicked(cx: &mut TestAppContext) {
         .iter()
         .position(|b| matches!(b, Block::Diff { .. }))
         .expect("the edit's diff is a block");
+    unfold(&page, at, cx);
     let (toggle, lines) = (
         format!("row-{at}-diff-toggle"),
         format!("row-{at}-diff-lines"),
@@ -5343,6 +5554,247 @@ fn an_edit_s_diff_is_folded_until_clicked(cx: &mut TestAppContext) {
     settle(cx);
     cx.update(|window, _| assert!(window.try_find(lines.clone()).is_none()));
     assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+}
+
+const DEEP_PATH: &str = "apps/front/src/app/pages/(dashboard)/settings/components/mail-recipient-sheet/mail-recipient-sheet.html";
+
+/// A session whose agent edited `path`, in a window `width` wide: the edit's row.
+fn edit_of<'a>(
+    path: &str,
+    width: f32,
+    cx: &'a mut TestAppContext,
+) -> (Entity<SessionPage>, usize, &'a mut VisualTestContext) {
+    edit_with(path, "c\nd\ne", width, cx)
+}
+
+/// [`edit_of`] where the agent wrote `new` in place of `a\nb`.
+fn edit_with<'a>(
+    path: &str,
+    new: &str,
+    width: f32,
+    cx: &'a mut TestAppContext,
+) -> (Entity<SessionPage>, usize, &'a mut VisualTestContext) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    settle(cx);
+    // The tree is a drawer in a narrow window: the session is opened first, then the window narrows.
+    cx.simulate_resize(size(px(width), px(800.)));
+    settle(cx);
+    read_events(
+        &page,
+        vec![
+            made_up(
+                1,
+                "agent.tool_call",
+                json!({"id": "e", "title": "fs_edit", "status": "in_progress",
+                    "raw_input": {"path": path, "edits": [
+                        {"old": "a\nb", "new": new}]}}),
+            ),
+            made_up(
+                2,
+                "agent.tool_call",
+                json!({"id": "e", "update": true, "status": "completed"}),
+            ),
+        ],
+        cx,
+    );
+    frame(cx);
+    let at = blocks(&page, cx)
+        .iter()
+        .position(|b| matches!(b, Block::Diff { .. }))
+        .expect("the edit's diff is a block");
+    unfold(&page, at, cx);
+    settle(cx);
+    (page, at, cx)
+}
+
+fn edit_bounds(at: usize, part: &str, cx: &mut VisualTestContext) -> Bounds<Pixels> {
+    cx.update(|window, _| window.find(format!("row-{at}-{part}")).bounds())
+}
+
+#[gpui_kit::test]
+fn a_long_path_keeps_the_count_inside_the_edit_card(cx: &mut TestAppContext) {
+    let (_page, at, cx) = edit_of(DEEP_PATH, 420., cx);
+    let (card, chevron, count) = (
+        edit_bounds(at, "diff", cx),
+        edit_bounds(at, "diff-chevron", cx),
+        edit_bounds(at, "diff-card-meta", cx),
+    );
+    assert!(card.size.width < px(420.), "the card is narrow: {card:?}");
+    assert!(chevron.right() <= card.right(), "{chevron:?} in {card:?}");
+    assert!(count.right() <= card.right(), "{count:?} in {card:?}");
+    assert!(
+        chevron.right() <= count.left(),
+        "the chevron comes before the count"
+    );
+}
+
+#[gpui_kit::test]
+fn the_file_name_stays_whole_when_the_folder_is_cut(cx: &mut TestAppContext) {
+    let (_page, at, cx) = edit_of("mail-recipient-sheet.html", 420., cx);
+    let alone = edit_bounds(at, "diff-path-name", cx).size.width;
+    let (_page, at, cx) = edit_of(DEEP_PATH, 420., cx);
+    let (name, folder) = (
+        edit_bounds(at, "diff-path-name", cx),
+        edit_bounds(at, "diff-path-folder", cx),
+    );
+    assert_eq!(name.size.width, alone, "the name is whole: {name:?}");
+    assert!(
+        folder.size.width < px(DEEP_PATH.len() as f32 * 6.),
+        "the folder is cut: {folder:?}"
+    );
+    assert!(folder.right() <= name.left() + px(0.5));
+}
+
+#[gpui_kit::test]
+fn the_whole_path_is_in_the_tooltip(cx: &mut TestAppContext) {
+    let (_page, at, cx) = edit_of(DEEP_PATH, 420., cx);
+    let line = format!("row-{at}-diff-path");
+    cx.update(|window, cx| window.hover(line.clone(), cx));
+    cx.executor()
+        .advance_clock(flottille_ui::motion::TOOLTIP + flottille_ui::motion::HOVER * 2);
+    cx.run_until_parked();
+    frame(cx);
+    cx.update(|window, _| {
+        assert_eq!(
+            window.find(format!("{line}-tooltip")).label(),
+            Some(DEEP_PATH)
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn a_cut_diff_line_shows_its_whole_text_in_a_tooltip(cx: &mut TestAppContext) {
+    let long = "let recipients = sheet.recipients().filter(|recipient| recipient.is_active()).collect::<Vec<_>>();";
+    let (_page, at, cx) = edit_with("src/sheet.rs", long, 420., cx);
+    cx.update(|window, cx| window.click(format!("row-{at}-diff-toggle"), cx));
+    settle(cx);
+    let rest_on = |line: usize, cx: &mut VisualTestContext| {
+        cx.update(|window, cx| window.hover(format!("row-{at}-diff-line-{line}"), cx));
+        cx.executor()
+            .advance_clock(flottille_ui::motion::TOOLTIP + flottille_ui::motion::HOVER * 2);
+        cx.run_until_parked();
+        frame(cx);
+    };
+    // The removed `a` fits; the added line does not, and its padding is not room.
+    rest_on(0, cx);
+    cx.update(|window, _| {
+        assert!(
+            window
+                .try_find(format!("row-{at}-diff-line-0-tooltip"))
+                .is_none()
+        );
+    });
+    rest_on(2, cx);
+    cx.update(|window, _| {
+        assert_eq!(
+            window.find(format!("row-{at}-diff-line-2-tooltip")).label(),
+            Some(format!("+ {long}").as_str())
+        );
+    });
+}
+
+/// A session whose agent read `path`, in a window `width` wide: the read's row, its steps open.
+fn read_of<'a>(
+    path: &str,
+    width: f32,
+    cx: &'a mut TestAppContext,
+) -> (Entity<SessionPage>, usize, &'a mut VisualTestContext) {
+    let user = team_user();
+    let (lead, _mcp, _) = lead_in_w(&user);
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    let page = session_page(&shell, cx);
+    settle(cx);
+    cx.simulate_resize(size(px(width), px(800.)));
+    settle(cx);
+    read_events(
+        &page,
+        vec![
+            made_up(
+                1,
+                "agent.tool_call",
+                json!({"id": "r", "title": "fs_read", "status": "in_progress",
+                    "raw_input": {"path": path}}),
+            ),
+            made_up(
+                2,
+                "agent.tool_call",
+                json!({"id": "r", "update": true, "status": "completed"}),
+            ),
+        ],
+        cx,
+    );
+    frame(cx);
+    let at = blocks(&page, cx)
+        .iter()
+        .position(|b| matches!(b, Block::Steps { .. }))
+        .expect("the read is a step");
+    unfold(&page, at, cx);
+    cx.update(|window, cx| window.click(format!("row-{at}-steps-toggle"), cx));
+    settle(cx);
+    (page, at, cx)
+}
+
+#[gpui_kit::test]
+fn a_long_path_read_stays_inside_its_step(cx: &mut TestAppContext) {
+    let (_page, at, cx) = read_of(DEEP_PATH, 420., cx);
+    let (step, folder, name) = cx.update(|window, _| {
+        (
+            window.find(format!("step-{at}-0")).bounds(),
+            window.find(format!("step-{at}-0-path-folder")).bounds(),
+            window.find(format!("step-{at}-0-path-name")).bounds(),
+        )
+    });
+    assert!(name.right() <= step.right(), "{name:?} in {step:?}");
+    assert!(folder.right() <= name.left() + px(0.5));
+    assert!(
+        folder.size.width < px(DEEP_PATH.len() as f32 * 6.),
+        "{folder:?}"
+    );
+}
+
+/// What the clipboard holds.
+fn copied(cx: &mut VisualTestContext) -> Option<String> {
+    cx.read_from_clipboard().and_then(|item| item.text())
+}
+
+/// What the newest toast says.
+fn newest_toast(cx: &mut VisualTestContext) -> Option<String> {
+    cx.update(|window, _| {
+        window
+            .try_find("toast-1")
+            .and_then(|toast| toast.label().map(str::to_owned))
+    })
+}
+
+#[gpui_kit::test]
+fn a_path_can_be_copied_whole(cx: &mut TestAppContext) {
+    // The edit card, in a window narrow enough to cut the path.
+    let (_page, at, cx) = edit_of(DEEP_PATH, 420., cx);
+    let shown = cx.update(|window, _| window.find(format!("row-{at}-diff-path")).bounds());
+    assert!(shown.size.width < px(DEEP_PATH.len() as f32 * 6.), "cut");
+    cx.update(|window, cx| window.click(format!("row-{at}-diff-copy"), cx));
+    settle(cx);
+    assert_eq!(copied(cx).as_deref(), Some(DEEP_PATH));
+    let toast = newest_toast(cx).expect("a toast says it was copied");
+    assert!(toast.contains("Path copied"), "{toast}");
+    cx.update(|window, _| {
+        assert!(
+            window.try_find(format!("row-{at}-diff-lines")).is_none(),
+            "the click on Copy did not open the edit"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn a_file_step_s_path_can_be_copied_whole(cx: &mut TestAppContext) {
+    let (_page, at, cx) = read_of(DEEP_PATH, 420., cx);
+    cx.update(|window, cx| window.click(format!("step-{at}-0-copy"), cx));
+    settle(cx);
+    assert_eq!(copied(cx).as_deref(), Some(DEEP_PATH));
+    assert!(newest_toast(cx).is_some_and(|toast| toast.contains("Path copied")));
 }
 
 #[gpui_kit::test]
@@ -5447,6 +5899,7 @@ fn a_thought_s_text_reaches_the_window_and_one_claude_sent_without_text_shows_no
     let (at, text) = &thoughts[0];
     assert_eq!(text, "weighing **two** options");
 
+    unfold(&page, *at, cx);
     cx.update(|window, cx| window.click(format!("row-{at}-thought-toggle"), cx));
     frame(cx);
     cx.update(|window, _| assert!(window.try_find(format!("row-{at}-thought-text")).is_some()));
@@ -5475,6 +5928,7 @@ fn a_thought_with_no_text_shows_its_duration_and_opens_on_nothing(cx: &mut TestA
         blocks(&page, cx)[0],
         Block::Thought { until: Some(_), .. }
     ));
+    unfold(&page, 0, cx);
     cx.update(|window, _| {
         assert!(window.try_find("row-0-thought").is_some(), "its duration");
         assert!(
@@ -5766,9 +6220,14 @@ fn the_workspace_section_shows_the_ticket_opens_it_on_a_click_and_links_and_unli
     cx.update(|window, cx| window.click("workspace-menu", cx));
     settle(cx);
     cx.update(|window, cx| window.click("workspace-unlink-ticket", cx));
-    until(&shell, cx, "the ticket gone from the rail", |cx| {
-        cx.update(|window, _| window.try_find("rail-ticket").is_none())
+    until(&shell, cx, "the ticket forgotten by the rail", |cx| {
+        session_page(&shell, cx).read_with(cx, |p, cx| {
+            p.rail().read(cx).place().unwrap().ticket.is_none()
+        })
     });
+    // The row folds away, then it is gone.
+    settle(cx);
+    assert!(cx.update(|window, _| window.try_find("rail-ticket").is_none()));
     let shown = user
         .call("workspace.show", json!({"project": "app", "name": "w"}))
         .unwrap();
@@ -6650,8 +7109,9 @@ fn stop_during_a_turn_cancels_it_and_the_next_message_is_taken(cx: &mut TestAppC
         })
     });
     assert_eq!(
-        reply.read_with(cx, |r, _| r.error().map(str::to_owned)),
-        None
+        toasts(&shell, cx),
+        Vec::<String>::new(),
+        "nothing was refused"
     );
     eventually("the message is played as a new turn", || {
         user.received_requests("session/prompt")
@@ -6768,8 +7228,9 @@ fn resume_on_an_ended_session_brings_the_composer_back_and_a_message_is_answered
         })
     });
     assert_eq!(
-        reply.read_with(cx, |r, _| r.error().map(str::to_owned)),
-        None
+        toasts(&shell, cx),
+        Vec::<String>::new(),
+        "nothing was refused"
     );
     eventually("the message is answered on the same session", || {
         let shown = user.call("agent.show", json!({"agent": lead})).unwrap();
@@ -6813,52 +7274,12 @@ fn no_resume_when_the_agent_can_neither_resume_nor_load(cx: &mut TestAppContext)
     });
 }
 
-/// The composer's error as it says it.
-fn reply_error(reply: &Entity<Reply>, cx: &mut VisualTestContext) -> Option<String> {
-    reply.read_with(cx, |r, _| r.error().map(str::to_owned))
-}
-
-/// The daemon refusing what the composer sent, as it answers.
-fn refuse_reply(reply: &Entity<Reply>, why: &str, cx: &mut VisualTestContext) {
-    cx.update(|window, cx| reply.update(cx, |r, cx| r.replied(Some(why.to_owned()), window, cx)));
-}
-
 fn the_composer_is_back(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     until(shell, cx, "the composer is back", |cx| {
         cx.update(|window, _| {
             window.try_find("reply-field").is_some() && window.try_find("session-ended").is_none()
         })
     });
-}
-
-#[gpui_kit::test]
-fn the_composer_s_old_error_goes_when_the_session_ends_and_when_it_is_resumed(
-    cx: &mut TestAppContext,
-) {
-    let user = team_user();
-    let (lead, _mcp, _) = lead_in_w(&user);
-    let (shell, cx) = open_session(&user, &lead, 1280., cx);
-    let reply = shell
-        .read_with(cx, |s, _| s.reply_of(&lead).cloned())
-        .unwrap();
-    refuse_reply(&reply, "refused: an old error", cx);
-    assert!(reply_error(&reply, cx).is_some());
-
-    user.call("agent.stop", json!({"agent": lead})).unwrap();
-    let page = session_page(&shell, cx);
-    until(&shell, cx, "the session ended, its process gone", |cx| {
-        page.read_with(cx, |p, _| {
-            p.ended_line().is_some() && p.tree().first().is_some_and(|root| !root.stopping)
-        })
-    });
-    assert_eq!(reply_error(&reply, cx), None, "gone with the end");
-
-    // An answer that came late, while it was ended, is not shown once it is resumed.
-    refuse_reply(&reply, "refused: a late error", cx);
-    settle(cx);
-    cx.update(|window, cx| window.click("session-resume", cx));
-    the_composer_is_back(&shell, cx);
-    assert_eq!(reply_error(&reply, cx), None, "gone with the resume");
 }
 
 #[gpui_kit::test]
@@ -7486,11 +7907,122 @@ fn slash_name_sends_the_instructions_with_the_trailing_text(cx: &mut TestAppCont
         sent.contains("\nThe command close of project atlas"),
         "{sent}"
     );
+    assert!(sent.contains(&format!("{instructions}\n")), "{sent}");
     assert!(
-        sent.ends_with(&format!("{instructions}\n\nkeep the branch")),
-        "the trailing text after the instructions: {sent}"
+        sent.ends_with("\n\n[command close] keep the branch"),
+        "the message as typed, last: {sent}"
     );
     assert!(!sent.contains("/close"), "{sent}");
+}
+
+#[gpui_kit::test]
+fn the_command_list_opens_on_the_word_at_the_cursor(cx: &mut TestAppContext) {
+    let user = user_with_commands();
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    settle(cx);
+    let sent = prompts(&user).len();
+
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("test /op");
+    until(&shell, cx, "the list offers it", |cx| {
+        slash_offered(&shell, cx) == ["open-prs"]
+    });
+    settle(cx);
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    let reply = reply_open(&shell, cx);
+    let value = |cx: &mut VisualTestContext| {
+        reply.read_with(cx, |r, cx| r.field().read(cx).value().to_string())
+    };
+    assert_eq!(
+        value(cx),
+        "test /open-prs ",
+        "the word at the cursor is completed"
+    );
+    assert_eq!(prompts(&user).len(), sent, "picking sends nothing");
+    // The field cannot colour a range: the command shows as a chip under it.
+    cx.update(|window, _| {
+        assert!(window.try_find("slash-list").is_none());
+        assert!(window.find("reply-command-open-prs").visible());
+    });
+
+    // A word in the middle: the list opens on it, and only it is completed.
+    reply.update_in(cx, |r, window, cx| {
+        r.field().clone().update(cx, |f, cx| {
+            f.set_value("first /cl then the rest", window, cx);
+            f.set_selected_range(9..9, cx);
+        });
+        r.typed_at("first /cl then the rest", 9, cx);
+    });
+    until(&shell, cx, "the list offers close", |cx| {
+        slash_offered(&shell, cx) == ["close"]
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("slash-close", cx));
+    settle(cx);
+    assert_eq!(value(cx), "first /close then the rest");
+    assert_eq!(reply.read_with(cx, |r, cx| r.commands_used(cx)), ["close"]);
+    cx.update(|window, _| {
+        assert!(window.find("reply-command-close").visible());
+        assert!(window.try_find("reply-command-open-prs").is_none());
+    });
+
+    // A word that is not a `/` word at the cursor leaves the list closed.
+    reply.update_in(cx, |r, _, cx| r.typed_at("see /usr/bin here", 2, cx));
+    settle(cx);
+    assert!(slash_offered(&shell, cx).is_empty());
+}
+
+#[gpui_kit::test]
+fn a_message_put_back_in_the_field_shows_its_command_chips_before_a_slash_is_typed(
+    cx: &mut TestAppContext,
+) {
+    let user = user_with_commands();
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    until(&shell, cx, "the composer knows the commands", |cx| {
+        reply_open(&shell, cx).read_with(cx, |r, _| r.knows_commands())
+    });
+    settle(cx);
+
+    let reply = reply_open(&shell, cx);
+    reply.update_in(cx, |r, window, cx| {
+        r.restore("then /close it", Vec::new(), window, cx)
+    });
+    settle(cx);
+
+    assert_eq!(reply.read_with(cx, |r, cx| r.commands_used(cx)), ["close"]);
+    cx.update(|window, _| assert!(window.find("reply-command-close").visible()));
+}
+
+#[gpui_kit::test]
+fn a_message_put_back_ending_with_a_command_opens_no_list_and_enter_sends_it(
+    cx: &mut TestAppContext,
+) {
+    let user = user_with_commands();
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    until(&shell, cx, "the composer knows the commands", |cx| {
+        reply_open(&shell, cx).read_with(cx, |r, _| r.knows_commands())
+    });
+    settle(cx);
+    let sent = prompts(&user).len();
+
+    let reply = reply_open(&shell, cx);
+    reply.update_in(cx, |r, window, cx| {
+        r.restore("fix it, then /close", Vec::new(), window, cx)
+    });
+    settle(cx);
+    assert!(slash_offered(&shell, cx).is_empty(), "no list opens");
+    cx.update(|window, _| assert!(window.try_find("slash-list").is_none()));
+
+    cx.simulate_keystrokes("enter");
+    until(&shell, cx, "the lead was sent the message", |_| {
+        prompts(&user).len() > sent
+    });
+    let text = prompts(&user).pop().unwrap();
+    assert!(text.ends_with("fix it, then [command close]"), "{text}");
 }
 
 #[gpui_kit::test]
@@ -9013,6 +9545,7 @@ fn agent_steps_are_folded_until_clicked_and_stay_open_while_the_session_is_shown
         cx,
     );
     frame(cx);
+    unfold(&page, 0, cx);
 
     cx.update(|window, _| {
         assert_eq!(
@@ -10178,6 +10711,7 @@ fn an_answered_request_leaves_the_rail_and_its_line_in_the_conversation_says_the
         cx.update(|window, _| window.try_find("rail-waiting".to_owned()).is_none()),
         "no section is left"
     );
+    unfold_request(&shell, number, cx);
     assert_eq!(
         text_of(&format!("approval-record-{number}"), cx).as_deref(),
         Some("Denied · Read .env · the conversation")
@@ -11046,6 +11580,45 @@ fn the_settings_page_sets_the_default_and_the_project_page_its_own(cx: &mut Test
         0,
         "nothing moves at rest"
     );
+}
+
+#[gpui_kit::test]
+fn the_branch_prefix_field_of_the_project_s_settings_accepts_an_empty_prefix(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_project_settings(&shell, "atlas", cx);
+    choose_tab("setup", cx);
+    settle(cx);
+
+    // The slug of the name is what the file gives, shown in the field.
+    assert_eq!(
+        page.read_with(cx, |page, _| page.branch_prefix().map(str::to_owned)),
+        Some("atlas".to_owned())
+    );
+    assert_eq!(
+        page.read_with(cx, |page, cx| page.branch_prefix_typed(cx)),
+        "atlas"
+    );
+    assert!(!page.read_with(cx, |page, cx| page.branch_prefix_savable(cx)));
+
+    // Emptied: Save keeps `branch_prefix = ""`, and the daemon says so.
+    let field = page
+        .read_with(cx, |page, _| page.branch_prefix_field().cloned())
+        .expect("the field is made once the page is drawn");
+    field.update_in(cx, |field, window, cx| field.set_value("", window, cx));
+    settle(cx);
+    assert!(page.read_with(cx, |page, cx| page.branch_prefix_savable(cx)));
+    cx.update(|window, cx| window.click("branch-prefix-save-atlas", cx));
+    until(&shell, cx, "the daemon keeps the empty prefix", |cx| {
+        page.read_with(cx, |page, _| page.branch_prefix() == Some(""))
+    });
+    let text = std::fs::read_to_string(user.project_file("atlas")).unwrap();
+    assert!(text.contains("branch_prefix = \"\"\n"), "{text}");
+    toast_said(&shell, "Branch prefix saved", cx);
+    assert!(!page.read_with(cx, |page, cx| page.branch_prefix_savable(cx)));
 }
 
 #[gpui_kit::test]

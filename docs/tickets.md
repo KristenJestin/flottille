@@ -64,12 +64,13 @@ user's), so that the user's own sign-in works; a call is cut after 30 s.
   status`, `acli jira workitem view <KEY> --json --fields summary,status,description,comment`
   (`--fields status` or `--fields comment` alone for the status of a write and the rounds'
   comments), and `acli jira workitem search --jql <JQL> --fields key,summary,status,assignee,labels --json
-  --limit 200`; its writes (`workitem create`, `comment create`, `edit`, `transition`, below) run
+  --limit 200`, `workitem link type --json` and `workitem view <KEY> --json --fields issuelinks` (the link types and an item's links); its writes (`workitem create`, `comment create`, `comment update`, `comment delete`, `edit`, `transition`, `link create`, `link delete`, below) run
   only for a `tickets` call the gate let through, and the tests look at every call the fake
   received. Of `gh`, the reads are `gh issue view <n> -R github.com/owner/name --json
   number,title,state,body,comments,url` and `gh issue list` (`docs/tools.md`, "The tickets"); its
-  writes (`issue create`, `comment`, `edit`, `close`, `reopen`, and for a status `project list`,
-  `field-list` and `item-edit`) run only for a `tickets` call the gate let through. A key is parsed first, so it is a number or `ABC-123`, and a JQL filter is
+  writes (`issue create`, `comment`, `edit`, `close`, `reopen`, for a status `project list`,
+  `field-list` and `item-edit`, and for links and comments `gh api` on the issue's `sub_issues`,
+  `dependencies/blocked_by` and `issues/comments/<id>`, read first with `gh api` on the issue for its id) run only for a `tickets` call the gate let through. A key is parsed first, so it is a number or `ABC-123`, and a JQL filter is
   quoted, never spliced. A text written is passed as one argument, never through a shell.
 - **Agents never get that sign-in.** An agent's own command runs have the forge tokens emptied and
   `GH_CONFIG_DIR` pointed at an empty folder (`docs/tools.md`), so `gh` has no login there.
@@ -119,21 +120,41 @@ footer (Jira) is shown the same way, without it.
 
 ### Jira's text
 
-Jira Cloud's descriptions and comments are Atlassian Document Format (ADF), a JSON tree. They are
-turned into plain text simply: the text of paragraphs, headings and code blocks, one block per
-line (an empty line between blocks), list items as `- ` or `1. ` lines, table rows as `a | b`, a
-mention as its text, a link card as its address, a hard break as a line break. Anything else
-(images, attachments, status lozenges) is left out. **Nothing is ever rendered as HTML**; a
-description that is already a string is taken as it is.
+Jira Cloud's descriptions and comments are Atlassian Document Format (ADF), a JSON tree. **An
+agent writes Markdown, as on every forge**, and Flottille converts it on each Jira write (below);
+the tree it reads is turned back into the Markdown it came from (`crates/flottille/src/adf.rs`), so
+what an agent reads is what it wrote, and an edit keeps the formatting it did not touch. A
+description that is already a string is taken as it is. **Nothing is ever rendered as HTML.**
 
-**What an agent posts is found again by its words, and Jira may rewrite them.** The record of a
-Jira comment is a hash of its text (`forges.md`, "What Flottille posts is recorded"): the match
-relies on `acli` keeping the words of the markdown it was given. A tree turned back into text
-keeps no code fence, no `**` emphasis, no code mark, no heading mark and draws its own list
-bullets, so the hash leaves those out on both sides (the text of an agent and the text read back
-are normalised the same way). Anything else Jira rewrites (a link `[text](url)` kept as its text,
-a table, a mention) breaks the match: that comment is then shown as a person's and `from:
-people` delivers it. The maintainer checks one real Jira comment, as for the shapes below.
+| Markdown | ADF |
+|---|---|
+| `#` to `######` | `heading` (level 1 to 6) |
+| paragraphs; a line break inside one | `paragraph`; `hardBreak` |
+| `**bold**`, `*italic*`, `~~strike~~`, `` `code` `` | the marks `strong`, `em`, `strike`, `code` |
+| a fenced block, with its language | `codeBlock` (`attrs.language`) |
+| `-` and `1.` lists, nested | `bulletList`, `orderedList` with `listItem` |
+| `[text](url)`, a bare address | the `link` mark |
+| `> quote`, `---` | `blockquote`, `rule` |
+| a table, as wide in every row as its header | `table` with `tableHeader` and `tableCell` |
+
+**Nothing is dropped.** Raw HTML, an image (`![alt](url)`), and a table Jira would not take stay in
+the document as the text they were written as. Inside a quote or a list item, where ADF takes only
+paragraphs, lists and code blocks, a heading becomes a bold paragraph and a table or a rule stays
+text. A code mark goes beside a link and no other mark, as Jira holds it. A text with no Markdown
+in it is paragraphs, a line break staying a line break.
+
+**Reading** gives, for the same nodes, the Markdown above (a table is `| a | b |` rows under a
+`| --- |` line), a mention as its text, a link card as its address, a hard break as a line break.
+Anything else (images, attachments, status lozenges) is left out. A character that Markdown would
+take for markup (`*`, `` ` ``, `[`, `<`, `~`, `_` at a word's edge, a line starting with `#`, `>`,
+`-` or `1.`) is written with a backslash, so that it comes back as the text it was.
+
+**What an agent posts is found again by its words.** The record of a Jira comment is a hash of its
+text (`forges.md`, "What Flottille posts is recorded"). What is recorded is the text after the
+round trip (Markdown, ADF, Markdown), the text a read gives, so the match does not rely on Jira
+keeping anything but the tree. What Jira rewrites on its own (a mention, a smart link) still
+breaks the match: that comment is then shown as a person's and `from: people` delivers it. The
+maintainer checks one real Jira comment, as for the shapes below.
 
 ### What `acli` prints is assumed, and the maintainer checks it
 
@@ -171,8 +192,8 @@ JSON: the same, with the tracker's own first line, masked. The rest of Flottille
 
 **On demand**: `workspace.ticket {project, name}` (and so `flottille workspace show` and the
 window's `WORKSPACE` section, when a page opens or the ticket is linked or unlinked) and
-`tickets` `show` read it now, one call; a workspace keeps only the reference, and what it shows
-is as fresh as the call.
+`tickets` `show` read it now, or give the read of the last 30 s ("How fast it is read" below); a
+workspace keeps only the reference, and what it shows is as fresh as that read.
 
 **And continuously**: every ticket of a declared tracker is read by the daemon on its own,
 incrementally, its title, state, assignee, labels and status kept in the store and its changes
@@ -181,6 +202,24 @@ except those of a Jira work item a subscription follows (below).
 `tickets` `list` and `search` answer from that store once a round of the tracker worked, saying
 its age; `show` reads live and stores what it read; a subscription to a ticket hears those
 events.
+
+## How fast it is read
+
+- **Together.** The check that the program is signed in (to the right site, for Jira) and the read
+  of the ticket itself are asked at the same time, not one after the other. When the check says
+  no, its problem is the one said and nothing of what the tracker answered is shown, as before;
+  the ticket was asked of the tracker meanwhile, which used to be avoided and is not now (a
+  Jira work item is still checked to come from the declared site).
+- **Given again for 30 s.** The daemon keeps the last read of each ticket, by project and key,
+  and gives it to the next `tickets` `show` of it and to `workspace.ticket` (so to the window's
+  session link, and to linking a ticket then opening its page), saying how old it is on `show`
+  (`(as read 12 s ago; "fresh": true reads it again)`) and by `read_at` in `workspace.ticket`.
+  `fresh: true` and `detail: full` read it again, and keep what they read. A read that fails is
+  never kept. A write through Flottille (`tickets` `create`, `comment`, `edit`, `close`, `reopen`,
+  `status`) drops everything kept. A subscription's own reads never use it.
+
+[`forges.md`](forges.md), "How fast `forge show` is read", has the same for pull requests and the
+developer log's `reads`.
 
 ## The protocol and the command line
 
@@ -251,7 +290,7 @@ leaves it out.
 
 `tickets {action, …}` (`docs/tools.md`, "The tickets"): `list` every ticket of a state in one call
 (by label and assignee), `search` with words, `show` the workspace's ticket or another of the
-project's tracker by its key; `create`, `comment`, `edit` (on GitHub also labels and assignees), `close` (on
+project's tracker by its key, `types` the work item types of a Jira project; `create`, `comment`, `edit` (on GitHub also labels and assignees; on Jira the assignee), `close` (on
 GitHub, completed or not planned), `reopen` and `status` (on GitHub, the Status of the issue on its
 Projects board, `docs/tools.md`), each to judge, held in Ask and allowed in Full as the other writes are. A key the
 tracker does not take, or a creation in a Jira project that is not one of the tracker's, is
@@ -281,7 +320,8 @@ do not see it yet, and so miss what happens before their next one: the tracker h
 round (it never worked), or the item is not stored (a Jira work item whose status Jira gives no
 category for). **A Jira work item's comments are read by the rounds only while a subscription
 to its `commented` follows it** (`acli jira workitem view <KEY> --json --fields comment`, one
-call per work item that changed), since a tracker's every work item would cost one call each;
+call per followed work item that changed: the one the round's search lists in its window, since a
+search never prints `updated`, below), since a tracker's every work item would cost one call each;
 a comment is then an `item.commented` as on GitHub, and an agent's own, known by its record,
 is said `posted by an agent` and left out of `from: people`. Subscribing again to the same
 ticket replaces the agent's subscription; **`unsubscribe {ticket?}`** cancels those to the ticket
@@ -297,10 +337,121 @@ are written (a text holding what looks like a secret is base for the gate, as on
 
 | Write | `acli` |
 |---|---|
-| `create` | `jira workitem create --project <P> --summary <title> [--description <body>] [--type <type>] [--label a,b] --json`, `P` one of the tracker's projects (the only one when it has one); with no type, the project's default |
-| `comment` | `jira workitem comment create --key <K> --body <body>` |
-| `edit` | `jira workitem edit --key <K> [--summary <title>] [--description <body>] --yes` |
+| `create` | `jira workitem create --project <P> --summary <title> [--description-file <file>] [--assignee <who>] [--type <type>] [--label a,b] --json`, `P` one of the tracker's projects (the only one when it has one); with no type, the project's default |
+| `comment` | `jira workitem comment create --key <K> --body-file <file>` |
+| `edit` | `jira workitem edit --key <K> [--summary <title>] [--description-file <file>] [--assignee <who> \| --remove-assignee] --yes` |
 | `close`, `reopen`, `status` | `jira workitem transition --key <K> --status <name> --yes` |
+
+**The text of a description and of a comment is Markdown converted to ADF** (above), and passed
+to `acli` through a file (`--description-file`, `--body-file`; `acli` takes "plain text or Atlassian
+Document Format" in both), never on the command line: the file is in a folder of the daemon's
+runtime folder that only the user can open (`0700`, the file `0600`), and both are removed once
+`acli` has answered. The conversion is of the text the gate judged, as it was shown (one that looks like a secret is
+base for the gate, and nothing is masked in what is sent); the Markdown parser is the `markdown` crate,
+already in the tree for the window. **The summary, the description and the assignee of `create`
+and `edit` are built in one place** (`work_item_fields`).
+
+### Links and comments
+
+The family of what ties tickets together, and of an agent's own comments (#365). Every write of it
+goes through the gate like the others; `link_types` and what `show` adds are reads.
+
+**A link reads `ticket kind other`**: `{"action": "link", "ticket": "ABC-2", "kind": "blocks",
+"other": "ABC-1"}` is `ABC-2 blocks ABC-1`, and `kind: "is blocked by"` with the two swapped is the
+same link. The gate's card says it in those words (`it links two tickets on the tracker: ABC-2
+blocks ABC-1`), and so does the result, from both ends (`The link was made: ABC-2 blocks ABC-1
+(ABC-1 is blocked by ABC-2).`). `ticket` is always named, never the workspace's, so that a card
+cannot say a link of a ticket it does not name; `other` is a ticket of the same tracker, not the
+ticket itself.
+
+- **On Jira**: `link_types` is `acli jira workitem link type --json`, which names the site's types
+  only (`{"issueLinkTypes": [{"name": "Blocks"}, …]}`); each is listed with Jira's own wordings for
+  its standard types, Blocks, Cloners, Duplicate and Relates (`blocks (is blocked by) [Blocks]`), and
+  by its name alone otherwise (`- Escalates`). `link` finds the kind among the outward wordings (or a
+  type's name: `ticket` is on the outward end), then the inward ones (`ticket` is on the inward end),
+  in any case, and runs `acli jira workitem link create --out <the outward item> --in <the inward
+  item> --type <the type's name> --yes` (`--out` is the item the outward wording applies to: `A
+  blocks B` is out A, in B; on a real site, `--out A --in B --type Blocks` printed `A Blocks B`). A kind the site does not have is refused before the user is asked, naming
+  the ones it has (`"devours" is not a link type of example.atlassian.net: its kinds are blocks, is
+  blocked by, relates to, …`). `unlink` reads the links of `ticket` (below), finds the link to
+  `other` of that type with `ticket` at that end and deletes it by its id (`link delete --id <id>
+  --yes`, which takes ids and not items); none is refused, saying the item's links. A parent
+  (`parent of`, `sub-task of`) is refused on Jira: `acli jira workitem edit` has no flag for a
+  parent, only `workitem create --parent` has.
+- **On GitHub**: `parent of`, `sub-task of` (also `sub-issue of`), `blocks` and `blocked by`, through
+  `gh api repos/<owner>/<name>/issues/<n>/sub_issues` and `…/dependencies/blocked_by` (a
+  `--method POST`, a `DELETE` to unlink), with the id of the issue that the endpoint takes, read
+  with `gh api repos/<owner>/<name>/issues/<n>`. No other relation exists in its API (a pull
+  request closes an issue with `Closes #n` in its description, which is `forge edit`): the other
+  kinds are refused, naming that.
+- **`show` lists the links** of a Jira work item, after its comments: `Links (2):` and a line each,
+  `- is blocked by ABC-2 (In Progress): Add search`. They are read in the same `acli jira workitem view
+  <KEY> --json --fields summary,status,description,comment,issuelinks` as the ticket and kept with it in
+  the 30 s cache, so a cached `show` runs nothing and still lists them; a write drops the cache. A
+  write that names a link (`unlink`) reads `--fields issuelinks` alone. `link list --key <KEY> --json`
+  is not used: it gives only `{"issueLinks": [{"id", "outwardIssueKey", "typeName"}]}`, the key `null`
+  when the item is the outward one, so it
+  cannot name the other item. Each of `issuelinks` is `{id, type: {name, inward, outward},
+  inwardIssue, outwardIssue}`, one of the two null, and the field names the **other** item's side,
+  as measured on a real site: a link made with `--out A --in B --type Blocks` is on A `inwardIssue:
+  B` (A reads it `blocks B`, the outward wording) and on B `outwardIssue: A` (B `is blocked by A`,
+  the inward one). Web links are not among them and are not listed. GitHub's sub-issues are not listed yet.
+- **Comments**: `comment_edit` and `comment_delete` change only a comment Flottille recorded by its
+  id as posted by an agent (`posts`, "What Flottille posts is recorded", `forges.md`; on Jira the id
+  is read right after the post, never later by its words), found by the id that
+  `show` with `detail full` prints after its author (`[comment 10100]`, GitHub's `issuecomment-501`);
+  any other comment, a person's or another tool's, is refused whatever its author's name, and a
+  comment that cannot be found among the newest ones is said; both before the user is asked, and
+  checked again right before the write. On Jira, `acli jira workitem comment
+  update --key <K> --id <id> --body-adf <file>` (the text as ADF, as for `comment`; `update`'s
+  `--body-file` takes plain text only) and `comment
+  delete --key <K> --id <id>`; on GitHub, `gh api repos/<owner>/<name>/issues/comments/<id>
+  --method PATCH -f body=<text>` and `--method DELETE`. An edit replaces the record of the id with the
+  new words, so that the comment stays the agent's and has one record; a delete drops it.
+- **`sprint {ticket, sprint}`** is refused, before anything is asked, saying why: `acli` 1.3.39 has
+  no way to put a work item in a sprint (`workitem edit` has no sprint flag; `acli jira sprint`
+  creates, updates, deletes, views and lists the work items of a sprint; `board list-sprints` lists
+  them), so the user puts it there on the board.
+
+**Measured on a real Jira Cloud site**: the shapes of `link type --json`, `link list --json` and
+`view --fields issuelinks` above, `link delete --id <link id> --yes`, and `comment list --key <K>
+--json`, whose comments each carry their `id` (their `body` plain text). The view's comments are
+taken to carry their `id` too, as in Jira's REST.
+
+### Types and assignment
+
+Seen in daily use: an agent guessed a work item type in the user's language (`Tâche`), Jira
+refused it, and the new work item went to the project's default assignee.
+
+- **`types {project?}`** lists a Jira project's work item types, with `acli jira project view
+  --key <P> --json` (not `workitem create --generate-json`, which describes the creation form and
+  not the project), after the site check; the project is left out when the tracker has one. The
+  list is kept five minutes per site and project, in the daemon's memory. A type that is a
+  sub-task is said so (`Sub-task (a sub-task)`). On GitHub the answer is that issues have no
+  type; `gh` lists no issue types that Flottille reads. The `create` description tells the agent
+  to read them when unsure.
+- **A `create` refused for its type**: when `acli` ends with an error and a `type` was given, the
+  project's types are read (the same call) and, if the type named is none of them (any case), the
+  answer is `"Tâche" is not a work item type of ABC: its types are Task, Bug and Story; nothing
+  was written; …` with `acli`'s own line. If the type is one of them, `acli`'s line is the answer,
+  as before: Flottille does not read an error's wording to find its cause.
+- **`assignee`** on Jira `create` (`--assignee`) and `edit` (`--assignee`; `assignee: null` is
+  `--remove-assignee`): `"@me"`, an email or an account id, **as `acli` takes them**. `acli`
+  resolves `@me` itself (`acli jira workitem create --help`: "Use '@me' to self-assign, 'default'
+  to assign to the project's default assignee"), so Flottille reads no account and no credential
+  for it. `default` is `acli`'s too. A blank assignee is no assignee; a `null` one is told from a
+  missing one (a blank is never a removal). On GitHub it is `assignees` (`edit`, `--add-assignee`,
+  `@me` accepted by `gh`); `assignee` there is refused, and on `comment`, `close`, `reopen` and
+  `status` on both trackers.
+- **Nothing is assigned by default**: the user is assigned only when the agent asks for `"@me"`;
+  the tool's description says that a tracker may assign a new work item itself.
+- **The card** of a ticket write says the assignee (`Its assignee: @me`, `It removes the
+  assignee`); each is a write judged as before.
+- **Assumed**, as the other shapes of this page: `project view --json` prints Jira's REST
+  project, with `issueTypes[].name` and `.subtask`. Its page gives flags and no output, and it
+  could not be run (a call to a site). The maintainer checks it with one `tickets {"action":
+  "types"}` on their work machine; a different shape answers `acli did not list the work item
+  types of ABC (no issueTypes)`, and the fix is in `work_item_types`.
 
 **`acli` lists no work item's transitions** (its commands,
 <https://developer.atlassian.com/cloud/acli/reference/commands/jira-workitem/>, have no listing
@@ -369,14 +520,20 @@ and `created` are therefore not asked: the items read `fields.updated` and `fiel
 the output holds them, and a work item without them is listed without a date (the search's own
 order, `ORDER BY updated DESC`, stays). `workitem view` is not run for the dates of a thousand
 work items; if the maintainer finds that `acli` prints them under another flag, that is a
-follow-up. The maintainer checks the Tickets tab of a Jira project on their machine.
+follow-up. A search prints only the fields asked (`key` alone prints `null` per work item), and
+`workitem view K --fields updated,comment` gives `fields.updated` and `fields.comment.total`. A
+round after the first searches `updated >= "-<minutes>m"` since its last, so **a work item it lists
+changed**: a followed one is then read for its comments, and a followed one the window does not
+list is not read at all. No search is sent for the followed items alone, and none asks `updated`. The maintainer checks the Tickets tab of a Jira project on their machine.
 
 ## Tests
 
 Tests never call GitHub or Jira nor use anyone's sign-in: a fake `gh` (`crates/flottille-fake-gh`,
 which answers `issue view`, `issue list`, the issue writes, the `gh project` calls of a status and the
 missing `project` scope too) and a fake `acli`
-(`crates/flottille-fake-acli`, `workitem view`, `workitem search` and the writes), first on the
+(`crates/flottille-fake-acli`, `workitem view`, `workitem search` and the writes; it reads the
+files of `--description-file` and `--body-file` and ends with 1 on a document that is not valid
+ADF, so that a test catches one), first on the
 `PATH` of the test's daemon, answer from a script and record every call; the repositories are
 throwaway ones whose `origin` is set to a GitHub URL after their workspace is made, and whose
 forge and tracker are declared with `project.set_settings`
