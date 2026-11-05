@@ -5,9 +5,7 @@
 //! Nothing is drawn while there is none; a row unfolds when a leave is given and folds away when
 //! it ends, withdrawn or with either session.
 
-use flottille_ui::{
-    Button, Icon, Item, Listing, Palette, Type, icon, palette, presence, presence_of, space,
-};
+use flottille_ui::{Button, Icon, Item, Listing, Palette, Type, icon, palette, presence, space};
 use gpui_kit::{
     AnyElement, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Render,
     SharedString, StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, Window, div,
@@ -74,7 +72,6 @@ pub struct LeaveList {
     rows: Vec<LeaveRow>,
     /// The rows as drawn: one that ends folds away before it is gone.
     list: Listing<LeaveRow>,
-    error: Option<SharedString>,
 }
 
 impl LeaveList {
@@ -84,16 +81,11 @@ impl LeaveList {
             root,
             rows: Vec::new(),
             list: Listing::default(),
-            error: None,
         }
     }
 
     pub fn rows(&self) -> &[LeaveRow] {
         &self.rows
-    }
-
-    pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
     }
 
     /// What the daemon listed; nothing is drawn again when it is what was drawn.
@@ -102,12 +94,6 @@ impl LeaveList {
             self.rows = rows;
             cx.notify();
         }
-    }
-
-    /// The daemon refused to withdraw one, and why; none clears it.
-    pub fn failed(&mut self, why: Option<String>, cx: &mut Context<Self>) {
-        self.error = why.map(Into::into);
-        cx.notify();
     }
 
     /// One leave: what it lets, since when, and its Withdraw.
@@ -220,22 +206,6 @@ impl Render for LeaveList {
                     .test_support(),
             )
             .children(rows)
-            .child(presence_of(
-                "rail-leaves-error-block",
-                self.error.clone(),
-                move |error| {
-                    div()
-                        .id("rail-leaves-error")
-                        .px(space::SM)
-                        .py(space::XS)
-                        .text_size(px(11.5))
-                        .text_color(p.fail)
-                        .aria_label(error.clone())
-                        .child(error)
-                        .test_support()
-                        .into_any_element()
-                },
-            ))
             .test_support();
         presence("rail-leaves-presence", present, section)
     }

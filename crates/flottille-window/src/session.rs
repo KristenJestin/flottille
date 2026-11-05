@@ -751,8 +751,6 @@ impl SessionPage {
 
     /// The user withdraws a leave: the daemon takes it back, and the list follows its event.
     pub fn withdraw_leave(&mut self, writer: &str, session: &str, cx: &mut Context<Self>) {
-        let list = self.leaves(cx);
-        list.update(cx, |list, cx| list.failed(None, cx));
         self.perform(
             Command::WithdrawLeave {
                 session: self.opened.id.clone(),
@@ -763,10 +761,11 @@ impl SessionPage {
         );
     }
 
-    /// What the daemon answered to a withdrawal: why, when it refused.
+    /// What the daemon answered to a withdrawal: why, in a toast, when it refused.
     pub fn leave_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
-        let list = self.leaves(cx);
-        list.update(cx, |list, cx| list.failed(refused, cx));
+        if let Some(why) = refused {
+            toast(Toast::failure("The leave was not withdrawn").detail(why), cx);
+        }
     }
 
     /// What the daemon answered to a cancellation: why, when it refused.

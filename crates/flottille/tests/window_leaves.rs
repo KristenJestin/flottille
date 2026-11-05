@@ -239,3 +239,37 @@ fn the_leave_card_says_what_allowing_it_gives(cx: &mut TestAppContext) {
          that one until either ends or you withdraw it."
     );
 }
+
+#[gpui_kit::test]
+fn a_refused_withdrawal_is_said_in_a_toast(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (_, session) = pair(&user);
+    let (shell, cx) = window(&user, cx);
+    let shown = open(&shell, cx, &session);
+
+    shown.update(cx, |page, cx| {
+        page.leave_answered(Some("there is no such leave".into()), cx)
+    });
+    settle(cx);
+
+    let toasts: Vec<(String, String)> = shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .map(|toast| {
+                (
+                    toast.title().to_owned(),
+                    toast.second_line().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect()
+    });
+    assert_eq!(
+        toasts,
+        [(
+            "The leave was not withdrawn".to_owned(),
+            "there is no such leave".to_owned()
+        )]
+    );
+    assert!(!present(cx, "rail-leaves-error"));
+}
