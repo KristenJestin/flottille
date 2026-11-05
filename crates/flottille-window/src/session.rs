@@ -16,17 +16,20 @@
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::FRAC_PI_2;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use flottille_core::images::{MAX_IMAGE_BYTES, MAX_IMAGES};
 use flottille_ui::color::mix;
 use flottille_ui::motion::{HOVER, Motion, PANEL};
 use flottille_ui::{
-    AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Menu, Modal, Palette, Pill,
-    PulsingLabel, Side, StateIcon, Status, Toast, Type, enter, fade, fold_frame, hoverable, icon,
-    palette, presence, presence_of, section_label, selectable, space, text_region, toast, turning,
+    AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Listing, Menu, Modal, Palette, Pill,
+    PulsingLabel, Side, Skeleton, StateIcon, Status, Toast, Type, awaiting, changing, enter, fade,
+    fold_frame, hoverable, icon, palette, path_line, presence, presence_of, section_label,
+    selectable, space, text_region, tipped_when_cut, toast, turning,
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{
@@ -47,7 +50,8 @@ use gpui_kit::{
 use crate::actions::{Answer, Command, Picture, RepositoryStatus, RunAct, RunAnswer};
 use crate::commands::CommandInfo;
 use crate::conversation::{
-    Activity, Block, Call, CallState, Change, Conversation, DiffLine, USER, WOKEN_BY_KIND,
+    Activity, Block, Call, CallState, Change, Conversation, DiffLine, Ending, STARTED_SESSION_KIND,
+    Summary, USER, WOKEN_BY_KIND, asks_the_user, in_sight,
 };
 use crate::link::{Connect, Update};
 use crate::mode::ModeSwitch;
@@ -55,14 +59,15 @@ use crate::model::Place;
 use crate::open::Opener;
 use crate::providers::Providers;
 use crate::queued::QueuedMessages;
-use crate::runs::{self, CommandList, CommandPanel, rail_label};
+use crate::runs::{self, CommandList, CommandPanel, EndedFold, ended_row, rail_label};
 use crate::session_link::{
-    self, PlaceFacts, PullRequest, RepositoryFacts, Request, SessionLink, SessionUpdate, TreeAgent,
-    Where,
+    self, ForgeFacts, PlaceFacts, PullRequest, RepositoryFacts, Request, SessionLink,
+    SessionUpdate, TicketFacts, TreeAgent, Where,
 };
 use crate::session_options::{Runs, SessionOptions};
 use crate::shell::{Layout, Selection, Shell, now_ms};
 use crate::subscriptions::SubscriptionList;
+use crate::to_end::ToEnd;
 use crate::tree::place_name;
 use crate::waiting::{Waiting, sentences};
 use flottille_ui::drawer::Closed;
@@ -92,13 +97,24 @@ pub const SEND: &str = "Send";
 pub const STOP: &str = "Stop the turn";
 /// The reply field is one line high when empty, and grows with its lines up to this many.
 const REPLY_MAX_ROWS: usize = 10;
-/// What the composer says of a picture it does not attach.
-pub const NO_IMAGES: &str = "This agent takes no images, so the picture was not attached.";
+/// What a toast says of a picture the composer does not attach: its title, and why.
+pub const NOT_ATTACHED: &str = "The picture was not attached";
+pub const NO_IMAGES: &str = "This agent takes no images.";
 const IMAGE_KINDS: &str = "Flottille takes png, jpeg, gif and webp images.";
-const TOO_MANY_IMAGES: &str = "A message carries 4 images at most.";
 const IMAGE_TOO_BIG: &str = "An image can be 5 MiB at most.";
-const MAX_IMAGES: usize = 4;
-const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+const NOT_READ: &str = "That file could not be read.";
+/// What a toast says when the daemon refuses the message, or the interruption.
+pub const NOT_SENT: &str = "The message was not sent";
+const STILL_SCALING: &str = "A picture is still being scaled down: send once it is there.";
+pub const NOT_INTERRUPTED: &str = "The turn was not interrupted";
+/// The biggest file read to be attached: a screenshot of a big screen weighs more than a message
+/// may, and is scaled down before its size is judged.
+const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
+
+/// The key of a thumbnail in the composer: the picture itself, which stays alive while it leaves.
+fn thumb_key(image: &Arc<gpui_kit::Image>) -> String {
+    format!("{:x}", Arc::as_ptr(image) as usize)
+}
 
 /// The state an agent of the tree is drawn with, from what the daemon says of it: only a root can
 /// need the user; a child waiting on its parent is waiting, in grey.
@@ -303,7 +319,7 @@ impl SessionPage {
         let drawer = cx.new(|_| Drawer::new("rail-drawer", Side::Right, px(RAIL), rail.clone()));
         let shown = opened.id.clone();
         let conversation =
-            cx.new(|_| ConversationView::new(page, &shown, THE_CONVERSATION.into(), None));
+            cx.new(|cx| ConversationView::new(page, &shown, THE_CONVERSATION.into(), None, cx));
         let _status = cx.observe(&status, |this, status, cx| {
             let needs_you = status.read(cx).state() == AgentState::NeedsYou;
             if this.needs_you != needs_you {
@@ -727,7 +743,21 @@ impl SessionPage {
         );
     }
 
-    /// What the daemon answered to a cancellation: why, when it refused.
+    /// The user resumes a paused following, as a message of theirs would: the daemon resumes it,
+    /// and the list follows its event.
+    pub fn resume_following(&mut self, subscription: &str, cx: &mut Context<Self>) {
+        let list = self.subscriptions(cx);
+        list.update(cx, |list, cx| list.failed(None, cx));
+        self.perform(
+            Command::ResumeFollowing {
+                session: self.opened.id.clone(),
+                subscription: subscription.to_owned(),
+            },
+            cx,
+        );
+    }
+
+    /// What the daemon answered to a cancellation or a resume: why, when it refused.
     pub fn subscription_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
         let list = self.subscriptions(cx);
         list.update(cx, |list, cx| list.failed(refused, cx));
@@ -817,7 +847,7 @@ impl SessionPage {
         let parent = self.parent_of(agent).map(|p| self.said_name(&p));
         let (page, name) = (cx.entity().downgrade(), self.said_name(agent));
         let shown = self.shown.clone();
-        self.conversation = cx.new(|_| ConversationView::new(page, &shown, name, parent));
+        self.conversation = cx.new(|cx| ConversationView::new(page, &shown, name, parent, cx));
         self.rail
             .update(cx, |rail, cx| rail.set_selected(agent.to_owned(), cx));
         self.relink();
@@ -931,6 +961,12 @@ impl SessionPage {
                 self.rail
                     .update(cx, |rail, cx| rail.set_place(facts.map(|facts| *facts), cx));
             }
+            SessionUpdate::PlaceForge(forge) => {
+                self.rail.update(cx, |rail, cx| rail.set_forge(forge, cx));
+            }
+            SessionUpdate::PlaceTicket(ticket) => {
+                self.rail.update(cx, |rail, cx| rail.set_ticket(ticket, cx));
+            }
             SessionUpdate::Commands(rows) => {
                 self.command_panel
                     .update(cx, |panel, cx| panel.set_rows(&rows, cx));
@@ -1029,6 +1065,20 @@ impl SessionPage {
                 _ => None,
             })
             .flatten()
+            .collect();
+        // The pictures of a message that waits are the root's, shown while the root is.
+        let queued = self.queued.read(cx);
+        let waiting: Vec<String> = match self.shown == queued.session() {
+            true => queued
+                .messages()
+                .iter()
+                .flat_map(|m| m.pictures.clone())
+                .collect(),
+            false => Vec::new(),
+        };
+        let wanted: Vec<String> = wanted
+            .into_iter()
+            .chain(waiting)
             .filter(|name| !self.asked_pictures.contains(name))
             .collect();
         for name in wanted {
@@ -1050,10 +1100,10 @@ impl SessionPage {
         let Some(format) = gpui_kit::ImageFormat::from_mime_type(&image.mime) else {
             return;
         };
-        self.pictures.insert(
-            name.clone(),
-            Arc::new(gpui_kit::Image::from_bytes(format, image.bytes)),
-        );
+        let picture = Arc::new(gpui_kit::Image::from_bytes(format, image.bytes));
+        self.pictures.insert(name.clone(), picture.clone());
+        self.queued
+            .update(cx, |queued, cx| queued.picture_read(&name, picture, cx));
         let rows = self.conversation.read(cx).rows.clone();
         for row in rows {
             if matches!(&*row.read(cx).block, Block::Message { images, .. } if images.contains(&name))
@@ -1100,6 +1150,7 @@ impl SessionPage {
             let images = root.images;
             let queued = root.queued.clone();
             self.queued.update(cx, |list, cx| list.set(queued, cx));
+            self.fetch_pictures(cx);
             self.reply.update(cx, |reply, cx| {
                 reply.set_images(images);
                 reply.set_running(running, cx)
@@ -1121,6 +1172,7 @@ impl SessionPage {
                     parent: agent.parent.clone(),
                     ended: matches!(state_of(agent), AgentState::Completed | AgentState::Stopped),
                     context: agent.context,
+                    context_tokens: agent.context_tokens,
                     doing: agent.doing.clone(),
                     waits_on_subscription: agent.waiting_on.as_deref() == Some("subscription"),
                     status,
@@ -1159,7 +1211,6 @@ impl SessionPage {
             if was_ended.is_some() {
                 // Ended or resumed: what was said before it is over.
                 self.resume_error = None;
-                self.reply.update(cx, |reply, cx| reply.clear_error(cx));
             }
             if !now_ended {
                 self.resuming = false;
@@ -1237,6 +1288,7 @@ impl SessionPage {
                                 row.card = card;
                                 cx.notify();
                             });
+                            view.card_changed(at, cx);
                         }
                     }
                 }
@@ -1323,7 +1375,7 @@ impl SessionPage {
 }
 
 impl Render for SessionPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
         let p = palette(cx);
         let narrow = self.layout == Layout::Narrow;
@@ -1341,7 +1393,7 @@ impl Render for SessionPage {
             .gap(space::MD)
             .border_b_1()
             .border_color(p.line)
-            .child(
+            .child(tipped_when_cut(
                 div()
                     .id("session-title")
                     .min_w_0()
@@ -1351,9 +1403,11 @@ impl Render for SessionPage {
                     .text_size(px(14.))
                     .semibold()
                     .aria_label(SharedString::from(self.opened.title.clone()))
-                    .child(SharedString::from(self.opened.title.clone()))
-                    .test_support(),
-            )
+                    .child(SharedString::from(self.opened.title.clone())),
+                SharedString::from(self.opened.title.clone()),
+                window,
+                cx,
+            ))
             .child(
                 div()
                     .id("session-place")
@@ -1380,17 +1434,21 @@ impl Render for SessionPage {
             )
             .children(self.opened.started_by.clone().map(|by| {
                 let said = SharedString::from(format!("started by {by}"));
-                div()
-                    .id("session-started-by")
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(px(12.))
-                    .text_color(p.faint)
-                    .aria_label(said.clone())
-                    .child(said)
-                    .test_support()
+                tipped_when_cut(
+                    div()
+                        .id("session-started-by")
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(px(12.))
+                        .text_color(p.faint)
+                        .aria_label(said.clone())
+                        .child(said.clone()),
+                    said,
+                    window,
+                    cx,
+                )
             }))
             .child(div().flex_1())
             .children(self.end_error.clone().map(|error| {
@@ -1611,8 +1669,11 @@ struct Read<'a> {
     follow: bool,
 }
 
-/// The conversation: one row view per block, in a list that lays out and draws only the rows in
-/// view, and follows its end unless the user scrolled up to read.
+/// The conversation: one row view per block, in a list that lays out and draws only the items in
+/// view, and follows its end unless the user scrolled up to read. What the agent said, the
+/// messages it was sent and the children it launched are items of their own; everything between
+/// two of them is one group, folded to a line by default: the line is one item, and each of its
+/// rows is one more while it is unfolded, so that a long group draws only the rows in view.
 pub struct ConversationView {
     page: WeakEntity<SessionPage>,
     id: String,
@@ -1625,17 +1686,86 @@ pub struct ConversationView {
     earlier: bool,
     /// How many times a row was looked at or changed, for the cost of an update.
     touched: usize,
-    /// The list's items: "Show earlier" first when older events remain, then the rows, a long
-    /// reply as one item per Markdown piece: the list draws only the pieces in view.
+    /// How many rows of a group were walked to say its line or what stays out of its fold: only
+    /// when the group changes, never to draw it.
+    walked: usize,
+    /// The list's items: "Show earlier" first when older events remain, then the segments, a
+    /// long reply as one item per Markdown piece: the list draws only the pieces in view.
     list: ListState,
     /// The items of each row past its first: the pieces of its reply past the first.
     more: Vec<usize>,
+    /// The rows in sight and the groups, in order: one per stretch of the list.
+    segments: Vec<Segment>,
+    /// The segment of each row.
+    segment_of: Vec<usize>,
+    /// The button back to the end, over the list.
+    to_end: Entity<ToEnd>,
+    /// Takes the rows that folded away out of the list once their fold has ended.
+    sweep: Option<Task<()>>,
     renders: usize,
 }
 
+/// A stretch of the conversation: a row in sight, or a group of the agent's work.
+enum Segment {
+    Row(usize),
+    Group(Group),
+}
+
+/// A group of the agent's work. What its line says and which of its rows stay out of the fold
+/// are kept with it, so that a frame never walks the rows it holds.
+struct Group {
+    rows: Range<usize>,
+    summary: Summary,
+    /// The rows that stay in sight while it is folded: a call held for the user, a command still
+    /// running, a question asked to the user.
+    needs: Vec<usize>,
+    /// Older events of it are on an earlier page: its line counts only the part read.
+    cut: bool,
+    open: bool,
+    /// Its rows that are items of the list now, in order: unfolding, shown, or folding away
+    /// until the sweep takes them out.
+    items: Vec<Shown>,
+}
+
+/// A row of a group that is an item of the list, with its fold.
+struct Shown {
+    at: usize,
+    motion: Motion,
+    height: Rc<Cell<Pixels>>,
+}
+
+/// What a group's fold is kept by, the same whatever page of the history was read first: the
+/// event that made its first block or, while older events of it are on an earlier page, the one
+/// that made the block after it (`Cut` when none came yet).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Key {
+    First(u64),
+    Before(u64),
+    Cut,
+}
+
+/// The space between two items of the conversation, kept between the rows of a group.
+fn row_gap() -> Pixels {
+    px(18.)
+}
+
+/// The groups the user unfolded, by agent: kept while the window is open, never stored.
+#[derive(Default)]
+struct Unfolded(HashMap<String, HashSet<Key>>);
+
+impl gpui_kit::Global for Unfolded {}
+
 impl ConversationView {
-    fn new(page: WeakEntity<SessionPage>, id: &str, me: String, parent: Option<String>) -> Self {
-        Self {
+    fn new(
+        page: WeakEntity<SessionPage>,
+        id: &str,
+        me: String,
+        parent: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let list = Self::list();
+        let to_end = cx.new(|_| ToEnd::new(list.clone()));
+        let this = Self {
             page,
             id: id.to_owned(),
             model: Conversation::new(me, parent),
@@ -1643,10 +1773,17 @@ impl ConversationView {
             specials: Vec::new(),
             earlier: false,
             touched: 0,
-            list: Self::list(),
+            walked: 0,
+            list,
             more: Vec::new(),
+            segments: Vec::new(),
+            segment_of: Vec::new(),
+            to_end,
+            sweep: None,
             renders: 0,
-        }
+        };
+        this.watch(cx);
+        this
     }
 
     fn list() -> ListState {
@@ -1655,27 +1792,69 @@ impl ConversationView {
         list
     }
 
-    /// The list's first item of a row.
-    fn item(&self, at: usize) -> usize {
-        at + usize::from(self.earlier) + self.more[..at.min(self.more.len())].iter().sum::<usize>()
+    /// The button back to the end moves this list.
+    fn watch(&self, cx: &mut Context<Self>) {
+        let (list, me) = (self.list.clone(), cx.entity().downgrade());
+        self.to_end
+            .update(cx, |to_end, cx| to_end.watch(list, me, cx));
     }
 
-    /// The row of the list's item `ix`, and which of its items it is.
-    fn row_of(&self, ix: usize) -> Option<(usize, usize)> {
+    /// How many items of the list a segment is.
+    fn items_of(&self, segment: &Segment) -> usize {
+        match segment {
+            Segment::Row(at) => 1 + self.more[*at],
+            Segment::Group(group) => 1 + group.items.len(),
+        }
+    }
+
+    /// The list's first item of a segment.
+    fn item_of(&self, segment: usize) -> usize {
+        usize::from(self.earlier)
+            + self.segments[..segment.min(self.segments.len())]
+                .iter()
+                .map(|s| self.items_of(s))
+                .sum::<usize>()
+    }
+
+    /// The list's first item of a row: its own, or its group's line while it is folded in.
+    fn item(&self, at: usize) -> usize {
+        let Some(&segment) = self.segment_of.get(at) else {
+            return self.item_of(self.segments.len());
+        };
+        let first = self.item_of(segment);
+        match &self.segments[segment] {
+            Segment::Group(group) => group
+                .items
+                .iter()
+                .position(|shown| shown.at == at)
+                .map_or(first, |n| first + 1 + n),
+            Segment::Row(_) => first,
+        }
+    }
+
+    /// The segment of the list's item `ix`, and which of its items it is.
+    fn segment_at(&self, ix: usize) -> Option<(usize, usize)> {
         let mut ix = ix.checked_sub(usize::from(self.earlier))?;
-        for (at, more) in self.more.iter().enumerate() {
-            if ix <= *more {
+        for (at, segment) in self.segments.iter().enumerate() {
+            let items = self.items_of(segment);
+            if ix < items {
                 return Some((at, ix));
             }
-            ix -= more + 1;
+            ix -= items;
         }
         None
     }
 
-    /// Gives the row `at` one item per piece of its reply, and measures again its last.
+    /// Gives the row `at` one item per piece of its reply, and measures again its last; a row
+    /// of a group is measured again.
     fn fit(&mut self, at: usize, cx: &gpui_kit::App) {
+        let first = self.item(at);
+        if !matches!(self.segments[self.segment_of[at]], Segment::Row(_)) {
+            self.list.remeasure_items(first..first + 1);
+            return;
+        }
         let more = self.rows[at].read(cx).more_pieces().len();
-        let (first, had) = (self.item(at), self.more[at]);
+        let had = self.more[at];
         if more != had {
             let kept = first + 1 + had.min(more);
             self.list
@@ -1683,6 +1862,207 @@ impl ConversationView {
             self.more[at] = more;
         }
         self.list.remeasure_items(first + more..first + more + 1);
+    }
+
+    /// Places the row `at`, just added at the end: a row of its own, or the last group grows
+    /// by it. Whether a new segment was made.
+    fn place(&mut self, at: usize) -> bool {
+        let prose = in_sight(&self.model.blocks()[at]);
+        if !prose
+            && let Some(Segment::Group(group)) = self.segments.last_mut()
+            && group.rows.end == at
+        {
+            group.rows.end = at + 1;
+            self.segment_of.push(self.segments.len() - 1);
+            return false;
+        }
+        // Only rows made before the events read stand before it: its start may be on an
+        // earlier page.
+        let cut = !prose
+            && self.earlier
+            && self.segments.iter().all(
+                |segment| matches!(segment, Segment::Row(row) if self.model.seq_of(*row) == 0),
+            );
+        self.segment_of.push(self.segments.len());
+        self.segments.push(match prose {
+            true => Segment::Row(at),
+            false => Segment::Group(Group {
+                rows: at..at + 1,
+                summary: Summary::default(),
+                needs: Vec::new(),
+                cut,
+                open: false,
+                items: Vec::new(),
+            }),
+        });
+        true
+    }
+
+    /// Says the line of a group again, from its rows alone. Whether it changed.
+    fn summarise(&mut self, segment: usize) -> bool {
+        let Some(Segment::Group(group)) = self.segments.get_mut(segment) else {
+            return false;
+        };
+        let rows = group.rows.clone();
+        self.walked += rows.len();
+        let said = Summary::of(
+            &self.model.blocks()[rows.clone()],
+            &self.model.times()[rows],
+        );
+        let changed = group.summary != said;
+        group.summary = said;
+        changed
+    }
+
+    /// Finds again the rows of a group that stay out of its fold. Whether they changed.
+    fn find_needs(&mut self, segment: usize, cx: &gpui_kit::App) -> bool {
+        let last = segment + 1 == self.segments.len();
+        let Some(Segment::Group(group)) = self.segments.get(segment) else {
+            return false;
+        };
+        let rows = group.rows.clone();
+        self.walked += rows.len();
+        let needs: Vec<usize> = rows
+            .filter(|&at| self.needs_the_user(at, last, cx))
+            .collect();
+        let Some(Segment::Group(group)) = self.segments.get_mut(segment) else {
+            return false;
+        };
+        let changed = group.needs != needs;
+        group.needs = needs;
+        changed
+    }
+
+    /// The rows of a group that are to be items of the list: all of them unfolded (but a
+    /// request answered by a card below it, which shows nothing), else those that stay out of
+    /// the fold.
+    fn wanted(&self, group: &Group) -> Vec<usize> {
+        match group.open {
+            true => group
+                .rows
+                .clone()
+                .filter(|&at| !matches!(self.model.blocks()[at], Block::Answered { .. }))
+                .collect(),
+            false => group.needs.clone(),
+        }
+    }
+
+    /// Makes the items of a group's rows what its fold wants: a row that comes unfolds, one
+    /// that goes folds away first, both over [`PANEL`], and the list follows.
+    fn reconcile(&mut self, segment: usize, cx: &mut Context<Self>) {
+        let Some(Segment::Group(group)) = self.segments.get(segment) else {
+            return;
+        };
+        let wanted = self.wanted(group);
+        let mut ix = self.item_of(segment) + 1;
+        let now = cx.background_executor().now();
+        let reduce = cx.reduce_motion();
+        let Some(Segment::Group(group)) = self.segments.get_mut(segment) else {
+            return;
+        };
+        let mut old = std::mem::take(&mut group.items).into_iter().peekable();
+        let mut wanted = wanted.into_iter().peekable();
+        let mut leaving = false;
+        enum Step {
+            Keep,
+            Come(usize),
+            Leave,
+        }
+        loop {
+            let step = match (old.peek().map(|shown| shown.at), wanted.peek().copied()) {
+                (None, None) => break,
+                (Some(o), Some(w)) if o == w => Step::Keep,
+                (Some(o), Some(w)) if w < o => Step::Come(w),
+                (None, Some(w)) => Step::Come(w),
+                (Some(_), _) => Step::Leave,
+            };
+            match step {
+                Step::Keep => {
+                    let mut shown = old.next().expect("peeked");
+                    wanted.next();
+                    if shown.motion.target() != 1.0 {
+                        shown.motion.animate(1.0, PANEL, now, reduce);
+                    }
+                    group.items.push(shown);
+                    ix += 1;
+                }
+                Step::Come(at) => {
+                    wanted.next();
+                    let mut motion = Motion::settled(0.0);
+                    motion.animate(1.0, PANEL, now, reduce);
+                    self.list.splice(ix..ix, 1);
+                    group.items.push(Shown {
+                        at,
+                        motion,
+                        height: Rc::default(),
+                    });
+                    ix += 1;
+                }
+                Step::Leave => {
+                    let mut shown = old.next().expect("peeked");
+                    if shown.motion.target() != 0.0 {
+                        shown.motion.animate(0.0, PANEL, now, reduce);
+                    }
+                    group.items.push(shown);
+                    leaving = true;
+                    ix += 1;
+                }
+            }
+        }
+        self.mark_asks(segment, cx);
+        if leaving {
+            self.sweep = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(PANEL + FRAME).await;
+                this.update(cx, |this, cx| this.swept(cx)).ok();
+            }));
+        }
+    }
+
+    /// A question to the user that stays out of a folded group shows alone, without the calls
+    /// merged with it.
+    fn mark_asks(&self, segment: usize, cx: &mut gpui_kit::App) {
+        let Some(Segment::Group(group)) = self.segments.get(segment) else {
+            return;
+        };
+        let only = !group.open;
+        for &at in &group.needs {
+            if asks_the_user(&self.model.blocks()[at]) {
+                self.rows[at].update(cx, |row, cx| row.set_asks_only(only, cx));
+            }
+        }
+    }
+
+    /// Takes out of the list the rows of groups whose fold away has ended.
+    fn swept(&mut self, cx: &mut Context<Self>) {
+        let now = cx.background_executor().now();
+        let mut ix = usize::from(self.earlier);
+        let mut again = false;
+        for segment in 0..self.segments.len() {
+            let items = self.items_of(&self.segments[segment]);
+            let Segment::Group(group) = &mut self.segments[segment] else {
+                ix += items;
+                continue;
+            };
+            ix += 1;
+            let list = &self.list;
+            group.items.retain(|shown| {
+                let leaving = shown.motion.target() == 0.0;
+                let gone = leaving && !shown.motion.is_running(now);
+                again |= leaving && !gone;
+                match gone {
+                    true => list.splice(ix..ix + 1, 0),
+                    false => ix += 1,
+                }
+                !gone
+            });
+        }
+        self.sweep = again.then(|| {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(FRAME).await;
+                this.update(cx, |this, cx| this.swept(cx)).ok();
+            })
+        });
+        cx.notify();
     }
 
     pub fn rows(&self) -> &[Entity<Row>] {
@@ -1707,9 +2087,117 @@ impl ConversationView {
         self.touched
     }
 
+    /// How many rows of groups were walked so far to say their lines and what stays out of
+    /// their folds.
+    pub fn walked(&self) -> usize {
+        self.walked
+    }
+
+    /// How many items the list holds.
+    pub fn item_count(&self) -> usize {
+        self.list.item_count()
+    }
+
+    /// How far the conversation is scrolled from its top.
+    pub fn scroll_offset(&self) -> Pixels {
+        -self.list.scroll_px_offset_for_scrollbar().y
+    }
+
+    /// The button back to the end.
+    pub fn to_end(&self) -> &Entity<ToEnd> {
+        &self.to_end
+    }
+
     /// Whether older events than those shown remain.
     pub fn has_earlier(&self) -> bool {
         self.earlier
+    }
+
+    /// The groups the conversation folds, each the rows it holds.
+    pub fn groups(&self) -> Vec<Range<usize>> {
+        self.segments
+            .iter()
+            .filter_map(|segment| match segment {
+                Segment::Group(group) => Some(group.rows.clone()),
+                Segment::Row(_) => None,
+            })
+            .collect()
+    }
+
+    /// The id of the line of the group that holds these rows.
+    pub fn group_id(&self, rows: &Range<usize>) -> Option<String> {
+        let segment = *self.segment_of.get(rows.start)?;
+        matches!(self.segments[segment], Segment::Group(_)).then(|| self.line_id(segment))
+    }
+
+    /// Whether the conversation follows its end.
+    pub fn is_following(&self) -> bool {
+        self.list.is_following_tail()
+    }
+
+    /// The keys a group's fold is kept by, the first naming it.
+    fn keys(&self, segment: usize) -> Vec<Key> {
+        let Some(Segment::Group(group)) = self.segments.get(segment) else {
+            return Vec::new();
+        };
+        let next = (group.rows.end < self.model.blocks().len())
+            .then(|| Key::Before(self.model.seq_of(group.rows.end)));
+        match group.cut {
+            true => vec![next.unwrap_or(Key::Cut)],
+            false => std::iter::once(Key::First(self.model.seq_of(group.rows.start)))
+                .chain(next)
+                .collect(),
+        }
+    }
+
+    /// The id of a group's line, which its other ids derive from: stable while earlier history
+    /// loads.
+    fn line_id(&self, segment: usize) -> String {
+        match self.keys(segment).first() {
+            Some(Key::First(seq)) => format!("group-{seq}"),
+            Some(Key::Before(seq)) => format!("group-before-{seq}"),
+            _ => "group-cut".into(),
+        }
+    }
+
+    fn is_unfolded(&self, segment: usize, cx: &gpui_kit::App) -> bool {
+        let Some(keys) = cx
+            .try_global::<Unfolded>()
+            .and_then(|unfolded| unfolded.0.get(&self.id))
+        else {
+            return false;
+        };
+        self.keys(segment).iter().any(|key| keys.contains(key))
+    }
+
+    /// Keeps whether a group is unfolded, by each of its keys.
+    fn keep(&self, segment: usize, cx: &mut gpui_kit::App) {
+        let Some(Segment::Group(group)) = self.segments.get(segment) else {
+            return;
+        };
+        let (open, keys) = (group.open, self.keys(segment));
+        let kept = cx
+            .default_global::<Unfolded>()
+            .0
+            .entry(self.id.clone())
+            .or_default();
+        for key in keys {
+            match open {
+                true => kept.insert(key),
+                false => kept.remove(&key),
+            };
+        }
+    }
+
+    /// The user folds or unfolds the group of `segment`.
+    fn toggle(&mut self, segment: usize, cx: &mut Context<Self>) {
+        let Some(Segment::Group(group)) = self.segments.get_mut(segment) else {
+            return;
+        };
+        group.open = !group.open;
+        self.keep(segment, cx);
+        self.reconcile(segment, cx);
+        cx.notify();
     }
 
     /// Makes the rows again from what a link read: the events are folded first, then each
@@ -1727,16 +2215,48 @@ impl ConversationView {
         self.rows.clear();
         self.specials.clear();
         self.more.clear();
+        self.segments.clear();
+        self.segment_of.clear();
+        self.sweep = None;
         for at in 0..self.model.blocks().len() {
             self.add_row(at, page, cx);
             self.more[at] = self.rows[at].read(cx).more_pieces().len();
+            self.place(at);
         }
-        let items = self.item(self.rows.len());
+        // Each group is said once, whole, and shows what the user left unfolded, at rest.
+        for segment in 0..self.segments.len() {
+            if !matches!(self.segments[segment], Segment::Group(_)) {
+                continue;
+            }
+            self.summarise(segment);
+            self.find_needs(segment, cx);
+            let open = self.is_unfolded(segment, cx);
+            if let Segment::Group(group) = &mut self.segments[segment] {
+                group.open = open;
+            }
+            let Segment::Group(group) = &self.segments[segment] else {
+                continue;
+            };
+            let wanted = self.wanted(group);
+            if let Segment::Group(group) = &mut self.segments[segment] {
+                group.items = wanted
+                    .into_iter()
+                    .map(|at| Shown {
+                        at,
+                        motion: Motion::settled(1.0),
+                        height: Rc::default(),
+                    })
+                    .collect();
+            }
+            self.mark_asks(segment, cx);
+        }
+        let items = self.item_of(self.segments.len());
         match read.follow {
             true => {
                 self.list = Self::list();
                 self.list.reset(items);
                 self.list.scroll_to_end();
+                self.watch(cx);
             }
             // Earlier pages read: the rows shown before stay where they were, below them.
             false => self.list.reset(items),
@@ -1758,17 +2278,55 @@ impl ConversationView {
         self.touched += 1;
     }
 
-    /// Adds a row for each block added, and draws again each row whose block changed.
+    /// A group changed: its line is said again, and the rows that stay out of its fold follow.
+    /// Whether it is to be drawn again.
+    fn group_changed(&mut self, segment: usize, cx: &mut Context<Self>) -> bool {
+        let said = self.summarise(segment);
+        let needs = self.find_needs(segment, cx);
+        if needs || said {
+            self.reconcile(segment, cx);
+        }
+        needs || said
+    }
+
+    /// Adds a row for each block added, and draws again each row whose block changed; a group
+    /// whose line changed is drawn again with it.
     fn changed(&mut self, changes: &[Change], page: &SessionPage, cx: &mut Context<Self>) {
-        let mut added = false;
+        let mut redraw = false;
         for change in changes {
             match change {
                 Change::Added => {
-                    let (at, item) = (self.rows.len(), self.item(self.rows.len()));
+                    let at = self.rows.len();
                     self.add_row(at, page, cx);
-                    self.list.splice(item..item, 1);
-                    self.fit(at, cx);
-                    added = true;
+                    let item = self.item_of(self.segments.len());
+                    if self.place(at) {
+                        self.list.splice(item..item, 1);
+                        // The group before is no longer the last: its question folds in, and
+                        // its fold is kept by the block after it too.
+                        let segment = self.segments.len() - 1;
+                        if segment > 0 && matches!(self.segments[segment - 1], Segment::Group(_)) {
+                            self.keep(segment - 1, cx);
+                            self.group_changed(segment - 1, cx);
+                        }
+                    }
+                    let segment = self.segment_of[at];
+                    if let Segment::Group(group) = &self.segments[segment] {
+                        if group.rows.len() == 1 {
+                            let open = self.is_unfolded(segment, cx);
+                            if let Segment::Group(group) = &mut self.segments[segment] {
+                                group.open = open;
+                            }
+                        }
+                        self.summarise(segment);
+                        self.find_needs(segment, cx);
+                        self.reconcile(segment, cx);
+                    } else {
+                        self.fit(at, cx);
+                    }
+                    if matches!(self.model.blocks()[at], Block::Text { .. }) {
+                        self.to_end.update(cx, |to_end, cx| to_end.wrote(cx));
+                    }
+                    redraw = true;
                 }
                 Change::Changed(at) => {
                     let block = self.model.blocks()[*at].clone();
@@ -1782,6 +2340,10 @@ impl ConversationView {
                         let item = self.item(*at);
                         self.list.remeasure_items(item..item + 1);
                         self.fit(*at, cx);
+                        let segment = self.segment_of[*at];
+                        if matches!(self.segments[segment], Segment::Group(_)) {
+                            redraw |= self.group_changed(segment, cx);
+                        }
                     }
                 }
                 Change::Appended(at, piece) => {
@@ -1793,13 +2355,125 @@ impl ConversationView {
                 }
             }
         }
-        if added {
+        if redraw {
             cx.notify();
         }
     }
 
-    /// The list's item `ix`: "Show earlier", a row, or a piece of a row's long reply, in the
-    /// conversation's column.
+    /// A row's card was brought up to date: a request answered folds into its group.
+    fn card_changed(&mut self, at: usize, cx: &mut Context<Self>) {
+        if let Some(&segment) = self.segment_of.get(at)
+            && matches!(self.segments[segment], Segment::Group(_))
+            && self.find_needs(segment, cx)
+        {
+            self.reconcile(segment, cx);
+        }
+        let item = self.item(at);
+        self.list.remeasure_items(item..item + 1);
+        cx.notify();
+    }
+
+    /// Whether the row `at` of a group shows under the group's line while it is folded: a call
+    /// held for the user's answer, a command still running, a question asked to the user in the
+    /// last group.
+    fn needs_the_user(&self, at: usize, last: bool, cx: &gpui_kit::App) -> bool {
+        match &self.model.blocks()[at] {
+            Block::Approval { .. } => self.rows[at]
+                .read(cx)
+                .card()
+                .is_some_and(|card| card.decision.is_none()),
+            Block::Command(card) => card.ending == Ending::Running,
+            block => last && asks_the_user(block),
+        }
+    }
+
+    /// A row of the conversation as the list draws it, entering when it first shows.
+    fn row_element(&self, at: usize) -> AnyElement {
+        enter(
+            ElementId::Name(format!("enter-row-{}-{at}", self.id).into()),
+            0,
+            self.rows[at].clone(),
+        )
+        .into_any_element()
+    }
+
+    /// A group's line: how many steps, their kinds, how many failed and how long it took, or
+    /// the step running now; a click unfolds its rows.
+    fn render_group_line(
+        &mut self,
+        segment: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(Segment::Group(group)) = self.segments.get(segment) else {
+            return div().into_any_element();
+        };
+        let (open, pieces) = (group.open, group_line(&group.summary, group.cut));
+        let failed = (group.summary.failed > 0).then(|| format!("{} failed", group.summary.failed));
+        let line_id = self.line_id(segment);
+        let p = palette(cx);
+        let id = |part: &str| ElementId::Name(format!("{line_id}{part}").into());
+        let said = SharedString::from(pieces.join(" · "));
+        let turn = turning(id("-chevron"), open, window, cx);
+        hoverable(
+            div()
+                .id(id(""))
+                .flex()
+                .items_center()
+                .gap(space::SM)
+                .py(space::XS)
+                .cursor_pointer()
+                .mono(12.)
+                .aria_label(said.clone())
+                .aria_expanded(open)
+                .child(
+                    icon(Icon::Chevron)
+                        .size(px(12.))
+                        .flex_none()
+                        .text_color(p.faint)
+                        .with_transformation(Transformation::rotate(radians(-FRAC_PI_2 * turn))),
+                )
+                .child(changing(id("-said"), said, {
+                    let id = id("-failed");
+                    move |_| {
+                        div()
+                            .flex()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .children(pieces.into_iter().enumerate().map(|(n, piece)| {
+                                let lead = if n == 0 { "" } else { " · " };
+                                match failed.as_ref() == Some(&piece) {
+                                    true => div()
+                                        .flex()
+                                        .flex_none()
+                                        .child(lead)
+                                        .child(
+                                            div()
+                                                .id(id.clone())
+                                                .text_color(p.fail)
+                                                .aria_label(SharedString::from(piece.clone()))
+                                                .child(piece)
+                                                .test_support(),
+                                        )
+                                        .into_any_element(),
+                                    false => div()
+                                        .flex_none()
+                                        .child(format!("{lead}{piece}"))
+                                        .into_any_element(),
+                                }
+                            }))
+                            .into_any_element()
+                    }
+                }))
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle(segment, cx))),
+            move |d, t| d.text_color(mix(p.faint, p.mute, t)),
+        )
+        .into_any_element()
+    }
+
+    /// The list's item `ix`: "Show earlier", a row, a piece of a row's long reply, a group's
+    /// line or one of its rows, in the conversation's column.
     fn render_item(
         &mut self,
         ix: usize,
@@ -1807,59 +2481,116 @@ impl ConversationView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let narrow = window.viewport_size().width < px(crate::shell::NARROW);
-        let (at, piece) = self.row_of(ix).unwrap_or((usize::MAX, 0));
-        let more = self.more.get(at).copied().unwrap_or(0);
-        // Between the pieces of one reply, the gap of its paragraphs.
-        let below = match () {
-            _ if piece < more => TextViewStyle::default()
-                .paragraph_gap()
-                .to_pixels(window.rem_size()),
-            _ if ix + 1 == self.item(self.rows.len()) => px(20.),
-            _ => px(18.),
+        let (segment, piece) = self.segment_at(ix).unwrap_or((usize::MAX, 0));
+        let last = ix + 1 == self.item_of(self.segments.len());
+        let column = |below: Pixels| {
+            div()
+                .max_w(px(780.))
+                .w_full()
+                .mx_auto()
+                .px(if narrow { space::LG } else { space::XXL })
+                .when(ix == 0, |d| {
+                    d.pt(if narrow { space::XL } else { space::XXL })
+                })
+                .pb(below)
         };
-        let column = div()
-            .max_w(px(780.))
-            .w_full()
-            .mx_auto()
-            .px(if narrow { space::LG } else { space::XXL })
-            .when(ix == 0, |d| {
-                d.pt(if narrow { space::XL } else { space::XXL })
-            })
-            .pb(below);
+        let gap = if last { px(20.) } else { row_gap() };
         // A list's item is not stretched to its width: the column is centred in a full one.
-        let centred = |column| div().w_full().child(column).into_any_element();
+        let centred = |column: Div| div().w_full().child(column).into_any_element();
         if self.earlier && ix == 0 {
             let page = self.page.clone();
-            return centred(column.flex().justify_center().child(
+            return centred(column(gap).flex().justify_center().child(
                 Button::quiet("show-earlier", "Show earlier").on_click(move |_, _, cx| {
                     page.update(cx, |page, cx| page.show_earlier(cx)).ok();
                 }),
             ));
         }
-        let Some(row) = self.rows.get(at) else {
-            return div().into_any_element();
-        };
-        // A request answered by a card below it: no row, not even the gap between two.
-        if matches!(row.read(cx).block(), Block::Answered { .. }) {
-            return div().into_any_element();
-        }
-        if piece > 0 {
-            let row = row.read(cx);
-            let shown = row.more_pieces().get(piece - 1).cloned();
-            // The last piece of a long reply carries its time and Copy.
-            if piece == more {
-                let p = palette(cx);
-                let said = row.said_text(div().children(shown), p);
-                return centred(column.child(said));
+        match self.segments.get(segment) {
+            Some(Segment::Group(_)) if piece == 0 => {
+                let line = self.render_group_line(segment, window, cx);
+                centred(column(gap).child(line))
             }
-            return centred(column.children(shown));
+            Some(Segment::Group(group)) => {
+                let Some(shown) = group.items.get(piece - 1) else {
+                    return div().into_any_element();
+                };
+                let (at, motion, height) = (shown.at, shown.motion, shown.height.clone());
+                let now = cx.background_executor().now();
+                let running = motion.is_running(now);
+                let open = motion.target() == 1.0;
+                if !open && !running {
+                    return div().into_any_element();
+                }
+                if running {
+                    window.request_animation_frame();
+                }
+                let t = motion.value(now);
+                let id = ElementId::Name(format!("{}-row-{at}", self.line_id(segment)).into());
+                let row = fold_frame(id, open, running, t, &height, self.rows[at].clone());
+                // The gap under it folds with it.
+                centred(column(gap * t).child(row))
+            }
+            Some(Segment::Row(at)) => {
+                let (at, more) = (*at, self.more[*at]);
+                let row = &self.rows[at];
+                if piece == 0 {
+                    // Between the pieces of one reply, the gap of its paragraphs.
+                    let below = match more {
+                        0 => gap,
+                        _ => TextViewStyle::default()
+                            .paragraph_gap()
+                            .to_pixels(window.rem_size()),
+                    };
+                    return centred(column(below).child(self.row_element(at)));
+                }
+                let below = match piece < more {
+                    true => TextViewStyle::default()
+                        .paragraph_gap()
+                        .to_pixels(window.rem_size()),
+                    false => gap,
+                };
+                let row = row.read(cx);
+                let shown = row.more_pieces().get(piece - 1).cloned();
+                // The last piece of a long reply carries its time and Copy.
+                if piece == more {
+                    let p = palette(cx);
+                    let said = row.said_text(div().children(shown), p);
+                    return centred(column(below).child(said));
+                }
+                centred(column(below).children(shown))
+            }
+            None => div().into_any_element(),
         }
-        centred(column.child(enter(
-            ElementId::Name(format!("enter-row-{}-{at}", self.id).into()),
-            0,
-            row.clone(),
-        )))
     }
+}
+
+/// How often a motion the conversation drives itself moves: one frame.
+const FRAME: Duration = Duration::from_millis(16);
+
+/// Whether a notice is a delivery the agent was sent, folded to one line, rather than the
+/// agent's own end or resumption, or a session it started, said whole.
+fn is_delivery(kind: &str) -> bool {
+    !matches!(kind, "failed" | "ended" | "resumed" | STARTED_SESSION_KIND)
+}
+
+/// The pieces of a group's line: how many steps (of the part read, when its start is on an
+/// earlier page), their kinds, how many failed, how long it took or the step running now.
+pub fn group_line(summary: &Summary, cut: bool) -> Vec<String> {
+    let mut pieces = vec![format!(
+        "{} {}{}",
+        summary.steps,
+        if summary.steps == 1 { "step" } else { "steps" },
+        if cut { " loaded" } else { "" }
+    )];
+    if !summary.kinds.is_empty() {
+        pieces.push(summary.kinds.join(", "));
+    }
+    if summary.failed > 0 {
+        pieces.push(format!("{} failed", summary.failed));
+    }
+    pieces.extend(summary.running.clone());
+    pieces.extend(summary.ms.map(seconds));
+    pieces
 }
 
 impl Render for ConversationView {
@@ -1887,6 +2618,7 @@ impl Render for ConversationView {
         div()
             .id(id)
             .size_full()
+            .relative()
             .child(
                 list(
                     self.list.clone(),
@@ -1894,6 +2626,7 @@ impl Render for ConversationView {
                 )
                 .size_full(),
             )
+            .child(self.to_end.clone())
             .test_support()
             .into_any_element()
     }
@@ -1973,12 +2706,18 @@ pub struct Row {
     markdown: Vec<Entity<MarkdownPiece>>,
     /// Where a selection begun in its text stays: see [`MarkdownPiece`].
     scope: TextSelectionScopeId,
+    /// What the agent received for a message that used commands, selectable as the message is: the
+    /// text it was made from, and its view.
+    received: Option<(String, MarkdownText)>,
     thinking: Option<(Entity<PulsingLabel>, Entity<ThinkingTimer>)>,
     calls: Vec<(Entity<Status>, Entity<StateIcon>)>,
     sub_agents: Vec<SubAgent>,
     card: Option<ApprovalCard>,
     icons: HashMap<String, Entity<StateIcon>>,
     pills: HashMap<String, Entity<Pill>>,
+    /// Its steps show only the question asked to the user: they stay out of a folded group
+    /// for it alone.
+    asks_only: bool,
     renders: usize,
 }
 
@@ -2015,12 +2754,14 @@ impl Row {
                 open: false,
                 markdown: Vec::new(),
                 scope: TextSelectionScopeId::new(),
+                received: None,
                 thinking: None,
                 calls: Vec::new(),
                 sub_agents,
                 card,
                 icons: HashMap::new(),
                 pills: HashMap::new(),
+                asks_only: false,
                 renders: 0,
             };
             row.set_block(block, cx);
@@ -2030,6 +2771,14 @@ impl Row {
 
     pub fn block(&self) -> &Block {
         &self.block
+    }
+
+    /// Shows only the question its steps ask the user, or all of them again.
+    fn set_asks_only(&mut self, only: bool, cx: &mut Context<Self>) {
+        if self.asks_only != only {
+            self.asks_only = only;
+            cx.notify();
+        }
     }
 
     /// The line drawn over the row, when it has one: who sent a message (none for the user's:
@@ -2109,12 +2858,15 @@ impl Row {
 
     /// Shows `text` as Markdown: each piece that did not change keeps its parse, and one that
     /// grew parses what it gained.
-    fn set_markdown(&mut self, text: &str, muted: bool, cx: &mut Context<Self>) {
+    fn set_markdown(&mut self, text: &str, muted: bool, chips: bool, cx: &mut Context<Self>) {
         let pieces = markdown_pieces(text);
         for (at, piece) in pieces.iter().enumerate() {
             match self.markdown.get(at) {
                 Some(markdown) => {
-                    let state = markdown.read(cx).state.clone();
+                    let state = markdown.update(cx, |markdown, _| {
+                        markdown.chips = chips;
+                        markdown.state.clone()
+                    });
                     state.update(cx, |state, cx| state.set_text(piece, cx));
                 }
                 None => {
@@ -2123,6 +2875,7 @@ impl Row {
                     self.markdown.push(cx.new(|_| MarkdownPiece {
                         state,
                         muted,
+                        chips,
                         scope,
                     }));
                 }
@@ -2161,11 +2914,34 @@ impl Row {
             &block
         {
             let muted = matches!(block, Block::Thought { .. });
-            self.set_markdown(text, muted, cx);
+            self.set_markdown(text, muted, false, cx);
         }
-        // The user's own message is selectable like a reply: the same view, fed what was typed.
-        if let Block::Message { text, .. } | Block::Relayed { text, .. } = &block {
-            self.set_markdown(&as_typed(text), false, cx);
+        // The user's own message is selectable like a reply: the same view, fed what was typed,
+        // each command in it a chip.
+        match &block {
+            Block::Message { text, commands, .. } => {
+                let chips = commands
+                    .as_ref()
+                    .map(|commanded| command_chips(text, &commanded.names))
+                    .unwrap_or_default();
+                self.set_markdown(
+                    &typed_with_chips(text, &chips),
+                    false,
+                    !chips.is_empty(),
+                    cx,
+                );
+                self.received = commands
+                    .as_ref()
+                    .map(|commanded| match self.received.take() {
+                        Some((seen, view)) if seen == commanded.received => (seen, view),
+                        _ => (
+                            commanded.received.clone(),
+                            MarkdownText::quiet(&as_typed(&commanded.received), cx),
+                        ),
+                    });
+            }
+            Block::Relayed { text, .. } => self.set_markdown(&as_typed(text), false, false, cx),
+            _ => {}
         }
         match &block {
             Block::Thought { since, until, .. } => {
@@ -2230,7 +3006,7 @@ impl Row {
         if let Block::Text { text } | Block::Thought { text, .. } = block {
             text.push_str(piece);
             let text = text.clone();
-            self.set_markdown(&text, muted, cx);
+            self.set_markdown(&text, muted, false, cx);
             cx.notify();
         }
     }
@@ -2276,7 +3052,15 @@ fn allowed_said(calls: &[Call]) -> String {
 /// keeps its break and its indentation. An address the renderer links by itself is left as typed:
 /// an escape inside it would be drawn, backslash and all.
 fn as_typed(text: &str) -> String {
+    typed_with_chips(text, &[])
+}
+
+/// [`as_typed`], each of `chips` (byte ranges of `text`, the commands it used) drawn as inline
+/// code, which the message's view styles as the accent's chip: its characters are the command's,
+/// nothing in it is escaped.
+fn typed_with_chips(text: &str, chips: &[std::ops::Range<usize>]) -> String {
     let line = |line: &str| {
+        let base = line.as_ptr() as usize - text.as_ptr() as usize;
         let indent = line.len() - line.trim_start_matches(' ').len();
         let mut out = "\u{a0}".repeat(indent);
         let line = &line[indent..];
@@ -2284,6 +3068,16 @@ fn as_typed(text: &str) -> String {
         let mut previous = None;
         while at < line.len() {
             let ahead = &line[at..];
+            let here = base + indent + at;
+            if let Some(chip) = chips
+                .iter()
+                .find(|chip| chip.start == here && !text[(*chip).clone()].contains('`'))
+            {
+                out.push_str(&format!("`{}`", &text[chip.clone()]));
+                at += chip.len();
+                previous = Some('`');
+                continue;
+            }
             if let Some(length) = address(previous, ahead) {
                 out.push_str(&ahead[..length]);
                 at += length;
@@ -2349,6 +3143,15 @@ pub struct MarkdownText {
 
 impl MarkdownText {
     pub fn new(text: &str, cx: &mut App) -> Self {
+        Self::drawn(text, false, cx)
+    }
+
+    /// In the muted ink, as a thought is.
+    pub fn quiet(text: &str, cx: &mut App) -> Self {
+        Self::drawn(text, true, cx)
+    }
+
+    fn drawn(text: &str, muted: bool, cx: &mut App) -> Self {
         let scope = TextSelectionScopeId::new();
         let pieces = markdown_pieces(text)
             .into_iter()
@@ -2356,7 +3159,8 @@ impl MarkdownText {
                 let state = cx.new(|cx| TextViewState::markdown(piece, cx));
                 cx.new(|_| MarkdownPiece {
                     state,
-                    muted: false,
+                    muted,
+                    chips: false,
                     scope,
                 })
             })
@@ -2400,6 +3204,8 @@ pub struct MarkdownPiece {
     state: Entity<TextViewState>,
     /// A thought's, in the muted ink.
     muted: bool,
+    /// Its inline code is the commands of a message the user typed: the accent's chip.
+    chips: bool,
     scope: TextSelectionScopeId,
 }
 
@@ -2408,13 +3214,23 @@ impl Render for MarkdownPiece {
         let scope = self.scope;
         // The scope is set where the view paints: a piece drawn again alone paints without its
         // row around it.
+        let p = palette(cx);
+        let mut style = markdown_style(&p, self.muted);
+        if self.chips {
+            style = style.with_inline_code(gpui_kit::HighlightStyle {
+                color: Some(p.acc),
+                background_color: Some(p.acc.opacity(0.14)),
+                font_weight: Some(gpui_kit::FontWeight::MEDIUM),
+                ..Default::default()
+            });
+        }
         div()
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 TextSelection::activate_scope(scope, window, cx)
             })
             .child(
                 TextView::new(&self.state)
-                    .style(markdown_style(&palette(cx), self.muted))
+                    .style(style)
                     .image_source(no_image),
             )
             .text_selection_scope(scope)
@@ -2546,12 +3362,88 @@ fn said(
     )
 }
 
+/// The button that copies a file's whole path, the one a line cut with an ellipsis stands for.
+/// Its click is its own: it neither opens the edit nor folds the steps.
+fn copy_path(id: ElementId, path: &str) -> Button {
+    let path = path.to_owned();
+    Button::icon(id, Icon::Copy, "Copy the path").on_click(move |_, _, cx| {
+        cx.stop_propagation();
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(path.clone()));
+        toast(Toast::success("Path copied").detail(path.clone()), cx);
+    })
+}
+
 fn call_state(call: &Call) -> AgentState {
     match call.state {
         CallState::Running => AgentState::Running,
         CallState::Done => AgentState::Completed,
         CallState::Failed => AgentState::Failed,
         CallState::Interrupted => AgentState::Stopped,
+    }
+}
+
+/// Where the commands of a message the user typed stand: each `/name` of `names`.
+pub fn command_chips(text: &str, names: &[String]) -> Vec<std::ops::Range<usize>> {
+    flottille_core::commands::used(text, |name| names.iter().any(|known| known == name))
+        .into_iter()
+        .map(|(range, _)| range)
+        .collect()
+}
+
+/// The line that says the agent received more than was typed.
+pub const RECEIVED: &str = "What the agent received";
+
+impl Row {
+    /// Under a message that used commands: "What the agent received", which unfolds into it.
+    fn render_received(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette(cx);
+        let id = |part: &str| ElementId::Name(format!("row-{}-{part}", self.at).into());
+        let turn = turning(id("received-toggle"), self.open, window, cx);
+        div()
+            .id(id("received-part"))
+            .flex()
+            .flex_col()
+            .px(space::SM)
+            .child(hoverable(
+                div()
+                    .id(id("received-toggle"))
+                    .flex()
+                    .items_center()
+                    .gap(space::SM)
+                    .cursor_pointer()
+                    .text_size(px(12.5))
+                    .aria_label(RECEIVED)
+                    .aria_expanded(self.open)
+                    .child(RECEIVED)
+                    .child(
+                        icon(Icon::Chevron).size(px(12.)).with_transformation(
+                            Transformation::rotate(radians(-FRAC_PI_2 * turn)),
+                        ),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.open = !this.open;
+                        cx.notify();
+                    })),
+                move |d, t| d.text_color(mix(p.faint, p.mute, t)),
+            ))
+            .child(presence(
+                id("received"),
+                self.open,
+                div()
+                    .id(id("received-text"))
+                    .pt(space::SM)
+                    .mono(12.)
+                    .when_some(self.received.as_ref(), |d, (received, _)| {
+                        d.aria_label(SharedString::from(received.clone()))
+                    })
+                    .children(
+                        self.received
+                            .as_ref()
+                            .map(|(_, view)| view.view(id("received-region"))),
+                    )
+                    .test_support(),
+            ))
+            .into_any_element()
     }
 }
 
@@ -2563,7 +3455,12 @@ impl Render for Row {
         // The row's own block, not a copy of it.
         let block = self.block.clone();
         match &*block {
-            Block::Message { text, images, .. } => {
+            Block::Message {
+                text,
+                images,
+                commands,
+                ..
+            } => {
                 let page = self.page.upgrade();
                 let pictures: Vec<Option<Arc<gpui_kit::Image>>> = images
                     .iter()
@@ -2647,6 +3544,7 @@ impl Render for Row {
                                         .test_support(),
                                 )
                             })
+                            .children(commands.as_ref().map(|_| self.render_received(window, cx)))
                             .test_support(),
                     )
                     .test_support();
@@ -2954,88 +3852,107 @@ impl Render for Row {
                     0 => format!("{done} of {}", calls.len()),
                     _ => "running".to_owned(),
                 };
-                let rows =
-                    calls
-                        .iter()
-                        .zip(&self.calls)
-                        .enumerate()
-                        .map(|(at, (call, (_, mark)))| {
-                            div()
-                                .id(ElementId::Name(format!("step-{}-{at}", self.at).into()))
-                                .flex()
-                                .gap(space::MD)
-                                .px(space::XS)
-                                .py(space::SM)
-                                .child(mark.clone())
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .items_center()
-                                                .gap(space::SM)
-                                                .mono(12.5)
-                                                .child(SharedString::from(call.name.clone()))
-                                                .children(call.allowed_by.as_ref().map(|by| {
-                                                    let said = SharedString::from(format!(
-                                                        "allowed by {by}"
-                                                    ));
-                                                    div()
-                                                        .id(ElementId::Name(
-                                                            format!(
-                                                                "step-{}-{at}-allowed",
-                                                                self.at
-                                                            )
+                let rows = calls
+                    .iter()
+                    .zip(&self.calls)
+                    .enumerate()
+                    .map(|(at, (call, (_, mark)))| {
+                        let shown = !self.asks_only || call.name == "ask_user";
+                        let step = div()
+                            .id(ElementId::Name(format!("step-{}-{at}", self.at).into()))
+                            .flex()
+                            .gap(space::MD)
+                            .px(space::XS)
+                            .py(space::SM)
+                            .child(mark.clone())
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(space::SM)
+                                            .mono(12.5)
+                                            .child(SharedString::from(call.name.clone()))
+                                            .children(call.allowed_by.as_ref().map(|by| {
+                                                let said =
+                                                    SharedString::from(format!("allowed by {by}"));
+                                                div()
+                                                    .id(ElementId::Name(
+                                                        format!("step-{}-{at}-allowed", self.at)
                                                             .into(),
-                                                        ))
-                                                        .text_size(px(11.5))
+                                                    ))
+                                                    .text_size(px(11.5))
+                                                    .text_color(p.faint)
+                                                    .aria_label(said.clone())
+                                                    .child(said)
+                                                    .test_support()
+                                            }))
+                                            .when(call.state == CallState::Interrupted, |d| {
+                                                d.child(
+                                                    div()
+                                                        .mono(10.)
+                                                        .medium()
                                                         .text_color(p.faint)
-                                                        .aria_label(said.clone())
-                                                        .child(said)
-                                                        .test_support()
-                                                }))
-                                                .when(call.state == CallState::Interrupted, |d| {
-                                                    d.child(
-                                                        div()
-                                                            .mono(10.)
-                                                            .medium()
-                                                            .text_color(p.faint)
-                                                            .child("INTERRUPTED"),
-                                                    )
-                                                }),
-                                        )
-                                        .child(
-                                            div()
-                                                .mono(11.5)
-                                                .text_color(p.faint)
-                                                .overflow_hidden()
-                                                .whitespace_nowrap()
-                                                .text_ellipsis()
-                                                .child(SharedString::from(call.args.clone())),
-                                        )
-                                        .child(presence(
-                                            ElementId::Name(
-                                                format!("step-{}-{at}-cut-line", self.at).into(),
-                                            ),
-                                            call.cut.is_some(),
-                                            cut_said(
+                                                        .child("INTERRUPTED"),
+                                                )
+                                            }),
+                                    )
+                                    .child(match &call.path {
+                                        Some(path) => div()
+                                            .text_color(p.faint)
+                                            .child(path_line(
                                                 ElementId::Name(
-                                                    format!("step-{}-{at}-cut", self.at).into(),
+                                                    format!("step-{}-{at}-path", self.at).into(),
                                                 ),
-                                                call.cut,
-                                                p.faint,
+                                                path,
+                                                11.5,
+                                                window,
+                                                cx,
+                                            ))
+                                            .into_any_element(),
+                                        None => div()
+                                            .mono(11.5)
+                                            .text_color(p.faint)
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .text_ellipsis()
+                                            .child(SharedString::from(call.args.clone()))
+                                            .into_any_element(),
+                                    })
+                                    .child(presence(
+                                        ElementId::Name(
+                                            format!("step-{}-{at}-cut-line", self.at).into(),
+                                        ),
+                                        call.cut.is_some(),
+                                        cut_said(
+                                            ElementId::Name(
+                                                format!("step-{}-{at}-cut", self.at).into(),
                                             ),
-                                        )),
+                                            call.cut,
+                                            p.faint,
+                                        ),
+                                    )),
+                            )
+                            .children(call.path.as_ref().map(|path| {
+                                copy_path(
+                                    ElementId::Name(format!("step-{}-{at}-copy", self.at).into()),
+                                    path,
                                 )
-                                .child(div().flex_none().mono(11.).text_color(p.faint).child(
-                                    SharedString::from(
-                                        call.duration_ms().map_or("…".into(), seconds),
-                                    ),
-                                ))
-                                .test_support()
-                        });
+                            }))
+                            .child(div().flex_none().mono(11.).text_color(p.faint).child(
+                                SharedString::from(call.duration_ms().map_or("…".into(), seconds)),
+                            ))
+                            .test_support();
+                        presence(
+                            ElementId::Name(format!("step-{}-{at}-shown", self.at).into()),
+                            shown,
+                            step,
+                        )
+                    })
+                    .collect::<Vec<_>>();
                 let toggle = || {
                     cx.listener(|this, _, _, cx| {
                         this.open = !this.open;
@@ -3050,8 +3967,12 @@ impl Render for Row {
                 };
                 // Folded to one discreet line until a click opens it: a long run of calls
                 // would push the conversation down. The line and the card fold into each other.
-                let last = calls.last().expect("a block of steps holds a call");
-                let count = calls.len();
+                let said: Vec<&Call> = calls
+                    .iter()
+                    .filter(|call| !self.asks_only || call.name == "ask_user")
+                    .collect();
+                let last = said.last().expect("a block of steps holds a call");
+                let count = said.len();
                 let line = SharedString::from(format!(
                     "{count} {} · {}{}",
                     if count == 1 { "step" } else { "steps" },
@@ -3069,7 +3990,9 @@ impl Render for Row {
                         .mono(12.)
                         .child(chevron(1.))
                         .aria_label(line.clone())
-                        .child(line)
+                        .child(changing(id("steps-said"), line, |line| {
+                            div().child(line).into_any_element()
+                        }))
                         .on_click(toggle()),
                     move |d, t| d.text_color(mix(p.faint, p.mute, t)),
                 );
@@ -3183,8 +4106,8 @@ impl Render for Row {
                     .test_support()
                     .into_any_element()
             }
-            // A notice is shown whole: a failure's reason, what was not done and why.
-            Block::Notice { kind, text } if kind != WOKEN_BY_KIND => div()
+            // The agent's own end is shown whole: a failure's reason, what was not done and why.
+            Block::Notice { kind, text } if !is_delivery(kind) => div()
                 .id(id("notice"))
                 .flex()
                 .gap(space::SM)
@@ -3195,14 +4118,19 @@ impl Render for Row {
                 .child(div().min_w_0().child(SharedString::from(text.clone())))
                 .test_support()
                 .into_any_element(),
-            // What woke the agent is one line; the forge's text follows it, folded under it
-            // until a click opens it.
+            // A delivery is one line, its kind and its first words, its whole text folded under
+            // it until a click opens it; what woke the agent is its own line, the forge's text
+            // folded under it.
             Block::Notice { kind, text } => {
-                let (first, rest) = match text.split_once('\n') {
-                    Some((first, rest)) => (first.trim(), rest.trim()),
-                    None => (text.trim(), ""),
+                let (first, rest) = match (kind == WOKEN_BY_KIND, text.split_once('\n')) {
+                    (true, Some((first, rest))) => (first.trim().to_owned(), rest.trim()),
+                    (true, None) => (text.trim().to_owned(), ""),
+                    (false, _) => (
+                        text.split_whitespace().collect::<Vec<_>>().join(" "),
+                        text.trim(),
+                    ),
                 };
-                let summary = SharedString::from(first.to_owned());
+                let summary = SharedString::from(first);
                 let detail = SharedString::from(rest.to_owned());
                 let foldable = !rest.is_empty();
                 let turn = turning(id("notice-toggle"), self.open, window, cx);
@@ -3275,22 +4203,33 @@ impl Render for Row {
                     .id(id("diff"))
                     .child(
                         Card::new()
+                            .id(id("diff-card"))
                             .title(hoverable(
                                 div()
                                     .id(id("diff-toggle"))
                                     .flex()
                                     .items_center()
                                     .gap(space::SM)
+                                    .flex_1()
+                                    .min_w_0()
                                     .cursor_pointer()
-                                    .child(icon(Icon::Repository).text_color(p.faint))
-                                    .child(div().mono(12.5).child(SharedString::from(path.clone())))
+                                    .child(icon(Icon::File).flex_none().text_color(p.faint))
+                                    .child(path_line(id("diff-path"), path, 12.5, window, cx))
+                                    .child(copy_path(id("diff-copy"), path))
                                     .child(
-                                        icon(Icon::Chevron)
-                                            .size(px(12.))
-                                            .text_color(p.faint)
-                                            .with_transformation(Transformation::rotate(radians(
-                                                -FRAC_PI_2 * turn,
-                                            ))),
+                                        div()
+                                            .id(id("diff-chevron"))
+                                            .flex_none()
+                                            .ml_auto()
+                                            .child(
+                                                icon(Icon::Chevron)
+                                                    .size(px(12.))
+                                                    .text_color(p.faint)
+                                                    .with_transformation(Transformation::rotate(
+                                                        radians(-FRAC_PI_2 * turn),
+                                                    )),
+                                            )
+                                            .test_support(),
                                     )
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.open = !this.open;
@@ -3306,7 +4245,7 @@ impl Render for Row {
                                     .id(id("diff-lines"))
                                     .py(space::SM)
                                     .mono(12.)
-                                    .children(lines.iter().map(|line| {
+                                    .children(lines.iter().enumerate().map(|(at, line)| {
                                         let (text, bg, ink) = match line {
                                             DiffLine::Removed(text) => {
                                                 (format!("- {text}"), p.del, p.fail)
@@ -3315,12 +4254,21 @@ impl Render for Row {
                                                 (format!("+ {text}"), p.add, p.ok)
                                             }
                                         };
-                                        div()
-                                            .px(space::LG)
-                                            .bg(bg)
-                                            .text_color(ink)
-                                            .whitespace_nowrap()
-                                            .child(SharedString::from(text))
+                                        let text = SharedString::from(text);
+                                        tipped_when_cut(
+                                            div()
+                                                .id(id(&format!("diff-line-{at}")))
+                                                .px(space::LG)
+                                                .bg(bg)
+                                                .text_color(ink)
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .text_ellipsis()
+                                                .child(text.clone()),
+                                            text,
+                                            window,
+                                            cx,
+                                        )
                                     }))
                                     .test_support(),
                             )),
@@ -3328,7 +4276,7 @@ impl Render for Row {
                     .test_support()
                     .into_any_element()
             }
-            Block::Approval { number } => self.render_card(*number, cx).into_any_element(),
+            Block::Approval { number } => self.render_card(*number, window, cx).into_any_element(),
             Block::Answered { .. } => div().into_any_element(),
             // One line; a click opens the output in the panel the rail opens.
             Block::Command(result) => {
@@ -3363,7 +4311,12 @@ impl Row {
     /// .env", which lights its card in the rail; once answered, the record of the outcome. The
     /// card, with Allow and Deny, is in the rail: the page says that the user is needed there,
     /// once.
-    fn render_card(&mut self, number: u64, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_card(
+        &mut self,
+        number: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let p = palette(cx);
         let Some(card) = self.card.clone() else {
             return div()
@@ -3390,15 +4343,21 @@ impl Row {
             .text_size(px(13.))
             .aria_label(SharedString::from(said.clone()))
             .child(div().flex_none().size(px(8.)).rounded_full().bg(ink))
-            .child(
+            .child(tipped_when_cut(
                 div()
+                    .id(ElementId::Name(
+                        format!("approval-line-{number}-said").into(),
+                    ))
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .child(SharedString::from(said)),
-            )
+                    .child(SharedString::from(said.clone())),
+                SharedString::from(said),
+                window,
+                cx,
+            ))
             .child(
                 div()
                     .flex_none()
@@ -3521,6 +4480,8 @@ pub struct RailAgent {
     pub ended: bool,
     /// How much of its context it used, in percent.
     pub context: Option<u64>,
+    /// The tokens its context holds, when the window's size is not known yet.
+    pub context_tokens: Option<u64>,
     /// What it does, in a few words.
     pub doing: String,
     /// It waits between turns for what happens outside (`doing` says what).
@@ -3603,11 +4564,13 @@ fn rail_rows(nodes: &[Node], open: &HashSet<String>) -> Vec<RailRow> {
     rows
 }
 
-/// The fold of the children behind one "ended" row.
-struct EndedFold {
-    motion: Motion,
-    /// The children's height, measured while they are drawn.
-    height: Rc<Cell<Pixels>>,
+/// A count of tokens as the row says it: `812`, `45k`, `1.2M`.
+fn tokens(count: u64) -> String {
+    match count {
+        0..1000 => count.to_string(),
+        1000..1_000_000 => format!("{}k", count / 1000),
+        _ => format!("{:.1}M", count as f64 / 1_000_000.0),
+    }
 }
 
 /// The rail: the session's agents, its workspace and its facts.
@@ -3619,10 +4582,17 @@ pub struct SessionRail {
     open_ended: HashSet<String>,
     /// How far each "ended" row's children are unfolded: they stay drawn until a fold ends.
     ended_folds: HashMap<String, EndedFold>,
+    /// How far the bar of each agent's gauge is filled, following the use.
+    gauges: HashMap<String, Motion>,
+    /// How many task runs each agent last had going: its row says it while the count folds away.
+    last_runs: HashMap<String, usize>,
     selected: String,
     workspace: Option<String>,
     project: String,
     place: Option<PlaceFacts>,
+    /// The daemon answered for the place (with facts, or with none): until then the Workspace
+    /// section waits as a skeleton.
+    place_known: bool,
     /// The "⋯" menu of the WORKSPACE section.
     menu: Entity<Menu>,
     /// The "⋯" menu of the root's row: it ends the session.
@@ -3641,6 +4611,8 @@ pub struct SessionRail {
     linking: bool,
     /// What the daemon said of the ticket typed.
     ticket_error: Option<SharedString>,
+    /// The last ticket the place had, drawn while its line folds away after an unlink.
+    last_ticket: Option<TicketFacts>,
     _ticket_subscription: Option<Subscription>,
     renders: usize,
 }
@@ -3686,7 +4658,7 @@ impl SessionRail {
                 cx,
             )
         });
-        let commands = cx.new(|_| CommandList::new(page.clone()));
+        let commands = cx.new(|_| CommandList::new(page.clone()).of_agent(root.clone()));
         let subscriptions = cx.new(|_| SubscriptionList::new(page.clone()));
         let waiting = cx.new(|cx| Waiting::new(page.clone(), cx));
         Self {
@@ -3699,15 +4671,19 @@ impl SessionRail {
             marks: HashMap::new(),
             open_ended: HashSet::new(),
             ended_folds: HashMap::new(),
+            gauges: HashMap::new(),
+            last_runs: HashMap::new(),
             menu,
             agent_menu,
             selected: root,
             workspace: opened.place.clone(),
             project: opened.project.clone(),
             place: None,
+            place_known: false,
             ticket_field: None,
             linking: false,
             ticket_error: None,
+            last_ticket: None,
             _ticket_subscription: None,
             renders: 0,
         }
@@ -3800,12 +4776,8 @@ impl SessionRail {
         let fold = self
             .ended_folds
             .entry(parent.to_owned())
-            .or_insert_with(|| EndedFold {
-                motion: Motion::settled(0.0),
-                height: Rc::new(Cell::new(px(0.))),
-            });
-        fold.motion
-            .animate(if open { 1.0 } else { 0.0 }, PANEL, now, reduce);
+            .or_insert_with(EndedFold::new);
+        fold.animate(open, now, reduce);
         cx.notify();
     }
 
@@ -3843,12 +4815,35 @@ impl SessionRail {
                 cx.new(|cx| StateIcon::new(status, cx))
             });
         }
+        let now = cx.background_executor().now();
+        let reduce = cx.reduce_motion();
+        // The gauges of the agents that left the rail go with them.
+        self.gauges
+            .retain(|id, _| agents.iter().any(|agent| &agent.id == id));
+        for agent in &agents {
+            let fill = agent.context.unwrap_or(0) as f32;
+            let had_bar = self
+                .agents
+                .iter()
+                .any(|before| before.id == agent.id && before.context.is_some());
+            match self.gauges.get_mut(&agent.id) {
+                // The fill follows a change of the use; a bar that unfolds is already at its
+                // share, and an agent first seen shows its gauge at once.
+                Some(motion) if had_bar => motion.animate(fill, PANEL, now, reduce),
+                Some(motion) => *motion = Motion::settled(fill),
+                None => {
+                    self.gauges.insert(agent.id.clone(), Motion::settled(fill));
+                }
+            }
+        }
         self.agents = agents;
         cx.notify();
     }
 
     fn set_selected(&mut self, selected: String, cx: &mut Context<Self>) {
         if self.selected != selected {
+            self.commands
+                .update(cx, |commands, cx| commands.show_agent(&selected, cx));
             self.selected = selected;
             cx.notify();
         }
@@ -3856,8 +4851,44 @@ impl SessionRail {
 
     /// The place's facts; `None` when the daemon has none (the workspace was removed).
     fn set_place(&mut self, place: Option<PlaceFacts>, cx: &mut Context<Self>) {
-        if self.place != place {
+        let first = !std::mem::replace(&mut self.place_known, true);
+        if self.place != place || first {
             self.place = place;
+            cx.notify();
+        }
+    }
+
+    /// The forge's part of the place, when it answers; the rest of the place is not touched.
+    fn set_forge(&mut self, forge: ForgeFacts, cx: &mut Context<Self>) {
+        let Some(place) = &mut self.place else {
+            return;
+        };
+        let ForgeFacts {
+            pulls,
+            forges,
+            problem,
+        } = forge;
+        if place.forge_pending
+            || place.pulls != pulls
+            || place.forges != forges
+            || place.forge_problem != problem
+        {
+            place.pulls = pulls;
+            place.forges = forges;
+            place.forge_problem = problem;
+            place.forge_pending = false;
+            cx.notify();
+        }
+    }
+
+    /// The ticket's part of the place, when its tracker answers.
+    fn set_ticket(&mut self, ticket: Option<TicketFacts>, cx: &mut Context<Self>) {
+        let Some(place) = &mut self.place else {
+            return;
+        };
+        if place.ticket_pending || place.ticket != ticket {
+            place.ticket = ticket;
+            place.ticket_pending = false;
             cx.notify();
         }
     }
@@ -3876,6 +4907,13 @@ impl Render for SessionRail {
                 drawn_open.insert(parent.clone());
             } else {
                 fold.motion.settle(now);
+            }
+        }
+        for motion in self.gauges.values_mut() {
+            if motion.is_running(now) {
+                window.request_animation_frame();
+            } else {
+                motion.settle(now);
             }
         }
         // The root alone is ended (the daemon refuses a child), and only while it is not ended.
@@ -3910,7 +4948,41 @@ impl Render for SessionRail {
             .filter(|row| row.wake)
             .map(|row| (row.agent.clone(), row.expires_at))
             .collect();
-        let agent_row = |agent: &RailAgent| {
+        // The bar of a gauge unfolds, its gap with it, once the window's size is known.
+        let bars: HashMap<String, f32> = self
+            .agents
+            .iter()
+            .map(|agent| {
+                let bar = fade(
+                    format!("rail-context-bar-{}", agent.id),
+                    agent.context.is_some(),
+                    PANEL,
+                    window,
+                    cx,
+                );
+                (agent.id.clone(), bar)
+            })
+            .collect();
+        // The task runs each agent has going, said on its row in the list while another agent is
+        // shown: nothing running in the tree stays hidden.
+        let mut going: HashMap<String, usize> = HashMap::new();
+        for run in self.commands.read(cx).rows() {
+            if run.running() && run.is_task() {
+                *going.entry(run.agent.clone()).or_default() += 1;
+            }
+        }
+        self.last_runs.extend(going.clone());
+        let counts: HashMap<String, f32> = self
+            .agents
+            .iter()
+            .filter(|agent| agent.depth > 0)
+            .map(|agent| {
+                let on = agent.id != self.selected && going.contains_key(&agent.id);
+                let id = format!("rail-runs-count-fade-{}", agent.id);
+                (agent.id.clone(), fade(id, on, PANEL, window, cx))
+            })
+            .collect();
+        let agent_row = |agent: &RailAgent, window: &mut Window, cx: &mut App| {
             let mark = self.marks[&agent.id].clone();
             let page = self.page.clone();
             let target = agent.id.clone();
@@ -3941,35 +5013,112 @@ impl Render for SessionRail {
                     None => agent.doing.clone(),
                 })
             });
-            let gauge = agent.context.map(|used| {
-                let used = used.min(100);
-                // The share and its bar on one line, the share before it.
-                div()
-                    .id(ElementId::Name(format!("rail-context-{}", agent.id).into()))
+            // A child with task runs going says how many; a click opens it with its Runs section.
+            let chip_t = counts.get(&agent.id).copied().unwrap_or_default();
+            let runs_chip = (kid && chip_t > 0.).then(|| {
+                let n = self.last_runs.get(&agent.id).copied().unwrap_or_default();
+                let said = SharedString::from(format!("{n} run{}", if n == 1 { "" } else { "s" }));
+                let (page, target) = (self.page.clone(), agent.id.clone());
+                let chip = div()
+                    .id(ElementId::Name(
+                        format!("rail-runs-count-{}", agent.id).into(),
+                    ))
                     .flex()
+                    .flex_none()
                     .items_center()
                     .gap(space::XS)
+                    .h(px(18.))
+                    .px(space::XS)
+                    .rounded(px(5.))
+                    .max_w(px(80.) * chip_t)
+                    .opacity(chip_t)
+                    .overflow_hidden()
+                    .whitespace_nowrap()
                     .mono(10.5)
                     .text_color(p.faint)
-                    .aria_label(SharedString::from(format!("{used}% of the context used")))
-                    .child(SharedString::from(format!("{used}%")))
-                    .child(
-                        div()
-                            .w(px(32.))
-                            .h(px(3.))
-                            .rounded(px(2.))
-                            .bg(p.line2)
-                            .overflow_hidden()
-                            .child(
-                                div()
-                                    .h_full()
-                                    .w(px(32. * used as f32 / 100.))
-                                    .rounded(px(2.))
-                                    .bg(p.mute),
-                            ),
-                    )
-                    .test_support()
+                    .cursor_pointer()
+                    .aria_label(said.clone())
+                    .child(icon(Icon::Play).size(px(9.)))
+                    .child(said)
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        if let Some(page) = page.upgrade() {
+                            page.update(cx, |page, cx| page.select(&target, cx));
+                        }
+                    });
+                hoverable(chip, move |d, t| {
+                    d.bg(p.hover.opacity(t)).text_color(mix(p.faint, p.text, t))
+                })
             });
+            let bar = bars.get(&agent.id).copied().unwrap_or_default();
+            let fill = self.gauges.get(&agent.id).map_or(0., |m| m.value(now));
+            let gauge_text = match (agent.context, agent.context_tokens) {
+                (Some(used), _) => Some((
+                    format!("{}%", used.min(100)),
+                    format!("{}% of the context used", used.min(100)),
+                )),
+                (None, Some(used)) => Some((
+                    tokens(used),
+                    format!("{} tokens in the context", tokens(used)),
+                )),
+                (None, None) => None,
+            };
+            let has_gauge = gauge_text.is_some();
+            let gauge = match gauge_text {
+                Some((text, label)) => {
+                    // The share (or the tokens used) and its bar on one line, the share before it.
+                    div()
+                        .id(ElementId::Name(format!("rail-context-{}", agent.id).into()))
+                        .flex()
+                        .items_center()
+                        .justify_end()
+                        .mono(10.5)
+                        .text_color(p.faint)
+                        .aria_label(SharedString::from(label))
+                        .child(
+                            div()
+                                .id(ElementId::Name(
+                                    format!("rail-context-text-{}", agent.id).into(),
+                                ))
+                                .child(SharedString::from(text))
+                                .test_support(),
+                        )
+                        // Drawn while it unfolds and while it folds away, too.
+                        .when(agent.context.is_some() || bar > 0., |d| {
+                            d.child(
+                                div()
+                                    .id(ElementId::Name(
+                                        format!("rail-context-bar-{}", agent.id).into(),
+                                    ))
+                                    .ml(space::XS * bar)
+                                    .w(px(32.) * bar)
+                                    .h(px(3.))
+                                    .flex_none()
+                                    .rounded(px(2.))
+                                    .bg(p.line2)
+                                    .opacity(bar)
+                                    .overflow_hidden()
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .w(px(32. * fill.clamp(0., 100.) / 100.) * bar)
+                                            .rounded(px(2.))
+                                            .bg(p.mute),
+                                    )
+                                    .test_support(),
+                            )
+                        })
+                        .test_support()
+                        .into_any_element()
+                }
+                None => div().into_any_element(),
+            };
+            // The whole gauge unfolds and fades in when the first usage arrives.
+            let gauge = presence(
+                ElementId::Name(format!("rail-context-{}-block", agent.id).into()),
+                has_gauge,
+                gauge,
+            );
             let row = div()
                 .id(ElementId::Name(format!("rail-row-{}", agent.id).into()))
                 .flex_1()
@@ -3996,27 +5145,48 @@ impl Render for SessionRail {
                         .min_w_0()
                         .overflow_hidden()
                         .whitespace_nowrap()
-                        .child(
-                            div()
-                                .id(ElementId::Name(top_id.into()))
-                                .medium()
-                                .text_size(px(13.))
-                                .text_ellipsis()
-                                .overflow_hidden()
-                                .aria_label(SharedString::from(name.clone()))
-                                .child(SharedString::from(name))
-                                .test_support(),
-                        )
+                        .child({
+                            let name = tipped_when_cut(
+                                div()
+                                    .id(ElementId::Name(top_id.into()))
+                                    .medium()
+                                    .text_size(px(13.))
+                                    .text_ellipsis()
+                                    .overflow_hidden()
+                                    .aria_label(SharedString::from(name.clone()))
+                                    .when(runs_chip.is_some(), |d| d.flex_1().min_w_0())
+                                    .child(SharedString::from(name.clone())),
+                                SharedString::from(name),
+                                window,
+                                cx,
+                            );
+                            match runs_chip {
+                                Some(chip) => div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(space::XS)
+                                    .child(name)
+                                    .child(chip)
+                                    .into_any_element(),
+                                None => name.into_any_element(),
+                            }
+                        })
                         .children(said.map(|said| {
-                            div()
-                                .id(ElementId::Name(format!("rail-runs-on-{}", agent.id).into()))
-                                .mono(11.)
-                                .text_color(p.faint)
-                                .text_ellipsis()
-                                .overflow_hidden()
-                                .aria_label(SharedString::from(said.clone()))
-                                .child(SharedString::from(said))
-                                .test_support()
+                            tipped_when_cut(
+                                div()
+                                    .id(ElementId::Name(
+                                        format!("rail-runs-on-{}", agent.id).into(),
+                                    ))
+                                    .mono(11.)
+                                    .text_color(p.faint)
+                                    .text_ellipsis()
+                                    .overflow_hidden()
+                                    .aria_label(SharedString::from(said.clone()))
+                                    .child(SharedString::from(said.clone())),
+                                SharedString::from(said),
+                                window,
+                                cx,
+                            )
                         }))
                         // What the root waits for between turns, folding in and away with it.
                         .when(!kid, |d| {
@@ -4049,7 +5219,7 @@ impl Render for SessionRail {
                         .flex_none()
                         .flex()
                         .justify_end()
-                        .children(gauge),
+                        .child(gauge),
                 )
                 .map(|d| match !kid && endable {
                     true => d.child(agent_menu.clone()),
@@ -4085,7 +5255,7 @@ impl Render for SessionRail {
                 ))
                 .test_support()
         };
-        let ended_row = |parent: &str, count: usize, open: bool, turn: f32| {
+        let ended_row = |parent: &str, count: usize, open: bool, turn: f32, cx: &Context<Self>| {
             let depth = self
                 .agents
                 .iter()
@@ -4093,30 +5263,16 @@ impl Render for SessionRail {
                 .map_or(1, |a| a.depth + 1);
             let indent = space::LG * depth as f32;
             let target = parent.to_owned();
-            let row = div()
-                .id(ElementId::Name(format!("rail-ended-{parent}").into()))
-                .aria_expanded(open)
-                .h(px(28.))
-                .flex()
-                .items_center()
-                .gap(space::SM)
-                .px(space::SM)
-                .rounded(px(7.))
-                .cursor_pointer()
-                .text_size(px(12.))
-                .child(
-                    icon(Icon::Chevron)
-                        .size(px(11.))
-                        .text_color(p.faint)
-                        .with_transformation(Transformation::rotate(radians(
-                            -FRAC_PI_2 * (1.0 - turn),
-                        ))),
-                )
-                .child(SharedString::from(format!("{count} ended")))
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle_ended(&target, cx)));
-            div().pl(indent).child(hoverable(row, move |d, t| {
-                d.bg(p.hover.opacity(t)).text_color(mix(p.faint, p.text, t))
-            }))
+            let said = SharedString::from(format!("{count} ended"));
+            div().pl(indent).child(ended_row(
+                ElementId::Name(format!("rail-ended-{parent}").into()),
+                said.clone(),
+                said,
+                open,
+                turn,
+                p,
+                cx.listener(move |this, _, _, cx| this.toggle_ended(&target, cx)),
+            ))
         };
         let mut rows: Vec<AnyElement> = Vec::new();
         let mut listed = listed.into_iter();
@@ -4127,7 +5283,7 @@ impl Render for SessionRail {
                         self.agents
                             .iter()
                             .find(|a| a.id == id)
-                            .map(|agent| agent_row(agent).into_any_element()),
+                            .map(|agent| agent_row(agent, window, cx).into_any_element()),
                     );
                 }
                 RailRow::Ended {
@@ -4141,6 +5297,7 @@ impl Render for SessionRail {
                             count,
                             self.open_ended.contains(&parent),
                             turns.get(&parent).copied().unwrap_or(0.0),
+                            cx,
                         )
                         .into_any_element(),
                     );
@@ -4154,7 +5311,7 @@ impl Render for SessionRail {
                         .filter_map(|row| match row {
                             RailRow::Agent(id) => {
                                 let agent = self.agents.iter().find(|a| a.id == id)?;
-                                Some(agent_row(agent).into_any_element())
+                                Some(agent_row(agent, window, cx).into_any_element())
                             }
                             RailRow::Ended { .. } => None,
                         })
@@ -4214,6 +5371,7 @@ impl Render for SessionRail {
             })
             .collect();
         let several = repositories.len() > 1;
+        let forge_pending = self.place.as_ref().is_some_and(|place| place.forge_pending);
         let mut lines: Vec<AnyElement> = Vec::new();
         for (path, name, facts, status) in repositories {
             let changes = match facts {
@@ -4301,32 +5459,47 @@ impl Render for SessionRail {
                             .test_support(),
                     )
                     // Its branch, commits ahead, files not committed and setup played; it
-                    // unfolds once the daemon said.
+                    // unfolds once the daemon said, and fades back in when it says another
+                    // (a branch renamed).
                     .child(presence(
                         ElementId::Name(format!("rail-status-{name}-block").into()),
                         status.is_some(),
-                        div()
-                            .id(ElementId::Name(format!("rail-status-{name}").into()))
-                            .pl(space::XL)
-                            .mono(11.5)
-                            .text_color(p.faint)
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .aria_label(SharedString::from(status.as_ref().map_or(
-                                String::new(),
-                                |s| match &s.note {
-                                    Some(note) => format!("{} · {note}", s.line()),
-                                    None => s.line(),
-                                },
-                            )))
-                            .children(status.as_ref().map(|s| SharedString::from(s.line())))
-                            .test_support(),
+                        {
+                            let said = SharedString::from(
+                                status.as_ref().map(|s| s.line()).unwrap_or_default(),
+                            );
+                            let line = tipped_when_cut(
+                                div()
+                                    .id(ElementId::Name(format!("rail-status-{name}").into()))
+                                    .pl(space::XL)
+                                    .mono(11.5)
+                                    .text_color(p.faint)
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .aria_label(SharedString::from(status.as_ref().map_or(
+                                        String::new(),
+                                        |s| match &s.note {
+                                            Some(note) => format!("{} · {note}", s.line()),
+                                            None => s.line(),
+                                        },
+                                    )))
+                                    .child(said.clone()),
+                                said.clone(),
+                                window,
+                                cx,
+                            );
+                            changing(
+                                ElementId::Name(format!("rail-status-{name}-change").into()),
+                                said,
+                                move |_| line,
+                            )
+                        },
                     ))
                     .test_support()
                     .into_any_element(),
             );
-            if let Some(pull) = pull_of(&path) {
+            let pull_line = pull_of(&path).map(|pull| {
                 let page = self.page.clone();
                 let url = pull.url.clone();
                 let row = pull_row(
@@ -4344,17 +5517,29 @@ impl Render for SessionRail {
                     ),
                     false => "Pull request".to_owned(),
                 };
-                lines.push(
-                    fact_line(
-                        format!("rail-line-pull-{name}"),
-                        Some(Icon::PullRequest),
-                        key,
-                        pull.label(),
-                        pull_hover(row, cx),
-                        p,
+                fact_line(
+                    format!("rail-line-pull-{name}"),
+                    Some(Icon::PullRequest),
+                    key,
+                    pull.label(),
+                    pull_hover(row, cx),
+                    p,
+                )
+                .into_any_element()
+            });
+            // A workspace's pull request waits for its forge: a skeleton stands for the row, and
+            // folds away when the repository turns out to have none.
+            match self.workspace.is_some() {
+                true => lines.push(
+                    awaiting(
+                        ElementId::Name(format!("rail-pull-wait-{name}").into()),
+                        forge_pending,
+                        skeleton_line(format!("rail-pull-skeleton-{name}"), 44.),
+                        pull_line.unwrap_or_else(|| div().into_any_element()),
                     )
                     .into_any_element(),
-                );
+                ),
+                false => lines.extend(pull_line),
             }
         }
         let forge_problem = self.place.as_ref().and_then(|p| p.forge_problem.clone());
@@ -4398,10 +5583,14 @@ impl Render for SessionRail {
                 );
             self.ticket_field = Some(field);
         }
-        let ticket = self.place.as_ref().and_then(|p| p.ticket.clone());
+        let linked = self.place.as_ref().and_then(|p| p.ticket.clone());
+        if linked.is_some() {
+            self.last_ticket = linked.clone();
+        }
+        let ticket = linked.or_else(|| self.last_ticket.clone());
         // The ticket is why the workspace exists: its line opens the section's lines, before any
         // pull request.
-        let ticket_line = ticket.map(|ticket| {
+        let ticket_content = ticket.map(|ticket| {
             let page = self.page.clone();
             let said = match (&ticket.title, &ticket.problem) {
                 (_, Some(problem)) => problem.clone(),
@@ -4433,13 +5622,17 @@ impl Render for SessionRail {
                         .flex_none()
                         .child(SharedString::from(ticket.reference.clone())),
                 )
-                .child(
+                .child(tipped_when_cut(
                     div()
+                        .id("rail-ticket-title")
                         .min_w_0()
                         .text_ellipsis()
                         .overflow_hidden()
-                        .child(SharedString::from(said)),
-                )
+                        .child(SharedString::from(said.clone())),
+                    SharedString::from(said),
+                    window,
+                    cx,
+                ))
                 .on_click(move |_, _, cx| {
                     if let Some(url) = &url {
                         page.update(cx, |page, _| page.open_link(url)).ok();
@@ -4456,6 +5649,24 @@ impl Render for SessionRail {
             )
             .into_any_element()
         });
+        // A linked ticket waits for its tracker: a skeleton holds its line's place until it is read.
+        let ticket_pending = self
+            .place
+            .as_ref()
+            .is_some_and(|place| place.ticket_pending);
+        // Unlinked, the line folds away with what it last said.
+        let ticket_present =
+            ticket_pending || self.place.as_ref().is_some_and(|p| p.ticket.is_some());
+        let ticket_line = presence(
+            "rail-ticket-block",
+            ticket_present,
+            awaiting(
+                "rail-ticket-wait",
+                ticket_pending,
+                skeleton_line("rail-ticket-skeleton".to_owned(), 150.),
+                ticket_content.unwrap_or_else(|| div().into_any_element()),
+            ),
+        );
         let ticket_field = self
             .ticket_field
             .clone()
@@ -4467,10 +5678,6 @@ impl Render for SessionRail {
                 if !place.bases.is_empty() {
                     facts.push(("From", place.bases.join(", ")));
                 }
-                facts.push((
-                    "Prepared",
-                    place.prepared_ms.map_or("not yet".into(), seconds),
-                ));
             }
             (None, _) => facts.push(("Place", "the project folder".into())),
             _ => {}
@@ -4489,86 +5696,101 @@ impl Render for SessionRail {
                 Some(self.menu.clone().into_any_element()),
                 cx,
             ))
-            .children(ticket_line)
-            .children(lines)
-            .child(presence(
-                "rail-no-forge-block",
-                no_forge.is_some(),
+            // Before the daemon's first answer the section is a skeleton; its lines replace it.
+            .child(awaiting(
+                "rail-workspace-wait",
+                !self.place_known,
+                workspace_skeleton(),
                 div()
-                    .id("rail-no-forge")
-                    .px(space::XS)
-                    .py(space::XS)
-                    .text_size(px(11.5))
-                    .text_color(p.faint)
-                    .children(no_forge.clone())
-                    .aria_label(no_forge.unwrap_or_default())
-                    .test_support(),
-            ))
-            .children(forge_problem.map(|problem| {
-                div()
-                    .id("rail-forge-problem")
-                    .px(space::XS)
-                    .py(space::XS)
-                    .text_size(px(11.5))
-                    .text_color(p.faint)
-                    .child(SharedString::from(problem))
-                    .test_support()
-            }))
-            .child(presence(
-                "rail-ticket-field-block",
-                self.linking && ticket_field.is_some(),
-                div()
-                    .id("rail-ticket-field")
-                    .h(px(30.))
-                    .mx(space::XS)
-                    .my(space::XS)
-                    .px(space::SM)
-                    .rounded(px(7.))
-                    .bg(p.field)
-                    .border_1()
-                    .border_color(p.line2)
-                    .flex()
-                    .items_center()
-                    .mono(11.5)
-                    .children(ticket_field.map(|field| Input::new(&field)))
-                    .test_support(),
-            ))
-            .child(presence_of(
-                "rail-ticket-error-block",
-                ticket_error,
-                move |error| {
-                    div()
-                        .id("rail-ticket-error")
-                        .px(space::XS)
-                        .py(space::XS)
-                        .text_size(px(11.5))
-                        .text_color(p.fail)
-                        .child(error)
-                        .test_support()
-                        .into_any_element()
-                },
-            ))
-            .child(
-                div()
-                    .id("rail-facts")
-                    .pt(space::SM)
                     .flex()
                     .flex_col()
-                    .children(facts.into_iter().map(|(key, value)| {
-                        let said = SharedString::from(value.clone());
-                        let value = div()
-                            .id(ElementId::Name(format!("rail-fact-{key}-value").into()))
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .mono(FACT_SIZE)
-                            .child(SharedString::from(value))
-                            .test_support();
-                        fact_line(format!("rail-fact-{key}"), None, key, said, value, p)
+                    .child(ticket_line)
+                    .children(lines)
+                    .child(presence(
+                        "rail-no-forge-block",
+                        no_forge.is_some(),
+                        div()
+                            .id("rail-no-forge")
+                            .px(space::XS)
+                            .py(space::XS)
+                            .text_size(px(11.5))
+                            .text_color(p.faint)
+                            .children(no_forge.clone())
+                            .aria_label(no_forge.unwrap_or_default())
+                            .test_support(),
+                    ))
+                    .children(forge_problem.map(|problem| {
+                        div()
+                            .id("rail-forge-problem")
+                            .px(space::XS)
+                            .py(space::XS)
+                            .text_size(px(11.5))
+                            .text_color(p.faint)
+                            .child(SharedString::from(problem))
+                            .test_support()
                     }))
-                    .test_support(),
-            )
+                    .child(presence(
+                        "rail-ticket-field-block",
+                        self.linking && ticket_field.is_some(),
+                        div()
+                            .id("rail-ticket-field")
+                            .h(px(30.))
+                            .mx(space::XS)
+                            .my(space::XS)
+                            .px(space::SM)
+                            .rounded(px(7.))
+                            .bg(p.field)
+                            .border_1()
+                            .border_color(p.line2)
+                            .flex()
+                            .items_center()
+                            .mono(11.5)
+                            .children(ticket_field.map(|field| Input::new(&field)))
+                            .test_support(),
+                    ))
+                    .child(presence_of(
+                        "rail-ticket-error-block",
+                        ticket_error,
+                        move |error| {
+                            div()
+                                .id("rail-ticket-error")
+                                .px(space::XS)
+                                .py(space::XS)
+                                .text_size(px(11.5))
+                                .text_color(p.fail)
+                                .child(error)
+                                .test_support()
+                                .into_any_element()
+                        },
+                    ))
+                    .child(
+                        div()
+                            .id("rail-facts")
+                            .pt(space::SM)
+                            .flex()
+                            .flex_col()
+                            .children(facts.into_iter().map(|(key, value)| {
+                                let said = SharedString::from(value.clone());
+                                let value = tipped_when_cut(
+                                    div()
+                                        .id(ElementId::Name(
+                                            format!("rail-fact-{key}-value").into(),
+                                        ))
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .mono(FACT_SIZE)
+                                        .child(SharedString::from(value)),
+                                    said.clone(),
+                                    window,
+                                    cx,
+                                );
+                                fact_line(format!("rail-fact-{key}"), None, key, said, value, p)
+                            }))
+                            .test_support(),
+                    ),
+            ))
             .test_support();
         div()
             .id("rail")
@@ -4609,6 +5831,41 @@ const FACT_SIZE: f32 = 12.;
 
 /// The width of the icon column of the Workspace section's lines.
 const FACT_ICON: f32 = 14.;
+
+/// A fact line that waits for its read: blocks where its icon, its label and its value will be.
+fn skeleton_line(id: String, value: f32) -> impl IntoElement {
+    let part = |what: &str| ElementId::Name(format!("{id}-{what}").into());
+    div()
+        .id(ElementId::Name(id.clone().into()))
+        .aria_label("Reading…")
+        .px(space::XS)
+        .min_h(px(24.))
+        .flex()
+        .items_center()
+        .gap(space::SM)
+        .child(
+            Skeleton::new(part("icon"))
+                .w(px(FACT_ICON))
+                .h(px(FACT_ICON)),
+        )
+        .child(Skeleton::new(part("label")).w(px(72.)).h(px(10.)))
+        .child(div().flex_1())
+        .child(Skeleton::new(part("value")).w(px(value)).h(px(10.)))
+        .test_support()
+}
+
+/// The Workspace section before the daemon first answered: a line for each of its facts.
+fn workspace_skeleton() -> impl IntoElement {
+    div()
+        .id("rail-workspace-skeleton")
+        .flex()
+        .flex_col()
+        .child(skeleton_line("rail-skeleton-repository".to_owned(), 80.))
+        .child(skeleton_line("rail-skeleton-ticket".to_owned(), 150.))
+        .child(skeleton_line("rail-skeleton-from".to_owned(), 60.))
+        .child(skeleton_line("rail-skeleton-machine".to_owned(), 56.))
+        .test_support()
+}
 
 /// One fact of the Workspace section: the icon column, the label, then the value at the right
 /// edge. Every line of the section sits in the same columns: a fact with no icon keeps the
@@ -4654,6 +5911,7 @@ fn fact_line(
                 .justify_end()
                 .overflow_hidden()
                 .whitespace_nowrap()
+                .text_ellipsis()
                 .child(value),
         )
         .test_support()
@@ -4762,9 +6020,10 @@ fn elbow(color: gpui_kit::Hsla) -> gpui_kit::Canvas<()> {
     )
 }
 
-/// The composer of a session: it writes to the root agent, and only to it. `/` at the start of a
-/// message lists the project's commands: picking one puts `/name ` in the field, and the daemon
-/// sends the command's instructions with what follows it.
+/// The composer of a session: it writes to the root agent, and only to it. A word at the cursor
+/// that starts with `/` lists the project's commands: picking one completes it into `/name `, and
+/// the daemon sends the instructions of each command the message uses with it. The field cannot
+/// colour a range, so the commands the message uses show as chips under it.
 pub struct Reply {
     shell: WeakEntity<Shell>,
     /// The root agent: fixed when the composer is made, the only agent it writes to.
@@ -4772,8 +6031,13 @@ pub struct Reply {
     project: String,
     /// The project's commands, as the daemon listed them when `/` was last typed.
     commands: Option<Vec<CommandInfo>>,
-    /// What follows the `/` while the message is that one word: the `/` list is open.
+    /// What follows the `/` of the word at the cursor, while it starts with one: the `/` list is
+    /// open.
     slash: Option<String>,
+    /// Where that word is in the message, its `/` included: what picking a command replaces.
+    slash_at: std::ops::Range<usize>,
+    /// The commands the message uses, as chips under the field.
+    chips: Listing<String>,
     /// The entry of the `/` list the keyboard is on.
     highlighted: usize,
     /// Escape closed the `/` list: it stays closed until the message is no longer a `/` word.
@@ -4801,7 +6065,13 @@ pub struct Reply {
     sent_images: Vec<Arc<gpui_kit::Image>>,
     /// Whether the root's agent takes images; `None` until it first started.
     images: Option<bool>,
-    error: Option<SharedString>,
+    /// The thumbnails, which unfold as a picture is attached and fold away as it leaves.
+    thumbs: Listing<Arc<gpui_kit::Image>>,
+    /// The big pictures being scaled down off the window's thread, each held by a skeleton in
+    /// the strip until its thumbnail is ready.
+    scaling: Vec<u64>,
+    scaling_places: Listing<()>,
+    scaled: u64,
     renders: usize,
     _subscriptions: Vec<Subscription>,
 }
@@ -4840,7 +6110,8 @@ impl Reply {
                         this.has_text = has_text;
                         cx.notify();
                     }
-                    this.typed(&text, cx);
+                    let cursor = field.read(cx).cursor();
+                    this.typed_at(&text, cursor, cx);
                 }
                 InputEvent::PressEnter { shift: false, .. } => this.enter(window, cx),
                 InputEvent::Focus if !this.focused => {
@@ -4856,12 +6127,14 @@ impl Reply {
         )];
         let mode = cx.new(|_| ModeSwitch::new(shell.clone(), session.clone()));
         let options = cx.new(|_| SessionOptions::new(shell.clone(), session.clone()));
-        Self {
+        let reply = Self {
             shell,
             session,
             project,
             commands: None,
             slash: None,
+            slash_at: 0..0,
+            chips: Listing::default(),
             highlighted: 0,
             dismissed: false,
             field,
@@ -4878,10 +6151,16 @@ impl Reply {
             attachments: Vec::new(),
             sent_images: Vec::new(),
             images: None,
-            error: None,
+            thumbs: Listing::default(),
+            scaling: Vec::new(),
+            scaling_places: Listing::default(),
+            scaled: 0,
             renders: 0,
             _subscriptions: subscriptions,
-        }
+        };
+        // A message put back or pasted shows its chips without a `/` typed first.
+        reply.list_commands(cx);
+        reply
     }
 
     /// The agent it writes to: the session's root.
@@ -4905,6 +6184,11 @@ impl Reply {
     /// The pictures that go with the next message.
     pub fn attachments(&self) -> &[Arc<gpui_kit::Image>] {
         &self.attachments
+    }
+
+    /// A big picture is still being scaled down.
+    pub fn is_scaling(&self) -> bool {
+        !self.scaling.is_empty()
     }
 
     /// The line above the field while a turn runs: what the root does.
@@ -4933,27 +6217,58 @@ impl Reply {
         self.images = images;
     }
 
-    /// Attaches a picture, or says in one sentence why not; the text in the field stays.
+    /// Says in a toast why a picture was not attached: the composer never changes for it.
+    fn not_attached(why: impl Into<SharedString>, cx: &mut Context<Self>) {
+        toast(Toast::failure(NOT_ATTACHED).detail(why), cx);
+    }
+
+    /// Attaches a picture, or says in a toast why not; the text in the field stays. A big one is
+    /// scaled down first, so that its weight is judged as it will be stored: decoding and
+    /// resizing a 4K screenshot takes long enough to freeze the window, so it happens on the
+    /// background executor and the picture is attached once it is done.
     pub fn attach(&mut self, image: gpui_kit::Image, cx: &mut Context<Self>) {
         use gpui_kit::ImageFormat::{Gif, Jpeg, Png, Webp};
-        let refused = if self.images == Some(false) {
-            Some(NO_IMAGES)
-        } else if !matches!(image.format, Png | Jpeg | Gif | Webp) {
-            Some(IMAGE_KINDS)
-        } else if image.bytes.len() > MAX_IMAGE_BYTES {
-            Some(IMAGE_TOO_BIG)
-        } else if self.attachments.len() >= MAX_IMAGES {
-            Some(TOO_MANY_IMAGES)
-        } else {
-            None
-        };
-        match refused {
-            Some(why) => self.error = Some(why.into()),
-            None => {
-                self.error = None;
-                self.attachments.push(Arc::new(image));
-            }
+        if self.images == Some(false) {
+            return Self::not_attached(NO_IMAGES, cx);
         }
+        if !matches!(image.format, Png | Jpeg | Gif | Webp) {
+            return Self::not_attached(IMAGE_KINDS, cx);
+        }
+        if self.attachments.len() + self.scaling.len() >= MAX_IMAGES {
+            return Self::not_attached(
+                format!("A message carries {MAX_IMAGES} images at most."),
+                cx,
+            );
+        }
+        let mime = image.format.mime_type();
+        if !flottille_core::images::needs_scaling(mime, &image.bytes) {
+            return self.keep(image, cx);
+        }
+        let (id, format) = (self.scaled, image.format);
+        self.scaled += 1;
+        self.scaling.push(id);
+        let scaling =
+            cx.background_spawn(
+                async move { flottille_core::images::scaled_down(mime, image.bytes) },
+            );
+        cx.spawn(async move |this, cx| {
+            let bytes = scaling.await;
+            this.update(cx, |this, cx| {
+                this.scaling.retain(|scaling| *scaling != id);
+                this.keep(gpui_kit::Image::from_bytes(format, bytes), cx);
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Keeps a picture that is ready to be sent, if it weighs what a message may carry.
+    fn keep(&mut self, image: gpui_kit::Image, cx: &mut Context<Self>) {
+        if image.bytes.len() > MAX_IMAGE_BYTES {
+            return Self::not_attached(IMAGE_TOO_BIG, cx);
+        }
+        self.attachments.push(Arc::new(image));
         cx.notify();
     }
 
@@ -4970,25 +6285,20 @@ impl Reply {
             Some("jpg" | "jpeg") => Jpeg,
             Some("gif") => Gif,
             Some("webp") => Webp,
-            _ => {
-                self.error = Some(IMAGE_KINDS.into());
-                cx.notify();
-                return;
-            }
+            _ => return Self::not_attached(IMAGE_KINDS, cx),
         };
-        let big = std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_IMAGE_BYTES as u64);
-        match std::fs::read(path) {
-            Ok(_) if big => self.error = Some(IMAGE_TOO_BIG.into()),
-            Ok(bytes) => return self.attach(gpui_kit::Image::from_bytes(format, bytes), cx),
-            Err(_) => self.error = Some("That file could not be read.".into()),
+        if std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_FILE_BYTES) {
+            return Self::not_attached(IMAGE_TOO_BIG, cx);
         }
-        cx.notify();
+        match std::fs::read(path) {
+            Ok(bytes) => self.attach(gpui_kit::Image::from_bytes(format, bytes), cx),
+            Err(_) => Self::not_attached(NOT_READ, cx),
+        }
     }
 
     pub fn detach(&mut self, at: usize, cx: &mut Context<Self>) {
         if at < self.attachments.len() {
             self.attachments.remove(at);
-            self.error = None;
             cx.notify();
         }
     }
@@ -5048,19 +6358,9 @@ impl Reply {
         .detach();
     }
 
-    pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
-    }
-
     /// The root runs a turn.
     pub fn is_running(&self) -> bool {
         self.running
-    }
-
-    fn clear_error(&mut self, cx: &mut Context<Self>) {
-        if self.error.take().is_some() {
-            cx.notify();
-        }
     }
 
     fn set_running(&mut self, running: bool, cx: &mut Context<Self>) {
@@ -5078,7 +6378,6 @@ impl Reply {
             return;
         }
         self.interrupting = true;
-        self.error = None;
         let command = Command::Interrupt {
             session: self.session.clone(),
         };
@@ -5091,7 +6390,9 @@ impl Reply {
     /// What the daemon answered to an interruption.
     pub fn interrupted(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
         self.interrupting = false;
-        self.error = refused.map(Into::into);
+        if let Some(why) = refused {
+            toast(Toast::failure(NOT_INTERRUPTED).detail(why), cx);
+        }
         cx.notify();
     }
 
@@ -5123,29 +6424,45 @@ impl Reply {
         self.slash.is_some() && !self.dismissed
     }
 
-    /// The message changed: a `/` and one word open the list, asking the daemon for the
-    /// commands again (the project's file is the user's to edit). The field says it when the
-    /// user types; a text set from code says it here.
+    /// The message changed, its cursor at its end: a text set from code says it here.
     pub fn typed(&mut self, text: &str, cx: &mut Context<Self>) {
-        let slash = text
-            .strip_prefix('/')
-            .filter(|word| !word.contains(char::is_whitespace))
-            .map(str::to_owned);
+        self.typed_at(text, text.len(), cx);
+    }
+
+    /// The message changed, its cursor at the byte `cursor`: a word there that starts with `/`
+    /// opens the list, asking the daemon for the commands again (the project's file is the user's
+    /// to edit). The field says it when the user types.
+    pub fn typed_at(&mut self, text: &str, cursor: usize, cx: &mut Context<Self>) {
+        let cursor = cursor.min(text.len());
+        let start = text[..cursor].rfind(char::is_whitespace).map_or(0, |at| {
+            at + text[at..].chars().next().map_or(1, char::len_utf8)
+        });
+        let end = text[cursor..]
+            .find(char::is_whitespace)
+            .map_or(text.len(), |at| cursor + at);
+        let slash = text[start..end].strip_prefix('/').map(str::to_owned);
+        self.slash_at = start..end;
         if slash.is_none() {
             self.dismissed = false;
         }
         if slash.is_some() && self.slash.is_none() {
-            let command = Command::Commands {
-                project: self.project.clone(),
-            };
-            // Later: the shell may be the one setting the text, as it hands a reply its answer.
-            crate::commands::perform_later(&self.shell, command, cx);
+            self.list_commands(cx);
         }
         if self.slash != slash {
             self.slash = slash;
             self.highlighted = 0;
             cx.notify();
         }
+    }
+
+    /// Asks the daemon for the project's commands: the `/` list offers them, and the chips know
+    /// them.
+    fn list_commands(&self, cx: &mut Context<Self>) {
+        let command = Command::Commands {
+            project: self.project.clone(),
+        };
+        // Later: the shell may be the one setting the text, as it hands a reply its answer.
+        crate::commands::perform_later(&self.shell, command, cx);
     }
 
     /// The project's commands, as the daemon listed them.
@@ -5182,21 +6499,110 @@ impl Reply {
         match entries.get(self.highlighted).or(entries.first()) {
             Some((name, _)) => {
                 let name = name.clone();
-                self.pick(&name, window, cx)
+                self.complete(&name, true, window, cx)
             }
             None => self.send(window, cx),
         }
     }
 
-    /// Puts `/name ` in the field, for the user to add what the command is about before sending.
+    /// Completes the `/` word at the cursor into `/name `, the rest of the message as it was, for
+    /// the user to add what the command is about before sending.
     pub fn pick(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.complete(name, false, window, cx);
+    }
+
+    /// `pick`; `entered` when Enter picked it, whose line break the field put after the word.
+    fn complete(&mut self, name: &str, entered: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.slash = None;
         self.dismissed = true;
         self.has_text = true;
-        let text = format!("/{name} ");
-        self.field
-            .update(cx, |field, cx| field.set_value(text.as_str(), window, cx));
+        let now = self.field.read(cx).value().to_string();
+        let at = self.slash_at.start.min(now.len())..self.slash_at.end.min(now.len());
+        let (before, mut after) = (&now[..at.start], &now[at.end..]);
+        if entered {
+            after = after.strip_prefix('\n').unwrap_or(after);
+        }
+        let space = if after.starts_with(char::is_whitespace) {
+            ""
+        } else {
+            " "
+        };
+        let text = format!("{before}/{name}{space}{after}");
+        let cursor = before.len() + name.len() + 2;
+        self.field.update(cx, |field, cx| {
+            field.set_value(text.as_str(), window, cx);
+            field.set_selected_range(cursor..cursor, cx);
+        });
         cx.notify();
+    }
+
+    /// The commands the message uses now, in the order of their first use: the chips under the
+    /// field.
+    pub fn commands_used(&self, cx: &App) -> Vec<String> {
+        let Some(commands) = &self.commands else {
+            return Vec::new();
+        };
+        let text = self.field.read(cx).value().to_string();
+        let mut used: Vec<String> = Vec::new();
+        for (_, name) in flottille_core::commands::used(&text, |name| {
+            commands.iter().any(|command| command.name == name)
+        }) {
+            if !used.iter().any(|known| known == name) {
+                used.push(name.to_owned());
+            }
+        }
+        used
+    }
+
+    /// The chips of the commands the message uses, under the field: each one comes and goes as
+    /// the message gains or loses it, the line with the first and the last.
+    fn render_chips(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let used = self.commands_used(cx);
+        let now = cx.background_executor().now();
+        self.chips.sync(
+            used.iter().map(|name| (name.clone(), name.clone())),
+            now,
+            cx.reduce_motion(),
+        );
+        let p = palette(cx);
+        let chips: Vec<AnyElement> = self
+            .chips
+            .rows()
+            .map(|row| {
+                let name = row.value.clone();
+                flottille_ui::Item::new(
+                    ElementId::Name(format!("reply-command-item-{name}").into()),
+                    row.placement,
+                    div()
+                        .id(ElementId::Name(format!("reply-command-{name}").into()))
+                        .flex_none()
+                        .px(space::SM)
+                        .rounded(px(6.))
+                        .bg(p.acc.opacity(0.14))
+                        .text_color(p.acc)
+                        .font_weight(gpui_kit::FontWeight::MEDIUM)
+                        .text_size(px(12.5))
+                        .aria_label(SharedString::from(format!("/{name}")))
+                        .child(format!("/{name}"))
+                        .test_support(),
+                )
+                .into_any_element()
+            })
+            .collect();
+        presence(
+            "reply-commands",
+            !used.is_empty(),
+            div()
+                .id("reply-commands-line")
+                .flex()
+                .flex_wrap()
+                .gap(space::XS)
+                .pt(space::SM)
+                .px(space::XS)
+                .children(chips)
+                .test_support(),
+        )
+        .into_any_element()
     }
 
     /// The `/` list, over the composer: the commands offered.
@@ -5281,13 +6687,19 @@ impl Reply {
     pub fn send(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         let typed = self.field.read(cx).value().to_string();
         let message = typed.trim().to_owned();
-        if self.sending || (message.is_empty() && self.attachments.is_empty()) {
+        if self.sending {
+            return;
+        }
+        // A picture that is not there yet would be left behind: the sender waits for it.
+        if self.is_scaling() {
+            return toast(Toast::failure(NOT_SENT).detail(STILL_SCALING), cx);
+        }
+        if message.is_empty() && self.attachments.is_empty() {
             return;
         }
         self.sending = true;
         self.sent = Some(typed);
         self.sent_images = self.attachments.clone();
-        self.error = None;
         let images = self
             .attachments
             .iter()
@@ -5326,6 +6738,10 @@ impl Reply {
         self.field
             .update(cx, |field, cx| field.set_value(joined.clone(), window, cx));
         self.typed(&joined, cx);
+        // Put back by code, not typed: a message that ends with a command is not asking for the
+        // list, and Enter sends it.
+        self.dismissed = self.slash.is_some();
+        self.list_commands(cx);
         for picture in pictures {
             if let Some(format) = gpui_kit::ImageFormat::from_mime_type(&picture.mime) {
                 self.attach(gpui_kit::Image::from_bytes(format, picture.bytes), cx);
@@ -5348,7 +6764,6 @@ impl Reply {
         let sent = self.sent.take();
         match refused {
             None => {
-                self.error = None;
                 let sent_images = std::mem::take(&mut self.sent_images);
                 self.attachments
                     .retain(|image| !sent_images.iter().any(|sent| Arc::ptr_eq(sent, image)));
@@ -5362,7 +6777,7 @@ impl Reply {
                     self.typed(&rest, cx);
                 }
             }
-            Some(why) => self.error = Some(why.into()),
+            Some(why) => toast(Toast::failure(NOT_SENT).detail(why), cx),
         }
         cx.notify();
     }
@@ -5381,53 +6796,157 @@ impl Render for Reply {
             window,
             cx,
         );
-        let thumbs: Vec<AnyElement> = self
-            .attachments
-            .iter()
-            .enumerate()
-            .map(|(at, image)| {
-                div()
-                    .id(ElementId::Name(format!("attachment-{at}").into()))
+        // A picture unfolds into the strip as it is attached and folds away as it leaves: the
+        // gone ones stay in the listing until they have.
+        let now = cx.background_executor().now();
+        self.thumbs.sync(
+            self.attachments.iter().map(|i| (thumb_key(i), i.clone())),
+            now,
+            cx.reduce_motion(),
+        );
+        let listed: Vec<(String, Arc<gpui_kit::Image>, bool)> = self
+            .thumbs
+            .rows()
+            .map(|row| {
+                (
+                    row.key.to_owned(),
+                    row.value.clone(),
+                    row.placement.is_gone(),
+                )
+            })
+            .collect();
+        self.scaling_places.sync(
+            self.scaling.iter().map(|id| (format!("scaling-{id}"), ())),
+            now,
+            cx.reduce_motion(),
+        );
+        let places: Vec<(String, bool)> = self
+            .scaling_places
+            .rows()
+            .map(|row| (row.key.to_owned(), row.placement.is_gone()))
+            .collect();
+        let mut live = 0;
+        let thumbs: Vec<AnyElement> = listed
+            .into_iter()
+            .map(|(key, image, gone)| {
+                let at = live;
+                let id = match gone {
+                    true => ElementId::Name(format!("attachment-leaving-{key}").into()),
+                    false => ElementId::Name(format!("attachment-{at}").into()),
+                };
+                live += usize::from(!gone);
+                let shown = fade(
+                    ElementId::Name(format!("attachment-shown-{key}").into()),
+                    !gone,
+                    PANEL,
+                    window,
+                    cx,
+                );
+                let thumb = div()
+                    .id(id)
                     .relative()
                     .flex_none()
                     .size(px(56.))
                     .child(
-                        gpui_kit::img(image.clone())
+                        gpui_kit::img(image)
                             .size_full()
                             .rounded(px(8.))
                             .object_fit(gpui_kit::ObjectFit::Cover),
                     )
-                    .child(hoverable(
-                        div()
-                            .id(ElementId::Name(format!("attachment-remove-{at}").into()))
-                            .absolute()
-                            .top(px(-5.))
-                            .right(px(-5.))
-                            .size(px(18.))
-                            .rounded_full()
-                            .bg(p.card2)
-                            .border_1()
-                            .border_color(p.line2)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .aria_label("Remove the picture")
-                            .on_click(cx.listener(move |this, _, _, cx| this.detach(at, cx))),
-                        // An icon does not inherit the ink: it is drawn here, in the ink this frame.
-                        move |d, t| {
-                            d.bg(mix(p.card2, p.hover, t)).child(
-                                icon(Icon::Close)
-                                    .size(px(12.))
-                                    .text_color(mix(p.mute, p.text, t)),
-                            )
-                        },
-                    ))
-                    .test_support()
-                    .into_any_element()
+                    .when(!gone, |d| {
+                        d.child(hoverable(
+                            div()
+                                .id(ElementId::Name(format!("attachment-remove-{at}").into()))
+                                .absolute()
+                                .top(px(-5.))
+                                .right(px(-5.))
+                                .size(px(18.))
+                                .rounded_full()
+                                .bg(p.card2)
+                                .border_1()
+                                .border_color(p.line2)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .aria_label("Remove the picture")
+                                .on_click(cx.listener(move |this, _, _, cx| this.detach(at, cx))),
+                            // An icon does not inherit the ink: it is drawn here, in the ink this frame.
+                            move |d, t| {
+                                d.bg(mix(p.card2, p.hover, t)).child(
+                                    icon(Icon::Close)
+                                        .size(px(12.))
+                                        .text_color(mix(p.mute, p.text, t)),
+                                )
+                            },
+                        ))
+                    })
+                    .test_support();
+                // The slot is as wide as the picture and the gap after it, narrowing as it leaves.
+                let slot = div()
+                    .flex_none()
+                    .w(px(68. * shown))
+                    .pr(space::MD)
+                    .pb(space::SM)
+                    .opacity(shown)
+                    .when(shown < 1.0, |d| d.overflow_hidden())
+                    .child(thumb);
+                enter(
+                    ElementId::Name(format!("attachment-enter-{key}").into()),
+                    0,
+                    slot,
+                )
+                .into_any_element()
             })
             .collect();
+        // A skeleton holds the place of a picture being scaled, and folds away as its thumbnail
+        // unfolds.
+        let mut held = 0;
+        let places: Vec<AnyElement> = places
+            .into_iter()
+            .map(|(key, gone)| {
+                let id = match gone {
+                    true => ElementId::Name(format!("attachment-scaling-leaving-{key}").into()),
+                    false => ElementId::Name(format!("attachment-scaling-{held}").into()),
+                };
+                held += usize::from(!gone);
+                let shown = fade(
+                    ElementId::Name(format!("attachment-scaling-shown-{key}").into()),
+                    !gone,
+                    PANEL,
+                    window,
+                    cx,
+                );
+                let slot = div()
+                    .flex_none()
+                    .w(px(68. * shown))
+                    .pr(space::MD)
+                    .pb(space::SM)
+                    .opacity(shown)
+                    .when(shown < 1.0, |d| d.overflow_hidden())
+                    .child(Skeleton::new(id).w(px(56.)).h(px(56.)));
+                enter(
+                    ElementId::Name(format!("attachment-scaling-enter-{key}").into()),
+                    0,
+                    slot,
+                )
+                .into_any_element()
+            })
+            .collect();
+        let strip = presence(
+            "reply-attachments",
+            !self.attachments.is_empty() || !self.scaling_places.is_empty(),
+            div()
+                .flex()
+                .flex_wrap()
+                .px(space::SM)
+                .pt(space::SM)
+                .pb(space::SM)
+                .children(thumbs)
+                .children(places),
+        );
         let slash = self.render_slash(cx);
+        let chips = self.render_chips(cx);
         div()
             .id("reply")
             .relative()
@@ -5480,19 +6999,7 @@ impl Render for Reply {
             .shadow_lg()
             .ui_text()
             .text_color(p.text)
-            .when(!thumbs.is_empty(), |d| {
-                d.child(
-                    div()
-                        .id("reply-attachments")
-                        .flex()
-                        .gap(space::MD)
-                        .px(space::SM)
-                        .pt(space::SM)
-                        .pb(space::MD)
-                        .children(thumbs)
-                        .test_support(),
-                )
-            })
+            .child(strip)
             .child(
                 div()
                     .id("reply-field")
@@ -5513,6 +7020,7 @@ impl Render for Reply {
                     }))
                     .test_support(),
             )
+            .child(chips)
             .child(
                 div()
                     .flex()
@@ -5572,22 +7080,6 @@ impl Render for Reply {
                             .test_support(),
                     ),
             )
-            .child(presence_of(
-                "reply-error-line",
-                self.error.clone(),
-                move |error| {
-                    div()
-                        .id("reply-error")
-                        .aria_label(error.clone())
-                        .px(space::MD)
-                        .pt(space::SM)
-                        .text_size(px(12.5))
-                        .text_color(p.fail)
-                        .child(error)
-                        .test_support()
-                        .into_any_element()
-                },
-            ))
             .test_support()
     }
 }
@@ -5638,29 +7130,39 @@ impl Render for StatusLine {
         } else {
             self.leaving = None;
         }
-        let line = |id: &'static str, text: SharedString, opacity: f32| {
-            div()
-                .id(id)
-                .aria_label(text.clone())
-                .text_size(px(12.5))
-                .text_color(p.faint)
-                .whitespace_nowrap()
-                .opacity(opacity)
-                .child(text)
-                .test_support()
+        let line = |id: &'static str,
+                    text: SharedString,
+                    opacity: f32,
+                    window: &mut Window,
+                    cx: &mut App| {
+            tipped_when_cut(
+                div()
+                    .id(id)
+                    .aria_label(text.clone())
+                    .text_size(px(12.5))
+                    .text_color(p.faint)
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .opacity(opacity)
+                    .child(text.clone()),
+                text,
+                window,
+                cx,
+            )
         };
         // The new words take the room; the old ones leave over them, from the same edge.
+        let current = self
+            .current
+            .clone()
+            .map(|text| line("reply-status", text, t, window, cx));
         div()
             .relative()
             .flex()
             .justify_end()
-            .children(
-                self.current
-                    .clone()
-                    .map(|text| line("reply-status", text, t)),
-            )
+            .children(current)
             .children(self.leaving.clone().map(|text| {
-                let leaving = line("reply-status-leaving", text, 1.0 - t);
+                let leaving = line("reply-status-leaving", text, 1.0 - t, window, cx);
                 match self.current.is_some() {
                     true => div().absolute().right_0().child(leaving).into_any_element(),
                     false => leaving.into_any_element(),
@@ -5684,6 +7186,7 @@ mod tests {
             id: "c".into(),
             name: "run".into(),
             args: String::new(),
+            path: None,
             state: CallState::Done,
             since: 0,
             until: Some(1),
@@ -5774,6 +7277,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_command_is_inline_code_in_the_text_as_typed_and_the_rest_keeps_its_marks() {
+        let text = "check\n\n- one /open-prs\n- two\n\n```\nlet a = 1;\n``` then /ship";
+        let chips = command_chips(text, &["open-prs".into(), "ship".into()]);
+        assert_eq!(chips.len(), 2);
+
+        assert_eq!(
+            typed_with_chips(text, &chips),
+            "check\n\n\\- one `/open-prs`\\\n\\- two\n\n\\`\\`\\`\\\nlet a = 1;\\\n\\`\\`\\` then `/ship`",
+        );
+        assert_eq!(typed_with_chips(text, &[]), as_typed(text));
+    }
+
     fn agent(parent: Option<&str>, state: &str) -> TreeAgent {
         TreeAgent {
             id: "a1".into(),
@@ -5795,6 +7311,7 @@ mod tests {
             images: None,
             gate_mode: Some("auto".into()),
             context: None,
+            context_tokens: None,
             queued: Vec::new(),
             tools_outdated: false,
         }

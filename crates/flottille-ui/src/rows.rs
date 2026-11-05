@@ -9,12 +9,13 @@ use std::f32::consts::{FRAC_PI_2, PI};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, ClickEvent, Div, ElementId, Entity, FontWeight, HighlightStyle,
-    InteractiveElement, IntoElement, ParentElement, RenderOnce, SharedString, Stateful,
-    StatefulInteractiveElement, Styled, StyledText, TestSupportExt, Transformation, Window, div,
-    px, radians,
+    InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce, ScrollHandle, SharedString,
+    Stateful, StatefulInteractiveElement, Styled, StyledText, TestSupportExt, Transformation,
+    Window, div, px, radians,
 };
 
 use crate::color::mix;
+use crate::cut::tipped_when_cut;
 use crate::icons::{Icon, icon};
 use crate::interact::{choose, fade, feel, wire, wire_with};
 use crate::listing::{Item, Placement};
@@ -202,13 +203,19 @@ impl RenderOnce for TreeRow {
             TreeLevel::Workspace => row = row.child(icon(Icon::Branch).text_color(p.faint)),
             TreeLevel::Project | TreeLevel::Session => {}
         }
-        let title = div()
-            .flex_1()
-            .min_w_0()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis()
-            .child(self.title.clone());
+        let title = tipped_when_cut(
+            div()
+                .id(ElementId::Name(format!("{}-title", self.id).into()))
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(self.title.clone()),
+            self.title.clone(),
+            window,
+            cx,
+        );
         let trailing = self
             .trailing
             .map(|trailing| div().flex_none().flex().items_center().child(trailing));
@@ -559,7 +566,9 @@ impl RenderOnce for ListRow {
                     .children(self.leading),
             )
             .child({
+                let mut whole = self.title.clone();
                 let name = div()
+                    .id(ElementId::Name(format!("{}-title", self.id).into()))
                     .font_weight(FontWeight::MEDIUM)
                     .text_ellipsis()
                     .overflow_hidden()
@@ -583,12 +592,14 @@ impl RenderOnce for ListRow {
                                 })
                                 .collect();
                             let text: String = pieces.into_iter().map(|(piece, _)| piece).collect();
+                            whole = text.clone().into();
                             StyledText::new(text)
                                 .with_highlights(marks)
                                 .into_any_element()
                         }
                         None => self.title.clone().into_any_element(),
                     });
+                let name = tipped_when_cut(name, whole, window, cx);
                 let title = div()
                     .flex()
                     .items_baseline()
@@ -602,7 +613,7 @@ impl RenderOnce for ListRow {
                     });
                 let mono_line = self.mono_line;
                 let line = self.line.map(|line| {
-                    div()
+                    let said = div()
                         .id(ElementId::Name(format!("{}-line", self.id).into()))
                         .aria_label(line.clone())
                         .text_size(px(12.5))
@@ -611,8 +622,8 @@ impl RenderOnce for ListRow {
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_ellipsis()
-                        .child(line)
-                        .test_support()
+                        .child(line.clone());
+                    tipped_when_cut(said, line, window, cx)
                 });
                 div()
                     .flex_1()
@@ -663,6 +674,7 @@ impl RenderOnce for ListRow {
 pub struct ListCard {
     id: ElementId,
     rows: Vec<(ListRow, Option<(ElementId, Placement)>)>,
+    scrolling: Option<(ScrollHandle, Pixels)>,
 }
 
 impl ListCard {
@@ -670,7 +682,15 @@ impl ListCard {
         Self {
             id: id.into(),
             rows: Vec::new(),
+            scrolling: None,
         }
+    }
+
+    /// A list longer than `max_height` scrolls inside its card, which keeps its frame; `scroll`
+    /// is the screen's, so that it keeps the place across renders and can take it back to the top.
+    pub fn scrolling(mut self, scroll: &ScrollHandle, max_height: Pixels) -> Self {
+        self.scrolling = Some((scroll.clone(), max_height));
+        self
     }
 
     pub fn row(mut self, row: ListRow) -> Self {
@@ -707,15 +727,26 @@ impl RenderOnce for ListCard {
                 None => content.into_any_element(),
             });
         }
-        div()
-            .id(self.id)
-            .flex()
-            .flex_col()
+        let frame = div()
+            .id(self.id.clone())
             .bg(p.card)
             .border_1()
             .border_color(p.line)
             .rounded(radius::CARD)
-            .children(children)
-            .test_support()
+            .overflow_hidden();
+        match self.scrolling {
+            Some((scroll, max_height)) => frame.child(
+                div()
+                    .id(ElementId::NamedChild(self.id.into(), "scroll".into()))
+                    .flex()
+                    .flex_col()
+                    .max_h(max_height)
+                    .overflow_y_scroll()
+                    .track_scroll(&scroll)
+                    .children(children),
+            ),
+            None => frame.flex().flex_col().children(children),
+        }
+        .test_support()
     }
 }

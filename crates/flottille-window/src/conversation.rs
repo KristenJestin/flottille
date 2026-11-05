@@ -15,10 +15,22 @@ pub const USER: &str = "you";
 /// What follows the launcher's name on the first line of a session an agent started for the user
 /// (the daemon's `tree::LAUNCHED`).
 const LAUNCHED: &str = " started this session for the user with this message:";
+/// What opens the paragraph the daemon adds after that message, to say where a question goes
+/// (`tree::WHERE_QUESTIONS_GO`): it is for the agent, the window does not show it.
+const WHERE_QUESTIONS_GO: &str = "\n\nWhere a question goes:";
 /// Who allowed a call the Auto judge let through, as a card says it.
 pub const JUDGE: &str = "the judge";
 /// Who allowed a call Full mode let through, as a card says it.
 pub const FULL: &str = "Full mode";
+
+/// What a message that used commands was sent as (`docs/commands.md`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Commanded {
+    /// The commands' names, in the order of their first use.
+    pub names: Vec<String>,
+    /// What the agent received: the commands' text with the message marked at its end.
+    pub received: String,
+}
 
 /// What one row of the conversation shows.
 #[derive(Clone, Debug, PartialEq)]
@@ -30,6 +42,9 @@ pub enum Block {
         from: String,
         text: String,
         images: Vec<String>,
+        /// For a message that used commands: `text` is what was typed, and this what it used
+        /// and what the agent received for it.
+        commands: Option<Commanded>,
     },
     /// A message between two sessions (`session_send`): one `peer` wrote to this agent, or one
     /// this agent `sent` to `peer`. An agent's words, never the user's. `agent` is the peer's id
@@ -143,6 +158,8 @@ pub struct Call {
     pub name: String,
     /// Its arguments on one line.
     pub args: String,
+    /// The file it reads, writes or lists, when it is a file's tool: its line is the path.
+    pub path: Option<String>,
     pub state: CallState,
     pub since: u64,
     pub until: Option<u64>,
@@ -158,6 +175,106 @@ impl Call {
     pub fn duration_ms(&self) -> Option<u64> {
         self.until.map(|until| until.saturating_sub(self.since))
     }
+}
+
+/// Whether a block stays in sight between the groups: what the agent said, the messages it was
+/// sent, the children it launched (where one that needs the user shows), and why it ended or
+/// came back. Everything else folds into the group between two of them.
+pub fn in_sight(block: &Block) -> bool {
+    match block {
+        Block::Text { .. } | Block::Message { .. } | Block::Relayed { .. } | Block::SubAgents => {
+            true
+        }
+        Block::Notice { kind, .. } => matches!(kind.as_str(), "failed" | "ended" | "resumed"),
+        _ => false,
+    }
+}
+
+/// What the line of a group of the agent's work says.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Summary {
+    /// Its thoughts, calls and deliveries.
+    pub steps: usize,
+    /// The kinds of its calls and deliveries, in the order they were first used.
+    pub kinds: Vec<String>,
+    pub failed: usize,
+    /// How long it took, from its first step to its last; none while a step runs.
+    pub ms: Option<u64>,
+    /// The step running now, as the line names it.
+    pub running: Option<String>,
+}
+
+impl Summary {
+    /// The line of the blocks of a group, each with when it came.
+    pub fn of(blocks: &[Block], times: &[u64]) -> Self {
+        let mut summary = Summary::default();
+        let (mut start, mut end) = (u64::MAX, 0);
+        let mut seen = |at: u64| {
+            start = start.min(at);
+            end = end.max(at);
+        };
+        let mut thought = false;
+        let kind = |kinds: &mut Vec<String>, name: &str| {
+            if !kinds.iter().any(|k| k == name) {
+                kinds.push(name.to_owned());
+            }
+        };
+        for (block, &at) in blocks.iter().zip(times) {
+            seen(at);
+            match block {
+                Block::Thought { since, until, .. } => {
+                    summary.steps += 1;
+                    thought = true;
+                    seen(*since);
+                    if let Some(at) = until {
+                        seen(*at);
+                    }
+                }
+                Block::Steps { calls } => {
+                    for call in calls {
+                        summary.steps += 1;
+                        kind(&mut summary.kinds, &call.name);
+                        seen(call.since);
+                        call.until.into_iter().for_each(&mut seen);
+                        match call.state {
+                            CallState::Failed => summary.failed += 1,
+                            CallState::Running => summary.running = Some(running(call)),
+                            _ => {}
+                        }
+                    }
+                }
+                Block::Notice { kind: name, .. } => {
+                    summary.steps += 1;
+                    kind(&mut summary.kinds, name);
+                }
+                Block::Report { .. } => {
+                    summary.steps += 1;
+                    kind(&mut summary.kinds, "report");
+                }
+                _ => {}
+            }
+        }
+        if summary.kinds.is_empty() && thought {
+            summary.kinds.push("thought".into());
+        }
+        summary.ms = (summary.running.is_none() && start <= end).then(|| end - start);
+        summary
+    }
+}
+
+/// A call that runs, as a group's line names it: a command by its line, else the tool.
+fn running(call: &Call) -> String {
+    let input: Option<Value> = serde_json::from_str(&call.args).ok();
+    match input.as_ref().and_then(|input| input["line"].as_str()) {
+        Some(line) => format!("running {line}"),
+        None => format!("running {}", call.name),
+    }
+}
+
+/// Whether a block of the conversation's last group waits on the user while it is folded: a
+/// question the agent asked them (its answer comes as a message, which ends the group).
+pub fn asks_the_user(block: &Block) -> bool {
+    matches!(block, Block::Steps { calls } if calls.iter().any(|call| call.name == "ask_user"))
 }
 
 /// What the agent does while a turn runs, as the line above the composer says it.
@@ -199,6 +316,8 @@ pub struct Conversation {
     blocks: Vec<Block>,
     /// When each block came: the event that made it.
     times: Vec<u64>,
+    /// The number of the event that made each block, 0 for one made before the events read.
+    seqs: Vec<u64>,
     /// When the event being folded came.
     now: u64,
     /// The number of the last event applied: an event read twice (history, then live) is applied
@@ -257,6 +376,7 @@ impl Conversation {
         Self {
             blocks: Vec::new(),
             times: Vec::new(),
+            seqs: Vec::new(),
             now: 0,
             last_seq: 0,
             last_at: None,
@@ -296,6 +416,17 @@ impl Conversation {
     /// When the block at this index came, in milliseconds since the epoch.
     pub fn at(&self, index: usize) -> Option<u64> {
         self.times.get(index).copied()
+    }
+
+    /// When each block came.
+    pub fn times(&self) -> &[u64] {
+        &self.times
+    }
+
+    /// The number of the event that made the block at this index: the same whatever page of the
+    /// history was read first; 0 for a block made before the events read.
+    pub fn seq_of(&self, index: usize) -> u64 {
+        self.seqs.get(index).copied().unwrap_or_default()
     }
 
     /// The agent shown, as the page names it.
@@ -375,6 +506,7 @@ impl Conversation {
         self.blocks.insert(0, Block::SubAgents);
         self.times
             .insert(0, self.times.first().copied().unwrap_or(self.now));
+        self.seqs.insert(0, 0);
         let shift = |at: &mut usize| *at += 1;
         self.calls.values_mut().for_each(shift);
         self.running = self.running.iter().map(|at| at + 1).collect();
@@ -464,6 +596,7 @@ impl Conversation {
                 let call = Call {
                     id: text("id"),
                     args: args_of(&name, &data["raw_input"]),
+                    path: path_of(&name, &data["raw_input"]),
                     name,
                     state: call_state(data["status"].as_str()),
                     since: event.at,
@@ -501,12 +634,31 @@ impl Conversation {
                     .flatten()
                     .filter_map(|name| name.as_str().map(str::to_owned))
                     .collect();
-                for (kind, body) in sections(&text("text")) {
+                for (at, (kind, body)) in sections(&text("text")).into_iter().enumerate() {
                     // A picture sent alone has no words: its thumbnails are the message.
                     if body.trim().is_empty() && !names.is_empty() {
                         continue;
                     }
-                    changes.extend(self.deliver(&kind, body));
+                    let said = changes.len();
+                    changes.extend(self.deliver(&kind, body.clone()));
+                    // A message that used commands shows what was typed; what the agent received
+                    // unfolds under it. The daemon says which, one entry per delivery.
+                    let entry = &data["typed"][at];
+                    if changes.len() > said
+                        && let Some(typed) = entry["text"].as_str()
+                        && let Some(Block::Message { text, commands, .. }) = self.blocks.last_mut()
+                    {
+                        *text = typed.to_owned();
+                        *commands = Some(Commanded {
+                            names: entry["commands"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|name| name.as_str().map(str::to_owned))
+                                .collect(),
+                            received: body,
+                        });
+                    }
                 }
                 if !names.is_empty() {
                     // The pictures go inside the bubble of the user's message they came with.
@@ -520,6 +672,7 @@ impl Conversation {
                             from: USER.into(),
                             text: String::new(),
                             images: names,
+                            commands: None,
                         })),
                     }
                 }
@@ -615,6 +768,7 @@ impl Conversation {
     fn push(&mut self, block: Block) -> Vec<Change> {
         self.blocks.push(block);
         self.times.push(self.now);
+        self.seqs.push(self.last_seq);
         vec![Change::Added]
     }
 
@@ -680,6 +834,7 @@ impl Conversation {
             (call.name == "agent_launch" && !data["raw_input"].is_null()).then(|| call.id.clone());
         if !data["raw_input"].is_null() {
             call.args = args_of(&call.name, &data["raw_input"]);
+            call.path = path_of(&call.name, &data["raw_input"]);
             if call.name == "fs_edit" {
                 self.edits
                     .insert(call.id.clone(), data["raw_input"].clone());
@@ -880,6 +1035,7 @@ impl Conversation {
                 from: USER.into(),
                 text: body,
                 images: Vec::new(),
+                commands: None,
             },
             // Another session wrote to this one: that agent's words, never the user's.
             ("session", _) => {
@@ -904,16 +1060,21 @@ impl Conversation {
                     Some((first.strip_suffix(LAUNCHED)?, rest.trim_start_matches('\n')))
                 });
                 let (who, text) = said.unwrap_or(("an agent", &body));
+                let text = text
+                    .rsplit_once(WHERE_QUESTIONS_GO)
+                    .map_or(text, |(brief, _)| brief);
                 Block::Message {
                     from: format!("started by {who}"),
                     text: text.to_owned(),
                     images: Vec::new(),
+                    commands: None,
                 }
             }
             ("brief" | "parent", Some(parent)) => Block::Message {
                 from: format!("{parent} → {}", self.me),
                 text: body,
                 images: Vec::new(),
+                commands: None,
             },
             ("child-report", _) => Block::Report {
                 from: self.child_named_in(&body),
@@ -1240,6 +1401,14 @@ fn args_of(tool: &str, input: &Value) -> String {
     }
 }
 
+/// The file a file's tool works on: what its line shows in place of its arguments.
+fn path_of(tool: &str, input: &Value) -> Option<String> {
+    match tool {
+        "fs_read" | "fs_write" | "fs_edit" | "fs_list" => input["path"].as_str().map(str::to_owned),
+        _ => None,
+    }
+}
+
 fn cut_args(line: String) -> String {
     match line.char_indices().nth(ARGS) {
         Some((cut, _)) => format!("{}…", &line[..cut]),
@@ -1448,7 +1617,8 @@ mod tests {
                 Block::Message {
                     from: "you".into(),
                     text: "Fix it".into(),
-                    images: Vec::new()
+                    images: Vec::new(),
+                    commands: None,
                 },
                 Block::Text {
                     text: "On it.".into()
@@ -1652,12 +1822,14 @@ mod tests {
                 Block::Message {
                     from: "lead → web-form".into(),
                     text: "Fix the timer".into(),
-                    images: Vec::new()
+                    images: Vec::new(),
+                    commands: None,
                 },
                 Block::Message {
                     from: "lead → web-form".into(),
                     text: "Also the docs".into(),
-                    images: Vec::new()
+                    images: Vec::new(),
+                    commands: None,
                 }
             ]
         );
@@ -1677,7 +1849,8 @@ mod tests {
             [Block::Message {
                 from: "started by agent 0123456789ab".into(),
                 text: "Fix the timer".into(),
-                images: Vec::new()
+                images: Vec::new(),
+                commands: None,
             }]
         );
     }
@@ -1808,7 +1981,8 @@ mod tests {
             [Block::Message {
                 from: USER.into(),
                 text: String::new(),
-                images: vec!["a-0.png".into()]
+                images: vec!["a-0.png".into()],
+                commands: None,
             }]
         );
     }
@@ -1826,7 +2000,8 @@ mod tests {
             [Block::Message {
                 from: USER.into(),
                 text: "look".into(),
-                images: vec!["b-0.png".into()]
+                images: vec!["b-0.png".into()],
+                commands: None,
             }],
             "one block: the bubble draws the picture above its text"
         );
@@ -2173,6 +2348,34 @@ mod tests {
         assert_eq!(calls[0].name, "web");
         assert_eq!(calls[0].args, "https://docs.example/select");
         assert_eq!(calls[1].args, "tokio select");
+    }
+
+    #[test]
+    fn a_file_step_keeps_its_path_even_when_its_arguments_are_cut() {
+        let mut c = root();
+        let content = "x".repeat(5_000);
+        for (seq, id, tool, input) in [
+            (1, "r", "fs_read", json!({"path": "src/a.rs"})),
+            (
+                3,
+                "w",
+                "fs_write",
+                json!({"path": "src/b.rs", "content": content}),
+            ),
+            (5, "s", "search", json!({"pattern": "x"})),
+        ] {
+            c.apply(&event(
+                seq,
+                "agent.tool_call",
+                json!({"id": id, "title": tool, "status": "in_progress", "raw_input": input}),
+            ));
+        }
+        let Block::Steps { calls } = &c.blocks()[0] else {
+            panic!("{:?}", c.blocks());
+        };
+        assert_eq!(calls[0].path.as_deref(), Some("src/a.rs"));
+        assert_eq!(calls[1].path.as_deref(), Some("src/b.rs"));
+        assert_eq!(calls[2].path, None, "a search has no one file");
     }
 
     #[test]

@@ -41,18 +41,22 @@ const USED: u64 = 82_000;
 const SIZE: u64 = 200_000;
 
 fn user() -> User {
-    let user = User::with_fake_agent();
-    user.fake_script(json!({"turns": [
+    user_with(json!([
         {"when": "lead the work", "do": [
             {"usage": {"used": USED, "size": SIZE}}, {"say": "On it."}]},
         {"when": "run server", "do": [
             {"mcp": {"tool": "run", "arguments": {"task": "server"}}}]},
         {"when": "start the docs session", "do": [{"mcp": {"tool": "agent_launch",
-            "arguments": {"title": "Docs", "brief": "Write the docs", "root": true,
+            "arguments": {"title": "Docs", "brief": "Write the docs", "follow": false, "root": true,
                 "workspace": "w"}}}]},
         {"when": "write to the session", "do": [{"mcp": {"tool": "session_send",
             "arguments": {"session": "{prompt:agent}", "text": "The tests pass now."}}}]}
-    ]}));
+    ]))
+}
+
+fn user_with(turns: serde_json::Value) -> User {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({ "turns": turns }));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     user
 }
@@ -610,6 +614,129 @@ fn each_agent_row_carries_its_context_gauge_and_the_composer_shows_none(cx: &mut
 }
 
 #[gpui_kit::test]
+fn before_the_window_is_known_the_row_shows_tokens_used(cx: &mut TestAppContext) {
+    let user = user_with(json!([
+        {"when": "lead the work", "do": [{"usage": {"used": 45_000, "size": 0}}, {"say": "On it."}]}
+    ]));
+    let (lead, _) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, 1440., cx);
+    until(&shell, cx, "the gauge on the lead's row", |cx| {
+        has(format!("rail-context-{lead}"), cx)
+    });
+    settle(cx);
+
+    assert_eq!(
+        label(format!("rail-context-{lead}"), cx).as_deref(),
+        Some("45k tokens in the context")
+    );
+    assert!(
+        !has(format!("rail-context-bar-{lead}"), cx),
+        "no bar without the window's size"
+    );
+}
+
+/// A few frames, enough to be on the way and not yet there.
+fn a_few_frames(cx: &mut VisualTestContext) {
+    for _ in 0..3 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    }
+}
+
+#[gpui_kit::test]
+fn the_gauge_unfolds_as_a_whole_when_the_first_usage_arrives(cx: &mut TestAppContext) {
+    let user = user_with(json!([
+        {"when": "lead the work", "do": [{"say": "On it."}]},
+        {"when": "go on", "do": [{"usage": {"used": 45_000, "size": 0}}, {"say": "Done."}]}
+    ]));
+    let (lead, _) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, 1440., cx);
+    let block = format!("rail-context-{lead}-block");
+    assert!(
+        !has(format!("rail-context-{lead}"), cx),
+        "no usage yet, no gauge"
+    );
+
+    user.call("agent.send", json!({"agent": lead, "message": "go on"}))
+        .unwrap();
+    until(&shell, cx, "the gauge begins to unfold", |cx| {
+        has(format!("rail-context-{lead}"), cx)
+    });
+
+    // On the frame after the first usage: the gauge is a block that unfolds, not at its end.
+    assert!(has(block.clone(), cx), "the gauge is not a presence");
+    let start = rect(block.clone(), cx).size.height;
+    a_few_frames(cx);
+    let midway = rect(block.clone(), cx).size.height;
+    settle(cx);
+    let end = rect(block.clone(), cx).size.height;
+    assert!(end > px(0.), "the gauge has a height once unfolded");
+    assert!(
+        start < end,
+        "in flight at the first frame: {start:?} < {end:?}"
+    );
+    assert!(
+        midway > start && midway < end,
+        "unfolding: {start:?} < {midway:?} < {end:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn the_bar_appears_once_the_window_is_known(cx: &mut TestAppContext) {
+    let user = user_with(json!([
+        {"when": "lead the work", "do": [{"usage": {"used": 45_000, "size": 0}}, {"say": "On it."}]},
+        {"when": "go on", "do": [{"usage": {"used": 50_000, "size": 200_000}}, {"say": "Done."}]}
+    ]));
+    let (lead, _) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, 1440., cx);
+    until(&shell, cx, "the tokens on the lead's row", |cx| {
+        has(format!("rail-context-{lead}"), cx)
+    });
+    assert!(!has(format!("rail-context-bar-{lead}"), cx));
+
+    user.call("agent.send", json!({"agent": lead, "message": "go on"}))
+        .unwrap();
+    until(&shell, cx, "the bar", |cx| {
+        has(format!("rail-context-bar-{lead}"), cx)
+    });
+    // It unfolds, its gap with it: on the way, not at its width at once.
+    let start = rect(format!("rail-context-bar-{lead}"), cx).size.width;
+    // The tokens stay where they were: the bar's gap is not there before the bar is.
+    let gap = |cx: &mut VisualTestContext| {
+        rect(format!("rail-context-{lead}"), cx).right()
+            - rect(format!("rail-context-text-{lead}"), cx).right()
+    };
+    assert!(
+        gap(cx) < px(0.5),
+        "the gap jumps in with the bar: {:?}",
+        gap(cx)
+    );
+    a_few_frames(cx);
+    let midway = rect(format!("rail-context-bar-{lead}"), cx).size.width;
+    assert!(
+        start < midway && midway < px(32.),
+        "unfolding: {start:?} < {midway:?} < 32px"
+    );
+    settle(cx);
+
+    assert!(
+        (gap(cx) - px(32. + 4.)).abs() < px(0.5),
+        "the bar and the gap once unfolded: {:?}",
+        gap(cx)
+    );
+    assert_eq!(
+        label(format!("rail-context-{lead}"), cx).as_deref(),
+        Some("25% of the context used")
+    );
+    let bar = rect(format!("rail-context-bar-{lead}"), cx);
+    assert!(
+        (bar.size.width - px(32.)).abs() < px(0.5),
+        "the bar unfolded to its width: {bar:?}"
+    );
+}
+
+#[gpui_kit::test]
 fn the_workspace_section_has_the_labelled_lines_of_the_card_and_its_menu(cx: &mut TestAppContext) {
     let user = user();
     let (lead, _) = lead(&user);
@@ -640,11 +767,19 @@ fn runs_list_the_running_first_then_the_last_five_finished_with_how_they_ended(
     let (shell, cx) = open_session(&user, &lead, 1440., cx);
     let page = session_page(&shell, cx);
     until(&shell, cx, "the rail lists the runs", |cx| {
-        has(format!("command-{server}"), cx) && has(format!("command-{}", blips[KEPT_ENDED]), cx)
+        has(format!("command-{server}"), cx) && has("rail-runs-ended", cx)
     });
     settle(cx);
 
     assert_eq!(KEPT_ENDED, 5);
+    assert_eq!(
+        label("rail-runs-ended", cx).as_deref(),
+        Some("5 ended"),
+        "the ended ones are counted, and folded"
+    );
+    assert!(!has(format!("command-{}", blips[KEPT_ENDED]), cx));
+    cx.update(|window, cx| window.click("rail-runs-ended", cx));
+    settle(cx);
     let arranged = page.read_with(cx, |page, cx| {
         let list = page.commands(cx).read(cx);
         let arranged = list.arranged();

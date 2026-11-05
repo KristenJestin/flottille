@@ -279,9 +279,11 @@ fn slash_name_sends_the_instructions_with_the_trailing_text() {
         "{brief}"
     );
     assert!(
-        brief.ends_with(
-            "\n---\n\nPush the branch, then open its pull request.\n\nand the tests too"
-        ),
+        brief.contains("\n---\n\nThe command ship of project app: Ship the workspace\n\nPush the branch, then open its pull request.\n"),
+        "{brief}"
+    );
+    assert!(
+        brief.ends_with("\n\n[command ship] and the tests too"),
         "{brief}"
     );
     // A session like any other, in the tree, in Auto.
@@ -305,6 +307,49 @@ fn slash_name_sends_the_instructions_with_the_trailing_text() {
                 .is_some_and(|text| text.ends_with("\n/deploy now"))
         })
     });
+}
+
+#[test]
+fn two_commands_share_their_context_once_and_keep_their_order() {
+    let user = User::with_fake_agent();
+    fixture(&user);
+    command(&user, "ship");
+    user.call(
+        "command.add",
+        json!({"project": "app", "name": "deploy", "description": "Deploy a preview",
+            "instructions": "Deploy the branch to the preview host."}),
+    )
+    .unwrap();
+
+    run(&user, "deploy first, then /ship and then /deploy again");
+    let brief = brief_of(&user, "of project app");
+    assert_eq!(
+        brief.matches("It runs in workspace login").count(),
+        1,
+        "{brief}"
+    );
+    assert_eq!(brief.matches("Its repositories").count(), 1, "{brief}");
+    let deploy = brief
+        .find("The command deploy of project app: Deploy a preview\n\nDeploy the branch")
+        .unwrap_or_else(|| panic!("{brief}"));
+    let ship = brief
+        .find("The command ship of project app: Ship the workspace\n\nPush the branch")
+        .unwrap_or_else(|| panic!("{brief}"));
+    assert!(
+        brief.find("It runs in").unwrap() < deploy && deploy < ship,
+        "{brief}"
+    );
+    assert_eq!(
+        brief.matches("Deploy the branch to").count(),
+        1,
+        "given once: {brief}"
+    );
+    assert!(
+        brief.ends_with(
+            "\n\n[command deploy] first, then [command ship] and then [command deploy] again"
+        ),
+        "the message as typed, in order, last: {brief}"
+    );
 }
 
 #[test]
@@ -372,6 +417,13 @@ fn a_force_push_or_a_deletion_on_the_remote_is_base_and_a_plain_push_is_to_judge
 /// The fixture's workspace, its remote GitHub's `acme/app` (created offline: nothing is fetched
 /// from it). The project's folder.
 fn on_github(user: &User) -> PathBuf {
+    let folder = on_github_unpushed(user);
+    pushed(user, "app/login");
+    folder
+}
+
+/// The same, the branch `app/login` not pushed.
+fn on_github_unpushed(user: &User) -> PathBuf {
     let (folder, _) = prepared(
         user,
         |folder| {
@@ -384,6 +436,20 @@ fn on_github(user: &User) -> PathBuf {
     );
     declare_proposed(user);
     folder
+}
+
+/// `branch` of the workspace `login` as a push leaves it: its remote-tracking ref at its head,
+/// with no remote to push to (the remote is a forge's address that is never reached).
+fn pushed(user: &User, branch: &str) {
+    let worktree = user.path("data/flottille/workspaces/app/login");
+    user.git(
+        &worktree,
+        &[
+            "update-ref",
+            &format!("refs/remotes/origin/{branch}"),
+            "HEAD",
+        ],
+    );
 }
 
 fn gh_calls(user: &User) -> Vec<String> {
@@ -447,11 +513,67 @@ fn forge_write_creates_a_pull_request_with_the_fake_gh_once_allowed() {
 }
 
 #[test]
+fn forge_create_refuses_an_unpushed_branch_with_the_push_to_do() {
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github_unpushed(&user);
+    let worktree = user.path("data/flottille/workspaces/app/login");
+    let mcp = plain_agent(&user);
+    let create = json!({"action": "create", "title": "Add the login page"});
+    let push_first = "push the branch first: git push -u origin app/login";
+
+    // Never pushed: no remote-tracking ref, no upstream.
+    let answer = write(&user, &mcp, create.clone());
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains(push_first), "{}", answer.text);
+    assert_eq!(creates(&user), 0);
+
+    // Pushed, then a commit more: the remote has not got it.
+    pushed(&user, "app/login");
+    std::fs::write(worktree.join("login.ts"), "login\n").unwrap();
+    user.git(&worktree, &["add", "."]);
+    user.git(&worktree, &["commit", "--quiet", "-m", "add login"]);
+    let answer = write(&user, &mcp, create.clone());
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains(push_first), "{}", answer.text);
+    assert_eq!(creates(&user), 0);
+
+    // Pushed up to its head.
+    pushed(&user, "app/login");
+    let answer = write(&user, &mcp, create);
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(creates(&user), 1);
+}
+
+#[test]
+fn a_place_with_one_repository_needs_no_repository_argument() {
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user);
+    user.gh_script(json!({"created": 12}));
+    let mcp = plain_agent(&user);
+
+    let answer = write(
+        &user,
+        &mcp,
+        json!({"action": "create", "title": "Add the login page"}),
+    );
+
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(creates(&user), 1);
+    let calls = gh_calls(&user);
+    let created = calls.iter().find(|c| c.starts_with("pr create")).unwrap();
+    assert!(
+        created.contains("-R github.com/acme/app --head app/login"),
+        "{created}"
+    );
+}
+
+#[test]
 fn a_pull_request_is_opened_from_the_branch_the_worktree_is_on() {
     let user = User::with_fake_agent().with_fake_gh();
     on_github(&user);
     let worktree = user.path("data/flottille/workspaces/app/login");
     user.git(&worktree, &["switch", "--quiet", "-c", "feature/x"]);
+    pushed(&user, "feature/x");
     let mcp = plain_agent(&user);
 
     let answer = write(
@@ -1010,12 +1132,12 @@ fn open_the_pull_requests_reports_first_opens_nothing_before_the_confirmation_th
         "{requests:?}"
     );
 
-    for request in &requests {
-        approve(&user, request);
-    }
+    // The branch is on the remote before the pull request is opened: the push first.
+    approve(&user, &requests[0]);
     eventually("the push", || {
         remote_branches(&user, &user.path("remotes/api.git")).contains("app/login")
     });
+    approve(&user, &requests[1]);
     eventually("the pull request", || creates(&user) == 1);
     let calls = gh_calls(&user);
     let created = calls.iter().find(|c| c.starts_with("pr create")).unwrap();
@@ -1247,6 +1369,7 @@ fn on_bitbucket(user: &User, url: &str) -> PathBuf {
         true,
     );
     declare_proposed(user);
+    pushed(user, "app/login");
     folder
 }
 

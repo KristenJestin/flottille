@@ -48,6 +48,9 @@ pub enum Update {
     AppearanceChanged,
     /// The limit of tool results was chosen, from any client: the settings page reads it again.
     ToolResultsChanged,
+    /// After how many days an inactive session is ended was chosen, from any client: the settings
+    /// page reads it again.
+    SessionsChanged,
     /// Where workspaces go was chosen (a project's own when it names one, the default of every
     /// project when `None`), from any client: the sections read it again.
     WorkspacesFolderChanged { project: Option<String> },
@@ -180,6 +183,9 @@ fn follow(
             let _ = updates.unbounded_send(Update::WorkspacesFolderChanged {
                 project: event.data["project"].as_str().map(str::to_owned),
             });
+        }
+        if event.name == "sessions.changed" {
+            let _ = updates.unbounded_send(Update::SessionsChanged);
         }
         if event.name == "tool_results.changed" {
             let _ = updates.unbounded_send(Update::ToolResultsChanged);
@@ -370,6 +376,8 @@ fn matters(event: &Event) -> bool {
         Some("project" | "approval" | "daemon" | "workspace") => true,
         // A subscription opening or ending moves the session from waiting to rest.
         Some("subscription") => true,
+        // A following that pauses or resumes shows on its row in the rail.
+        Some("session") => name.starts_with("session.following_"),
         // A command starting or ending shows in the tree; its output is no event.
         Some("run") => true,
         Some("agent") => matches!(

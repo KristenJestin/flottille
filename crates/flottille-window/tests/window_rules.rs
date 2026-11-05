@@ -313,3 +313,50 @@ fn the_window_never_says_extension() {
         found.join("\n")
     );
 }
+
+// ── A one-line text has a way to shrink ────────────────────────────────────────────────────────
+
+/// The lines that set a text on one line (`whitespace_nowrap`) with nothing near them that lets
+/// it give way: `overflow_hidden` (it is clipped, and cut with an ellipsis), `text_ellipsis`, or
+/// `flex_none` (a short mark that keeps its room, which its siblings give way to). Such a text
+/// leaves its frame as soon as it is long. "Near" is the same builder chain: nine lines around.
+fn unshrinkable_lines(source: &str) -> Vec<(usize, String)> {
+    let lines: Vec<&str> = source.lines().collect();
+    code(source)
+        .filter(|(_, line)| line.contains(".whitespace_nowrap()"))
+        .filter(|(at, _)| {
+            let around = &lines[at.saturating_sub(10)..(*at + 9).min(lines.len())];
+            !around.iter().any(|line| {
+                [".overflow_hidden()", ".text_ellipsis()", ".flex_none()"]
+                    .iter()
+                    .any(|way| line.contains(way))
+            })
+        })
+        .map(|(at, line)| (at, line.to_owned()))
+        .collect()
+}
+
+#[test]
+fn a_one_line_text_that_cannot_shrink_is_found() {
+    let wrong = "div()\n    .mono(12.)\n    .whitespace_nowrap()\n    .child(path)";
+    assert_eq!(unshrinkable_lines(wrong).len(), 1);
+    for right in [
+        "div()\n    .overflow_hidden()\n    .whitespace_nowrap()\n    .child(path)",
+        "div()\n    .whitespace_nowrap()\n    .text_ellipsis()\n    .child(path)",
+        "div()\n    .flex_none()\n    .whitespace_nowrap()\n    .child(mark)",
+    ] {
+        assert!(unshrinkable_lines(right).is_empty(), "{right}");
+    }
+    assert!(unshrinkable_lines("// .whitespace_nowrap() in a comment").is_empty());
+}
+
+#[test]
+fn every_one_line_text_of_the_window_can_shrink() {
+    let found = offenders(unshrinkable_lines);
+    assert!(
+        found.is_empty(),
+        "a text on one line is clipped (`overflow_hidden`, with `text_ellipsis`) so that it never \
+         leaves its frame; a path is a `path_line`:\n{}",
+        found.join("\n")
+    );
+}

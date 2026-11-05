@@ -29,6 +29,7 @@ use serde_json::{Value, json};
 
 use crate::actions::Command;
 use crate::commands::{CommandsSection, boxed, menu_of, problem_line};
+use crate::message_checks::MessageChecks;
 use crate::programs::{ProgramChecks, program_block};
 use crate::project::repository_label;
 use crate::repositories::{ProjectRepositories, RepositoryInfo};
@@ -312,6 +313,7 @@ pub enum Dialog {
 enum Saving {
     Forge { path: String, used: bool },
     Tracker,
+    BranchPrefix,
 }
 
 /// The dialogs' fields, made once a window is at hand.
@@ -400,12 +402,18 @@ pub struct ProjectSettingsPage {
     narrow: bool,
     /// This project's own rules (`docs/projects.md`, "Rules").
     rules: Entity<RulesEditor>,
+    /// The checks of its agents' messages, under its rules (`docs/projects.md`, "Message checks").
+    message_checks: Entity<MessageChecks>,
     skills: Entity<SkillsSection>,
     commands: Entity<CommandsSection>,
     tasks: Entity<TasksSection>,
     setup: Entity<SetupSection>,
     /// Where its workspaces are made, above the setup that prepares them.
     workspaces: Entity<WorkspacesFolder>,
+    /// The branch prefix as the file has it, empty for none; none until read.
+    branch_prefix: Option<String>,
+    /// Made when first drawn, since a text field needs a window.
+    prefix_field: Option<Entity<InputState>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -420,6 +428,7 @@ impl ProjectSettingsPage {
             let (shell, project) = (shell.clone(), name.clone());
             cx.new(|_| RulesEditor::new(shell, Some(project)))
         };
+        let message_checks = cx.new(|_| MessageChecks::new(shell.clone(), name.clone()));
         let skills = cx.new(|_| SkillsSection::new(shell.clone(), name.clone()));
         let commands = cx.new(|_| CommandsSection::new(shell.clone(), name.clone()));
         let tasks = cx.new(|_| TasksSection::new(shell.clone(), name.clone()));
@@ -496,17 +505,24 @@ impl ProjectSettingsPage {
             removed: None,
             narrow: false,
             rules,
+            message_checks,
             skills,
             commands,
             tasks,
             setup,
             workspaces,
+            branch_prefix: None,
+            prefix_field: None,
             _subscriptions: [observed, checked].into_iter().chain(counted).collect(),
         }
     }
 
     pub fn rules(&self) -> &Entity<RulesEditor> {
         &self.rules
+    }
+
+    pub fn message_checks(&self) -> &Entity<MessageChecks> {
+        &self.message_checks
     }
 
     pub fn skills(&self) -> &Entity<SkillsSection> {
@@ -523,6 +539,47 @@ impl ProjectSettingsPage {
 
     pub fn workspaces_folder(&self) -> &Entity<WorkspacesFolder> {
         &self.workspaces
+    }
+
+    /// The branch prefix the file has, empty for none.
+    pub fn branch_prefix(&self) -> Option<&str> {
+        self.branch_prefix.as_deref()
+    }
+
+    pub fn branch_prefix_field(&self) -> Option<&Entity<InputState>> {
+        self.prefix_field.as_ref()
+    }
+
+    /// The text in the branch prefix field.
+    pub fn branch_prefix_typed(&self, cx: &App) -> String {
+        self.prefix_field
+            .as_ref()
+            .map(|field| field.read(cx).value().to_string())
+            .unwrap_or_default()
+    }
+
+    /// Whether Save has something to write: the field differs from what is kept. Empty is a
+    /// prefix like another (`docs/projects.md`).
+    pub fn branch_prefix_savable(&self, cx: &App) -> bool {
+        self.saving.is_none()
+            && self
+                .branch_prefix
+                .as_deref()
+                .is_some_and(|kept| kept != self.branch_prefix_typed(cx).trim())
+    }
+
+    pub fn save_branch_prefix(&mut self, cx: &mut Context<Self>) {
+        if !self.branch_prefix_savable(cx) {
+            return;
+        }
+        // Only the prefix: the forges are left out and the tracker is given as it stands, so the
+        // save writes nothing else.
+        let settings = json!({
+            "name": self.name,
+            "tracker": self.tracker,
+            "branch_prefix": self.branch_prefix_typed(cx).trim(),
+        });
+        self.send(settings, Saving::BranchPrefix, cx);
     }
 
     pub fn setup(&self) -> &Entity<SetupSection> {
@@ -634,11 +691,13 @@ impl ProjectSettingsPage {
         &mut self,
         read: Result<Value, String>,
         saved: bool,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let mut wrote_prefix = false;
         if saved {
             let saving = self.saving.take();
+            wrote_prefix = saving == Some(Saving::BranchPrefix);
             // A new forge or tracker may need another program: read them anew.
             if saving.is_some() && read.is_ok() {
                 self.programs.update(cx, |checks, cx| checks.check(cx));
@@ -699,6 +758,19 @@ impl ProjectSettingsPage {
         self.tasks
             .update(cx, |section, cx| section.set_repositories(paths, cx));
         self.tracker = serde_json::from_value::<ProjectTracker>(settings["tracker"].clone()).ok();
+        let checks = strings(&settings["message_checks"]);
+        self.message_checks
+            .update(cx, |section, cx| section.read(checks, window, cx));
+        let kept = settings["branch_prefix"].as_str().map(str::to_owned);
+        // What was typed stays unless it was only the former value, or a save just wrote it.
+        let untouched =
+            self.branch_prefix_typed(cx) == self.branch_prefix.clone().unwrap_or_default();
+        if let (Some(field), Some(kept)) = (self.prefix_field.clone(), &kept)
+            && (wrote_prefix || untouched)
+        {
+            field.update(cx, |field, cx| field.set_value(kept, window, cx));
+        }
+        self.branch_prefix = kept;
         cx.notify();
     }
 
@@ -761,6 +833,14 @@ impl ProjectSettingsPage {
                     }
                 })
             }
+            Some(Saving::BranchPrefix) => Toast::success("Branch prefix saved").detail(
+                match settings["branch_prefix"].as_str() {
+                    Some("") | None => "New workspaces have their name as branch.".to_owned(),
+                    Some(prefix) => {
+                        format!("New workspaces have branches starting with {prefix}/.")
+                    }
+                },
+            ),
             None => Toast::success("Settings saved"),
         };
         toast(said, cx);
@@ -1472,6 +1552,61 @@ impl ProjectSettingsPage {
             .child(problem_line("repositories-problem", problem, space::MD, cx))
     }
 
+    /// The branch prefix of the project's workspaces: a field with its Save, empty allowed.
+    fn branch_prefix_section(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let field = match self.prefix_field.clone() {
+            Some(field) => field,
+            None => {
+                let field = cx
+                    .new(|cx| styled_input("none: the branch is the workspace's name", window, cx));
+                if let Some(kept) = self.branch_prefix.clone() {
+                    field.update(cx, |field, cx| field.set_value(kept, window, cx));
+                }
+                self._subscriptions
+                    .push(cx.subscribe(&field, |this, _, event, cx| match event {
+                        // Save follows what is typed.
+                        InputEvent::Change => cx.notify(),
+                        InputEvent::PressEnter { .. } => this.save_branch_prefix(cx),
+                        _ => {}
+                    }));
+                self.prefix_field = Some(field.clone());
+                field
+            }
+        };
+        let id = |part: &str| ElementId::Name(format!("branch-prefix-{part}-{}", self.name).into());
+        let save = Button::primary(id("save"), "Save")
+            .disabled(!self.branch_prefix_savable(cx))
+            .on_click(cx.listener(|this, _, _, cx| this.save_branch_prefix(cx)));
+        Section::new(
+            format!("branch-prefix-section-{}", self.name),
+            "Branch prefix",
+        )
+        .sentence(
+            "A new workspace is on the branch <prefix>/<name> unless one is given. Leave it \
+                 empty for the workspace's name alone, as a repository that names its branches \
+                 after tickets wants. Workspaces that exist keep their branch.",
+        )
+        .child(Field::new(
+            id("field"),
+            "Branch prefix",
+            div()
+                .flex()
+                .items_center()
+                .gap(space::SM)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(field_frame(id("input"), &field, cx)),
+                )
+                .child(save),
+        ))
+    }
+
     fn tracker_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let kind = TrackerKind::of(self.tracker.as_ref());
@@ -2023,7 +2158,7 @@ fn shown_folder(folder: &str) -> String {
 }
 
 impl Render for ProjectSettingsPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let pad = if self.narrow { space::LG } else { space::XXL };
         let crumb = {
@@ -2096,9 +2231,17 @@ impl Render for ProjectSettingsPage {
                 .flex_col()
                 .gap(space::XXL)
                 .child(self.workspaces.clone())
+                .child(self.branch_prefix_section(window, cx))
                 .child(self.setup.clone())
                 .into_any_element(),
-            self.rules.clone().into_any_element(),
+            // What checks the agents' messages belongs with how they are told to work.
+            div()
+                .flex()
+                .flex_col()
+                .gap(space::XXL)
+                .child(self.rules.clone())
+                .child(self.message_checks.clone())
+                .into_any_element(),
         ];
         // After the core's, a section for each part of Flottille the user can turn off that
         // touches a project, while it is on globally; drawn from what it declares.

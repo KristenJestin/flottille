@@ -38,6 +38,9 @@ pub enum ButtonKind {
     Icon,
     /// A 30 px round primary holding one icon: the composer's send.
     Round,
+    /// A 32 px round on the card's colour, bordered, holding one icon: a button that floats over
+    /// a page (back to the end of a conversation).
+    Float,
 }
 
 type OnClick = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
@@ -108,6 +111,15 @@ impl Button {
         button
     }
 
+    /// A round button floating over a page, on the card's colour, holding one icon; `tooltip`
+    /// says what it does.
+    pub fn float(id: impl Into<ElementId>, glyph: Icon, tooltip: impl Into<SharedString>) -> Self {
+        let mut button = Self::new(id, ButtonKind::Float);
+        button.icon = Some(glyph);
+        button.tooltip = Some(tooltip.into());
+        button
+    }
+
     /// A quiet button that is one of several choices: it fills with the accent when it is the
     /// chosen one, and the fill moves over [`PANEL`](crate::motion::PANEL) when the choice does.
     pub fn choice(id: impl Into<ElementId>, label: impl Into<SharedString>, chosen: bool) -> Self {
@@ -167,6 +179,7 @@ impl RenderOnce for Button {
         let (state, now) = feel(&self.id, window, cx);
         let height = match self.kind {
             ButtonKind::Icon => 28.,
+            ButtonKind::Float => 32.,
             _ => 30.,
         };
         let (fill, ink, hover_ink) = match self.kind {
@@ -174,9 +187,10 @@ impl RenderOnce for Button {
             ButtonKind::Danger => (Some(p.fail), p.on_fail, p.on_fail),
             ButtonKind::Secondary => (None, p.text, p.text),
             ButtonKind::Quiet | ButtonKind::Icon => (None, p.mute, p.text),
+            ButtonKind::Float => (Some(p.card), p.mute, p.text),
         };
-        let border =
-            (self.kind == ButtonKind::Secondary).then(|| mix(p.line2, p.focus_line, now.hover));
+        let border = matches!(self.kind, ButtonKind::Secondary | ButtonKind::Float)
+            .then(|| mix(p.line2, p.focus_line, now.hover));
         let hover_bg = match self.kind {
             ButtonKind::Primary | ButtonKind::Round => mix(p.acc, p.on_acc, 0.08),
             ButtonKind::Danger => mix(p.fail, p.text, 0.15),
@@ -201,6 +215,7 @@ impl RenderOnce for Button {
             .or_else(|| tooltip.clone())
             .unwrap_or_default();
 
+        let round = matches!(self.kind, ButtonKind::Round | ButtonKind::Float);
         let mut button = div()
             .id(self.id.clone())
             .aria_label(accessible)
@@ -223,16 +238,16 @@ impl RenderOnce for Button {
                     .bottom(inset)
                     .left(inset)
                     .right(inset)
-                    .when(self.kind == ButtonKind::Round, |d| d.rounded_full())
-                    .when(self.kind != ButtonKind::Round, |d| {
-                        d.rounded(radius::BUTTON)
-                    })
+                    .when(round, |d| d.rounded_full())
+                    .when(self.kind == ButtonKind::Float, |d| d.shadow_sm())
+                    .when(!round, |d| d.rounded(radius::BUTTON))
                     .bg(background)
                     .when_some(border, |d, border| d.border_1().border_color(border)),
             );
         button = match self.kind {
             ButtonKind::Icon => button.w(px(28.)),
             ButtonKind::Round => button.w(px(30.)),
+            ButtonKind::Float => button.w(px(32.)),
             _ => button.px(px(12.)),
         };
         if self.full_width {
@@ -241,7 +256,7 @@ impl RenderOnce for Button {
         if let Some(glyph) = self.icon {
             let size = match self.kind {
                 ButtonKind::Icon => 15.,
-                ButtonKind::Round => 14.,
+                ButtonKind::Round | ButtonKind::Float => 14.,
                 _ => 14.,
             };
             button = button.child(
@@ -372,7 +387,40 @@ fn bubble(text: SharedString, p: Palette) -> gpui_kit::Div {
         .ui_text()
         .text_size(px(12.))
         .whitespace_nowrap()
-        .child(text)
+        .child(SharedString::from(broken(&text)))
+}
+
+/// The longest line of a tooltip before it is broken.
+const TIP_LINE: usize = 48;
+
+/// A tooltip is one line, which a whole path would stretch past the window: a text with no space
+/// in it is broken after a `/` (else every `TIP_LINE` characters) so that it keeps to lines of
+/// about `TIP_LINE`.
+fn broken(text: &str) -> String {
+    if text.chars().count() <= TIP_LINE || text.contains(char::is_whitespace) {
+        return text.to_owned();
+    }
+    let mut out = String::new();
+    let mut line = 0;
+    for piece in text.split_inclusive('/') {
+        let mut piece = piece;
+        if line > 0 && line + piece.chars().count() > TIP_LINE {
+            out.push('\n');
+            line = 0;
+        }
+        while piece.chars().count() > TIP_LINE {
+            let cut = piece
+                .char_indices()
+                .nth(TIP_LINE)
+                .map_or(piece.len(), |(at, _)| at);
+            out.push_str(&piece[..cut]);
+            out.push('\n');
+            piece = &piece[cut..];
+        }
+        out.push_str(piece);
+        line += piece.chars().count();
+    }
+    out
 }
 
 /// Whether the pointer rests on a button, and how far its tooltip is shown (0 to 1).

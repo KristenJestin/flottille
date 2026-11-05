@@ -236,3 +236,126 @@ fn the_mode_is_switched_from_the_command_line_and_says_where_its_log_is() {
         "{seen:?}"
     );
 }
+
+/// `session`, the project also holding a task `quick` that exits 0.
+fn session_with_a_task(user: &User) -> (String, Mcp, PathBuf) {
+    let session = session(user);
+    let file = user.project_file("app");
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    text.push_str("\n[commands.quick]\nline = \"true\"\n");
+    std::fs::write(&file, text).unwrap();
+    session
+}
+
+/// The events of runs in the log, `run.started` and `run.ended`.
+fn run_events(user: &User) -> Vec<Value> {
+    log_lines(user)
+        .into_iter()
+        .filter(|line| {
+            line["kind"] == "event"
+                && ["run.started", "run.ended"].contains(&line["name"].as_str().unwrap())
+        })
+        .collect()
+}
+
+/// The `call` lines of the `run` tool.
+fn run_calls(user: &User) -> Vec<Value> {
+    log_lines(user)
+        .into_iter()
+        .filter(|line| line["kind"] == "call" && line["tool"] == "run")
+        .collect()
+}
+
+/// The id of the run an answer of `run` names.
+fn run_of(answer: &Answer) -> String {
+    assert!(!answer.error, "{}", answer.text);
+    answer
+        .text
+        .strip_prefix("run ")
+        .and_then(|rest| rest.split(':').next())
+        .unwrap_or_else(|| panic!("no run in {}", answer.text))
+        .to_owned()
+}
+
+#[test]
+fn a_short_run_writes_only_its_call_to_the_log() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    developer(&user, &["on"]);
+    let (_, mcp, _) = session(&user);
+
+    let run = run_of(&mcp.call("run", json!({"line": "true"})));
+
+    let calls = run_calls(&user);
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(calls[0]["run"], run.as_str());
+    // The run's events reached the clients all the same.
+    let events = user.watch(&["--after", "0"]);
+    let seen = events.until(|e| e["name"] == "run.ended" && e["data"]["run"] == run.as_str());
+    assert!(seen.iter().any(|e| e["name"] == "run.started"), "{seen:?}");
+    assert_eq!(run_events(&user), Vec::<Value>::new());
+}
+
+#[test]
+fn a_task_run_keeps_its_events_in_the_log() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    developer(&user, &["on"]);
+    let (_, mcp, _) = session_with_a_task(&user);
+
+    let run = run_of(&mcp.call("run", json!({"task": "quick"})));
+
+    let events = run_events(&user);
+    let names: Vec<_> = events.iter().map(|e| e["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["run.started", "run.ended"], "{events:?}");
+    assert!(events.iter().all(|e| e["data"]["run"] == run.as_str()));
+}
+
+#[test]
+fn a_run_still_going_when_answered_logs_its_end() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    developer(&user, &["on"]);
+    let (_, mcp, _) = session(&user);
+
+    let run = run_of(&mcp.call("run", json!({"line": "sleep 2", "timeout": 1})));
+
+    eventually("the end is logged", || !run_events(&user).is_empty());
+    let events = run_events(&user);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["name"], "run.ended");
+    assert_eq!(events[0]["data"]["run"], run.as_str());
+    assert_eq!(run_calls(&user)[0]["run"], run.as_str());
+}
+
+#[test]
+fn a_failed_run_logs_its_end() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    developer(&user, &["on"]);
+    let (_, mcp, _) = session(&user);
+
+    let run = run_of(&mcp.call("run", json!({"line": "false"})));
+
+    let events = run_events(&user);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["name"], "run.ended");
+    assert_eq!(events[0]["data"]["run"], run.as_str());
+    assert_eq!(events[0]["data"]["exit_code"], 1);
+}
+
+#[test]
+fn the_call_line_names_its_run() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    developer(&user, &["on"]);
+    let (_, mcp, _) = session(&user);
+
+    let first = run_of(&mcp.call("run", json!({"line": "true"})));
+    let second = run_of(&mcp.call("run", json!({"line": "false"})));
+    let refused = mcp.call("run", json!({"line": "ls | wc"}));
+
+    assert!(refused.error, "{}", refused.text);
+    let calls = run_calls(&user);
+    let runs: Vec<_> = calls.iter().map(|c| c["run"].clone()).collect();
+    assert_eq!(
+        runs,
+        [json!(first), json!(second), Value::Null],
+        "{calls:?}"
+    );
+}

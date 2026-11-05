@@ -172,6 +172,32 @@ impl Mcp {
         self.call_with_meta(tool, arguments, Some(json!({"claudecode/toolUseId": key})))
     }
 
+    /// A call given up once `ready` holds, as a client whose user stops it: rmcp then sends its
+    /// cancellation.
+    pub fn call_given_up(&self, tool: &str, arguments: Value, ready: impl Fn() -> bool) {
+        let client = self.client.as_ref().unwrap();
+        let params = CallToolRequestParams::new(tool.to_owned())
+            .with_arguments(arguments.as_object().cloned().unwrap_or_default());
+        self.runtime.block_on(async {
+            let call = client.call_tool_once(params);
+            tokio::pin!(call);
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while !ready() {
+                assert!(
+                    Instant::now() < deadline,
+                    "{tool} was never ready to give up"
+                );
+                tokio::select! {
+                    _ = &mut call => panic!("{tool} answered before it was given up"),
+                    () = tokio::time::sleep(Duration::from_millis(50)) => {}
+                }
+            }
+        });
+        // The cancellation goes out as the runtime runs.
+        self.runtime
+            .block_on(async { tokio::time::sleep(Duration::from_millis(300)).await });
+    }
+
     fn call_with_meta(&self, tool: &str, arguments: Value, meta: Option<Value>) -> Answer {
         let client = self.client.as_ref().unwrap();
         let mut params = CallToolRequestParams::new(tool.to_owned())

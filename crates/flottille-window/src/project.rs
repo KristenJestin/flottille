@@ -11,9 +11,9 @@ use flottille_core::workspace::StepState;
 use flottille_ui::color::mix;
 use flottille_ui::{
     AgentState, Block, Button, Card, CardHead, Chip, Confirm, Field, FlatRow, FooterAction, Icon,
-    Item, LINE_GAP, LabelledLine, Listing, Menu, Modal, PageHeader, Section, StateIcon, Status,
-    StepRow, StepTone, Toast, Type, caption, enter, hoverable, icon, lines_block, palette,
-    presence, presence_of, selectable, space, toast,
+    Item, LINE_GAP, LabelledLine, Listing, Menu, Modal, PageHeader, Section, Skeleton, StateIcon,
+    Status, StepRow, StepTone, Toast, Type, awaiting, caption, enter, hoverable, icon, lines_block,
+    palette, presence, presence_of, selectable, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -315,6 +315,8 @@ impl ProjectPage {
                 pulls: details.pulls.get(&name).cloned().unwrap_or_default(),
                 statuses: details.statuses.get(&name).cloned().unwrap_or_default(),
                 ticket: details.tickets.get(&name).cloned(),
+                pulls_pending: details.pending_pulls.contains(&name),
+                ticket_pending: details.pending_tickets.contains(&name),
             };
             if card.read(cx).facts != facts {
                 card.update(cx, |card, cx| {
@@ -517,6 +519,10 @@ struct Facts {
     /// Where each of its repositories stands.
     statuses: Vec<RepositoryStatus>,
     ticket: Option<TicketFacts>,
+    /// Its forge has not answered yet.
+    pulls_pending: bool,
+    /// Its ticket is linked and its tracker has not answered yet.
+    ticket_pending: bool,
 }
 
 /// The state a step's mark says.
@@ -543,8 +549,11 @@ fn step_word(state: StepState) -> &'static str {
 #[derive(Clone)]
 enum Line {
     Repository(RepositoryStatus),
-    Pull(PullRequest),
-    Ticket(TicketFacts),
+    /// A repository's pull request, or the wait for it (`true`): a skeleton stands for the line
+    /// until the forge has answered.
+    Pull(String, Option<PullRequest>, bool),
+    /// The ticket, or the wait for it (`true`).
+    Ticket(Option<TicketFacts>, bool),
 }
 
 /// How long a step took, or has been running.
@@ -898,8 +907,12 @@ impl PlaceCard {
     fn lines(&mut self, name: &str, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut found = Vec::new();
         // The ticket is why the workspace exists: it comes before the rest.
-        if let Some(ticket) = &self.facts.ticket {
-            found.push(("ticket".to_owned(), Line::Ticket(ticket.clone())));
+        let ticket_pending = self.facts.ticket_pending;
+        if ticket_pending || self.facts.ticket.is_some() {
+            found.push((
+                "ticket".to_owned(),
+                Line::Ticket(self.facts.ticket.clone(), ticket_pending),
+            ));
         }
         for status in &self.facts.statuses {
             let quiet = status.ahead.unwrap_or(0) == 0
@@ -910,11 +923,25 @@ impl PlaceCard {
                 found.push((key, Line::Repository(status.clone())));
             }
         }
-        for pull in &self.facts.pulls {
-            found.push((
-                format!("pull-{}", pull.repository),
-                Line::Pull(pull.clone()),
-            ));
+        match self.facts.pulls_pending {
+            // Which repository has a pull request is not known until the forge answers: a
+            // skeleton for each, which folds away when there is none.
+            true => {
+                for status in &self.facts.statuses {
+                    found.push((
+                        format!("pull-{}", status.path),
+                        Line::Pull(status.path.clone(), None, true),
+                    ));
+                }
+            }
+            false => {
+                for pull in &self.facts.pulls {
+                    found.push((
+                        format!("pull-{}", pull.repository),
+                        Line::Pull(pull.repository.clone(), Some(pull.clone()), false),
+                    ));
+                }
+            }
         }
         let (now, reduce) = (cx.background_executor().now(), cx.reduce_motion());
         self.line_rows.sync(found, now, reduce);
@@ -975,69 +1002,115 @@ impl PlaceCard {
                 )
                 .into_any_element()
             }
-            Line::Pull(pull) => {
-                let label = repository_label(&self.project, &pull.repository);
-                let (shell, url) = (self.shell.clone(), pull.url.clone());
-                let (fill, ink) = match pull.state.as_str() {
-                    "open" => (p.ok_bg, p.ok),
-                    "merged" => (p.run_bg, p.run),
-                    "draft" => (p.card2, p.faint),
-                    _ => (p.fail_bg, p.fail),
-                };
-                LabelledLine::new(
-                    ElementId::Name(format!("pull-{name}-{label}").into()),
+            Line::Pull(repository, pull, pending) => {
+                let label = repository_label(&self.project, repository);
+                let ready = pull.as_ref().map_or_else(
+                    || div().into_any_element(),
+                    |pull| {
+                        let (shell, url) = (self.shell.clone(), pull.url.clone());
+                        let (fill, ink) = match pull.state.as_str() {
+                            "open" => (p.ok_bg, p.ok),
+                            "merged" => (p.run_bg, p.run),
+                            "draft" => (p.card2, p.faint),
+                            _ => (p.fail_bg, p.fail),
+                        };
+                        LabelledLine::new(
+                            ElementId::Name(format!("pull-{name}-{label}").into()),
+                            Icon::PullRequest,
+                            "Pull request",
+                            SharedString::from(pull.label()),
+                        )
+                        .on_click(move |_, _, cx| {
+                            shell.update(cx, |shell, _| shell.open_link(&url)).ok();
+                        })
+                        .child(SharedString::from(format!("#{}", pull.number)))
+                        .child(
+                            div()
+                                .h(px(16.))
+                                .px(space::XS)
+                                .rounded(px(5.))
+                                .flex()
+                                .items_center()
+                                .bg(fill)
+                                .text_color(ink)
+                                .mono(9.5)
+                                .medium()
+                                .child(SharedString::from(pull.state.to_uppercase())),
+                        )
+                        .into_any_element()
+                    },
+                );
+                let waiting = LabelledLine::new(
+                    ElementId::Name(format!("pull-skeleton-{name}-{label}").into()),
                     Icon::PullRequest,
                     "Pull request",
-                    SharedString::from(pull.label()),
+                    "Reading…",
                 )
-                .on_click(move |_, _, cx| {
-                    shell.update(cx, |shell, _| shell.open_link(&url)).ok();
-                })
-                .child(SharedString::from(format!("#{}", pull.number)))
                 .child(
-                    div()
-                        .h(px(16.))
-                        .px(space::XS)
-                        .rounded(px(5.))
-                        .flex()
-                        .items_center()
-                        .bg(fill)
-                        .text_color(ink)
-                        .mono(9.5)
-                        .medium()
-                        .child(SharedString::from(pull.state.to_uppercase())),
+                    Skeleton::new(format!("pull-skeleton-{name}-{label}-value"))
+                        .w(px(72.))
+                        .h(px(10.)),
+                );
+                awaiting(
+                    ElementId::Name(format!("pull-wait-{name}-{label}").into()),
+                    *pending,
+                    waiting,
+                    ready,
                 )
                 .into_any_element()
             }
-            Line::Ticket(ticket) => {
-                let title = ticket
-                    .title
-                    .clone()
-                    .or_else(|| ticket.problem.clone())
-                    .unwrap_or_default();
-                let mut line = LabelledLine::new(
-                    ElementId::Name(format!("ticket-{name}").into()),
+            Line::Ticket(ticket, pending) => {
+                let ready = ticket.as_ref().map_or_else(
+                    || div().into_any_element(),
+                    |ticket| {
+                        let title = ticket
+                            .title
+                            .clone()
+                            .or_else(|| ticket.problem.clone())
+                            .unwrap_or_default();
+                        let mut line = LabelledLine::new(
+                            ElementId::Name(format!("ticket-{name}").into()),
+                            Icon::Ticket,
+                            "Ticket",
+                            SharedString::from(format!("{} {title}", ticket.reference)),
+                        )
+                        .child(SharedString::from(ticket.reference.clone()))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .ui_text()
+                                .text_size(px(12.5))
+                                .child(SharedString::from(title)),
+                        );
+                        if let Some(url) = ticket.url.clone() {
+                            let shell = self.shell.clone();
+                            line = line.on_click(move |_, _, cx| {
+                                shell.update(cx, |shell, _| shell.open_link(&url)).ok();
+                            });
+                        }
+                        line.into_any_element()
+                    },
+                );
+                let waiting = LabelledLine::new(
+                    ElementId::Name(format!("ticket-skeleton-{name}").into()),
                     Icon::Ticket,
                     "Ticket",
-                    SharedString::from(format!("{} {title}", ticket.reference)),
+                    "Reading…",
                 )
-                .child(SharedString::from(ticket.reference.clone()))
                 .child(
-                    div()
-                        .min_w_0()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .ui_text()
-                        .text_size(px(12.5))
-                        .child(SharedString::from(title)),
+                    Skeleton::new(format!("ticket-skeleton-{name}-value"))
+                        .w(px(160.))
+                        .h(px(10.)),
                 );
-                if let Some(url) = ticket.url.clone() {
-                    let shell = self.shell.clone();
-                    line = line.on_click(move |_, _, cx| {
-                        shell.update(cx, |shell, _| shell.open_link(&url)).ok();
-                    });
-                }
-                line.into_any_element()
+                awaiting(
+                    ElementId::Name(format!("ticket-wait-{name}").into()),
+                    *pending,
+                    waiting,
+                    ready,
+                )
+                .into_any_element()
             }
         }
     }

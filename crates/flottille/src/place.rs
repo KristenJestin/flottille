@@ -76,6 +76,41 @@ pub struct Place {
     pub home: Option<PathBuf>,
 }
 
+/// Where a tool takes a folder, which an agent that gave one as `repository` is told.
+#[derive(Clone, Copy)]
+pub enum Folder {
+    /// The `path` of the file tools.
+    Path,
+    /// `search` has no `path`: a glob keeps it to a folder.
+    Glob,
+    /// `run` has no folder: the program takes it.
+    Line,
+    /// A task's declared repository: nothing to give instead.
+    Task,
+}
+
+impl Folder {
+    /// The end of a refusal: what to give instead of `folder` as a repository.
+    fn give(self, folder: &str) -> String {
+        match self {
+            Folder::Path => format!(": give `path: \"{folder}\"`"),
+            Folder::Glob => format!(": give `glob: \"{folder}/**\"`"),
+            Folder::Line => {
+                ": give the folder in the command line, as an argument of the program".into()
+            }
+            Folder::Task => String::new(),
+        }
+    }
+}
+
+/// A repository's path as a refusal lists it: `.` is the project folder itself.
+fn listed_repository(path: &str) -> String {
+    match path {
+        "." => "`.` (the project folder itself)".into(),
+        path => path.to_owned(),
+    }
+}
+
 /// A path an agent named, resolved.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Resolved {
@@ -133,8 +168,35 @@ impl Place {
         }
     }
 
+    /// A workspace, whose folder is `root`: its repositories' worktrees, its branch and its
+    /// variables, frozen when it was made.
+    pub fn of_workspace(workspace: &flottille_core::workspace::Workspace, root: PathBuf) -> Place {
+        Place {
+            project: workspace.project.clone(),
+            workspace: Some(workspace.name.clone()),
+            root,
+            repositories: workspace
+                .repositories
+                .iter()
+                .map(|r| (r.path.clone(), workspace.folder_of(&r.path)))
+                .collect(),
+            branch: workspace.branch.clone(),
+            variables: workspace.variables.clone(),
+            home: std::env::var_os("HOME").map(Into::into),
+        }
+    }
+
     /// Where relative paths start: the repository's folder, or the place's.
     pub fn base(&self, repository: Option<&str>) -> Result<(&str, &Path), String> {
+        self.base_for(repository, Folder::Path)
+    }
+
+    /// `base`, for a tool that takes a folder as `field` says.
+    pub fn base_for(
+        &self,
+        repository: Option<&str>,
+        field: Folder,
+    ) -> Result<(&str, &Path), String> {
         let Some(asked) = repository else {
             return Ok((".", &self.root));
         };
@@ -142,13 +204,44 @@ impl Place {
             .iter()
             .find(|(path, _)| path == asked)
             .map(|(path, folder)| (path.as_str(), folder.as_path()))
-            .ok_or_else(|| {
-                let names: Vec<&str> = self.repositories.iter().map(|(p, _)| p.as_str()).collect();
-                format!(
-                    "refused: the project has no repository {asked}: it has {}",
-                    names.join(", ")
-                )
-            })
+            .ok_or_else(|| self.not_a_repository(asked, field))
+    }
+
+    /// The refusal of a `repository` that is none: a folder of one, with the field that takes a
+    /// folder, or only unknown, with the repositories said by name.
+    fn not_a_repository(&self, asked: &str, field: Folder) -> String {
+        // An agent takes a folder of a monorepo for a repository: the most specific one holding it.
+        let inside = (Path::new(asked)
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+            && self.root.join(asked).is_dir())
+        .then(|| {
+            self.repositories
+                .iter()
+                .filter(|(path, _)| path == "." || Path::new(asked).starts_with(path))
+                .max_by_key(|(path, _)| path.len())
+        })
+        .flatten();
+        if let Some((path, _)) = inside {
+            return format!(
+                "refused: {asked} is a folder of the repository {}, not a repository{}",
+                if path == "." {
+                    listed_repository(path)
+                } else {
+                    format!("`{path}`")
+                },
+                field.give(asked)
+            );
+        }
+        let names: Vec<String> = self
+            .repositories
+            .iter()
+            .map(|(path, _)| listed_repository(path))
+            .collect();
+        format!(
+            "refused: the project has no repository {asked}: it has {}",
+            names.join(", ")
+        )
     }
 
     /// `named`, relative to `base` unless absolute or starting with `~`.
@@ -534,9 +627,55 @@ mod tests {
         let place = place(dir.path());
 
         assert_eq!(place.base(Some("api")).unwrap().1, dir.path().join("api"));
+    }
+
+    #[test]
+    fn the_root_repository_is_named_as_the_project_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let place = place(dir.path());
+
         assert_eq!(
             place.base(Some("web")).unwrap_err(),
-            "refused: the project has no repository web: it has ., api"
+            "refused: the project has no repository web: it has `.` (the project folder itself), \
+             api"
         );
+    }
+
+    #[test]
+    fn a_folder_given_as_repository_is_refused_with_the_field_to_use() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("apps/front")).unwrap();
+        std::fs::create_dir_all(dir.path().join("api/src")).unwrap();
+        let place = place(dir.path());
+
+        assert_eq!(
+            place.base(Some("apps/front")).unwrap_err(),
+            "refused: apps/front is a folder of the repository `.` (the project folder itself), \
+             not a repository: give `path: \"apps/front\"`"
+        );
+        // The most specific repository is the one named.
+        assert_eq!(
+            place.base(Some("api/src")).unwrap_err(),
+            "refused: api/src is a folder of the repository `api`, not a repository: give \
+             `path: \"api/src\"`"
+        );
+        // A path that is no folder here, or that leaves the place, is only unknown.
+        for asked in ["apps/missing", "../outside", "/etc"] {
+            assert!(
+                place.base(Some(asked)).unwrap_err().starts_with(&format!(
+                    "refused: the project has no repository {asked}: it has"
+                )),
+                "{asked}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_place_with_one_repository_needs_no_repository_argument() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut place = place(dir.path());
+        place.repositories.truncate(1);
+
+        assert_eq!(place.base(None).unwrap(), (".", dir.path()));
     }
 }

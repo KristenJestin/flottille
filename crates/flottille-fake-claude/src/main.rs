@@ -12,8 +12,9 @@
 //!   environment, its folder and the content of the file `--mcp-config` named. Then every line it read on its standard input
 //!   (`{"pid", "received": <the message>}`), and what it did that a test checks (`{"pid",
 //!   "permission": <the answer>}`);
-//! - `sessions/<id>`, one empty file per session `--session-id` made: `--resume` of a session
-//!   that has none fails, as the real one does.
+//! - `sessions/<id>`, one file per session `--session-id` made: `--resume` of a session that has
+//!   none fails, as the real one does. It holds the session's running totals of `modelUsage`,
+//!   which a resumed session continues from, as the real one does from its transcript.
 //!
 //! # The script
 //!
@@ -27,7 +28,14 @@
 //!
 //! A prompt plays the first turn whose `when` is in its text; a prompt matching none is answered
 //! `ok`. A turn ends with a `result` message: `"stop_reason"` (`end_turn` by default), `"subtype"`
-//! (`success` by default) and `"error"` (a text: the result is an error) shape it.
+//! (`success` by default) and `"error"` (a text: the result is an error) shape it. `"no_window":
+//! true` leaves the model's context window out of the result, as a result that does not say it.
+//! `"used"` is what each model used in the turn (`{"claude-fake-1": {"inputTokens": 100,
+//! "outputTokens": 20, "cacheReadInputTokens": 1000, "cacheCreationInputTokens": 50, "costUSD":
+//! 0.0125}}` by default), `claude-fake-1` the main loop's when it is there, else the first by
+//! name: as the real one, the result's
+//! `modelUsage` and `total_cost_usd` are the session's running totals, its `usage` the turn's main
+//! loop alone.
 //!
 //! | Step | What the fake does |
 //! |---|---|
@@ -42,6 +50,7 @@
 //! | `{"retry": true}` | an `api_retry` message: the provider is overloaded |
 //! | `{"limit": "five_hour"}` | a `rate_limit_event` rejected for that limit, then the synthetic message Claude Code writes, with its `error`; the result is an error with its text |
 //! | `{"garbage": true}` | a line on its output that is not UTF-8 |
+//! | `{"context": 45000}` | the input tokens the following messages count, so the context in use: 100 by default |
 //! | `{"wait": 500}` | waits that many milliseconds; an interrupt ends the turn |
 //! | `{"hang": true}` | goes silent until an interrupt |
 //! | `{"die": 3}` | exits at once with that code |
@@ -134,6 +143,7 @@ fn main() {
     };
     std::thread::spawn(move || reader.run(prompts, answers));
 
+    let fake_session = session.clone();
     let mut fake = Fake {
         record,
         out,
@@ -144,6 +154,12 @@ fn main() {
         mcp: mcp_config.map(|config| config["mcpServers"]["flottille"].clone()),
         next_message: 0,
         started: None,
+        input_tokens: 100,
+        totals: std::fs::read_to_string(sessions.join(&fake_session))
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default(),
+        sessions,
     };
     for prompt in incoming {
         fake.play(&prompt, &answered);
@@ -250,6 +266,11 @@ struct Fake {
     next_message: u64,
     /// The message of the API whose `message_start` was sent last.
     started: Option<String>,
+    /// The input tokens the next messages of the API count, as the context in use.
+    input_tokens: u64,
+    /// What each model used in the session so far.
+    totals: Map<String, Value>,
+    sessions: PathBuf,
 }
 
 impl Fake {
@@ -289,7 +310,7 @@ impl Fake {
         self.send(
             json!({"type": "assistant", "parent_tool_use_id": null, "session_id": self.session,
             "message": {"id": id, "model": MODEL, "role": "assistant", "content": [block],
-                "usage": {"input_tokens": 100, "output_tokens": 20,
+                "usage": {"input_tokens": self.input_tokens, "output_tokens": 20,
                     "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 50}}}),
         );
     }
@@ -408,6 +429,8 @@ impl Fake {
                     "message": {"model": "<synthetic>", "role": "assistant",
                         "content": [{"type": "text", "text": text}]}}));
                 limited = Some(text);
+            } else if let Some(tokens) = step["context"].as_u64() {
+                self.input_tokens = tokens;
             } else if step["garbage"] == true {
                 let mut out = self.out.lock().unwrap();
                 out.write_all(b"\xff\xfe not text\n").unwrap();
@@ -432,17 +455,58 @@ impl Fake {
             None if interrupted => "error_during_execution",
             None => "success",
         };
+        let used = turn.get("used").cloned().unwrap_or_else(|| {
+            json!({MODEL: {"inputTokens": 100, "outputTokens": 20,
+                "cacheReadInputTokens": 1000, "cacheCreationInputTokens": 50, "costUSD": 0.0125}})
+        });
+        let used = used.as_object().cloned().unwrap_or_default();
+        for (model, counts) in &used {
+            let total = self.totals.entry(model.clone()).or_insert_with(|| {
+                json!({"inputTokens": 0, "outputTokens": 0, "cacheReadInputTokens": 0,
+                    "cacheCreationInputTokens": 0, "webSearchRequests": 0, "costUSD": 0.0,
+                    "contextWindow": 200000, "maxOutputTokens": 32000})
+            });
+            for key in [
+                "inputTokens",
+                "outputTokens",
+                "cacheReadInputTokens",
+                "cacheCreationInputTokens",
+            ] {
+                total[key] =
+                    json!(total[key].as_u64().unwrap_or(0) + counts[key].as_u64().unwrap_or(0));
+            }
+            total["costUSD"] = json!(
+                total["costUSD"].as_f64().unwrap_or(0.0)
+                    + counts["costUSD"].as_f64().unwrap_or(0.0)
+            );
+        }
+        let _ = std::fs::write(
+            self.sessions.join(&self.session),
+            Value::Object(self.totals.clone()).to_string(),
+        );
+        let cost: f64 = self
+            .totals
+            .values()
+            .filter_map(|t| t["costUSD"].as_f64())
+            .sum();
+        let main = used
+            .get(MODEL)
+            .or(used.values().next())
+            .cloned()
+            .unwrap_or_default();
+        let count = |key: &str| main[key].as_u64().unwrap_or(0);
         let mut result = json!({"type": "result", "subtype": subtype, "session_id": self.session,
             "is_error": error.is_some(), "num_turns": 1, "duration_ms": 10, "duration_api_ms": 8,
             "stop_reason": turn["stop_reason"].as_str().unwrap_or("end_turn"),
-            "result": error.unwrap_or(&said), "total_cost_usd": 0.0125,
-            "usage": {"input_tokens": 100, "output_tokens": 20,
-                "cache_read_input_tokens": 1000, "cache_creation_input_tokens": 50},
-            "modelUsage": {MODEL: {"inputTokens": 100, "outputTokens": 20,
-                "cacheReadInputTokens": 1000, "cacheCreationInputTokens": 50,
-                "webSearchRequests": 0, "costUSD": 0.0125, "contextWindow": 200000,
-                "maxOutputTokens": 32000}},
+            "result": error.unwrap_or(&said), "total_cost_usd": cost,
+            "usage": {"input_tokens": count("inputTokens"), "output_tokens": count("outputTokens"),
+                "cache_read_input_tokens": count("cacheReadInputTokens"),
+                "cache_creation_input_tokens": count("cacheCreationInputTokens")},
+            "modelUsage": self.totals,
             "permission_denials": []});
+        if turn["no_window"] == true {
+            result["modelUsage"] = json!({});
+        }
         if let Some(error) = error {
             result["errors"] = json!([error]);
         }

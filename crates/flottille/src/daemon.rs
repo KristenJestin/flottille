@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{ErrorKind, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -168,10 +169,15 @@ pub struct Daemon {
     pub launching: Mutex<HashMap<String, usize>>,
     /// What the forges said of each workspace, and who watches them.
     pub forges: forge::Forges,
+    /// The tickets read in the last 30 s, for the next `tickets show` and the window's session
+    /// link (`reads`).
+    pub kept_tickets: crate::reads::Kept<crate::tickets::Ticket>,
     /// The rounds of the items, the windows connected (`docs/items.md`).
     pub items: items::Items,
     /// The developer mode's log (`docs/developer.md`).
     pub developer: developer::Log,
+    /// When the inactive sessions were last looked for (`inactive::check`); 0 before the first.
+    pub inactive_checked: AtomicU64,
     /// Becomes true when the daemon stops.
     stopping: watch::Sender<bool>,
 }
@@ -215,10 +221,29 @@ impl Daemon {
         &self,
         write: impl FnOnce(&mut Store) -> flottille_core::Result<(T, E)>,
     ) -> flottille_core::Result<T> {
+        self.written(true, write)
+    }
+
+    /// `write`, the event left out of the developer log when a line of it says more already. The
+    /// subscribers see it all the same.
+    pub fn write_unlogged<T, E: Into<Option<Event>>>(
+        &self,
+        write: impl FnOnce(&mut Store) -> flottille_core::Result<(T, E)>,
+    ) -> flottille_core::Result<T> {
+        self.written(false, write)
+    }
+
+    fn written<T, E: Into<Option<Event>>>(
+        &self,
+        logged: bool,
+        write: impl FnOnce(&mut Store) -> flottille_core::Result<(T, E)>,
+    ) -> flottille_core::Result<T> {
         let mut events = self.events.lock().unwrap();
         let (value, event) = write(&mut events.store)?;
         if let Some(event) = event.into() {
-            self.developer.event(&event);
+            if logged {
+                self.developer.event(&event);
+            }
             if let Some(bus) = &events.bus {
                 let _ = bus.send(event);
             }
@@ -323,8 +348,10 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         judge_chose_none: Mutex::new(None),
         launching: Mutex::new(HashMap::new()),
         forges: forge::Forges::default(),
+        kept_tickets: crate::reads::Kept::default(),
         items: items::Items::default(),
         developer: developer::Log::open(paths),
+        inactive_checked: AtomicU64::new(0),
         stopping: watch::Sender::new(false),
     });
     let mut terminate = signal(SignalKind::terminate())?;
@@ -360,6 +387,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     ));
     tokio::spawn(sweep::run(daemon.clone(), daemon.stopping.subscribe()));
     crate::models::check(&daemon);
+    crate::inactive::check(&daemon);
 
     let mut connections = JoinSet::new();
     let reason = loop {
@@ -732,6 +760,13 @@ fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) 
             },
             None,
         ),
+        method if method.starts_with("sessions.") => (
+            match crate::inactive::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+            },
+            None,
+        ),
         method if method.starts_with("tool_results.") => (
             match crate::results::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
@@ -762,6 +797,13 @@ fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) 
         ),
         method if method.starts_with("rules.") => (
             match rules::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+            },
+            None,
+        ),
+        "project.set_message_checks" => (
+            match projects::set_message_checks(daemon, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => Message::error(Some(id), failure.code, failure.message),
             },

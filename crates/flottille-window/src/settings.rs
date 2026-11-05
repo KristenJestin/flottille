@@ -31,11 +31,12 @@ use crate::shell::Shell;
 use crate::workspaces_folder::WorkspacesFolder;
 
 /// The sections of the page, in order: each index entry's key and label.
-pub const SECTIONS: [(&str, &str); 6] = [
+pub const SECTIONS: [(&str, &str); 7] = [
     ("judge", "Judge"),
     ("providers", "Providers"),
     ("rules", "Rules"),
     ("workspaces", "Workspaces"),
+    ("sessions", "Sessions"),
     ("appearance", "Appearance"),
     ("developer", "Developer mode"),
 ];
@@ -91,6 +92,21 @@ const TOOL_RESULTS_SENTENCE: &str = "A tool result longer than this reaches the 
      with the number of characters left out; the agent reads the rest by ranges, and only that \
      session can. It saves the agent's context. For every project and every agent.";
 
+/// The days the Sessions select offers. The daemon takes any number from 1 to 90
+/// (`docs/protocol.md`): a file edited by hand keeps its own, shown as one more option.
+pub const DAYS: [u64; 7] = [1, 3, 7, 14, 30, 60, 90];
+
+/// The days a first switch on chooses.
+const FIRST_DAYS: u64 = 7;
+
+/// What the Sessions switch does, under its label.
+pub const SESSIONS_HINT: &str = "A session with no activity for that many days is ended as End session \
+     ends it. One with work waiting is never ended.";
+
+/// What the Sessions section says under its title.
+const SESSIONS_SENTENCE: &str = "Sessions pile up: one that finished its work stays open until you end it. \
+     Off, nothing is ended on its own.";
+
 /// What the developer mode's switch logs, under its label.
 pub const DEVELOPER_HINT: &str = "Each gate decision with its reasons, the judge's input and \
      answer, requests, deliveries and agent processes, one JSON object per line, every secret \
@@ -126,6 +142,11 @@ pub struct SettingsPage {
     tool_results: Option<Option<usize>>,
     /// A limit chosen, until the daemon answers: what it was asked to become.
     tool_results_pending: Option<Option<usize>>,
+    /// After how many days an inactive session is ended, once the daemon said it (`Some(None)` is
+    /// off).
+    sessions: Option<Option<u64>>,
+    /// A choice made, until the daemon answers: what it was asked to become.
+    sessions_pending: Option<Option<u64>>,
     /// The window's appearance, once the daemon said it.
     appearance: Option<Appearance>,
     /// Why the daemon could not read the appearance it keeps: the tab says so and stays usable,
@@ -187,6 +208,8 @@ impl SettingsPage {
             developer_pending: None,
             tool_results: None,
             tool_results_pending: None,
+            sessions: None,
+            sessions_pending: None,
             appearance: None,
             appearance_unread: None,
             tab: 0,
@@ -675,6 +698,125 @@ impl SettingsPage {
             ))
     }
 
+    /// Whether the daemon said the setting of inactive sessions.
+    pub fn sessions_known(&self) -> bool {
+        self.sessions.is_some()
+    }
+
+    /// The days as the daemon last said them (`Some(None)` is off), whatever was asked since.
+    pub fn sessions_said(&self) -> Option<Option<u64>> {
+        self.sessions
+    }
+
+    /// The days the page shows (`None` is off): what it was asked to become while the daemon has
+    /// not answered.
+    pub fn sessions_days(&self) -> Option<u64> {
+        self.sessions_pending.or(self.sessions).flatten()
+    }
+
+    fn choose_sessions(&mut self, days: Option<u64>, cx: &mut Context<Self>) {
+        if self.sessions_pending.is_some() || self.sessions.is_none() {
+            return;
+        }
+        self.sessions_pending = Some(days);
+        self.shell
+            .update(cx, |shell, _| shell.perform(Command::SessionsSet { days }))
+            .ok();
+        cx.notify();
+    }
+
+    /// The daemon's answer to a read or a choice: a choice refused goes back, and a toast says
+    /// why.
+    pub fn sessions_answered(
+        &mut self,
+        shown: Result<Option<u64>, String>,
+        written: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if written {
+            self.sessions_pending = None;
+        }
+        match shown {
+            Ok(days) => self.sessions = Some(days),
+            Err(why) if written => toast(
+                Toast::failure("Ending inactive sessions was not changed").detail(why),
+                cx,
+            ),
+            Err(_) => {}
+        }
+        cx.notify();
+    }
+
+    fn sessions_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let shown = self.sessions_days();
+        let switch = Switch::new("sessions-switch", shown.is_some(), "End inactive sessions")
+            .hint(SESSIONS_HINT)
+            .disabled(self.sessions.is_none() || self.sessions_pending.is_some())
+            .on_click(cx.listener(|this, _, _, cx| {
+                let days = match this.sessions_days() {
+                    Some(_) => None,
+                    None => Some(FIRST_DAYS),
+                };
+                this.choose_sessions(days, cx)
+            }));
+        let mut days: Vec<u64> = DAYS.to_vec();
+        if let Some(own) = shown
+            && !DAYS.contains(&own)
+        {
+            days.push(own);
+            days.sort();
+        }
+        let options = days.iter().map(|days| {
+            SelectOption::new(
+                SharedString::from(days.to_string()),
+                SharedString::from(match days {
+                    1 => "1 day".to_owned(),
+                    days => format!("{days} days"),
+                }),
+            )
+        });
+        let chosen = days
+            .iter()
+            .position(|days| Some(*days) == shown)
+            .unwrap_or(0);
+        let this = cx.entity().downgrade();
+        let picked = days.clone();
+        let select = Select::new("sessions-days", options, chosen)
+            .disabled(self.sessions.is_none() || self.sessions_pending.is_some())
+            .on_choose(move |index, _, cx| {
+                let days = picked[index];
+                this.update(cx, |this, cx| this.choose_sessions(Some(days), cx))
+                    .ok();
+            });
+        let card = div()
+            .id("sessions")
+            .p(space::LG)
+            .flex()
+            .flex_col()
+            .rounded(px(12.))
+            .bg(p.card)
+            .border_1()
+            .border_color(p.line)
+            .child(switch)
+            .child(
+                presence(
+                    "sessions-days-block",
+                    shown.is_some(),
+                    div().pt(space::MD).child(Field::new(
+                        "sessions-days-field",
+                        "Inactive for",
+                        select,
+                    )),
+                )
+                .gap(space::MD),
+            )
+            .test_support();
+        Section::new("sessions", "Sessions")
+            .sentence(SESSIONS_SENTENCE)
+            .child(card)
+    }
+
     /// Whether the daemon answered about the window's appearance, with it or with why it cannot
     /// read it: until then it cannot be chosen.
     pub fn appearance_known(&self) -> bool {
@@ -1126,6 +1268,7 @@ impl Render for SettingsPage {
             ],
             vec![("rules", self.rules.clone().into_any_element())],
             vec![("workspaces", self.workspaces.clone().into_any_element())],
+            vec![("sessions", self.sessions_section(cx).into_any_element())],
             vec![("appearance", self.appearance_section(cx).into_any_element())],
             vec![("developer", self.developer_section(cx).into_any_element())],
         ];

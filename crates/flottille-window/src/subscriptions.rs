@@ -34,6 +34,10 @@ pub struct SubscriptionRow {
     pub pull: String,
     /// A wake the agent asked for (the source `timer`), not a pull request's events.
     pub wake: bool,
+    /// The following of a session the agent started (the source `session`): no end of its own.
+    pub following: bool,
+    /// A following paused because the two sessions wrote to each other without the user.
+    pub paused: bool,
     pub events: Vec<String>,
     pub created_at: u64,
     pub expires_at: u64,
@@ -44,11 +48,13 @@ impl SubscriptionRow {
         let target = &value["target"];
         let text = |value: &Value| value.as_str().unwrap_or_default().to_owned();
         let wake = value["source"] == "timer";
+        let following = value["source"] == "session";
         SubscriptionRow {
             id: text(&value["id"]),
             agent: text(&value["agent"]),
             pull: match (wake, value["source"] == "tickets") {
                 (true, _) => format!("Wake: {}", text(&target["why"])),
+                _ if following => format!("Following {}", text(&target["title"])),
                 (false, true) => match text(&target["repository"]).as_str() {
                     "" => format!("Ticket {}", text(&target["key"])),
                     repository => format!(
@@ -70,6 +76,8 @@ impl SubscriptionRow {
                 ),
             },
             wake,
+            following,
+            paused: value["paused"] == true,
             events: value["events"]
                 .as_array()
                 .into_iter()
@@ -88,6 +96,10 @@ impl SubscriptionRow {
         }
         let since = said_at(self.created_at);
         let since = since.rsplit(", ").next().unwrap_or(&since);
+        // A following has no end of its own.
+        if self.following {
+            return format!("since {since}");
+        }
         let left = self.expires_at.saturating_sub(now).div_ceil(60_000);
         let left = match left {
             0..=119 => format!("{left} min"),
@@ -96,6 +108,10 @@ impl SubscriptionRow {
         format!("since {since} · expires in {left}")
     }
 }
+
+/// What a paused following says, above its Resume.
+pub const PAUSED: &str = "Paused: the two sessions wrote to each other five times without you. \
+    Resume, or write to either, to go on.";
 
 /// The rail's Subscriptions section.
 pub struct SubscriptionList {
@@ -132,7 +148,8 @@ impl SubscriptionList {
         if self.rows == rows {
             return;
         }
-        if rows.is_empty() {
+        // A following has no time left to draw again.
+        if rows.iter().all(|row| row.following) {
             self.ticker = None;
         } else if self.ticker.is_none() {
             self.ticker = Some(cx.spawn(async move |this, cx| {
@@ -172,6 +189,32 @@ impl SubscriptionList {
                 .child(SharedString::from(text))
                 .test_support()
         };
+        let paused = presence(
+            id("paused-block"),
+            row.following && row.paused,
+            div()
+                .flex()
+                .flex_col()
+                .items_start()
+                .gap(space::XS)
+                .pt(space::XS)
+                .child(
+                    div()
+                        .id(id("paused"))
+                        .text_size(px(11.5))
+                        .text_color(p.faint)
+                        .aria_label(PAUSED)
+                        .child(PAUSED)
+                        .test_support(),
+                )
+                .child({
+                    let (page, subscription) = (self.page.clone(), row.id.clone());
+                    Button::quiet(id("resume"), "Resume").on_click(move |_, _, cx| {
+                        page.update(cx, |page, cx| page.resume_following(&subscription, cx))
+                            .ok();
+                    })
+                }),
+        );
         let cancel = {
             let (page, subscription) = (self.page.clone(), row.id.clone());
             Button::icon(id("cancel"), Icon::Close, "Cancel").on_click(move |_, _, cx| {
@@ -214,7 +257,8 @@ impl SubscriptionList {
                     .when(!row.wake, |d| {
                         d.child(line(id("events"), row.events.join(", ")))
                     })
-                    .child(line(id("times"), row.times(now))),
+                    .child(line(id("times"), row.times(now)))
+                    .child(paused),
             )
             .child(cancel)
             .into_any_element()
@@ -339,6 +383,27 @@ mod tests {
         assert_eq!(ticket("api", "5"), "Ticket #5 of api");
         assert_eq!(ticket(".", "5"), "Ticket #5 of app");
         assert_eq!(ticket("", "ABC-1"), "Ticket ABC-1");
+    }
+
+    #[test]
+    fn a_following_is_named_by_the_session_and_has_no_end() {
+        let following = |paused: bool| {
+            SubscriptionRow::of(&json!({
+                "id": "sub-4", "agent": "a1", "source": "session",
+                "target": {"session": "a2", "title": "Fix login"}, "events": ["turn-ended"],
+                "created_at": 0, "expires_at": 5 * 60_000, "paused": paused,
+            }))
+        };
+        assert!(following(false).following && !following(false).paused);
+        assert!(following(true).paused);
+        assert_eq!(following(false).pull, "Following Fix login");
+        // Its source says it, not its time: a following never expires.
+        let times = following(false).times(0);
+        assert!(
+            times.starts_with("since") && !times.contains("expires"),
+            "{times}"
+        );
+        assert!(!row(5 * 60_000).following);
     }
 
     #[test]

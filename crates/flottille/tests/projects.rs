@@ -694,6 +694,79 @@ fn saving_the_settings_writes_the_file_its_comments_kept() {
 }
 
 #[test]
+fn an_empty_branch_prefix_saved_by_the_settings_is_kept_in_the_file() {
+    let user = User::new();
+    settings_fixture(&user);
+
+    let saved = user
+        .call(
+            "project.set_settings",
+            json!({"name": "app", "branch_prefix": ""}),
+        )
+        .unwrap();
+
+    let text = std::fs::read_to_string(user.project_file("app")).unwrap();
+    assert!(text.starts_with("# my project, by hand\n"), "{text}");
+    assert!(text.contains("branch_prefix = \"\"\n"), "{text}");
+    assert_eq!(saved["branch_prefix"], "");
+    let shown = user.call("project.show", json!({"name": "app"})).unwrap();
+    assert_eq!(shown["branch_prefix"], "");
+}
+
+#[test]
+fn a_save_without_branch_prefix_leaves_the_slug_and_the_file_alone() {
+    let user = User::new();
+    settings_fixture(&user);
+
+    let settings = user
+        .call("project.settings", json!({"name": "app"}))
+        .unwrap();
+    assert_eq!(settings["branch_prefix"], "app");
+    let before = std::fs::read_to_string(user.project_file("app")).unwrap();
+    user.call(
+        "project.set_settings",
+        json!({"name": "app", "tracker": null}),
+    )
+    .unwrap();
+
+    let text = std::fs::read_to_string(user.project_file("app")).unwrap();
+    assert_eq!(
+        text.lines()
+            .filter(|l| l.starts_with("branch_prefix"))
+            .count(),
+        before
+            .lines()
+            .filter(|l| l.starts_with("branch_prefix"))
+            .count()
+    );
+    assert!(!text.contains("branch_prefix = \"\""), "{text}");
+}
+
+#[test]
+fn a_branch_prefix_with_a_space_is_refused_and_nothing_is_saved() {
+    let user = User::new();
+    settings_fixture(&user);
+    let before = std::fs::read_to_string(user.project_file("app")).unwrap();
+
+    let (code, message) = user
+        .call(
+            "project.set_settings",
+            json!({"name": "app", "branch_prefix": "my app"}),
+        )
+        .unwrap_err();
+
+    assert_eq!(code, "invalid-config");
+    assert!(
+        message.contains("branch_prefix: must not hold spaces"),
+        "{message}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(user.project_file("app")).unwrap(),
+        before
+    );
+}
+
+#[test]
 fn a_forge_its_remote_does_not_lead_to_is_never_saved() {
     let user = User::new();
     settings_fixture(&user);

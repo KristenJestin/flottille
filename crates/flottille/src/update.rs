@@ -11,6 +11,7 @@ use std::process::{Command, ExitCode, Stdio};
 
 use flottille_core::paths::Paths;
 use semver::Version;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::client::Client;
@@ -33,19 +34,73 @@ const BRANCH: &str = env!("FLOTTILLE_BRANCH");
 /// This build's version alone, `0.3.0-beta.12`.
 const VERSION: &str = env!("FLOTTILLE_VERSION_NUMBER");
 
+/// What going down does to the store: no schema is read from a release, so this is the only guard.
+const NOT_DOWN: &str =
+    "the store is not migrated down, and an older build refuses a store a newer one migrated";
+
+/// The channel last chosen with `--channel`, kept in the state folder (not the configuration: it
+/// is Flottille's own memory, not a setting to edit). A plain `flottille update` follows it.
+#[derive(Default, Serialize, Deserialize)]
+struct Choice {
+    channel: Option<String>,
+    branch: Option<String>,
+}
+
+fn choice_file(paths: &Paths) -> PathBuf {
+    paths.state.join("update-channel.json")
+}
+
+/// The remembered choice; none when there is no file, or one that is not ours to read.
+fn remembered(paths: &Paths) -> Choice {
+    std::fs::read(choice_file(paths))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+fn remember(paths: &Paths, choice: &Choice) -> Result<()> {
+    flottille_core::paths::ensure_private_dir(&paths.state)?;
+    // Written beside the file and renamed over it, so that the file is the old choice or the new
+    // one, never half of one. The process's id keeps two updates from writing the same file.
+    let file = choice_file(paths);
+    let temp = file.with_extension(format!("json.{}.tmp", std::process::id()));
+    std::fs::write(&temp, serde_json::to_vec(choice)?)?;
+    std::fs::rename(&temp, &file)?;
+    Ok(())
+}
+
 pub fn run(
     paths: &Paths,
     channel: Option<String>,
     branch: Option<String>,
+    version: Option<String>,
     force: bool,
 ) -> Result<ExitCode> {
     if branch.is_some() && channel.as_deref() != Some("alpha") {
         return Err("--branch names an alpha: give it with --channel alpha".into());
     }
-    let channel = channel.unwrap_or_else(|| match CHANNEL {
-        "beta" | "alpha" => CHANNEL.to_owned(),
-        _ => "stable".to_owned(),
+    let wanted = version.as_deref().map(exact).transpose()?;
+    // A version says nothing of the channel: it is neither read from nor written to the memory.
+    let chosen = channel.is_some();
+    let kept = remembered(paths);
+    let channel = channel
+        .or(kept.channel.clone())
+        .unwrap_or_else(|| match CHANNEL {
+            "beta" | "alpha" => CHANNEL.to_owned(),
+            _ => "stable".to_owned(),
+        });
+    let branch = branch.or_else(|| {
+        kept.branch
+            .filter(|_| kept.channel.as_deref() == Some(&channel))
     });
+    if !chosen && wanted.is_none() && kept.channel.is_some() {
+        match (channel.as_str(), branch.as_deref()) {
+            ("alpha", Some(branch)) => println!(
+                "Following the channel last chosen: alpha ({branch}); --channel beta goes back to dev's builds."
+            ),
+            _ => println!("Following the channel last chosen: {channel}."),
+        }
+    }
     if Client::connect(paths)?.is_some() {
         return Err(format!(
             "the daemon is running, and would go on from a binary that is gone: stop it first \
@@ -54,13 +109,19 @@ pub fn run(
         )
         .into());
     }
-    let url = archive_url(&channel, branch.as_deref())?;
+    let url = match &wanted {
+        Some(version) => exact_url(version)?,
+        None => archive_url(&channel, branch.as_deref())?,
+    };
     let name = url.rsplit('/').next().unwrap_or_default().to_owned();
     let version = version_of(&name);
-    if let (Some(new), Ok(this)) = (&version, Version::parse(VERSION))
-        && !force
-    {
-        if *new == this {
+    // What the user asked for, to say it right when it is refused.
+    let which = match &wanted {
+        Some(_) => "",
+        None => &channel,
+    };
+    if let (Some(new), Ok(this)) = (&version, Version::parse(VERSION)) {
+        if *new == this && !force {
             println!("Flottille is already {this}: nothing to update (--force installs it again).");
             // The binary may have moved since the entry was written.
             let followed = std::env::current_exe()
@@ -69,12 +130,23 @@ pub fn run(
             if let Err(error) = followed {
                 eprintln!("flottille: the launcher entry was not updated: {error}");
             }
+            if chosen {
+                remember_choice(paths, &channel, branch.as_deref());
+            }
             return Ok(ExitCode::SUCCESS);
         }
         if *new < this {
-            return Err(
-                format!("{new} is older than this {this}: --force goes back to it.").into(),
-            );
+            if !force {
+                return Err(if which.is_empty() {
+                    format!("{new} is older than this {this}: --force goes back to it ({NOT_DOWN}).")
+                } else {
+                    format!(
+                        "{new} is the latest of {which}, but older than this {this}: --force goes to it ({NOT_DOWN})."
+                    )
+                }
+                .into());
+            }
+            println!("{new} is older than this {this}: {NOT_DOWN}.");
         }
     }
     let archive = fetch(&url)?;
@@ -89,7 +161,98 @@ pub fn run(
     let binary = std::env::current_exe()?.canonicalize()?;
     let version = replace(paths, &binary, &name, &archive)?;
     println!("{} is now {version}.", binary.display());
+    if chosen {
+        remember_choice(paths, &channel, branch.as_deref());
+    }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The binary is in place: a memory that cannot be written is said, not undone.
+fn remember_choice(paths: &Paths, channel: &str, branch: Option<&str>) {
+    let choice = Choice {
+        channel: Some(channel.to_owned()),
+        branch: branch.filter(|_| channel == "alpha").map(str::to_owned),
+    };
+    if let Err(error) = remember(paths, &choice) {
+        eprintln!("flottille: the channel was not remembered: {error}");
+    }
+}
+
+/// `text` as the exact version of a release: a semantic version, nothing else (it is written
+/// into an address).
+fn exact(text: &str) -> Result<Version> {
+    match Version::parse(text) {
+        Ok(version) if version.build.is_empty() && version.to_string() == text => Ok(version),
+        _ => Err(format!("{text} is not a version (X.Y.Z, or X.Y.Z-pre)").into()),
+    }
+}
+
+/// The tag a version is published under: an alpha's is its branch's, replaced in place
+/// (`0.5.0-alpha.feat-x.7` is in `alpha-feat-x`), any other's is `v` and the version.
+fn tag_of(version: &Version) -> String {
+    version
+        .pre
+        .as_str()
+        .strip_prefix("alpha.")
+        .and_then(|rest| rest.rsplit_once('.'))
+        .filter(|(branch, _)| !branch.is_empty())
+        .map_or_else(
+            || format!("v{version}"),
+            |(branch, _)| format!("alpha-{branch}"),
+        )
+}
+
+/// The archive of exactly this version; when there is none, the error names the versions
+/// published nearest to it.
+fn exact_url(version: &Version) -> Result<String> {
+    let name = format!("flottille-{version}-x86_64-linux.tar.gz");
+    let tagged = json(&format!("{}/releases/tags/{}", api(), tag_of(version)))?;
+    let found = tagged
+        .iter()
+        .flat_map(archives)
+        .find(|url| url.ends_with(&format!("/{name}")));
+    if let Some(url) = found {
+        return Ok(url);
+    }
+    let mut known: Vec<Version> = json(&format!("{}/releases?per_page=100", api()))?
+        .unwrap_or_default()
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(archives)
+        .filter_map(|url| version_of(url.rsplit('/').next()?))
+        .collect();
+    known.sort();
+    known.dedup();
+    let at = known.partition_point(|v| v < version);
+    let close: Vec<String> = known
+        .iter()
+        .skip(at.saturating_sub(2))
+        .take(5)
+        .map(Version::to_string)
+        .collect();
+    let mut said = format!("there is no release {version} for Linux x86_64");
+    if !close.is_empty() {
+        said.push_str(&format!(" (close versions: {})", close.join(", ")));
+    }
+    Err(said.into())
+}
+
+/// The archive of the release published last among these (ties go to the higher version): a
+/// channel's latest is the newest build, not the highest number, which a numbering change can
+/// leave behind (#413). The dates are UTC and all of one shape, so they compare as text. A draft
+/// has no date and is not published: it is not offered.
+fn latest_published(releases: &[Value]) -> Option<String> {
+    releases
+        .iter()
+        .filter_map(|release| Some((release["published_at"].as_str()?, release)))
+        .flat_map(|(at, release)| {
+            archives(release)
+                .into_iter()
+                .filter_map(move |url| Some(((at, version_of(url.rsplit('/').next()?)?), url)))
+        })
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, url)| url)
 }
 
 /// The archive of the highest version among these addresses.
@@ -108,35 +271,35 @@ fn version_of(name: &str) -> Option<Version> {
     Version::parse(version).ok()
 }
 
+/// The addresses of the archives for this machine that a release holds.
+fn archives(release: &Value) -> Vec<String> {
+    release["assets"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|a| a["browser_download_url"].as_str())
+        .filter(|url| url.ends_with("-x86_64-linux.tar.gz"))
+        .map(str::to_owned)
+        .collect()
+}
+
 /// The address of the channel's latest archive for this machine.
 fn archive_url(channel: &str, branch: Option<&str>) -> Result<String> {
-    let is_archive = |url: &&str| url.ends_with("-x86_64-linux.tar.gz");
-    let urls = |release: &Value| -> Vec<String> {
-        release["assets"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|a| a["browser_download_url"].as_str())
-            .filter(is_archive)
-            .map(str::to_owned)
-            .collect()
-    };
     let found = match channel {
         "stable" => {
             let release = json(&format!("{}/releases/latest", api()))?
                 .ok_or("there is no stable release yet")?;
-            urls(&release).into_iter().next()
+            archives(&release).into_iter().next()
         }
-        // The newest by version, whatever order they were published in.
-        "beta" => highest(
-            json(&format!("{}/releases?per_page=100", api()))?
+        "beta" => latest_published(
+            &json(&format!("{}/releases?per_page=100", api()))?
                 .unwrap_or_default()
                 .as_array()
                 .into_iter()
                 .flatten()
                 .filter(|r| r["tag_name"].as_str().is_some_and(|t| t.contains("-beta.")))
-                .flat_map(&urls)
-                .collect(),
+                .cloned()
+                .collect::<Vec<_>>(),
         ),
         "alpha" => {
             let branch = branch
@@ -153,10 +316,14 @@ fn archive_url(channel: &str, branch: Option<&str>) -> Result<String> {
                     }
                 })
                 .collect();
-            let release = json(&format!("{}/releases/tags/alpha-{tag}", api()))?
-                .ok_or_else(|| format!("there is no alpha release for {branch}"))?;
+            let release = json(&format!("{}/releases/tags/alpha-{tag}", api()))?.ok_or_else(|| {
+                format!(
+                    "there is no alpha release for {branch}: --channel beta (or another --branch) \
+                     chooses another channel."
+                )
+            })?;
             // Two while it is replaced: the newer.
-            highest(urls(&release))
+            highest(archives(&release))
         }
         _ => return Err("the channel is stable, beta or alpha".into()),
     };

@@ -7,7 +7,7 @@ use flottille_ui::{
     Align, Button, Dropdown, Icon, MenuItem, Type, enter, fade, hoverable, palette, presence_of,
     space,
 };
-use gpui_kit::base::input::{InputEditorStyle, InputEvent, TextareaState};
+use gpui_kit::base::input::{InputEditorStyle, InputEvent, RopeExt as _, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement, IntoElement,
@@ -461,6 +461,15 @@ impl Composer {
         let focus = self.field.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
         cx.notify();
+    }
+
+    /// Puts the caret at the end of what the field holds and gives it the focus: where "New
+    /// session" lands, a draft kept or not.
+    pub fn focus_end(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.field.update(cx, |field, cx| {
+            let end = field.text().offset_to_position(field.text().len());
+            field.set_cursor_position(end, window, cx);
+        });
     }
 
     /// Opens one of its pickers' lists.

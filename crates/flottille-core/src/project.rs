@@ -342,7 +342,8 @@ pub struct Project {
     pub name: String,
     /// Absolute.
     pub folder: PathBuf,
-    /// Starts the branches of the project's workspaces; a slug of the name unless set.
+    /// Starts the branches of the project's workspaces; a slug of the name unless set, and empty
+    /// when the branch is to be the workspace's name alone.
     pub branch_prefix: String,
     /// Where the workspaces are made; absolute: the project's own `workspaces_root` when it has
     /// one, else the user's default (`place`).
@@ -385,6 +386,11 @@ pub struct Project {
     pub commands: BTreeMap<String, Command>,
     #[serde(skip_serializing_if = "PullRequests::is_empty")]
     pub pull_requests: PullRequests,
+    /// The user's checks of an agent's commit message, a pull request's title and a squash
+    /// message: one command line each, `{message}` standing for a file holding the text
+    /// (`docs/projects.md`, "Message checks"). None by default.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub message_checks: Vec<String>,
     /// The tracker of its tickets, as the user declared it; none is read without one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tracker: Option<ProjectTracker>,
@@ -456,6 +462,8 @@ struct File {
     procedures: BTreeMap<String, toml::Value>,
     #[serde(default)]
     pull_requests: PullRequests,
+    #[serde(default)]
+    message_checks: Vec<String>,
     tracker: Option<ProjectTracker>,
     /// Obsolete: read as nothing, and said (`OBSOLETE_AGENT_ACTIONS`).
     agent_actions: Option<toml::Value>,
@@ -538,6 +546,7 @@ impl Project {
             skills: BTreeMap::new(),
             commands: BTreeMap::new(),
             pull_requests: PullRequests::default(),
+            message_checks: Vec::new(),
             tracker: None,
             rules: None,
             extensions: BTreeMap::new(),
@@ -626,6 +635,15 @@ impl Project {
         check(name, file, places).map_err(refuse)
     }
 
+    /// The branch of a workspace named `name` when none is given: the name alone when the
+    /// project has no branch prefix.
+    pub fn default_branch(&self, name: &str) -> String {
+        match self.branch_prefix.as_str() {
+            "" => name.to_owned(),
+            prefix => format!("{prefix}/{name}"),
+        }
+    }
+
     /// The text of the project's file.
     pub fn to_toml(&self) -> crate::Result<String> {
         let refused = |error: &dyn fmt::Display| {
@@ -662,8 +680,8 @@ fn check(name: &str, mut file: File, places: &Places) -> Result<Project, String>
         ));
     }
     let branch_prefix = match file.branch_prefix {
-        Some(prefix) if prefix.is_empty() || prefix.contains(char::is_whitespace) => {
-            return Err("branch_prefix: must not be empty nor hold spaces".into());
+        Some(prefix) if prefix.contains(char::is_whitespace) => {
+            return Err("branch_prefix: must not hold spaces".into());
         }
         Some(prefix) => prefix,
         None => slug(name),
@@ -813,6 +831,10 @@ fn check(name: &str, mut file: File, places: &Places) -> Result<Project, String>
         }
     }
 
+    for (index, line) in file.message_checks.iter().enumerate() {
+        check_message_check(line).map_err(|error| format!("message_checks[{index}]: {error}"))?;
+    }
+
     for (skill, entry) in &skills {
         check_skill(skill, entry).map_err(|error| format!("skills.{skill}{error}"))?;
     }
@@ -875,6 +897,7 @@ fn check(name: &str, mut file: File, places: &Places) -> Result<Project, String>
         skills,
         commands,
         pull_requests: file.pull_requests,
+        message_checks: file.message_checks,
         tracker,
         rules: file.rules,
         extensions: file.extensions,
@@ -1137,6 +1160,21 @@ pub fn check_step(
     Ok(())
 }
 
+/// What stands for the file holding the message in a message check.
+pub const MESSAGE: &str = "{message}";
+
+/// Why a message check cannot be run, none when it can: one line split without a shell, naming
+/// the file it checks.
+pub fn check_message_check(line: &str) -> Result<(), String> {
+    let words = crate::command::split_line(line)?;
+    if !words.iter().any(|word| word.contains(MESSAGE)) {
+        return Err(format!(
+            "must name {MESSAGE}, the file that holds the message it checks"
+        ));
+    }
+    Ok(())
+}
+
 /// What each repository holds by itself: a path that is its own, a remote, a base rule.
 fn check_repositories(repositories: &[Repository]) -> Result<(), String> {
     if repositories.is_empty() {
@@ -1389,6 +1427,27 @@ mod tests {
         let project = Project::parse("My_App.2", MINIMAL, Path::new(DATA)).unwrap();
 
         assert_eq!(project.branch_prefix, "my-app-2");
+    }
+
+    #[test]
+    fn an_empty_branch_prefix_is_accepted_and_kept_in_the_file() {
+        let project = parse(&format!("branch_prefix = \"\"\n{MINIMAL}")).unwrap();
+
+        assert_eq!(project.branch_prefix, "");
+        assert_eq!(project.default_branch("login"), "login");
+        assert!(project.to_toml().unwrap().contains("branch_prefix = \"\""));
+    }
+
+    #[test]
+    fn a_branch_prefix_with_a_space_is_still_refused() {
+        let error = parse(&format!("branch_prefix = \"my app\"\n{MINIMAL}")).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("branch_prefix: must not hold spaces"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1782,6 +1841,31 @@ line = \"serve\"
         ] {
             let refused = refusal(&format!("{MINIMAL}\n[pull_requests]\n{body}\n"));
             assert!(refused.contains(said), "{body}: {refused}");
+        }
+    }
+
+    #[test]
+    fn the_message_checks_are_read_and_checked() {
+        let project = parse(&format!(
+            "message_checks = [\"pnpm commitlint --edit {{message}}\"]\n{MINIMAL}"
+        ))
+        .unwrap();
+        assert_eq!(project.message_checks, ["pnpm commitlint --edit {message}"]);
+        assert!(parse(MINIMAL).unwrap().message_checks.is_empty());
+
+        for (checks, said) in [
+            ("[\" \"]", "message_checks[0]: the line is empty"),
+            (
+                "[\"commitlint --edit msg\"]",
+                "message_checks[0]: must name {message}",
+            ),
+            (
+                "[\"lint {message}\", \"lint {message} | tee x\"]",
+                "message_checks[1]: ",
+            ),
+        ] {
+            let refused = refusal(&format!("message_checks = {checks}\n{MINIMAL}"));
+            assert!(refused.contains(said), "{checks}: {refused}");
         }
     }
 

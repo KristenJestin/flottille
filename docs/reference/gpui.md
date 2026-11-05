@@ -39,6 +39,11 @@ measured on a 16-core Linux machine with a 165 Hz screen. Keep them; they cost a
   timer at a few Hz in a separate view to a continuous `with_animation` loop (340 ms of drawing
   per second against 22).
 - Never notify or write a global during prepaint or paint, nor on every frame.
+- **A ticker runs only while its view is drawn.** A page the window keeps but no longer shows
+  keeps its views alive, and a view notified while off screen still draws the window. Measured
+  (#444): fourteen skeletons' pulses left ticking drew a settled session page 140 times a
+  second. A ticker stops at the first tick that finds its view was not drawn since the last one
+  (`Skeleton`'s pulse does).
 - An animation requested in the same view as a list makes the list lose its scroll layer: split
   them.
 - A **text input** (`gpui_kit::component::input`) notifies its state on every caret blink: render
@@ -64,6 +69,7 @@ durations and the easing of `crates/flottille-ui/src/motion.rs` (`HOVER` 140 ms,
 | a state with no pointer: a focus ring, a highlight, a button enabled or not | `fade(id, on, duration, window, cx)` (`Button` fades its own enabled state) |
 | a choice among a few words (Ask \| Auto) | `Segmented`: its highlight slides to the one clicked, the inks fade along it |
 | words under the pointer on an element that is no button (a row's mark) | `tipped(element, text, height, window, cx)`: the button's anchored tooltip, `<id>-tooltip` |
+| a one-line text cut with an ellipsis (a title, a row's line, a fact, a diff line) | `tipped_when_cut(element, text, window, cx)`: the same tooltip, shown only when the text really is wider than its frame (a probe shapes the whole text in the element's font and compares it with the width less its padding; the answer comes one frame late), `<id>-tooltip`; the element needs an id, `overflow_hidden` and `text_ellipsis`. `ListRow`, `TreeRow`, `CardHead`, `FlatRow`, `LabelledLine`, `StepRow`, `PageHeader` and `path_line` do it for their own texts |
 | a chevron | `turning(id, open, window, cx)` |
 | a page's blocks, a card, anything that shows once | `enter(id, index, element)` |
 | a block that comes and goes while its view stays (an empty-list line, the fields a choice needs, a body that unfolds) | `presence(id, present, element).gap(..)`: build it on every frame, outside a `when`; `.gap` is the gap the parent flex puts between its children, which folds with the block |
@@ -72,6 +78,7 @@ durations and the easing of `crates/flottille-ui/src/motion.rs` (`HOVER` 140 ms,
 | a block whose height follows its content (a field that wraps its text and grows by a line) | `growing(id, element)`: it eases to the new height over `PANEL`, also when it shrinks; build it on every frame; `<id>` is the animated frame, so its bounds are the height drawn |
 | the rows of a list that comes from elsewhere | `Listing::sync` on each render, each row drawn inside an `Item`: it unfolds when it arrives, folds away when it leaves (it stays drawn until then), slides when it moves |
 | a level that folds | `Fold` (a view) or `fold_frame` |
+| a part that waits for a slow read, then shows it | `awaiting(id, pending, Skeleton, content)`: the skeleton fades out and the content in at the same place, the height easing from one to the other (to nothing when nothing came); build it on every frame |
 | a panel over the page (a menu, a drawer, a modal, the bell's list) | rises a little and fades in, fades out, and stays drawn until it has |
 
 Never in a screen: `.hover(..)` or `.group_hover(..)` (they switch at once; `tests/the_rule.rs`
@@ -95,7 +102,10 @@ description:
 - [ ] every list that gains, loses or reorders rows is a `Listing` of `Item`s;
 - [ ] every new page, section or panel enters (staggered), and every overlay rises and fades;
 - [ ] reduced motion jumps (the helpers do it; a `Motion` kept by hand must pass `reduce`);
-- [ ] nothing is redrawn at rest: a scenario ends on `pending_frames == 0`;
+- [ ] nothing is redrawn at rest: a scenario ends on `pending_frames == 0`, and a page the pull
+      request touches is held by a scenario of `crates/flottille/tests/window_at_rest.rs`, which
+      counts the frames drawn over ten seconds of the window's clock once the page settled
+      (`window.layout_stats().frames`, none) and the animation frames asked (none);
 - [ ] the pull request lists each element it animated, and a capture or a scenario shows one.
 
 ## Rules of the window
@@ -154,6 +164,12 @@ the wrong code first).
 10. **Motion**, as above: everything that appears, leaves, opens, folds or changes state moves
     with the shared durations; a drawer slides from the right; a select's list fades in; a
     radio's dot scales in. **[test]** each component's scenario.
+11. **Waiting**: a section that waits for a read shows its skeleton, never an empty space nor a
+    spinner alone. What is known is drawn at once and only the slow parts (a forge, a tracker)
+    wait, each by its own skeleton, of the size of the line it stands for, replaced in place
+    when its read ends or by its reason when it failed. A skeleton is `Skeleton`, wrapped in
+    `awaiting`: it pulses slowly (no shimmer), and the content crossfades into it. **[test]**
+    `crates/flottille-ui/tests/skeletons.rs`.
 
 The components that hold them:
 
@@ -173,8 +189,9 @@ The components that hold them:
 | `Select::new(id, options, chosen)` | `SelectOption::new(key, title).line(l)`, `.fit()`, `.disabled(b)`, `.on_choose(f)` |
 | `Drawer::detail(id, view, cx)` | a run's detail: 520 px from the right, no scrim, Escape closes; `.show(window, cx)` |
 | `Card::new().id(id).block(Block)` | a card whose separators are drawn only between blocks with content |
-| `ListCard::new(id).row(ListRow)` | rule 7's list; `ListRow` has `.mono()`, `.tag(t)`, `.line(l)`, `.more(Entity<Menu>)` (its clicks stay its own), `.below(el)` (labelled values, a reason under the title); `.item(id, placement, row)` draws a row of a `Listing` in its `Item`; a search's result has `.pieces(..)` (what matched, in the accent), `.marked(bool)` (the row the keys move to, its fill moving over `HOVER`) and `.on_enter(f)` (the pointer entered it) |
+| `ListCard::new(id).row(ListRow)` | rule 7's list; `.scrolling(&ScrollHandle, max_height)` makes a long one scroll inside its card (the screen keeps the handle: it holds the place and takes it back to the top); `ListRow` has `.mono()`, `.tag(t)`, `.line(l)`, `.more(Entity<Menu>)` (its clicks stay its own), `.below(el)` (labelled values, a reason under the title); `.item(id, placement, row)` draws a row of a `Listing` in its `Item`; a search's result has `.pieces(..)` (what matched, in the accent), `.marked(bool)` (the row the keys move to, its fill moving over `HOVER`) and `.on_enter(f)` (the pointer entered it) |
 | `Tabs::new(id, label, chosen).tab(key, words)`, `.counted(key, words, count)`, `.on_choose(f)` | a page of sections shown one at a time (the project's settings, Settings): as many tabs as sections, a count after the name of a list, the marker slides to the tab chosen over `PANEL`; the page draws the chosen section alone, inside an `enter` that plays again as it is chosen again |
+| `Skeleton::new(id)` | rule 11: `.w(px)` (all the room without), `.h(px)` (12 px without), a block in the faint fill that pulses once every `PULSE`, in its own small view; `awaiting(id, pending, skeleton, content)` crossfades it into the content |
 | `EmptyLine::new(id, Icon, text)` | an empty list; `.action(Button)` |
 | `fuzzy::find(query, title, context)` | a search's matching (the window's quick switcher): each word typed in the title, else as a whole in the context, ignoring case, accents and ligatures; a score and the marks, `Match::pieces(title)` for a `ListRow` |
 | `space::{XS, SM, MD, LG, XL, XXL, XXXL}`, `COLUMN`, `DIALOG`, `DIALOG_WIDE` | rule 9 |
@@ -196,6 +213,11 @@ The components that hold them:
   another included: a list nested in a dialog with a lower priority is drawn under the dialog. The
   window's priorities live in `flottille_ui::layer` (dialog, list, toast); a new floating layer
   takes one there, never a number of its own.
+- A path cut by its frame is copied whole by a "Copy the path" icon button beside it (the edit
+  card and the file steps), with a `Toast::success`: the click is the button's own
+  (`cx.stop_propagation()`), it neither opens the card nor folds the steps. GPUI wraps a long
+  unbroken word (a path, a hash) at any character by itself, so a toast keeps it inside; a
+  `whitespace_nowrap` text (a tooltip) must be broken by hand.
 - A text view sets the I-beam over its own lines only, so a pointer crossing the gap between two
   paragraphs (or two views) flickers between I-beam and arrow. A selectable text sits in a
   `text_region(id)`, one region that keeps the I-beam from its first line to its last.

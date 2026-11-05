@@ -11,7 +11,7 @@ use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use flottille_core::agent::{Agent, AgentState, Choices, GateMode, new_id};
+use flottille_core::agent::{Agent, AgentState, Choices, GateMode, TurnUsage, Used, new_id};
 use flottille_core::approval;
 use flottille_core::paths::{Paths, ensure_private_dir};
 use flottille_core::project::Project;
@@ -127,8 +127,15 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 agent.workspace.as_deref(),
                 &asked.message,
             )?;
-            let images = keep_images(daemon, &agent, &asked.images)?;
-            let delivery = deliveries::deliver_with_images(
+            // Decoding and scaling a big picture takes a good while for a 4K screenshot: it
+            // runs where it holds no thread of the runtime.
+            let images = {
+                let (daemon, agent, uploads) = (daemon.clone(), agent.clone(), asked.images);
+                tokio::task::spawn_blocking(move || keep_images(&daemon, &agent, &uploads))
+                    .await
+                    .map_err(|e| Failure::new("unavailable", format!("images not kept: {e}")))??
+            };
+            let delivery = deliveries::deliver_message(
                 daemon,
                 &agent.id,
                 "user",
@@ -141,6 +148,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 deliveries::discard_images(&daemon.paths, &agent.id, &images);
                 Failure::new("unavailable", "the message could not be stored")
             })?;
+            crate::subscriptions::user_wrote(daemon, &agent.id);
             Ok(json!({"agent": agent.to_json(), "after": after, "delivery": delivery}))
         }
         "agent.unqueue" => {
@@ -433,6 +441,8 @@ fn keep_images(
                 MAX_IMAGE_BYTES / 1024 / 1024
             )));
         }
+        // Scaled before it is stored, so that more of them fit under the byte caps of a prompt.
+        let bytes = flottille_core::images::scaled_down(&image.mime, bytes);
         checked.push((extension, bytes));
     }
     let folder = daemon.paths.images(&agent.id);
@@ -496,7 +506,7 @@ fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
             role,
             parent: None,
             title: None,
-            brief: message.clone(),
+            brief: message.text.clone(),
             provider: asked.provider,
             model: asked.model,
             effort: asked.effort,
@@ -506,13 +516,14 @@ fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
     )?;
     // The root's brief is its first message: a replacement supersedes it by its id, as any
     // brief, and delivers the brief again.
-    deliveries::deliver(
+    deliveries::deliver_message(
         daemon,
         &agent.id,
         "user",
         Some(format!("brief-{}-0", agent.id)),
         &message,
         approval::BETWEEN_TURNS,
+        Vec::new(),
     );
     Ok(json!({"agent": agent.to_json(), "after": after}))
 }
@@ -903,7 +914,7 @@ async fn agent_task(daemon: Arc<Daemon>, id: String, orders: mpsc::UnboundedRece
 /// more, and what their tools printed goes with them.
 pub fn forget_kept_sessions(daemon: &Daemon) {
     let now = now_ms();
-    for agent in daemon.read(Store::agents).unwrap_or_default() {
+    for agent in daemon.read(Store::kept_sessions).unwrap_or_default() {
         let Some(ended_at) = agent.ended_at else {
             continue;
         };
@@ -1028,6 +1039,14 @@ async fn process(
     // A token of this process's own, which revokes the last one.
     let grant = mcp::grant_of(daemon, agent)?;
     let token = mcp::mint(daemon, grant, provider)?;
+    // What minting it queued (the tools a new build changed) goes with the prompt that woke the
+    // process: read before it answers, not a turn later.
+    if let Some(woke) = turns.queued.front_mut()
+        && let Some(more) = deliveries::pump(daemon, &agent.id)
+    {
+        woke.text = format!("{}\n\n{}", woke.text, more.text);
+        woke.images.extend(more.images);
+    }
     let mut command = Command::new(&launch.program);
     // The daemon's environment, less what the agent has no business with; what Flottille sets
     // comes after, so that it is not among the removed.
@@ -1080,6 +1099,7 @@ async fn process(
         pid,
         speech: Speech::new(Secrets::new(&env, &[])),
         env,
+        started_at: Mutex::new(None),
     });
     let events = recorder.clone();
     let server = acp::Server {
@@ -1307,6 +1327,8 @@ struct Recorder {
     env: BTreeMap<OsString, OsString>,
     /// What the agent is saying, held back until it is settled.
     speech: Speech,
+    /// When the turn under way started.
+    started_at: Mutex<Option<u64>>,
 }
 
 /// Events of the session that say nothing of the conversation: they may come between two pieces
@@ -1429,6 +1451,69 @@ impl Recorder {
         record(&self.daemon, &self.agent, name, data, activity);
     }
 
+    /// The model the agent's process runs, as it reported it at its start.
+    fn model(&self) -> Option<String> {
+        self.daemon
+            .read(|store| store.agent(&self.agent))
+            .ok()??
+            .taken
+            .model
+    }
+
+    /// The context window of the agent's last usage report, when it was said of `model`: another
+    /// model has a window of its own.
+    fn known_window(&self, model: &Option<String>) -> Option<u64> {
+        let last = self
+            .daemon
+            .read(|store| store.last_agent_events(&self.agent, "agent.usage", 1))
+            .ok()?
+            .into_iter()
+            .next()?;
+        let said_of = last.data["model"].as_str();
+        (said_of == model.as_deref())
+            .then(|| last.data["size"].as_u64())
+            .flatten()
+    }
+
+    /// What the turn used, one row per model, before its end is told: a model the agent did not
+    /// name is the one it had taken.
+    fn record_usage(&self, stop_reason: &str, used: Vec<Used>) {
+        let ended_at = now_ms();
+        let started_at = self.started_at.lock().unwrap().take().unwrap_or(ended_at);
+        let Ok(Some(agent)) = self.daemon.read(|store| store.agent(&self.agent)) else {
+            return;
+        };
+        let session = tree::root_of(&self.daemon, &agent.id);
+        let rows: Vec<TurnUsage> = used
+            .into_iter()
+            .map(|used| TurnUsage {
+                agent: agent.id.clone(),
+                title: agent.title.clone(),
+                session: session.clone(),
+                project: agent.project.clone(),
+                workspace: agent.workspace.clone(),
+                provider: agent.provider.clone(),
+                role: agent.role.clone(),
+                started_at,
+                ended_at,
+                stop_reason: stop_reason.to_owned(),
+                used: Used {
+                    model: used.model.or_else(|| agent.taken.model.clone()),
+                    ..used
+                },
+            })
+            .collect();
+        if let Err(error) = self
+            .daemon
+            .write(|store| Ok((store.record_turn_usage(&rows)?, None)))
+        {
+            eprintln!(
+                "flottille daemon: agent {}: recording its usage: {error}",
+                self.agent
+            );
+        }
+    }
+
     /// The text the agent was streaming is over: what was held back is recorded.
     fn said(&self) {
         self.speech
@@ -1466,6 +1551,16 @@ impl acp::Events for Recorder {
             return;
         }
         let mut data = mask(data, &self.env);
+        // A process that knows no context window yet (a new one, after a release) says the tokens
+        // used alone: the window the agent had at its last report is still its own, unless its
+        // model changed since.
+        if name == "agent.usage" {
+            let model = self.model();
+            if data["size"].as_u64().is_none() {
+                data["size"] = self.known_window(&model).map_or(Value::Null, Value::from);
+            }
+            data["model"] = model.into();
+        }
         // Bookkeeping between two pieces of a message does not end it: it is kept after the
         // message, which stays one. Anything else the agent does (a tool call, a compaction…)
         // ends it.
@@ -1607,10 +1702,14 @@ impl acp::Events for Recorder {
         }
     }
 
-    fn turn_started(&self, text: &str, images: &[String]) {
+    fn turn_started(&self, text: &str, images: &[String], typed: &Value) {
+        *self.started_at.lock().unwrap() = Some(now_ms());
         let mut data = json!({"text": text});
         if !images.is_empty() {
             data["images"] = json!(images);
+        }
+        if !typed.is_null() {
+            data["typed"] = typed.clone();
         }
         change(
             &self.daemon,
@@ -1621,8 +1720,9 @@ impl acp::Events for Recorder {
         );
     }
 
-    fn turn_ended(&self, stop_reason: &str, usage: Value) {
+    fn turn_ended(&self, stop_reason: &str, usage: Value, used: Vec<Used>) {
         self.said();
+        self.record_usage(stop_reason, used);
         let _ = self
             .daemon
             .read(|store| store.deliveries_taken(&self.agent));

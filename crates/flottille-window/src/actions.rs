@@ -8,7 +8,7 @@
 //! the daemon is taken as silent, the request answers so (a session not started, a workspace
 //! refused, the details not changed) and its connection is dropped.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
@@ -142,6 +142,12 @@ pub enum Command {
     ToolResultsSet {
         limit: Option<usize>,
     },
+    /// After how many days an inactive session is ended (`sessions.show`).
+    SessionsRead,
+    /// Chooses it (`sessions.set`): `None` is off.
+    SessionsSet {
+        days: Option<u64>,
+    },
     /// The window's appearance (`appearance.show`); `seq` numbers the request (see
     /// `Shell::ask_appearance`).
     AppearanceRead {
@@ -197,6 +203,11 @@ pub enum Command {
     SaveProjectSettings {
         project: String,
         settings: Value,
+    },
+    /// Writes the project's message checks (`project.set_message_checks`).
+    SaveMessageChecks {
+        project: String,
+        checks: Vec<String>,
     },
     /// Detects the project's repositories again, against its file.
     CheckProject(String),
@@ -410,6 +421,11 @@ pub enum Command {
         session: String,
         subscription: String,
     },
+    /// Resumes a paused following of the session's agents, as a message of the user's does.
+    ResumeFollowing {
+        session: String,
+        subscription: String,
+    },
     /// The user's answer to a request they hold, given on the page of the session of `session`
     /// (its root agent).
     Answer {
@@ -502,6 +518,10 @@ pub struct Details {
     pub statuses: HashMap<String, Vec<RepositoryStatus>>,
     /// The ticket each workspace is linked to, as its tracker said it.
     pub tickets: HashMap<String, TicketFacts>,
+    /// The workspaces whose forge has not answered yet: their pull requests are still to come.
+    pub pending_pulls: HashSet<String>,
+    /// The workspaces whose ticket is linked and not read yet.
+    pub pending_tickets: HashSet<String>,
 }
 
 /// Where one repository of a workspace stands (`workspace.show`): the branch its worktree is on,
@@ -613,6 +633,11 @@ pub enum Outcome {
         read: Result<Value, String>,
         saved: bool,
     },
+    /// The project's message checks as saved, or why nothing was.
+    MessageChecks {
+        project: String,
+        saved: Result<Vec<String>, String>,
+    },
     /// The project's repositories, read, added to or removed from, or why not.
     Repositories {
         project: String,
@@ -707,6 +732,12 @@ pub enum Outcome {
     ToolResults {
         written: bool,
         shown: Result<Option<usize>, String>,
+    },
+    /// After how many days an inactive session is ended as the daemon says it (`None` is off),
+    /// after a read (`written` false) or a choice.
+    Sessions {
+        written: bool,
+        shown: Result<Option<u64>, String>,
     },
     /// The window's appearance as the daemon keeps it, after a read (`written` false) or a
     /// choice.
@@ -864,7 +895,8 @@ pub enum Outcome {
         session: String,
         answer: RunAnswer,
     },
-    /// A subscription was cancelled as asked, or the daemon refused with why.
+    /// A subscription was cancelled, or a following resumed, as asked, or the daemon refused with
+    /// why.
     SubscriptionCancelled {
         session: String,
         refused: Option<String>,
@@ -978,6 +1010,7 @@ fn read_details(
 ) {
     let mut conn: Option<Conn> = None;
     let mut tickets = Tickets::new();
+    let mut pulls = Pulls::new();
     while let Ok(first) = asked.recv() {
         let began = Instant::now();
         // Details asked again before they were read are read once.
@@ -988,11 +1021,22 @@ fn read_details(
             }
         }
         for project in projects {
-            if let Some(details) =
-                details(&connect, &mut conn, &mut tickets, &project, bounds.quick)
-                && updates
-                    .unbounded_send(Update::Done(Outcome::Details(details)))
-                    .is_err()
+            // What git knows is sent as soon as it is read, the slow parts as each is read.
+            let mut partial = |details: &Details| {
+                updates
+                    .unbounded_send(Update::Done(Outcome::Details(details.clone())))
+                    .is_ok()
+            };
+            if let Some(details) = details(
+                &connect,
+                &mut conn,
+                (&mut tickets, &mut pulls),
+                &project,
+                bounds.quick,
+                &mut partial,
+            ) && updates
+                .unbounded_send(Update::Done(Outcome::Details(details)))
+                .is_err()
             {
                 return;
             }
@@ -1181,6 +1225,19 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 .map(|shown| shown["limit"].as_u64().map(|limit| limit as usize));
             Outcome::ToolResults { written, shown }
         }
+        Command::SessionsRead | Command::SessionsSet { .. } => {
+            let (method, params, written) = match command {
+                Command::SessionsSet { days } => (
+                    "sessions.set",
+                    json!({"days": days.map_or(json!("off"), |d| json!(d))}),
+                    true,
+                ),
+                _ => ("sessions.show", json!({}), false),
+            };
+            let shown = answer(ask_alone(connect, method, params, bounds.quick))
+                .map(|shown| shown["days"].as_u64());
+            Outcome::Sessions { written, shown }
+        }
         Command::AppearanceRead { seq } | Command::AppearanceSet { seq, .. } => {
             let (method, params, written) = match command {
                 Command::AppearanceSet { appearance, .. } => {
@@ -1237,6 +1294,24 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             )),
             project,
             saved: true,
+        },
+        Command::SaveMessageChecks { project, checks } => Outcome::MessageChecks {
+            saved: answer(ask_alone(
+                connect,
+                "project.set_message_checks",
+                json!({"name": project, "checks": checks}),
+                bounds.quick,
+            ))
+            .map(|saved| {
+                saved["message_checks"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            }),
+            project,
         },
         Command::Repositories {
             project,
@@ -1858,6 +1933,21 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             };
             Outcome::SubscriptionCancelled { session, refused }
         }
+        Command::ResumeFollowing {
+            session,
+            subscription,
+        } => {
+            let refused = match ask_alone(
+                connect,
+                "subscription.resume",
+                json!({"subscription": subscription}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::SubscriptionCancelled { session, refused }
+        }
         Command::Answer {
             session,
             number,
@@ -2051,12 +2141,17 @@ fn started_outcome(project: &str, started: &Value) -> Outcome {
 /// read is [`TICKET_FRESH`] no more, or the workspace is linked to another ticket.
 type Tickets = HashMap<(String, String), (TicketFacts, Instant)>;
 
+/// The pull requests each workspace's forge last gave: a page read again shows them while it asks
+/// again.
+type Pulls = HashMap<(String, String), Vec<PullRequest>>;
+
 fn details(
     connect: &Connect,
     conn: &mut Option<Conn>,
-    kept: &mut Tickets,
+    (kept, kept_pulls): (&mut Tickets, &mut Pulls),
     project: &str,
     bound: Duration,
+    partial: &mut dyn FnMut(&Details) -> bool,
 ) -> Option<Details> {
     let shown = ask(
         connect,
@@ -2091,6 +2186,10 @@ fn details(
     let mut pulls = HashMap::new();
     let mut statuses = HashMap::new();
     let mut tickets = HashMap::new();
+    let mut pending_pulls = HashSet::new();
+    let mut pending_tickets = HashSet::new();
+    // The workspaces read, and the ticket each is linked to.
+    let mut read: Vec<(String, Option<String>)> = Vec::new();
     for workspace in listed["workspaces"].as_array().into_iter().flatten() {
         let name = workspace["name"].as_str().unwrap_or_default();
         let Ok(Ok(shown)) = ask(
@@ -2112,58 +2211,113 @@ fn details(
         changes.insert(name.to_owned(), total);
         statuses.insert(name.to_owned(), RepositoryStatus::of_workspace(&shown));
         let key = (project.to_owned(), name.to_owned());
-        match shown["ticket"].as_str() {
+        let linked = shown["ticket"].as_str().map(str::to_owned);
+        match &linked {
             None => {
                 kept.remove(&key);
             }
             Some(linked) => {
-                let stale = kept.get(&key).is_none_or(|(facts, at)| {
-                    facts.reference != linked || at.elapsed() > TICKET_FRESH
-                });
-                if stale {
-                    let read = ask(
-                        connect,
-                        conn,
-                        "workspace.ticket",
-                        json!({"project": project, "name": name}),
-                        bound,
-                    );
-                    let facts = match read {
-                        Ok(Ok(read)) => ticket_facts(&read),
-                        _ => None,
-                    }
-                    .unwrap_or_else(|| TicketFacts {
-                        reference: linked.to_owned(),
-                        state: None,
-                        title: None,
-                        url: None,
-                        problem: Some("the ticket could not be read".into()),
-                    });
-                    kept.insert(key.clone(), (facts, Instant::now()));
+                // A ticket read for another reference is not this one's.
+                if kept
+                    .get(&key)
+                    .is_some_and(|(facts, _)| &facts.reference != linked)
+                {
+                    kept.remove(&key);
                 }
-                if let Some((facts, _)) = kept.get(&key) {
-                    tickets.insert(name.to_owned(), facts.clone());
+                match kept.get(&key) {
+                    Some((facts, _)) => {
+                        tickets.insert(name.to_owned(), facts.clone());
+                    }
+                    None => {
+                        pending_tickets.insert(name.to_owned());
+                    }
                 }
             }
         }
-        if let Ok(Ok(forge)) = ask(
-            connect,
-            conn,
-            "workspace.forge",
-            json!({"project": project, "name": name}),
-            bound,
-        ) {
-            pulls.insert(name.to_owned(), pull_requests(&forge).0);
+        match kept_pulls.get(&key) {
+            Some(known) => {
+                pulls.insert(name.to_owned(), known.clone());
+            }
+            None => {
+                pending_pulls.insert(name.to_owned());
+            }
         }
+        read.push((name.to_owned(), linked));
     }
-    Some(Details {
+    kept_pulls.retain(|(kept_project, name), _| {
+        kept_project != project || read.iter().any(|(read, _)| read == name)
+    });
+    let mut details = Details {
         project: project.to_owned(),
         branches,
         changes,
         pulls,
         statuses,
         tickets,
-    })
+        pending_pulls,
+        pending_tickets,
+    };
+    // The workspaces' facts that git knows are shown while the forge and the tracker are asked.
+    if !details.pending_pulls.is_empty() || !details.pending_tickets.is_empty() {
+        partial(&details);
+    }
+    for (name, linked) in read {
+        let key = (project.to_owned(), name.clone());
+        match ask(
+            connect,
+            conn,
+            "workspace.forge",
+            json!({"project": project, "name": name}),
+            bound,
+        ) {
+            Ok(Ok(forge)) => {
+                let found = pull_requests(&forge).0;
+                kept_pulls.insert(key.clone(), found.clone());
+                details.pulls.insert(name.clone(), found);
+            }
+            // A forge that cannot be read is answered all the same: its card does not wait for
+            // it again at each round.
+            _ => {
+                kept_pulls.entry(key.clone()).or_default();
+            }
+        }
+        details.pending_pulls.remove(&name);
+        if let Some(linked) = linked {
+            let stale = kept
+                .get(&key)
+                .is_none_or(|(_, at)| at.elapsed() > TICKET_FRESH);
+            if stale {
+                let read = ask(
+                    connect,
+                    conn,
+                    "workspace.ticket",
+                    json!({"project": project, "name": name}),
+                    bound,
+                );
+                let facts = match read {
+                    Ok(Ok(read)) => ticket_facts(&read),
+                    _ => None,
+                }
+                .unwrap_or_else(|| TicketFacts {
+                    reference: linked.clone(),
+                    state: None,
+                    title: None,
+                    url: None,
+                    problem: Some("the ticket could not be read".into()),
+                });
+                kept.insert(key.clone(), (facts, Instant::now()));
+            }
+            if let Some((facts, _)) = kept.get(&key) {
+                details.tickets.insert(name.clone(), facts.clone());
+            }
+        }
+        details.pending_tickets.remove(&name);
+        // The last workspace's answer is the final snapshot the caller sends.
+        if !details.pending_pulls.is_empty() || !details.pending_tickets.is_empty() {
+            partial(&details);
+        }
+    }
+    Some(details)
 }
 
 #[cfg(test)]

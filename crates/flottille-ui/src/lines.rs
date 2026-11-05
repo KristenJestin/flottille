@@ -5,16 +5,18 @@
 //! Each part that is clicked fades its hover; none draws a separator: the [`Card`](crate::Card)
 //! draws them between its blocks.
 
+use std::ops::Range;
 use std::rc::Rc;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, ClickEvent, ElementId, Entity, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement, Styled,
-    TestSupportExt, Window, div, px,
+    AnyElement, App, ClickEvent, ElementId, Entity, FontWeight, HighlightStyle, InteractiveElement,
+    IntoElement, ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement,
+    Styled, StyledText, TestSupportExt, Window, div, px,
 };
 
 use crate::color::mix;
+use crate::cut::tipped_when_cut;
 use crate::icons::{Icon, icon};
 use crate::interact::{hoverable, tint};
 use crate::menu::Menu;
@@ -131,8 +133,22 @@ impl CardHead {
 }
 
 impl RenderOnce for CardHead {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let p = palette(cx);
+        let title = tipped_when_cut(
+            div()
+                .id(ElementId::Name(format!("{}-title", self.id).into()))
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_size(px(13.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(self.title.clone()),
+            self.title.clone(),
+            window,
+            cx,
+        );
         let meta = self.meta.map(|meta| {
             div()
                 .id(ElementId::Name(format!("{}-meta", self.id).into()))
@@ -157,16 +173,7 @@ impl RenderOnce for CardHead {
             .ui_text()
             .text_color(p.text)
             .child(icon(self.glyph).size(px(14.)).text_color(p.faint))
-            .child(
-                div()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(px(13.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(self.title),
-            )
+            .child(title)
             .children(meta)
             .child(div().flex_1())
             .children(self.trailing)
@@ -218,9 +225,26 @@ impl ParentElement for LabelledLine {
 }
 
 impl RenderOnce for LabelledLine {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let p = palette(cx);
         let clickable = self.on_click.is_some();
+        let value = tipped_when_cut(
+            div()
+                .id(ElementId::Name(format!("{}-value", self.id).into()))
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .mono(12.)
+                .children(self.value),
+            self.said.clone(),
+            window,
+            cx,
+        );
         let mut line = div()
             .id(self.id)
             .aria_label(SharedString::from(format!("{} {}", self.label, self.said)))
@@ -241,18 +265,7 @@ impl RenderOnce for LabelledLine {
                     .child(icon(self.glyph).size(px(13.)).text_color(p.faint))
                     .child(self.label),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .mono(12.)
-                    .children(self.value),
-            );
+            .child(value);
         if let Some(on_click) = self.on_click {
             line = line
                 .cursor_pointer()
@@ -357,7 +370,7 @@ impl FlatRow {
 }
 
 impl RenderOnce for FlatRow {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let p = palette(cx);
         let id = self.id.clone();
         let mut row = div()
@@ -379,16 +392,20 @@ impl RenderOnce for FlatRow {
                     .justify_center()
                     .children(self.leading),
             )
-            .child(
+            .child(tipped_when_cut(
                 div()
+                    .id(ElementId::Name(format!("{id}-title").into()))
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .font_weight(FontWeight::MEDIUM)
-                    .child(self.title),
-            )
+                    .child(self.title.clone()),
+                self.title,
+                window,
+                cx,
+            ))
             .when_some(self.meta, |d, meta| {
                 d.child(
                     div()
@@ -514,6 +531,7 @@ impl RenderOnce for StepRow {
                 .test_support()
         });
         let clickable = self.on_click.is_some();
+        let id = self.id.clone();
         let mut row = div()
             .id(self.id)
             .aria_label(SharedString::from(said))
@@ -545,14 +563,18 @@ impl RenderOnce for StepRow {
                     .whitespace_nowrap()
                     .child(self.verb)
                     .when_some(self.object, |d, object| {
-                        d.child(
+                        d.child(tipped_when_cut(
                             div()
+                                .id(ElementId::Name(format!("{id}-object").into()))
                                 .min_w_0()
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .mono(12.)
-                                .child(object),
-                        )
+                                .child(object.clone()),
+                            object,
+                            window,
+                            cx,
+                        ))
                     }),
             )
             .children(time);
@@ -627,4 +649,19 @@ impl RenderOnce for FooterAction {
             d.bg(p.hover.opacity(t)).text_color(mix(p.faint, p.text, t))
         })
     }
+}
+
+/// A message as it was typed, each command it used (`commands`, byte ranges of `/name`) drawn as
+/// an accent chip in its line: the accent's ink, medium, on the accent's faint fill. A chip is a
+/// run of the text, so that the line wraps as the words do.
+pub fn commanded_text(text: &str, commands: &[Range<usize>], cx: &App) -> StyledText {
+    let p = palette(cx);
+    let chip = HighlightStyle {
+        color: Some(p.acc),
+        background_color: Some(p.acc.opacity(0.14)),
+        font_weight: Some(FontWeight::MEDIUM),
+        ..Default::default()
+    };
+    StyledText::new(text.to_owned())
+        .with_highlights(commands.iter().map(|range| (range.clone(), chip)))
 }

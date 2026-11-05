@@ -10,7 +10,7 @@ use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 
-use crate::agent::{Agent, AgentState, Choices, GateMode};
+use crate::agent::{Agent, AgentState, Choices, GateMode, TurnUsage, Used};
 use crate::approval::{Decision, Delivery, Forward, Judgement, Kind, Request, RequestState};
 use crate::item::{Check, Cursor, Filter, Item, Post};
 use crate::protocol::Event;
@@ -592,6 +592,55 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE runs ADD COLUMN url TEXT;
     ALTER TABLE runs ADD COLUMN url_error TEXT;
 ",
+    "
+    -- What each turn used, one row per model the turn used (`docs/reference/acp.md`, \"What a
+    -- turn used\"). History, not state: no reference to the agents or the workspaces, so that
+    -- their removal neither takes the rows nor is held by them; the ids and names are those of
+    -- the time. A count the agent did not give is NULL, never 0. Times in milliseconds.
+    CREATE TABLE turn_usage (
+        id           INTEGER PRIMARY KEY,
+        agent        TEXT NOT NULL,
+        title        TEXT,
+        session      TEXT NOT NULL,
+        project      TEXT NOT NULL,
+        workspace    TEXT,
+        provider     TEXT NOT NULL,
+        role         TEXT NOT NULL,
+        model        TEXT,
+        started_at   INTEGER NOT NULL,
+        ended_at     INTEGER NOT NULL,
+        stop_reason  TEXT NOT NULL,
+        input        INTEGER,
+        output       INTEGER,
+        cache_read   INTEGER,
+        cache_write  INTEGER,
+        reasoning    INTEGER,
+        cost_usd     REAL
+    ) STRICT;
+    -- The statistics read a span of time, of everything or of one project, by day, model or
+    -- kind of agent.
+    CREATE INDEX turn_usage_by_time ON turn_usage (started_at);
+    CREATE INDEX turn_usage_by_project ON turn_usage (project, started_at);
+",
+    "
+    -- The tool list an agent's last process was given (`docs/tools.md`, \"When the tools
+    -- change\"): its digest and the actions of each tool, as JSON; NULL before its first process.
+    ALTER TABLE agents ADD COLUMN tools_given TEXT;
+",
+    "
+    -- A message that used commands keeps what the user typed beside what the agent received
+    -- (`body`), with the names of the commands, in the order of their first use: nothing reads
+    -- them back from the text. A message stored before held one command, named by its header:
+    -- it is read once here, and its typed text, never kept, stays NULL.
+    ALTER TABLE deliveries ADD COLUMN typed TEXT;
+    ALTER TABLE deliveries ADD COLUMN commands TEXT NOT NULL DEFAULT '[]';
+    UPDATE deliveries
+        SET commands = json_array(substr(body, 13, instr(body, ' of project ') - 13))
+        WHERE kind IN ('user', 'parent')
+            AND body GLOB 'The command * of project *: *'
+            AND instr(body, ' of project ') > 13
+            AND instr(substr(body, 13, instr(body, ' of project ') - 13), ' ') = 0;
+",
 ];
 
 /// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its
@@ -617,7 +666,8 @@ const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, sta
     depth, epoch, title, brief, reported_at, quiet_turns, waiting_on_answer, reopens, images, gate_mode, \
     launched_by, pending_model, pending_effort, exchanged_at";
 
-const DELIVERY_COLUMNS: &str = "id, agent, kind, body, urgency, state, created_at, sent_at, images";
+const DELIVERY_COLUMNS: &str =
+    "id, agent, kind, body, urgency, state, created_at, sent_at, images, typed, commands";
 
 /// What changes on an agent; what is left `None` stays as it is.
 #[derive(Clone, Debug, Default)]
@@ -1129,6 +1179,27 @@ impl Store {
         rows.map(|row| row?).collect()
     }
 
+    /// The agents not in a final state: what the daemon's sweep looks after, every few seconds,
+    /// without reading the whole history (each agent holds its instructions).
+    pub fn live_agents(&self) -> Result<Vec<Agent>> {
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {AGENT_COLUMNS} FROM agents WHERE state NOT IN ('ended', 'failed') \
+             ORDER BY created_at, id"
+        ))?;
+        let rows = statement.query_map([], agent_row)?;
+        rows.map(|row| row?).collect()
+    }
+
+    /// The ended roots whose session is kept to be resumed: those the sweep forgets in time.
+    pub fn kept_sessions(&self) -> Result<Vec<Agent>> {
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {AGENT_COLUMNS} FROM agents WHERE state = 'ended' AND parent IS NULL \
+             AND reopens = 1 AND native_id IS NOT NULL ORDER BY created_at, id"
+        ))?;
+        let rows = statement.query_map([], agent_row)?;
+        rows.map(|row| row?).collect()
+    }
+
     /// Changes an agent, with its event when one is given, in one transaction; the agent as it
     /// is now. An agent in a final state keeps it.
     pub fn change_agent(
@@ -1246,6 +1317,28 @@ impl Store {
         Ok(event)
     }
 
+    /// The tool list the agent's last process was given, as `set_agent_tools_given` kept it.
+    pub fn agent_tools_given(&self, agent: &str) -> Result<Option<String>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT tools_given FROM agents WHERE id = ?1",
+                params![agent],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// Keeps the tool list the agent's process is given.
+    pub fn set_agent_tools_given(&mut self, agent: &str, given: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE agents SET tools_given = ?2 WHERE id = ?1",
+            params![agent, given],
+        )?;
+        Ok(())
+    }
+
     /// An event of the agent's conversation; `activity` says it is a sign of activity, which
     /// moves the agent's `active_at`.
     pub fn append_agent_event(
@@ -1311,6 +1404,29 @@ impl Store {
         Ok(self.connection.query_row(
             "SELECT max(ended_at) FROM runs WHERE agent = ?1",
             params![agent],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// The latest sign of activity of these agents, from what is recorded: their events (but
+    /// the two the daemon says on its own, `agent.tools_outdated` and `agent.released`), their
+    /// deliveries made and sent, their runs started and ended, their requests asked and decided,
+    /// and the agents' own `created_at`, `active_at` and `exchanged_at`. `None` for no agent.
+    pub fn last_activity_of(&self, agents: &[String]) -> Result<Option<u64>> {
+        Ok(self.connection.query_row(
+            "WITH tree(id) AS (SELECT value FROM json_each(?1)) \
+             SELECT max(at) FROM ( \
+               SELECT max(created_at, coalesce(active_at, 0), coalesce(exchanged_at, 0)) AS at \
+                 FROM agents WHERE id IN tree \
+               UNION ALL SELECT max(e.at) FROM agent_events a JOIN events e ON e.seq = a.seq \
+                 WHERE a.agent IN tree AND e.name NOT IN ('agent.tools_outdated', 'agent.released') \
+               UNION ALL SELECT max(created_at, coalesce(sent_at, 0)) FROM deliveries \
+                 WHERE agent IN tree \
+               UNION ALL SELECT max(started_at, coalesce(ended_at, 0)) FROM runs \
+                 WHERE agent IN tree \
+               UNION ALL SELECT max(created_at, coalesce(decided_at, 0)) FROM approval_requests \
+                 WHERE agent IN tree)",
+            params![serde_json::to_string(agents)?],
             |row| row.get(0),
         )?)
     }
@@ -1906,8 +2022,8 @@ impl Store {
         let transaction = self.connection.transaction()?;
         let stored = transaction.execute(
             "INSERT OR IGNORE INTO deliveries (id, agent, kind, body, urgency, state, created_at, \
-             images) SELECT ?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7 WHERE EXISTS (SELECT 1 FROM agents \
-             WHERE id = ?2 AND state NOT IN ('ended', 'failed'))",
+             images, typed, commands) SELECT ?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8, ?9 WHERE \
+             EXISTS (SELECT 1 FROM agents WHERE id = ?2 AND state NOT IN ('ended', 'failed'))",
             params![
                 delivery.id,
                 delivery.agent,
@@ -1915,7 +2031,9 @@ impl Store {
                 delivery.body,
                 delivery.urgency,
                 now_ms(),
-                serde_json::to_string(&delivery.images)?
+                serde_json::to_string(&delivery.images)?,
+                delivery.typed,
+                serde_json::to_string(&delivery.commands)?
             ],
         )?;
         if stored == 0 {
@@ -2334,6 +2452,20 @@ impl Store {
         Ok(())
     }
 
+    /// Forgets the comment `comment_id` of an item: it was deleted, or its record is replaced.
+    pub fn drop_comment_posts(
+        &self,
+        (project, source, repository, key): (&str, &str, &str, &str),
+        comment_id: &str,
+    ) -> Result<()> {
+        self.connection.execute(
+            "DELETE FROM posts WHERE project = ?1 AND source = ?2 AND repository = ?3 \
+             AND key = ?4 AND kind = 'comment' AND comment_id = ?5",
+            params![project, source, repository, key, comment_id],
+        )?;
+        Ok(())
+    }
+
     /// What was posted on one item, oldest first.
     pub fn posts(
         &self,
@@ -2356,6 +2488,76 @@ impl Store {
                 comment_id: row.get(1)?,
                 fingerprint: row.get(2)?,
                 posted_at: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Records what a turn used, one row per model.
+    pub fn record_turn_usage(&mut self, rows: &[TurnUsage]) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        {
+            let mut statement = transaction.prepare_cached(
+                "INSERT INTO turn_usage (agent, title, session, project, workspace, provider, \
+                 role, model, started_at, ended_at, stop_reason, input, output, cache_read, \
+                 cache_write, reasoning, cost_usd) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            )?;
+            for row in rows {
+                let used = &row.used;
+                statement.execute(params![
+                    row.agent,
+                    row.title,
+                    row.session,
+                    row.project,
+                    row.workspace,
+                    row.provider,
+                    row.role,
+                    used.model,
+                    row.started_at,
+                    row.ended_at,
+                    row.stop_reason,
+                    used.input,
+                    used.output,
+                    used.cache_read,
+                    used.cache_write,
+                    used.reasoning,
+                    used.cost_usd
+                ])?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Every row of the turns' usage, in the order they were recorded.
+    pub fn turn_usage(&self) -> Result<Vec<TurnUsage>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT agent, title, session, project, workspace, provider, role, model, started_at, \
+             ended_at, stop_reason, input, output, cache_read, cache_write, reasoning, cost_usd \
+             FROM turn_usage ORDER BY id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(TurnUsage {
+                agent: row.get(0)?,
+                title: row.get(1)?,
+                session: row.get(2)?,
+                project: row.get(3)?,
+                workspace: row.get(4)?,
+                provider: row.get(5)?,
+                role: row.get(6)?,
+                started_at: row.get(8)?,
+                ended_at: row.get(9)?,
+                stop_reason: row.get(10)?,
+                used: Used {
+                    model: row.get(7)?,
+                    input: row.get(11)?,
+                    output: row.get(12)?,
+                    cache_read: row.get(13)?,
+                    cache_write: row.get(14)?,
+                    reasoning: row.get(15)?,
+                    cost_usd: row.get(16)?,
+                },
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -3096,6 +3298,8 @@ fn delivery_row(row: &rusqlite::Row) -> rusqlite::Result<Delivery> {
         created_at: row.get(6)?,
         sent_at: row.get(7)?,
         images: serde_json::from_str(&row.get::<_, String>(8)?).unwrap_or_default(),
+        typed: row.get(9)?,
+        commands: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or_default(),
     })
 }
 
@@ -3907,6 +4111,48 @@ mod tests {
     }
 
     #[test]
+    fn the_sweep_reads_the_agents_still_running_and_the_sessions_kept_not_the_whole_history() {
+        let mut store = Store::open_in_memory().unwrap();
+        let made = |id: &str, parent: Option<&str>, reopens: bool, native: Option<&str>| Agent {
+            id: id.into(),
+            parent: parent.map(str::to_owned),
+            reopens,
+            native_id: native.map(str::to_owned),
+            ..an_agent()
+        };
+        let agents = [
+            made("running00000", None, true, Some("s1")),
+            made("kept00000000", None, true, Some("s2")),
+            made("forgotten000", None, false, Some("s3")),
+            made("nosession000", None, true, None),
+            made("worker000000", Some("kept00000000"), true, Some("s4")),
+            made("failed000000", None, true, Some("s5")),
+        ];
+        for agent in &agents {
+            store
+                .create_agent(agent, ("agent.created", json!({})))
+                .unwrap();
+        }
+        for (id, state) in [
+            ("kept00000000", AgentState::Ended),
+            ("forgotten000", AgentState::Ended),
+            ("nosession000", AgentState::Ended),
+            ("worker000000", AgentState::Ended),
+            ("failed000000", AgentState::Failed),
+        ] {
+            let change = AgentChange {
+                state: Some(state),
+                ..AgentChange::default()
+            };
+            store.change_agent(id, change, None).unwrap();
+        }
+        let ids = |agents: Vec<Agent>| agents.into_iter().map(|a| a.id).collect::<Vec<_>>();
+
+        assert_eq!(ids(store.live_agents().unwrap()), ["running00000"]);
+        assert_eq!(ids(store.kept_sessions().unwrap()), ["kept00000000"]);
+    }
+
+    #[test]
     fn an_ended_agent_is_resumed_on_its_session_and_a_failed_one_is_not() {
         let mut store = Store::open_in_memory().unwrap();
         let mut agent = an_agent();
@@ -4622,6 +4868,73 @@ mod tests {
             created_at: 0,
             sent_at: None,
             images: Vec::new(),
+            typed: None,
+            commands: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_message_keeps_what_the_user_typed_and_the_commands_it_used() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .create_agent(&an_agent(), ("agent.created", json!({})))
+            .unwrap();
+        let mut said = a_delivery("d1", "user");
+        said.typed = Some("test /ship then /deploy".into());
+        said.commands = vec!["ship".into(), "deploy".into()];
+        store.deliver(&said).unwrap().unwrap();
+        store.deliver(&a_delivery("d2", "user")).unwrap().unwrap();
+
+        let read = store.delivery("d1").unwrap().unwrap();
+        assert_eq!(read.typed.as_deref(), Some("test /ship then /deploy"));
+        assert_eq!(read.commands, ["ship", "deploy"]);
+        let plain = store.delivery("d2").unwrap().unwrap();
+        assert_eq!((plain.typed, plain.commands), (None, Vec::<String>::new()));
+    }
+
+    #[test]
+    fn an_old_command_message_reads_with_its_text_and_the_command_its_header_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let old = Connection::open(&path).unwrap();
+        let previous = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("ADD COLUMN typed"))
+            .unwrap();
+        for migration in &MIGRATIONS[..previous] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.pragma_update(None, "user_version", previous).unwrap();
+        old.execute_batch(
+            "INSERT INTO agents (id, provider, role, project, folder, state, created_at, \
+             updated_at, instructions, tools) VALUES ('a', 'claude', 'lead', 'app', '/w', \
+             'idle', 1, 1, 'i', '[]'); \
+             INSERT INTO deliveries (id, agent, kind, body, state, created_at) VALUES \
+             ('d1', 'a', 'user', 'The command open-prs of project app: Open them\n\n---\n\nDo it.', \
+              'sent', 1), \
+             ('d2', 'a', 'user', 'The command is broken, look', 'sent', 2), \
+             ('d3', 'a', 'user', 'plain words', 'sent', 3), \
+             ('d4', 'a', 'child-report', 'The command deploy of project app: hi', 'sent', 4), \
+             ('d5', 'a', 'user', 'THE COMMAND deploy OF PROJECT app: hi', 'sent', 5), \
+             ('d6', 'a', 'parent', 'The command deploy of project app: hi', 'sent', 6);",
+        )
+        .unwrap();
+        drop(old);
+
+        let store = Store::open(&path).unwrap();
+
+        let d1 = store.delivery("d1").unwrap().unwrap();
+        assert!(d1.body.ends_with("Do it."), "its text as the agent got it");
+        assert_eq!((d1.typed, d1.commands), (None, vec!["open-prs".to_owned()]));
+        let d6 = store.delivery("d6").unwrap().unwrap();
+        assert_eq!(d6.commands, ["deploy"], "a parent's message is one too");
+        for id in ["d2", "d3", "d4", "d5"] {
+            let plain = store.delivery(id).unwrap().unwrap();
+            assert_eq!(
+                (plain.typed, plain.commands),
+                (None, Vec::<String>::new()),
+                "{id}"
+            );
         }
     }
 
@@ -5071,6 +5384,56 @@ mod tests {
             .unwrap();
         assert_eq!(denied.state, RequestState::Denied);
         assert!(store.pending_requests(approval::USER).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_last_activity_of_a_tree_is_its_latest_sign_but_for_what_the_daemon_says_alone() {
+        let mut store = Store::open_in_memory().unwrap();
+        // Created long ago, so that the clock decides what is later.
+        let agent = Agent {
+            created_at: 1_000,
+            updated_at: 1_000,
+            ..an_agent()
+        };
+        assert_eq!(
+            store
+                .last_activity_of(std::slice::from_ref(&agent.id))
+                .unwrap(),
+            None
+        );
+        store
+            .create_agent(&agent, ("agent.created", json!({})))
+            .unwrap();
+        let ids = [agent.id.clone()];
+        let created = store.last_activity_of(&ids).unwrap().unwrap();
+        assert!(created > agent.created_at);
+
+        // The daemon's own words are no activity.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        for name in ["agent.tools_outdated", "agent.released"] {
+            store
+                .append_agent_event(&agent.id, name, json!({}), false)
+                .unwrap();
+        }
+        assert_eq!(store.last_activity_of(&ids).unwrap(), Some(created));
+
+        // A message of the conversation, then a request, is.
+        let message = store
+            .append_agent_event(&agent.id, "agent.message", json!({}), true)
+            .unwrap();
+        assert_eq!(store.last_activity_of(&ids).unwrap(), Some(message.at));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let (asked, event) = store.ask(&a_request(Some("toolu_01"))).unwrap();
+        assert!(asked.created_at > message.at);
+        // The request's event reads the clock again, a millisecond later at times.
+        assert_eq!(
+            store.last_activity_of(&ids).unwrap(),
+            Some(event.unwrap().at)
+        );
+        assert_eq!(
+            store.last_activity_of(&["somebody-else".into()]).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -6132,5 +6495,45 @@ mod tests {
                 MIGRATIONS.len()
             );
         }
+    }
+
+    #[test]
+    fn the_usage_of_a_removed_session_is_kept() {
+        let mut store = Store::open_in_memory().unwrap();
+        let agent = an_agent();
+        store
+            .create_agent(&agent, ("agent.created", json!({})))
+            .unwrap();
+        let row = TurnUsage {
+            agent: agent.id.clone(),
+            title: None,
+            session: agent.id.clone(),
+            project: "app".into(),
+            workspace: Some("login".into()),
+            provider: "claude".into(),
+            role: "lead".into(),
+            started_at: 1_792_843_730_808,
+            ended_at: 1_792_843_731_808,
+            stop_reason: "end_turn".into(),
+            used: Used {
+                model: Some("claude-fake-1".into()),
+                input: Some(100),
+                output: Some(20),
+                cache_read: Some(1000),
+                cache_write: Some(50),
+                reasoning: None,
+                cost_usd: Some(0.0125),
+            },
+        };
+        store.record_turn_usage(std::slice::from_ref(&row)).unwrap();
+
+        // Nothing removes an agent yet: the rows must neither hold its removal nor go with it.
+        store
+            .connection
+            .execute("DELETE FROM agents WHERE id = ?1", params![agent.id])
+            .unwrap();
+
+        assert_eq!(store.agent(&agent.id).unwrap(), None);
+        assert_eq!(store.turn_usage().unwrap(), [row]);
     }
 }

@@ -52,6 +52,7 @@ use crate::judge;
 use crate::place::{Place, Resolved};
 use crate::projects;
 use crate::providers::{self, Provider};
+use crate::reads::Reads;
 use crate::runs;
 use crate::skills;
 use crate::tree;
@@ -114,7 +115,7 @@ const SERVED: [Definition; 28] = [
         schema: || {
             json!({"type": "object", "properties": {
                 "path": {"type": "string", "description": "Relative to the place, or to the repository when given."},
-                "repository": {"type": "string", "description": "One of the project's repositories, by its path."},
+                "repository": {"type": "string", "description": "One of the project's repositories, by its path (\".\" is the project folder itself), never a folder inside one: that goes in path. Left out: the place's top."},
                 "range": {"type": "object", "properties": {
                     "offset": {"type": "integer", "minimum": 0, "description": "The byte to start at; a page names the next one."},
                     "length": {"type": "integer", "minimum": 1, "maximum": files::READ_PAGE_BYTES}
@@ -135,7 +136,7 @@ const SERVED: [Definition; 28] = [
         schema: || {
             json!({"type": "object", "properties": {
                 "path": {"type": "string", "description": "Relative to the place, or to the repository when given; \".\" for its top."},
-                "repository": {"type": "string"},
+                "repository": {"type": "string", "description": "One of the project's repositories, by its path (\".\" is the project folder itself), never a folder inside one: that goes in path. Left out: the place's top."},
                 "depth": {"type": "integer", "minimum": 1, "maximum": 5}
             }, "required": ["path"], "additionalProperties": false})
         },
@@ -153,7 +154,7 @@ const SERVED: [Definition; 28] = [
         schema: || {
             json!({"type": "object", "properties": {
                 "pattern": {"type": "string", "description": "The text to find."},
-                "repository": {"type": "string"},
+                "repository": {"type": "string", "description": "One of the project's repositories, by its path (\".\" is the project folder itself), never a folder inside one: keep to a folder with glob (\"apps/front/**\"). Left out: the place's top."},
                 "glob": {"type": "string", "description": "Only the files it matches: on the name alone without a /, ** for any folders."},
                 "cursor": {"type": "string", "description": "The cursor a stopped search gave, path:line."}
             }, "required": ["pattern"], "additionalProperties": false})
@@ -172,7 +173,7 @@ const SERVED: [Definition; 28] = [
         schema: || {
             json!({"type": "object", "properties": {
                 "path": {"type": "string"},
-                "repository": {"type": "string"},
+                "repository": {"type": "string", "description": "One of the project's repositories, by its path (\".\" is the project folder itself), never a folder inside one: that goes in path. Left out: the place's top."},
                 "content": {"type": "string", "description": "The whole new content."},
                 "why": {"type": "string", "description": "One sentence: why this write."}
             }, "required": ["path", "content"], "additionalProperties": false})
@@ -191,7 +192,7 @@ const SERVED: [Definition; 28] = [
         schema: || {
             json!({"type": "object", "properties": {
                 "path": {"type": "string"},
-                "repository": {"type": "string"},
+                "repository": {"type": "string", "description": "One of the project's repositories, by its path (\".\" is the project folder itself), never a folder inside one: that goes in path. Left out: the place's top."},
                 "edits": {"type": "array", "minItems": 1, "maxItems": 50, "items": {
                     "type": "object", "properties": {
                         "old": {"type": "string", "minLength": 1, "description": "The text to replace, appearing once."},
@@ -219,7 +220,7 @@ const SERVED: [Definition; 28] = [
                 "action": {"type": "string", "enum": ["list", "show", "add", "edit", "remove"]},
                 "name": {"type": "string"},
                 "line": {"type": "string", "description": "add, edit: one command line, never run by a shell."},
-                "repository": {"type": ["string", "null"], "description": "add, edit: where it runs; the place's top when left out or null."},
+                "repository": {"type": ["string", "null"], "description": "add, edit: a repository of the project, by its path (\".\" is the project folder itself), never a folder inside one; the place's top when left out or null."},
                 "serve": {"type": "boolean", "description": "It keeps running."},
                 "check": {"type": "boolean", "description": "Tests, lint."},
                 "read_only": {"type": "boolean", "description": "It changes nothing."},
@@ -254,7 +255,7 @@ const SERVED: [Definition; 28] = [
             json!({"type": "object", "properties": {
                 "task": {"type": "string", "description": "A task of the project (tasks lists them)."},
                 "line": {"type": "string", "description": "One command line, split on spaces, quotes kept whole."},
-                "repository": {"type": "string", "description": "Where it runs; the place's top by default."},
+                "repository": {"type": "string", "description": "A repository of the project, by its path (\".\" is the project folder itself), never a folder inside one: a program takes its folder as an argument. The place's top by default."},
                 "timeout": {"type": "integer", "minimum": 1, "maximum": 600},
                 "notify": {"type": "string", "enum": ["ready"], "description": "A task that says when it is ready: you are told when it is, or when it ends before."},
                 "why": {"type": "string", "description": "One sentence: why this run."}
@@ -315,18 +316,18 @@ const SERVED: [Definition; 28] = [
     Definition {
         name: "forge",
         title: "Pull requests",
-        description: "The pull requests of the project's repositories on their forge, through \
-            the user's own gh or bkt (no forge sign-in here: never run them). list: by state \
-            (open by default) and branch, as last read. show: a workspace's branch's (yours; in main, name \
+        description: "Pull requests and CI of the project's repositories, through the user's \
+            own gh or bkt (no forge sign-in here: never run them). list: by state (open by \
+            default) and branch, as last read. show: a workspace's branch's (yours; in main, name \
             it), or number's, with checks (the log's end of each failed job), review and comment \
             counts; detail full adds texts. Writes, judged, answered at once, the result maybe \
             later: create, merge (method, squash by default; refused with no check, while checks \
             fail or a review asks for changes unless waive gives the user's words) and checks \
             (re-run failed) act on a workspace's branch; comment, edit, close (comment first), \
-            reopen on number. subscribe: the next events of a workspace's pull request wakes you \
-            once, by a delivery (from people: no bot nor agent; minutes: sized by CI, else 60); \
-            unsubscribe. CI: pipelines, runs, run_view, run_logs; judged run, stop, step. \
-            {\"action\": \"create\", \"repository\": \"api\", \"title\": \
+            reopen on number. subscribe: a workspace's pull request's next events wake you once, \
+            by a delivery; unsubscribe. CI: pipelines lists what can be run; run starts one by \
+            name (custom: <name>) with its variables; runs, run_view, run_logs read; run, stop, \
+            step judged. {\"action\": \"create\", \"repository\": \"api\", \"title\": \
             \"fix: ...\", \"body\": \"...\"}",
         read_only: false,
         idempotent: false,
@@ -335,21 +336,24 @@ const SERVED: [Definition; 28] = [
             json!({"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["list", "show", "subscribe", "unsubscribe", "create", "comment", "edit", "merge", "checks", "close", "reopen", "pipelines", "runs", "run_view", "run_logs", "run", "stop", "step"]},
                 "workspace": {"type": "string", "description": "Yours when left out; in main, name it."},
-                "repository": {"type": "string", "description": "By path; all of the place's when left out (list, show)."},
+                "repository": {"type": "string", "description": "A repository of the project, by its path (\".\" is the project folder itself), never a folder inside one; all of the place's when left out (list, show); the only one is taken without being named."},
                 "number": {"type": "integer", "minimum": 1, "description": "show, comment, edit: a pull request."},
                 "state": {"type": "string", "enum": ["open", "closed", "merged", "all"]},
                 "branch": {"type": "string", "description": "list: its source branch."},
                 "detail": {"type": "string", "enum": ["short", "full"]},
-                "title": {"type": "string"},
+                "fresh": {"type": "boolean", "description": "show: read the pull request again; one read in the last 30 s is given again otherwise (detail full always reads)."},
+                "title": {"type": "string", "description": "create, edit: the pull request's title. create needs the branch pushed first (git push -u origin <branch>)."},
                 "body": {"type": "string", "description": "create, edit: description; comment: the comment."},
                 "draft": {"type": "boolean"},
                 "comment": {"type": "string", "description": "close, reopen: posted on the pull request first."},
                 "delete_branch": {"type": "boolean", "description": "close: also delete the pull request's branch, unless a workspace is on it or it comes from a fork."},
                 "waive": {"type": "string", "description": "merge: the user's words letting a blocked pull request be merged; held for them."},
                 "method": {"type": "string", "enum": ["squash", "merge", "rebase"], "description": "merge: squash when left out."},
+                "message": {"type": "string", "description": "merge by squash: the squashed commit's message, its subject on the first line; the forge's own when left out."},
                 "events": {"type": "array", "items": {"enum": crate::forge::EVENTS}},
-                "from": {"enum": crate::subscriptions::FROM},
-                "minutes": {"type": "integer", "minimum": 1, "maximum": crate::subscriptions::LONGEST_MINUTES},
+                "from": {"enum": crate::subscriptions::FROM, "description": "subscribe: whose reviews and comments count: anyone (the default), or people (no bot nor agent)."},
+                "minutes": {"type": "integer", "minimum": 1, "maximum": crate::subscriptions::LONGEST_MINUTES, "description": "subscribe: how long it waits; sized by CI when left out, else 60."},
+                "session": {"type": "string", "description": "unsubscribe: a session you follow, by its agent id, to stop following it."},
                 "pipeline": {"type": "string", "description": "run: as pipelines lists it (Bitbucket default, custom: <name>, branches: <pattern>; GitHub a workflow's file)."},
                 "variables": {"type": "array", "description": "run: Bitbucket variables, GitHub inputs.", "items": {"type": "object", "properties": {
                     "key": {"type": "string"}, "value": {"type": "string"}, "secured": {"type": "boolean"}
@@ -363,39 +367,46 @@ const SERVED: [Definition; 28] = [
     Definition {
         name: "tickets",
         title: "Tickets",
-        description: "The tickets of the project's tracker (GitHub issues #123, Jira ABC-123), \
-            through the user's own gh or acli (no sign-in here: never run them). list: every \
-            ticket of a state (open by default), by label and assignee, in one call, as the \
-            daemon last read them (it says when); search: the same, with words of the title; \
-            show: a workspace's linked ticket (yours; in main, name workspace) or ticket, read \
-            now, detail full adds the comments. Writes, judged, answered at once, the result \
-            maybe later: create, comment, edit, close, reopen, status (Jira moves a work item, \
-            GitHub its board column). subscribe: the next events of a ticket wake you once, by \
-            a delivery (from people: no bot nor agent; minutes: 60 by default); unsubscribe. \
-            {\"action\": \"comment\", \"ticket\": \"#12\", \"body\": \"...\"}",
+        description: "The tickets of the project's tracker (GitHub #123, Jira ABC-123), through the user's own \
+            gh or acli (never run them). list, search (title words): the tickets of a state (open by \
+            default), by label and assignee, as last read; show: a workspace's linked ticket (in \
+            main, name workspace) or ticket, read now, with its links; detail full adds the \
+            comments, with the id of those you posted; types: a Jira project's work item types; \
+            link_types: the kinds of link. Writes, judged, answered at once, the result maybe later: \
+            create, comment, edit, close, reopen, status, link and unlink (ticket kind other: ABC-2 \
+            blocks ABC-1), comment_edit and comment_delete (your own comments only). Nothing is \
+            assigned unless you ask: assignee \"@me\" gives it to the user (Jira create, edit; null \
+            on edit removes it; GitHub edit: assignees). subscribe: the next events of a ticket wake you once (from people: no bot nor agent; \
+            minutes: 60 by default); unsubscribe. {\"action\": \"comment\", \"ticket\": \"#12\", \
+            \"body\": \"...\"}",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "search", "show", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status"]},
+                "action": {"type": "string", "enum": ["list", "search", "show", "types", "link_types", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "sprint"]},
                 "ticket": {"type": "string", "description": "#123 or ABC-123; the workspace's when left out."},
                 "workspace": {"type": "string"},
                 "query": {"type": "string", "description": "search: words."},
                 "state": {"type": "string", "enum": ["open", "closed", "all"]},
                 "label": {"type": "string"},
-                "assignee": {"type": "string"},
+                "assignee": {"type": ["string", "null"], "description": "list, search: only those assigned to them. create, edit on Jira: whom to assign, \"@me\" (the user signed in to acli), an email or an account id; edit: null removes the assignee."},
                 "detail": {"type": "string", "enum": ["short", "full"]},
+                "fresh": {"type": "boolean", "description": "show: read the ticket again; one read in the last 30 s is given again otherwise (detail full always reads)."},
                 "title": {"type": "string"},
-                "body": {"type": "string", "description": "create, edit: description; comment: the comment."},
+                "body": {"type": "string", "description": "create, edit: description; comment, comment_edit: the comment. Markdown, converted for Jira."},
                 "labels": {"type": "array", "items": {"type": "string"}, "description": "create, edit: labels to add (GitHub)."},
                 "reason": {"enum": ["completed", "not planned"], "description": "close: completed or not planned (GitHub)."},
                 "remove_labels": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to remove (GitHub)."},
-                "assignees": {"type": "array", "items": {"type": "string"}, "description": "edit: logins to add (GitHub)."},
+                "assignees": {"type": "array", "items": {"type": "string"}, "description": "edit: logins to add (GitHub), \"@me\" for the user."},
                 "remove_assignees": {"type": "array", "items": {"type": "string"}, "description": "edit: logins to remove (GitHub)."},
                 "status": {"type": "string", "description": "status: its name."},
-                "project": {"type": "string", "description": "create on Jira: the tracker's project; status: the board."},
-                "type": {"type": "string", "description": "create on Jira: work item type."},
+                "other": {"type": "string", "description": "link, unlink: the other ticket. The link reads ticket, kind, other: ABC-2 blocks ABC-1 is ticket ABC-2, kind blocks, other ABC-1."},
+                "kind": {"type": "string", "description": "link, unlink: a kind link_types lists (blocks, is blocked by, relates to; GitHub: parent of, sub-task of)."},
+                "comment": {"type": "string", "description": "comment_edit, comment_delete: the id show (detail full) gives a comment an agent posted; no one else's."},
+                "sprint": {"type": "string", "description": "sprint: refused, acli cannot do it."},
+                "project": {"type": "string", "description": "create, types on Jira: the tracker's project; status: the board."},
+                "type": {"type": "string", "description": "create on Jira: work item type, one of those types lists."},
                 "events": {"type": "array", "items": {"enum": crate::tickets::EVENTS}},
                 "from": {"enum": crate::subscriptions::FROM},
                 "minutes": {"type": "integer", "minimum": 1, "maximum": crate::subscriptions::LONGEST_MINUTES}
@@ -499,8 +510,10 @@ const SERVED: [Definition; 28] = [
         title: "The project's workspaces",
         description: "The project's workspaces. list and show read them. A root's writes, \
             judged: create makes one (worktrees, then setup, judged as a run of each step; to \
-            resume a branch, name it), prepare resumes a failed setup, link_ticket links a \
-            ticket (null unlinks); remove, always held for the user, its request saying what \
+            resume a branch, name it; name new ones by the repository's naming convention), prepare resumes a failed setup, link_ticket links a \
+            ticket (null unlinks), rename_branch {branch, repository?} renames the workspace's \
+            branch in each of its repositories (or the one named), only while no remote nor pull \
+            request has it and the workspace did not resume it; remove, always held for the user, its request saying what \
             would be lost: yours too once its work is done, your commands in it stopped, and you \
             go on in main. name: yours when left out, but for create. To work on another branch in this workspace, switch with git: the \
             workspace follows the branch its worktrees are on. {\"action\": \"create\", \
@@ -510,10 +523,11 @@ const SERVED: [Definition; 28] = [
         destructive: true,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "show", "create", "prepare", "link_ticket", "remove"]},
+                "action": {"type": "string", "enum": ["list", "show", "create", "prepare", "link_ticket", "rename_branch", "remove"]},
                 "name": {"type": "string"},
                 "repositories": {"type": "array", "items": {"type": "string"}, "description": "create: by path."},
-                "branch": {"type": "string", "description": "create: <branch prefix>/<name> when left out; an existing branch is checked out."},
+                "branch": {"type": "string", "description": "create: give it when the repository has a naming convention (its AGENTS.md, CONTRIBUTING, or the branches it already has to read), with the ticket's key when the workspace has a ticket (fix/ABC-12-login). Left out, <branch prefix>/<name> is the fallback (the name alone when the project has no prefix). An existing branch is checked out. rename_branch: the new name."},
+                "repository": {"type": "string", "description": "rename_branch: by path; every repository of the workspace when left out."},
                 "ticket": {"type": ["string", "null"], "description": "#123 or ABC-123."}
             }, "required": ["action"], "additionalProperties": false})
         },
@@ -542,17 +556,17 @@ const SERVED: [Definition; 28] = [
         name: "agent_launch",
         title: "Start a session, or launch a child",
         description: "Work that belongs in a workspace is a session for the user: root: true \
-            with workspace (an existing one) or new_workspace (made for it, repositories picks \
-            them), judged; theirs, not your child, the brief its first message; you write to it, \
+            with workspace (existing; main is the project folder) or new_workspace (made \
+            for it, repositories picks them), judged; theirs, not your child, the brief its first \
+            message; follow (required): true wakes you when each turn ends; you write to it, \
             and it answers you, with session_send. A root only. Without root: a child agent on \
             one precise task, in your own place (workspace and new_workspace are refused), \
             answered at once with its agent_id; it works on its own and you are told when it \
             reports, asks, fails, is stuck or idles, so never poll. The brief is all it knows: \
-            the task, what to read, the checks, the deliverable. provider: yours when left out; \
-            a refusal names the ready ones. Only a root has this tool, never a child; a \
-            child launch is refused above the children cap. {\"title\": \"Fix login\", \"brief\": \"...\", \"root\": true, \
-            \"workspace\": \"login\"}; {\"title\": \"Add API\", \"brief\": \"...\", \"root\": \
-            true, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}; {\"title\": \
+            the task, what to read, the checks, the deliverable. A child launch is refused above \
+            the children cap. {\"title\": \"Fix login\", \"brief\": \"...\", \"root\": true, \
+            \"workspace\": \"login\", \"follow\": true}; {\"title\": \"Add API\", \"brief\": \
+            \"...\", \"root\": true, \"follow\": false, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}; {\"title\": \
             \"Write the tests\", \"brief\": \"...\"}",
         read_only: false,
         idempotent: false,
@@ -565,10 +579,11 @@ const SERVED: [Definition; 28] = [
                 "model": {"type": "string", "description": "The model; the provider's default when left out."},
                 "effort": {"type": "string", "description": "The model's effort; its default when left out."},
                 "role": {"type": "string", "enum": ["worker", "lead"], "description": "worker by default."},
-                "workspace": {"type": "string", "description": "With root: an existing workspace of the project, for the session to work in. A child works in your place."},
+                "workspace": {"type": "string", "description": "With root: an existing workspace of the project, for the session to work in; main is the project folder. A child works in your place."},
                 "new_workspace": {"type": "string", "description": "With root: the name of a new workspace to make for the session. Not with workspace."},
                 "repositories": {"type": "array", "items": {"type": "string"}, "description": "With new_workspace: its repositories, by path; the project's when left out."},
-                "root": {"type": "boolean", "description": "A session for the user, in a workspace or your place, not a child."}
+                "root": {"type": "boolean", "description": "A session for the user, in a workspace or your place, not a child."},
+                "follow": {"type": "boolean", "description": "Required with root: true, refused without it. true: you are woken at each end of a turn of the session (and when it ends), with its last message. false: you are told nothing of it."}
             }, "required": ["title", "brief"], "additionalProperties": false})
         },
     },
@@ -651,7 +666,9 @@ const SERVED: [Definition; 28] = [
         description: "Says you are done: your report goes at once to your parent (to the user for \
             a root), and a child's session ends with this turn. Give the result, each point done \
             or skipped and why, what was not verified, open questions. Call it once, as your \
-            last action.",
+            last action. A question left in a report is a follow-up, not a wait: a decision \
+            only the user can take goes through ask_user (ask_parent for a child), a question \
+            about the brief to the agent that started your session, with session_send.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -666,7 +683,10 @@ const SERVED: [Definition; 28] = [
         title: "Ask the user",
         description: "Puts a question to the user. It does not wait: the answer comes later as a \
             message. Go on with what does not depend on it, or end your turn saying what you \
-            wait for.",
+            wait for. What goes here is a decision only the user can take (commit, push, scope, a \
+            choice): a question about the brief or its context goes to the agent that started \
+            your session, with session_send. A question left in a report or a last message is a \
+            follow-up, not a wait.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -681,7 +701,8 @@ const SERVED: [Definition; 28] = [
         title: "Ask your parent",
         description: "Puts a question to the agent that launched you. It does not wait: the \
             answer comes later as [flottille:parent]. Go on with what does not depend on it, or \
-            end your turn saying what you wait for.",
+            end your turn saying what you wait for. What you need from your parent goes here, \
+            never in a report or a last message: that is a follow-up, not a wait.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -715,7 +736,10 @@ const SERVED: [Definition; 28] = [
         description: "Writes to a session you started (agent_launch with root), or to the agent \
             that started yours. It does not wait: it reaches it on its next tool result, or as \
             a new turn, labelled with your name; its answer comes later as [flottille:session]. \
-            Judged, as a write is. Your children are written to with agent_send.",
+            Judged, as a write is. Your children are written to with agent_send. A question \
+            about the brief or its context to the agent that started your session goes here; a \
+            decision only the user can take goes through ask_user, and one left in a last \
+            message is a follow-up, not a wait.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -1117,13 +1141,15 @@ impl Server {
     /// A new token for the agent, revoking the one it had; `takes` says whether its agent can
     /// take tools its role gains while it runs. The grant holds the tools its process was started
     /// with; it serves `stored`, those its agent has now: a change of its project announced
-    /// since its process read them found no token to give them to. The token, and whether its
-    /// session runs an older list, when it does from the start.
+    /// since its process read them found no token to give them to. `newer`: its agent's last
+    /// process was given another list (a new build), which it is told of. The token, and whether
+    /// its session runs an older list, when it does from the start.
     pub fn mint(
         &self,
         grant: Grant,
         takes: bool,
         stored: Vec<&'static str>,
+        newer: bool,
     ) -> std::io::Result<(String, Option<bool>)> {
         let mut bytes = [0u8; 32];
         std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
@@ -1144,6 +1170,9 @@ impl Server {
         };
         let mut grant = Arc::new(grant);
         let outdated = notice.change(&mut grant, stored);
+        if newer {
+            notice.changed += 1;
+        }
         tokens.notices.insert(agent, notice);
         tokens.grants.insert(digest, grant);
         Ok((token, outdated))
@@ -1289,19 +1318,7 @@ pub fn grant_of(daemon: &Daemon, agent: &Agent) -> Result<Grant, String> {
                 .read(|store| store.workspace(&project.name, name))
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("project {} has no workspace named {name}", project.name))?;
-            Place {
-                project: project.name.clone(),
-                workspace: Some(name.clone()),
-                root: agent.folder.clone(),
-                repositories: workspace
-                    .repositories
-                    .iter()
-                    .map(|r| (r.path.clone(), workspace.folder_of(&r.path)))
-                    .collect(),
-                branch: workspace.branch.clone(),
-                variables: workspace.variables.clone(),
-                home: std::env::var_os("HOME").map(Into::into),
-            }
+            Place::of_workspace(&workspace, agent.folder.clone())
         }
         None => Place::main(&project, agent.folder.clone()),
     };
@@ -1379,14 +1396,116 @@ pub fn mint(daemon: &Daemon, grant: Grant, provider: &Provider) -> Result<String
         Ok(Some(stored)) => served(provider, &stored.tools),
         _ => grant.tools.clone(),
     };
+    let given = Given::of(&stored);
+    // An agent whose last process was given none (made by a build that kept none) is told
+    // nothing: there is nothing to compare with.
+    let before = daemon
+        .read(|store| store.agent_tools_given(&agent))
+        .ok()
+        .flatten()
+        .and_then(|before| serde_json::from_str::<Given>(&before).ok());
+    let newer = before.as_ref().filter(|b| b.digest != given.digest);
     let (token, outdated) = daemon
         .mcp
-        .mint(grant, provider.takes_new_tools, stored)
+        .mint(grant, provider.takes_new_tools, stored, newer.is_some())
         .map_err(|e| format!("cannot make the agent's token: {e}"))?;
     if let Some(outdated) = outdated {
         say_outdated(daemon, &agent, outdated);
     }
+    // Its conversation still holds what it said of its old tools: an agent that does not list
+    // them again reads what changed with its next turn.
+    if let Some(before) = newer
+        && !provider.lists_tools_again
+        && let Some(changes) = given.since(before)
+    {
+        deliveries::queue(daemon, &agent, "tools", None, &changes);
+    }
+    let kept = serde_json::to_string(&given).expect("a list given is JSON");
+    let kept = daemon.write(|store| {
+        store.set_agent_tools_given(&agent, &kept)?;
+        Ok(((), None))
+    });
+    if let Err(error) = kept {
+        eprintln!("flottille daemon: agent {agent}: its tools given: {error}");
+    }
     Ok(token)
+}
+
+/// The tool list a process is given (`docs/tools.md`, "When the tools change"), kept with its
+/// agent: a digest of the tools as they are listed (names, schemas, descriptions), and the
+/// actions of each.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Given {
+    digest: String,
+    actions: BTreeMap<String, Vec<String>>,
+}
+
+impl Given {
+    fn of(tools: &[&'static str]) -> Given {
+        let definitions: Vec<&Definition> =
+            tools.iter().filter_map(|name| definition(name)).collect();
+        let listed: Vec<Tool> = definitions.iter().map(|d| tool_of(d, true)).collect();
+        let listed = serde_json::to_string(&listed).expect("tools are JSON");
+        let actions = definitions
+            .iter()
+            .map(|definition| {
+                let schema = (definition.schema)();
+                let actions = schema["properties"]["action"]["enum"]
+                    .as_array()
+                    .map(|all| all.iter().filter_map(Value::as_str).map(str::to_owned))
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                (definition.name.to_owned(), actions)
+            })
+            .collect();
+        Given {
+            digest: files::sha256(listed.as_bytes()),
+            actions,
+        }
+    }
+
+    /// What changed since `before`: a line for each tool gained, lost, or whose actions changed;
+    /// `None` when only descriptions or schemas did.
+    fn since(&self, before: &Given) -> Option<String> {
+        let mut lines = Vec::new();
+        for (tool, now) in &self.actions {
+            match before.actions.get(tool) {
+                None => lines.push(format!("- {tool}: new")),
+                Some(had) => {
+                    let missing = |list: &[String], other: &[String]| -> Vec<String> {
+                        list.iter()
+                            .filter(|a| !other.contains(a))
+                            .cloned()
+                            .collect()
+                    };
+                    let (added, removed) = (missing(now, had), missing(had, now));
+                    let mut said = Vec::new();
+                    if !added.is_empty() {
+                        said.push(format!("added {}", added.join(", ")));
+                    }
+                    if !removed.is_empty() {
+                        said.push(format!("removed {}", removed.join(", ")));
+                    }
+                    if !said.is_empty() {
+                        lines.push(format!("- {tool}: {}", said.join("; ")));
+                    }
+                }
+            }
+        }
+        for tool in before.actions.keys() {
+            if !self.actions.contains_key(tool) {
+                lines.push(format!("- {tool}: gone"));
+            }
+        }
+        (!lines.is_empty()).then(|| {
+            format!(
+                "Flottille was updated: your tools changed since you last read them. They are as \
+                 listed now, whatever was said of them before:\n{}",
+                lines.join("\n")
+            )
+        })
+    }
 }
 
 /// The agent's token no longer works: its process is gone (`Server::revoke`).
@@ -1813,6 +1932,16 @@ fn cut_long(
     }
 }
 
+tokio::task_local! {
+    /// The run the call in progress started, for the developer log's line of the call to name.
+    static RUN_STARTED: Mutex<Option<String>>;
+}
+
+/// Says that the call in progress started, or joined, this run.
+pub fn started_run(id: &str) {
+    let _ = RUN_STARTED.try_with(|run| *run.lock().unwrap() = Some(id.to_owned()));
+}
+
 async fn played(
     daemon: &Arc<Daemon>,
     grant: &Arc<Grant>,
@@ -1821,7 +1950,41 @@ async fn played(
     key: Option<&str>,
     cancelled: CancellationToken,
 ) -> (String, bool) {
+    RUN_STARTED
+        .scope(
+            Mutex::default(),
+            played_in(daemon, grant, tool, args, key, cancelled),
+        )
+        .await
+}
+
+async fn played_in(
+    daemon: &Arc<Daemon>,
+    grant: &Arc<Grant>,
+    tool: &str,
+    args: Value,
+    key: Option<&str>,
+    cancelled: CancellationToken,
+) -> (String, bool) {
     let started = Instant::now();
+    let replaced = daemon
+        .read(|store| store.agent(&grant.agent))
+        .ok()
+        .flatten()
+        .is_some_and(|agent| agent.epoch != grant.epoch);
+    let removed = crate::workspaces::being_removed(daemon, &grant.agent, tool);
+    // A line that only prints part of a file is the read it is, served and recorded as such, once
+    // nothing refuses the call as the run it was sent as.
+    let read = if replaced || removed.is_some() {
+        None
+    } else {
+        crate::read_commands::as_read(daemon, grant, tool, &args).await
+    };
+    let (tool, args, said) = match read {
+        Some((args, said)) => ("fs_read", args, Some(said)),
+        None => (tool, args, None),
+    };
+    let reads = Reads::default();
     let recorded = record_of(&args, &grant.place);
     let reads_a_result = reads_a_result(tool, &args);
     let mut verdict = None;
@@ -1831,14 +1994,9 @@ async fn played(
     let mut held: Option<(&'static str, Vec<String>)> = None;
     let mut judged_log = None;
     let mut request = None;
-    let replaced = daemon
-        .read(|store| store.agent(&grant.agent))
-        .ok()
-        .flatten()
-        .is_some_and(|agent| agent.epoch != grant.epoch);
     let outcome = if replaced {
         Outcome::Refused(REPLACED.into())
-    } else if let Some(why) = crate::workspaces::being_removed(daemon, &grant.agent, tool) {
+    } else if let Some(why) = removed {
         Outcome::Refused(format!("refused: {why}"))
     } else if grant.tools.contains(&tool) {
         // A write of the project shows what it changes; one that cannot be done is refused
@@ -1850,7 +2008,7 @@ async fn played(
                 verdict = Some(decided.word());
                 match decided {
                     gate::Verdict::Allow => {
-                        perform(daemon, grant, tool, args, cancelled, None).await
+                        perform(daemon, grant, tool, args, cancelled, None, &reads).await
                     }
                     gate::Verdict::Deny(why) => Outcome::Refused(why),
                     gate::Verdict::Ask(ask) => {
@@ -1901,13 +2059,15 @@ async fn played(
                                     crate::actions::remove_losing(daemon, grant, args).await
                                 } else {
                                     let approved = Some(ask.class);
-                                    perform(daemon, grant, tool, args, cancelled, approved).await
+                                    perform(daemon, grant, tool, args, cancelled, approved, &reads)
+                                        .await
                                 }
                             }
                             Some(judged) if judged.verdict == "allow" => {
                                 verdict = Some("judged");
                                 let approved = Some(gate::Class::Judge);
-                                perform(daemon, grant, tool, args, cancelled, approved).await
+                                perform(daemon, grant, tool, args, cancelled, approved, &reads)
+                                    .await
                             }
                             judged => {
                                 let (outcome, number) = approvals::ask(
@@ -1929,11 +2089,16 @@ async fn played(
             grant.tools.join(", ")
         ))
     };
+    // What a `run` line was answered as, said before what it read.
+    let outcome = match (outcome, said) {
+        (Outcome::Done(text), Some(said)) => Outcome::Done(format!("{said}\n{text}")),
+        (outcome, _) => outcome,
+    };
     let (outcome, cut) = cut_long(daemon, grant, tool, reads_a_result, outcome);
     if logging {
         log_call(
             daemon, grant, tool, key, &recorded, verdict, held, judged_log, &outcome, request,
-            started,
+            started, &reads,
         );
     }
     record(
@@ -1978,6 +2143,7 @@ fn log_call(
     outcome: &Outcome,
     request: Option<u64>,
     started: Instant,
+    reads: &Reads,
 ) {
     let (class, reasons) = match held {
         Some((class, reasons)) => (Some(class), reasons),
@@ -1999,8 +2165,10 @@ fn log_call(
             "gate": verdict, "allowed_by": allowed_by(verdict), "class": class,
             "reasons": reasons, "judge": judge,
             "outcome": outcome.word(), "request": request, "error": error,
+            "run": RUN_STARTED.try_with(|run| run.lock().unwrap().clone()).ok().flatten(),
             "result_chars": text.chars().count(),
-            "duration_ms": started.elapsed().as_millis() as u64}),
+            "duration_ms": started.elapsed().as_millis() as u64,
+            "reads": reads.to_json()}),
         &grant.place.secret_values(),
     );
 }
@@ -2238,7 +2406,18 @@ pub async fn performed(
     let cancelled = CancellationToken::new();
     let outcome = match discarding {
         Some(losses) => crate::actions::remove_discarding(daemon, grant, args, &losses).await,
-        None => perform(daemon, grant, tool, args, cancelled, Some(class)).await,
+        None => {
+            perform(
+                daemon,
+                grant,
+                tool,
+                args,
+                cancelled,
+                Some(class),
+                &Reads::default(),
+            )
+            .await
+        }
     };
     let (outcome, cut) = cut_long(daemon, grant, tool, reads_a_result, outcome);
     let verdict = Some("allow");
@@ -2338,16 +2517,19 @@ async fn perform(
     args: Value,
     cancelled: CancellationToken,
     approved: Option<gate::Class>,
+    reads: &Reads,
 ) -> Outcome {
     if !matches!(tool, "web" | "tickets" | "forge") {
         return performed_once(daemon, grant, tool, args, cancelled, approved).await;
     }
     // What a page, a search, a ticket or a pull request showed the agent, from its data and
-    // never from the call's own arguments, it may read with `web`.
-    let (outcome, shown) = crate::web::showing(performed_once(
-        daemon, grant, tool, args, cancelled, approved,
-    ))
-    .await;
+    // never from the call's own arguments, it may read with `web`. The forge and tracker reads
+    // it made are counted for the developer log.
+    let (outcome, shown) = reads
+        .counting(crate::web::showing(performed_once(
+            daemon, grant, tool, args, cancelled, approved,
+        )))
+        .await;
     if let Outcome::Done(_) = &outcome {
         daemon.mcp.seen.saw(&grant.agent, shown);
     }
@@ -2704,6 +2886,48 @@ mod tests {
     }
 
     #[test]
+    fn the_workspace_create_description_says_to_follow_the_repository_s_naming() {
+        let workspace = definition("workspace").unwrap();
+        let tool = serde_json::to_value(tool_of(workspace, true)).unwrap();
+        let branch = tool["inputSchema"]["properties"]["branch"]["description"]
+            .as_str()
+            .unwrap();
+        for said in [
+            "repository's naming convention",
+            "AGENTS.md",
+            "CONTRIBUTING",
+            "branches it already has",
+            "ticket's key",
+            "fallback",
+        ] {
+            assert!(
+                workspace.description.contains(said) || branch.contains(said),
+                "{said:?} in {} / {branch}",
+                workspace.description
+            );
+        }
+        // The limit every description stays under.
+        assert!(
+            workspace.description.len() < 1000,
+            "{}",
+            workspace.description.len()
+        );
+    }
+
+    #[test]
+    fn the_forge_description_says_what_the_ci_actions_do() {
+        let forge = definition("forge").unwrap().description;
+        for said in [
+            "pipelines lists what can be run",
+            "run starts one by name (custom: <name>) with its variables",
+        ] {
+            assert!(forge.contains(said), "{said:?} in {forge}");
+        }
+        // The limit every description stays under.
+        assert!(forge.len() < 1000, "{}", forge.len());
+    }
+
+    #[test]
     fn the_texts_cut_to_fit_the_old_cap_are_whole_again() {
         // What #224, #225, #233, #255 and #259 took out of other tools to stay under a number
         // nobody chose (#264): what is still true is said again.
@@ -2775,7 +2999,7 @@ mod tests {
             (
                 "agent_launch",
                 None,
-                "{\"title\": \"Add API\", \"brief\": \"...\", \"root\": true, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}",
+                "{\"title\": \"Add API\", \"brief\": \"...\", \"root\": true, \"follow\": false, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}",
             ),
             (
                 "agent_launch",
@@ -2882,7 +3106,9 @@ mod tests {
     /// tools the same, and the token's digest.
     fn minted(takes: bool) -> (Server, String) {
         let server = Server::new(0);
-        let (token, outdated) = server.mint(grant(), takes, STARTED.to_vec()).unwrap();
+        let (token, outdated) = server
+            .mint(grant(), takes, STARTED.to_vec(), false)
+            .unwrap();
         assert_eq!(outdated, None);
         (server, files::sha256(token.as_bytes()))
     }
@@ -2898,7 +3124,7 @@ mod tests {
         // The process read its tools, then its project changed and found no token: the token is
         // made with the tools stored since.
         let server = Server::new(0);
-        let (token, outdated) = server.mint(grant(), false, GAINED.to_vec()).unwrap();
+        let (token, outdated) = server.mint(grant(), false, GAINED.to_vec(), false).unwrap();
         let digest = files::sha256(token.as_bytes());
         assert_eq!(
             outdated,
@@ -2909,7 +3135,7 @@ mod tests {
         assert!(server.outdated("a1"));
 
         let server = Server::new(0);
-        let (token, outdated) = server.mint(grant(), true, GAINED.to_vec()).unwrap();
+        let (token, outdated) = server.mint(grant(), true, GAINED.to_vec(), false).unwrap();
         let digest = files::sha256(token.as_bytes());
         assert_eq!(outdated, None);
         assert_eq!(server.current(&digest).unwrap().tools, GAINED);

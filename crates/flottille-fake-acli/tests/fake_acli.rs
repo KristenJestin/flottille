@@ -76,10 +76,17 @@ fn a_search_answers_the_scripted_items_up_to_its_limit_and_needs_its_jql() {
     let one = search(&["--jql", "project = ABC", "--json", "--limit", "1"]);
     let without_jql = search(&["--json"]);
 
-    let items: Value = serde_json::from_slice(&all.stdout).unwrap();
-    assert_eq!(items, json!([{"key": "ABC-2"}, {"key": "ABC-1"}]));
-    let items: Value = serde_json::from_slice(&one.stdout).unwrap();
-    assert_eq!(items, json!([{"key": "ABC-2"}]));
+    let keys = |output: &std::process::Output| -> Vec<String> {
+        let items: Value = serde_json::from_slice(&output.stdout).unwrap();
+        items
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["key"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(keys(&all), ["ABC-2", "ABC-1"]);
+    assert_eq!(keys(&one), ["ABC-2"]);
     assert_eq!(without_jql.status.code(), Some(2));
 }
 
@@ -104,6 +111,112 @@ fn the_fake_acli_refuses_a_field_search_does_not_allow() {
     );
     assert!(refused.stdout.is_empty());
     assert_eq!(allowed.status.code(), Some(0));
+}
+
+#[test]
+fn a_search_asked_only_the_key_answers_a_null_per_work_item_as_the_real_one() {
+    let dir = scripted(json!({"search": [{"key": "ABC-2"}, {"key": "ABC-1"}]}));
+    let search = |fields: &str| {
+        let output = fake(dir.path())
+            .args(["jira", "workitem", "search", "--jql", "project = ABC"])
+            .args(["--fields", fields, "--json"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+
+    assert_eq!(search("key"), json!([null, null]));
+    assert_eq!(search("key,summary")[1]["key"], "ABC-1");
+}
+
+#[test]
+fn a_search_prints_jira_s_issue_with_only_the_fields_asked_counts_and_pages() {
+    let item = |key: &str| {
+        json!({"key": key, "self": format!("https://example.atlassian.net/rest/api/3/issue/{key}"),
+            "fields": {"summary": "Log in", "status": {"name": "To Do"}}})
+    };
+    let dir = scripted(json!({"search": [item("ABC-1"), item("ABC-2"), item("ABC-3")], "page": 2}));
+    let search = |extra: &[&str]| {
+        let output = fake(dir.path())
+            .args([
+                "jira",
+                "workitem",
+                "search",
+                "--jql",
+                "project = ABC",
+                "--json",
+            ])
+            .args(extra)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        String::from_utf8(output.stdout).unwrap()
+    };
+
+    let found: Value = serde_json::from_str(&search(&["--fields", "key,summary"])).unwrap();
+    assert_eq!(
+        found.as_array().unwrap().len(),
+        2,
+        "a page without --paginate"
+    );
+    assert_eq!(found[0]["key"], "ABC-1");
+    assert!(found[0]["changelog"].is_null() && found[0]["id"].is_string());
+    let all: Value = serde_json::from_str(&search(&["--paginate", "--limit", "1000"])).unwrap();
+    assert_eq!(all.as_array().unwrap().len(), 3);
+    assert_eq!(
+        search(&["--count", "--paginate"]).trim(),
+        "✓ Number of work items in the search: 3"
+    );
+}
+
+#[test]
+fn a_search_prints_only_the_fields_it_was_asked_and_a_view_gives_updated() {
+    let item = json!({"key": "ABC-1", "self": "https://example.atlassian.net/rest/api/3/issue/1",
+        "fields": {"summary": "Log in", "status": {"name": "To Do"},
+            "updated": "2026-11-05T11:23:09.006+0100", "comment": {"comments": [], "total": 0}}});
+    let dir = scripted(json!({"search": [item.clone()], "items": {"ABC-1": item}}));
+    let run = |args: &[&str]| {
+        let output = fake(dir.path()).args(args).output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+
+    let found = run(&[
+        "jira",
+        "workitem",
+        "search",
+        "--jql",
+        "project = ABC",
+        "--json",
+        "--fields",
+        "key,summary",
+    ]);
+    assert_eq!(found[0]["fields"], json!({"summary": "Log in"}));
+    let all = run(&[
+        "jira",
+        "workitem",
+        "search",
+        "--jql",
+        "project = ABC",
+        "--json",
+    ]);
+    assert!(
+        all[0]["fields"]["updated"].is_string(),
+        "no --fields, the default is the script's"
+    );
+
+    let viewed = run(&[
+        "jira",
+        "workitem",
+        "view",
+        "ABC-1",
+        "--json",
+        "--fields",
+        "updated,comment",
+    ]);
+    assert_eq!(viewed["fields"]["updated"], "2026-11-05T11:23:09.006+0100");
+    assert!(viewed["fields"]["summary"].is_null());
 }
 
 #[test]
@@ -295,4 +408,48 @@ fn a_comment_created_shows_in_the_next_view_as_the_script_s_user_wrote_it() {
     assert_eq!(comments[0]["body"], "First");
     assert_eq!(comments[1]["author"]["displayName"], "Casey Example");
     assert_eq!(comments[1]["body"], "Second");
+}
+
+#[test]
+fn a_project_view_gives_the_scripted_types_and_a_creation_of_another_type_ends_with_1() {
+    let dir = scripted(json!({"types": {"ABC": ["Task", {"name": "Sub-task", "subtask": true}]}}));
+
+    let viewed = fake(dir.path())
+        .args(["jira", "project", "view", "--key", "ABC", "--json"])
+        .output()
+        .unwrap();
+    let unknown = fake(dir.path())
+        .args(["jira", "project", "view", "--key", "XYZ", "--json"])
+        .status()
+        .unwrap();
+    let create = |kind: &str, project: &str| {
+        fake(dir.path())
+            .args([
+                "jira",
+                "workitem",
+                "create",
+                "--project",
+                project,
+                "--summary",
+                "s",
+            ])
+            .args(["--type", kind, "--json"])
+            .status()
+            .unwrap()
+            .code()
+    };
+
+    let viewed: Value = serde_json::from_slice(&viewed.stdout).unwrap();
+    assert_eq!(
+        viewed["issueTypes"],
+        json!([{"name": "Task", "subtask": false}, {"name": "Sub-task", "subtask": true}])
+    );
+    assert_eq!(unknown.code(), Some(1));
+    assert_eq!(create("task", "ABC"), Some(0));
+    assert_eq!(create("Tâche", "ABC"), Some(1));
+    assert_eq!(
+        create("Tâche", "XYZ"),
+        Some(0),
+        "no types scripted, none checked"
+    );
 }

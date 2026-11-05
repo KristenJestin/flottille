@@ -7,22 +7,27 @@
 //! into the palette's, every other escape sequence dropped (`flottille_core::ansi`). The stored
 //! output is untouched.
 
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::f32::consts::FRAC_PI_2;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use flottille_core::ansi;
 use flottille_ui::color::mix;
-use flottille_ui::motion::{MODAL, PANEL};
+use flottille_ui::motion::{MODAL, Motion, PANEL};
 use flottille_ui::{
-    AgentState, Button, Icon, Item, Listing, Modal, Palette, StateIcon, Status, Toast, Type, fade,
-    hoverable, icon, palette, presence, section_label, space, tipped, toast,
+    AgentState, Button, Icon, Item, Listing, Modal, Palette, Skeleton, StateIcon, Status, Toast,
+    Type, awaiting, changing, fade, fold_frame, hoverable, icon, palette, presence, section_label,
+    space, tipped, tipped_when_cut, toast, turning,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, ClickEvent, Context, ElementId, Entity, FocusHandle, Hsla,
-    InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle, SharedString,
-    StatefulInteractiveElement, Styled, Task, TestSupportExt as _, WeakEntity, Window, div, px,
+    InteractiveElement, IntoElement, ParentElement, Pixels, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement, Styled, Task, TestSupportExt as _, Transformation, WeakEntity,
+    Window, div, px, radians,
 };
 use serde_json::Value;
 
@@ -226,6 +231,12 @@ impl CommandRow {
 
     pub fn running(&self) -> bool {
         self.state == "running"
+    }
+
+    /// A run of one of the project's tasks, not of a one-off line (`run {"line": …}`): the daemon
+    /// gives a run its task's name, and a line none.
+    pub fn is_task(&self) -> bool {
+        self.name.is_some()
     }
 
     /// `starting` or `ready` while it runs, for a task that says when it is ready.
@@ -437,10 +448,25 @@ pub struct Arranged<'a> {
     pub kept: Vec<&'a CommandRow>,
 }
 
-/// Sorts the rows of the section: the running ones, then the last ones to have finished.
+/// Sorts the task runs of the section: the running ones, then the last ones to have finished.
 pub fn arrange(rows: &[CommandRow]) -> Arranged<'_> {
-    let running = rows.iter().filter(|row| row.running()).collect();
-    let mut ended: Vec<&CommandRow> = rows.iter().filter(|row| !row.running()).collect();
+    arrange_of(rows, None)
+}
+
+/// [`arrange`] for the runs `agent` started, or for every agent's when none is given. A one-off
+/// line is left out: its card in the conversation is where it is seen.
+pub fn arrange_of<'a>(rows: &'a [CommandRow], agent: Option<&str>) -> Arranged<'a> {
+    let mine = |row: &&CommandRow| row.is_task() && agent.is_none_or(|agent| row.agent == agent);
+    let running = rows
+        .iter()
+        .filter(mine)
+        .filter(|row| row.running())
+        .collect();
+    let mut ended: Vec<&CommandRow> = rows
+        .iter()
+        .filter(mine)
+        .filter(|row| !row.running())
+        .collect();
     let ended_at = |row: &CommandRow| row.ended_at.unwrap_or(row.started_at);
     ended.sort_by_key(|row| std::cmp::Reverse((ended_at(row), row.started_at)));
     ended.truncate(KEPT_ENDED);
@@ -448,6 +474,65 @@ pub fn arrange(rows: &[CommandRow]) -> Arranged<'_> {
         running,
         kept: ended,
     }
+}
+
+/// How far the children behind a folded "N ended" row are unfolded: they stay drawn until the
+/// fold ends.
+pub(crate) struct EndedFold {
+    pub motion: Motion,
+    /// The children's height, measured while they are drawn.
+    pub height: Rc<Cell<Pixels>>,
+}
+
+impl EndedFold {
+    pub fn new() -> Self {
+        Self {
+            motion: Motion::settled(0.0),
+            height: Rc::new(Cell::new(px(0.))),
+        }
+    }
+
+    /// Unfolds or folds over [`PANEL`].
+    pub fn animate(&mut self, open: bool, now: Instant, reduce: bool) {
+        self.motion
+            .animate(if open { 1.0 } else { 0.0 }, PANEL, now, reduce);
+    }
+}
+
+/// The row that gathers what ended, under the Agents' and under the runs: a chevron that turns
+/// as its level folds, and `label`, which `said` names.
+pub(crate) fn ended_row(
+    id: ElementId,
+    said: SharedString,
+    label: impl IntoElement,
+    open: bool,
+    turn: f32,
+    p: Palette,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let row = div()
+        .id(id)
+        .aria_expanded(open)
+        .aria_label(said)
+        .h(px(28.))
+        .flex()
+        .items_center()
+        .gap(space::SM)
+        .px(space::SM)
+        .rounded(px(7.))
+        .cursor_pointer()
+        .text_size(px(12.))
+        .child(
+            icon(Icon::Chevron)
+                .size(px(11.))
+                .text_color(p.faint)
+                .with_transformation(Transformation::rotate(radians(-FRAC_PI_2 * (1.0 - turn)))),
+        )
+        .child(label)
+        .on_click(on_click);
+    hoverable(row, move |d, t| {
+        d.bg(p.hover.opacity(t)).text_color(mix(p.faint, p.text, t))
+    })
 }
 
 /// Who started a command: the task, then the agent as `names` calls it, or the user. The root
@@ -628,13 +713,24 @@ pub fn address_link(
 pub struct CommandList {
     page: Owner,
     rows: Vec<CommandRow>,
-    /// The rows as drawn: one that goes folds away before it is gone.
-    list: Listing<CommandRow>,
+    /// The agent whose runs are listed; none lists every agent's (the project page's).
+    agent: Option<String>,
+    /// The running runs as drawn: one that goes folds away before it is gone.
+    running: Listing<CommandRow>,
+    /// The ended runs as drawn, behind the `N ended` row.
+    ended: Listing<CommandRow>,
+    /// The `N ended` row is open.
+    open_ended: bool,
+    fold: EndedFold,
+    /// How many ended runs the row last said, drawn while it folds away.
+    ended_said: usize,
     /// How the tree names each agent.
     names: HashMap<String, String>,
     /// The spinner of each running command.
     spinners: HashMap<String, Entity<StateIcon>>,
     error: Option<SharedString>,
+    /// The daemon listed the commands once: until then the section waits as a skeleton.
+    known: bool,
     /// Draws the time again each second, while a command runs.
     ticker: Option<Task<()>>,
     renders: usize,
@@ -645,22 +741,55 @@ impl CommandList {
         Self {
             page: page.into(),
             rows: Vec::new(),
-            list: Listing::default(),
+            agent: None,
+            running: Listing::default(),
+            ended: Listing::default(),
+            open_ended: false,
+            fold: EndedFold::new(),
+            ended_said: 0,
             names: HashMap::new(),
             spinners: HashMap::new(),
             error: None,
+            known: false,
             ticker: None,
             renders: 0,
         }
     }
 
+    /// Lists the runs of `agent` only.
+    pub fn of_agent(mut self, agent: String) -> Self {
+        self.agent = Some(agent);
+        self
+    }
+
+    /// Every run of the session's tree, whoever started it and whatever it is.
     pub fn rows(&self) -> &[CommandRow] {
         &self.rows
     }
 
-    /// The rows listed, as the section sorts them now.
+    /// The runs listed, as the section sorts them now: the task runs of the agent shown.
     pub fn arranged(&self) -> Arranged<'_> {
-        arrange(&self.rows)
+        arrange_of(&self.rows, self.agent.as_deref())
+    }
+
+    /// The agent whose runs are listed changed: the other's runs fade in, and what ended is
+    /// folded again.
+    pub fn show_agent(&mut self, agent: &str, cx: &mut Context<Self>) {
+        if self.agent.as_deref() == Some(agent) {
+            return;
+        }
+        self.agent = Some(agent.to_owned());
+        self.open_ended = false;
+        self.fold = EndedFold::new();
+        cx.notify();
+    }
+
+    /// The `N ended` row opens or folds; the runs behind it come and go over [`PANEL`].
+    fn toggle_ended(&mut self, cx: &mut Context<Self>) {
+        self.open_ended = !self.open_ended;
+        let now = cx.background_executor().now();
+        self.fold.animate(self.open_ended, now, cx.reduce_motion());
+        cx.notify();
     }
 
     pub fn renders(&self) -> usize {
@@ -673,6 +802,11 @@ impl CommandList {
 
     /// What the daemon listed; nothing is drawn again when it is what was drawn.
     pub fn set(&mut self, rows: Vec<CommandRow>, cx: &mut Context<Self>) {
+        if !std::mem::replace(&mut self.known, true) && self.rows == rows {
+            // Nothing to list: the skeleton gives way to the empty section.
+            cx.notify();
+            return;
+        }
         if self.rows == rows {
             return;
         }
@@ -754,17 +888,21 @@ impl CommandList {
         let who = who(row, &self.names);
         let has_who = who.is_some();
         let time = seconds(row.elapsed_ms(now));
-        let line = |id: ElementId, text: String| {
-            div()
-                .id(id)
-                .mono(11.)
-                .text_color(p.faint)
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .aria_label(SharedString::from(text.clone()))
-                .child(SharedString::from(text))
-                .test_support()
+        let line = |id: ElementId, text: String, window: &mut Window, cx: &mut App| {
+            tipped_when_cut(
+                div()
+                    .id(id)
+                    .mono(11.)
+                    .text_color(p.faint)
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .aria_label(SharedString::from(text.clone()))
+                    .child(SharedString::from(text.clone())),
+                SharedString::from(text),
+                window,
+                cx,
+            )
         };
         let stop = (!ended).then(|| {
             let (page, run) = (self.page.clone(), run.clone());
@@ -800,7 +938,7 @@ impl CommandList {
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .child(
+                    .child(tipped_when_cut(
                         div()
                             .id(id("line"))
                             .mono(12.5)
@@ -809,9 +947,11 @@ impl CommandList {
                             .whitespace_nowrap()
                             .text_ellipsis()
                             .aria_label(SharedString::from(row.line.clone()))
-                            .child(SharedString::from(row.line.clone()))
-                            .test_support(),
-                    )
+                            .child(SharedString::from(row.line.clone())),
+                        SharedString::from(row.line.clone()),
+                        window,
+                        cx,
+                    ))
                     .child(
                         div()
                             .flex()
@@ -832,15 +972,19 @@ impl CommandList {
                                 .child("·")
                             })
                             .children(who.map(|who| {
-                                div()
-                                    .id(id("who"))
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .aria_label(SharedString::from(who.clone()))
-                                    .child(SharedString::from(who))
-                                    .test_support()
+                                tipped_when_cut(
+                                    div()
+                                        .id(id("who"))
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .aria_label(SharedString::from(who.clone()))
+                                        .child(SharedString::from(who.clone())),
+                                    SharedString::from(who),
+                                    window,
+                                    cx,
+                                )
                             }))
                             .children(has_who.then_some("·"))
                             .child(
@@ -857,7 +1001,7 @@ impl CommandList {
                     .child(presence(
                         id("last-presence"),
                         address.is_none() && !last.is_empty(),
-                        line(id("last"), last),
+                        line(id("last"), last, window, cx),
                     )),
             )
             .children(stop)
@@ -869,41 +1013,110 @@ impl CommandList {
 impl Render for CommandList {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
-        let arranged = arrange(&self.rows);
-        let entries: Vec<(String, CommandRow)> = arranged
-            .running
-            .iter()
-            .chain(&arranged.kept)
-            .map(|row| (row.run.clone(), (*row).clone()))
-            .collect();
+        let arranged = self.arranged();
+        let keyed = |rows: &[&CommandRow]| -> Vec<(String, CommandRow)> {
+            rows.iter()
+                .map(|row| (row.run.clone(), (*row).clone()))
+                .collect()
+        };
+        let (running, ended) = (keyed(&arranged.running), keyed(&arranged.kept));
         let at = cx.background_executor().now();
-        self.list.sync(entries, at, cx.reduce_motion());
+        let reduce = cx.reduce_motion();
+        self.running.sync(running, at, reduce);
+        self.ended.sync(ended, at, reduce);
+        let ended_count = self.ended.len();
+        if ended_count > 0 {
+            self.ended_said = ended_count;
+        }
+        // A folding row still has its runs until the fold ends.
+        let mut drawn_open = self.open_ended;
+        if self.fold.motion.is_running(at) {
+            window.request_animation_frame();
+            drawn_open = true;
+        } else {
+            self.fold.motion.settle(at);
+        }
         let p = palette(cx);
         let now = now_ms();
-        let present = !self.list.is_empty();
-        let listed: Vec<(String, CommandRow, flottille_ui::Placement)> = self
-            .list
-            .rows()
-            .map(|listed| {
-                (
-                    listed.key.to_owned(),
-                    listed.value.clone(),
-                    listed.placement,
-                )
-            })
-            .collect();
-        let rows: Vec<AnyElement> = listed
-            .into_iter()
-            .map(|(key, row, placement)| {
-                let content = self.run_row(&row, now, p, window, cx);
-                Item::new(
-                    ElementId::Name(format!("command-item-{key}").into()),
-                    placement,
-                    content,
-                )
-                .into_any_element()
-            })
-            .collect();
+        let present = !self.running.is_empty() || ended_count > 0;
+        let draw =
+            |this: &Self, listing: &Listing<CommandRow>, window: &mut Window, cx: &mut App| {
+                let listed: Vec<(String, CommandRow, flottille_ui::Placement)> = listing
+                    .rows()
+                    .map(|listed| {
+                        (
+                            listed.key.to_owned(),
+                            listed.value.clone(),
+                            listed.placement,
+                        )
+                    })
+                    .collect();
+                listed
+                    .into_iter()
+                    .map(|(key, row, placement)| {
+                        let content = this.run_row(&row, now, p, window, cx);
+                        Item::new(
+                            ElementId::Name(format!("command-item-{key}").into()),
+                            placement,
+                            content,
+                        )
+                        .into_any_element()
+                    })
+                    .collect::<Vec<AnyElement>>()
+            };
+        let running_rows = draw(self, &self.running, window, cx);
+        let ended_rows = match drawn_open {
+            true => draw(self, &self.ended, window, cx),
+            false => Vec::new(),
+        };
+        let ended_id = ElementId::Name("rail-runs-ended".into());
+        let turn = turning(ended_id.clone(), self.open_ended, window, cx);
+        let said = SharedString::from(format!("{} ended", self.ended_said));
+        let ended_block = presence(
+            "rail-runs-ended-block",
+            ended_count > 0,
+            div()
+                .flex()
+                .flex_col()
+                .child(ended_row(
+                    ended_id,
+                    said.clone(),
+                    changing("rail-runs-ended-count", said, |said| {
+                        div().child(said).into_any_element()
+                    }),
+                    self.open_ended,
+                    turn,
+                    p,
+                    cx.listener(|this, _, _, cx| this.toggle_ended(cx)),
+                ))
+                .when(drawn_open, |d| {
+                    d.child(fold_frame(
+                        "rail-runs-ended-children",
+                        self.open_ended,
+                        self.fold.motion.is_running(at),
+                        self.fold.motion.value(at),
+                        &self.fold.height,
+                        div().flex().flex_col().children(ended_rows),
+                    ))
+                }),
+        );
+        // Switching the agent shown fades the other's runs in.
+        let body = div()
+            .flex()
+            .flex_col()
+            .children(running_rows)
+            .child(ended_block)
+            .children(self.error.clone().map(|error| {
+                div()
+                    .id("rail-runs-error")
+                    .px(space::SM)
+                    .py(space::XS)
+                    .text_size(px(11.5))
+                    .text_color(p.fail)
+                    .child(error)
+                    .test_support()
+            }))
+            .into_any_element();
         let section = div()
             .id("rail-runs")
             .flex()
@@ -919,19 +1132,42 @@ impl Render for CommandList {
                     .child(rail_label("Runs", None, cx))
                     .test_support(),
             )
-            .children(rows)
-            .children(self.error.clone().map(|error| {
+            .child(changing(
+                "rail-runs-body",
+                self.agent.clone().unwrap_or_default(),
+                move |_| body,
+            ))
+            .test_support();
+        // Before the first listing the section is a skeleton: a run's row, which folds away when
+        // the session ran nothing.
+        let waiting = div()
+            .id("rail-runs-skeleton")
+            .flex()
+            .flex_col()
+            .border_t_1()
+            .border_color(p.line)
+            .pt(space::SM)
+            .pb(space::MD)
+            .child(
+                div().h(px(32.)).flex().items_center().child(
+                    Skeleton::new("rail-runs-skeleton-title")
+                        .w(px(40.))
+                        .h(px(10.)),
+                ),
+            )
+            .child(
                 div()
-                    .id("rail-runs-error")
                     .px(space::SM)
                     .py(space::XS)
-                    .text_size(px(11.5))
-                    .text_color(p.fail)
-                    .child(error)
-                    .test_support()
-            }))
+                    .child(Skeleton::new("rail-runs-skeleton-row").h(px(40.))),
+            )
             .test_support();
-        presence("rail-runs-presence", present, section)
+        awaiting(
+            "rail-runs-wait",
+            !self.known,
+            waiting,
+            presence("rail-runs-presence", present, section),
+        )
     }
 }
 
@@ -1817,13 +2053,46 @@ mod tests {
         assert_eq!(by("", None).as_deref(), Some("you"));
     }
 
+    /// The rows as runs of a task: a one-off line has no name.
+    fn tasks(rows: Vec<CommandRow>) -> Vec<CommandRow> {
+        rows.into_iter()
+            .map(|mut run| {
+                run.name = Some("build".into());
+                run
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_one_off_line_is_never_arranged_and_another_agent_s_run_only_when_none_is_asked() {
+        let mut rows = tasks(vec![
+            row("mine", "running", 1, None),
+            row("theirs", "running", 2, None),
+            row("done", "exited", 3, Some(4)),
+        ]);
+        rows[1].agent = "b".into();
+        let mut lines = vec![
+            row("line", "running", 5, None),
+            row("old", "exited", 6, Some(7)),
+        ];
+        rows.append(&mut lines);
+
+        let all = arrange_of(&rows, None);
+        assert_eq!(runs(&all.running), ["mine", "theirs"]);
+        assert_eq!(runs(&all.kept), ["done"]);
+        let mine = arrange_of(&rows, Some("a"));
+        assert_eq!(runs(&mine.running), ["mine"]);
+        assert_eq!(runs(&mine.kept), ["done"]);
+        assert_eq!(runs(&arrange_of(&rows, Some("c")).running), [] as [&str; 0]);
+    }
+
     fn runs(rows: &[&CommandRow]) -> Vec<String> {
         rows.iter().map(|row| row.run.clone()).collect()
     }
 
     #[test]
     fn running_come_first_then_the_last_five_finished_the_latest_first() {
-        let rows = vec![
+        let rows = tasks(vec![
             row("e1", "exited", 10, Some(20)),
             row("r1", "running", 15, None),
             row("e2", "exited", 11, Some(30)),
@@ -1832,7 +2101,7 @@ mod tests {
             row("r2", "running", 16, None),
             row("e5", "stopped", 14, Some(60)),
             row("e6", "exited", 15, Some(70)),
-        ];
+        ]);
         let arranged = arrange(&rows);
         assert_eq!(runs(&arranged.running), ["r1", "r2"]);
         assert_eq!(

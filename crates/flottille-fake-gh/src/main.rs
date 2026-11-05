@@ -50,7 +50,8 @@
 //! `view_fail` (`{"acme/app": {"12": "HTTP 502: Bad Gateway"}}`) makes `pr view` and `issue view`
 //! of that number alone fail that way; `list_delay_ms` makes `pr list` wait that long first,
 //! `listing_delay_ms` a `pr list` of every branch alone (a round's, not a branch's `--head`),
-//! `view_delay_ms` `pr view`.
+//! `view_delay_ms` `pr view`. `read_delay_ms` makes every `pr` and `issue` call wait that long
+//! before it answers or fails, as a network of seconds does.
 //!
 //! A `--search` of `pr list` and `issue list` keeps, for each `updated:>=<time>` it holds, the
 //! objects whose `updatedAt` is that time or later (compared as the RFC 3339 texts they are, as
@@ -59,6 +60,14 @@
 //! `user_fail` when the script has it. `unlisted` (`{"acme/app": [5]}`) keeps those numbers out
 //! of `pr list` and `issue list`, while `pr view` and `issue view` still answer them: an issue
 //! transferred elsewhere, which GitHub still answers by its old number with its new url.
+//!
+//! The links and comments of an issue (#365, `docs/tickets.md`, "Links and comments"), through
+//! `gh api <path> [--method M] [-F|-f key=value]`: `api repos/<owner>/<name>/issues/<n>` prints
+//! `{"number": n, "id": <the issue's id>}` of an issue the script holds (`id` its own, `1000 + n`
+//! without), not found otherwise; the writes (`…/issues/<n>/sub_issues` POST and
+//! `…/issues/<n>/sub_issue` DELETE with `sub_issue_id`, `…/issues/<n>/dependencies/blocked_by`
+//! POST with `issue_id` and `…/blocked_by/<id>` DELETE, `…/issues/comments/<id>` PATCH with
+//! `body` and DELETE) end with 0 and print `{}`: the test reads them in the record.
 //!
 //! `events` gives, by repository and number, what `gh api repos/<owner>/<name>/issues/<number>/events`
 //! lists (`{"acme/app": {"7": [{"event": "merged", "actor": {"login": "bob"}, "created_at":
@@ -196,6 +205,11 @@ fn answer(script: &Value, args: &[String]) -> i32 {
         },
     });
     let repository = repository.as_deref();
+    if let (Some("pr" | "issue"), Some(ms)) =
+        (words.first().copied(), script["read_delay_ms"].as_u64())
+    {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
     let asks_boards = words.starts_with(&["issue", "view"])
         && option("--json").is_some_and(|fields| fields.contains("projectItems"));
     if script["missing_scope"] == true && (words.first() == Some(&"project") || asks_boards) {
@@ -242,6 +256,43 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 return 2;
             }
             0
+        }
+        ["api", path, rest @ ..]
+            if path.starts_with("repos/")
+                && (path.contains("/comments/")
+                    || path.contains("/sub_issue")
+                    || path.contains("/dependencies/")) =>
+        {
+            let allowed = ["--method", "-F", "-f"];
+            if rest.first().is_none_or(|flag| !allowed.contains(flag)) {
+                eprintln!("fake gh: api {path} is not a call Flottille makes");
+                return 2;
+            }
+            println!("{{}}");
+            0
+        }
+        ["api", path] if path.starts_with("repos/") && path.matches('/').count() == 4 => {
+            let parts: Vec<&str> = path.split('/').collect();
+            let [_, owner, name, "issues", number] = parts[..] else {
+                eprintln!("fake gh: api {path} is not a call Flottille makes");
+                return 2;
+            };
+            match script["issues"][format!("{owner}/{name}")].get(number) {
+                Some(issue) => {
+                    let id = issue["id"]
+                        .as_u64()
+                        .unwrap_or(1000 + number.parse().unwrap_or(0));
+                    println!(
+                        "{}",
+                        json!({"number": number.parse::<u64>().unwrap_or(0), "id": id})
+                    );
+                    0
+                }
+                None => {
+                    eprintln!("gh: Not Found (HTTP 404)");
+                    1
+                }
+            }
         }
         ["api", path, ..] if path.starts_with("repos/") && path.contains("/issues/") => {
             // `repos/<owner>/<name>/issues/<number>/events`, the events of an issue or pull

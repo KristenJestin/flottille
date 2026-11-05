@@ -31,6 +31,7 @@ use crate::git::{self, Class};
 use crate::mcp::{Outcome, arguments, full_detail, workspace_named};
 use crate::place::Place;
 use crate::projects::{self, Failure};
+use crate::reads::{self, Kept, Reads};
 use crate::workspaces::{self, Head};
 
 mod bitbucket;
@@ -733,7 +734,10 @@ async fn run_for(
         std::io::ErrorKind::NotFound => Gh::Missing,
         _ => Gh::Failed(error.to_string()),
     })?;
-    match tokio::time::timeout(time, child.wait_with_output()).await {
+    let started = std::time::Instant::now();
+    let waited = tokio::time::timeout(time, child.wait_with_output()).await;
+    Reads::ran(started.elapsed());
+    match waited {
         Ok(Ok(output)) => Ok((
             output.status.success(),
             String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -844,6 +848,8 @@ pub fn repositories_of(workspace: &Workspace, project: Option<&Project>) -> Vec<
 #[derive(Default)]
 pub struct Forges {
     entries: Mutex<HashMap<i64, Entry>>,
+    /// The pull requests `forge show` read in the last 30 s, by `kept_key` (`reads`).
+    pulls: Kept<Pull>,
 }
 
 #[derive(Default)]
@@ -1024,6 +1030,9 @@ pub(crate) struct ForgeCall {
     state: Option<String>,
     branch: Option<String>,
     detail: Option<String>,
+    /// show: read the pull request again even if it was read in the last 30 s.
+    #[serde(default)]
+    fresh: bool,
     title: Option<String>,
     body: Option<String>,
     #[serde(default)]
@@ -1033,6 +1042,9 @@ pub(crate) struct ForgeCall {
     waive: Option<String>,
     /// merge: `squash` (the default), `merge` or `rebase`; the gate refused any other.
     method: Option<String>,
+    /// merge by squash: the squashed commit's message, its subject on the first line; the gate
+    /// refused it with another method.
+    message: Option<String>,
     /// close, reopen: posted on the pull request first.
     comment: Option<String>,
     /// close: also delete the pull request's branch on the forge.
@@ -1044,6 +1056,8 @@ pub(crate) struct ForgeCall {
     from: Option<String>,
     /// subscribe: how long it waits at most.
     minutes: Option<u64>,
+    /// unsubscribe: a session the agent follows (`agent_launch` with `follow`), to stop following.
+    session: Option<String>,
     /// run: what to run, as `pipelines` lists it.
     pipeline: Option<String>,
     /// run: the pipeline's variables, the workflow's inputs.
@@ -1118,11 +1132,26 @@ pub async fn forge(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Value
         }
         ("subscribe", _) => forge_subscribe(daemon, agent, place, asked).await,
         ("unsubscribe", _) => forge_unsubscribe(daemon, agent, asked),
-        ("create" | "merge" | "checks", _) => forge_write(daemon, place, asked).await,
-        ("comment" | "edit", _) => forge_note(daemon, place, asked).await,
-        ("close" | "reopen", _) => forge_close(daemon, place, asked).await,
+        ("create" | "merge" | "checks", _) => {
+            let written = forge_write(daemon, place, asked).await;
+            daemon.forges.pulls.drop_all();
+            written
+        }
+        ("comment" | "edit", _) => {
+            let written = forge_note(daemon, place, asked).await;
+            daemon.forges.pulls.drop_all();
+            written
+        }
+        ("close" | "reopen", _) => {
+            let written = forge_close(daemon, place, asked).await;
+            daemon.forges.pulls.drop_all();
+            written
+        }
         (action, _) if pipelines::ACTIONS.contains(&action) => {
-            pipelines::call(daemon, place, asked).await
+            // A run started or stopped changes the checks of the pull request it is for.
+            let done = pipelines::call(daemon, place, asked).await;
+            daemon.forges.pulls.drop_all();
+            done
         }
         (action, _) => Outcome::Refused(format!(
             "refused: forge has no action {action:?}: its actions are {}",
@@ -1137,11 +1166,24 @@ fn subscriptions_text(daemon: &Daemon, agent: &str) -> String {
         .into_iter()
         .filter(|s| s.source == "forge")
         .collect();
-    if mine.is_empty() {
+    let following = crate::subscriptions::following(daemon, agent, None);
+    if mine.is_empty() && following.is_empty() {
         return String::new();
     }
     let now = now_ms();
     let mut text = "\nYour subscriptions:\n".to_owned();
+    for subscription in following {
+        text.push_str(&format!(
+            "- {}{}\n",
+            crate::subscriptions::named(&subscription),
+            if subscription.seen["paused"] == true {
+                " (paused: you two wrote to each other five times without the user; a message of \
+                 theirs to either resumes it)"
+            } else {
+                ""
+            }
+        ));
+    }
     for subscription in mine {
         let from = match subscription.from.as_str() {
             "people" => " (from people)",
@@ -1342,6 +1384,25 @@ fn remember(daemon: &Arc<Daemon>, project: &str, path: &str, forge: &Forge, pull
 /// `forge unsubscribe`: the agent's subscriptions to the workspace and repository it names, every
 /// one when it names none.
 fn forge_unsubscribe(daemon: &Daemon, agent: &str, asked: ForgeCall) -> Outcome {
+    if let Some(session) = &asked.session {
+        if asked.workspace.is_some() || asked.repository.is_some() {
+            return Outcome::Refused(
+                "refused: session goes alone: it names a session you follow, workspace and \
+                 repository a pull request"
+                    .into(),
+            );
+        }
+        let followed = crate::subscriptions::following(daemon, agent, Some(session));
+        if followed.is_empty() {
+            return Outcome::Refused(format!(
+                "refused: you do not follow {session}: forge show lists the sessions you follow"
+            ));
+        }
+        for subscription in &followed {
+            crate::subscriptions::end(daemon, subscription, "cancelled");
+        }
+        return Outcome::Done(format!("You no longer follow {session}."));
+    }
     let named =
         |s: &flottille_core::subscription::Subscription, key: &str, asked: &Option<String>| {
             asked.as_ref().is_none_or(|a| s.target[key] == a.as_str())
@@ -1618,6 +1679,16 @@ async fn forge_show(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall, numbe
         Err(None) => return Outcome::Refused(format!("refused: {}: {NO_FORGE}", checkout.path)),
         Err(Some(why)) => return Outcome::Refused(why),
     };
+    // `detail: full` and `fresh` read again, and keep what they read for the next show.
+    let key = kept_key(&forge, number);
+    if !full
+        && !asked.fresh
+        && let Some((pull, age)) = daemon.forges.pulls.get(&key)
+    {
+        Reads::from_cache();
+        return shown_pull(&checkout, &forge, &pull, full, Some(age));
+    }
+    let generation = daemon.forges.pulls.generation();
     // A round of the project running stores a read of its own; none starts during this one.
     let held = crate::items::held_now(daemon, &place.project);
     let pull = match &forge {
@@ -1648,24 +1719,60 @@ async fn forge_show(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall, numbe
                 remember(daemon, &place.project, &checkout.path, &forge, &pull);
             }
             drop(held);
-            logs::attach(&forge, &mut pull).await;
-            ci::attach(&forge, &mut pull).await;
-            closing::attach(&forge, &mut pull).await;
-            let again = format!(
-                "{{\"action\": \"show\", \"repository\": {}, \"number\": {number}, \
-                 \"detail\": \"full\"}}",
-                Value::from(checkout.path.as_str())
-            );
-            let mut text = String::new();
-            pull_text(
-                &mut text,
-                &format!("{} ({})", checkout.path, forge.slug()),
-                &pull,
-                full,
-                &again,
-            );
-            Outcome::Done(text.trim_start().to_owned())
+            attached(&forge, &mut pull).await;
+            daemon.forges.pulls.put(key, pull.clone(), generation);
+            shown_pull(&checkout, &forge, &pull, full, None)
         }
+    }
+}
+
+/// What `forge show` says of a pull request of one repository: read now, or `age` ms ago.
+fn shown_pull(
+    checkout: &Checkout,
+    forge: &Forge,
+    pull: &Pull,
+    full: bool,
+    age: Option<u64>,
+) -> Outcome {
+    let again = format!(
+        "{{\"action\": \"show\", \"repository\": {}, \"number\": {}, \"detail\": \"full\"}}",
+        Value::from(checkout.path.as_str()),
+        pull.number
+    );
+    let mut text = String::new();
+    pull_text(
+        &mut text,
+        &format!("{} ({})", checkout.path, forge.slug()),
+        pull,
+        full,
+        &again,
+        age,
+    );
+    Outcome::Done(text.trim_start().to_owned())
+}
+
+/// What `Forges::pulls` keeps a pull request under: its forge, host included, and its number.
+fn kept_key(forge: &Forge, number: u64) -> String {
+    match forge {
+        Forge::GitHub { .. } => format!("github/{}#{number}", forge.slug()),
+        Forge::Bitbucket { host, .. } => format!("bitbucket/{host}/{}#{number}", forge.slug()),
+    }
+}
+
+/// What a pull request is still told once read: the logs of its failed checks, how long its CI
+/// usually takes and the comment it was closed with. They do not depend on one another, so they
+/// are read together.
+async fn attached(forge: &Forge, pull: &mut Pull) {
+    let mut jobs = std::mem::take(&mut pull.jobs);
+    let (_, ci, closing) = futures::join!(
+        logs::attach(forge, &mut jobs),
+        ci::recent(forge),
+        closing::of(forge, pull)
+    );
+    pull.jobs = jobs;
+    pull.ci = ci;
+    if let Some(closing) = closing {
+        pull.closing = closing;
     }
 }
 
@@ -1730,6 +1837,19 @@ async fn forge_note(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
                 "refused: the pull request #{number} of {slug} is {state}, not open; nothing was \
                  written: comment on it, or open a new pull request for the change"
             ));
+        }
+        if let Some(title) = title {
+            let at = crate::message_checks::Where {
+                daemon,
+                place,
+                repository: &checkout.path,
+                folder: &checkout.folder,
+            };
+            let checked =
+                crate::message_checks::check(&at, crate::message_checks::Checked::Title, title);
+            if let Err(refusal) = checked.await {
+                return Outcome::Refused(refusal);
+            }
         }
     }
     let number = number.to_string();
@@ -1976,6 +2096,7 @@ async fn forge_read(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall) -> Ou
         repositories = vec![repositories.remove(at)];
         branches = vec![branches.remove(at)];
     }
+    let generation = daemon.forges.pulls.generation();
     // A round of the project running stores a read of its own; none starts during this one,
     // whose logs and runs are read after it.
     let held = crate::items::held_now(daemon, &place.project);
@@ -1993,11 +2114,19 @@ async fn forge_read(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall) -> Ou
         }
     }
     drop(held);
-    for repository in &mut read.repositories {
-        if let (Some(forge), Some(pull)) = (&repository.forge, &mut repository.pull) {
-            logs::attach(forge, pull).await;
-            ci::attach(forge, pull).await;
-            closing::attach(forge, pull).await;
+    futures::future::join_all(read.repositories.iter_mut().filter_map(|repository| {
+        match (&repository.forge, &mut repository.pull) {
+            (Some(forge), Some(pull)) => Some(attached(forge, pull)),
+            _ => None,
+        }
+    }))
+    .await;
+    for repository in &read.repositories {
+        if let (Some(forge), Some(pull)) = (&repository.forge, &repository.pull) {
+            daemon
+                .forges
+                .pulls
+                .put(kept_key(forge, pull.number), pull.clone(), generation);
         }
     }
     Outcome::Done(read_text(
@@ -2050,15 +2179,40 @@ fn blocks(
     (!blocks.is_empty()).then(|| blocks.join(", "))
 }
 
+/// Refuses a branch the remote has not got up to its last commit, as the remote-tracking ref
+/// says it (a push leaves it, with or without `-u`; nothing is fetched): a pull request opened
+/// before has no source branch, or one without the work.
+async fn on_remote(folder: &Path, remote: &str, branch: &str) -> Result<(), String> {
+    let tracking = format!("refs/remotes/{remote}/{branch}");
+    let push = format!("push the branch first: git push -u {remote} {branch}");
+    let verified = git::run(
+        folder,
+        &["rev-parse", "--verify", "--quiet", &tracking],
+        Class::Read,
+    )
+    .await;
+    if !verified.is_ok_and(|said| said.success) {
+        return Err(format!("refused: {branch} is not on {remote} yet: {push}"));
+    }
+    let range = format!("{tracking}..HEAD");
+    let ahead = git::output(folder, &["rev-list", "--count", &range], Class::Read)
+        .await
+        .ok()
+        .and_then(|said| said.trim().parse::<u64>().ok());
+    match ahead {
+        Some(0) => Ok(()),
+        Some(commits) => Err(format!(
+            "refused: {branch} is {commits} commit(s) ahead of {remote}: {push}"
+        )),
+        None => Err(format!(
+            "refused: could not tell whether {branch} is on {remote}: {push}"
+        )),
+    }
+}
+
 /// `forge` `create`, `merge` and `checks`: one write to the forge of one repository of a
 /// workspace, for the workspace's branch only, through the user's own `gh` or `bkt`.
 async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
-    let Some(asked_repository) = asked.repository.clone() else {
-        return Outcome::Refused(format!(
-            "refused: forge {} needs repository, one of the workspace's",
-            asked.action
-        ));
-    };
     let name = match workspace_named(daemon, place, asked.workspace.as_deref(), "forge") {
         Ok(name) => name,
         Err(refusal) => return refusal,
@@ -2075,6 +2229,19 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
         Err(failure) => return Outcome::Failed(failure.message),
     };
     let repositories = repositories_of(&workspace, Some(&project));
+    // The only repository of the workspace needs no name.
+    let asked_repository = match (asked.repository.clone(), repositories.as_slice()) {
+        (Some(asked), _) => asked,
+        (None, [only]) => only.path.clone(),
+        (None, _) => {
+            let names: Vec<&str> = repositories.iter().map(|r| r.path.as_str()).collect();
+            return Outcome::Refused(format!(
+                "refused: forge {} needs repository, one of {}",
+                asked.action,
+                names.join(", ")
+            ));
+        }
+    };
     let found = repositories
         .iter()
         .zip(&workspace.repositories)
@@ -2108,6 +2275,33 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
         Err(Some(why)) => return Outcome::Refused(why),
     };
     let branch = head.branch_or(&workspace.branch);
+    if asked.action == "create"
+        && let Err(refusal) = on_remote(
+            &workspace.folder_of(&checkout.path),
+            &repository.base.remote,
+            branch,
+        )
+        .await
+    {
+        return Outcome::Refused(refusal);
+    }
+    // The checks run in the place of the workspace written for, which an agent of main names.
+    let target;
+    let at = crate::message_checks::Where {
+        daemon,
+        place: match place.workspace.as_deref() == Some(name.as_str()) {
+            true => place,
+            false => {
+                target = Place::of_workspace(&workspace, workspace.folder.clone());
+                &target
+            }
+        },
+        repository: &checkout.path,
+        folder: &workspace.folder_of(&checkout.path),
+    };
+    if let Err(refusal) = messages_checked(&at, &asked).await {
+        return Outcome::Refused(refusal);
+    }
     let reviewers = project.pull_requests.reviewers;
     if matches!(forge, Forge::Bitbucket { .. }) {
         let base = &repository.base.branch;
@@ -2224,7 +2418,12 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
             }
             let method = asked.method();
             let flag = format!("--{method}");
-            match gh_text(&["pr", "merge", &number, "-R", &repo, &flag]).await {
+            let mut args = vec!["pr", "merge", &number, "-R", &repo, &flag];
+            let message = asked.message.as_deref().map(squash_message);
+            if let Some((subject, body)) = &message {
+                args.extend(["--subject", subject, "--body", body]);
+            }
+            match gh_text(&args).await {
                 Ok(_) => Outcome::Done(format!(
                     "The pull request #{number} of {branch} was merged by {method} into {base} \
                      in {slug}."
@@ -2303,6 +2502,32 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
     }
 }
 
+/// The project's message checks on what a write gives the forge: the title of a pull request
+/// it opens, the message of a squash merge (`crate::message_checks`).
+async fn messages_checked(
+    at: &crate::message_checks::Where<'_>,
+    asked: &ForgeCall,
+) -> Result<(), String> {
+    use crate::message_checks::{Checked, check};
+    match (asked.action.as_str(), &asked.title, &asked.message) {
+        ("create", Some(title), _) if !title.trim().is_empty() => {
+            check(at, Checked::Title, title).await
+        }
+        ("merge", _, Some(message)) => check(at, Checked::Squash, message).await,
+        _ => Ok(()),
+    }
+}
+
+/// A squash message as `gh pr merge` takes it: its first line, the subject, and the rest, the
+/// body, from its first line that is not blank.
+fn squash_message(message: &str) -> (&str, &str) {
+    let (subject, body) = message.split_once('\n').unwrap_or((message, ""));
+    (
+        subject.trim_end(),
+        body.trim_start_matches(['\n', '\r']).trim_end(),
+    )
+}
+
 /// `gh <args>`'s output, masked, or a sentence saying why it failed.
 pub(crate) async fn gh_text(args: &[&str]) -> Result<String, String> {
     let shown = args[..2].join(" ");
@@ -2367,7 +2592,7 @@ fn read_text(workspace: &Workspace, read: &Read, full: bool, asked: Option<&str>
             ));
             continue;
         };
-        pull_text(&mut text, &named, pull, full, &again);
+        pull_text(&mut text, &named, pull, full, &again, None);
     }
     text
 }
@@ -2386,7 +2611,14 @@ fn comment_body(comment: &Comment) -> (String, bool) {
 
 /// A pull request, as `forge show` says it: the texts of its comments and reviews only when
 /// `full`, otherwise their number and `again`, the call that gives them.
-fn pull_text(text: &mut String, named: &str, pull: &Pull, full: bool, again: &str) {
+fn pull_text(
+    text: &mut String,
+    named: &str,
+    pull: &Pull,
+    full: bool,
+    again: &str,
+    age: Option<u64>,
+) {
     // The forge's own fields may lead the agent to a page; what it asked with never does, nor a
     // title, which an agent may have written.
     crate::web::shown(&pull.url, crate::web::Source::Link);
@@ -2394,6 +2626,12 @@ fn pull_text(text: &mut String, named: &str, pull: &Pull, full: bool, again: &st
         "\n{named}: pull request #{}, {}, {} into {}: {}\n  {}\n",
         pull.number, pull.state, pull.head, pull.base, pull.title, pull.url
     ));
+    if let Some(age) = age {
+        text.push_str(&format!(
+            "  ({}; \"fresh\": true reads it again)\n",
+            reads::age_text(age)
+        ));
+    }
     match pull.mergeable {
         Some(true) => text.push_str(&format!(
             "  mergeable: yes, no conflict with {}\n",
@@ -2571,6 +2809,7 @@ impl Pulls {
             items,
             note,
             details: true,
+            log: Vec::new(),
         })
     }
 

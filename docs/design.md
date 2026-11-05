@@ -291,6 +291,13 @@ running, or ran past the call's wait) delivers `command-ended` to the agent that
 ends: the line, the exit code, the duration and the last lines of the output, masked
 (`docs/tools.md`, "Commands").
 
+An agent that starts a session for the user chooses, with `follow`, whether it hears of it: with
+`follow: true` it is woken, between turns, by `session-turn-ended` at each end of a turn of that
+session (and when the session ends), a delivery that names the session, says why the turn ended
+(turn done, a report, a question with `ask_user`, a failure) and holds its last message, masked and
+cut. It is a following, a subscription that has no end of its own (§5.6, `docs/tools.md`, "Sessions
+for the user"). Two sessions that write to each other five times without the user pause it.
+
 ### 5.3 What the parent is told
 
 | Event of a child | Delivery to the parent |
@@ -344,6 +351,11 @@ review) subscribes to it instead of reading again and again. Four parts, each it
   waited for), when
   its time is up (an hour by default, 100 hours at most, said), when the agent ends, or when the agent unsubscribes.
   Nothing is delivered of what does not change: each delivery costs the agent a turn.
+- **A following** is a subscription whose source is a session the agent started for the user
+  (`agent_launch` with `root` and `follow: true`): it is not one shot and has no time, and ends
+  when the agent unsubscribes (`forge unsubscribe` with `session`), when the session ends or
+  fails, or when the agent ends. It wakes the agent at each end of a turn of the session, never
+  more than once for a turn.
 - **Delivering** is the existing path (§5.2): a `subscription` delivery, masked, its forge texts
   framed as data and not instructions, wakes the agent as a child's report does.
 
@@ -352,10 +364,40 @@ the rounds' for a subscription that needs it.
 
 The window shows them: the session page's rail lists the session's open subscriptions (the pull
 request or the ticket, the events, since when and until when; a wake, `Wake: <why>` and when it is due), each with a Cancel that ends it through the daemon
-(`subscription.cancel`), an agent between turns that waits on one is drawn waiting, not idle, in the
+(`subscription.cancel`); the following of a session an agent started, `Following <title>`, since
+when, and, paused because the two sessions wrote to each other five times without the user, a line
+that says so with a Resume (`subscription.resume`), unfolding when it pauses and folding away when
+it resumes; an agent between turns that waits on one is drawn waiting, not idle, in the
 left tree and in the rail (`Waiting: wake at 10:42` for a wake), and the delivery that wakes the
 agent is a folded step saying what woke it (`woken by the timer: <why>`).
 Opening and ending are events (`subscription.opened`, `subscription.ended`, `docs/events.md`).
+
+### 5.7 Inactive sessions
+
+Sessions pile up: a root that finished its work stays open until the user ends it. A setting
+ends them on its own, **off by default** (nothing ever happens unless the user turns it on): "End
+sessions inactive for", 1 to 90 days, `end_inactive_days` of `sessions.toml` in the configuration
+folder, set in Settings, Sessions, or by `sessions.set` (`docs/protocol.md`, "The sessions
+methods").
+
+When it is on, the daemon ends a root that is between turns and had **no activity for that many
+days** in its whole tree: no event of its conversation (a turn, a tool call, a message of the
+user's), no delivery made or sent, no command started or ended, no request asked or answered
+(`docs/events.md` has the events; the two the daemon says on its own, `agent.tools_outdated` and
+`agent.released`, do not count). Nothing new is recorded for it: the latest of those is the
+session's last activity. **A session with anything pending or running is never ended, whatever
+the dates**: a turn running, a message queued, a command running, a request or a question
+waiting for an answer, a subscription or a timer pending anywhere in its tree.
+
+It ends the session as the user's "End session" does (`agent.stop`: the tree under it, the
+commands it ran, what was queued; the workspaces stay), with the reason `inactive for N days`:
+the conversation says it in the line that ends it, `agent.ended` carries it, and the window shows
+the session like any ended one, resumable as today (`agent.resume`) while its agent resumes. There
+is no second way to end a session.
+
+It is looked for when the daemon starts and then about once an hour, from the sweep that already
+runs: no timer of its own, nothing woken more often. The clock is the store's, which a test moves
+(`test.advance`).
 
 ## 6. Projects and workspaces
 
@@ -572,9 +614,10 @@ started for the user (labelled as that agent's, never the user's), and last the 
 messages to the session, nothing else: the three newest, up to the moment of the call (one sent
 while the agent works, still waiting for its turn, among them), in the order they were sent, each
 numbered, the last named as the newest, so that a small model never takes an older one for it.
-A message that ran a command (`/name`) is told as that: the user ran the command, from its file
-or the project's, and its text as it was sent comes in a block of its own, escaped, since it is
-the project's text, not the user's words.
+A message that used commands (`/name`) is told as that, from the names the daemon recorded with
+it, never read from its text: the user used the commands, each from its file or the project's;
+what they typed comes as their words, and what the agent received in a block of its own, escaped,
+since it is the project's text, not the user's words.
 What the agent wrote comes in blocks of its own, every `<` escaped, so that no text of the agent
 reads as the user's; only the user's messages say what is wanted. It answers one JSON object,
 `{"verdict": "allow" | "ask", "reason": "…"}`. A failure, an answer that is not that object, or
@@ -716,7 +759,11 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   workspace (with the preparation's progress and failure output), the composer that starts
   a session (place, agent, model, first message), its pull requests and tickets (`items.md`: two
   tabs, Pull requests and Tickets, each counting what it lists, filtered open, closed or all, the
-  user's own, and a repository for the pull requests; each row its number, title, state, CI mark,
+  user's own, and a repository for the pull requests, and searched by key or title (the quick
+  switcher's matching, what matched in the accent; a line says how many are listed, `128 open`,
+  or `3 of 128 open` under a search); the list is about ten rows tall and scrolls inside its
+  section, the tabs and the filters staying above it, keeps its place when it is read again and
+  goes back to the top when a tab, a filter or the search changes; each row its number, title, state, CI mark,
   author, assignee and when it changed, coming, going and changing live with the `item.*` events
   and going with `items.forgotten`; a project with no forge or no tracker says so with a link to
   its Settings, a source that fails says why; a click opens the item's detail in a dialog: its
@@ -738,7 +785,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   "Use only this project's rules"; the project's text editor, Reset to default, and a line saying
   a change reaches the agents created from now on), and, while Specs is on globally, its Specs
   section: the project's own switch and its language;
-- Settings, in tabs (Judge, Specs, Providers, Rules, Appearance, Developer mode: one tab shown at a time, as in a project's settings; the first, the Judge, is
+- Settings, in tabs (Judge, Specs, Providers, Rules, Sessions, Appearance, Developer mode: one tab shown at a time, as in a project's settings; the first, the Judge, is
   the one it opens on, and a link to a section opens its tab; the tab of a part of Flottille the
   user can turn off, Specs, comes after the Judge's, drawn from what it declares: its switch at
   the top with its one sentence, and nothing else while it is off; on, its settings, which fold
@@ -747,7 +794,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   judge (Auto asks like Ask)" among its choices) and, under it with its own heading, the Judge
   guidance (its editor, Reset to default, Save and its line on when a change applies; a link to the
   guidance opens this tab with the guidance in view), then the providers, the
-  Rules for every project, edited the same way as the guidance, the Appearance (the window's colours: Omarchy
+  Rules for every project, edited the same way as the guidance, the Sessions (a switch, "End inactive sessions", off by default; switched on it chooses 7 days and a select of the days unfolds under it: 1, 3, 7, 14, 30, 60 or 90, and what a file edited by hand says; `sessions.set`, §5.7), the Appearance (the window's colours: Omarchy
   or Flottille, and for Flottille Light or Dark, each a segmented choice; off an Omarchy desktop
   the Omarchy choice is shown disabled with one line saying why), and last the Developer mode, a
   switch with the path of its log (`developer.md`: what the daemon decides and why, off by default); a judge
@@ -772,12 +819,13 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   time and a Copy icon button (a toast says it is copied); each step the Auto judge let through
   says "allowed by the judge" (a ticket or a pull request created included), and the folded line
   of its steps says it too; a message the user sent while the root works stays under the
-  conversation, above the composer, drawn as waiting (quieter, "Sent when the agent finishes its
-  step"), until the root reads it between its turns and it is a message like the others (the
-  queued deliveries of `agent.tree`), with three buttons while it waits: Send now (stops the
+  conversation, above the composer, drawn as waiting (quieter, with its pictures as small
+  thumbnails, and one short line, "Queued · after this step", whose tooltip says "Sent when the
+  agent finishes its step"), until the root reads it between its turns and it is a message like
+  the others (the queued deliveries of `agent.tree`), with three buttons while it waits: Send now (stops the
   root's turn and hands it this message next), Edit (takes it back into the composer, text and
   pictures, after what is typed) and Cancel (takes it back); the daemon checks that the root has
-  not read it in one transaction, and says "already read by the agent" in a toast if it has; and a composer that writes to the root, with the session's mode
+  not read it in one transaction, and says "already read by the agent" in a toast if it has; and a composer that writes to the root (it carries 20 pictures at most; a refusal, of a picture or of a message, is a toast and never changes the composer's height; what appears in it unfolds and what leaves folds away), with the session's mode
   (an Ask | Auto | Full control, with a warning icon when Auto has no judge, its highlight in the
   alarm colour on Full, each step Full let through saying "allowed by Full mode") in its bar, whose Stop
   button, in Send's place while a turn runs and Send has nothing to send (the two cross-fade), and
@@ -789,10 +837,11 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   `Writing…`, `Running <tool>…`) is said in the same bar, where the words cross-fade as they change,
   and goes with the turn. A running agent is
   drawn by its icon alone, in the tree and in the rail: no text badge, nothing in the header. In the
-  composer, `/` at the start
-  of a message lists the project's commands, filtered as the user types: picking one puts `/name `
-  in the field, and sending it sends the command's instructions with what follows the name (a
-  `/word` that names none is sent as text); the header says the session's title and its place,
+  composer, a word at the cursor that starts with `/`, anywhere in the message, lists the project's
+  commands, filtered as the user types: picking one completes that word into `/name `, and sending
+  it sends the commands' instructions with the message as it was written (a `/word` that names none
+  is sent as text); the message and the queued message show what the user typed, each command as a
+  chip, what the agent received in a fold; the header says the session's title and its place,
   and no state; a rail with, from its top, the session's tree of agents (each row with the share
   of its context the agent used, a percentage beside a thin bar, on one line; the session's own
   agent says only what it runs on, the others their name over what they run on and do; the composer's bar does not say
@@ -820,10 +869,16 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   where it says it ended, not its header, and its conversation says it ended, then resumed. Selecting a child shows its
   conversation read-only;
 - the runs of the agents (`docs/tools.md`, "Tasks and runs"): the rail's **Runs** section lists
-  those of the session's tree (it is not called "Commands", which are the project's `/name`
-  instructions), running first, each with its line, who started it (the agent, and the task when
-  it is one), how long, its last output line and Stop, then the last five that ended, greyed, with
-  how they ended; a click opens the run's drawer (the same on the project page): its command, its
+  the **task** runs of the agent shown (the root by default, the child once the user opens it from
+  the Agents list; a run belongs to the agent that started it) (it is not called "Commands", which
+  are the project's `/name` instructions), running first, each with its line, who started it (the
+  agent, and the task), how long, its last output line and Stop, then the last five that ended,
+  greyed, folded under `N ended` (unfolded by a click, as the Agents' `N ended`), with how they
+  ended. A one-off line (`run {"line": …}`) is not listed, running or ended: its card in the
+  conversation is where it is seen, and the section folds away when there is no task run. A child
+  with task runs still going says so on its row in the Agents list (`2 runs`), and a click opens
+  that child with its Runs section; a click on a run opens its drawer (the same on the project
+  page, which lists only the tasks the user ran there): its command, its
   task, where it runs, who started it (a link to the agent in its session), since when or how it
   ended, its output, live and following its end, Copy, Restart (the daemon's `run.restart`: it
   stops the command if it runs and starts the same line again in the same place; the drawer, and

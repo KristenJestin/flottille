@@ -270,12 +270,14 @@ its sign-in check only, never for anything else, and nothing it prints of the ac
 
 #### `project.set_settings`
 
-`{"name", "repositories": [{"path", "forge", "base", "depends_on"}], "tracker"}`. Writes each listed
+`{"name", "repositories": [{"path", "forge", "base", "depends_on"}], "tracker", "branch_prefix"?}`. Writes each listed
 repository's `forge` (removed when `null`; a repository left out is unchanged), its `base` (the base
 branches in order of preference, one at least) and its `depends_on` (the paths of the repositories it
 depends on, `[]` for none) when they are given, and the project's `[tracker]` (removed when `null`
 or left out) in its file, where they stand, what is around them kept, and answers as
-`project.settings`. A `base` or a `depends_on` left out keeps the file's: a client that knows only
+`project.settings` (which also gives the project's `branch_prefix`). `branch_prefix` is written when
+given, `""` included (no prefix: the branch of a workspace is its name), and kept when left out;
+a space in it is refused (`invalid-config`). A `base` or a `depends_on` left out keeps the file's: a client that knows only
 the forge is not affected. A change of base is used by the workspaces created after it; the ones
 already made keep theirs. `refused`, with nothing written, when a path is not one of the project's,
 a forge or the tracker cannot be used (naming its key), a forge is not where its repository's
@@ -286,6 +288,15 @@ ls-remote`; from the tracking refs last fetched when the remote cannot be read, 
 own branches when it has no such remote), or a dependency is on the repository itself, on one the
 project lacks or closes a cycle (`projects/app.toml: repositories[0].depends_on: cycle web -> api
 -> web; nothing was saved`).
+
+#### `project.set_message_checks`
+
+`{"name", "checks"}`. Writes the project's message checks (`docs/projects.md`, "Message checks"),
+every one in order, in its file where they stand: `message_checks`, removed when `checks` is empty
+(a blank line is left out). Answers `{"name", "message_checks"}`. `refused`, nothing written, when a
+line cannot be split without a shell or does not name `{message}` (`the check `lint x` cannot be
+used: must name {message}, the file that holds the message it checks; nothing was saved`). It is the
+user's alone: no tool of an agent writes the checks, which Flottille runs outside the gate.
 
 #### `project.ticket`
 
@@ -498,6 +509,25 @@ The daemon reads the file at every tool call: a change applies to the next resul
 running session. `tool_results.set` emits `tool_results.changed` with what it answers. The user's
 door alone reaches them: no tool of an agent does.
 
+### The sessions methods
+
+`sessions.show` and `sessions.set` read and keep after how many days without activity the daemon
+ends a root session (`docs/design.md` §5.7): `end_inactive_days` in `sessions.toml` of Flottille's
+configuration folder.
+
+- `sessions.show` answers `{"days"}`: a number of days from 1 to 90, or `"off"` (no file, no key,
+  or the word). `invalid-config` when the file cannot be read, names another key, or holds a value
+  that is neither `"off"` nor a whole number from 1 to 90.
+- `sessions.set {days}` takes a number of days or `"off"`, writes the file
+  (`end_inactive_days = 7`, or `end_inactive_days = "off"`) and answers as `sessions.show`;
+  `invalid-params` for anything else, a number out of the range and a missing `days` included (a
+  client leaves null fields out, so `"off"` is a word). The window sends 7 when the user first
+  turns it on.
+
+The daemon reads the file when a check is due, at its start and about once an hour. `sessions.set`
+emits `sessions.changed` with what it answers. The user's door alone reaches them: no tool of an
+agent does.
+
 ### The workspaces folder methods
 
 `workspaces_folder.show` and `workspaces_folder.set` read and keep where workspaces go
@@ -637,7 +667,7 @@ cannot be used.
 `{"project", "name", "repositories"?, "branch"?, "bases"?, "offline"?, "ticket"?}`. Fetches the
 base of each repository, writes the workspace, makes the worktrees and answers the workspace; the
 rest of the setup goes on in the background. `repositories` is the project's default set when left
-out, `branch` is `<branch prefix>/<name>` when left out, and a branch that exists already is checked
+out, `branch` is `<branch prefix>/<name>` when left out (the name alone when the project's prefix is empty), and a branch that exists already is checked
 out rather than started (`docs/workspaces.md`), `bases` (`{"api": "main"}`) gives a repository it takes
 the branch it starts from in place of its base rule, `offline: true` fetches nothing, and `ticket` (`#123`, `123`
 or a Jira key) links the workspace to a ticket (`tickets.md`); the workspace's `ticket` says it, in
@@ -771,6 +801,20 @@ the tracker's text is masked. Nothing is kept: every call reads again.
 `null`, and answers as `workspace.ticket` does. `refused` when `ticket` is not `#123`, `123` or a
 Jira key (`ABC-123`, any case). Emits `workspace.ticket` (`docs/events.md`).
 
+#### `workspace.rename_branch`
+
+`{"project", "name", "branch", "repository"?}`. Renames the workspace's branch to `branch` in the
+repository named, or in each repository of the workspace, and answers the workspace as
+`workspace.show` does without the git reads, with `"renamed": ["<repository>", ...]`
+(`docs/workspaces.md`, "Renaming the branch"). All or none: it is `refused`, nothing renamed, when
+the workspace is being prepared; when `branch` is not a name `git check-ref-format --branch`
+accepts, is the branch a worktree is on already, exists in a repository or is checked out in a
+checkout of one; when a worktree is on no branch; when a repository's branch was resumed by the
+workspace, has a remote branch (the tracking ref, or what the remote lists) or has a pull request.
+Each refusal says which repository and why. Emits `workspace.changed` (`docs/events.md`) when
+every worktree made is on the new branch, and the record follows; renaming one repository of
+several leaves the record as it is.
+
 #### `workspace.prepare`
 
 `{"project", "name"}`. Resumes the preparation (`docs/workspaces.md`) and answers the workspace
@@ -804,7 +848,9 @@ no such project.
 `{"project", "kind"?, "state"?, "repository"?, "mine"?}`: `kind` is `pull` or `ticket`, `state`
 one of an item's states (`open`, `draft`, `merged`, `closed`), `repository` a path of the
 project's (a Jira work item has none), `mine` true for the user's own. Answers `{project, items,
-sources}`, the items most recently changed first, from the store: nothing is read.
+sources}`, the items most recently changed first, from the store: nothing is read. Each source
+has its `mine_unknown`: why its last round could not tell which items are the user's, `null`
+when it could.
 
 #### `items.show`
 
@@ -1037,15 +1083,21 @@ its parent writes to it, and the sentence names its root.
 
 `images` is a list of `{"mime", "data"}`, `data` the image's bytes in base64: a pasted or dropped
 picture, sent as ACP image blocks after the message's text. With images, the message may be
-empty. `mime` is `image/png`, `image/jpeg`, `image/gif` or `image/webp`; a message carries 4
-images at most, 5 MiB each. The daemon writes them in `$XDG_DATA_HOME/flottille/images/<agent>/`
+empty. `mime` is `image/png`, `image/jpeg`, `image/gif` or `image/webp`; a message carries 20
+images at most, 5 MiB each (20 is the least of what the providers document: the Claude API takes
+100 or more images per request, the OpenAI API 1500, and OpenCode leaves the count to its
+provider; the Claude API also asks every image of a request of more than 20 to be 2000 px at most
+on its long side). A PNG or a JPEG whose long side is over 2000 px is scaled down to 2000 px
+before it is written, keeping its proportions and its format; a GIF and a WebP (they may be
+animated) are kept as they came, and so is a file that cannot be read as the picture its `mime`
+says. The daemon writes them in `$XDG_DATA_HOME/flottille/images/<agent>/`
 (never the project's), and the `agent.prompted` event of the turn that sends them names them.
 `refused` for an image of another type, bad base64, an empty or too big image, too many, and
 when the agent's agent said, when it last started, that it takes no images (`images` of the
 agent, below); before it started once, `images` is `null` and the message is accepted: if the
 agent turns out to take no images, none is sent and the text of the turn ends with
 `[N images not sent: this agent takes no images]`. A file gone when the turn starts leaves
-`[image <name> is missing]` in the text. Merged queued messages make one prompt of 4 images and
+`[image <name> is missing]` in the text. Merged queued messages make one prompt of 20 images and
 10 MiB at most (the first message is always whole); the others wait for the next turn. The
 images of an agent go with it: when it ends for good, or 7 days after a root that can be resumed.
 
@@ -1054,7 +1106,7 @@ images of an agent go with it: when it ends for good, or 7 days after a root tha
 `{"agent", "delivery", "images"?}`. Takes back a message the user wrote to a root that still waits
 for the root to read it (`queued` of `agent.tree`): `{"agent", "delivery", "text", "images"}`. The
 root never reads it, and `delivery.withdrawn` is its event (`docs/events.md`). `text` is the
-message as it is stored (masked); `images` are its pictures, `{"mime", "data"}` as `agent.send`
+message as it is stored (masked), as the user typed it for one that used commands; `images` are its pictures, `{"mime", "data"}` as `agent.send`
 takes them, when the request says `"images": true`, else empty (the picture files are deleted
 either way). The check and the withdrawal are one transaction: `refused` with "already read by
 the agent" when the root took the message first (nothing changes), "that message was withdrawn
@@ -1131,7 +1183,7 @@ does it with `agent_send` (`docs/tools.md`).
 #### `agent.tree`
 
 `{"agent"}`. The whole tree of the agent's root, each agent before its children:
-`{"agents": [{"agent", "doing", "waiting_on", "needs_user", "context", "queued"}]}`. `agent` is the agent in short
+`{"agents": [{"agent", "doing", "waiting_on", "needs_user", "context", "context_tokens", "queued"}]}`. `agent` is the agent in short
 (`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `launched_by`, `depth`, `epoch`, `state`,
 `state_reason`, `created_at`, `active_at`, `exchanged_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
 took at the last start of its process, else the one asked, `null` for the agent's default before it
@@ -1145,10 +1197,14 @@ has, which a restart replaces, `docs/tools.md`, "When the tools change"); `doing
 root whose own does, `subscription` for an agent between turns that has an open subscription (`doing` then
 says `waiting for #12: checks`, `#12 of api` when the project has several repositories, `waiting for its wake in 20 min`), else `null`; `needs_user`, for the root, whether a request of its tree or its
 own question waits for the user; `context`, how much of its context the agent used at its last
-report (`agent.usage`), in percent, `null` before one; `queued`, for the root, the messages the
+report (`agent.usage`), in percent, `null` before one and while the window's size is not known;
+`context_tokens`, the tokens its context holds at that report, `null` before one; `queued`, for the root, the messages the
 user wrote to it that wait for it to read them between its turns, the oldest first, each
-`{"delivery", "text", "images", "at"}` (its text masked as it is stored, how many pictures go with
-it, when it was written), empty for a child.
+`{"delivery", "text", "images", "pictures", "at"}` (its text masked as it is stored, how many pictures go with
+it and their names, which `agent.image` reads back, when it was written), empty for a child. For a
+message that used commands (`docs/commands.md`), `text` is what the user typed, `commands` the
+names of the commands, in the order of their first use, and `received` what the agent will receive
+for it.
 
 #### `agent.read`
 
@@ -1286,19 +1342,29 @@ it. The agent's own way is the `forge` and `tickets` tools (`docs/tools.md`).
 
 `{"tree"?}`. `{"subscriptions": [...]}`, the open ones, the oldest first. With `tree`, an agent's id,
 those of the agents of its root's tree (`not-found` when it names no agent); without, every one. Each
-is `{"id", "agent", "source", "named", "target", "events", "from", "created_at", "expires_at"}`: `named`
+is `{"id", "agent", "source", "named", "target", "events", "from", "created_at", "expires_at", "paused"}`: `named`
 says what it watches (`pull request #12 of api, workspace login`, a repository that is the project's
 folder named by the project; `ticket #5 of api`, `ticket ABC-1`; `wake: <why>`), `target` is the
 source's own (`forge`: `project`, `workspace`, `repository`, `number`; `tickets`: `project`,
 `repository`, the tracker's, empty for Jira, and `key`, `5` or `ABC-1`; `timer`: `why`,
-`expires_at` being when it wakes), `from` is `anyone` or `people`, the times are in milliseconds since the Unix
-epoch.
+`expires_at` being when it wakes; `session`: `session` and `title`, the session followed, with no
+end of its own), `from` is `anyone` or `people`, the times are in milliseconds since the Unix
+epoch. `paused` is true for a following paused because its two sessions wrote to each other
+without the user (`docs/tools.md`, "Sessions that talk to each other"), false otherwise.
 
 #### `subscription.cancel`
 
 `{"subscription"}`. `{"subscription": {...}}`: the subscription ends as the agent's `forge unsubscribe`
 (or `tickets unsubscribe`) ends it, without a word to the agent, and `subscription.ended` is emitted with `why` `cancelled`.
 `not-found` when it is not open.
+
+#### `subscription.resume`
+
+`{"subscription"}`. `{"subscription": {...}}`: a paused following resumes as a message of the
+user's to either session resumes it: its count starts again, its wakes and the `session_send`
+between the two come back, and `session.following_resumed` is emitted. The user's alone: no tool
+of an agent does it. `not-found` when it is no open following; `invalid-params` when it is not
+paused.
 
 ### `provider.list`
 
@@ -1414,7 +1480,10 @@ changes when the judge was not picked.
 `{"after"?, "limit"?}`. What the root agents sent to the user: `{"entries": [...]}`, oldest first.
 An entry is `{"seq", "at", "kind", "agent", "project", "workspace", "text"}`, made from an event of
 a root agent (`docs/events.md`): `report` (`agent.reported`, `text` its report), `question`
-(`agent.asked` to the user, `text` its question) or `failure` (`agent.failed`, `text` its reason).
+(`agent.asked` to the user, `text` its question), `failure` (`agent.failed`, `text` its reason) or
+`paused` (`session.following_paused`: two sessions talk to each other without the user, `text` says
+which and how to resume; `agent` is the followed session). A pause that resumed since is
+`"resolved": true`, its `text` ending `It has resumed since.`
 A child's own go to its parent and are not here. Without `after`, the last `limit` entries (50 by
 default); with it, the first `limit` entries numbered after it. Nothing is marked read: the inbox
 is a view of the stored events.
