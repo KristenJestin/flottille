@@ -1728,9 +1728,8 @@ async fn run_line(
                 .map_err(|error| format!("cannot run it: {error}"))?,
         )
         .stderr(writer)
-        .process_group(0)
         .kill_on_drop(true);
-    let spawned = command.spawn();
+    let spawned = crate::children::spawn(crate::children::in_own_session(&mut command));
     // The command holds the pipe's writing end: dropped, only the processes hold it.
     drop(command);
     let mut child = spawned.map_err(|error| format!("cannot run {}: {error}", words[0]))?;
@@ -1752,12 +1751,14 @@ async fn run_line(
         }
     };
     // What it left in the background holds the pipe and would keep the step running: it ends
-    // with the step, and what is already in the pipe is read without waiting for it.
+    // with the step, even in a group of its own, and what is already in the pipe is read
+    // without waiting for it.
     if let Some(group) = group {
-        // SAFETY: kill has no precondition; the group is the step's own (process_group(0)).
+        // SAFETY: kill has no precondition; the group is the step's own (it leads its session).
         unsafe {
             libc::kill(-(group as i32), libc::SIGKILL);
         }
+        crate::children::end_session(group).await;
     }
     while let Ok(read) = reader.try_read(&mut buffer) {
         if read == 0 {

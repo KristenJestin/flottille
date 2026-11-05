@@ -743,7 +743,21 @@ impl SessionPage {
         );
     }
 
-    /// What the daemon answered to a cancellation: why, when it refused.
+    /// The user resumes a paused following, as a message of theirs would: the daemon resumes it,
+    /// and the list follows its event.
+    pub fn resume_following(&mut self, subscription: &str, cx: &mut Context<Self>) {
+        let list = self.subscriptions(cx);
+        list.update(cx, |list, cx| list.failed(None, cx));
+        self.perform(
+            Command::ResumeFollowing {
+                session: self.opened.id.clone(),
+                subscription: subscription.to_owned(),
+            },
+            cx,
+        );
+    }
+
+    /// What the daemon answered to a cancellation or a resume: why, when it refused.
     pub fn subscription_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
         let list = self.subscriptions(cx);
         list.update(cx, |list, cx| list.failed(refused, cx));

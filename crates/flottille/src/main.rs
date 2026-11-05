@@ -1,3 +1,6 @@
+// The tool schemas are large `json!` literals: the default limit of 128 is too low for them.
+#![recursion_limit = "256"]
+
 mod acp;
 mod actions;
 mod adf;
@@ -8,6 +11,7 @@ mod approval_command;
 mod approvals;
 mod bridge;
 mod chat;
+mod children;
 mod claude;
 mod claude_import;
 mod client;

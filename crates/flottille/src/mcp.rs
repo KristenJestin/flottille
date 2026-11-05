@@ -318,18 +318,18 @@ const SERVED: [Definition; 29] = [
         name: "forge",
         title: "Pull requests",
         description: "Pull requests and CI of the project's repositories, through the user's \
-            own gh or bkt (no forge sign-in here: never run them). list: by state (open by \
-            default) and branch, as last read. show: a workspace's branch's (yours; in main, name \
-            it), or number's, with checks (the log's end of each failed job), review and comment \
-            counts; detail full adds texts. Writes, judged, answered at once, the result maybe \
-            later: create, merge (method, squash by default; refused with no check, while checks \
-            fail or a review asks for changes unless waive gives the user's words) and checks \
-            (re-run failed) act on a workspace's branch; comment, edit, close (comment first), \
-            reopen on number. subscribe: a workspace's pull request's next events wake you once, \
-            by a delivery; unsubscribe. CI: pipelines lists what can be run; run starts one by \
-            name (custom: <name>) with its variables; runs, run_view, run_logs read; run, stop, \
-            step judged. {\"action\": \"create\", \"repository\": \"api\", \"title\": \
-            \"fix: ...\", \"body\": \"...\"}",
+            own gh or bkt (no forge sign-in here: never run them). list: by state and branch, \
+            as last read. show: a workspace's branch's (yours; in main, name it), or number's, \
+            with checks (the log's end of each failed job), review and comment counts; detail \
+            full: texts. Writes, judged, answered at once, the result maybe later: create \
+            (reviewers, labels, delete_branch_on_merge), merge (squash by default; refused with \
+            no check, while checks fail or a review asks for changes unless waive gives the \
+            user's words) and checks act on a workspace's branch; edit (title, body, draft, \
+            reviewers, labels, base), comment, close (comment first), reopen on number. \
+            subscribe: its next events wake you once; unsubscribe. CI: pipelines lists what can \
+            be run; run starts one by name (custom: <name>) with its variables; runs, run_view, \
+            run_logs read; run, stop, step judged. {\"action\": \"create\", \"repository\": \
+            \"api\", \"title\": \"fix\", \"body\": \"...\"}",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -345,15 +345,24 @@ const SERVED: [Definition; 29] = [
                 "fresh": {"type": "boolean", "description": "show: read the pull request again; one read in the last 30 s is given again otherwise (detail full always reads)."},
                 "title": {"type": "string", "description": "create, edit: the pull request's title. create needs the branch pushed first (git push -u origin <branch>)."},
                 "body": {"type": "string", "description": "create, edit: description; comment: the comment."},
-                "draft": {"type": "boolean"},
+                "draft": {"type": "boolean", "description": "create: open as a draft. edit: false marks it ready for review, true makes it a draft again."},
+                "reviewers": {"type": "array", "items": {"type": "string"}, "description": "create: reviewers besides the project's."},
+                "labels": {"type": "array", "items": {"type": "string"}, "description": "create: labels (GitHub only)."},
+                "delete_branch_on_merge": {"type": "boolean", "description": "create: delete the source branch when it is merged."},
+                "reviewers_add": {"type": "array", "items": {"type": "string"}, "description": "edit: reviewers to ask."},
+                "reviewers_remove": {"type": "array", "items": {"type": "string"}, "description": "edit: reviewers to take off."},
+                "labels_add": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to put on (GitHub only)."},
+                "labels_remove": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to take off (GitHub only)."},
+                "base": {"type": "string", "description": "edit: the branch it goes into; it must exist on the remote."},
                 "comment": {"type": "string", "description": "close, reopen: posted on the pull request first."},
-                "delete_branch": {"type": "boolean", "description": "close: also delete the pull request's branch, unless a workspace is on it or it comes from a fork."},
+                "delete_branch": {"type": "boolean", "description": "close: also delete the pull request's branch, unless a workspace is on it or it comes from a fork. merge: delete its source branch after the merge; the project's setting when left out; never a branch the workspace resumed."},
                 "waive": {"type": "string", "description": "merge: the user's words letting a blocked pull request be merged; held for them."},
                 "method": {"type": "string", "enum": ["squash", "merge", "rebase"], "description": "merge: squash when left out."},
                 "message": {"type": "string", "description": "merge by squash: the squashed commit's message, its subject on the first line; the forge's own when left out."},
                 "events": {"type": "array", "items": {"enum": crate::forge::EVENTS}},
                 "from": {"enum": crate::subscriptions::FROM, "description": "subscribe: whose reviews and comments count: anyone (the default), or people (no bot nor agent)."},
                 "minutes": {"type": "integer", "minimum": 1, "maximum": crate::subscriptions::LONGEST_MINUTES, "description": "subscribe: how long it waits; sized by CI when left out, else 60."},
+                "session": {"type": "string", "description": "unsubscribe: a session you follow, by its agent id, to stop following it."},
                 "pipeline": {"type": "string", "description": "run: as pipelines lists it (Bitbucket default, custom: <name>, branches: <pattern>; GitHub a workflow's file)."},
                 "variables": {"type": "array", "description": "run: Bitbucket variables, GitHub inputs.", "items": {"type": "object", "properties": {
                     "key": {"type": "string"}, "value": {"type": "string"}, "secured": {"type": "boolean"}
@@ -593,16 +602,17 @@ const SERVED: [Definition; 29] = [
         name: "agent_launch",
         title: "Start a session, or launch a child",
         description: "Work that belongs in a workspace is a session for the user: root: true \
-            with workspace (an existing one; main is the project folder) or new_workspace (made \
-            for it, repositories picks them), judged; theirs, not your child, the brief its first message; you write to it, \
+            with workspace (existing; main is the project folder) or new_workspace (made \
+            for it, repositories picks them), judged; theirs, not your child, the brief its first \
+            message; follow (required): true wakes you when each turn ends; you write to it, \
             and it answers you, with session_send. A root only. Without root: a child agent on \
             one precise task, in your own place (workspace and new_workspace are refused), \
             answered at once with its agent_id; it works on its own and you are told when it \
             reports, asks, fails, is stuck or idles, so never poll. The brief is all it knows: \
-            the task, what to read, the checks, the deliverable. provider: yours when left out; \
-            a refusal names the ready ones. A child launch is refused above the children cap. {\"title\": \"Fix login\", \"brief\": \"...\", \"root\": true, \
-            \"workspace\": \"login\"}; {\"title\": \"Add API\", \"brief\": \"...\", \"root\": \
-            true, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}; {\"title\": \
+            the task, what to read, the checks, the deliverable. A child launch is refused above \
+            the children cap. {\"title\": \"Fix login\", \"brief\": \"...\", \"root\": true, \
+            \"workspace\": \"login\", \"follow\": true}; {\"title\": \"Add API\", \"brief\": \
+            \"...\", \"root\": true, \"follow\": false, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}; {\"title\": \
             \"Write the tests\", \"brief\": \"...\"}",
         read_only: false,
         idempotent: false,
@@ -618,7 +628,8 @@ const SERVED: [Definition; 29] = [
                 "workspace": {"type": "string", "description": "With root: an existing workspace of the project, for the session to work in; main is the project folder. A child works in your place."},
                 "new_workspace": {"type": "string", "description": "With root: the name of a new workspace to make for the session. Not with workspace."},
                 "repositories": {"type": "array", "items": {"type": "string"}, "description": "With new_workspace: its repositories, by path; the project's when left out."},
-                "root": {"type": "boolean", "description": "A session for the user, in a workspace or your place, not a child."}
+                "root": {"type": "boolean", "description": "A session for the user, in a workspace or your place, not a child."},
+                "follow": {"type": "boolean", "description": "Required with root: true, refused without it. true: you are woken at each end of a turn of the session (and when it ends), with its last message. false: you are told nothing of it."}
             }, "required": ["title", "brief"], "additionalProperties": false})
         },
     },
@@ -701,7 +712,9 @@ const SERVED: [Definition; 29] = [
         description: "Says you are done: your report goes at once to your parent (to the user for \
             a root), and a child's session ends with this turn. Give the result, each point done \
             or skipped and why, what was not verified, open questions. Call it once, as your \
-            last action.",
+            last action. A question left in a report is a follow-up, not a wait: a decision \
+            only the user can take goes through ask_user (ask_parent for a child), a question \
+            about the brief to the agent that started your session, with session_send.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -716,7 +729,10 @@ const SERVED: [Definition; 29] = [
         title: "Ask the user",
         description: "Puts a question to the user. It does not wait: the answer comes later as a \
             message. Go on with what does not depend on it, or end your turn saying what you \
-            wait for.",
+            wait for. What goes here is a decision only the user can take (commit, push, scope, a \
+            choice): a question about the brief or its context goes to the agent that started \
+            your session, with session_send. A question left in a report or a last message is a \
+            follow-up, not a wait.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -731,7 +747,8 @@ const SERVED: [Definition; 29] = [
         title: "Ask your parent",
         description: "Puts a question to the agent that launched you. It does not wait: the \
             answer comes later as [flottille:parent]. Go on with what does not depend on it, or \
-            end your turn saying what you wait for.",
+            end your turn saying what you wait for. What you need from your parent goes here, \
+            never in a report or a last message: that is a follow-up, not a wait.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -765,7 +782,10 @@ const SERVED: [Definition; 29] = [
         description: "Writes to a session you started (agent_launch with root), or to the agent \
             that started yours. It does not wait: it reaches it on its next tool result, or as \
             a new turn, labelled with your name; its answer comes later as [flottille:session]. \
-            Judged, as a write is. Your children are written to with agent_send.",
+            Judged, as a write is. Your children are written to with agent_send. A question \
+            about the brief or its context to the agent that started your session goes here; a \
+            decision only the user can take goes through ask_user, and one left in a last \
+            message is a follow-up, not a wait.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -2583,13 +2603,16 @@ fn pushed(place: &Place, folder: Option<&Resolved>) -> bool {
     let Some(folder) = folder else {
         return false;
     };
-    let listed = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&folder.path)
-        .args(["for-each-ref", "--format=%(refname)", "refs/remotes"])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output();
+    let listed = crate::children::spawn_std(
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&folder.path)
+            .args(["for-each-ref", "--format=%(refname)", "refs/remotes"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()),
+    )
+    .and_then(std::process::Child::wait_with_output);
     match listed {
         Ok(output) => String::from_utf8_lossy(&output.stdout)
             .lines()
@@ -3154,7 +3177,7 @@ mod tests {
     fn the_texts_cut_to_fit_the_old_cap_are_whole_again() {
         // What #224, #225, #233, #255 and #259 took out of other tools to stay under a number
         // nobody chose (#264): what is still true is said again.
-        let whole: [(&str, Option<&str>, &str); 25] = [
+        let whole: [(&str, Option<&str>, &str); 29] = [
             ("tasks", None, "(tests, lint, servers…)"),
             (
                 "run_status",
@@ -3173,6 +3196,14 @@ mod tests {
             ),
             ("forge", None, "no forge sign-in here: never run them"),
             ("forge", None, "the log's end of each failed job"),
+            ("forge", None, "by state and branch, as last read"),
+            ("forge", None, "close (comment first), reopen on number"),
+            ("forge", None, "run, stop, step judged"),
+            (
+                "forge",
+                None,
+                "{\"action\": \"create\", \"repository\": \"api\", \"title\": \"fix\", \"body\": \"...\"}",
+            ),
             (
                 "forge",
                 None,
@@ -3222,7 +3253,7 @@ mod tests {
             (
                 "agent_launch",
                 None,
-                "{\"title\": \"Add API\", \"brief\": \"...\", \"root\": true, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}",
+                "{\"title\": \"Add API\", \"brief\": \"...\", \"root\": true, \"follow\": false, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}",
             ),
             (
                 "agent_launch",

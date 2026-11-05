@@ -148,6 +148,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 deliveries::discard_images(&daemon.paths, &agent.id, &images);
                 Failure::new("unavailable", "the message could not be stored")
             })?;
+            crate::subscriptions::user_wrote(daemon, &agent.id);
             Ok(json!({"agent": agent.to_json(), "after": after, "delivery": delivery}))
         }
         "agent.unqueue" => {
@@ -1034,8 +1035,7 @@ async fn process(
         // children go together.
         .process_group(0)
         .kill_on_drop(true);
-    let spawned = command
-        .spawn()
+    let spawned = crate::children::spawn(&mut command)
         .map_err(|e| format!("cannot start {}: {e}", launch.program.display()))
         .and_then(|child| match child.id() {
             Some(pid) => Ok((child, pid)),
@@ -1744,7 +1744,8 @@ async fn stop(child: &mut Child, pid: u32) {
 }
 
 pub fn signal_group(pid: u32, signal: i32) {
-    // SAFETY: killpg has no memory precondition; the group is the process's own (`process_group(0)`).
+    // SAFETY: killpg has no memory precondition; the group is the process's own (`process_group(0)`,
+    // or the session it leads).
     unsafe {
         libc::killpg(pid as i32, signal);
     }

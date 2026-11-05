@@ -137,6 +137,7 @@ remote = "origin"                     # default
 base = ["develop", "main"]            # the first that exists on the remote wins; default ["main"]
 depends_on = ["lib-core"]             # paths of repositories of the project, leaves first; no cycle
 forge = { kind = "github", repository = "acme/app" }   # its forge (docs/forges.md); none when left out
+delete_branch_on_merge = false        # "Delete the branch on merge": a merge by `forge` deletes the source branch on the forge; default false
 
 [variables]                           # name -> templated value, for every command run in a workspace
 STORE = "{workspace.path}/.store"
@@ -180,6 +181,13 @@ message_checks = ["pnpm commitlint --edit {message}"]   # run on an agent's mess
 title = "type(TICKET): subject"       # the title's format, told to the agent that writes it
 reviewers = ["alice", "bob"]          # asked to review each pull request Flottille opens
 ```
+
+**Delete the branch on merge** is a switch of each repository, in the project's Settings page and in
+its file, off by default. On, a `forge` `merge` of that repository's pull request deletes its source
+branch on the forge once merged, unless the merge says `delete_branch: false` (`docs/tools.md`, "The
+forge"). It never deletes a branch that existed before its workspace was made (the workspace
+resumed it) nor one another workspace of the project is on; the answer says it was left, and why.
+It is a project setting only: an agent's `project set_settings` does not set it.
 
 The repositories are put in dependency order (a repository after those it depends on; among those
 that are ready, the first of the file first) by `Project::in_dependency_order()`, which preparing
