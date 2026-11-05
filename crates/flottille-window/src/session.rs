@@ -3277,6 +3277,17 @@ fn said(
     )
 }
 
+/// The button that copies a file's whole path, the one a line cut with an ellipsis stands for.
+/// Its click is its own: it neither opens the edit nor folds the steps.
+fn copy_path(id: ElementId, path: &str) -> Button {
+    let path = path.to_owned();
+    Button::icon(id, Icon::Copy, "Copy the path").on_click(move |_, _, cx| {
+        cx.stop_propagation();
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(path.clone()));
+        toast(Toast::success("Path copied").detail(path.clone()), cx);
+    })
+}
+
 fn call_state(call: &Call) -> AgentState {
     match call.state {
         CallState::Running => AgentState::Running,
@@ -3769,6 +3780,12 @@ impl Render for Row {
                                         ),
                                     )),
                             )
+                            .children(call.path.as_ref().map(|path| {
+                                copy_path(
+                                    ElementId::Name(format!("step-{}-{at}-copy", self.at).into()),
+                                    path,
+                                )
+                            }))
                             .child(div().flex_none().mono(11.).text_color(p.faint).child(
                                 SharedString::from(call.duration_ms().map_or("…".into(), seconds)),
                             ))
@@ -4042,6 +4059,7 @@ impl Render for Row {
                                     .cursor_pointer()
                                     .child(icon(Icon::File).flex_none().text_color(p.faint))
                                     .child(path_line(id("diff-path"), path, 12.5, window, cx))
+                                    .child(copy_path(id("diff-copy"), path))
                                     .child(
                                         div()
                                             .id(id("diff-chevron"))
