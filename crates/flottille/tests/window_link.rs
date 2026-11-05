@@ -293,7 +293,11 @@ fn show_link_leaves_a_card_in_the_conversation(cx: &mut TestAppContext) {
         label(format!("row-{at}-link"), cx).as_deref(),
         Some("Link shared by the agent: Ticket 42, example.org")
     );
-    // The toast was missed: the card still opens it.
+    // The toast was missed: the card still opens it. It comes on its own thread, maybe after
+    // the card.
+    until(&shell, cx, "the toast is shown", |cx| {
+        has("toast-1-dismiss", cx)
+    });
     cx.update(|window, cx| window.click("toast-1-dismiss", cx));
     settle(cx);
     assert!(!has("toast-1", cx));
