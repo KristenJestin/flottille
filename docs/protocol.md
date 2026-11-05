@@ -922,15 +922,21 @@ its parent writes to it, and the sentence names its root.
 
 `images` is a list of `{"mime", "data"}`, `data` the image's bytes in base64: a pasted or dropped
 picture, sent as ACP image blocks after the message's text. With images, the message may be
-empty. `mime` is `image/png`, `image/jpeg`, `image/gif` or `image/webp`; a message carries 4
-images at most, 5 MiB each. The daemon writes them in `$XDG_DATA_HOME/flottille/images/<agent>/`
+empty. `mime` is `image/png`, `image/jpeg`, `image/gif` or `image/webp`; a message carries 20
+images at most, 5 MiB each (20 is the least of what the providers document: the Claude API takes
+100 or more images per request, the OpenAI API 1500, and OpenCode leaves the count to its
+provider; the Claude API also asks every image of a request of more than 20 to be 2000 px at most
+on its long side). A PNG or a JPEG whose long side is over 2000 px is scaled down to 2000 px
+before it is written, keeping its proportions and its format; a GIF and a WebP (they may be
+animated) are kept as they came, and so is a file that cannot be read as the picture its `mime`
+says. The daemon writes them in `$XDG_DATA_HOME/flottille/images/<agent>/`
 (never the project's), and the `agent.prompted` event of the turn that sends them names them.
 `refused` for an image of another type, bad base64, an empty or too big image, too many, and
 when the agent's agent said, when it last started, that it takes no images (`images` of the
 agent, below); before it started once, `images` is `null` and the message is accepted: if the
 agent turns out to take no images, none is sent and the text of the turn ends with
 `[N images not sent: this agent takes no images]`. A file gone when the turn starts leaves
-`[image <name> is missing]` in the text. Merged queued messages make one prompt of 4 images and
+`[image <name> is missing]` in the text. Merged queued messages make one prompt of 20 images and
 10 MiB at most (the first message is always whole); the others wait for the next turn. The
 images of an agent go with it: when it ends for good, or 7 days after a root that can be resumed.
 

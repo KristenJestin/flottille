@@ -392,9 +392,9 @@ pub fn pump(daemon: &Daemon, agent: &str) -> Option<Prompt> {
     })
 }
 
-/// Most images one message carries, and the biggest one (the least any agent takes).
-pub const MAX_IMAGES: usize = 4;
-pub const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+/// Most images one message carries, and the biggest one: `flottille_core::images` says, so that
+/// the window and the daemon agree.
+pub use flottille_core::images::{MAX_IMAGE_BYTES, MAX_IMAGES};
 /// The most bytes of images one prompt carries once the queued messages are merged: 10 MiB, which is about
 /// 14 MB in base64, well under the 32 MB a request to the Claude API may weigh, and that request
 /// also holds the history. A message is never split, and the first one is always taken whole

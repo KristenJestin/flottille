@@ -184,8 +184,8 @@ fn an_image_that_is_not_one_the_daemon_takes_is_refused() {
     assert!(text.1.contains("base64"), "{}", text.1);
     let empty = send(json!([image("image/png", b"")]), "x");
     assert!(empty.1.contains("empty or over"), "{}", empty.1);
-    let many = send(json!(vec![image("image/png", PNG); 5]), "x");
-    assert!(many.1.contains("4 images at most"), "{}", many.1);
+    let many = send(json!(vec![image("image/png", PNG); 21]), "x");
+    assert!(many.1.contains("20 images at most"), "{}", many.1);
     let nothing = send(json!([]), " ");
     assert!(nothing.1.contains("empty"), "{}", nothing.1);
 }
@@ -348,14 +348,14 @@ fn an_image_queued_before_the_first_start_of_an_agent_without_images_is_not_sent
 }
 
 #[test]
-fn a_prompt_carries_four_images_at_most_and_the_rest_waits_for_the_next_turn() {
+fn a_prompt_carries_twenty_images_at_most_and_the_rest_waits_for_the_next_turn() {
     let user = User::with_fake_agent();
     let id = busy_agent(&user, 4000);
-    let two = || json!([image("image/png", PNG), image("image/png", PNG)]);
+    let eight = || json!(vec![image("image/png", PNG); 8]);
     for message in ["first", "second", "third"] {
         user.call(
             "agent.send",
-            json!({"agent": id, "message": message, "images": two()}),
+            json!({"agent": id, "message": message, "images": eight()}),
         )
         .unwrap();
     }
@@ -364,8 +364,8 @@ fn a_prompt_carries_four_images_at_most_and_the_rest_waits_for_the_next_turn() {
         user.received_requests("session/prompt").len() == 3
     });
 
-    // `hello`, then four images of two messages, then the two of the third.
-    assert_eq!(images_per_prompt(&user), vec![0, 4, 2]);
+    // `hello`, then sixteen images of two messages (a third would make 24), then the eight left.
+    assert_eq!(images_per_prompt(&user), vec![0, 16, 8]);
 }
 
 #[test]
@@ -462,4 +462,93 @@ fn a_request_far_over_the_size_is_refused_before_it_is_decoded() {
         .unwrap_err();
 
     assert!(refused.1.contains("over 5 MiB"), "{}", refused.1);
+}
+
+#[test]
+fn a_message_carries_up_to_n_images() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"images": true}));
+    project(&user);
+    let id = idle_agent(&user);
+
+    // The cap itself is taken, one more is refused with the number said.
+    user.call(
+        "agent.send",
+        json!({"agent": id, "message": "look", "images": vec![image("image/png", PNG); 20]}),
+    )
+    .unwrap();
+    let refused = user
+        .call(
+            "agent.send",
+            json!({"agent": id, "message": "look", "images": vec![image("image/png", PNG); 21]}),
+        )
+        .unwrap_err();
+    assert!(refused.1.contains("20 images at most"), "{}", refused.1);
+    eventually("the twenty reach the agent", || {
+        images_per_prompt(&user) == vec![0, 20]
+    });
+}
+
+/// A PNG of `width` x `height` pixels, a gradient so that it is a real picture.
+fn png_of(width: u32, height: u32) -> Vec<u8> {
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::RgbImage::from_fn(width, height, |x, y| {
+        image::Rgb([(x / 12) as u8, (y / 12) as u8, ((x + y) / 24) as u8])
+    })
+    .write_to(&mut out, image::ImageFormat::Png)
+    .unwrap();
+    out.into_inner()
+}
+
+fn dimensions_of(bytes: &[u8]) -> (u32, u32) {
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .unwrap()
+        .into_dimensions()
+        .unwrap()
+}
+
+#[test]
+fn a_big_image_is_scaled_down_before_it_is_stored() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"images": true}));
+    project(&user);
+    let id = idle_agent(&user);
+    let (big, small) = (png_of(3000, 1500), png_of(800, 600));
+
+    user.call(
+        "agent.send",
+        json!({"agent": id, "message": "look", "images": [image("image/png", &big), image("image/png", &small)]}),
+    )
+    .unwrap();
+    eventually("the second turn started", || {
+        show(&user, &id)["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["name"] == "agent.prompted")
+            .count()
+            == 2
+    });
+
+    let prompted = show(&user, &id)["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["name"] == "agent.prompted")
+        .last()
+        .cloned()
+        .unwrap();
+    let names: Vec<&str> = prompted["data"]["images"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n.as_str().unwrap())
+        .collect();
+    let stored = |name: &str| std::fs::read(user.path(&format!("data/flottille/images/{id}/{name}"))).unwrap();
+    let (first, second) = (stored(names[0]), stored(names[1]));
+    assert!(names[0].ends_with(".png"), "it stays a PNG: {}", names[0]);
+    assert_eq!(dimensions_of(&first), (2000, 1000), "long side 2000, same proportions");
+    assert!(first.len() < big.len());
+    assert_eq!(second, small, "one that fits is stored as it came");
 }

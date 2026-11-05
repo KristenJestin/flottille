@@ -433,6 +433,8 @@ fn keep_images(
                 MAX_IMAGE_BYTES / 1024 / 1024
             )));
         }
+        // Scaled before it is stored, so that more of them fit under the byte caps of a prompt.
+        let bytes = flottille_core::images::scaled_down(&image.mime, bytes);
         checked.push((extension, bytes));
     }
     let folder = daemon.paths.images(&agent.id);
