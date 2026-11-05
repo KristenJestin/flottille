@@ -5,7 +5,8 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::sync::Mutex;
+use std::sync::{Mutex, Once};
+use std::time::Duration;
 
 use crate::agents::start_time;
 
@@ -54,17 +55,20 @@ pub fn in_own_session(command: &mut tokio::process::Command) -> &mut tokio::proc
 }
 
 /// Kills every process of the session `leader` started (`in_own_session`), whatever its group,
-/// off the async workers: `end_session_now` reads all of `/proc`, more than once.
+/// off the async workers: `end_session_now` reads all of `/proc`, more than once, and pauses.
 pub async fn end_session(leader: u32) {
     let _ = tokio::task::spawn_blocking(move || end_session_now(leader)).await;
 }
 
 /// `end_session`, on the calling thread. Each process is signalled through a pidfd opened before
 /// its session is read again, so a process that took the pid of one that ended meanwhile is
-/// never signalled. Again while one is found, up to `ROUNDS` times: a process may start another
-/// as it is killed.
+/// never signalled. Again while one is found, up to `ROUNDS` times, after a pause that grows: a
+/// process may start another as it is killed, and a killed one takes a moment to leave.
 pub fn end_session_now(leader: u32) {
-    for _ in 0..ROUNDS {
+    for round in 0..ROUNDS {
+        if round > 0 {
+            std::thread::sleep(Duration::from_millis(2 * round as u64));
+        }
         let mut found = false;
         for pid in processes() {
             if !in_session(pid, leader) {
@@ -73,6 +77,17 @@ pub fn end_session_now(leader: u32) {
             // SAFETY: pidfd_open takes a pid and flags and returns a descriptor or -1.
             let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
             if fd < 0 {
+                let error = io::Error::last_os_error();
+                // One that ended meanwhile is no failure; anything else (a kernel before 5.3, a
+                // seccomp filter) is, and no process is ever signalled by its bare pid instead.
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    PIDFD_FAILED.call_once(|| {
+                        eprintln!(
+                            "flottille daemon: cannot open a pidfd ({error}): what a run leaves \
+                             outside its process group is not ended with it"
+                        );
+                    });
+                }
                 continue;
             }
             let fd = fd as libc::c_int;
@@ -100,6 +115,9 @@ pub fn end_session_now(leader: u32) {
 
 /// How many times `end_session` reads `/proc` at most.
 const ROUNDS: u32 = 10;
+
+/// Said once in the daemon's log, not at every run's end.
+static PIDFD_FAILED: Once = Once::new();
 
 /// Whether the process runs in the session `leader` leads; one that ended runs nothing.
 fn in_session(pid: u32, leader: u32) -> bool {
