@@ -1042,6 +1042,9 @@ pub(crate) struct ForgeCall {
     waive: Option<String>,
     /// merge: `squash` (the default), `merge` or `rebase`; the gate refused any other.
     method: Option<String>,
+    /// merge by squash: the squashed commit's message, its subject on the first line; the gate
+    /// refused it with another method.
+    message: Option<String>,
     /// close, reopen: posted on the pull request first.
     comment: Option<String>,
     /// close: also delete the pull request's branch on the forge.
@@ -1801,6 +1804,19 @@ async fn forge_note(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
                  written: comment on it, or open a new pull request for the change"
             ));
         }
+        if let Some(title) = title {
+            let at = crate::message_checks::Where {
+                daemon,
+                place,
+                repository: &checkout.path,
+                folder: &checkout.folder,
+            };
+            let checked =
+                crate::message_checks::check(&at, crate::message_checks::Checked::Title, title);
+            if let Err(refusal) = checked.await {
+                return Outcome::Refused(refusal);
+            }
+        }
     }
     let number = number.to_string();
     // The id of the comment, where the forge answers one: `gh` prints its link, `bkt` none.
@@ -2235,6 +2251,23 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
     {
         return Outcome::Refused(refusal);
     }
+    // The checks run in the place of the workspace written for, which an agent of main names.
+    let target;
+    let at = crate::message_checks::Where {
+        daemon,
+        place: match place.workspace.as_deref() == Some(name.as_str()) {
+            true => place,
+            false => {
+                target = Place::of_workspace(&workspace, workspace.folder.clone());
+                &target
+            }
+        },
+        repository: &checkout.path,
+        folder: &workspace.folder_of(&checkout.path),
+    };
+    if let Err(refusal) = messages_checked(&at, &asked).await {
+        return Outcome::Refused(refusal);
+    }
     let reviewers = project.pull_requests.reviewers;
     if matches!(forge, Forge::Bitbucket { .. }) {
         let base = &repository.base.branch;
@@ -2351,7 +2384,12 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
             }
             let method = asked.method();
             let flag = format!("--{method}");
-            match gh_text(&["pr", "merge", &number, "-R", &repo, &flag]).await {
+            let mut args = vec!["pr", "merge", &number, "-R", &repo, &flag];
+            let message = asked.message.as_deref().map(squash_message);
+            if let Some((subject, body)) = &message {
+                args.extend(["--subject", subject, "--body", body]);
+            }
+            match gh_text(&args).await {
                 Ok(_) => Outcome::Done(format!(
                     "The pull request #{number} of {branch} was merged by {method} into {base} \
                      in {slug}."
@@ -2428,6 +2466,32 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
         }
         action => Outcome::Refused(format!("refused: forge {action} writes nothing here")),
     }
+}
+
+/// The project's message checks on what a write gives the forge: the title of a pull request
+/// it opens, the message of a squash merge (`crate::message_checks`).
+async fn messages_checked(
+    at: &crate::message_checks::Where<'_>,
+    asked: &ForgeCall,
+) -> Result<(), String> {
+    use crate::message_checks::{Checked, check};
+    match (asked.action.as_str(), &asked.title, &asked.message) {
+        ("create", Some(title), _) if !title.trim().is_empty() => {
+            check(at, Checked::Title, title).await
+        }
+        ("merge", _, Some(message)) => check(at, Checked::Squash, message).await,
+        _ => Ok(()),
+    }
+}
+
+/// A squash message as `gh pr merge` takes it: its first line, the subject, and the rest, the
+/// body, from its first line that is not blank.
+fn squash_message(message: &str) -> (&str, &str) {
+    let (subject, body) = message.split_once('\n').unwrap_or((message, ""));
+    (
+        subject.trim_end(),
+        body.trim_start_matches(['\n', '\r']).trim_end(),
+    )
 }
 
 /// `gh <args>`'s output, masked, or a sentence saying why it failed.

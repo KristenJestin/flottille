@@ -802,6 +802,13 @@ fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) 
             },
             None,
         ),
+        "project.set_message_checks" => (
+            match projects::set_message_checks(daemon, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+            },
+            None,
+        ),
         method if method.starts_with("project.") => (
             match projects::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),

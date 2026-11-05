@@ -398,6 +398,23 @@ pub async fn run(
         crate::mcp::started_run(&going.run.id);
         return Outcome::Done(describe(daemon, &going.run.id, None, None, true, false));
     }
+    // The project's checks of a commit's message, before git makes it.
+    let at = crate::message_checks::Where {
+        daemon,
+        place,
+        repository: &repository,
+        folder: &folder.path,
+    };
+    tokio::select! {
+        checked = crate::message_checks::commits(&at, &words) => {
+            if let Err(refusal) = checked {
+                return Outcome::Refused(refusal);
+            }
+        }
+        () = cancelled.cancelled() => {
+            return Outcome::Failed("the call was stopped before it ended".into());
+        }
+    }
     let started = match crate::services::start_needed(daemon, &needs).await {
         Ok(started) => started,
         Err(why) => {
@@ -594,7 +611,7 @@ pub(crate) fn wait_for_end(daemon: &Daemon, id: &str) -> impl Future<Output = ()
 
 /// The environment of a run in the place: the daemon's, the place's variables filled, the forges
 /// and the daemon kept out of reach, and pushes too unless `lift`.
-fn environment(
+pub(crate) fn environment(
     daemon: &Daemon,
     place: &Place,
     repository: &str,

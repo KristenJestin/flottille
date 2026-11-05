@@ -53,7 +53,7 @@ pub use interact::{
 };
 pub use lines::{
     CardHead, Chip, FlatRow, FooterAction, LINE_GAP, LabelledLine, StepRow, StepTone, caption,
-    lines_block,
+    commanded_text, lines_block,
 };
 pub use listing::{Item, Listing, Placement};
 pub use menu::Menu;

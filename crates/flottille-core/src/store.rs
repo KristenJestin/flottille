@@ -624,6 +624,20 @@ const MIGRATIONS: &[&str] = &[
     -- change\"): its digest and the actions of each tool, as JSON; NULL before its first process.
     ALTER TABLE agents ADD COLUMN tools_given TEXT;
 ",
+    "
+    -- A message that used commands keeps what the user typed beside what the agent received
+    -- (`body`), with the names of the commands, in the order of their first use: nothing reads
+    -- them back from the text. A message stored before held one command, named by its header:
+    -- it is read once here, and its typed text, never kept, stays NULL.
+    ALTER TABLE deliveries ADD COLUMN typed TEXT;
+    ALTER TABLE deliveries ADD COLUMN commands TEXT NOT NULL DEFAULT '[]';
+    UPDATE deliveries
+        SET commands = json_array(substr(body, 13, instr(body, ' of project ') - 13))
+        WHERE kind IN ('user', 'parent')
+            AND body GLOB 'The command * of project *: *'
+            AND instr(body, ' of project ') > 13
+            AND instr(substr(body, 13, instr(body, ' of project ') - 13), ' ') = 0;
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -638,7 +652,8 @@ const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, sta
     depth, epoch, title, brief, reported_at, quiet_turns, waiting_on_answer, reopens, images, gate_mode, \
     launched_by, pending_model, pending_effort, exchanged_at";
 
-const DELIVERY_COLUMNS: &str = "id, agent, kind, body, urgency, state, created_at, sent_at, images";
+const DELIVERY_COLUMNS: &str =
+    "id, agent, kind, body, urgency, state, created_at, sent_at, images, typed, commands";
 
 /// What changes on an agent; what is left `None` stays as it is.
 #[derive(Clone, Debug, Default)]
@@ -1972,8 +1987,8 @@ impl Store {
         let transaction = self.connection.transaction()?;
         let stored = transaction.execute(
             "INSERT OR IGNORE INTO deliveries (id, agent, kind, body, urgency, state, created_at, \
-             images) SELECT ?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7 WHERE EXISTS (SELECT 1 FROM agents \
-             WHERE id = ?2 AND state NOT IN ('ended', 'failed'))",
+             images, typed, commands) SELECT ?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?7, ?8, ?9 WHERE \
+             EXISTS (SELECT 1 FROM agents WHERE id = ?2 AND state NOT IN ('ended', 'failed'))",
             params![
                 delivery.id,
                 delivery.agent,
@@ -1981,7 +1996,9 @@ impl Store {
                 delivery.body,
                 delivery.urgency,
                 now_ms(),
-                serde_json::to_string(&delivery.images)?
+                serde_json::to_string(&delivery.images)?,
+                delivery.typed,
+                serde_json::to_string(&delivery.commands)?
             ],
         )?;
         if stored == 0 {
@@ -2396,6 +2413,20 @@ impl Store {
                 post.fingerprint,
                 post.posted_at
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Forgets the comment `comment_id` of an item: it was deleted, or its record is replaced.
+    pub fn drop_comment_posts(
+        &self,
+        (project, source, repository, key): (&str, &str, &str, &str),
+        comment_id: &str,
+    ) -> Result<()> {
+        self.connection.execute(
+            "DELETE FROM posts WHERE project = ?1 AND source = ?2 AND repository = ?3 \
+             AND key = ?4 AND kind = 'comment' AND comment_id = ?5",
+            params![project, source, repository, key, comment_id],
         )?;
         Ok(())
     }
@@ -2969,6 +3000,8 @@ fn delivery_row(row: &rusqlite::Row) -> rusqlite::Result<Delivery> {
         created_at: row.get(6)?,
         sent_at: row.get(7)?,
         images: serde_json::from_str(&row.get::<_, String>(8)?).unwrap_or_default(),
+        typed: row.get(9)?,
+        commands: serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or_default(),
     })
 }
 
@@ -4514,6 +4547,73 @@ mod tests {
             created_at: 0,
             sent_at: None,
             images: Vec::new(),
+            typed: None,
+            commands: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_message_keeps_what_the_user_typed_and_the_commands_it_used() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .create_agent(&an_agent(), ("agent.created", json!({})))
+            .unwrap();
+        let mut said = a_delivery("d1", "user");
+        said.typed = Some("test /ship then /deploy".into());
+        said.commands = vec!["ship".into(), "deploy".into()];
+        store.deliver(&said).unwrap().unwrap();
+        store.deliver(&a_delivery("d2", "user")).unwrap().unwrap();
+
+        let read = store.delivery("d1").unwrap().unwrap();
+        assert_eq!(read.typed.as_deref(), Some("test /ship then /deploy"));
+        assert_eq!(read.commands, ["ship", "deploy"]);
+        let plain = store.delivery("d2").unwrap().unwrap();
+        assert_eq!((plain.typed, plain.commands), (None, Vec::<String>::new()));
+    }
+
+    #[test]
+    fn an_old_command_message_reads_with_its_text_and_the_command_its_header_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let old = Connection::open(&path).unwrap();
+        let previous = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("ADD COLUMN typed"))
+            .unwrap();
+        for migration in &MIGRATIONS[..previous] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.pragma_update(None, "user_version", previous).unwrap();
+        old.execute_batch(
+            "INSERT INTO agents (id, provider, role, project, folder, state, created_at, \
+             updated_at, instructions, tools) VALUES ('a', 'claude', 'lead', 'app', '/w', \
+             'idle', 1, 1, 'i', '[]'); \
+             INSERT INTO deliveries (id, agent, kind, body, state, created_at) VALUES \
+             ('d1', 'a', 'user', 'The command open-prs of project app: Open them\n\n---\n\nDo it.', \
+              'sent', 1), \
+             ('d2', 'a', 'user', 'The command is broken, look', 'sent', 2), \
+             ('d3', 'a', 'user', 'plain words', 'sent', 3), \
+             ('d4', 'a', 'child-report', 'The command deploy of project app: hi', 'sent', 4), \
+             ('d5', 'a', 'user', 'THE COMMAND deploy OF PROJECT app: hi', 'sent', 5), \
+             ('d6', 'a', 'parent', 'The command deploy of project app: hi', 'sent', 6);",
+        )
+        .unwrap();
+        drop(old);
+
+        let store = Store::open(&path).unwrap();
+
+        let d1 = store.delivery("d1").unwrap().unwrap();
+        assert!(d1.body.ends_with("Do it."), "its text as the agent got it");
+        assert_eq!((d1.typed, d1.commands), (None, vec!["open-prs".to_owned()]));
+        let d6 = store.delivery("d6").unwrap().unwrap();
+        assert_eq!(d6.commands, ["deploy"], "a parent's message is one too");
+        for id in ["d2", "d3", "d4", "d5"] {
+            let plain = store.delivery(id).unwrap().unwrap();
+            assert_eq!(
+                (plain.typed, plain.commands),
+                (None, Vec::<String>::new()),
+                "{id}"
+            );
         }
     }
 
@@ -5002,11 +5102,12 @@ mod tests {
             .unwrap();
         assert_eq!(store.last_activity_of(&ids).unwrap(), Some(message.at));
         std::thread::sleep(std::time::Duration::from_millis(5));
-        let (asked, _) = store.ask(&a_request(Some("toolu_01"))).unwrap();
+        let (asked, event) = store.ask(&a_request(Some("toolu_01"))).unwrap();
         assert!(asked.created_at > message.at);
+        // The request's event reads the clock again, a millisecond later at times.
         assert_eq!(
             store.last_activity_of(&ids).unwrap(),
-            Some(asked.created_at)
+            Some(event.unwrap().at)
         );
         assert_eq!(
             store.last_activity_of(&["somebody-else".into()]).unwrap(),

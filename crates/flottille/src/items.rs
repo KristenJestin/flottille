@@ -937,9 +937,12 @@ async fn read_round(
             None if knows_me => item.mine = old.is_some_and(|old| old.mine),
             None => {}
         }
+        // A real Jira search prints no `updated` (`acli` refuses it), so the dates never differ:
+        // what its window lists (`updated >= "-Nm"`) is what changed since the last round.
+        let changed_in_window = fetched.item.source == "jira" && !first;
         if listing.details
             && !fetched.detailed
-            && wants_detail(old, &fetched, first)
+            && (changed_in_window || wants_detail(old, &fetched, first))
             && (fetched.item.source != "jira" || followed.contains(&fetched.item.key))
         {
             match reader.detail(&mut fetched).await {

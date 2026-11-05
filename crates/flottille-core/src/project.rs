@@ -390,6 +390,11 @@ pub struct Project {
     pub commands: BTreeMap<String, Command>,
     #[serde(skip_serializing_if = "PullRequests::is_empty")]
     pub pull_requests: PullRequests,
+    /// The user's checks of an agent's commit message, a pull request's title and a squash
+    /// message: one command line each, `{message}` standing for a file holding the text
+    /// (`docs/projects.md`, "Message checks"). None by default.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub message_checks: Vec<String>,
     /// The tracker of its tickets, as the user declared it; none is read without one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tracker: Option<ProjectTracker>,
@@ -457,6 +462,8 @@ struct File {
     procedures: BTreeMap<String, toml::Value>,
     #[serde(default)]
     pull_requests: PullRequests,
+    #[serde(default)]
+    message_checks: Vec<String>,
     tracker: Option<ProjectTracker>,
     /// Obsolete: read as nothing, and said (`OBSOLETE_AGENT_ACTIONS`).
     agent_actions: Option<toml::Value>,
@@ -541,6 +548,7 @@ impl Project {
             skills: BTreeMap::new(),
             commands: BTreeMap::new(),
             pull_requests: PullRequests::default(),
+            message_checks: Vec::new(),
             tracker: None,
             rules: None,
             rules_alone: false,
@@ -830,6 +838,10 @@ fn check(name: &str, mut file: File, places: &Places) -> Result<Project, String>
         }
     }
 
+    for (index, line) in file.message_checks.iter().enumerate() {
+        check_message_check(line).map_err(|error| format!("message_checks[{index}]: {error}"))?;
+    }
+
     for (skill, entry) in &skills {
         check_skill(skill, entry).map_err(|error| format!("skills.{skill}{error}"))?;
     }
@@ -892,6 +904,7 @@ fn check(name: &str, mut file: File, places: &Places) -> Result<Project, String>
         skills,
         commands,
         pull_requests: file.pull_requests,
+        message_checks: file.message_checks,
         tracker,
         rules: file.rules,
         rules_alone: file.rules_alone,
@@ -1149,6 +1162,21 @@ pub fn check_step(
                 return Err(format!("{key}.task: the project has no task \"{name}\""));
             }
         }
+    }
+    Ok(())
+}
+
+/// What stands for the file holding the message in a message check.
+pub const MESSAGE: &str = "{message}";
+
+/// Why a message check cannot be run, none when it can: one line split without a shell, naming
+/// the file it checks.
+pub fn check_message_check(line: &str) -> Result<(), String> {
+    let words = crate::command::split_line(line)?;
+    if !words.iter().any(|word| word.contains(MESSAGE)) {
+        return Err(format!(
+            "must name {MESSAGE}, the file that holds the message it checks"
+        ));
     }
     Ok(())
 }
@@ -1819,6 +1847,31 @@ line = \"serve\"
         ] {
             let refused = refusal(&format!("{MINIMAL}\n[pull_requests]\n{body}\n"));
             assert!(refused.contains(said), "{body}: {refused}");
+        }
+    }
+
+    #[test]
+    fn the_message_checks_are_read_and_checked() {
+        let project = parse(&format!(
+            "message_checks = [\"pnpm commitlint --edit {{message}}\"]\n{MINIMAL}"
+        ))
+        .unwrap();
+        assert_eq!(project.message_checks, ["pnpm commitlint --edit {message}"]);
+        assert!(parse(MINIMAL).unwrap().message_checks.is_empty());
+
+        for (checks, said) in [
+            ("[\" \"]", "message_checks[0]: the line is empty"),
+            (
+                "[\"commitlint --edit msg\"]",
+                "message_checks[0]: must name {message}",
+            ),
+            (
+                "[\"lint {message}\", \"lint {message} | tee x\"]",
+                "message_checks[1]: ",
+            ),
+        ] {
+            let refused = refusal(&format!("message_checks = {checks}\n{MINIMAL}"));
+            assert!(refused.contains(said), "{checks}: {refused}");
         }
     }
 
