@@ -5002,11 +5002,12 @@ mod tests {
             .unwrap();
         assert_eq!(store.last_activity_of(&ids).unwrap(), Some(message.at));
         std::thread::sleep(std::time::Duration::from_millis(5));
-        let (asked, _) = store.ask(&a_request(Some("toolu_01"))).unwrap();
+        let (asked, event) = store.ask(&a_request(Some("toolu_01"))).unwrap();
         assert!(asked.created_at > message.at);
+        // The request's event reads the clock again, a millisecond later at times.
         assert_eq!(
             store.last_activity_of(&ids).unwrap(),
-            Some(asked.created_at)
+            Some(event.unwrap().at)
         );
         assert_eq!(
             store.last_activity_of(&["somebody-else".into()]).unwrap(),
