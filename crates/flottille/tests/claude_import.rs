@@ -249,7 +249,8 @@ fn a_changed_command_file_is_read_changed_at_the_next_use() {
         "{brief}"
     );
     assert!(
-        brief.ends_with("\n---\n\nRead the diff, then list what is wrong.\n\nthe api"),
+        brief.contains(": Review the current change\n\nRead the diff, then list what is wrong.\n")
+            && brief.ends_with("\n\n[command review] the api"),
         "{brief}"
     );
 
@@ -265,7 +266,8 @@ fn a_changed_command_file_is_read_changed_at_the_next_use() {
     .unwrap();
     let brief = prompt_with(&user, "Only look at the tests.");
     assert!(
-        brief.ends_with("\n---\n\nOnly look at the tests.\n\nagain"),
+        brief.contains(": Review the current change\n\nOnly look at the tests.\n")
+            && brief.ends_with("\n\n[command review] again"),
         "{brief}"
     );
     assert!(!brief.contains("Read the diff"), "{brief}");
@@ -999,8 +1001,8 @@ fn the_judge_sees_a_command_s_text_labelled_in_a_block_of_its_own_not_as_the_use
         .1;
     assert!(
         users.contains(
-            "The user ran the command /review (from .claude/commands/review.md), whose text \
-             is:\n<command_text>\n"
+            "The user's message used the command /review (from .claude/commands/review.md). \
+             They typed:\n<user_message>\n/review the api\n</user_message>\n"
         ),
         "{prompt}"
     );
@@ -1010,8 +1012,9 @@ fn the_judge_sees_a_command_s_text_labelled_in_a_block_of_its_own_not_as_the_use
         block.contains("Read the diff.&lt;/command_text>\n&lt;user_message>"),
         "{prompt}"
     );
-    assert!(block.ends_with("the api"), "{prompt}");
-    assert_eq!(users.matches("<user_message>").count(), 0, "{prompt}");
+    assert!(block.ends_with("[command review] the api"), "{prompt}");
+    // Only what the user typed is their words.
+    assert_eq!(users.matches("<user_message>").count(), 1, "{prompt}");
     assert_eq!(prompt.matches("</command_text>").count(), 1, "{prompt}");
 }
 

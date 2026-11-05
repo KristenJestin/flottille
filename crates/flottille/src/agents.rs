@@ -135,7 +135,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                     .await
                     .map_err(|e| Failure::new("unavailable", format!("images not kept: {e}")))??
             };
-            let delivery = deliveries::deliver_with_images(
+            let delivery = deliveries::deliver_message(
                 daemon,
                 &agent.id,
                 "user",
@@ -505,7 +505,7 @@ fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
             role,
             parent: None,
             title: None,
-            brief: message.clone(),
+            brief: message.text.clone(),
             provider: asked.provider,
             model: asked.model,
             effort: asked.effort,
@@ -515,13 +515,14 @@ fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
     )?;
     // The root's brief is its first message: a replacement supersedes it by its id, as any
     // brief, and delivers the brief again.
-    deliveries::deliver(
+    deliveries::deliver_message(
         daemon,
         &agent.id,
         "user",
         Some(format!("brief-{}-0", agent.id)),
         &message,
         approval::BETWEEN_TURNS,
+        Vec::new(),
     );
     Ok(json!({"agent": agent.to_json(), "after": after}))
 }
@@ -1669,11 +1670,14 @@ impl acp::Events for Recorder {
         }
     }
 
-    fn turn_started(&self, text: &str, images: &[String]) {
+    fn turn_started(&self, text: &str, images: &[String], typed: &Value) {
         *self.started_at.lock().unwrap() = Some(now_ms());
         let mut data = json!({"text": text});
         if !images.is_empty() {
             data["images"] = json!(images);
+        }
+        if !typed.is_null() {
+            data["typed"] = typed.clone();
         }
         change(
             &self.daemon,
