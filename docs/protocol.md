@@ -686,6 +686,20 @@ the tracker's text is masked. Nothing is kept: every call reads again.
 `null`, and answers as `workspace.ticket` does. `refused` when `ticket` is not `#123`, `123` or a
 Jira key (`ABC-123`, any case). Emits `workspace.ticket` (`docs/events.md`).
 
+#### `workspace.rename_branch`
+
+`{"project", "name", "branch", "repository"?}`. Renames the workspace's branch to `branch` in the
+repository named, or in each repository of the workspace, and answers the workspace as
+`workspace.show` does without the git reads, with `"renamed": ["<repository>", ...]`
+(`docs/workspaces.md`, "Renaming the branch"). All or none: it is `refused`, nothing renamed, when
+the workspace is being prepared; when `branch` is not a name `git check-ref-format --branch`
+accepts, is the branch a worktree is on already, exists in a repository or is checked out in a
+checkout of one; when a worktree is on no branch; when a repository's branch was resumed by the
+workspace, has a remote branch (the tracking ref, or what the remote lists) or has a pull request.
+Each refusal says which repository and why. Emits `workspace.changed` (`docs/events.md`) when
+every worktree made is on the new branch, and the record follows; renaming one repository of
+several leaves the record as it is.
+
 #### `workspace.prepare`
 
 `{"project", "name"}`. Resumes the preparation (`docs/workspaces.md`) and answers the workspace
