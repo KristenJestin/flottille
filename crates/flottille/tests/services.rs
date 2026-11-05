@@ -1101,3 +1101,29 @@ fn a_service_that_stops_between_the_judgement_of_an_agent_s_run_and_its_start_is
     );
     assert_eq!(service_runs(&user, "db"), 0);
 }
+#[test]
+fn a_list_of_the_services_runs_none_of_their_commands() {
+    let user = User::new();
+    let marks = user.path("marks");
+    std::fs::create_dir_all(&marks).unwrap();
+    let marker = marks.join("probed");
+    let probe = marks.join("probe.sh");
+    std::fs::write(&probe, format!("touch {}\nexit 0\n", marker.display())).unwrap();
+    services_file(
+        &user,
+        &format!(
+            "[services.db]\nfolder = \"{}\"\nline = \"{}\"\nready = {{ command = \"sh {}\" }}\n",
+            folder(&user, "db").display(),
+            server(0),
+            probe.display()
+        ),
+    );
+    let started = user.call("service.start", json!({"name": "db"})).unwrap();
+    assert_eq!(started["service"]["state"], "outside", "{started}");
+    std::fs::remove_file(&marker).unwrap();
+
+    user.call("service.list", json!({})).unwrap();
+    show(&user, "db");
+
+    assert!(!marker.exists(), "a list ran the service's ready command");
+}

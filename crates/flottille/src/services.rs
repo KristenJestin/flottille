@@ -566,11 +566,15 @@ fn flottille_runs(daemon: &Daemon, name: &str) -> bool {
     known.run.is_some_and(|id| runs::is_going(daemon, &id))
 }
 
-/// Probes again each service seen running outside Flottille: one that no longer answers is shown
-/// as it is, stopped. A service being started is left to its start.
+/// Probes again each service seen running outside Flottille whose `ready` is an address: one that
+/// no longer answers is shown as it is, stopped. Only a connection is tried: a `ready` or `url`
+/// command is a line the gate has not judged for this read, and is left to the next start. A
+/// service being started is left to its start.
 async fn probed(daemon: &Arc<Daemon>, services: &BTreeMap<String, Service>) {
-    let home = flottille_core::place::home();
     for (name, service) in services {
+        let Some(address) = runs::service_address(service) else {
+            continue;
+        };
         let lock = daemon.services.lock_of(name);
         let Ok(_starting) = lock.try_lock() else {
             continue;
@@ -584,14 +588,7 @@ async fn probed(daemon: &Arc<Daemon>, services: &BTreeMap<String, Service>) {
         {
             continue;
         }
-        let answers = match service.folder_in(home.as_deref()) {
-            Ok(folder) => match runs::service_start(daemon, service, folder).await {
-                Ok(prepared) => prepared.has_ready() && prepared.answers(daemon, name).await,
-                Err(_) => false,
-            },
-            Err(_) => false,
-        };
-        if !answers {
+        if !crate::ready::answers(&address).await {
             daemon.services.set(
                 name,
                 Known {

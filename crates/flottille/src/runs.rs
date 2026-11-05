@@ -1728,6 +1728,31 @@ pub(crate) struct ServiceStart {
 /// The run of a service in `folder`: its line split without a shell, the environment of a run
 /// with no place's variables, the values of the folder's secret files to mask, its address and
 /// its probe, filled with its address alone (a service has no workspace).
+/// The address a service's `ready` probes, found without running anything: none when its `ready`
+/// is not an address, or asks for one only its `url` command gives.
+pub(crate) fn service_address(service: &flottille_core::service::Service) -> Option<String> {
+    let ready = service
+        .ready
+        .as_deref()
+        .filter(|ready| matches!(ready, Ready::Url(_)))?;
+    let names = Names {
+        workspace: String::new(),
+        workspace_path: String::new(),
+        project: String::new(),
+        branch: String::new(),
+        repository: String::new(),
+    };
+    let url = match service.url.as_deref() {
+        None => None,
+        Some(TaskUrl::Address(url)) => Some(variables::fill_also(url, &names, &[]).ok()?),
+        Some(TaskUrl::Command { .. }) => return None,
+    };
+    match ready::probe(ready, &names, url.as_deref()) {
+        Ok(Probe::Url(address)) => Some(address),
+        _ => None,
+    }
+}
+
 pub(crate) async fn service_start(
     daemon: &Daemon,
     service: &flottille_core::service::Service,
