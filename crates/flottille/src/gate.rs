@@ -660,6 +660,8 @@ const TICKET_ONLY: [(&str, &str); 4] = [
 fn tickets(call: &Call) -> Verdict {
     let action = call.args["action"].as_str().unwrap_or_default();
     let words = |key: &str| call.args[key].as_str().unwrap_or("?").trim().to_owned();
+    // What the agent wrote, as the card shows it: masked.
+    let shown = |key: &str| crate::mcp::masked(&words(key), &call.grant.place);
     let said = match action {
         "list" | "search" | "show" | "types" | "link_types" | "subscribe" | "unsubscribe" => {
             return Verdict::Allow;
@@ -677,10 +679,18 @@ fn tickets(call: &Call) -> Verdict {
             words("kind"),
             words("other")
         ),
-        "comment_edit" => "it changes a comment an agent posted on a ticket of the tracker".into(),
-        "comment_delete" => {
-            "it deletes a comment an agent posted on a ticket of the tracker".into()
-        }
+        // Which comment, and its new words in full, as the other writes show theirs.
+        "comment_edit" => format!(
+            "it changes the comment {} an agent posted on {} on the tracker, its new text: {}",
+            shown("comment"),
+            shown("ticket"),
+            shown("body")
+        ),
+        "comment_delete" => format!(
+            "it deletes the comment {} an agent posted on {} on the tracker",
+            shown("comment"),
+            shown("ticket")
+        ),
         "sprint" => "it puts a ticket in a sprint on the tracker".into(),
         "create" => "it opens a ticket on the tracker".into(),
         "comment" => "it comments on a ticket on the tracker".into(),
@@ -4225,6 +4235,45 @@ mod tests {
             Some(&fixture.never),
         );
         assert!(base_class(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn the_card_of_a_comment_write_names_the_ticket_the_comment_and_the_new_text() {
+        let fixture = Fixture::main();
+        let body = "Fixed on app/login, rebased on main after the review";
+
+        let edit = fixture.judge(
+            "tickets",
+            json!({"action": "comment_edit", "ticket": "ABC-1", "comment": "10100", "body": body}),
+            Some(&fixture.never),
+        );
+        let delete = fixture.judge(
+            "tickets",
+            json!({"action": "comment_delete", "ticket": "ABC-1", "comment": "10100"}),
+            Some(&fixture.never),
+        );
+
+        assert!(
+            reasons(&edit).contains(&format!(
+                "it changes the comment 10100 an agent posted on ABC-1 on the tracker, its new \
+                 text: {body}"
+            )),
+            "{edit:?}"
+        );
+        assert!(
+            reasons(&delete)
+                .contains("it deletes the comment 10100 an agent posted on ABC-1 on the tracker"),
+            "{delete:?}"
+        );
+        // A secret in the new text is shown masked, as in the other cards.
+        let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let masked = fixture.judge(
+            "tickets",
+            json!({"action": "comment_edit", "ticket": "ABC-1", "comment": "10100",
+                "body": format!("key {token}")}),
+            Some(&fixture.never),
+        );
+        assert!(!reasons(&masked).contains(token), "{masked:?}");
     }
 
     #[test]
