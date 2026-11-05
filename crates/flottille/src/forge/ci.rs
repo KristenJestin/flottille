@@ -6,7 +6,7 @@
 
 use serde_json::Value;
 
-use super::{Forge, Pull, bitbucket, gh_json};
+use super::{Forge, bitbucket, gh_json};
 use crate::session_read::form;
 use crate::subscriptions::{DEFAULT_MINUTES, LONGEST_MINUTES};
 
@@ -84,11 +84,6 @@ pub fn wait_for(runs: Option<&Runs>) -> (u64, String) {
         minutes,
         format!("Duration: {minutes} min, {why} {twice} min."),
     )
-}
-
-/// Tells `pull` how long its repository's CI usually takes, when the forge says it.
-pub(super) async fn attach(forge: &Forge, pull: &mut Pull) {
-    pull.ci = recent(forge).await;
 }
 
 /// The newest finished runs of the repository's CI, when there are some and the forge gave them.

@@ -290,7 +290,7 @@ pub(crate) fn offer(
             closing: None,
             ended: None,
         };
-        logs::attach(&forge, &mut pull).await;
+        logs::attach(&forge, &mut pull.jobs).await;
         let jobs: Vec<(Job, Option<u64>)> = pull.jobs.into_iter().zip(took).collect();
         let found: Vec<Event> = found
             .into_iter()
