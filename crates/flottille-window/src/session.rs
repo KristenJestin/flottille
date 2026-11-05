@@ -28,12 +28,12 @@ use flottille_ui::motion::{HOVER, Motion, PANEL};
 use flottille_ui::{
     AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Listing, Menu, Modal, Palette, Pill,
     PulsingLabel, Side, Skeleton, StateIcon, Status, Toast, Type, awaiting, changing, enter, fade,
-    fold_frame, hoverable, icon, palette, path_line, presence, presence_of, section_label,
-    selectable, space, text_region, tipped_when_cut, toast, turning,
+    fold_frame, follow_theme, hoverable, icon, palette, path_line, presence, presence_of,
+    section_label, selectable, space, text_region, tipped_when_cut, toast, turning,
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{
-    Escape, Input, InputEditorStyle, InputEvent, InputState, MoveDown, MoveUp, Paste, TextareaState,
+    Escape, Input, InputEvent, InputState, MoveDown, MoveUp, Paste, TextareaState,
 };
 use gpui_kit::base::text::{TextView, TextViewState, TextViewStyle};
 use gpui_kit::base::{ElementExt as _, TextSelection, TextSelectionScopeId};
@@ -5616,13 +5616,7 @@ impl Render for SessionRail {
         if self.workspace.is_some() && self.ticket_field.is_none() {
             let field = cx.new(|cx| {
                 let mut field = InputState::new(window, cx).placeholder("#123 or ABC-123");
-                field.set_editor_style(InputEditorStyle {
-                    foreground: p.text,
-                    muted_foreground: p.faint,
-                    selection: p.run.opacity(0.35),
-                    caret: p.text,
-                    ..Default::default()
-                });
+                follow_theme(&mut field, cx);
                 field
             });
             self._ticket_subscription =
@@ -6093,6 +6087,9 @@ pub struct Reply {
     slash_at: std::ops::Range<usize>,
     /// The commands the message uses, as chips under the field.
     chips: Listing<String>,
+    /// The rows of the `/` list, which unfold as a command matches and fold away as it does not.
+    /// Kept as they were while the list closes, so that it folds away with its rows.
+    slash_rows: Listing<(String, String)>,
     /// The entry of the `/` list the keyboard is on.
     highlighted: usize,
     /// Escape closed the `/` list: it stays closed until the message is no longer a `/` word.
@@ -6144,14 +6141,7 @@ impl Reply {
                 .auto_grow(1, REPLY_MAX_ROWS)
                 .submit_on_enter(true)
                 .placeholder(REPLY_PLACEHOLDER);
-            let p = palette(cx);
-            field.set_editor_style(InputEditorStyle {
-                foreground: p.text,
-                muted_foreground: p.faint,
-                selection: p.run.opacity(0.35),
-                caret: p.text,
-                ..Default::default()
-            });
+            follow_theme(&mut field, cx);
             field
         });
         let subscriptions = vec![cx.subscribe_in(
@@ -6190,6 +6180,7 @@ impl Reply {
             slash: None,
             slash_at: 0..0,
             chips: Listing::default(),
+            slash_rows: Listing::default(),
             highlighted: 0,
             dismissed: false,
             field,
@@ -6660,82 +6651,87 @@ impl Reply {
         .into_any_element()
     }
 
-    /// The `/` list, over the composer: the commands offered.
-    fn render_slash(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if !self.slash_open() {
-            return None;
-        }
+    /// The `/` list, over the composer: the commands offered. It unfolds when it opens and folds
+    /// away when it closes, and its height follows its rows.
+    fn render_slash(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let p = palette(cx);
-        let note = |id: &'static str, text: &'static str| {
-            div()
-                .id(id)
-                .aria_label(text)
-                .px(space::MD)
-                .py(space::SM)
-                .text_size(px(12.5))
-                .text_color(p.faint)
-                .child(text)
-                .test_support()
-                .into_any_element()
-        };
-        let body: Vec<AnyElement> = {
-            let entries = self.slash_entries();
-            if entries.is_empty() {
-                // A word that names no command is a message like any other: nothing to show.
-                if self.commands.as_ref().is_none_or(|c| !c.is_empty())
-                    || self.slash.as_deref() != Some("")
-                {
-                    return None;
-                }
-                vec![note(
-                    "slash-none",
-                    "This project has no command yet: add one in its settings.",
-                )]
-            } else {
-                let mut rows = vec![section_label("Commands", cx).into_any_element()];
-                for (at, (name, description)) in entries.into_iter().enumerate() {
-                    let picked = name.clone();
-                    rows.push(
-                        ListRow::new(
-                            ElementId::Name(format!("slash-{name}").into()),
-                            format!("/{name}"),
-                        )
-                        .line(description)
-                        .selected(at == self.highlighted)
-                        .on_click(
-                            cx.listener(move |this, _, window, cx| this.pick(&picked, window, cx)),
-                        )
-                        .into_any_element(),
+        let entries = self.slash_entries();
+        // A word that names no command is a message like any other: nothing to show, unless the
+        // project has no command at all.
+        let none = self.slash_open()
+            && entries.is_empty()
+            && self.slash.as_deref() == Some("")
+            && self.commands.as_ref().is_some_and(|c| c.is_empty());
+        let open = !entries.is_empty() || none;
+        let on = entries.get(self.highlighted).or(entries.first()).cloned();
+        if open {
+            let now = cx.background_executor().now();
+            self.slash_rows.sync(
+                entries.into_iter().map(|entry| (entry.0.clone(), entry)),
+                now,
+                cx.reduce_motion(),
+            );
+        }
+        let rows: Vec<AnyElement> = self
+            .slash_rows
+            .rows()
+            .map(|row| {
+                let (name, description) = row.value.clone();
+                let picked = name.clone();
+                let mut line = ListRow::new(
+                    ElementId::Name(format!("slash-{name}").into()),
+                    format!("/{name}"),
+                )
+                .line(description)
+                .selected(open && on.as_ref().is_some_and(|(on, _)| *on == name));
+                if open && !row.placement.is_gone() {
+                    line = line.on_click(
+                        cx.listener(move |this, _, window, cx| this.pick(&picked, window, cx)),
                     );
                 }
-                rows
-            }
-        };
-        Some(
-            div()
-                .absolute()
-                .left_0()
-                .right_0()
-                .bottom(gpui_kit::relative(1.))
-                .pb(space::SM)
-                .child(
-                    div()
-                        .id("slash-list")
-                        .occlude()
-                        .p(space::SM)
-                        .rounded(px(12.))
-                        .bg(p.card)
-                        .border_1()
-                        .border_color(p.line2)
-                        .shadow_lg()
-                        .flex()
-                        .flex_col()
-                        .gap(space::XS)
-                        .children(body)
-                        .test_support(),
+                flottille_ui::Item::new(
+                    ElementId::Name(format!("slash-item-{name}").into()),
+                    row.placement,
+                    line,
                 )
-                .into_any_element(),
-        )
+                .gap(space::XS)
+                .into_any_element()
+            })
+            .collect();
+        let listed = !self.slash_rows.is_empty();
+        let note = div()
+            .id("slash-none")
+            .aria_label("This project has no command yet: add one in its settings.")
+            .px(space::MD)
+            .py(space::SM)
+            .text_size(px(12.5))
+            .text_color(p.faint)
+            .child("This project has no command yet: add one in its settings.")
+            .test_support();
+        let card = div()
+            .id("slash-list")
+            .when(open, |card| card.occlude())
+            .p(space::SM)
+            .rounded(px(12.))
+            .bg(p.card)
+            .border_1()
+            .border_color(p.line2)
+            .shadow_lg()
+            .flex()
+            .flex_col()
+            .gap(space::XS)
+            .child(presence("slash-label", listed, section_label("Commands", cx)).gap(space::XS))
+            .children(rows)
+            .child(presence("slash-note", !listed, note).gap(space::XS))
+            .test_support();
+        div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .bottom(gpui_kit::relative(1.))
+            .pb(space::SM)
+            .child(presence("slash-panel", open, card))
+            .into_any_element()
     }
 
     /// Sends what the field holds to the root agent.
@@ -7027,7 +7023,7 @@ impl Render for Reply {
                     cx.notify();
                 }
             }))
-            .children(slash.map(|slash| gpui_kit::deferred(slash).priority(1)))
+            .child(gpui_kit::deferred(slash).priority(1))
             // A picture on the clipboard is an attachment; text is left to the field.
             .capture_action(cx.listener(|this, _: &Paste, _, cx| {
                 if this.pasted(cx) {

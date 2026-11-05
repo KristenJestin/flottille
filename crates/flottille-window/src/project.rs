@@ -12,8 +12,8 @@ use flottille_ui::color::mix;
 use flottille_ui::{
     AgentState, Block, Button, Card, CardHead, Chip, Confirm, Field, FlatRow, FooterAction, Icon,
     Item, LINE_GAP, LabelledLine, Listing, Menu, Modal, PageHeader, Section, Skeleton, StateIcon,
-    Status, StepRow, StepTone, Toast, Type, awaiting, caption, enter, hoverable, icon, lines_block,
-    palette, presence, presence_of, selectable, space, toast,
+    Status, StepRow, StepTone, Toast, Type, awaiting, caption, enter, follow_theme, hoverable,
+    icon, lines_block, palette, presence, presence_of, selectable, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -1610,27 +1610,13 @@ impl NewWorkspace {
         cx: &mut Context<Self>,
     ) -> Self {
         let name = cx.new(|cx| {
-            let p = palette(cx);
             let mut name = InputState::new(window, cx).placeholder("for example login-fix");
-            name.set_editor_style(gpui_kit::base::input::InputEditorStyle {
-                foreground: p.text,
-                muted_foreground: p.faint,
-                selection: p.run.opacity(0.35),
-                caret: p.text,
-                ..Default::default()
-            });
+            follow_theme(&mut name, cx);
             name
         });
         let ticket = cx.new(|cx| {
-            let p = palette(cx);
             let mut ticket = InputState::new(window, cx).placeholder("#123 or ABC-123");
-            ticket.set_editor_style(gpui_kit::base::input::InputEditorStyle {
-                foreground: p.text,
-                muted_foreground: p.faint,
-                selection: p.run.opacity(0.35),
-                caret: p.text,
-                ..Default::default()
-            });
+            follow_theme(&mut ticket, cx);
             ticket
         });
         let branch = cx

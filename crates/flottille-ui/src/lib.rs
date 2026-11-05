@@ -45,7 +45,7 @@ pub use confirm::Confirm;
 pub use cut::tipped_when_cut;
 pub use drawer::{Drawer, Side};
 pub use dropdown::{Align, Dropdown, MenuItem};
-pub use field::Field;
+pub use field::{Field, StyledField, field_style, follow_theme};
 pub use icons::{Icon, Icons, icon};
 pub use interact::{
     Hoverable, dismiss_on_navigate, dismiss_top_overlay, fade, forget_overlays, hoverable,

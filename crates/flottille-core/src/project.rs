@@ -59,6 +59,10 @@ pub struct Repository {
     /// The forge it is on, as the user declared it; none is read nor written without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forge: Option<RepositoryForge>,
+    /// "Delete the branch on merge": a merge by `forge` deletes the pull request's source branch
+    /// on the forge, unless the merge says otherwise (`docs/projects.md`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delete_branch_on_merge: bool,
 }
 
 fn default_remote() -> String {
@@ -138,6 +142,10 @@ pub struct Task {
     /// Where a run of it answers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<Box<TaskUrl>>,
+    /// The services of the machine started, and waited for, before it runs (`service.rs`). A
+    /// boxed slice, not a `Vec`, for the gate's answers to stay small.
+    #[serde(default, skip_serializing_if = "<[String]>::is_empty")]
+    pub needs: Box<[String]>,
     /// Obsolete: who added it (a line the user allowed always). Read and not followed: the line
     /// is a plain task, and the daemon's migration drops the key.
     ///
@@ -493,6 +501,9 @@ pub struct Places<'a> {
     pub home: Option<&'a Path>,
     /// Where the workspaces of a project that names no folder go.
     pub default: &'a Place,
+    /// The services of the machine, which a task's `needs` names; `None` when they are not
+    /// known (their file cannot be read), and the names are then not checked.
+    pub services: Option<&'a [String]>,
 }
 
 impl<'a> Places<'a> {
@@ -503,6 +514,7 @@ impl<'a> Places<'a> {
             data,
             home: None,
             default: &Place::Data,
+            services: None,
         }
     }
 }
@@ -532,6 +544,7 @@ impl Project {
                     base: default_base(),
                     depends_on: Vec::new(),
                     forge: None,
+                    delete_branch_on_merge: false,
                 })
                 .collect(),
             variables: BTreeMap::new(),
@@ -795,6 +808,12 @@ fn check(name: &str, mut file: File, places: &Places) -> Result<Project, String>
     }
     for (task, entry) in &tasks {
         check_task(task, entry, &known).map_err(|error| format!("tasks.{task}{error}"))?;
+        if let Some(services) = places.services {
+            crate::service::check_needs(&entry.needs, &|need| {
+                services.iter().any(|service| service == need)
+            })
+            .map_err(|error| format!("tasks.{task}.needs: {error}"))?;
+        }
     }
 
     for (index, step) in setup.iter().enumerate() {
@@ -1350,6 +1369,13 @@ mod tests {
         [[repositories]]
         path = "."
     "#;
+
+    #[test]
+    fn a_repository_deletes_its_branch_on_merge_only_when_its_file_says_so() {
+        assert!(!parse(MINIMAL).unwrap().repositories[0].delete_branch_on_merge);
+        let text = format!("{MINIMAL}\n        delete_branch_on_merge = true\n");
+        assert!(parse(&text).unwrap().repositories[0].delete_branch_on_merge);
+    }
 
     #[test]
     fn a_minimal_configuration_gets_the_defaults() {
@@ -1966,6 +1992,7 @@ line = \"serve\"
                 data: Path::new(DATA),
                 home: Some(Path::new("/home/someone")),
                 default: place,
+                services: None,
             },
         )
     }

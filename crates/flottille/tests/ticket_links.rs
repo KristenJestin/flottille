@@ -373,7 +373,7 @@ fn show_lists_an_item_s_links() {
     // asked with the ticket's own fields so that one read serves both.
     assert!(
         acli_calls(&user).contains(
-            &"jira workitem view ABC-1 --json --fields summary,status,description,comment,issuelinks"
+            &"jira workitem view ABC-1 --json --fields summary,status,description,comment,issuelinks,attachment"
                 .to_owned()
         ),
         "{:?}",

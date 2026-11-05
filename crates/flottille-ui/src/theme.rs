@@ -313,6 +313,8 @@ pub fn set_palette(palette: Palette, cx: &mut App) {
         loop {
             cx.background_executor().timer(FADE_FRAME).await;
             let running = cx.update(|cx| {
+                // The fields that follow the theme restyle themselves a frame at a time.
+                cx.global_mut::<Theme>();
                 cx.refresh_windows();
                 let now = cx.background_executor().now();
                 cx.try_global::<Theme>()

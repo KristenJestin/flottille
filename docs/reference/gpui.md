@@ -48,6 +48,10 @@ measured on a 16-core Linux machine with a 165 Hz screen. Keep them; they cost a
   them.
 - A **text input** (`gpui_kit::component::input`) notifies its state on every caret blink: render
   it in its own view, keep its text in a separate entity updated on `Change`.
+  A field's colours (ink, placeholder, selection, caret) are not drawn from the palette by the
+  input: they are set on it. `flottille_ui::follow_theme` sets them from `field_style` and again at
+  each frame of a theme change; a field made with an `InputEditorStyle` of its own keeps the
+  colours of the theme it was made in (a scan refuses it).
 - `uniform_list` calls its row closure for row 0 alone to measure, and only for missing rows
   later: side effects in the closure must ignore `0..1` and not count on being called again.
 - A list that grows while it is looked at (a streaming conversation): keep the rows in an
