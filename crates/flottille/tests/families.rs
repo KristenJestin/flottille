@@ -1141,7 +1141,10 @@ fn tickets_search_finds_the_tickets_holding_its_words() {
         mcp.call("tickets", json!({"action": "search", "query": "login"})),
     );
 
-    assert!(found.contains("matching \"login\": 1"), "{found}");
+    assert!(
+        found.contains("matching \"login\" in the titles, descriptions and comments: 1"),
+        "{found}"
+    );
     assert!(found.contains("- #1 open: The login fails"), "{found}");
     assert!(issue_lists(&user)[0].contains("--search login"));
     let refused = mcp.call("tickets", json!({"action": "search"}));

@@ -64,7 +64,7 @@ user's), so that the user's own sign-in works; a call is cut after 30 s.
   status`, `acli jira workitem view <KEY> --json --fields summary,status,description,comment`
   (`--fields status` or `--fields comment` alone for the status of a write and the rounds'
   comments), and `acli jira workitem search --jql <JQL> --fields key,summary,status,assignee,labels --json
-  --limit 200`; its writes (`workitem create`, `comment create`, `edit`, `transition`, below) run
+  --limit 200` (the JQL of a `list` or a `search`, `docs/tools.md`); its writes (`workitem create`, `comment create`, `edit`, `transition`, below) run
   only for a `tickets` call the gate let through, and the tests look at every call the fake
   received. Of `gh`, the reads are `gh issue view <n> -R github.com/owner/name --json
   number,title,state,body,comments,url` and `gh issue list` (`docs/tools.md`, "The tickets"); its
@@ -198,8 +198,8 @@ workspace keeps only the reference, and what it shows is as fresh as that read.
 incrementally, its title, state, assignee, labels and status kept in the store and its changes
 said as `item.*` events ([`items.md`](items.md)); its description is not kept, nor its comments,
 except those of a Jira work item a subscription follows (below).
-`tickets` `list` and `search` answer from that store once a round of the tracker worked, saying
-its age; `show` reads live and stores what it read; a subscription to a ticket hears those
+`tickets` `list` answers from that store once a round of the tracker worked, saying its age;
+`search`, and a `list` with `updated_within`, ask the tracker; `show` reads live and stores what it read; a subscription to a ticket hears those
 events.
 
 ## How fast it is read
@@ -257,7 +257,7 @@ or why the ticket is not taken, before anything is created.
 ## The agent's tool `tickets`
 
 `tickets {action, …}` (`docs/tools.md`, "The tickets"): `list` every ticket of a state in one call
-(by label and assignee), `search` with words, `show` the workspace's ticket or another of the
+(by label, assignee and `updated_within`), `search` with words, `in_comments` or `jql`, `show` the workspace's ticket or another of the
 project's tracker by its key, `types` the work item types of a Jira project; `create`, `comment`, `edit` (on GitHub also labels and assignees; on Jira the assignee), `close` (on
 GitHub, completed or not planned), `reopen` and `status` (on GitHub, the Status of the issue on its
 Projects board, `docs/tools.md`), each to judge, held in Ask and allowed in Full as the other writes are. A key the
@@ -268,11 +268,14 @@ whose link is the tracker repository's are kept, the others counted. Every agent
 the tool, in `main` as in a workspace, whether a ticket is linked or not (a session running
 when the tracker is declared is told, `docs/tools.md`, "When the tools change"). Until #141 `show` was `ticket_read`.
 
-`list` and `search` answer from what the daemon's rounds keep ([`items.md`](items.md), "What
-reads this stream"), with its age (`… : 2 (as of 3 min ago)`); a `search` finds the words in the
-titles, all of them, whatever their case, since no description is kept, and its answer says
-so. Before the first round
-of the tracker worked, they ask the tracker as they did.
+`list` answers from what the daemon's rounds keep ([`items.md`](items.md), "What reads this
+stream"), with its age (`… : 2 (as of 3 min ago)`); before the first round of the tracker worked,
+it asks the tracker. A `search` always asks the tracker, since the rounds keep no description nor
+comment: Jira's `text ~` (`comment ~` for `in_comments`), GitHub's `in:title,body,comments`, its
+answer saying where it looked; the same search within 30 s is given again. `updated_within` is a
+date the rounds do not keep of a Jira work item (`acli` refuses `updated`): a list with it asks
+the tracker too. An agent's `jql` is put in parentheses after the tracker's projects, and refused
+when it could leave them (`docs/tools.md`, "The tickets").
 
 ### Subscribing to a ticket
 
@@ -434,7 +437,9 @@ which answers `issue view`, `issue list`, the issue writes, the `gh project` cal
 missing `project` scope too) and a fake `acli`
 (`crates/flottille-fake-acli`, `workitem view`, `workitem search` and the writes; it reads the
 files of `--description-file` and `--body-file` and ends with 1 on a document that is not valid
-ADF, so that a test catches one), first on the
+ADF, so that a test catches one; without a scripted `search`, a search finds the work items its
+JQL's `project in`, `text ~`, `comment ~` and `updated >= "-<n>d"` find, as a site does, and the
+fake `gh` reads `in:` and `updated:>=` of an issue search), first on the
 `PATH` of the test's daemon, answer from a script and record every call; the repositories are
 throwaway ones whose `origin` is set to a GitHub URL after their workspace is made, and whose
 forge and tracker are declared with `project.set_settings`

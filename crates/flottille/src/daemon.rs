@@ -169,6 +169,8 @@ pub struct Daemon {
     /// The tickets read in the last 30 s, for the next `tickets show` and the window's session
     /// link (`reads`).
     pub kept_tickets: crate::reads::Kept<crate::tickets::Ticket>,
+    /// The searches of the tracker made in the last 30 s, by what they asked.
+    pub kept_searches: crate::reads::Kept<crate::tickets::Found>,
     /// The rounds of the items, the windows connected (`docs/items.md`).
     pub items: items::Items,
     /// The developer mode's log (`docs/developer.md`).
@@ -346,6 +348,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         launching: Mutex::new(HashMap::new()),
         forges: forge::Forges::default(),
         kept_tickets: crate::reads::Kept::default(),
+        kept_searches: crate::reads::Kept::default(),
         items: items::Items::default(),
         developer: developer::Log::open(paths),
         inactive_checked: AtomicU64::new(0),

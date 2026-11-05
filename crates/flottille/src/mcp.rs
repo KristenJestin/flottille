@@ -366,18 +366,19 @@ const SERVED: [Definition; 28] = [
     Definition {
         name: "tickets",
         title: "Tickets",
-        description: "The tickets of the project's tracker (GitHub issues #123, Jira ABC-123), \
-            through the user's own gh or acli (no sign-in here: never run them). list: every \
-            ticket of a state (open by default), by label and assignee, as the daemon last read \
-            them; search: the same, with words of the title; show: a workspace's linked ticket \
-            (in main, name workspace) or ticket, read now, detail full adds the comments; \
-            types: a Jira project's work item types: read them when unsure of a type, a guess \
-            is refused. Writes, judged, answered at once, the result maybe later: create, \
-            comment, edit, close, reopen, status. Nothing is assigned unless you ask, and a \
-            tracker may assign a new work item itself: assignee \"@me\" gives it to the user \
-            (Jira create, edit; null on edit removes it; GitHub edit: assignees). Markdown body, \
-            converted for Jira. subscribe: the next events of a ticket wake you once (from \
-            people: no bot nor agent; minutes: 60 by default); unsubscribe. {\"action\": \"comment\", \"ticket\": \"#12\", \"body\": \"...\"}",
+        description: "The project tracker's tickets (#123, ABC-123), via the user's \
+             own gh or acli (no sign-in here: never run them). list: a state's tickets \
+            (open by default), by label, assignee, updated_within (days). search asks the tracker, \
+            in titles, descriptions, comments: {\"action\": \"search\", \"query\": \"natures\", \
+            \"updated_within\": 15}; on Jira also {\"action\": \"search\", \"in_comments\": \"x\"} \
+            (not by author) or {\"action\": \"search\", \"jql\": \"priority = High ORDER BY key\"}, \
+            kept in the projects. show: the workspace's ticket (in main, name \
+            workspace) or ticket; detail full adds comments. types: a Jira project's work item \
+            types (a guess is refused). Writes, judged, answered at once, the result maybe later: \
+            create, comment, edit, close, reopen, status. Nothing is assigned unless asked: \
+            assignee \"@me\" is the user (Jira create, edit; null on edit removes; GitHub edit: \
+            assignees). Markdown bodies. subscribe: a ticket's next events wake \
+            you once (from: people, no bot nor agent; 60 minutes by default); unsubscribe.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -387,6 +388,9 @@ const SERVED: [Definition; 28] = [
                 "ticket": {"type": "string", "description": "#123 or ABC-123; the workspace's when left out."},
                 "workspace": {"type": "string"},
                 "query": {"type": "string", "description": "search: words."},
+                "updated_within": {"type": "integer", "minimum": 1, "maximum": 365, "description": "list, search: updated in the last that many days."},
+                "in_comments": {"type": "string", "description": "search on Jira: words of the comments."},
+                "jql": {"type": "string", "description": "search on Jira: a JQL query, put in parentheses after the tracker's projects."},
                 "state": {"type": "string", "enum": ["open", "closed", "all"]},
                 "label": {"type": "string"},
                 "assignee": {"type": ["string", "null"], "description": "list, search: only those assigned to them. create, edit on Jira: whom to assign, \"@me\" (the user signed in to acli), an email or an account id; edit: null removes the assignee."},

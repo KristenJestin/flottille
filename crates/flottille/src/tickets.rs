@@ -696,6 +696,12 @@ struct TicketsCall {
     ticket: Option<String>,
     workspace: Option<String>,
     query: Option<String>,
+    /// `list`, `search`: only the tickets updated in the last that many days.
+    updated_within: Option<u64>,
+    /// `search` on Jira: words of the comments.
+    in_comments: Option<String>,
+    /// `search` on Jira: the agent's own JQL, confined to the tracker's projects.
+    jql: Option<String>,
     state: Option<String>,
     label: Option<String>,
     /// `list`, `search`: whose tickets. `create`, `edit` on Jira: whom to assign; an explicit
@@ -953,6 +959,7 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
         "create" => {
             let created = create(daemon, &project, &asked).await;
             daemon.kept_tickets.drop_all();
+            daemon.kept_searches.drop_all();
             created
         }
         "comment" | "edit" | "close" | "reopen" | "status" => {
@@ -965,6 +972,7 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
                 _ => write(daemon, &project, &asked, &key).await,
             };
             daemon.kept_tickets.drop_all();
+            daemon.kept_searches.drop_all();
             written
         }
         action => Outcome::Refused(format!(
@@ -978,6 +986,7 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
 const LISTED: usize = 200;
 
 /// A ticket of a list.
+#[derive(Clone)]
 struct Listed {
     reference: String,
     state: String,
@@ -997,20 +1006,52 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
              and all"
         ));
     }
-    let query = match (asked.action.as_str(), asked.query.as_deref()) {
-        ("search", Some(query)) if !query.trim().is_empty() => Some(query.trim()),
-        ("search", _) => {
-            return Outcome::Refused(
-                "refused: tickets search needs query, the words to find; list takes none".into(),
-            );
-        }
-        _ => None,
-    };
+    let search = asked.action == "search";
+    // What only a search reads, when it says something.
+    fn given(search: bool, text: Option<&str>) -> Option<&str> {
+        text.map(str::trim).filter(|t| search && !t.is_empty())
+    }
+    let query = given(search, asked.query.as_deref());
+    let in_comments = given(search, asked.in_comments.as_deref());
+    let asked_jql = given(search, asked.jql.as_deref());
+    if search && query.is_none() && in_comments.is_none() && asked_jql.is_none() {
+        return Outcome::Refused(
+            "refused: tickets search needs query, the words to find (or, on Jira, in_comments or \
+             jql); list takes none"
+                .into(),
+        );
+    }
+    if let Some(days) = asked.updated_within
+        && !(1..=365).contains(&days)
+    {
+        return Outcome::Refused(format!(
+            "refused: tickets takes an updated_within of 1 to 365 days, not {days}"
+        ));
+    }
     let Some(tracker) = &project.tracker else {
         return Outcome::Refused(format!("refused: {NO_TRACKER}"));
     };
-    if let (ProjectTracker::Github { .. }, Some(query)) = (tracker, query) {
-        if reaches(query) {
+    let jql_asked = match (tracker, asked_jql) {
+        (_, None) => None,
+        (ProjectTracker::Github { .. }, Some(_)) => {
+            return Outcome::Refused(
+                "refused: jql is Jira's: on GitHub, give the words in query (GitHub's search \
+                 syntax, in the tracker's repository)"
+                    .into(),
+            );
+        }
+        (ProjectTracker::Jira { .. }, Some(text)) => match confined(text) {
+            Ok(confined) => Some(confined),
+            Err(why) => return Outcome::Refused(format!("refused: {why}")),
+        },
+    };
+    if let ProjectTracker::Github { .. } = tracker {
+        if in_comments.is_some() {
+            return Outcome::Refused(
+                "refused: in_comments is Jira's: on GitHub, query looks in the comments too".into(),
+            );
+        }
+        if query.is_some_and(reaches) {
             return Outcome::Refused(
                 "refused: tickets search looks in the tracker's repository only: its query \
                  cannot hold repo:, org:, user:, owner:, is:pr or type:pr; give the words alone"
@@ -1019,15 +1060,17 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
         }
         // The flags are joined into GitHub's search query by `gh`: a value with a quote or a
         // colon could carry a qualifier of its own.
-        for (flag, value) in [
-            ("label", asked.label.as_deref()),
-            ("assignee", asked.assigned_to()),
-        ] {
-            if value.is_some_and(|v| v.contains(['"', ':'])) {
-                return Outcome::Refused(format!(
-                    "refused: tickets search takes a {flag} without a quote or a colon: they \
-                     could add a qualifier that leaves the tracker's repository"
-                ));
+        if query.is_some() || asked.updated_within.is_some() {
+            for (flag, value) in [
+                ("label", asked.label.as_deref()),
+                ("assignee", asked.assigned_to()),
+            ] {
+                if value.is_some_and(|v| v.contains(['"', ':'])) {
+                    return Outcome::Refused(format!(
+                        "refused: tickets search takes a {flag} without a quote or a colon: \
+                         they could add a qualifier that leaves the tracker's repository"
+                    ));
+                }
             }
         }
     }
@@ -1036,27 +1079,25 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
         label: asked.label.as_deref(),
         assignee: asked.assigned_to(),
         query,
+        updated_within: asked.updated_within,
+        in_comments,
+        jql: jql_asked,
     };
-    // What the items' rounds keep, once one read the tracker; the tracker itself before.
+    // What the items' rounds keep, once one read the tracker; the tracker itself before. A search
+    // looks in the descriptions and comments, and a time in the tracker's dates, which the rounds
+    // do not keep: they always ask the tracker.
     let cursor = daemon
         .read(|store| store.cursors(&project.name))
         .unwrap_or_default()
         .into_iter()
-        .find(|c| c.kind == "ticket" && c.cursor.is_some());
-    let found = match (&cursor, tracker) {
-        (Some(_), _) => Ok((stored_tickets(daemon, project, &filters), 0, 0)),
-        (None, ProjectTracker::Github { repository }) => match github_of(project, repository).await
-        {
-            Ok(forge) => list_issues(&forge, &filters)
-                .await
-                .map(|(tickets, left_out)| (tickets, left_out, 0)),
-            Err(why) => Err(why),
-        },
-        (None, ProjectTracker::Jira { site, projects }) => {
-            list_work_items(site, projects, &filters).await
-        }
+        .find(|c| c.kind == "ticket" && c.cursor.is_some())
+        .filter(|_| !search && filters.updated_within.is_none());
+    let found = match &cursor {
+        Some(_) => Ok(Found(stored_tickets(daemon, project, &filters), 0, 0)),
+        None if search => searched_again(daemon, project, tracker, &filters).await,
+        None => asked_tracker(project, tracker, &filters).await,
     };
-    let (tickets, left_out, nulls) = match found {
+    let Found(tickets, left_out, nulls) = match found {
         Ok(found) => found,
         Err(why) => return Outcome::Failed(format!("the tickets could not be listed: {why}")),
     };
@@ -1074,13 +1115,19 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
     if let Some(assignee) = filters.assignee {
         header.push_str(&format!(", assigned to {assignee}"));
     }
+    if let Some(days) = filters.updated_within {
+        header.push_str(&format!(", updated in the last {days} days"));
+    }
     if let Some(query) = query {
-        header.push_str(&format!(" matching {query:?}"));
-        // What the rounds keep of a ticket is its title: an agent must not read "none" as no
-        // ticket of it.
-        if cursor.is_some() {
-            header.push_str(" in their titles (not their descriptions nor comments)");
-        }
+        header.push_str(&format!(
+            " matching {query:?} in the titles, descriptions and comments"
+        ));
+    }
+    if let Some(words) = in_comments {
+        header.push_str(&format!(" with {words:?} in their comments"));
+    }
+    if let Some(jql) = asked_jql {
+        header.push_str(&format!(" found by the JQL {jql:?}"));
     }
     let mut text = format!("{header}: {}", tickets.len());
     if let Some(cursor) = &cursor {
@@ -1135,19 +1182,13 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
     Outcome::Done(text)
 }
 
-/// The tickets the items' rounds keep, as a list keeps them: by state, label, assignee and, for a
-/// search, the words of their title, the most recently changed first.
+/// The tickets the items' rounds keep, as a list keeps them: by state, label and assignee, the
+/// most recently changed first.
 fn stored_tickets(daemon: &Daemon, project: &Project, filters: &Filters<'_>) -> Vec<Listed> {
     let kind = flottille_core::item::Filter {
         kind: Some("ticket".into()),
         ..Default::default()
     };
-    let words: Vec<String> = filters
-        .query
-        .unwrap_or_default()
-        .split_whitespace()
-        .map(str::to_lowercase)
-        .collect();
     let named = |names: &[String], asked: Option<&str>| {
         asked.is_none_or(|asked| names.iter().any(|n| n.eq_ignore_ascii_case(asked)))
     };
@@ -1158,10 +1199,6 @@ fn stored_tickets(daemon: &Daemon, project: &Project, filters: &Filters<'_>) -> 
         .filter(|item| filters.state == "all" || item.state == filters.state)
         .filter(|item| named(&item.labels, filters.label))
         .filter(|item| named(&item.assignees, filters.assignee))
-        .filter(|item| {
-            let title = item.title.to_lowercase();
-            words.iter().all(|word| title.contains(word))
-        })
         .take(LISTED)
         .map(|item| Listed {
             reference: match item.repository.is_empty() {
@@ -1203,6 +1240,157 @@ struct Filters<'a> {
     label: Option<&'a str>,
     assignee: Option<&'a str>,
     query: Option<&'a str>,
+    updated_within: Option<u64>,
+    in_comments: Option<&'a str>,
+    jql: Option<Confined>,
+}
+
+/// What a list found on the tracker: its tickets, how many were answered from another site, and
+/// how many `acli` answered as `null`.
+#[derive(Clone)]
+pub struct Found(Vec<Listed>, usize, usize);
+
+/// The tracker's list.
+async fn asked_tracker(
+    project: &Project,
+    tracker: &ProjectTracker,
+    filters: &Filters<'_>,
+) -> Result<Found, String> {
+    match tracker {
+        ProjectTracker::Github { repository } => {
+            let forge = github_of(project, repository).await?;
+            let (tickets, left_out) = list_issues(&forge, filters).await?;
+            Ok(Found(tickets, left_out, 0))
+        }
+        ProjectTracker::Jira { site, projects } => list_work_items(site, projects, filters)
+            .await
+            .map(|(tickets, left_out, nulls)| Found(tickets, left_out, nulls)),
+    }
+}
+
+/// A search of the tracker, or what the same search found in the last 30 s; a write forgets them
+/// all.
+async fn searched_again(
+    daemon: &Daemon,
+    project: &Project,
+    tracker: &ProjectTracker,
+    filters: &Filters<'_>,
+) -> Result<Found, String> {
+    let kept = json!([
+        project.name,
+        filters.state,
+        filters.label,
+        filters.assignee,
+        filters.query,
+        filters.updated_within,
+        filters.in_comments,
+        filters.jql.as_ref().map(|jql| (&jql.clause, &jql.order)),
+    ])
+    .to_string();
+    if let Some((found, _)) = daemon.kept_searches.get(&kept) {
+        Reads::from_cache();
+        return Ok(found);
+    }
+    let generation = daemon.kept_searches.generation();
+    let found = asked_tracker(project, tracker, filters).await?;
+    daemon.kept_searches.put(kept, found.clone(), generation);
+    Ok(found)
+}
+
+/// An agent's JQL, cut in two: what it asks, put between parentheses after the tracker's
+/// projects, and its `ORDER BY`, kept at the end.
+struct Confined {
+    clause: String,
+    order: Option<String>,
+}
+
+/// The agent's JQL confined to the tracker's projects (`project in (…) AND (<jql>)`), or why it
+/// cannot be: read outside its quoted texts, it must close no parenthesis it did not open, leave
+/// none open and no quote either, hold no backslash (Jira reads `\)` as text, which would hide a
+/// parenthesis from this count), and name only fields after its `ORDER BY`.
+fn confined(jql: &str) -> Result<Confined, String> {
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut order_at = None;
+    for (at, c) in jql.char_indices() {
+        if let Some(open) = quote {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                c if c == open => quote = None,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => quote = Some(c),
+            '\\' => {
+                return Err(
+                    "the jql holds a backslash outside a quoted text: quote the text instead"
+                        .into(),
+                );
+            }
+            '(' => depth += 1,
+            ')' if depth == 0 => {
+                return Err(
+                    "the jql closes a parenthesis it did not open: it is put in parentheses \
+                     after the tracker's projects, and must stay in them"
+                        .into(),
+                );
+            }
+            ')' => depth -= 1,
+            _ if depth == 0 && order_by(jql, at) => {
+                order_at = Some(at);
+                break;
+            }
+            _ => {}
+        }
+    }
+    if quote.is_some() {
+        return Err("the jql leaves a quote open".into());
+    }
+    if depth > 0 {
+        return Err("the jql leaves a parenthesis open".into());
+    }
+    let (clause, order) = match order_at {
+        None => (jql.trim(), None),
+        Some(at) => {
+            // "order", the blanks, "by": what follows is the order.
+            let rest = jql[at + 5..].trim_start()[2..].trim();
+            let fields = |c: char| c.is_alphanumeric() || " \t\n,._[]-".contains(c);
+            if rest.is_empty() || !rest.chars().all(fields) {
+                return Err(
+                    "after its ORDER BY, the jql takes field names, commas, ASC and DESC only"
+                        .into(),
+                );
+            }
+            (jql[..at].trim(), Some(rest.to_owned()))
+        }
+    };
+    Ok(Confined {
+        clause: clause.to_owned(),
+        order,
+    })
+}
+
+/// Whether `ORDER BY`, in any case, begins at `at` as words of their own.
+fn order_by(jql: &str, at: usize) -> bool {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    if jql[..at].chars().next_back().is_some_and(word) {
+        return false;
+    }
+    let Some(rest) = jql
+        .get(at..at + 5)
+        .filter(|w| w.eq_ignore_ascii_case("order"))
+    else {
+        return false;
+    };
+    let after = &jql[at + rest.len()..];
+    let by = after.trim_start();
+    by.len() < after.len()
+        && by.get(..2).is_some_and(|w| w.eq_ignore_ascii_case("by"))
+        && by[2..].chars().next().is_none_or(|c| !word(c))
 }
 
 /// `gh issue list` of the tracker's repository.
@@ -1220,10 +1408,24 @@ async fn list_issues(forge: &Forge, filters: &Filters<'_>) -> Result<(Vec<Listed
         "--limit",
         &limit,
     ];
+    // GitHub's search looks in the comments only when asked to; a time is its own qualifier.
+    let mut search: Vec<String> = filters
+        .query
+        .map(|query| format!("{query} in:title,body,comments"))
+        .into_iter()
+        .collect();
+    if let Some(days) = filters.updated_within {
+        let since = now_ms().saturating_sub(days * 86_400_000);
+        search.push(format!(
+            "updated:>={}",
+            crate::session_read::shown_date(since)
+        ));
+    }
+    let search = search.join(" ");
     for (flag, value) in [
         ("--label", filters.label),
         ("--assignee", filters.assignee),
-        ("--search", filters.query),
+        ("--search", Some(search.as_str()).filter(|s| !s.is_empty())),
     ] {
         if let Some(value) = value {
             args.extend([flag, value]);
@@ -1269,7 +1471,7 @@ fn jql_quoted(text: &str) -> String {
 }
 
 /// The JQL of a list: the tracker's projects, the state as Jira's status category, and the
-/// filters, each quoted.
+/// filters, each quoted; the agent's own JQL last, between parentheses, its order kept.
 fn jql(projects: &[String], filters: &Filters<'_>) -> String {
     let projects: Vec<String> = projects.iter().map(|p| jql_quoted(p)).collect();
     let mut clauses = vec![format!("project in ({})", projects.join(", "))];
@@ -1287,7 +1489,20 @@ fn jql(projects: &[String], filters: &Filters<'_>) -> String {
     if let Some(query) = filters.query {
         clauses.push(format!("text ~ {}", jql_quoted(query)));
     }
-    format!("{} ORDER BY created DESC", clauses.join(" AND "))
+    if let Some(words) = filters.in_comments {
+        clauses.push(format!("comment ~ {}", jql_quoted(words)));
+    }
+    if let Some(days) = filters.updated_within {
+        clauses.push(format!("updated >= \"-{days}d\""));
+    }
+    let mut order = "created DESC";
+    if let Some(jql) = &filters.jql {
+        if !jql.clause.is_empty() {
+            clauses.push(format!("({})", jql.clause));
+        }
+        order = jql.order.as_deref().unwrap_or(order);
+    }
+    format!("{} ORDER BY {order}", clauses.join(" AND "))
 }
 
 /// `acli jira workitem search` on the tracker's projects, once `acli` is checked to be signed in
