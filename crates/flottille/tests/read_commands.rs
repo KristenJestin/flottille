@@ -103,9 +103,14 @@ fn tools_served(user: &User, agent: &str) -> Vec<(String, Option<String>)> {
 
 /// A session in Ask, a fake `sudo` first on the PATH, and the workspace's folder.
 fn session() -> (User, String, Mcp, PathBuf) {
-    let user = User::with_fake_agent()
-        .with_fake_escalation()
-        .with_allowing_judge();
+    session_of(
+        User::with_fake_agent()
+            .with_fake_escalation()
+            .with_allowing_judge(),
+    )
+}
+
+fn session_of(user: User) -> (User, String, Mcp, PathBuf) {
     let workspace = project(&user);
     let (agent, mcp) = root(&user);
     set_mode(&user, &agent, "ask");
@@ -338,5 +343,104 @@ fn a_range_longer_than_a_page_is_handled_as_today() {
         lines(&text),
         ["line number 4999", "line number 5000"],
         "{text}"
+    );
+}
+
+/// A file of `count` lines of 49 bytes each, which `fs_read` shows as 56 bytes a line.
+fn wide(count: usize) -> String {
+    (1..=count).map(|n| format!("{n:048}\n")).collect()
+}
+
+#[test]
+fn a_read_through_run_with_a_long_path_is_never_cut_in_the_middle() {
+    let (_user, _, mcp, workspace) = session_of(
+        User::with_fake_agent()
+            .with_fake_escalation()
+            .with_allowing_judge()
+            .with_cut_results(),
+    );
+    // A file a page of fs_read shows whole at the default limit (7560 of 7600 bytes), under a
+    // path that the line saying what it was read as does not leave room for.
+    let folder: String = (1..=5).map(|n| format!("{n}{}/", "d".repeat(99))).collect();
+    std::fs::create_dir_all(workspace.join(&folder)).unwrap();
+    std::fs::write(workspace.join(&folder).join("big.md"), wide(135)).unwrap();
+    let answer = mcp.call("run", json!({"line": format!("cat {folder}big.md")}));
+    assert!(!answer.error, "{}", answer.text);
+    // Either it is read whole, the end of the file in its page's tail, or it is not read.
+    if answer.text.starts_with("read with fs_read") {
+        assert!(
+            answer.text.contains("the end of the file)"),
+            "cut in the middle: {}",
+            answer.text.chars().take(200).collect::<String>()
+        );
+        assert!(!answer.text.contains("characters left out"), "cut");
+    }
+    // A smaller file under the same path is read whole.
+    std::fs::write(workspace.join(&folder).join("small.md"), wide(100)).unwrap();
+    let text = served(mcp.call("run", json!({"line": format!("cat {folder}small.md")})));
+    assert!(said(&text).starts_with("read with fs_read "), "{text}");
+    assert_eq!(lines(&text).len(), 100, "{}", text.len());
+}
+
+#[test]
+fn a_never_listed_program_is_not_served_as_a_read() {
+    let (user, agent, mcp, _) = session();
+    let file = user.project_file("app");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let text: String = text
+        .lines()
+        .filter(|line| !line.starts_with("never"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    std::fs::write(&file, format!("never = [[\"cat\"], [\"sed\"]]\n{text}")).unwrap();
+
+    for line in ["cat other.md", "sed -n 5,7p notes.md"] {
+        let answer = mcp.call("run", json!({ "line": line }));
+        assert!(
+            !answer.text.starts_with("read with fs_read"),
+            "{line}: {}",
+            answer.text
+        );
+        assert_eq!(held_class(&user, answer), "base", "{line}");
+    }
+    // Another program of the list is not in the way.
+    served(mcp.call("run", json!({"line": "head -n 1 notes.md"})));
+    let served_calls = tools_served(&user, &agent);
+    let reads = served_calls.iter().filter(|(tool, _)| tool == "fs_read");
+    assert_eq!(reads.count(), 1, "{served_calls:?}");
+    assert_eq!(user.escalations(), Vec::<String>::new());
+}
+
+#[test]
+fn a_file_bigger_than_the_page_shown_is_handled_as_today() {
+    let (_user, _, mcp, workspace) = session_of(
+        User::with_fake_agent()
+            .with_fake_escalation()
+            .with_allowing_judge()
+            .with_cut_results(),
+    );
+    // 20 KB of text: more than the 7600 bytes a page shows at the default limit, less than the
+    // 32 KB a page may hold.
+    std::fs::write(workspace.join("twenty.md"), wide(400)).unwrap();
+    for line in [
+        "cat twenty.md",
+        "tail -n 300 twenty.md",
+        "sed -n '1,$p' twenty.md",
+    ] {
+        let answer = mcp.call("run", json!({ "line": line }));
+        assert!(
+            !answer.text.starts_with("read with fs_read"),
+            "{line}: {}",
+            answer.text.chars().take(200).collect::<String>()
+        );
+    }
+    // What a page shows whole is read: the line numbers it adds count in its size.
+    let text = served(mcp.call("run", json!({"line": "head -n 120 twenty.md"})));
+    assert_eq!(lines(&text).len(), 120, "{}", text.len());
+    let answer = mcp.call("run", json!({"line": "head -n 140 twenty.md"}));
+    assert!(
+        !answer.text.starts_with("read with fs_read"),
+        "{}",
+        answer.text.chars().take(200).collect::<String>()
     );
 }

@@ -10,12 +10,12 @@ use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
 use crate::files::{self, Lines};
-use crate::gate::Verdict;
+use crate::gate::{Ask, Class, Verdict};
 use crate::mcp::{self, Grant};
 
 /// The `fs_read` a `run` call is, with the line that says so to the agent; `None` for any call
 /// that is not such a read.
-pub fn as_read(
+pub async fn as_read(
     daemon: &Daemon,
     grant: &Grant,
     tool: &str,
@@ -38,27 +38,46 @@ pub fn as_read(
     if let Some(repository) = object.get("repository") {
         read["repository"] = repository.clone();
     }
-    // The file is opened only once the gate lets a read of it through.
+    // The file is opened only once the gate lets a read of it through, and does not hold the
+    // line as a run either: what a rule of the user holds or refuses, such as a program of the
+    // project's never list, stays held or refused whatever the line prints.
     if !matches!(
         mcp::classify(daemon, grant, "fs_read", &read),
         Verdict::Allow
+    ) || matches!(
+        mcp::classify(daemon, grant, "run", args),
+        Verdict::Deny(_)
+            | Verdict::Ask(Ask {
+                class: Class::Base,
+                ..
+            })
     ) {
         return None;
     }
     let resolved = files::reaches(&grant.place, "fs_read", &read)
         .into_iter()
         .next()?;
-    let (offset, length) = files::line_span(&resolved, lines).ok()??;
     let repository = match &read["repository"] {
         Value::Null => String::new(),
         repository => format!(r#", "repository": {repository}"#),
     };
-    let said = format!(
-        r#"read with fs_read {{"path": {}{repository}, "range": {{"offset": {offset}, "length": {length}}}}}: use it directly"#,
-        Value::from(path)
-    );
+    let said = |offset: u64, length: u64| {
+        format!(
+            r#"read with fs_read {{"path": {}{repository}, "range": {{"offset": {offset}, "length": {length}}}}}: use it directly"#,
+            Value::from(path)
+        )
+    };
+    // The line goes before the page in the result, which is not cut: it takes its room of the
+    // page, counted with the widest numbers it can hold.
+    let room = files::page_budget(daemon).saturating_sub(said(u64::MAX, u64::MAX).len());
+    // The scan of a big file is not on the thread of the call.
+    let (offset, length) =
+        tokio::task::spawn_blocking(move || files::line_span(&resolved, lines, room))
+            .await
+            .ok()?
+            .ok()??;
     read["range"] = json!({"offset": offset, "length": length});
-    Some((read, said))
+    Some((read, said(offset, length)))
 }
 
 /// The file and the lines a command line prints, when it is one of the shapes and nothing else.

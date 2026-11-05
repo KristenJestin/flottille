@@ -1725,12 +1725,6 @@ async fn call(
         .find_map(|provider| provider.tool_of(name))
         .unwrap_or(name);
     let (tool, args) = current(tool, args);
-    // A line that only prints part of a file is the read it is: served and recorded as such.
-    let (tool, args, said) = match crate::reads::as_read(daemon, &grant, &tool, &args) {
-        Some((args, said)) => ("fs_read".to_owned(), args, Some(said)),
-        None => (tool, args, None),
-    };
-    let said = said.as_deref();
     let Some(key) = key else {
         if daemon
             .mcp
@@ -1745,7 +1739,7 @@ async fn call(
                 grant.agent
             );
         }
-        return played(daemon, &grant, &tool, args, None, said, cancelled).await;
+        return played(daemon, &grant, &tool, args, None, cancelled).await;
     };
     let slot = (grant.agent.clone(), key.clone());
     let first = {
@@ -1767,7 +1761,7 @@ async fn call(
     };
     match first {
         Ok(sender) => {
-            let answer = played(daemon, &grant, &tool, args, Some(&key), said, cancelled).await;
+            let answer = played(daemon, &grant, &tool, args, Some(&key), cancelled).await;
             sender.send_replace(Some(answer.clone()));
             answer
         }
@@ -1813,10 +1807,26 @@ async fn played(
     tool: &str,
     args: Value,
     key: Option<&str>,
-    said: Option<&str>,
     cancelled: CancellationToken,
 ) -> (String, bool) {
     let started = Instant::now();
+    let replaced = daemon
+        .read(|store| store.agent(&grant.agent))
+        .ok()
+        .flatten()
+        .is_some_and(|agent| agent.epoch != grant.epoch);
+    let removed = crate::workspaces::being_removed(daemon, &grant.agent, tool);
+    // A line that only prints part of a file is the read it is, served and recorded as such, once
+    // nothing refuses the call as the run it was sent as.
+    let read = if replaced || removed.is_some() {
+        None
+    } else {
+        crate::reads::as_read(daemon, grant, tool, &args).await
+    };
+    let (tool, args, said) = match read {
+        Some((args, said)) => ("fs_read", args, Some(said)),
+        None => (tool, args, None),
+    };
     let recorded = record_of(&args, &grant.place);
     let reads_a_result = reads_a_result(tool, &args);
     let mut verdict = None;
@@ -1826,14 +1836,9 @@ async fn played(
     let mut held: Option<(&'static str, Vec<String>)> = None;
     let mut judged_log = None;
     let mut request = None;
-    let replaced = daemon
-        .read(|store| store.agent(&grant.agent))
-        .ok()
-        .flatten()
-        .is_some_and(|agent| agent.epoch != grant.epoch);
     let outcome = if replaced {
         Outcome::Refused(REPLACED.into())
-    } else if let Some(why) = crate::workspaces::being_removed(daemon, &grant.agent, tool) {
+    } else if let Some(why) = removed {
         Outcome::Refused(format!("refused: {why}"))
     } else if grant.tools.contains(&tool) {
         // A write of the project shows what it changes; one that cannot be done is refused

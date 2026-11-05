@@ -311,11 +311,15 @@ pending requests.
   <file>` (`5p`, `5,20p`, `5,$p`), `head [-n N] <file>`, `tail [-n N] <file>` or `cat <file>`, with
   no `task`, `timeout` or `notify`, is read from the words the splitter below makes of it. When
   the gate lets the `fs_read` of that file through at once (a path in the place, no sensitive
-  place, no link leading out) and the lines fit one page, it is served, recorded and gated as
-  that `fs_read`, with no process and no judge, in every mode. The answer starts with
+  place, no link leading out), the line is not one a rule of the user holds or refuses as a `run`
+  (a program of the project's never list stays held, `cat` or `sed` included), and a page shows
+  the lines whole, it is served, recorded and gated as that `fs_read`, with no process and no
+  judge, in every mode. A page is as long as the result limit allows (`fs_read`'s own page, its
+  line numbers counted, less the line below): `cat` of a file longer than that is a `run`.
+  The answer starts with
   `read with fs_read {"path": …, "range": {"offset": …, "length": …}}: use it directly`, then the
-  page. Any other line, a file that is not there or has no such lines, a range longer than a page
-  is a `run` as below.
+  page. Any other line, a file that is not there or has no such lines, a range a page does not
+  show whole is a `run` as below, and a `run` the workspace's removal refuses is refused as such.
 - **No shell, ever.** A line is split as `flottille_core::command` does (the setup's `run` steps
   too): words on whitespace, a quoted part kept whole, a backslash literal. What a shell expands
   inside double quotes too (a newline, a backtick, `$(`, `${`, `$VAR`, `%VAR%`) is refused outside

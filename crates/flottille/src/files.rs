@@ -356,7 +356,7 @@ pub fn fs_read(cx: &Context, args: Value) -> Outcome {
     // A page is sized so that its result is not cut (`docs/tools.md`, "Long results"): the
     // session knows the file's fingerprint once it read a page, and a page it was shown only in
     // part would let it write over text it never saw.
-    let budget = crate::results::page_room(&cx.daemon.paths).min(BODY_BUDGET);
+    let budget = page_budget(cx.daemon);
     match read_page(Some(cx), &path, offset, length, budget) {
         Ok(outcome) => outcome,
         Err(error) => failed(&path, error),
@@ -374,19 +374,35 @@ pub enum Lines {
 /// How far into a file the start of a range of lines is looked for.
 const SCAN_BYTES: u64 = 8 * 1024 * 1024;
 
+/// The room `fs_read` has for the text of a page now, the line numbers it adds included.
+pub fn page_budget(daemon: &Daemon) -> usize {
+    crate::results::page_room(&daemon.paths).min(BODY_BUDGET)
+}
+
+/// What the number of a line and its tab add to the line in a page.
+fn numbered(number: u64) -> u64 {
+    number.to_string().len().max(6) as u64 + 1
+}
+
 /// Where `lines` are in the file `path`, as the offset and the length of a page of `fs_read`;
-/// `None` when the file has no such lines or they do not fit in a page, which is for the caller to
-/// leave to something else. Nothing is returned of the file itself.
-pub fn line_span(path: &Resolved, lines: Lines) -> std::io::Result<Option<(u64, u64)>> {
+/// `None` when the file has no such lines or a page of `budget` bytes, line numbers counted, does
+/// not show them whole, which is for the caller to leave to something else. Nothing is returned
+/// of the file itself.
+pub fn line_span(
+    path: &Resolved,
+    lines: Lines,
+    budget: usize,
+) -> std::io::Result<Option<(u64, u64)>> {
+    let budget = budget as u64;
     let mut file = open_regular(&path.path)?;
     let size = file.metadata()?.len();
-    let span = |start: u64, end: u64| {
-        (start < end && end - start <= READ_PAGE_BYTES).then_some((start, end - start))
+    let span = |start: u64, end: u64, numbers: u64| {
+        (start < end && end - start + numbers <= budget).then_some((start, end - start))
     };
     let (first, last) = match lines {
         Lines::From { first, last } => (first, last),
         Lines::Last(count) => {
-            let from = size.saturating_sub(READ_PAGE_BYTES + 1);
+            let from = size.saturating_sub(budget + 1);
             file.seek(SeekFrom::Start(from))?;
             let mut window = Vec::new();
             file.by_ref().take(size - from).read_to_end(&mut window)?;
@@ -400,27 +416,38 @@ pub fn line_span(path: &Resolved, lines: Lines) -> std::io::Result<Option<(u64, 
                 None if from == 0 => 0,
                 None => return Ok(None),
             };
-            return Ok(span(start, size));
+            // The number of the first line is not known without counting up to it: no more than
+            // the size of the file, which is the widest it can be.
+            let wanted = &window[(start - from) as usize..];
+            let shown = wanted.iter().filter(|byte| **byte == b'\n').count()
+                + usize::from(!wanted.ends_with(b"\n"));
+            return Ok(span(start, size, shown as u64 * numbered(size + 1)));
         }
     };
     let mut start = (first == 1).then_some(0);
     let mut line = 1;
     let mut position = 0;
+    let mut after = 0;
+    let mut numbers = 0;
     let mut buffer = vec![0; CHUNK];
     loop {
         let read = file.read(&mut buffer)?;
         if read == 0 {
-            return Ok(start.and_then(|start| span(start, size)));
+            // A last line with no newline is a line too.
+            let unended = size > after && start.is_some();
+            let numbers = numbers + if unended { numbered(line) } else { 0 };
+            return Ok(start.and_then(|start| span(start, size, numbers)));
         }
         for (at, byte) in buffer[..read].iter().enumerate() {
             if *byte != b'\n' {
                 continue;
             }
-            let after = position + at as u64 + 1;
-            if let Some(start) = start
-                && last == Some(line)
-            {
-                return Ok(span(start, after));
+            after = position + at as u64 + 1;
+            if let Some(start) = start {
+                numbers += numbered(line);
+                if last == Some(line) {
+                    return Ok(span(start, after, numbers));
+                }
             }
             line += 1;
             if line == first {
@@ -428,7 +455,7 @@ pub fn line_span(path: &Resolved, lines: Lines) -> std::io::Result<Option<(u64, 
             }
         }
         position += read as u64;
-        let too_long = start.is_some_and(|start| position - start > READ_PAGE_BYTES);
+        let too_long = start.is_some_and(|start| position - start > budget);
         if too_long || (start.is_none() && position > SCAN_BYTES) {
             return Ok(None);
         }
