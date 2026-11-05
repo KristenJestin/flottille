@@ -787,6 +787,13 @@ fn a_run_started_while_the_workspace_is_removed_is_refused() {
         text.contains("the workspace login is being removed"),
         "{text}"
     );
+    // A line that only prints a file is a run until the checks are made, not a read that
+    // slips past them.
+    let text = refused(mcp.call("run", json!({"line": "cat stubborn.sh"})));
+    assert!(
+        text.contains("the workspace login is being removed"),
+        "{text}"
+    );
     let text = refused(mcp.call("fs_write", json!({"path": "x", "content": "x"})));
     assert!(
         text.contains("the workspace login is being removed"),

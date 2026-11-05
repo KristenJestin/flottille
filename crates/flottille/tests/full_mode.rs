@@ -863,7 +863,7 @@ fn in_full_a_repository_s_claude_commands_are_readable_but_never_written() {
     assert!(read.contains("Deploy a preview"), "{read}");
     let ran = done(mcp.call(
         "run",
-        json!({"line": "cat .claude/commands/deploy-preview.md"}),
+        json!({"line": "cat -n .claude/commands/deploy-preview.md"}),
     ));
     assert!(ran.contains("exited with code 0"), "{ran}");
 

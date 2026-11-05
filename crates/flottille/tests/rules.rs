@@ -670,6 +670,20 @@ fn the_enforced_text_matches_the_gate_s_rules() {
     }
     assert_eq!(judged(&user), 0, "a harmless call reached the judge");
 
+    claim("Read files with `fs_read`, never with `sed`, `cat`, `head` or `tail`");
+    for line in [
+        "sed -n 1,1p README.md",
+        "head -n 1 README.md",
+        "cat README.md",
+    ] {
+        for mode in ["ask", "auto"] {
+            set_mode(&user, &agent, mode);
+            let text = done(mcp.call("run", json!({ "line": line })));
+            assert!(text.starts_with("read with fs_read "), "{line}: {text}");
+        }
+    }
+    assert_eq!(judged(&user), 0, "a read through run reached the judge");
+
     claim("Calls to judge are everything else");
     claim("In Ask a call to judge is held for the user.");
     set_mode(&user, &agent, "ask");

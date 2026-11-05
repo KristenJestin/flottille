@@ -675,6 +675,7 @@ pub(super) async fn list_pulls(
             note: more
                 .then(|| format!("only the {ALL} most recently changed pull requests are listed")),
             details: true,
+            log: Vec::new(),
         });
     }
     let base = format!("/rest/api/1.0/projects/{owner}/repos/{name}/pull-requests");
@@ -717,6 +718,7 @@ pub(super) async fn list_pulls(
         items,
         note: Some(notes.join("; ")),
         details: true,
+        log: Vec::new(),
     })
 }
 

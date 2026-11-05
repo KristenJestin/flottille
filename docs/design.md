@@ -357,6 +357,33 @@ left tree and in the rail (`Waiting: wake at 10:42` for a wake), and the deliver
 agent is a folded step saying what woke it (`woken by the timer: <why>`).
 Opening and ending are events (`subscription.opened`, `subscription.ended`, `docs/events.md`).
 
+### 5.7 Inactive sessions
+
+Sessions pile up: a root that finished its work stays open until the user ends it. A setting
+ends them on its own, **off by default** (nothing ever happens unless the user turns it on): "End
+sessions inactive for", 1 to 90 days, `end_inactive_days` of `sessions.toml` in the configuration
+folder, set in Settings, Sessions, or by `sessions.set` (`docs/protocol.md`, "The sessions
+methods").
+
+When it is on, the daemon ends a root that is between turns and had **no activity for that many
+days** in its whole tree: no event of its conversation (a turn, a tool call, a message of the
+user's), no delivery made or sent, no command started or ended, no request asked or answered
+(`docs/events.md` has the events; the two the daemon says on its own, `agent.tools_outdated` and
+`agent.released`, do not count). Nothing new is recorded for it: the latest of those is the
+session's last activity. **A session with anything pending or running is never ended, whatever
+the dates**: a turn running, a message queued, a command running, a request or a question
+waiting for an answer, a subscription or a timer pending anywhere in its tree.
+
+It ends the session as the user's "End session" does (`agent.stop`: the tree under it, the
+commands it ran, what was queued; the workspaces stay), with the reason `inactive for N days`:
+the conversation says it in the line that ends it, `agent.ended` carries it, and the window shows
+the session like any ended one, resumable as today (`agent.resume`) while its agent resumes. There
+is no second way to end a session.
+
+It is looked for when the daemon starts and then about once an hour, from the sweep that already
+runs: no timer of its own, nothing woken more often. The clock is the store's, which a test moves
+(`test.advance`).
+
 ## 6. Projects and workspaces
 
 ### 6.1 Projects
@@ -738,13 +765,13 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   its Rules (the global rules above, read-only and folded, with a link to edit them; a switch,
   "Use only this project's rules"; the project's text editor, Reset to default, and a line saying
   a change reaches the agents created from now on);
-- Settings, in tabs (Judge, Providers, Rules, Appearance, Developer mode: one tab shown at a time, as in a project's settings; the first, the Judge, is
+- Settings, in tabs (Judge, Providers, Rules, Sessions, Appearance, Developer mode: one tab shown at a time, as in a project's settings; the first, the Judge, is
   the one it opens on, and a link to a section opens its tab): the Judge tab holds the Auto judge (two lines on Auto: the rules pass what is known to be harmless, a
   small model on the user's own quota decides the rest, base calls always come to the user; "No
   judge (Auto asks like Ask)" among its choices) and, under it with its own heading, the Judge
   guidance (its editor, Reset to default, Save and its line on when a change applies; a link to the
   guidance opens this tab with the guidance in view), then the providers, the
-  Rules for every project, edited the same way as the guidance, the Appearance (the window's colours: Omarchy
+  Rules for every project, edited the same way as the guidance, the Sessions (a switch, "End inactive sessions", off by default; switched on it chooses 7 days and a select of the days unfolds under it: 1, 3, 7, 14, 30, 60 or 90, and what a file edited by hand says; `sessions.set`, §5.7), the Appearance (the window's colours: Omarchy
   or Flottille, and for Flottille Light or Dark, each a segmented choice; off an Omarchy desktop
   the Omarchy choice is shown disabled with one line saying why), and last the Developer mode, a
   switch with the path of its log (`developer.md`: what the daemon decides and why, off by default); a judge

@@ -96,7 +96,7 @@ pub struct ProjectTicket {
 
 /// The parameters of `project.set_settings`: the forge declared for each repository named (none
 /// to declare none; a repository left out keeps its own), its base branches and dependencies
-/// when given, and the project's tracker (none for none).
+/// when given, the project's tracker (none for none) and its branch prefix when given.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectSettings {
@@ -105,6 +105,9 @@ pub struct ProjectSettings {
     pub repositories: Vec<RepositorySetting>,
     #[serde(default)]
     pub tracker: Option<crate::declared::ProjectTracker>,
+    /// The branch prefix of its workspaces, empty for none; the file's when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_prefix: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

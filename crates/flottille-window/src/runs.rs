@@ -20,7 +20,7 @@ use flottille_ui::motion::{MODAL, Motion, PANEL};
 use flottille_ui::{
     AgentState, Button, Icon, Item, Listing, Modal, Palette, Skeleton, StateIcon, Status, Toast,
     Type, awaiting, changing, fade, fold_frame, hoverable, icon, palette, presence, section_label,
-    space, tipped, toast, turning,
+    space, tipped, tipped_when_cut, toast, turning,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -888,17 +888,21 @@ impl CommandList {
         let who = who(row, &self.names);
         let has_who = who.is_some();
         let time = seconds(row.elapsed_ms(now));
-        let line = |id: ElementId, text: String| {
-            div()
-                .id(id)
-                .mono(11.)
-                .text_color(p.faint)
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .aria_label(SharedString::from(text.clone()))
-                .child(SharedString::from(text))
-                .test_support()
+        let line = |id: ElementId, text: String, window: &mut Window, cx: &mut App| {
+            tipped_when_cut(
+                div()
+                    .id(id)
+                    .mono(11.)
+                    .text_color(p.faint)
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .aria_label(SharedString::from(text.clone()))
+                    .child(SharedString::from(text.clone())),
+                SharedString::from(text),
+                window,
+                cx,
+            )
         };
         let stop = (!ended).then(|| {
             let (page, run) = (self.page.clone(), run.clone());
@@ -934,7 +938,7 @@ impl CommandList {
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .child(
+                    .child(tipped_when_cut(
                         div()
                             .id(id("line"))
                             .mono(12.5)
@@ -943,9 +947,11 @@ impl CommandList {
                             .whitespace_nowrap()
                             .text_ellipsis()
                             .aria_label(SharedString::from(row.line.clone()))
-                            .child(SharedString::from(row.line.clone()))
-                            .test_support(),
-                    )
+                            .child(SharedString::from(row.line.clone())),
+                        SharedString::from(row.line.clone()),
+                        window,
+                        cx,
+                    ))
                     .child(
                         div()
                             .flex()
@@ -966,15 +972,19 @@ impl CommandList {
                                 .child("·")
                             })
                             .children(who.map(|who| {
-                                div()
-                                    .id(id("who"))
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .aria_label(SharedString::from(who.clone()))
-                                    .child(SharedString::from(who))
-                                    .test_support()
+                                tipped_when_cut(
+                                    div()
+                                        .id(id("who"))
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .aria_label(SharedString::from(who.clone()))
+                                        .child(SharedString::from(who.clone())),
+                                    SharedString::from(who),
+                                    window,
+                                    cx,
+                                )
                             }))
                             .children(has_who.then_some("·"))
                             .child(
@@ -991,7 +1001,7 @@ impl CommandList {
                     .child(presence(
                         id("last-presence"),
                         address.is_none() && !last.is_empty(),
-                        line(id("last"), last),
+                        line(id("last"), last, window, cx),
                     )),
             )
             .children(stop)

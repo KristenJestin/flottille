@@ -1144,6 +1144,27 @@ impl Store {
         rows.map(|row| row?).collect()
     }
 
+    /// The agents not in a final state: what the daemon's sweep looks after, every few seconds,
+    /// without reading the whole history (each agent holds its instructions).
+    pub fn live_agents(&self) -> Result<Vec<Agent>> {
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {AGENT_COLUMNS} FROM agents WHERE state NOT IN ('ended', 'failed') \
+             ORDER BY created_at, id"
+        ))?;
+        let rows = statement.query_map([], agent_row)?;
+        rows.map(|row| row?).collect()
+    }
+
+    /// The ended roots whose session is kept to be resumed: those the sweep forgets in time.
+    pub fn kept_sessions(&self) -> Result<Vec<Agent>> {
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {AGENT_COLUMNS} FROM agents WHERE state = 'ended' AND parent IS NULL \
+             AND reopens = 1 AND native_id IS NOT NULL ORDER BY created_at, id"
+        ))?;
+        let rows = statement.query_map([], agent_row)?;
+        rows.map(|row| row?).collect()
+    }
+
     /// Changes an agent, with its event when one is given, in one transaction; the agent as it
     /// is now. An agent in a final state keeps it.
     pub fn change_agent(
@@ -1348,6 +1369,29 @@ impl Store {
         Ok(self.connection.query_row(
             "SELECT max(ended_at) FROM runs WHERE agent = ?1",
             params![agent],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// The latest sign of activity of these agents, from what is recorded: their events (but
+    /// the two the daemon says on its own, `agent.tools_outdated` and `agent.released`), their
+    /// deliveries made and sent, their runs started and ended, their requests asked and decided,
+    /// and the agents' own `created_at`, `active_at` and `exchanged_at`. `None` for no agent.
+    pub fn last_activity_of(&self, agents: &[String]) -> Result<Option<u64>> {
+        Ok(self.connection.query_row(
+            "WITH tree(id) AS (SELECT value FROM json_each(?1)) \
+             SELECT max(at) FROM ( \
+               SELECT max(created_at, coalesce(active_at, 0), coalesce(exchanged_at, 0)) AS at \
+                 FROM agents WHERE id IN tree \
+               UNION ALL SELECT max(e.at) FROM agent_events a JOIN events e ON e.seq = a.seq \
+                 WHERE a.agent IN tree AND e.name NOT IN ('agent.tools_outdated', 'agent.released') \
+               UNION ALL SELECT max(created_at, coalesce(sent_at, 0)) FROM deliveries \
+                 WHERE agent IN tree \
+               UNION ALL SELECT max(started_at, coalesce(ended_at, 0)) FROM runs \
+                 WHERE agent IN tree \
+               UNION ALL SELECT max(created_at, coalesce(decided_at, 0)) FROM approval_requests \
+                 WHERE agent IN tree)",
+            params![serde_json::to_string(agents)?],
             |row| row.get(0),
         )?)
     }
@@ -3732,6 +3776,48 @@ mod tests {
     }
 
     #[test]
+    fn the_sweep_reads_the_agents_still_running_and_the_sessions_kept_not_the_whole_history() {
+        let mut store = Store::open_in_memory().unwrap();
+        let made = |id: &str, parent: Option<&str>, reopens: bool, native: Option<&str>| Agent {
+            id: id.into(),
+            parent: parent.map(str::to_owned),
+            reopens,
+            native_id: native.map(str::to_owned),
+            ..an_agent()
+        };
+        let agents = [
+            made("running00000", None, true, Some("s1")),
+            made("kept00000000", None, true, Some("s2")),
+            made("forgotten000", None, false, Some("s3")),
+            made("nosession000", None, true, None),
+            made("worker000000", Some("kept00000000"), true, Some("s4")),
+            made("failed000000", None, true, Some("s5")),
+        ];
+        for agent in &agents {
+            store
+                .create_agent(agent, ("agent.created", json!({})))
+                .unwrap();
+        }
+        for (id, state) in [
+            ("kept00000000", AgentState::Ended),
+            ("forgotten000", AgentState::Ended),
+            ("nosession000", AgentState::Ended),
+            ("worker000000", AgentState::Ended),
+            ("failed000000", AgentState::Failed),
+        ] {
+            let change = AgentChange {
+                state: Some(state),
+                ..AgentChange::default()
+            };
+            store.change_agent(id, change, None).unwrap();
+        }
+        let ids = |agents: Vec<Agent>| agents.into_iter().map(|a| a.id).collect::<Vec<_>>();
+
+        assert_eq!(ids(store.live_agents().unwrap()), ["running00000"]);
+        assert_eq!(ids(store.kept_sessions().unwrap()), ["kept00000000"]);
+    }
+
+    #[test]
     fn an_ended_agent_is_resumed_on_its_session_and_a_failed_one_is_not() {
         let mut store = Store::open_in_memory().unwrap();
         let mut agent = an_agent();
@@ -4963,6 +5049,55 @@ mod tests {
             .unwrap();
         assert_eq!(denied.state, RequestState::Denied);
         assert!(store.pending_requests(approval::USER).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_last_activity_of_a_tree_is_its_latest_sign_but_for_what_the_daemon_says_alone() {
+        let mut store = Store::open_in_memory().unwrap();
+        // Created long ago, so that the clock decides what is later.
+        let agent = Agent {
+            created_at: 1_000,
+            updated_at: 1_000,
+            ..an_agent()
+        };
+        assert_eq!(
+            store
+                .last_activity_of(std::slice::from_ref(&agent.id))
+                .unwrap(),
+            None
+        );
+        store
+            .create_agent(&agent, ("agent.created", json!({})))
+            .unwrap();
+        let ids = [agent.id.clone()];
+        let created = store.last_activity_of(&ids).unwrap().unwrap();
+        assert!(created > agent.created_at);
+
+        // The daemon's own words are no activity.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        for name in ["agent.tools_outdated", "agent.released"] {
+            store
+                .append_agent_event(&agent.id, name, json!({}), false)
+                .unwrap();
+        }
+        assert_eq!(store.last_activity_of(&ids).unwrap(), Some(created));
+
+        // A message of the conversation, then a request, is.
+        let message = store
+            .append_agent_event(&agent.id, "agent.message", json!({}), true)
+            .unwrap();
+        assert_eq!(store.last_activity_of(&ids).unwrap(), Some(message.at));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let (asked, _) = store.ask(&a_request(Some("toolu_01"))).unwrap();
+        assert!(asked.created_at > message.at);
+        assert_eq!(
+            store.last_activity_of(&ids).unwrap(),
+            Some(asked.created_at)
+        );
+        assert_eq!(
+            store.last_activity_of(&["somebody-else".into()]).unwrap(),
+            None
+        );
     }
 
     #[test]
