@@ -107,6 +107,23 @@ fn the_fake_acli_refuses_a_field_search_does_not_allow() {
 }
 
 #[test]
+fn a_search_asked_only_the_key_answers_a_null_per_work_item_as_the_real_one() {
+    let dir = scripted(json!({"search": [{"key": "ABC-2"}, {"key": "ABC-1"}]}));
+    let search = |fields: &str| {
+        let output = fake(dir.path())
+            .args(["jira", "workitem", "search", "--jql", "project = ABC"])
+            .args(["--fields", fields, "--json"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+
+    assert_eq!(search("key"), json!([null, null]));
+    assert_eq!(search("key,summary")[1]["key"], "ABC-1");
+}
+
+#[test]
 fn the_writes_follow_the_script_and_change_nothing() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(

@@ -43,7 +43,8 @@
 //! `--jql` (or `--filter`) or `--json` it ends with 2, as a call Flottille never makes.
 //!
 //! A JQL that names `currentUser()` is answered with the script's `mine_search`, none without:
-//! the work items of the signed-in user.
+//! the work items of the signed-in user. A search whose `--fields` is `key` alone prints `null`
+//! for each work item it finds, as the real one was seen to: `key` is no field of `fields`.
 //!
 //! `acli jira project view --key P --json` prints `{"key": P, "issueTypes": [{"name": …, "subtask":
 //! …}]}` (assumed, as Jira's REST project is: the page of the command gives no output), from the
@@ -201,6 +202,11 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
                     .collect(),
             };
             found.truncate(limit);
+            // As the real one does: `key` is no field of `fields`, so asked alone it prints
+            // nothing of each work item but `null`.
+            if value(rest, "--fields") == Some("key") {
+                found = vec![Value::Null; found.len()];
+            }
             println!("{}", Value::from(found));
             0
         }
