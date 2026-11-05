@@ -398,8 +398,15 @@ pub async fn run(
         repository: &repository,
         folder: &folder.path,
     };
-    if let Err(refusal) = crate::message_checks::commits(&at, &words).await {
-        return Outcome::Refused(refusal);
+    tokio::select! {
+        checked = crate::message_checks::commits(&at, &words) => {
+            if let Err(refusal) = checked {
+                return Outcome::Refused(refusal);
+            }
+        }
+        () = cancelled.cancelled() => {
+            return Outcome::Failed("the call was stopped before it ended".into());
+        }
     }
     // Only a push the gate read, and that the user or the judge let through, goes out.
     let lift = approved && gate::is_push(&words);

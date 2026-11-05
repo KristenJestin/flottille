@@ -503,6 +503,59 @@ fn a_revert_is_refused_while_checks_are_declared() {
     );
 }
 
+/// Whether the process `pid` still runs: a zombie has ended.
+fn alive(pid: &str) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit_once(") ")
+            .is_some_and(|(_, rest)| !rest.starts_with('Z'))
+    })
+}
+
+#[test]
+fn a_check_stops_with_the_call_that_is_given_up() {
+    let user = User::with_fake_agent();
+    prepared(&user, |_| {});
+    // A check whose own child outlives it unless its whole group is stopped.
+    let slow = script(
+        &user,
+        "slow.sh",
+        "#!/bin/sh\nsleep 30 &\necho $$ $! > \"$(dirname \"$0\")/pids.tmp\"\n\
+         mv \"$(dirname \"$0\")/pids.tmp\" \"$(dirname \"$0\")/pids\"\nwait\n",
+    );
+    declare(&user, &[format!("{} {{message}}", slow.display())]);
+    let opened = user.received_requests("session/new").len();
+    let started = user
+        .call(
+            "agent.run",
+            json!({"project": "app", "workspace": "login", "message": "hello"}),
+        )
+        .unwrap();
+    let id = started["agent"]["id"].as_str().unwrap().to_owned();
+    let (url, authorization) = server_of(&user, opened);
+    let mcp = Mcp::initialize(&url, &authorization);
+    staged(&user, &mcp);
+    // Full: the commit is not held, and the call is the agent's own until it ends.
+    let output = user.run(&["agent", "mode", &id, "full"]);
+    assert!(output.status.success(), "{output:?}");
+    let pids = user.path("checks/pids");
+
+    let given_up = Instant::now();
+    mcp.call_given_up(
+        "run",
+        json!({"line": "git commit -m 'fix: a good change'", "timeout": 60}),
+        || pids.exists(),
+    );
+
+    let pids = std::fs::read_to_string(&pids).unwrap();
+    let pids: Vec<&str> = pids.split_whitespace().collect();
+    assert_eq!(pids.len(), 2, "{pids:?}");
+    eventually("the check's processes stop", || {
+        pids.iter().all(|pid| !alive(pid))
+    });
+    assert!(given_up.elapsed() < Duration::from_secs(20));
+    assert_eq!(subjects(&user).lines().count(), 1, "{}", subjects(&user));
+}
+
 // The forge: the title of a pull request, the message of a squash merge.
 
 /// The fixture on GitHub (`acme/app`), its forge declared and the branch `app/login` as a push

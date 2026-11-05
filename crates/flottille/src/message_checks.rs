@@ -217,6 +217,17 @@ impl Drop for MessageFile {
     }
 }
 
+/// The process group of a check, killed when it is dropped.
+struct Group(Option<u32>);
+
+impl Drop for Group {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            crate::agents::signal_group(pid, libc::SIGKILL);
+        }
+    }
+}
+
 /// One check: split without a shell, `{message}` filled with the file, run in the place's run
 /// environment, bounded in time.
 async fn run_one(at: &Where<'_>, line: &str, file: &Path, checked: Checked) -> Result<(), String> {
@@ -250,24 +261,19 @@ async fn run_one(at: &Where<'_>, line: &str, file: &Path, checked: Checked) -> R
     let child = command
         .spawn()
         .map_err(|e| not_run(format!("cannot run {}: {e}", words[0])))?;
-    let pid = child.id();
+    // Its whole group goes once it ended, was stopped at its limit, or its call was dropped:
+    // `kill_on_drop` alone stops only its first process.
+    let _group = Group(child.id());
     let output = match tokio::time::timeout(TIME_LIMIT, child.wait_with_output()).await {
         Ok(Ok(output)) => output,
         Ok(Err(e)) => return Err(not_run(e.to_string())),
         Err(_) => {
-            if let Some(pid) = pid {
-                crate::agents::signal_group(pid, libc::SIGKILL);
-            }
             return Err(not_run(format!(
                 "it took longer than {} s and was stopped",
                 TIME_LIMIT.as_secs()
             )));
         }
     };
-    // What it left in its group goes with it.
-    if let Some(pid) = pid {
-        crate::agents::signal_group(pid, libc::SIGKILL);
-    }
     if output.status.success() {
         return Ok(());
     }
