@@ -716,7 +716,11 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   workspace (with the preparation's progress and failure output), the composer that starts
   a session (place, agent, model, first message), its pull requests and tickets (`items.md`: two
   tabs, Pull requests and Tickets, each counting what it lists, filtered open, closed or all, the
-  user's own, and a repository for the pull requests; each row its number, title, state, CI mark,
+  user's own, and a repository for the pull requests, and searched by key or title (the quick
+  switcher's matching, what matched in the accent; a line says how many are listed, `128 open`,
+  or `3 of 128 open` under a search); the list is about ten rows tall and scrolls inside its
+  section, the tabs and the filters staying above it, keeps its place when it is read again and
+  goes back to the top when a tab, a filter or the search changes; each row its number, title, state, CI mark,
   author, assignee and when it changed, coming, going and changing live with the `item.*` events
   and going with `items.forgotten`; a project with no forge or no tracker says so with a link to
   its Settings, a source that fails says why; a click opens the item's detail in a dialog: its
