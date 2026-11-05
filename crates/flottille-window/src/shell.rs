@@ -1982,7 +1982,10 @@ impl Shell {
         }
         .or_else(|| self.snapshot.projects.first().map(|p| p.name.clone()));
         if let Some(project) = project {
-            self.open(Selection::Project(project), window, cx);
+            self.open(Selection::Project(project.clone()), window, cx);
+            if let Some(composer) = self.composer_of(&project).cloned() {
+                composer.update(cx, |composer, cx| composer.focus_end(window, cx));
+            }
         }
     }
 
