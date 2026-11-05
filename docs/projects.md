@@ -330,7 +330,9 @@ run.
   file; a `git merge`'s that makes a commit (its `-m` or `-F`; none with `--ff-only`,
   `--squash` or `--no-commit`); a `git commit-tree`'s (its `-m` or `-F`); and the same through
   the user's own git alias of one of them (`alias.ci = commit` makes `git ci -m …` a commit;
-  an alias of a builtin is never followed, as git follows none). Options are read as git reads
+  a command git has, built in or a `git-<command>` it finds, is never an alias, as git follows
+  none; a command that is neither, nor an alias, is refused, since git could run another in its
+  place, `help.autocorrect`). Options are read as git reads
   them, an abbreviated long one too (`--m` is `--message`; one git finds ambiguous is
   refused). Flottille makes no commit of its own for an agent. A commit whose message cannot be
   known before it is made is refused while checks are declared, saying why and what to do
@@ -342,12 +344,34 @@ run.
   title, `forge edit` the title it gives, and `forge merge` its squash `message`, the same way,
   before anything is written to the forge (`docs/tools.md`, "The forge"), with the variables of
   the workspace written for.
-- **What they do not see**: the commits `git cherry-pick`, `git am`, `git rebase` and `git pull`
-  make carry messages git takes or writes itself, and are not checked; nor is a commit a
-  program the line runs makes itself (a script calling git). The `-F` file is read once for
-  the checks, and git reads it again: a run that rewrites it in between commits what was not
-  checked. The checks see the message as given: what git adds or removes after them
-  (`--trailer`, `-s`/`--signoff`, `--cleanup`, a merge's `--log`) is not in the text they read.
+- **At push time**: the checks at commit time are an early answer; what goes out is checked
+  again. Before a `git push` the user or the judge let through goes out, each commit it sends to
+  a branch or a tag (`refs/heads/*`, `refs/tags/*`) has its message, as the commit holds it,
+  given to each check, oldest first; notes (`refs/notes/*`) and other refs are not the project's
+  history and are not read. Which refs it sends is git's own reading of the line and of the
+  configuration (the same push with `--dry-run --porcelain`, refs up to date, rejected or
+  deleted left out); which commits it sends, those they lead to that no ref of the remote has,
+  as the remote itself lists them (`git ls-remote`), not the remote-tracking refs, which the
+  agent can write. A new branch sends every commit no remote ref has, a force-push the commits
+  of its new history, and the first push to an empty remote every commit it sends, those made
+  before the checks were declared included. A failing commit refuses the push, naming the commit
+  (its short sha and subject) and what the check said: nothing is pushed. A push whose commits
+  cannot be known is refused as well: its options cannot be read (a valued option left without
+  its value), its dry run fails for any of its URLs (git cannot reach a remote, the push fails
+  already), or the remote's URL is rewritten for reads (`url.<base>.insteadOf`, which would list
+  another remote than the one the push goes to). So is a push that would send submodule commits
+  too (`--recurse-submodules=on-demand` or `only`, `push.recurseSubmodules` set to one of them,
+  or `submodule.recurse` true with no other said): push each submodule from its own folder. So
+  the commits checked at commit time are not the only ones: those of `git cherry-pick`,
+  `git am`, `git rebase`, `git pull`, a stash, a raw commit object moved onto the branch, a
+  script calling git, or whose message git changed after the checks (`--cleanup`, `--trailer`,
+  `--signoff`) are checked here. Every other push is walled: `git push` inside another line or a
+  script goes nowhere, and `git send-pack`, `git http-push` and git's transport helpers, which
+  would push past the wall, are refused in every mode (`docs/tools.md`).
+- **What they do not see**: a commit the agent makes and never pushes stays unchecked; a ref
+  another run of the agent's, still going, moves between the check and the push goes out
+  unchecked; and a push through the user's own git alias of `send-pack` or `http-push`, which
+  the gate sees only by the alias's name.
 - **How**: each line is split without a shell as a run's line is (`{message}` replaced in its
   words by the file's path), and run by the daemon, not as a call of the agent, in the folder of
   the repository the commit or the pull request is in, with the environment of a run of the place

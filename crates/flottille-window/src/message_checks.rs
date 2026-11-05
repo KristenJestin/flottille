@@ -3,7 +3,9 @@
 //! title and a squash message. The window writes nothing itself: Save is the daemon's
 //! (`project.set_message_checks`), and the field shows what the daemon says next.
 
-use flottille_ui::{Button, Field, Section, Toast, Type as _, growing, palette, space, toast};
+use flottille_ui::{
+    Button, Field, Section, Toast, Type as _, follow_theme, growing, palette, space, toast,
+};
 use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::{
     AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement,
@@ -11,7 +13,7 @@ use gpui_kit::{
 };
 
 use crate::actions::Command;
-use crate::commands::{editor_style, perform_later};
+use crate::commands::perform_later;
 use crate::shell::Shell;
 
 /// What the section says they are for.
@@ -152,7 +154,7 @@ impl MessageChecks {
             let mut field = TextareaState::new(window, cx)
                 .auto_grow(3, 8)
                 .placeholder("pnpm commitlint --edit {message}");
-            field.set_editor_style(editor_style(cx));
+            follow_theme(&mut field, cx);
             field
         });
         self._subscriptions

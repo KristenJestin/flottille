@@ -1480,6 +1480,12 @@ fn git_refusal(args: &[String]) -> Option<String> {
             "refused: git {command} reads or prints a login, and agents never see one, in any mode"
         ));
     }
+    // The wall rewrites the URL a push goes to; these connect to the URL they are given.
+    if ["send-pack", "http-push"].contains(&command) || command.starts_with("remote-") {
+        return Some(format!(
+            "refused: git {command} pushes past Flottille's wall; use git push"
+        ));
+    }
     if command == "config" && !config_reads(rest) {
         if let Some(scope) = rest
             .iter()
@@ -1509,17 +1515,7 @@ fn git_refusal(args: &[String]) -> Option<String> {
             ));
         }
     }
-    if [
-        "clone",
-        "fetch",
-        "pull",
-        "push",
-        "send-pack",
-        "ls-remote",
-        "archive",
-    ]
-    .contains(&command)
-    {
+    if ["clone", "fetch", "pull", "push", "ls-remote", "archive"].contains(&command) {
         let named = rest.iter().take_while(|w| *w != "--").find(|w| {
             abbreviates(w, "upload-pack", 3)
                 || abbreviates(w, "receive-pack", 4)
@@ -2375,7 +2371,7 @@ fn command_line(call: &Call, layer: &[String], command: &str, rest: &[String]) -
         return Line::Reads;
     }
     match command {
-        "push" | "send-pack" | "http-push" => push(rest),
+        "push" => push(rest),
         "subtree" | "lfs" if any(&["push"]) => push(rest),
         "filter-branch" | "filter-repo" => Line::Base(format!(
             "git {command} rewrites the whole history of the repository"
@@ -6196,6 +6192,33 @@ mod tests {
             }
             let verdict = fixture.run("git push --repo=origin");
             assert!(to_judge(&verdict), "{verdict:?}");
+        }
+    }
+
+    #[test]
+    fn a_push_past_the_wall_is_refused_naming_git_push() {
+        for fixture in [Fixture::main(), Fixture::workspace()] {
+            for (command, line) in [
+                ("send-pack", "git send-pack ../r HEAD:refs/heads/x"),
+                ("send-pack", "git -C . send-pack --all ../r"),
+                ("http-push", "git http-push https://example.com/r.git x"),
+                (
+                    "remote-https",
+                    "git remote-https origin https://example.com/r.git",
+                ),
+                ("remote-ext", "git remote-ext origin 'git-receive-pack r'"),
+                ("remote-fd", "git remote-fd 0"),
+            ] {
+                let verdict = fixture.run(line);
+                assert!(denied(&verdict), "{line}: {verdict:?}");
+                let said = format!("{verdict:?}");
+                assert!(
+                    said.contains(&format!(
+                        "refused: git {command} pushes past Flottille's wall; use git push"
+                    )),
+                    "{line}: {said}"
+                );
+            }
         }
     }
 

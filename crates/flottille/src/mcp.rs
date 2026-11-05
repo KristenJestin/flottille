@@ -376,18 +376,18 @@ const SERVED: [Definition; 29] = [
     Definition {
         name: "tickets",
         title: "Tickets",
-        description: "The tickets of the project's tracker (GitHub #123, Jira ABC-123), through the user's own \
-            gh or acli (never run them). list, search (title words): the tickets of a state (open by \
-            default), by label and assignee, as last read; show: a workspace's linked ticket (in \
-            main, name workspace) or ticket, read now, with its links; detail full adds the \
-            comments, with the id of those you posted; types: a Jira project's work item types; \
-            link_types: the kinds of link. Writes, judged, answered at once, the result maybe later: \
-            create, comment, edit, close, reopen, status, link and unlink (ticket kind other: ABC-2 \
-            blocks ABC-1), comment_edit and comment_delete (your own comments only). Nothing is \
-            assigned unless you ask: assignee \"@me\" gives it to the user (Jira create, edit; null \
-            on edit removes it; GitHub edit: assignees). subscribe: the next events of a ticket wake you once (from people: no bot nor agent; \
-            minutes: 60 by default); unsubscribe. {\"action\": \"comment\", \"ticket\": \"#12\", \
-            \"body\": \"...\"}",
+        description: "The project's tracker tickets (GitHub #123, Jira ABC-123), via the user's gh or acli \
+            (never run them). list, search (title words): tickets by state (default open), label, \
+            assignee, as last read; show: a workspace's linked ticket (in main, name workspace) or \
+            ticket, read now, with its links; detail full adds the comments, with the id of yours; \
+            Jira images and files are named, not shown (the user can paste one); types: a Jira \
+            project's work item types (read them when unsure; a guess is refused); link_types: link \
+            kinds. Writes, judged, answered at once, the result maybe later: create, comment, edit, close, \
+            reopen, status, link and unlink (ticket kind other: ABC-2 blocks ABC-1), comment_edit \
+            and comment_delete (yours only). Assign only when asked: assignee \"@me\" is the user \
+            (Jira create, edit; null on edit removes; GitHub edit: assignees). subscribe: a ticket's \
+            next events wake you once (people only; minutes: default 60); unsubscribe. \
+            {\"action\": \"comment\", \"ticket\": \"#12\", \"body\": \"...\"}",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -2948,6 +2948,17 @@ mod tests {
     #[test]
     fn the_server_instructions_stay_short() {
         assert!(GUIDE.split_whitespace().count() < 400);
+    }
+
+    #[test]
+    fn the_tickets_description_says_images_and_files_are_named_not_shown() {
+        let tickets = SERVED.iter().find(|d| d.name == "tickets").unwrap();
+
+        assert!(
+            tickets
+                .description
+                .contains("Jira images and files are named, not shown (the user can paste one)")
+        );
     }
 
     #[test]

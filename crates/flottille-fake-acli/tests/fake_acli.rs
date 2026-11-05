@@ -358,6 +358,30 @@ fn view_of(dir: &std::path::Path, fields: Option<&str>) -> Value {
 }
 
 #[test]
+fn a_view_gives_the_scripted_attachments_only_when_asked_for_them_and_a_comment_keeps_its_media() {
+    let attachment = json!({"id": "10001", "filename": "image-20260101-120000.png",
+        "mimeType": "image/png", "size": 97717, "created": "2026-01-01T12:00:00.000+0100",
+        "author": {"displayName": "Ana Example"},
+        "content": "https://example.atlassian.net/rest/api/3/attachment/content/10001"});
+    let media = json!({"type": "mediaSingle", "content": [{"type": "media", "attrs": {
+        "alt": "image-20260101-120000.png", "type": "file",
+        "id": "00000000-0000-4000-8000-000000000001"}}]});
+    let dir = scripted(json!({"items": {"ABC-1": {"key": "ABC-1", "fields": {
+        "attachment": [attachment.clone()],
+        "comment": {"comments": [{"body": {"type": "doc", "content": [media.clone()]}}]}}}}}));
+
+    let without = view_of(dir.path(), Some("comment"));
+    let with = view_of(dir.path(), Some("comment,attachment"));
+
+    assert_eq!(without["fields"].get("attachment"), None);
+    assert_eq!(with["fields"]["attachment"], json!([attachment]));
+    assert_eq!(
+        with["fields"]["comment"]["comments"][0]["body"]["content"],
+        json!([media])
+    );
+}
+
+#[test]
 fn a_view_shows_the_fields_it_was_asked_for_beside_its_key_and_self() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
