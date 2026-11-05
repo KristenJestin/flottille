@@ -2198,7 +2198,7 @@ impl Store {
     }
 
     /// The user lets `writer` write to `session`, with the request it was asked in, and its
-    /// `leave.granted` event; `None` when it was given already.
+    /// `leave.granted` event; `None` when it was given already or either session has ended.
     pub fn grant_leave(
         &mut self,
         writer: &str,
@@ -2212,9 +2212,12 @@ impl Store {
             request,
             granted_at: now_ms(),
         };
+        // Checked in the same write as `change_agent`'s DELETE, so a session ended between the
+        // approval and here never keeps a leave a resume would find.
         let added = transaction.execute(
             "INSERT OR IGNORE INTO session_leaves (writer, session, request, granted_at) \
-             VALUES (?1, ?2, ?3, ?4)",
+             SELECT ?1, ?2, ?3, ?4 WHERE (SELECT count(*) FROM agents \
+             WHERE id IN (?1, ?2) AND state NOT IN ('ended', 'failed')) = 2",
             params![writer, session, request, leave.granted_at],
         )?;
         if added == 0 {
@@ -3938,6 +3941,33 @@ mod tests {
 
         assert_eq!(ids(store.live_agents().unwrap()), ["running00000"]);
         assert_eq!(ids(store.kept_sessions().unwrap()), ["kept00000000"]);
+    }
+
+    #[test]
+    fn a_leave_is_granted_only_while_both_sessions_are_live() {
+        let mut store = Store::open_in_memory().unwrap();
+        let writer = an_agent();
+        let mut session = an_agent();
+        session.id = "session00000".into();
+        for agent in [&writer, &session] {
+            store
+                .create_agent(agent, ("agent.created", json!({})))
+                .unwrap();
+        }
+        let ended = AgentChange {
+            state: Some(AgentState::Ended),
+            ..AgentChange::default()
+        };
+        store.change_agent(&session.id, ended, None).unwrap();
+
+        let granted = store.grant_leave(&writer.id, &session.id, 7).unwrap();
+
+        assert_eq!(granted, (None, None));
+        store.resume_agent(&session.id).unwrap().unwrap();
+        assert!(!store.has_leave(&writer.id, &session.id).unwrap());
+        let (leave, event) = store.grant_leave(&writer.id, &session.id, 8).unwrap();
+        assert_eq!(leave.map(|l| l.request), Some(8));
+        assert_eq!(event.unwrap().name, "leave.granted");
     }
 
     #[test]
