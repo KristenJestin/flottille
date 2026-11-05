@@ -149,6 +149,12 @@ pub fn history(paths: &Paths, session: &str) -> Option<PathBuf> {
     is_session_id(session).then(|| histories(paths).join(format!("{session}.jsonl")))
 }
 
+/// The running totals of `modelUsage` the session's last result said, which a turn's usage is
+/// told from (`docs/reference/acp.md`, "What a turn used").
+pub fn totals(paths: &Paths, session: &str) -> Option<PathBuf> {
+    is_session_id(session).then(|| histories(paths).join(format!("{session}.totals.json")))
+}
+
 /// A session id that names a file: letters, digits and dashes only.
 pub fn is_session_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
@@ -156,7 +162,10 @@ pub fn is_session_id(id: &str) -> bool {
 
 /// The session is over (replaced, or its agent ended): its history goes, nothing will load it.
 pub fn forget_history(paths: &Paths, session: &str) {
-    if let Some(path) = history(paths, session) {
+    for path in [history(paths, session), totals(paths, session)]
+        .into_iter()
+        .flatten()
+    {
         let _ = std::fs::remove_file(path);
     }
 }
