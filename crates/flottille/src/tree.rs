@@ -1727,7 +1727,8 @@ pub fn tree(daemon: &Daemon, agent: &Agent) -> Result<Vec<Value>, Failure> {
                 .filter(|delivery| delivery.kind == "user")
                 .map(|delivery| {
                     json!({"delivery": delivery.id, "text": delivery.body,
-                        "images": delivery.images.len(), "at": delivery.created_at})
+                        "images": delivery.images.len(), "pictures": delivery.images,
+                        "at": delivery.created_at})
                 })
                 .collect(),
         };

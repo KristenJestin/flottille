@@ -17,7 +17,9 @@ use flottille_window::Shell;
 use flottille_window::actions::Command;
 use flottille_window::conversation::{Block, JUDGE};
 use flottille_window::link::Connect;
-use flottille_window::queued::{CANCEL, EDIT, SEND_NOW, WAITS, queued_button, queued_id};
+use flottille_window::queued::{
+    CANCEL, EDIT, SEND_NOW, WAITS, WAITS_FULL, queued_button, queued_id,
+};
 use flottille_window::session::{COPIED, SessionPage, said_at};
 use flottille_window::tree::session_id;
 use gpui_kit::test::TestWindowExt;
@@ -2031,4 +2033,147 @@ fn the_button_to_the_end_rises_into_place(cx: &mut TestAppContext) {
         arriving.top() > placed.top(),
         "from below: {arriving:?} then {placed:?}"
     );
+}
+
+/// A valid 8 x 8 PNG, so that the window can draw its thumbnail.
+const PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGM4YWODFTEMLQkAZZlQAVIPr1MAAAAASUVORK5CYII=";
+
+fn bubble_height(delivery: &str, cx: &mut VisualTestContext) -> f32 {
+    cx.update(|window, _| {
+        window
+            .try_find(format!("queued-item-{delivery}"))
+            .map_or(0., |item| f32::from(item.bounds().size.height))
+    })
+}
+
+#[gpui_kit::test]
+fn a_queued_message_says_queued_in_one_short_line(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    let (_shell, _page, _, delivery, cx) =
+        with_a_waiting_message(&user, &lead, "work a while", "and update the docs", cx);
+
+    let waits = format!("queued-{delivery}-waits");
+    assert_eq!(WAITS, "Queued · after this step");
+    assert_eq!(label(waits.clone(), cx).as_deref(), Some(WAITS));
+    // The long sentence is the tooltip's, once the pointer has rested on the line.
+    cx.update(|window, cx| window.hover(waits.clone(), cx));
+    settle(cx);
+    assert_eq!(
+        label(format!("{waits}-tooltip"), cx).as_deref(),
+        Some(WAITS_FULL)
+    );
+    assert_eq!(WAITS_FULL, "Sent when the agent finishes its step");
+}
+
+#[gpui_kit::test]
+fn a_queued_message_shows_its_pictures_as_thumbnails(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let mut with_images = script();
+    with_images["images"] = true.into();
+    user.fake_script(with_images);
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let lead = lead(&user);
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": "work a while"}),
+    )
+    .unwrap();
+    let reply = shell
+        .read_with(cx, |s, _| s.reply_of(&lead).cloned())
+        .unwrap();
+    until(&shell, cx, "the turn runs", |cx| {
+        reply.read_with(cx, |r, _| r.is_running())
+    });
+    let picture = json!({"mime": "image/png", "data": PNG_BASE64});
+    let delivery = user
+        .call(
+            "agent.send",
+            json!({"agent": lead, "message": "look at these", "images": [picture, picture]}),
+        )
+        .unwrap()["delivery"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    until(
+        &shell,
+        cx,
+        "the message waits with its pictures read",
+        |cx| {
+            queued(&page, cx) == ["look at these"]
+                && page.read_with(cx, |p, cx| p.queued().read(cx).pictures_read() == 2)
+        },
+    );
+    settle(cx);
+
+    for n in 0..2 {
+        assert!(
+            has(format!("queued-{delivery}-image-{n}"), cx),
+            "thumbnail {n}"
+        );
+    }
+    assert!(!has(format!("queued-{delivery}-image-2"), cx));
+    // The count is not said in words any more: the pictures are there to see.
+    assert_eq!(
+        label(format!("queued-{delivery}-waits"), cx).as_deref(),
+        Some(WAITS)
+    );
+    // #353 (the large viewer) is not merged: a click on one opens nothing and breaks nothing.
+    cx.update(|window, cx| window.click(format!("queued-{delivery}-image-0"), cx));
+    settle(cx);
+    assert!(has(queued_id(&delivery), cx));
+}
+
+#[gpui_kit::test]
+fn a_queued_message_unfolds_into_the_composer_and_folds_away_when_sent(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": "work a while"}),
+    )
+    .unwrap();
+    let reply = shell
+        .read_with(cx, |s, _| s.reply_of(&lead).cloned())
+        .unwrap();
+    until(&shell, cx, "the turn runs", |cx| {
+        reply.read_with(cx, |r, _| r.is_running())
+    });
+    settle(cx);
+    let delivery = user
+        .call(
+            "agent.send",
+            json!({"agent": lead, "message": "and the docs"}),
+        )
+        .unwrap()["delivery"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    until(&shell, cx, "the message waits", |cx| {
+        queued(&page, cx) == ["and the docs"]
+    });
+
+    // It unfolds: one frame in, it is not at its full height yet.
+    let first = bubble_height(&delivery, cx);
+    settle(cx);
+    let full = bubble_height(&delivery, cx);
+    assert!(full > 40., "its room: {full}");
+    assert!(first < full, "unfolding: {first} of {full}");
+
+    // Cancelled (or sent), it folds away: still there a frame later, then gone.
+    cx.update(|window, cx| window.click(queued_button(&delivery, "cancel"), cx));
+    until(&shell, cx, "it leaves the queue", |cx| {
+        queued(&page, cx).is_empty()
+    });
+    cx.executor().advance_clock(Duration::from_millis(60));
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    let folding = bubble_height(&delivery, cx);
+    assert!(
+        folding > 0. && folding < full,
+        "folding: {folding} of {full}"
+    );
+    at_rest(cx);
+    assert!(!has(queued_id(&delivery), cx));
 }
