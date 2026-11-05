@@ -1291,7 +1291,7 @@ pub async fn restart_by_user(
         .iter()
         .find(|(_, folder)| here(folder) == here(&old.folder))
         .map(|(path, _)| path.clone());
-    let (name, line, words, repository, ready, url, needs) = match &old.name {
+    let (name, line, words, repository, ready, url, needs, serve) = match &old.name {
         Some(name) => {
             let args = RunArguments {
                 task: Some(name.clone()),
@@ -1310,6 +1310,7 @@ pub async fn restart_by_user(
                     r.ready,
                     r.url,
                     r.needs,
+                    r.serve,
                 ),
                 Err(Outcome::Refused(why) | Outcome::Failed(why) | Outcome::Held(why)) => {
                     return Err(why);
@@ -1334,8 +1335,22 @@ pub async fn restart_by_user(
                 None,
                 None,
                 Vec::new(),
+                false,
             )
         }
+    };
+    // A server's needs start as a run of it starts them: one at a time for its owner.
+    let serving = match (serve, name.as_deref()) {
+        (true, Some(task)) => Some(daemon.mcp.runs.serving(
+            alive.map(|agent| agent.id.as_str()),
+            &place.project,
+            task,
+        )),
+        _ => None,
+    };
+    let _serving = match &serving {
+        Some(lock) => Some(lock.lock().await),
+        None => None,
     };
     // Run again is a run: what the task needs is started first.
     crate::services::start_needed(daemon, &needs, None)
