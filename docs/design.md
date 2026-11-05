@@ -364,7 +364,10 @@ the rounds' for a subscription that needs it.
 
 The window shows them: the session page's rail lists the session's open subscriptions (the pull
 request or the ticket, the events, since when and until when; a wake, `Wake: <why>` and when it is due), each with a Cancel that ends it through the daemon
-(`subscription.cancel`), an agent between turns that waits on one is drawn waiting, not idle, in the
+(`subscription.cancel`); the following of a session an agent started, `Following <title>`, since
+when, and, paused because the two sessions wrote to each other five times without the user, a line
+that says so with a Resume (`subscription.resume`), unfolding when it pauses and folding away when
+it resumes; an agent between turns that waits on one is drawn waiting, not idle, in the
 left tree and in the rail (`Waiting: wake at 10:42` for a wake), and the delivery that wakes the
 agent is a folded step saying what woke it (`woken by the timer: <why>`).
 Opening and ending are events (`subscription.opened`, `subscription.ended`, `docs/events.md`).

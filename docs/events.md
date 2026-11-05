@@ -762,7 +762,8 @@ ends first, `cancelled`.
 
 The two sessions of a following (`docs/tools.md`, "Sessions that talk to each other") wrote to each
 other five times with no message of the user's in either: the following pauses, and wakes nobody
-until it resumes. A message of the user's to either session resumes it.
+until it resumes, and the `session_send` between the two are refused. A message of the user's to
+either session, or the window's Resume (`subscription.resume`), resumes it.
 
 | Field | |
 |---|---|

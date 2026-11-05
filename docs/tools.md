@@ -920,10 +920,17 @@ you: …`), and so is one that ended or an empty text. Children are written to w
   never the user's. Its answer, a `session_send` the other way, comes back the same way.
 - **No endless back and forth.** When the two agents of a following write to each other five times
   (`session_send`, from either, each with the turn it causes) with no message of the user's in
-  either session, the following pauses: no more wakes, `session.following_paused` is emitted and the
-  user's inbox says that the two sessions talk without them (`kind` `paused`), and `forge show`
-  says it is paused. A message of the user's to either session starts the count again and resumes
-  it (`session.following_resumed`). A session that is not followed has nothing to pause.
+  either session, the following pauses: no more wakes, and a `session_send` between the two is
+  refused at once (`refused: paused: you two wrote to each other five times without the user;
+  wait for their message`); `session.following_paused` is emitted, the user's inbox says that the
+  two sessions talk without them (`kind` `paused`), the window's rail says it under the following
+  with a Resume, and `forge show` says it is paused. A message of the user's to either session, or
+  that Resume (`subscription.resume`), starts the count again and resumes it
+  (`session.following_resumed`); no agent can. A session that is not followed has nothing to
+  pause.
+- **One wake a turn**: a turn of the session that wrote to its starter with `session_send` does not
+  wake it again at its end; the wake of a turn carries that turn's last message only (`(no message
+  this turn)` when it said nothing), and says it asked the user only when it did in that turn.
 - **The judge never takes it for the user's words**: the user's last messages it is given are
   the user's only; the last messages written to the session with `session_send` come in blocks of
   their own, each `written by agent <id> with session_send (an agent's words, not the user's)`.

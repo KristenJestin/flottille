@@ -1213,19 +1213,29 @@ it. The agent's own way is the `forge` and `tickets` tools (`docs/tools.md`).
 
 `{"tree"?}`. `{"subscriptions": [...]}`, the open ones, the oldest first. With `tree`, an agent's id,
 those of the agents of its root's tree (`not-found` when it names no agent); without, every one. Each
-is `{"id", "agent", "source", "named", "target", "events", "from", "created_at", "expires_at"}`: `named`
+is `{"id", "agent", "source", "named", "target", "events", "from", "created_at", "expires_at", "paused"}`: `named`
 says what it watches (`pull request #12 of api, workspace login`, a repository that is the project's
 folder named by the project; `ticket #5 of api`, `ticket ABC-1`; `wake: <why>`), `target` is the
 source's own (`forge`: `project`, `workspace`, `repository`, `number`; `tickets`: `project`,
 `repository`, the tracker's, empty for Jira, and `key`, `5` or `ABC-1`; `timer`: `why`,
-`expires_at` being when it wakes), `from` is `anyone` or `people`, the times are in milliseconds since the Unix
-epoch.
+`expires_at` being when it wakes; `session`: `session` and `title`, the session followed, with no
+end of its own), `from` is `anyone` or `people`, the times are in milliseconds since the Unix
+epoch. `paused` is true for a following paused because its two sessions wrote to each other
+without the user (`docs/tools.md`, "Sessions that talk to each other"), false otherwise.
 
 #### `subscription.cancel`
 
 `{"subscription"}`. `{"subscription": {...}}`: the subscription ends as the agent's `forge unsubscribe`
 (or `tickets unsubscribe`) ends it, without a word to the agent, and `subscription.ended` is emitted with `why` `cancelled`.
 `not-found` when it is not open.
+
+#### `subscription.resume`
+
+`{"subscription"}`. `{"subscription": {...}}`: a paused following resumes as a message of the
+user's to either session resumes it: its count starts again, its wakes and the `session_send`
+between the two come back, and `session.following_resumed` is emitted. The user's alone: no tool
+of an agent does it. `not-found` when it is no open following; `invalid-params` when it is not
+paused.
 
 ### `provider.list`
 
@@ -1343,7 +1353,8 @@ An entry is `{"seq", "at", "kind", "agent", "project", "workspace", "text"}`, ma
 a root agent (`docs/events.md`): `report` (`agent.reported`, `text` its report), `question`
 (`agent.asked` to the user, `text` its question), `failure` (`agent.failed`, `text` its reason) or
 `paused` (`session.following_paused`: two sessions talk to each other without the user, `text` says
-which and how to resume; `agent` is the followed session).
+which and how to resume; `agent` is the followed session). A pause that resumed since is
+`"resolved": true`, its `text` ending `It has resumed since.`
 A child's own go to its parent and are not here. Without `after`, the last `limit` entries (50 by
 default); with it, the first `limit` entries numbered after it. Nothing is marked read: the inbox
 is a view of the stored events.
