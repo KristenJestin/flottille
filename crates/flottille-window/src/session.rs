@@ -2425,6 +2425,7 @@ impl ConversationView {
                                 let lead = if n == 0 { "" } else { " · " };
                                 match failed.as_ref() == Some(&piece) {
                                     true => div()
+                                        .flex()
                                         .flex_none()
                                         .child(lead)
                                         .child(

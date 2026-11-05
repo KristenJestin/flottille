@@ -212,10 +212,29 @@ impl Daemon {
         &self,
         write: impl FnOnce(&mut Store) -> flottille_core::Result<(T, E)>,
     ) -> flottille_core::Result<T> {
+        self.written(true, write)
+    }
+
+    /// `write`, the event left out of the developer log when a line of it says more already. The
+    /// subscribers see it all the same.
+    pub fn write_unlogged<T, E: Into<Option<Event>>>(
+        &self,
+        write: impl FnOnce(&mut Store) -> flottille_core::Result<(T, E)>,
+    ) -> flottille_core::Result<T> {
+        self.written(false, write)
+    }
+
+    fn written<T, E: Into<Option<Event>>>(
+        &self,
+        logged: bool,
+        write: impl FnOnce(&mut Store) -> flottille_core::Result<(T, E)>,
+    ) -> flottille_core::Result<T> {
         let mut events = self.events.lock().unwrap();
         let (value, event) = write(&mut events.store)?;
         if let Some(event) = event.into() {
-            self.developer.event(&event);
+            if logged {
+                self.developer.event(&event);
+            }
             if let Some(bus) = &events.bus {
                 let _ = bus.send(event);
             }

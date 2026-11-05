@@ -1257,6 +1257,24 @@ fn the_group_line_counts_steps_kinds_failures_and_time(cx: &mut TestAppContext) 
 }
 
 #[gpui_kit::test]
+fn the_failed_count_is_on_the_group_s_line(cx: &mut TestAppContext) {
+    let user = user();
+    let (_shell, page, cx, group) = after_much_work(&user, cx);
+    let id = line_of(&page, &group, cx);
+    let line = cx.update(|window, _| window.find(id.clone()).bounds());
+    let failed = cx.update(|window, _| window.find(format!("{id}-failed")).bounds());
+    // On a line of its own, the count would sit below the middle of a line grown twice as high.
+    let (count, whole) = (
+        f32::from(failed.origin.y + failed.size.height / 2.),
+        f32::from(line.origin.y + line.size.height / 2.),
+    );
+    assert!(
+        (count - whole).abs() < 1.,
+        "the count is on the line: {failed:?} in {line:?}"
+    );
+}
+
+#[gpui_kit::test]
 fn a_click_unfolds_the_group_into_today_s_view(cx: &mut TestAppContext) {
     let user = user();
     let (_shell, page, cx, group) = after_much_work(&user, cx);
