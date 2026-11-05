@@ -2704,6 +2704,10 @@ pub struct Row {
     /// The reply or the thought as Markdown, in the pieces [`markdown_pieces`] cuts: a piece
     /// streamed parses the last one again, never the whole reply.
     markdown: Vec<Entity<MarkdownPiece>>,
+    /// How many bytes of Markdown were handed to the parser to read again so far: a piece that
+    /// did not change counts none, one that grew counts its whole length (the parser reads
+    /// again its last block, which is no more than that).
+    parsed: usize,
     /// Where a selection begun in its text stays: see [`MarkdownPiece`].
     scope: TextSelectionScopeId,
     /// What the agent received for a message that used commands, selectable as the message is: the
@@ -2753,6 +2757,7 @@ impl Row {
                 when,
                 open: false,
                 markdown: Vec::new(),
+                parsed: 0,
                 scope: TextSelectionScopeId::new(),
                 received: None,
                 thinking: None,
@@ -2814,6 +2819,18 @@ impl Row {
         })
     }
 
+    /// How many bytes of Markdown were handed to the parser to read again so far: what a piece
+    /// streamed costs the parser, whatever the machine does meanwhile.
+    pub fn parsed(&self) -> usize {
+        self.parsed
+    }
+
+    /// How many times the pieces of its Markdown were drawn so far: a frame draws the pieces in
+    /// view, never all of a long reply.
+    pub fn pieces_drawn(&self, cx: &gpui_kit::App) -> usize {
+        self.markdown.iter().map(|m| m.read(cx).renders).sum()
+    }
+
     /// The text a reply or a thought shows, its Markdown drawn: as of the last parse that landed.
     pub fn rendered(&self, cx: &gpui_kit::App) -> Option<String> {
         let pieces = self
@@ -2863,20 +2880,26 @@ impl Row {
         for (at, piece) in pieces.iter().enumerate() {
             match self.markdown.get(at) {
                 Some(markdown) => {
-                    let state = markdown.update(cx, |markdown, _| {
+                    let (state, grew) = markdown.update(cx, |markdown, _| {
                         markdown.chips = chips;
-                        markdown.state.clone()
+                        let grew = markdown.bytes != piece.len();
+                        markdown.bytes = piece.len();
+                        (markdown.state.clone(), grew)
                     });
+                    self.parsed += if grew { piece.len() } else { 0 };
                     state.update(cx, |state, cx| state.set_text(piece, cx));
                 }
                 None => {
                     let state = cx.new(|cx| TextViewState::markdown(piece, cx));
                     let scope = self.scope;
+                    self.parsed += piece.len();
                     self.markdown.push(cx.new(|_| MarkdownPiece {
                         state,
                         muted,
                         chips,
                         scope,
+                        bytes: piece.len(),
+                        renders: 0,
                     }));
                 }
             }
@@ -3162,6 +3185,8 @@ impl MarkdownText {
                     muted,
                     chips: false,
                     scope,
+                    bytes: piece.len(),
+                    renders: 0,
                 })
             })
             .collect();
@@ -3207,10 +3232,15 @@ pub struct MarkdownPiece {
     /// Its inline code is the commands of a message the user typed: the accent's chip.
     chips: bool,
     scope: TextSelectionScopeId,
+    /// The length of the text it was last given, to tell a piece that grew from one that did not.
+    bytes: usize,
+    /// How many times it was drawn.
+    renders: usize,
 }
 
 impl Render for MarkdownPiece {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.renders += 1;
         let scope = self.scope;
         // The scope is set where the view paints: a piece drawn again alone paints without its
         // row around it.
