@@ -136,7 +136,7 @@ pub fn is_address(text: &str) -> bool {
     })
 }
 
-/// A line's process group, killed whole when it is dropped, whatever ends the line: its end, its
+/// A line's session, killed whole when it is dropped, whatever ends the line: its end, its
 /// limit, or the run it probes ending first. Recorded as a run's are, so that a daemon started
 /// after a crash kills it too.
 struct Group<'a> {
@@ -163,6 +163,7 @@ impl Drop for Group<'_> {
     fn drop(&mut self) {
         if let Some(pid) = self.pid {
             signal_group(pid, libc::SIGKILL);
+            crate::children::end_session(pid);
             let _ = self.daemon.read(|store| store.remove_run_process(pid));
         }
     }
@@ -177,7 +178,7 @@ fn last_line(bytes: &[u8]) -> Option<String> {
         .map(|line| line.chars().take(300).collect())
 }
 
-/// A line of the project's, started without a shell in a process group of its own, with the
+/// A line of the project's, started without a shell in a session of its own, with the
 /// run's environment; its output piped when `piped`, else dropped.
 fn spawn(
     words: &[String],
@@ -188,18 +189,17 @@ fn spawn(
     let output = || {
         if piped { Stdio::piped() } else { Stdio::null() }
     };
-    crate::children::spawn(
-        tokio::process::Command::new(&words[0])
-            .args(&words[1..])
-            .env_clear()
-            .envs(env)
-            .current_dir(folder)
-            .stdin(Stdio::null())
-            .stdout(output())
-            .stderr(output())
-            .process_group(0)
-            .kill_on_drop(true),
-    )
+    let mut command = tokio::process::Command::new(&words[0]);
+    command
+        .args(&words[1..])
+        .env_clear()
+        .envs(env)
+        .current_dir(folder)
+        .stdin(Stdio::null())
+        .stdout(output())
+        .stderr(output())
+        .kill_on_drop(true);
+    crate::children::spawn(crate::children::in_own_session(&mut command))
 }
 
 /// Whether the line exits with 0 within the probe's limit; killed past it.

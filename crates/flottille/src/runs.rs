@@ -1,7 +1,7 @@
 //! The command tools: `run` and `run_status` (`docs/tools.md`, "Running", and
 //! `docs/reference/hemera.md` §3 "Commands"), and the tasks the user runs from the window.
 //!
-//! A run is a line split without a shell and spawned in a process group of its own, with the
+//! A run is a line split without a shell and spawned in a session of its own, with the
 //! place's variables and an environment that keeps forges out of reach: no forge token, the forge
 //! command lines' configuration in an empty folder, and no git hook. The call waits
 //! for its end a while, then answers that it keeps going; its output is kept (its end), masked
@@ -703,9 +703,8 @@ fn start(
                 .map_err(|e| format!("cannot run it: {e}"))?,
         )
         .stderr(writer)
-        .process_group(0)
         .kill_on_drop(true);
-    let spawned = crate::children::spawn(&mut command);
+    let spawned = crate::children::spawn(crate::children::in_own_session(&mut command));
     // The command holds the pipe's writing end: dropped, only the processes hold it.
     drop(command);
     let child = spawned.map_err(|e| format!("cannot run {}: {e}", words[0]))?;
@@ -900,8 +899,10 @@ async fn follow(
         }
     };
     // What it left in the background holds the pipe and would keep running unseen: it ends with
-    // the run, and what is already in the pipe is read without waiting for it.
+    // the run, even in a group of its own, and what is already in the pipe is read without
+    // waiting for it.
     signal_group(pid, libc::SIGKILL);
+    crate::children::end_session(pid);
     while let Ok(read) = reader.try_read(&mut buffer) {
         if read == 0 {
             break;
@@ -1571,6 +1572,7 @@ pub fn settle_at_start(daemon: &Daemon) {
         for (pid, started) in store.run_processes()? {
             if start_time(pid) == Some(started) {
                 signal_group(pid, libc::SIGKILL);
+                crate::children::end_session(pid);
                 eprintln!("flottille daemon: killed the run process {pid} that was left running");
             }
             store.remove_run_process(pid)?;

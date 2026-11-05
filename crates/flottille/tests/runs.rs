@@ -1308,6 +1308,48 @@ fn a_grandchild_in_its_own_group_is_reaped() {
 }
 
 #[test]
+fn a_grandchild_in_its_own_group_is_ended_with_its_run() {
+    let user = User::with_fake_agent();
+    let (_, mcp, workspace) = session(&user);
+    launcher_scripts(&workspace);
+
+    let answer = ok(mcp.call("run", json!({"task": "pnpm"})));
+
+    assert!(answer.contains("exited with code 0"), "{answer}");
+    let left = grandchildren(&workspace, 1)[0];
+    eventually("the left shell to be ended", || !alive(left));
+}
+
+#[test]
+fn the_daemon_leaves_no_zombie_after_runs_end_stop_and_time_out() {
+    let user = User::with_fake_agent();
+    let (agent, mcp, workspace) = session(&user);
+    launcher_scripts(&workspace);
+    let daemon = user.status()["pid"].as_u64().unwrap();
+
+    // Ends by itself within its call.
+    let ended = ok(mcp.call("run", json!({"task": "pnpm"})));
+    assert!(ended.contains("exited with code 0"), "{ended}");
+    // Stopped by the user.
+    let stopped = start(&mcp, "pnpm-waits");
+    grandchildren(&workspace, 2);
+    user.call("run.stop", json!({"run": stopped})).unwrap();
+    // Past its call's time, then ending by itself.
+    let timed_out = start(&mcp, "pnpm-waits");
+    prompted(&user, &["[flottille:command-ended]", &timed_out]);
+
+    let left = grandchildren(&workspace, 3);
+    let commands = listed(&user, &agent);
+    assert!(
+        commands.iter().all(|command| command["state"] != "running"),
+        "{commands:?}"
+    );
+    eventually("every left shell ended and waited for", || {
+        left.iter().all(|pid| !alive(*pid)) && zombies_of(daemon).is_empty()
+    });
+}
+
+#[test]
 fn a_child_the_daemon_waits_itself_is_not_reaped_by_the_sweep() {
     let user = User::with_fake_agent();
     let (_, mcp, workspace) = session(&user);

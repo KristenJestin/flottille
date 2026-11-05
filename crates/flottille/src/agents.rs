@@ -1722,7 +1722,8 @@ async fn stop(child: &mut Child, pid: u32) {
 }
 
 pub fn signal_group(pid: u32, signal: i32) {
-    // SAFETY: killpg has no memory precondition; the group is the process's own (`process_group(0)`).
+    // SAFETY: killpg has no memory precondition; the group is the process's own (`process_group(0)`,
+    // or the session it leads).
     unsafe {
         libc::killpg(pid as i32, signal);
     }
