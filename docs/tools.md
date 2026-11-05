@@ -654,7 +654,7 @@ reasons.
   another ticket of the same tracker by its key (`#123` or `ABC-123`): its reference, tracker,
   state, title, link and description, masked, and how many comments it has with the newest one's
   author (`Comments: 12, … read them with tickets {"action": "show", "detail": "full"}`); `detail
-  full` gives the comments (the newest 30). A ticket read in the last 30 s is given again, saying
+  full` gives the comments (the newest 30). A Jira work item's attachments are listed at the end, named and not shown, and an image in a text is a line saying so; the description says the user can paste one into the conversation ([`tickets.md`](tickets.md), "Attachments"). A ticket read in the last 30 s is given again, saying
   how old it is (`fresh: true` and `detail full` read it again; [`tickets.md`](tickets.md), "How
   fast it is read"). A key of the other tracker is refused (`refused:
   ABC-123 is a Jira ticket, and this workspace's tracker is GitHub issues (#123): …`), and nothing

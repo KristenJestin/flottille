@@ -367,16 +367,16 @@ const SERVED: [Definition; 28] = [
         name: "tickets",
         title: "Tickets",
         description: "The tickets of the project's tracker (GitHub issues #123, Jira ABC-123), \
-            through the user's own gh or acli (no sign-in here: never run them). list: every \
-            ticket of a state (open by default), by label and assignee, as the daemon last read \
-            them; search: the same, with words of the title; show: a workspace's linked ticket \
-            (in main, name workspace) or ticket, read now, detail full adds the comments; \
-            types: a Jira project's work item types: read them when unsure of a type, a guess \
-            is refused. Writes, judged, answered at once, the result maybe later: create, \
-            comment, edit, close, reopen, status. Nothing is assigned unless you ask, and a \
-            tracker may assign a new work item itself: assignee \"@me\" gives it to the user \
-            (Jira create, edit; null on edit removes it; GitHub edit: assignees). Markdown body, \
-            converted for Jira. subscribe: the next events of a ticket wake you once (from \
+            through the user's own gh or acli (no sign-in here: never run them). list: tickets \
+            of a state (open by default), by label and assignee, as last read; search: the \
+            same, with words of the title; show: a workspace's linked ticket (in main, name \
+            workspace) or ticket, read now, detail full adds the comments; Jira images and \
+            files are named, not shown (the user can paste one); types: a Jira project's work \
+            item types (a guess is refused). Writes, judged, answered at once, the result \
+            maybe later: create, comment, edit, close, reopen, status. Nothing is assigned \
+            unless you ask (a tracker may assign a new item itself): assignee \"@me\" is the \
+            user (Jira create, edit; null on edit removes it; GitHub edit: assignees). \
+            Markdown body, converted for Jira. subscribe: the next events of a ticket wake you once (from \
             people: no bot nor agent; minutes: 60 by default); unsubscribe. {\"action\": \"comment\", \"ticket\": \"#12\", \"body\": \"...\"}",
         read_only: false,
         idempotent: false,
@@ -2655,6 +2655,17 @@ mod tests {
     #[test]
     fn the_server_instructions_stay_short() {
         assert!(GUIDE.split_whitespace().count() < 400);
+    }
+
+    #[test]
+    fn the_tickets_description_says_images_and_files_are_named_not_shown() {
+        let tickets = SERVED.iter().find(|d| d.name == "tickets").unwrap();
+
+        assert!(
+            tickets
+                .description
+                .contains("Jira images and files are named, not shown (the user can paste one)")
+        );
     }
 
     #[test]

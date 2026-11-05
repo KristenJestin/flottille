@@ -2222,6 +2222,47 @@ fn a_jira_description_read_back_is_the_markdown_written() {
 }
 
 #[test]
+fn a_jira_work_item_shows_its_attachments_and_names_the_images_of_its_texts() {
+    let user = user();
+    on_jira(&user);
+    let mut item = in_status(
+        work_item("ABC-1", "The login fails", "example.atlassian.net"),
+        "To Do",
+        "new",
+    );
+    item["fields"]["description"] = json!({"type": "doc", "version": 1, "content": [
+        {"type": "mediaSingle", "content": [{"type": "media", "attrs": {
+            "alt": "image-20260101-120000.png", "type": "file",
+            "id": "00000000-0000-4000-8000-000000000001"}}]}]});
+    item["fields"]["attachment"] = json!([{"id": "10001", "filename": "image-20260101-120000.png",
+        "mimeType": "image/png", "size": 97717, "created": "2026-01-01T12:00:00.000+0100",
+        "author": {"displayName": "Ana Example"},
+        "content": "https://example.atlassian.net/rest/api/3/attachment/content/10001"}]);
+    user.acli_script(json!({"items": {"ABC-1": item}}));
+    let (_, mcp) = root_in(&user, None);
+
+    let shown = read(
+        &user,
+        mcp.call("tickets", json!({"action": "show", "ticket": "ABC-1"})),
+    );
+
+    for part in [
+        "[image: image-20260101-120000.png, not shown: ask the user to paste it if it matters]",
+        "Attachments (1)",
+        "- image-20260101-120000.png, image/png, 95.4 KiB, by Ana Example, 2026-01-01T12:00:00.000+0100",
+    ] {
+        assert!(shown.contains(part), "{part} in {shown}");
+    }
+    assert!(!shown.contains("attachment/content"), "{shown}");
+    assert!(
+        words(user.acli_received())
+            .contains(&"jira workitem view ABC-1 --json --fields summary,status,description,comment,attachment".to_owned()),
+        "{:?}",
+        user.acli_received()
+    );
+}
+
+#[test]
 fn a_post_flottille_wrote_on_jira_is_still_recognised() {
     // The text of a comment that Jira keeps as a tree, with a link, a table and marks, is found
     // by the record after the round trip, not by the Markdown typed.

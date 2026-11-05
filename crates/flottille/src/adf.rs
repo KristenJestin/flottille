@@ -419,11 +419,82 @@ fn block(node: &Value, out: &mut Vec<String>) {
             }
         }
         "blockCard" => out.push(node["attrs"]["url"].as_str().unwrap_or_default().to_owned()),
+        // An image or a file has no text: a line says where it stands and that it is not seen.
+        "mediaSingle" | "mediaGroup" | "media" => {
+            let lines: Vec<String> = match node["type"] == "media" {
+                true => vec![media_line(node)],
+                false => content(node)
+                    .iter()
+                    .filter(|child| child["type"] == "media")
+                    .map(media_line)
+                    .collect(),
+            };
+            if !lines.is_empty() {
+                out.push(lines.join("\n"));
+            }
+        }
         "text" | "hardBreak" | "mention" | "emoji" | "inlineCard" => {
             out.push(inline(std::slice::from_ref(node), "\n"));
         }
         // The document, a panel, an expand and anything unknown: the blocks it holds, if any.
         _ => content(node).iter().for_each(|child| block(child, out)),
+    }
+}
+
+/// What an agent that cannot see an image is told of it.
+const NOT_SHOWN: &str = "not shown: ask the user to paste it if it matters";
+
+/// A line saying that a `media` is there: an image (its type, `attrs.mimeType`, or failing that
+/// its name's extension says so; an external one always is) or a file, by its name, which is the
+/// attachment's file name (`alt`), or its address when it is external. Never fetched: the
+/// attachment's address needs the user's credentials.
+fn media_line(node: &Value) -> String {
+    let attrs = &node["attrs"];
+    let text = |key: &str| {
+        attrs[key]
+            .as_str()
+            .map(|t| t.split_whitespace().collect::<Vec<_>>().join(" "))
+            .filter(|t| !t.is_empty())
+    };
+    let (alt, url) = (text("alt"), text("url"));
+    let external = attrs["type"] == "external";
+    let name = match (external, alt, url) {
+        (true, Some(alt), Some(url)) => format!("{alt} ({url})"),
+        (true, None, Some(url)) => url,
+        (_, Some(alt), _) => alt,
+        _ => "unnamed".to_owned(),
+    };
+    let image = match attrs["mimeType"].as_str() {
+        Some(mime) => mime.starts_with("image/"),
+        None => {
+            external
+                || name.rsplit_once('.').is_some_and(|(_, extension)| {
+                    [
+                        "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "heic", "tif", "tiff",
+                    ]
+                    .iter()
+                    .any(|image| extension.eq_ignore_ascii_case(image))
+                })
+        }
+    };
+    match image {
+        true => format!("[image: {name}, {NOT_SHOWN}]"),
+        false => format!("[file: {name}, not shown]"),
+    }
+}
+
+/// Gives each `media` of `node` named in `types` (attachment file name to media type) the type its
+/// attachment has: what the name's extension would only guess.
+pub(crate) fn typed(node: &mut Value, types: &HashMap<String, String>) {
+    if matches!(node["type"].as_str(), Some("media" | "mediaInline"))
+        && let Some(mime) = node["attrs"]["alt"].as_str().and_then(|alt| types.get(alt))
+    {
+        node["attrs"]["mimeType"] = Value::from(mime.as_str());
+    }
+    if let Some(children) = node["content"].as_array_mut() {
+        for child in children {
+            typed(child, types);
+        }
     }
 }
 
@@ -467,6 +538,11 @@ fn inline(nodes: &[Value], hard: &str) -> String {
                 .to_owned(),
             "inlineCard" | "blockCard" => {
                 node["attrs"]["url"].as_str().unwrap_or_default().to_owned()
+            }
+            // Written as it is: the brackets are not Markdown to escape.
+            "mediaInline" | "media" => {
+                runs.push((media_line(node), vec![&Value::Null]));
+                continue;
             }
             _ => continue,
         };
@@ -677,6 +753,78 @@ mod tests {
                 paragraph("<div class=\"x\">raw</div>"),
                 paragraph("See ![a logo](https://example.com/l.png) here"),
             ]))
+        );
+    }
+
+    /// A `mediaSingle` as a real site prints it, its media named `alt`.
+    fn media_single(alt: &str) -> Value {
+        json!({"type": "mediaSingle",
+            "attrs": {"layout": "align-start", "localId": "a0f1803bf23b", "width": 1035},
+            "content": [{"type": "media", "attrs": {"alt": alt, "collection": "", "height": 852,
+                "id": "00000000-0000-4000-8000-000000000001", "type": "file", "width": 1291}}]})
+    }
+
+    const NOT_SHOWN: &str = "not shown: ask the user to paste it if it matters";
+
+    #[test]
+    fn an_image_in_a_jira_comment_is_named_where_it_stands() {
+        let adf = doc(json!([
+            paragraph("Claudio proposes this for the mobile version"),
+            media_single("image-20260101-120000.png"),
+            paragraph("What do you think?"),
+        ]));
+
+        assert_eq!(
+            to_markdown(&adf),
+            format!(
+                "Claudio proposes this for the mobile version\n\n\
+                 [image: image-20260101-120000.png, {NOT_SHOWN}]\n\nWhat do you think?"
+            )
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_not_an_image_is_named_as_a_file() {
+        let group = json!({"type": "mediaGroup", "content": [
+            {"type": "media", "attrs": {"type": "file", "id": "1", "alt": "spec.pdf"}},
+            {"type": "media", "attrs": {"type": "file", "id": "2", "alt": "photo.JPG"}},
+        ]});
+        let inline = json!({"type": "paragraph", "content": [
+            {"type": "text", "text": "See "},
+            {"type": "mediaInline", "attrs": {"id": "3", "alt": "notes.txt"}},
+        ]});
+        // The attachment's own type wins over the name: a `.bin` the site calls an image.
+        let typed = json!({"type": "mediaSingle", "content": [
+            {"type": "media", "attrs": {"type": "file", "alt": "shot.bin", "mimeType": "image/png"}}]});
+
+        assert_eq!(
+            to_markdown(&doc(json!([group, inline, typed]))),
+            format!(
+                "[file: spec.pdf, not shown]\n[image: photo.JPG, {NOT_SHOWN}]\n\n\
+                 See [file: notes.txt, not shown]\n\n[image: shot.bin, {NOT_SHOWN}]"
+            )
+        );
+    }
+
+    #[test]
+    fn an_external_image_gives_its_address() {
+        let external = json!({"type": "mediaSingle", "content": [
+            {"type": "media", "attrs": {"type": "external", "url": "https://example.com/a.png"}}]});
+
+        assert_eq!(
+            to_markdown(&doc(json!([external]))),
+            format!("[image: https://example.com/a.png, {NOT_SHOWN}]")
+        );
+    }
+
+    #[test]
+    fn a_media_with_no_name_is_still_said() {
+        let nameless = json!({"type": "mediaSingle", "content": [
+            {"type": "media", "attrs": {"type": "file", "id": "1"}}]});
+
+        assert_eq!(
+            to_markdown(&doc(json!([nameless]))),
+            "[file: unnamed, not shown]"
         );
     }
 

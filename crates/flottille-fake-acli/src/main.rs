@@ -35,7 +35,9 @@
 //! of that key end with 1, saying its text. With `--fields a,b`, the view prints the work item's
 //! `key`, its `self` and only those of its `fields`, as the real one is assumed to: a read that
 //! forgot to ask for a field does not find it. Its `fields.comment.comments` are the script's,
-//! then those posted (below). A script's `user` (`Casey Example` by default) is whom they are by.
+//! then those posted (below). A work item's `attachment` (`filename`, `mimeType`, `size`, `created`,
+//! `author`, `content`, as a real site gives them) and the `mediaSingle` nodes of its texts are the
+//! script's as they are: a `media`'s `alt` is its attachment's `filename`. A script's `user` (`Casey Example` by default) is whom they are by.
 //!
 //! `acli jira workitem search --jql Q --json [--limit N]` prints the script's `search` (an array
 //! of work items, Jira's REST shape assumed as for `view`), or every item of `items` without it,

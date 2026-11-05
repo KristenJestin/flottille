@@ -61,8 +61,8 @@ user's), so that the user's own sign-in works; a call is cut after 30 s.
 - **What a tracker says is masked** before it is shown or stored (titles, descriptions, comments,
   errors), as every output is (`flottille_core::secrets`).
 - **The reads and the writes Flottille runs are known.** Of `acli`, the reads are `acli jira auth
-  status`, `acli jira workitem view <KEY> --json --fields summary,status,description,comment`
-  (`--fields status` or `--fields comment` alone for the status of a write and the rounds'
+  status`, `acli jira workitem view <KEY> --json --fields summary,status,description,comment,attachment`
+  (`--fields status` or `--fields comment,attachment` alone for the status of a write and the rounds'
   comments), and `acli jira workitem search --jql <JQL> --fields key,summary,status,assignee,labels --json
   --limit 200`; its writes (`workitem create`, `comment create`, `edit`, `transition`, below) run
   only for a `tickets` call the gate let through, and the tests look at every call the fake
@@ -144,7 +144,15 @@ in it is paragraphs, a line break staying a line break.
 
 **Reading** gives, for the same nodes, the Markdown above (a table is `| a | b |` rows under a
 `| --- |` line), a mention as its text, a link card as its address, a hard break as a line break.
-Anything else (images, attachments, status lozenges) is left out. A character that Markdown would
+An image or a file (`mediaSingle`, `mediaGroup`, `media`, `mediaInline`) is a line where it stands:
+`[image: <name>, not shown: ask the user to paste it if it matters]`, or `[file: <name>, not
+shown]`; an external image (`type: "external"`) gives its address as its name. The name is the
+media's `alt`, which is the attachment's file name (the media's `id` is not the attachment's), and
+the type is the attachment's `mimeType` when one has that name, else the name's extension. Flottille
+cannot show it: `acli` has no command that downloads an attachment, and its address needs the
+user's credentials, which Flottille never reads, so that address is never fetched nor shown. The
+same text is what a subscription delivers of a new comment. Anything else (status lozenges) is
+left out. A character that Markdown would
 take for markup (`*`, `` ` ``, `[`, `<`, `~`, `_` at a word's edge, a line starting with `#`, `>`,
 `-` or `1.`) is written with a backslash, so that it comes back as the text it was.
 
@@ -172,7 +180,7 @@ item as `acli … --json` is expected to print it,
 ```
 
 Also assumed: `acli jira auth status` prints the active site on a line `Site: <host>` (the
-site check above reads it, and refuses when it is missing), `--fields summary,status,description,comment` returns the comments (the
+site check above reads it, and refuses when it is missing), `--fields summary,status,description,comment,attachment` returns the comments and the attachments (the
 documentation's own example is `--fields summary,comment`), and `acli jira auth status` ends with 0
 when signed in and non-zero when not (its page does not document its exit codes). The reading
 tolerates a description that is a string and `fields.comment` being the array itself. **The
@@ -202,6 +210,14 @@ except those of a Jira work item a subscription follows (below).
 its age; `show` reads live and stores what it read; a subscription to a ticket hears those
 events.
 
+### Attachments
+
+A work item's attachments (`fields.attachment`, read with the item, so cached with it) are listed
+at the end of `tickets show`, one line each: file name, type, size, who added it and when. They are
+named, never shown (the same words as an image in a text): the user can paste one into the
+conversation. `workspace.ticket` gives them as `attachments: [{name, type, bytes, author, at}]`.
+Their `content` address is never kept.
+
 ## How fast it is read
 
 - **Together.** The check that the program is signed in (to the right site, for Jira) and the read
@@ -223,7 +239,8 @@ developer log's `reads`.
 ## The protocol and the command line
 
 - `workspace.ticket {project, name}` answers `{project, workspace, ticket, tracker, repository,
-  title, state, url, description, comments: [{author, at, body}], older_comments, read_at,
+  title, state, url, description, comments: [{author, at, body}], older_comments, attachments,
+  read_at,
   problem}`; with no ticket linked, `ticket` is null and the rest is absent; when it cannot be
   read, `problem` says why (`docs/protocol.md`).
 - `workspace.link_ticket {project, name, ticket}` links, or unlinks when `ticket` is null, and

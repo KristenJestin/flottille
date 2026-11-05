@@ -46,7 +46,7 @@ pub(crate) const COMMENTS: usize = 30;
 /// What `gh issue view` is asked for.
 const GH_FIELDS: &str = "number,title,state,body,comments,url";
 /// What `acli jira workitem view` is asked for.
-const ACLI_FIELDS: &str = "summary,status,description,comment";
+const ACLI_FIELDS: &str = "summary,status,description,comment,attachment";
 
 /// A ticket as its tracker said it, its texts masked.
 #[derive(Clone, Debug, PartialEq)]
@@ -70,6 +70,18 @@ pub struct Ticket {
     pub comments: Vec<Comment>,
     /// How many older comments are not kept.
     pub older: usize,
+    /// The files attached to a Jira work item, named only: Flottille never fetches one.
+    pub attachments: Vec<Attachment>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Attachment {
+    pub name: String,
+    /// Empty when the site gave none.
+    pub mime: String,
+    pub bytes: u64,
+    pub author: String,
+    pub at: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -121,6 +133,10 @@ impl Ticket {
                 .map(|c| json!({"author": c.author, "at": c.at, "body": c.body}))
                 .collect::<Vec<_>>(),
             "older_comments": self.older,
+            "attachments": self.attachments.iter()
+                .map(|a| json!({"name": a.name, "type": a.mime, "bytes": a.bytes,
+                    "author": a.author, "at": a.at}))
+                .collect::<Vec<_>>(),
         })
     }
 
@@ -195,6 +211,25 @@ impl Ticket {
                     comment.by(),
                     comment.body.replace('\n', "\n    ")
                 ));
+            }
+        }
+        if !self.attachments.is_empty() {
+            text.push_str(&format!(
+                "\nAttachments ({}), named but not shown: the user can paste one into the \
+                 conversation:\n",
+                self.attachments.len()
+            ));
+            for file in &self.attachments {
+                let mut parts = vec![file.name.clone()];
+                if !file.mime.is_empty() {
+                    parts.push(file.mime.clone());
+                }
+                parts.push(size_text(file.bytes));
+                if !file.author.is_empty() {
+                    parts.push(format!("by {}", file.author));
+                }
+                parts.extend(file.at.clone());
+                text.push_str(&format!("- {}\n", parts.join(", ")));
             }
         }
         text
@@ -344,6 +379,7 @@ async fn read_issue(forge: &Forge, number: u64) -> Result<Ticket, String> {
         description_by_agent,
         older: comments.len().saturating_sub(COMMENTS),
         comments: newest(comments),
+        attachments: Vec::new(),
     })
 }
 
@@ -483,7 +519,7 @@ fn answered_by(item: &Value, host: &str, site: &str) -> bool {
 fn work_item(key: &str, item: &Value, site: &str) -> Ticket {
     let fields = &item["fields"];
     let comments = work_item_comments(fields);
-    let description = masked(&document_text(&fields["description"]));
+    let description = masked(&attached_text(&fields["description"], fields));
     let (description, description_by_agent) = forge::unmarked(&description);
     let status = status_of(item);
     Ticket {
@@ -499,6 +535,7 @@ fn work_item(key: &str, item: &Value, site: &str) -> Ticket {
         description_by_agent,
         older: comments.len().saturating_sub(COMMENTS),
         comments: newest(comments),
+        attachments: attachments_of(fields),
     }
 }
 
@@ -514,10 +551,55 @@ fn work_item_comments(fields: &Value) -> Vec<Comment> {
                 said(&comment["author"]["displayName"]),
                 comment["created"].as_str(),
                 None,
-                &masked(&document_text(&comment["body"])),
+                &masked(&attached_text(&comment["body"], fields)),
             )
         })
         .collect()
+}
+
+/// A Jira text field, an image or a file in it named as its attachment is (`fields.attachment`).
+fn attached_text(field: &Value, fields: &Value) -> String {
+    let types: HashMap<String, String> = fields["attachment"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|file| Some((file["filename"].as_str()?, file["mimeType"].as_str()?)))
+        .map(|(name, mime)| (name.to_owned(), mime.to_owned()))
+        .collect();
+    match (field, types.is_empty()) {
+        (Value::Object(_), false) => {
+            let mut tree = field.clone();
+            crate::adf::typed(&mut tree, &types);
+            document_text(&tree)
+        }
+        _ => document_text(field),
+    }
+}
+
+/// The attachments of a Jira work item's `fields`, named only: their address needs the user's
+/// credentials, so it is never kept.
+fn attachments_of(fields: &Value) -> Vec<Attachment> {
+    fields["attachment"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|file| Attachment {
+            name: said(&file["filename"]),
+            mime: said(&file["mimeType"]),
+            bytes: file["size"].as_u64().unwrap_or_default(),
+            author: said(&file["author"]["displayName"]),
+            at: file["created"].as_str().map(masked),
+        })
+        .collect()
+}
+
+/// A size as a person reads it: `512 B`, `95.4 KiB`, `3.0 MiB`.
+fn size_text(bytes: u64) -> String {
+    match bytes {
+        0..1024 => format!("{bytes} B"),
+        1024..1_048_576 => format!("{:.1} KiB", bytes as f64 / 1024.0),
+        _ => format!("{:.1} MiB", bytes as f64 / 1_048_576.0),
+    }
 }
 
 /// Comments as a round or a live read stores them (`docs/items.md`).
@@ -2398,7 +2480,7 @@ impl Tickets {
             // Jira's list carries no comment: a work item's are read by itself, as its live read
             // does (`read_work_item`), only for the ones a subscription follows.
             Tickets::Jira { site, .. } => {
-                let item = viewed(&fetched.item.key, site, "comment").await?;
+                let item = viewed(&fetched.item.key, site, "comment,attachment").await?;
                 let comments = work_item_comments(&item["fields"]);
                 fetched.comments = comments_said(&comments);
                 fetched.item.details["comments"] = json!(comments.len());
@@ -2659,7 +2741,7 @@ mod tests {
     }
 
     #[test]
-    fn a_document_is_its_paragraphs_and_list_items_as_plain_text() {
+    fn a_document_is_its_paragraphs_and_list_items_as_plain_text_and_its_media_as_lines() {
         let document = json!({"type": "doc", "version": 1, "content": [
             {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Goal"}]},
             {"type": "paragraph", "content": [
@@ -2680,7 +2762,8 @@ mod tests {
 
         assert_eq!(
             document_text(&document),
-            "## Goal\n\nLet users **log in**\n@alice\n\n- form\n- session\n\n1. ship"
+            "## Goal\n\nLet users **log in**\n@alice\n\n- form\n- session\n\n1. ship\n\n\
+             [file: unnamed, not shown]"
         );
         assert_eq!(
             document_text(&json!("plain <b>text</b>")),
@@ -2752,6 +2835,88 @@ mod tests {
         );
         assert_eq!(ticket.comments[0].author, "Alice");
         assert_eq!(ticket.comments[0].body, "On it");
+    }
+
+    fn media(alt: &str) -> Value {
+        json!({"type": "mediaSingle", "content": [
+            {"type": "media", "attrs": {"alt": alt, "type": "file",
+                "id": "00000000-0000-4000-8000-000000000001"}}]})
+    }
+
+    fn attachment(name: &str, mime: Option<&str>) -> Value {
+        json!({"id": "10001", "filename": name, "mimeType": mime, "size": 97717,
+            "created": "2026-01-01T12:00:00.000+0100", "author": {"displayName": "Ana Example"},
+            "content": "https://example.atlassian.net/rest/api/3/attachment/content/10001"})
+    }
+
+    #[test]
+    fn an_image_in_a_jira_description_is_named_where_it_stands() {
+        let item = json!({"fields": {
+            "description": {"type": "doc", "content": [
+                {"type": "paragraph", "content": [{"type": "text", "text": "Mock-up:"}]},
+                media("mock-up.png"),
+            ]},
+        }});
+
+        let ticket = work_item("ABC-1", &item, "acme.atlassian.net");
+
+        assert_eq!(
+            ticket.description,
+            "Mock-up:\n\n[image: mock-up.png, not shown: ask the user to paste it if it matters]"
+        );
+    }
+
+    #[test]
+    fn a_media_is_an_image_or_a_file_as_its_attachment_says() {
+        let item = json!({"fields": {
+            "comment": {"comments": [{"author": {"displayName": "Bob"}, "body":
+                {"type": "doc", "content": [media("shot.bin"), media("scan.png")]}}]},
+            "attachment": [attachment("shot.bin", Some("image/png")),
+                attachment("scan.png", Some("application/pdf"))],
+        }});
+
+        let ticket = work_item("ABC-1", &item, "acme.atlassian.net");
+
+        assert_eq!(
+            ticket.comments[0].body,
+            "[image: shot.bin, not shown: ask the user to paste it if it matters]\n\n\
+             [file: scan.png, not shown]"
+        );
+    }
+
+    #[test]
+    fn a_jira_work_item_lists_its_attachments() {
+        let item = json!({"fields": {
+            "attachment": [attachment("image-20260101-120000.png", Some("image/png")),
+                attachment("spec.pdf", None)],
+        }});
+
+        let ticket = work_item("ABC-1", &item, "acme.atlassian.net");
+        let text = ticket.text(false, None, None);
+
+        assert_eq!(ticket.attachments.len(), 2);
+        assert!(
+            text.ends_with(
+                "\nAttachments (2), named but not shown: the user can paste one into the \
+                 conversation:\n\
+                 - image-20260101-120000.png, image/png, 95.4 KiB, by Ana Example, \
+                 2026-01-01T12:00:00.000+0100\n\
+                 - spec.pdf, 95.4 KiB, by Ana Example, 2026-01-01T12:00:00.000+0100\n"
+            ),
+            "{text}"
+        );
+        // Never the address that needs the user's credentials.
+        assert!(!text.contains("attachment/content"), "{text}");
+        assert!(!ticket.to_json().to_string().contains("attachment/content"));
+    }
+
+    #[test]
+    fn a_work_item_with_no_attachment_says_nothing_of_them() {
+        let item = json!({"fields": {"summary": "x"}});
+
+        let text = work_item("ABC-1", &item, "acme.atlassian.net").text(false, None, None);
+
+        assert!(!text.contains("Attachments"), "{text}");
     }
 
     #[test]
