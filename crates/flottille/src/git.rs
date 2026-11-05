@@ -52,7 +52,9 @@ pub async fn run<S: AsRef<OsStr>>(dir: &Path, args: &[S], class: Class) -> Resul
 
 /// Runs `words` (`git`, its global options, its command) in `dir` with the environment `env` and
 /// no other, `input` on its standard input: a git line of an agent's, read before it runs, in
-/// the environment of its run.
+/// the environment of its run. Unlike `command`, it adds no `-c` of its own: the run's
+/// environment already sets `core.hooksPath`, and the line's global options, approved with the
+/// line, apply to what is read for it as they apply to the line itself.
 pub async fn run_in<S: AsRef<OsStr>>(
     dir: &Path,
     words: &[S],
