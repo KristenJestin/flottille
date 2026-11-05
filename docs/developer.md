@@ -35,7 +35,7 @@ and a field is never renamed.
 | Field | |
 |---|---|
 | `at` | When it was written, in milliseconds since the Unix epoch. |
-| `kind` | `call`, `event` or `models`. |
+| `kind` | `call`, `event`, `models` or `items`. |
 | `agent` | The agent the line is about; `null` for an event about no agent. |
 
 ### `call`
@@ -89,6 +89,20 @@ Written only while developer mode is on, as every line: a failed listing is said
 | `outcome` | `read` or `failed`. |
 | `models` | For `read`: how many models it offers. |
 | `error` | For `failed`: why, masked (the program is missing or failed, it is not signed in, it was over time). |
+
+### `items`
+
+A round of a project's Jira tracker read one of its projects (`docs/items.md`): how many work
+items its two searches found, so that a "Mine only" that lists nothing can be told from a search
+that answered nothing. `agent` is `null`.
+
+| Field | |
+|---|---|
+| `project` | The Flottille project. |
+| `tracker` | The Jira project's key. |
+| `listed` | How many work items the search of what changed found. |
+| `mine` | How many of them the search with `currentUser()` found. |
+| `nulls` | How many work items the two searches answered as `null`, left out. |
 
 ## Reading it
 

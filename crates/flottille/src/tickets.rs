@@ -1000,17 +1000,19 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
         .into_iter()
         .find(|c| c.kind == "ticket" && c.cursor.is_some());
     let found = match (&cursor, tracker) {
-        (Some(_), _) => Ok((stored_tickets(daemon, project, &filters), 0)),
+        (Some(_), _) => Ok((stored_tickets(daemon, project, &filters), 0, 0)),
         (None, ProjectTracker::Github { repository }) => match github_of(project, repository).await
         {
-            Ok(forge) => list_issues(&forge, &filters).await,
+            Ok(forge) => list_issues(&forge, &filters)
+                .await
+                .map(|(tickets, left_out)| (tickets, left_out, 0)),
             Err(why) => Err(why),
         },
         (None, ProjectTracker::Jira { site, projects }) => {
             list_work_items(site, projects, &filters).await
         }
     };
-    let (tickets, left_out) = match found {
+    let (tickets, left_out, nulls) = match found {
         Ok(found) => found,
         Err(why) => return Outcome::Failed(format!("the tickets could not be listed: {why}")),
     };
@@ -1074,6 +1076,11 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
     if left_out > 0 && matches!(tracker, ProjectTracker::Jira { .. }) {
         text.push_str(&format!(
             "({left_out} answered from another site than the tracker's are left out)\n"
+        ));
+    }
+    if nulls > 0 {
+        text.push_str(&format!(
+            "({nulls} answered by acli as null, with nothing of them, are left out)\n"
         ));
     }
     text.push_str("tickets {\"action\": \"show\", \"ticket\": …} reads one.");
@@ -1237,12 +1244,12 @@ fn jql(projects: &[String], filters: &Filters<'_>) -> String {
 
 /// `acli jira workitem search` on the tracker's projects, once `acli` is checked to be signed in
 /// to the tracker's site. An item whose `self` names another site, or cannot be read, is left
-/// out and counted; one that has no `self` is kept.
+/// out and counted; one that has no `self` is kept. Those answered `null` are counted apart.
 async fn list_work_items(
     site: &str,
     projects: &[String],
     filters: &Filters<'_>,
-) -> Result<(Vec<Listed>, usize), String> {
+) -> Result<(Vec<Listed>, usize, usize), String> {
     jira_site(site, "read").await?;
     let query = jql(projects, filters);
     let limit = LISTED.to_string();
@@ -1274,11 +1281,7 @@ async fn list_work_items(
     let found: Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("acli jira workitem search answered what is not JSON: {error}"))?;
     // Assumed: the items as an array, or under `issues` as Jira's REST search gives them.
-    let items = found
-        .as_array()
-        .or(found["issues"].as_array())
-        .cloned()
-        .unwrap_or_default();
+    let (items, nulls) = searched(&found)?;
     let mut left_out = 0;
     let mut tickets = Vec::new();
     for item in &items {
@@ -1310,7 +1313,7 @@ async fn list_work_items(
             url: Some(format!("https://{site}/browse/{}", masked(key))),
         });
     }
-    Ok((tickets, left_out))
+    Ok((tickets, left_out, nulls))
 }
 
 /// The ticket a call names, or the one its workspace (the agent's own, or the one named) is
@@ -1802,13 +1805,10 @@ async fn statuses_of(site: &str, project: &str) -> Result<Vec<Status>, String> {
     .await?;
     let found: Value = serde_json::from_str(&answer)
         .map_err(|error| format!("acli jira workitem search answered what is not JSON: {error}"))?;
+    // A few said as `null` take nothing from what the others suggest; all of them is no answer.
+    let (items, _nulls) = searched(&found)?;
     let mut statuses: Vec<Status> = Vec::new();
-    for item in found
-        .as_array()
-        .or(found["issues"].as_array())
-        .into_iter()
-        .flatten()
-    {
+    for item in &items {
         let unlinked = item.get("self").is_none_or(Value::is_null);
         if !unlinked && site_of(item).is_none_or(|from| !answered_by(item, &from, site)) {
             continue;
@@ -2251,9 +2251,11 @@ impl Tickets {
             Tickets::Jira { site, projects } => {
                 let mut items = Vec::new();
                 let mut notes = Vec::new();
+                let mut log = Vec::new();
                 for key in projects {
-                    let (found, cut) = changed_work_items(site, key, since, now).await?;
+                    let (found, cut, said) = changed_work_items(site, key, since, now).await?;
                     items.extend(found);
+                    log.push(said);
                     if cut {
                         notes.push(format!("only {ALL_COUNT} work items of {key} are listed"));
                     }
@@ -2262,6 +2264,7 @@ impl Tickets {
                     items,
                     note: (!notes.is_empty()).then(|| notes.join("; ")),
                     details: true,
+                    log,
                 });
             }
             Tickets::GitHub { forge, repository } => (forge, repository),
@@ -2309,6 +2312,7 @@ impl Tickets {
                 )
             }),
             details: true,
+            log: Vec::new(),
         })
     }
 
@@ -2429,27 +2433,34 @@ fn listed_issue(repo: &str, repository: &str, issue: &Value) -> Option<crate::it
 /// at its cap. The time is given to JQL as minutes before now (`updated >= "-12m"`), which Jira
 /// reads the same whatever the time zone of the user's profile, where a date would be read in it.
 /// The user's own are those a second search with `currentUser()` finds, in the same window: Jira
-/// says who the user is without Flottille reading it.
+/// says who the user is without Flottille reading it. That search asks `summary` beside `key`:
+/// asked `key` alone, `acli` prints `null` for each work item. With them, what the developer log
+/// says of the two searches.
 async fn changed_work_items(
     site: &str,
     key: &str,
     since: Option<u64>,
     now: u64,
-) -> Result<(Vec<crate::items::Fetched>, bool), String> {
+) -> Result<(Vec<crate::items::Fetched>, bool, Value), String> {
     let mut query = format!("project = {}", jql_quoted(key));
     if let Some(since) = since {
         let minutes = now.saturating_sub(since).div_ceil(60_000).max(1);
         query.push_str(&format!(" AND updated >= \"-{minutes}m\""));
     }
-    let items = jira_search(&format!("{query} ORDER BY updated DESC"), ITEM_JIRA_FIELDS).await?;
-    let mine: Vec<String> = jira_search(
+    let (items, nulls) =
+        jira_search(&format!("{query} ORDER BY updated DESC"), ITEM_JIRA_FIELDS).await?;
+    let (theirs, mine_nulls) = jira_search(
         &format!("{query} AND (assignee = currentUser() OR reporter = currentUser())"),
-        "key",
+        "key,summary",
     )
-    .await?
-    .iter()
-    .filter_map(|item| item["key"].as_str().map(masked))
-    .collect();
+    .await
+    .map_err(|error| format!("{MINE_UNKNOWN}: {error}"))?;
+    let mine: Vec<String> = theirs
+        .iter()
+        .filter_map(|item| item["key"].as_str().map(masked))
+        .collect();
+    let logged = json!({"tracker": key, "listed": items.len(), "mine": mine.len(),
+        "nulls": nulls + mine_nulls});
     let cut = items.len() >= ALL_COUNT;
     let fetched = items
         .iter()
@@ -2504,11 +2515,15 @@ async fn changed_work_items(
             })
         })
         .collect();
-    Ok((fetched, cut))
+    Ok((fetched, cut, logged))
 }
 
-/// `acli jira workitem search` of `query`, the items as an array.
-async fn jira_search(query: &str, fields: &str) -> Result<Vec<Value>, String> {
+/// What a failed read of the user's own work items begins with: then who the user is cannot be
+/// told (`items::mine_unknown`).
+pub const MINE_UNKNOWN: &str = "which work items are yours could not be read";
+
+/// `acli jira workitem search` of `query`: the items, and how many it answered `null` (`searched`).
+async fn jira_search(query: &str, fields: &str) -> Result<(Vec<Value>, usize), String> {
     let (ok, stdout, stderr) = match acli(&[
         "jira",
         "workitem",
@@ -2536,16 +2551,44 @@ async fn jira_search(query: &str, fields: &str) -> Result<Vec<Value>, String> {
     }
     let found: Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("acli jira workitem search answered what is not JSON: {error}"))?;
-    Ok(found
+    searched(&found)
+}
+
+/// The work items of a search's answer, and how many it said as `null`, which are left out:
+/// `acli` prints `null` for a work item it was asked nothing of it can print (`--fields key`
+/// alone). An answer of nothing but `null` is no answer, never "none".
+fn searched(found: &Value) -> Result<(Vec<Value>, usize), String> {
+    let all = found
         .as_array()
         .or(found["issues"].as_array())
         .cloned()
-        .unwrap_or_default())
+        .unwrap_or_default();
+    let nulls = all.iter().filter(|item| item.is_null()).count();
+    if nulls > 0 && nulls == all.len() {
+        return Err(format!(
+            "acli jira workitem search answered {nulls} work items, each as null: nothing of \
+             them could be read"
+        ));
+    }
+    Ok((
+        all.into_iter().filter(|item| !item.is_null()).collect(),
+        nulls,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_search_answer_counts_its_nulls_and_one_of_nothing_but_nulls_is_no_answer() {
+        let (items, nulls) = searched(&json!([{"key": "ABC-1"}, null])).unwrap();
+        assert_eq!((items, nulls), (vec![json!({"key": "ABC-1"})], 1));
+        let (items, nulls) = searched(&json!({"issues": []})).unwrap();
+        assert_eq!((items.len(), nulls), (0, 0));
+        let refused = searched(&json!([null, null])).unwrap_err();
+        assert!(refused.contains("2 work items, each as null"), "{refused}");
+    }
 
     #[test]
     fn a_document_is_its_paragraphs_and_list_items_as_plain_text() {

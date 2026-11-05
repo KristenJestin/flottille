@@ -2619,6 +2619,7 @@ impl Pulls {
             items,
             note,
             details: true,
+            log: Vec::new(),
         })
     }
 

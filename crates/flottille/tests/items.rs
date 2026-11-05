@@ -1167,12 +1167,15 @@ fn mine_is_kept_while_the_forge_does_not_say_who_the_user_is() {
     advance(&user, 20 * 60_000);
     refresh(&user);
     assert_eq!(mine(&user), ["5"]);
+    let unknown = |user: &User| refresh(user)["sources"][0]["mine_unknown"].clone();
+    assert!(unknown(&user).is_string(), "the window is told why");
     // It answers again: 7, which did not change and is no longer listed, is the user's too.
     user.gh_script(json!({"user": {"login": "someone"},
         "issues": {"acme/api": issues(NEW, true)}}));
     advance(&user, 10 * 60_000);
     refresh(&user);
     assert_eq!(mine(&user), ["5", "7"]);
+    assert!(unknown(&user).is_null());
 }
 
 #[test]
@@ -1431,4 +1434,123 @@ fn a_bitbucket_pull_never_read_in_full_keeps_the_description_its_list_says() {
         shown["details"]["description"], "Moves the **old** work.",
         "{shown}"
     );
+}
+
+/// A project `app` whose tracker is Jira, read once from the fake `acli`'s `script`.
+fn jira_project(user: &User, script: Value) {
+    project(user, "git@github.com:acme/api.git");
+    user.acli_script(script);
+    user.call(
+        "project.set_settings",
+        json!({"name": "app", "tracker": jira()}),
+    )
+    .unwrap();
+    refresh(user);
+}
+
+/// The keys of the stored tickets that are the user's, sorted.
+fn mine_keys(user: &User) -> Vec<String> {
+    let mut keys: Vec<String> = list(user, json!({"kind": "ticket", "mine": true}))
+        .iter()
+        .map(|i| i["key"].as_str().unwrap().to_owned())
+        .collect();
+    keys.sort();
+    keys
+}
+
+#[test]
+fn jira_items_assigned_to_the_user_are_mine() {
+    let user = user();
+    let mut assigned = work_item("ABC-1", "Assigned to me", "To Do");
+    assigned["fields"]["assignee"] = json!({"displayName": "Casey Example"});
+    jira_project(
+        &user,
+        json!({"search": [assigned.clone(), work_item("ABC-2", "Theirs", "To Do")],
+            "mine_search": [assigned]}),
+    );
+    assert_eq!(mine_keys(&user), ["ABC-1"]);
+}
+
+#[test]
+fn jira_items_reported_by_the_user_are_mine() {
+    let user = user();
+    let mut reported = work_item("ABC-3", "Reported by me", "To Do");
+    reported["fields"]["reporter"] = json!({"displayName": "Casey Example"});
+    jira_project(
+        &user,
+        json!({"search": [work_item("ABC-2", "Theirs", "To Do"), reported.clone()],
+            "mine_search": [reported]}),
+    );
+    assert_eq!(mine_keys(&user), ["ABC-3"]);
+}
+
+#[test]
+fn mine_survives_a_later_read_that_lists_the_item_again() {
+    let user = user();
+    let script = |status: &str| {
+        let item = work_item("ABC-1", "Mine", status);
+        json!({"search": [item.clone(), work_item("ABC-2", "Theirs", "To Do")],
+            "mine_search": [item]})
+    };
+    jira_project(&user, script("To Do"));
+    assert_eq!(mine_keys(&user), ["ABC-1"]);
+    // It changed: the next read, of what changed since, lists it again.
+    user.acli_script(script("In Progress"));
+    advance(&user, 5 * 60_000);
+    refresh(&user);
+    let searches: Vec<String> = calls(user.acli_received())
+        .into_iter()
+        .filter(|c| c.contains("currentUser()") && c.contains("updated >= "))
+        .collect();
+    assert!(!searches.is_empty(), "{:?}", calls(user.acli_received()));
+    assert_eq!(mine_keys(&user), ["ABC-1"]);
+}
+
+#[test]
+fn mine_is_right_beyond_the_first_two_hundred_items() {
+    let user = user();
+    let items: Vec<Value> = (1..=250)
+        .map(|n| work_item(&format!("ABC-{n}"), "An item", "To Do"))
+        .collect();
+    let theirs: Vec<Value> = [3, 230, 250].iter().map(|n| items[n - 1].clone()).collect();
+    jira_project(&user, json!({"search": items, "mine_search": theirs}));
+    assert_eq!(list(&user, json!({"kind": "ticket"})).len(), 250);
+    assert_eq!(mine_keys(&user), ["ABC-230", "ABC-250", "ABC-3"]);
+}
+
+#[test]
+fn a_jira_mine_search_that_answers_only_nulls_fails_the_read_and_says_so() {
+    let user = user();
+    jira_project(
+        &user,
+        json!({"search": [work_item("ABC-1", "Mine", "To Do")], "mine_search": [null, null]}),
+    );
+    let sources = user.call("items.list", json!({"project": "app"})).unwrap()["sources"].clone();
+    let problem = sources[0]["problem"].as_str().unwrap_or_default();
+    assert!(problem.contains("null"), "{sources}");
+    assert!(sources[0]["mine_unknown"].is_string(), "{sources}");
+    assert_eq!(list(&user, json!({"kind": "ticket"})), Vec::<Value>::new());
+}
+
+#[test]
+fn a_jira_round_says_in_the_developer_log_how_many_items_the_mine_search_found() {
+    let user = user();
+    assert!(user.run(&["developer", "on"]).status.success());
+    let item = work_item("ABC-1", "Mine", "To Do");
+    jira_project(
+        &user,
+        json!({"search": [item.clone(), work_item("ABC-2", "Theirs", "To Do")],
+            "mine_search": [item]}),
+    );
+    let text = std::fs::read_to_string(user.path("state/flottille/developer.log")).unwrap();
+    let line = text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|line| line["kind"] == "items" && line["tracker"] == "ABC")
+        .unwrap_or_else(|| panic!("{text}"));
+    assert_eq!(line["listed"], 2, "{line}");
+    assert_eq!(line["mine"], 1, "{line}");
+    assert_eq!(line["nulls"], 0, "{line}");
+    assert_eq!(line["project"], "app", "{line}");
+    assert!(line["agent"].is_null(), "{line}");
 }
