@@ -887,11 +887,13 @@ session that ended and an empty text.
   both sessions and give the text (`Let the session "A" (agent …) write to the session "X" (agent
   …) (started by you, not by this agent)`, then `Its first message: …`); the call is answered at
   once that it is held. Allowed, the text is delivered and A writes to X from then on without the
-  user's leave (`leave.granted`); refused, nothing is sent and A is told so. While it waits,
-  another message from A to X is refused, naming the request, so that two first messages ask the
-  user once. The leave is one way (A to X, not X to A) and lasts until either session ends (one
-  resumed asks again) or the user withdraws it, in the window where the session's rights are shown
-  or with `leave.withdraw` (`leave.withdrawn`).
+  user's leave (`leave.granted`, kept only if both sessions still run); refused, nothing is sent
+  and A is told so. While it waits, and while its message is being sent once allowed, another
+  message from A to X is refused, naming the request, so that two first messages ask the user
+  once. The leave is one way (A to X, not X to A) and lasts until either session ends (one
+  resumed asks again) or the user withdraws it, in the window's Write access section of either
+  session or with `leave.withdraw` (`leave.withdrawn`). A message the judge allows after the
+  user withdrew the leave, or after X ended, is refused, saying which, and is not sent.
 - **It is to judge**, as a write is (a card in Ask, the judge in Auto, through in Full), as an
   `action` request whose words name the session and give the text whole (`Send to the session
   "Login" (agent …), which you started: …`; `…, which the user let you write to: …` once the leave
