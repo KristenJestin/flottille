@@ -2443,9 +2443,9 @@ pub fn pushes(words: &[String]) -> bool {
     })
 }
 
-/// Each `git commit` a line runs, at any of its layers: its words from `git` on, for the
+/// Each git command a line runs, at any of its layers: its words from `git` on, for the
 /// project's message checks (`crate::message_checks`).
-pub fn commits(words: &[String]) -> Vec<Vec<String>> {
+pub fn gits(words: &[String]) -> Vec<Vec<String>> {
     let Ok(layers) = lines(words) else {
         return Vec::new();
     };
@@ -2453,9 +2453,9 @@ pub fn commits(words: &[String]) -> Vec<Vec<String>> {
     for layer in &layers {
         for (_, suffix) in suffixes(layer) {
             let args = &suffix[1..];
-            // A wrapper's layer and the layer it runs say the same commit.
+            // A wrapper's layer and the layer it runs say the same command.
             if base(&suffix[0]) == "git"
-                && args.get(git_globals(args).0).is_some_and(|w| w == "commit")
+                && args.get(git_globals(args).0).is_some()
                 && !found
                     .iter()
                     .any(|seen: &Vec<String>| seen.as_slice() == suffix)

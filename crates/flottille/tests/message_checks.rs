@@ -384,6 +384,125 @@ fn the_checks_come_from_the_project_not_the_repository() {
     );
 }
 
+// The other ways to commit: the user's alias, a merge, a tree commit, a revert.
+
+#[test]
+fn a_commit_made_through_the_users_alias_is_checked() {
+    let user = User::with_fake_agent();
+    prepared(&user, |folder| {
+        user.git(folder, &["config", "alias.ci", "commit"])
+    });
+    let (passing, refusing) = two_checks(&user);
+    declare(&user, &[passing, refusing]);
+    let mcp = agent(&user);
+    staged(&user, &mcp);
+
+    let answer = line(&user, &mcp, "git ci -m 'bad change'");
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("nothing was committed"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(seen(&user), "bad change\n");
+    assert_eq!(subjects(&user).lines().count(), 1, "{}", subjects(&user));
+}
+
+/// A branch `other` with a commit of its own, beside the workspace's branch.
+fn other_branch(user: &User) {
+    let worktree = worktree(user);
+    let branch = user.git_output(&worktree, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    user.git(&worktree, &["checkout", "--quiet", "-b", "other"]);
+    std::fs::write(worktree.join("other.txt"), "other\n").unwrap();
+    user.git(&worktree, &["add", "other.txt"]);
+    user.git(&worktree, &["commit", "--quiet", "-m", "other"]);
+    user.git(&worktree, &["checkout", "--quiet", branch.trim()]);
+}
+
+#[test]
+fn a_merge_message_is_checked_before_the_merge() {
+    let user = User::with_fake_agent();
+    prepared(&user, |_| {});
+    other_branch(&user);
+    let (passing, refusing) = two_checks(&user);
+    declare(&user, &[passing, refusing]);
+    let mcp = agent(&user);
+
+    let answer = line(&user, &mcp, "git merge --no-ff -m 'bad merge' other");
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("nothing was committed"),
+        "{}",
+        answer.text
+    );
+    assert!(
+        !subjects(&user).contains("bad merge"),
+        "{}",
+        subjects(&user)
+    );
+    // Git would write its message itself.
+    let answer = line(&user, &mcp, "git merge --no-ff other");
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains("-m"), "{}", answer.text);
+
+    let answer = line(&user, &mcp, "git merge --no-ff -m 'fix: merge other' other");
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        subjects(&user).starts_with("fix: merge other"),
+        "{}",
+        subjects(&user)
+    );
+    assert_eq!(seen(&user), "bad merge\nfix: merge other\n");
+}
+
+#[test]
+fn a_tree_commit_message_is_checked() {
+    let user = User::with_fake_agent();
+    prepared(&user, |_| {});
+    let (passing, refusing) = two_checks(&user);
+    declare(&user, &[passing, refusing]);
+    let mcp = agent(&user);
+
+    let answer = line(
+        &user,
+        &mcp,
+        "git commit-tree -m 'bad tree' -p HEAD HEAD^{tree}",
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("nothing was committed"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(seen(&user), "bad tree\n");
+}
+
+#[test]
+fn a_revert_is_refused_while_checks_are_declared() {
+    let user = User::with_fake_agent();
+    prepared(&user, |_| {});
+    let (passing, refusing) = two_checks(&user);
+    declare(&user, &[passing, refusing]);
+    let mcp = agent(&user);
+    staged(&user, &mcp);
+    let answer = line(&user, &mcp, "git commit -m 'fix: a good change'");
+    assert!(!answer.error, "{}", answer.text);
+
+    // Git writes `Revert "…"`, which no check reads first.
+    let answer = line(&user, &mcp, "git revert --no-edit HEAD");
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains("--no-commit"), "{}", answer.text);
+    assert!(answer.text.contains("git commit -m"), "{}", answer.text);
+    assert!(
+        subjects(&user).starts_with("fix: a good change"),
+        "{}",
+        subjects(&user)
+    );
+}
+
 // The forge: the title of a pull request, the message of a squash merge.
 
 /// The fixture on GitHub (`acme/app`), its forge declared and the branch `app/login` as a push

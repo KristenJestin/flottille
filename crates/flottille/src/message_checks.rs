@@ -59,29 +59,97 @@ pub struct Where<'a> {
     pub folder: &'a Path,
 }
 
-/// Runs the project's checks on each `git commit` the line `words` runs in `folder`: the
-/// refusal of the first that fails, or of a commit whose message cannot be known before it is
-/// made. Nothing when the project declares none.
+/// Runs the project's checks on each commit the line `words` makes in `folder` (`git commit`,
+/// `git merge`, `git commit-tree`, the user's alias of one): the refusal of the first that
+/// fails, or of a commit whose message cannot be known before it is made. Nothing when the
+/// project declares none.
 pub async fn commits(at: &Where<'_>, words: &[String]) -> Result<(), String> {
-    let commits = gate::commits(words);
-    if commits.is_empty() {
+    let gits = gate::gits(words);
+    if gits.is_empty() {
         return Ok(());
     }
     let checks = declared(at.daemon, at.place, Checked::Commit)?;
     if checks.is_empty() {
         return Ok(());
     }
-    for git in commits {
-        let message = commit_message(&git, at.folder).map_err(|why| {
-            format!(
-                "refused: the project's message checks read the commit message before the \
-                 commit, and {why}: give the message with -m or -F; {}",
-                Checked::Commit.nothing()
-            )
-        })?;
-        run_all(at, &checks, Checked::Commit, &message).await?;
+    let unknown = |why: String| {
+        format!(
+            "refused: the project's message checks read the commit message before the commit, \
+             and {why}; {}",
+            Checked::Commit.nothing()
+        )
+    };
+    for git in gits {
+        let git = unaliased(git, at.folder).await.map_err(unknown)?;
+        if let Some(message) = message_of(&git, at.folder).map_err(unknown)? {
+            run_all(at, &checks, Checked::Commit, &message).await?;
+        }
     }
     Ok(())
+}
+
+/// Aliases followed at most, as git stops a loop of them.
+const ALIASES_MAX: usize = 10;
+
+/// A git command's words with the user's alias of its command expanded, as git expands it: an
+/// alias of `ci` to `commit` makes `git ci -m x` a commit. A builtin command is never an alias.
+async fn unaliased(mut git: Vec<String>, folder: &Path) -> Result<Vec<String>, String> {
+    for _ in 0..ALIASES_MAX {
+        let args = &git[1..];
+        let (at, globals) = gate::git_globals(args);
+        let Some(command) = args.get(at).cloned() else {
+            return Ok(git);
+        };
+        if ["commit", "merge", "commit-tree", "revert"].contains(&command.as_str()) {
+            return Ok(git);
+        }
+        // Where git would look for it: the line's folder and its own aliases.
+        let mut dir = folder.to_path_buf();
+        let mut asked: Vec<String> = Vec::new();
+        for (option, value) in globals {
+            let alias = value.is_some_and(|v| v.to_ascii_lowercase().starts_with("alias."));
+            match (option, value) {
+                ("-C", Some(value)) => dir = dir.join(value),
+                ("-c", Some(value)) if alias => asked.extend(["-c".into(), value.into()]),
+                ("--config-env", _) if alias => {
+                    return Err(format!(
+                        "git {command} is an alias set from the environment, whose commits \
+                         cannot be read: commit with git commit -m"
+                    ));
+                }
+                _ => {}
+            }
+        }
+        asked.extend(["config".into(), "--get".into(), format!("alias.{command}")]);
+        let unread = |why: String| format!("the alias git {command} could not be read ({why})");
+        let found = crate::git::run(&dir, &asked, crate::git::Class::Read)
+            .await
+            .map_err(unread)?;
+        if !found.success {
+            return Ok(git);
+        }
+        let builtins = crate::git::output(&dir, &["--list-cmds=builtins"], crate::git::Class::Read)
+            .await
+            .map_err(unread)?;
+        if builtins.lines().any(|builtin| builtin == command) {
+            return Ok(git);
+        }
+        let alias = found.stdout.trim_end_matches('\n');
+        if alias.starts_with('!') {
+            return Err(format!(
+                "git {command} is the user's alias of a shell command, whose commits cannot be \
+                 read: commit with git commit -m"
+            ));
+        }
+        let expanded = split_line(alias).map_err(unread)?;
+        let mut words = git[..=at].to_vec();
+        words.extend(expanded);
+        words.extend_from_slice(&git[at + 2..]);
+        git = words;
+    }
+    Err(format!(
+        "its aliases lead to more than {ALIASES_MAX} others: commit with git commit -m"
+    ))
 }
 
 /// Runs the project's checks on `message`: the refusal of the first that fails.
@@ -162,12 +230,12 @@ async fn run_one(at: &Where<'_>, line: &str, file: &Path, checked: Checked) -> R
     };
     let file = file.to_string_lossy();
     let words: Vec<String> = split_line(line)
-        .map_err(&not_run)?
+        .map_err(not_run)?
         .iter()
         .map(|word| word.replace(MESSAGE, &file))
         .collect();
     let env =
-        crate::runs::environment(at.daemon, at.place, at.repository, false).map_err(&not_run)?;
+        crate::runs::environment(at.daemon, at.place, at.repository, false).map_err(not_run)?;
     let mut command = tokio::process::Command::new(&words[0]);
     command
         .args(&words[1..])
@@ -244,10 +312,10 @@ fn end_of(text: &str) -> String {
     )
 }
 
-/// What a `git commit` (its words from `git` on) commits as its message, run in `folder`, or
-/// why it cannot be known before the commit: an editor writes it, or git takes it from another
-/// commit.
-pub fn commit_message(git: &[String], folder: &Path) -> Result<String, String> {
+/// What a git command (its words from `git` on) run in `folder` commits as its message: `None`
+/// when it makes no commit, or why the message cannot be known before the commit, with what to
+/// do instead: an editor writes it, git takes it from another commit or writes it itself.
+pub fn message_of(git: &[String], folder: &Path) -> Result<Option<String>, String> {
     let args = &git[1..];
     let (at, globals) = gate::git_globals(args);
     let mut folder = folder.to_path_buf();
@@ -256,10 +324,271 @@ pub fn commit_message(git: &[String], folder: &Path) -> Result<String, String> {
             folder = folder.join(value);
         }
     }
-    let mut messages: Vec<String> = Vec::new();
-    let mut file: Option<String> = None;
-    let mut edit = false;
-    let mut words = args[at + 1..].iter().map(String::as_str);
+    let Some(command) = args.get(at) else {
+        return Ok(None);
+    };
+    let rest = &args[at + 1..];
+    match command.as_str() {
+        "commit" => commit(read(rest, &COMMIT)?, &folder)
+            .map(Some)
+            .map_err(|why| format!("{why}: give the message with -m or -F")),
+        "merge" => merge(read(rest, &MERGE)?, &folder).map_err(|why| {
+            format!(
+                "{why}: give the message with -m or -F, or merge with --no-commit and commit with \
+                 git commit -m"
+            )
+        }),
+        "commit-tree" => joined(read(rest, &COMMIT_TREE)?, &folder)
+            .and_then(|message| {
+                message.ok_or_else(|| "it reads its message from its standard input".to_owned())
+            })
+            .map(Some)
+            .map_err(|why| {
+                format!("{why}: give the message with -m or -F, or commit with git commit -m")
+            }),
+        "revert" => revert(&read(rest, &REVERT)?),
+        _ => Ok(None),
+    }
+}
+
+/// `git commit`: its `-m`, as git joins them, or its last `-F` file.
+fn commit(mut said: Said, folder: &Path) -> Result<String, String> {
+    if said.edit {
+        return Err("it opens an editor on the message (--edit)".into());
+    }
+    let files = said
+        .parts
+        .iter()
+        .filter(|p| matches!(p, Part::File(_)))
+        .count();
+    match (said.parts.len() - files, files) {
+        (0, 0) => Err("it gives no message: an editor would write it".into()),
+        (0, _) => {
+            said.parts.drain(..files - 1);
+            joined(said, folder).map(Option::unwrap_or_default)
+        }
+        (_, 0) => joined(said, folder).map(Option::unwrap_or_default),
+        _ => Err("it gives both -m and -F, which git refuses".into()),
+    }
+}
+
+/// `git merge`: none when it makes no commit, its `-m` and `-F` when it does.
+fn merge(said: Said, folder: &Path) -> Result<Option<String>, String> {
+    let (mut squash, mut no_commit, mut ff_only) = (false, false, false);
+    for switch in &said.switches {
+        match *switch {
+            "abort" | "quit" => return Ok(None),
+            "continue" => return Err("git writes the message of the merge it concludes".into()),
+            "squash" | "no-squash" => squash = *switch == "squash",
+            "commit" | "no-commit" => no_commit = *switch == "no-commit",
+            _ => ff_only = *switch == "ff-only",
+        }
+    }
+    if squash || no_commit || ff_only {
+        return Ok(None);
+    }
+    if said.edit {
+        return Err("it opens an editor on the message (--edit)".into());
+    }
+    match joined(said, folder)? {
+        Some(message) => Ok(Some(message)),
+        None => Err("git writes the message of the merge (Merge branch …)".into()),
+    }
+}
+
+/// `git revert`: none with `--no-commit`, refused otherwise, git writes its message.
+fn revert(said: &Said) -> Result<Option<String>, String> {
+    let mut no_commit = false;
+    for switch in &said.switches {
+        match *switch {
+            "abort" | "quit" => return Ok(None),
+            "continue" | "skip" => no_commit = false,
+            _ => no_commit = *switch == "no-commit",
+        }
+    }
+    match no_commit {
+        true => Ok(None),
+        false => Err(
+            "git writes the message of a revert (Revert \"…\"): revert with --no-commit, then \
+             commit with git commit -m"
+                .into(),
+        ),
+    }
+}
+
+/// The messages and files a command gives, in their order, a paragraph each: `None` when it
+/// gives neither.
+fn joined(said: Said, folder: &Path) -> Result<Option<String>, String> {
+    let mut paragraphs = Vec::new();
+    for part in said.parts {
+        paragraphs.push(match part {
+            Part::Text(text) => text,
+            Part::File(file) if file == "-" => {
+                return Err("it reads the message from its standard input".into());
+            }
+            Part::File(file) => read_message(&folder.join(file))?,
+        });
+    }
+    Ok((!paragraphs.is_empty()).then(|| paragraphs.join("\n\n")))
+}
+
+/// What a command's options say of its message.
+#[derive(Default)]
+struct Said {
+    /// Its `-m` and `-F`, in their order.
+    parts: Vec<Part>,
+    edit: bool,
+    /// The switches that say whether a commit is made, in their order.
+    switches: Vec<&'static str>,
+}
+
+enum Part {
+    Text(String),
+    File(String),
+}
+
+/// How a git command reads one of its options, for its message.
+#[derive(Clone, Copy)]
+enum Opt {
+    /// A paragraph of the message.
+    Message,
+    /// A file holding the message.
+    File,
+    /// Drops the messages, or the files, given before it.
+    NoMessage,
+    NoFile,
+    /// Takes a value, which is no message.
+    Valued,
+    /// Takes a value only stuck to it (`-Skey`), which ends a cluster of letters.
+    Stuck,
+    Edit(bool),
+    /// The message comes from elsewhere than the line: why.
+    Elsewhere(&'static str),
+    /// Says whether a commit is made: its name.
+    Switch(&'static str),
+    Flag,
+}
+
+/// A git command's options: its long ones as `--git-completion-helper-all` says them (git
+/// 2.39, a value marked `=`), those of them that matter to the message, and its letters that do.
+struct Options {
+    longs: &'static str,
+    matter: &'static [(&'static str, Opt)],
+    letters: &'static [(char, Opt)],
+}
+
+const OTHER_COMMIT: Opt = Opt::Elsewhere("it takes the message of another commit");
+
+const COMMIT: Options = Options {
+    longs: "quiet verbose file= author= date= message= reedit-message= reuse-message= fixup= \
+        squash= reset-author trailer= signoff template= edit cleanup= status gpg-sign all \
+        include interactive patch only no-verify dry-run short branch ahead-behind porcelain \
+        long null amend no-post-rewrite untracked-files pathspec-from-file= pathspec-file-nul \
+        allow-empty allow-empty-message verify post-rewrite no-quiet no-verbose no-file \
+        no-author no-date no-message no-reedit-message no-reuse-message no-fixup no-squash \
+        no-reset-author no-signoff no-template no-edit no-cleanup no-status no-gpg-sign no-all \
+        no-include no-interactive no-patch no-only no-dry-run no-short no-branch \
+        no-ahead-behind no-porcelain no-long no-null no-amend no-untracked-files \
+        no-pathspec-from-file no-pathspec-file-nul no-allow-empty no-allow-empty-message",
+    matter: &[
+        ("message", Opt::Message),
+        ("file", Opt::File),
+        ("no-message", Opt::NoMessage),
+        ("no-file", Opt::NoFile),
+        ("edit", Opt::Edit(true)),
+        ("no-edit", Opt::Edit(false)),
+        ("reuse-message", OTHER_COMMIT),
+        ("reedit-message", OTHER_COMMIT),
+        ("fixup", Opt::Elsewhere("git writes the message of a fixup")),
+        (
+            "squash",
+            Opt::Elsewhere("git writes the message of a squash commit"),
+        ),
+    ],
+    letters: &[
+        ('m', Opt::Message),
+        ('F', Opt::File),
+        ('C', OTHER_COMMIT),
+        ('c', OTHER_COMMIT),
+        ('t', Opt::Valued),
+        ('e', Opt::Edit(true)),
+        ('S', Opt::Stuck),
+        ('u', Opt::Stuck),
+    ],
+};
+
+const MERGE: Options = Options {
+    longs: "stat summary log squash commit edit cleanup= ff ff-only rerere-autoupdate \
+        verify-signatures strategy= strategy-option= message= file= into-name= verbose quiet \
+        abort quit continue allow-unrelated-histories progress gpg-sign autostash \
+        overwrite-ignore signoff no-verify verify no-stat no-summary no-log no-squash no-commit \
+        no-edit no-cleanup no-ff no-rerere-autoupdate no-verify-signatures no-strategy \
+        no-strategy-option no-message no-into-name no-verbose no-quiet no-abort no-quit \
+        no-continue no-allow-unrelated-histories no-progress no-gpg-sign no-autostash \
+        no-overwrite-ignore no-signoff",
+    matter: &[
+        ("message", Opt::Message),
+        ("file", Opt::File),
+        ("no-message", Opt::NoMessage),
+        ("edit", Opt::Edit(true)),
+        ("no-edit", Opt::Edit(false)),
+        ("squash", Opt::Switch("squash")),
+        ("no-squash", Opt::Switch("no-squash")),
+        ("commit", Opt::Switch("commit")),
+        ("no-commit", Opt::Switch("no-commit")),
+        ("ff", Opt::Switch("ff")),
+        ("no-ff", Opt::Switch("no-ff")),
+        ("ff-only", Opt::Switch("ff-only")),
+        ("abort", Opt::Switch("abort")),
+        ("quit", Opt::Switch("quit")),
+        ("continue", Opt::Switch("continue")),
+    ],
+    letters: &[
+        ('m', Opt::Message),
+        ('F', Opt::File),
+        ('e', Opt::Edit(true)),
+        ('s', Opt::Valued),
+        ('X', Opt::Valued),
+        ('S', Opt::Stuck),
+    ],
+};
+
+const COMMIT_TREE: Options = Options {
+    longs: "gpg-sign no-gpg-sign",
+    matter: &[],
+    letters: &[
+        ('p', Opt::Valued),
+        ('m', Opt::Message),
+        ('F', Opt::File),
+        ('S', Opt::Stuck),
+    ],
+};
+
+const REVERT: Options = Options {
+    longs: "quit continue abort skip cleanup= no-commit edit signoff mainline= \
+        rerere-autoupdate strategy= strategy-option= gpg-sign reference commit no-cleanup \
+        no-edit no-signoff no-mainline no-rerere-autoupdate no-strategy no-strategy-option \
+        no-gpg-sign no-reference",
+    matter: &[
+        ("no-commit", Opt::Switch("no-commit")),
+        ("commit", Opt::Switch("commit")),
+        ("abort", Opt::Switch("abort")),
+        ("quit", Opt::Switch("quit")),
+        ("continue", Opt::Switch("continue")),
+        ("skip", Opt::Switch("skip")),
+    ],
+    letters: &[
+        ('n', Opt::Switch("no-commit")),
+        ('m', Opt::Valued),
+        ('X', Opt::Valued),
+        ('S', Opt::Stuck),
+    ],
+};
+
+/// The options of a command's words, read as git reads them, up to `--`.
+fn read(words: &[String], options: &Options) -> Result<Said, String> {
+    let mut said = Said::default();
+    let mut words = words.iter().map(String::as_str);
     while let Some(word) = words.next() {
         if word == "--" {
             break;
@@ -268,128 +597,107 @@ pub fn commit_message(git: &[String], folder: &Path) -> Result<String, String> {
             let (name, value) = long
                 .split_once('=')
                 .map_or((long, None), |(n, v)| (n, Some(v)));
-            let long = long_option(name)?;
-            match long {
-                Long::Message | Long::File | Long::Valued => {
-                    let value = match value {
-                        Some(value) => value,
-                        None => words.next().ok_or("an option lacks its value")?,
-                    };
-                    match long {
-                        Long::Message => messages.push(value.to_owned()),
-                        Long::File => file = Some(value.to_owned()),
-                        _ => {}
-                    }
+            let opt = long_option(options, name)?;
+            let value = match (opt, value) {
+                (Opt::Message | Opt::File | Opt::Valued, None) => {
+                    Some(words.next().ok_or("an option lacks its value")?)
                 }
-                Long::Edit(on) => edit = on,
-                Long::Elsewhere(why) => return Err(why.into()),
-                Long::Flag => {}
-            }
+                _ => value,
+            };
+            take(&mut said, opt, value.unwrap_or_default())?;
         } else if let Some(cluster) = word.strip_prefix('-').filter(|c| !c.is_empty()) {
             for (index, letter) in cluster.char_indices() {
-                if letter == 'e' {
-                    edit = true;
-                    continue;
+                let opt = options
+                    .letters
+                    .iter()
+                    .find(|(known, _)| *known == letter)
+                    .map_or(Opt::Flag, |(_, opt)| *opt);
+                match opt {
+                    Opt::Stuck => break,
+                    Opt::Message | Opt::File | Opt::Valued => {
+                        let rest = &cluster[index + letter.len_utf8()..];
+                        let value = match rest.is_empty() {
+                            true => words.next().ok_or("an option lacks its value")?,
+                            false => rest,
+                        };
+                        take(&mut said, opt, value)?;
+                        break;
+                    }
+                    _ => take(&mut said, opt, "")?,
                 }
-                if !"mFCct".contains(letter) {
-                    continue;
-                }
-                let rest = &cluster[index + letter.len_utf8()..];
-                let value = match rest.is_empty() {
-                    true => words.next().ok_or("an option lacks its value")?,
-                    false => rest,
-                };
-                match letter {
-                    'm' => messages.push(value.to_owned()),
-                    'F' => file = Some(value.to_owned()),
-                    'C' | 'c' => return Err("it takes the message of another commit".into()),
-                    _ => {}
-                }
-                break;
             }
         }
     }
-    if edit {
-        return Err("it opens an editor on the message (--edit)".into());
-    }
-    match (messages.is_empty(), file) {
-        (false, None) => Ok(messages.join("\n\n")),
-        (false, Some(_)) => Err("it gives both -m and -F, which git refuses".into()),
-        (true, Some(file)) if file == "-" => {
-            Err("it reads the message from its standard input".into())
-        }
-        (true, Some(file)) => read_message(&folder.join(file)),
-        (true, None) => Err("it gives no message: an editor would write it".into()),
-    }
+    Ok(said)
 }
 
-/// The long options of `git commit` that matter to its message. Git takes any unambiguous start
-/// of one.
-#[derive(Clone, Copy)]
-enum Long {
-    Message,
-    File,
-    /// One that takes a value, which is no message.
-    Valued,
-    Edit(bool),
-    /// The message comes from elsewhere than the line: why.
-    Elsewhere(&'static str),
-    Flag,
+fn take(said: &mut Said, opt: Opt, value: &str) -> Result<(), String> {
+    match opt {
+        Opt::Message => said.parts.push(Part::Text(value.to_owned())),
+        Opt::File => said.parts.push(Part::File(value.to_owned())),
+        Opt::NoMessage => said.parts.retain(|p| !matches!(p, Part::Text(_))),
+        Opt::NoFile => said.parts.retain(|p| !matches!(p, Part::File(_))),
+        Opt::Edit(on) => said.edit = on,
+        Opt::Elsewhere(why) => return Err(why.into()),
+        Opt::Switch(name) => said.switches.push(name),
+        Opt::Valued | Opt::Stuck | Opt::Flag => {}
+    }
+    Ok(())
 }
 
-fn long_option(name: &str) -> Result<Long, String> {
-    const OPTIONS: [(&str, Long); 14] = [
-        ("message", Long::Message),
-        ("file", Long::File),
-        ("author", Long::Valued),
-        ("date", Long::Valued),
-        ("cleanup", Long::Valued),
-        ("trailer", Long::Valued),
-        ("template", Long::Valued),
-        ("pathspec-from-file", Long::Valued),
-        ("edit", Long::Edit(true)),
-        ("no-edit", Long::Edit(false)),
+/// A long option as git finds it: its whole name, or the start of one name alone, however short
+/// (`--m` is `--message`); a start of several is ambiguous, which git refuses too. One git does
+/// not have is left to git to refuse.
+fn long_option(options: &Options, name: &str) -> Result<Opt, String> {
+    let of = |long: &'static str| {
+        let (long, valued) = long
+            .strip_suffix('=')
+            .map_or((long, false), |long| (long, true));
+        let opt = options
+            .matter
+            .iter()
+            .find(|(known, _)| *known == long)
+            .map(|(_, opt)| *opt);
         (
-            "reuse-message",
-            Long::Elsewhere("it takes the message of another commit"),
-        ),
-        (
-            "reedit-message",
-            Long::Elsewhere("it takes the message of another commit"),
-        ),
-        (
-            "fixup",
-            Long::Elsewhere("git writes the message of a fixup"),
-        ),
-        (
-            "squash",
-            Long::Elsewhere("git writes the message of a squash commit"),
-        ),
-    ];
-    if let Some((_, long)) = OPTIONS.iter().find(|(option, _)| *option == name) {
-        return Ok(*long);
+            long,
+            opt.unwrap_or(if valued { Opt::Valued } else { Opt::Flag }),
+        )
+    };
+    let longs = || options.longs.split_whitespace().map(of);
+    if let Some((_, opt)) = longs().find(|(long, _)| *long == name) {
+        return Ok(opt);
     }
-    let started: Vec<Long> = OPTIONS
-        .iter()
-        .filter(|(option, _)| name.len() >= 3 && option.starts_with(name))
-        .map(|(_, long)| *long)
-        .collect();
+    let started: Vec<(&str, Opt)> = longs().filter(|(long, _)| long.starts_with(name)).collect();
     match started.as_slice() {
-        [] => Ok(Long::Flag),
-        [one] => Ok(*one),
-        _ => Err(format!("--{name} is ambiguous")),
+        [] => Ok(Opt::Flag),
+        [(_, opt)] => Ok(*opt),
+        _ => Err(format!("--{name} is ambiguous, which git refuses")),
     }
 }
 
+/// The message file of `-F`, read at once: a FIFO or a device would hold the read, or the open,
+/// until something writes to it.
 fn read_message(path: &Path) -> Result<String, String> {
     use std::io::Read;
-    let opened = std::fs::File::open(path)
-        .map_err(|e| format!("its message file {} cannot be read: {e}", path.display()))?;
+    use std::os::unix::fs::OpenOptionsExt;
+    let unread =
+        |e: std::io::Error| format!("its message file {} cannot be read: {e}", path.display());
+    let opened = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .map_err(unread)?;
+    if !opened.metadata().map_err(unread)?.is_file() {
+        return Err(format!(
+            "its message file {} is not a regular file",
+            path.display()
+        ));
+    }
     let mut text = String::new();
     opened
         .take(FILE_BYTES + 1)
         .read_to_string(&mut text)
-        .map_err(|e| format!("its message file {} cannot be read: {e}", path.display()))?;
+        .map_err(unread)?;
     if text.len() as u64 > FILE_BYTES {
         return Err(format!(
             "its message file {} is longer than {FILE_BYTES} bytes",
@@ -407,10 +715,15 @@ mod tests {
         split_line(line).unwrap()
     }
 
+    /// What the line's one git command commits as its message: `None` when it commits none.
+    fn committed(line: &str) -> Result<Option<String>, String> {
+        let gits = gate::gits(&words(line));
+        assert_eq!(gits.len(), 1, "{line}");
+        message_of(&gits[0], Path::new("/nowhere"))
+    }
+
     fn message(line: &str) -> Result<String, String> {
-        let commits = gate::commits(&words(line));
-        assert_eq!(commits.len(), 1, "{line}");
-        commit_message(&commits[0], Path::new("/nowhere"))
+        committed(line).map(|message| message.unwrap_or_else(|| panic!("no commit: {line}")))
     }
 
     #[test]
@@ -456,19 +769,97 @@ mod tests {
         let folder = std::env::temp_dir().join(format!("flottille-message-{}", std::process::id()));
         std::fs::create_dir_all(folder.join("api")).unwrap();
         std::fs::write(folder.join("api/msg"), "fix: a\n").unwrap();
-        let commits = gate::commits(&words("git -C api commit -F msg"));
+        let gits = gate::gits(&words("git -C api commit -F msg"));
         assert_eq!(
-            commit_message(&commits[0], &folder).as_deref(),
-            Ok("fix: a\n")
+            message_of(&gits[0], &folder),
+            Ok(Some("fix: a\n".to_owned()))
         );
         std::fs::remove_dir_all(folder).unwrap();
     }
 
     #[test]
     fn a_line_without_a_commit_has_none_to_check() {
-        for line in ["git log -m", "echo git commit", "git status"] {
-            assert!(gate::commits(&words(line)).is_empty(), "{line}");
+        for line in ["git log -m", "git status", "git merge --ff-only -m x main"] {
+            assert_eq!(committed(line), Ok(None), "{line}");
         }
+        assert!(gate::gits(&words("echo git commit")).is_empty());
+    }
+
+    #[test]
+    fn a_long_option_of_any_length_is_read_as_git_reads_it() {
+        for (line, said) in [
+            (
+                "git commit --m 'not conventional' -m 'fix: ok'",
+                "not conventional\n\nfix: ok",
+            ),
+            ("git commit --me 'not conventional'", "not conventional"),
+            ("git commit --m=one --no-m -m two", "two"),
+        ] {
+            assert_eq!(message(line).as_deref(), Ok(said), "{line}");
+        }
+        // `--f` starts --file and --fixup, `--re` three options: git refuses both.
+        for line in ["git commit --f msg", "git commit --re HEAD -m 'fix: a'"] {
+            let refused = message(line).unwrap_err();
+            assert!(refused.contains("ambiguous"), "{line}: {refused}");
+        }
+        // `--e` is --edit, `--fix` is --fixup.
+        assert!(message("git commit -m 'fix: a' --e").is_err());
+        assert!(message("git commit --fix HEAD").is_err());
+    }
+
+    #[test]
+    fn the_message_of_a_merge_a_tree_commit_and_a_revert() {
+        for (line, said) in [
+            ("git merge --no-ff -m 'bad merge' other", "bad merge"),
+            ("git merge --mes 'a' -m b other", "a\n\nb"),
+            (
+                "git commit-tree -m 'bad tree' -p HEAD HEAD^{tree}",
+                "bad tree",
+            ),
+        ] {
+            assert_eq!(message(line).as_deref(), Ok(said), "{line}");
+        }
+        for line in [
+            "git merge --squash other",
+            "git merge --no-commit other",
+            "git merge --abort",
+            "git revert --no-commit HEAD",
+            "git revert -n HEAD",
+            "git revert --abort",
+        ] {
+            assert_eq!(committed(line), Ok(None), "{line}");
+        }
+        for line in [
+            "git merge other",
+            "git merge -m x -e other",
+            "git merge --continue",
+            "git commit-tree HEAD^{tree}",
+            "git revert HEAD",
+            "git revert --no-edit -m 1 HEAD",
+        ] {
+            let refused = committed(line).unwrap_err();
+            assert!(refused.contains("git commit -m"), "{line}: {refused}");
+        }
+    }
+
+    #[test]
+    fn a_message_file_that_is_not_a_regular_file_is_refused() {
+        let folder = std::env::temp_dir().join(format!("flottille-fifo-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let fifo = folder.join("msg");
+        let path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let gits = gate::gits(&words("git commit -F msg"));
+        // A FIFO with no writer would hold an open for reading forever.
+        let (sender, answer) = std::sync::mpsc::channel();
+        let read = folder.clone();
+        std::thread::spawn(move || sender.send(message_of(&gits[0], &read)));
+        let refused = answer
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the read of a FIFO returns")
+            .unwrap_err();
+        assert!(refused.contains("not a regular file"), "{refused}");
+        std::fs::remove_dir_all(folder).unwrap();
     }
 
     #[test]
