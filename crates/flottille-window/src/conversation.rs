@@ -20,6 +20,15 @@ pub const JUDGE: &str = "the judge";
 /// Who allowed a call Full mode let through, as a card says it.
 pub const FULL: &str = "Full mode";
 
+/// What a message that used commands was sent as (`docs/commands.md`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Commanded {
+    /// The commands' names, in the order of their first use.
+    pub names: Vec<String>,
+    /// What the agent received: the commands' text with the message marked at its end.
+    pub received: String,
+}
+
 /// What one row of the conversation shows.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Block {
@@ -30,6 +39,9 @@ pub enum Block {
         from: String,
         text: String,
         images: Vec<String>,
+        /// For a message that used commands: `text` is what was typed, and this what it used
+        /// and what the agent received for it.
+        commands: Option<Commanded>,
     },
     /// A message between two sessions (`session_send`): one `peer` wrote to this agent, or one
     /// this agent `sent` to `peer`. An agent's words, never the user's. `agent` is the peer's id
@@ -619,12 +631,31 @@ impl Conversation {
                     .flatten()
                     .filter_map(|name| name.as_str().map(str::to_owned))
                     .collect();
-                for (kind, body) in sections(&text("text")) {
+                for (at, (kind, body)) in sections(&text("text")).into_iter().enumerate() {
                     // A picture sent alone has no words: its thumbnails are the message.
                     if body.trim().is_empty() && !names.is_empty() {
                         continue;
                     }
-                    changes.extend(self.deliver(&kind, body));
+                    let said = changes.len();
+                    changes.extend(self.deliver(&kind, body.clone()));
+                    // A message that used commands shows what was typed; what the agent received
+                    // unfolds under it. The daemon says which, one entry per delivery.
+                    let entry = &data["typed"][at];
+                    if changes.len() > said
+                        && let Some(typed) = entry["text"].as_str()
+                        && let Some(Block::Message { text, commands, .. }) = self.blocks.last_mut()
+                    {
+                        *text = typed.to_owned();
+                        *commands = Some(Commanded {
+                            names: entry["commands"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|name| name.as_str().map(str::to_owned))
+                                .collect(),
+                            received: body,
+                        });
+                    }
                 }
                 if !names.is_empty() {
                     // The pictures go inside the bubble of the user's message they came with.
@@ -638,6 +669,7 @@ impl Conversation {
                             from: USER.into(),
                             text: String::new(),
                             images: names,
+                            commands: None,
                         })),
                     }
                 }
@@ -1000,6 +1032,7 @@ impl Conversation {
                 from: USER.into(),
                 text: body,
                 images: Vec::new(),
+                commands: None,
             },
             // Another session wrote to this one: that agent's words, never the user's.
             ("session", _) => {
@@ -1028,12 +1061,14 @@ impl Conversation {
                     from: format!("started by {who}"),
                     text: text.to_owned(),
                     images: Vec::new(),
+                    commands: None,
                 }
             }
             ("brief" | "parent", Some(parent)) => Block::Message {
                 from: format!("{parent} → {}", self.me),
                 text: body,
                 images: Vec::new(),
+                commands: None,
             },
             ("child-report", _) => Block::Report {
                 from: self.child_named_in(&body),
@@ -1576,7 +1611,8 @@ mod tests {
                 Block::Message {
                     from: "you".into(),
                     text: "Fix it".into(),
-                    images: Vec::new()
+                    images: Vec::new(),
+                    commands: None,
                 },
                 Block::Text {
                     text: "On it.".into()
@@ -1780,12 +1816,14 @@ mod tests {
                 Block::Message {
                     from: "lead → web-form".into(),
                     text: "Fix the timer".into(),
-                    images: Vec::new()
+                    images: Vec::new(),
+                    commands: None,
                 },
                 Block::Message {
                     from: "lead → web-form".into(),
                     text: "Also the docs".into(),
-                    images: Vec::new()
+                    images: Vec::new(),
+                    commands: None,
                 }
             ]
         );
@@ -1805,7 +1843,8 @@ mod tests {
             [Block::Message {
                 from: "started by agent 0123456789ab".into(),
                 text: "Fix the timer".into(),
-                images: Vec::new()
+                images: Vec::new(),
+                commands: None,
             }]
         );
     }
@@ -1936,7 +1975,8 @@ mod tests {
             [Block::Message {
                 from: USER.into(),
                 text: String::new(),
-                images: vec!["a-0.png".into()]
+                images: vec!["a-0.png".into()],
+                commands: None,
             }]
         );
     }
@@ -1954,7 +1994,8 @@ mod tests {
             [Block::Message {
                 from: USER.into(),
                 text: "look".into(),
-                images: vec!["b-0.png".into()]
+                images: vec!["b-0.png".into()],
+                commands: None,
             }],
             "one block: the bubble draws the picture above its text"
         );

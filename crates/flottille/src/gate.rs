@@ -536,6 +536,7 @@ fn untexted(tool: &str, action: &str, args: &Value, keys: &[&str]) -> Result<(),
             let takers = match *key {
                 "title" => "edit and create",
                 "comment" => "close and reopen",
+                "message" => "a merge by squash",
                 _ => "create, comment and edit",
             };
             return Err(Verdict::Deny(format!(
@@ -589,10 +590,11 @@ fn forge(call: &Call) -> Verdict {
         }
     };
     let none: &[&str] = match action {
-        "comment" => &["title", "comment"],
-        "merge" | "checks" | "run" | "stop" | "step" => &["title", "body", "comment"],
-        "close" | "reopen" => &["title", "body"],
-        _ => &["comment"],
+        "comment" => &["title", "comment", "message"],
+        "merge" => &["title", "body", "comment"],
+        "checks" | "run" | "stop" | "step" => &["title", "body", "comment", "message"],
+        "close" | "reopen" => &["title", "body", "message"],
+        _ => &["comment", "message"],
     };
     if let Err(refused) = untexted("forge", action, call.args, none) {
         return refused;
@@ -607,12 +609,18 @@ fn forge(call: &Call) -> Verdict {
             "refused: forge {action} takes no delete_branch: delete_branch is for close"
         ));
     }
+    if by != methods[0] && call.args.get("message").is_some_and(|m| !m.is_null()) {
+        return Verdict::Deny(format!(
+            "refused: forge merge by {by} takes no message: a message is the squashed commit's, \
+             for a merge by squash; leave it out, and the forge writes its own"
+        ));
+    }
     let mut found = Found::default();
     found.judge(said.into());
     if let Err(refused) = texts(
         call.grant,
         call.args,
-        &["title", "body", "comment"],
+        &["title", "body", "comment", "message"],
         &mut found,
     ) {
         return refused;
@@ -2435,6 +2443,30 @@ pub fn pushes(words: &[String]) -> bool {
     })
 }
 
+/// Each git command a line runs, at any of its layers: its words from `git` on, for the
+/// project's message checks (`crate::message_checks`).
+pub fn gits(words: &[String]) -> Vec<Vec<String>> {
+    let Ok(layers) = lines(words) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for layer in &layers {
+        for (_, suffix) in suffixes(layer) {
+            let args = &suffix[1..];
+            // A wrapper's layer and the layer it runs say the same command.
+            if base(&suffix[0]) == "git"
+                && args.get(git_globals(args).0).is_some()
+                && !found
+                    .iter()
+                    .any(|seen: &Vec<String>| seen.as_slice() == suffix)
+            {
+                found.push(suffix.to_vec());
+            }
+        }
+    }
+    found
+}
+
 /// Whether the line's own program is git pushing, with no wrapper around it: the push the gate
 /// read, which may go out once it passed.
 pub fn is_push(words: &[String]) -> bool {
@@ -2446,7 +2478,7 @@ pub fn is_push(words: &[String]) -> bool {
 
 /// git's global options before its command: where the command is, and each option with its
 /// value.
-fn git_globals(args: &[String]) -> (usize, Vec<(&str, Option<&str>)>) {
+pub(crate) fn git_globals(args: &[String]) -> (usize, Vec<(&str, Option<&str>)>) {
     const VALUED: [&str; 8] = [
         "-C",
         "-c",

@@ -479,6 +479,7 @@ fn posted_says(args: &Value) -> Vec<String> {
     let mut says: Vec<String> = [
         ("title", "Its title"),
         ("body", "Its body"),
+        ("message", "Its message"),
         ("assignee", "Its assignee"),
     ]
     .into_iter()

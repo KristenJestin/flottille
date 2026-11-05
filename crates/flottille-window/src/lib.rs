@@ -12,6 +12,7 @@ pub mod history;
 pub mod instance;
 pub mod items;
 pub mod link;
+pub mod message_checks;
 pub mod mode;
 pub mod model;
 pub mod open;

@@ -881,6 +881,16 @@ impl Shell {
                     page.update(cx, |page, cx| page.answered(read, saved, window, cx));
                 }
             }
+            Outcome::MessageChecks { project, saved } => {
+                let section = self
+                    .project_settings
+                    .clone()
+                    .filter(|page| page.read(cx).name() == project)
+                    .map(|page| page.read(cx).message_checks().clone());
+                if let Some(section) = section {
+                    section.update(cx, |section, cx| section.answered(saved, window, cx));
+                }
+            }
             Outcome::Repositories {
                 project,
                 read,
