@@ -58,6 +58,15 @@ pub enum Then {
     Draft {
         spec: u64,
     },
+    /// The user's choice once the ticket changed: `take` or `overwrite`.
+    Ticket {
+        spec: u64,
+        choice: &'static str,
+    },
+    /// The departures posted on the spec's tickets.
+    Departures {
+        spec: u64,
+    },
 }
 
 impl Then {
@@ -67,7 +76,9 @@ impl Then {
             Then::Shown { spec, .. }
             | Then::Answer { spec, .. }
             | Then::Ready { spec }
-            | Then::Draft { spec } => Some(*spec),
+            | Then::Draft { spec }
+            | Then::Ticket { spec, .. }
+            | Then::Departures { spec } => Some(*spec),
             Then::Listed { .. } | Then::New | Then::FromTicket { .. } => None,
         }
     }
@@ -249,7 +260,12 @@ pub(super) fn answered(
             Err(why) => toast(Toast::failure("The spec was not started").detail(why), cx),
         },
         // The page's own, when it is no longer open.
-        Then::Shown { .. } | Then::Answer { .. } | Then::Ready { .. } | Then::Draft { .. } => {
+        Then::Shown { .. }
+        | Then::Answer { .. }
+        | Then::Ready { .. }
+        | Then::Draft { .. }
+        | Then::Ticket { .. }
+        | Then::Departures { .. } => {
             if let Err(why) = answer {
                 toast(Toast::failure("The spec was not changed").detail(why), cx);
             }
@@ -682,6 +698,12 @@ pub struct Spec {
     pub asked: Vec<Question>,
     /// The session that writes it.
     pub writer: Option<String>,
+    pub mode: String,
+    /// Its last write to its ticket: `written`, `changed` or `failed`, and what that says.
+    pub ticket_write: Option<(String, String)>,
+    /// An internal spec's comment of where it departs from its tickets.
+    pub departures: String,
+    pub departures_posted: bool,
 }
 
 impl Spec {
@@ -744,7 +766,23 @@ impl Spec {
                 })
                 .collect(),
             writer: value["writer"].as_str().map(str::to_owned),
+            mode: text(&value["mode"]),
+            ticket_write: value["ticket_write"]["state"]
+                .as_str()
+                .map(|state| (state.to_owned(), text(&value["ticket_write"]["problem"]))),
+            departures: text(&value["departures"]),
+            departures_posted: value["departures_posted_at"].is_u64(),
         }
+    }
+
+    /// What its ticket's line says, once a Ready wrote to it or tried.
+    pub fn ticket_said(&self) -> Option<String> {
+        let (state, said) = self.ticket_write.as_ref()?;
+        Some(match state.as_str() {
+            "failed" => format!("Not written to its ticket: {said}"),
+            "written" => format!("The spec is {said}."),
+            _ => format!("{said}."),
+        })
     }
 
     /// Its questions asked and not answered, and its own open ones.
@@ -789,6 +827,10 @@ pub struct SpecPage {
     moving: bool,
     /// The confirmation of Back to draft during a development is open.
     confirming: bool,
+    /// The confirmation of overwriting a changed ticket is open.
+    overwriting: bool,
+    /// A choice on the ticket, or the departures' post, was asked, until the daemon answers.
+    writing: bool,
     narrow: bool,
 }
 
@@ -807,6 +849,8 @@ impl SpecPage {
             answering: Vec::new(),
             moving: false,
             confirming: false,
+            overwriting: false,
+            writing: false,
             narrow: false,
         }
     }
@@ -921,8 +965,89 @@ impl SpecPage {
                 }
                 cx.notify();
             }
+            Then::Ticket { choice, .. } => {
+                self.writing = false;
+                match answer {
+                    Ok(spec) => {
+                        let spec = Spec::of(&spec);
+                        let (title, detail) = match choice {
+                            "take" => (
+                                "Change taken",
+                                "The spec is a Draft again; the session writing it is told the \
+                                 ticket's new text."
+                                    .to_owned(),
+                            ),
+                            _ => ("Ticket overwritten", spec.ticket_said().unwrap_or_default()),
+                        };
+                        match spec.ticket_write.as_ref().map(|(state, _)| state.as_str()) {
+                            Some("failed") => toast(
+                                Toast::failure("The ticket was not written")
+                                    .detail(spec.ticket_said().unwrap_or_default()),
+                                cx,
+                            ),
+                            _ => toast(Toast::success(title).detail(detail), cx),
+                        }
+                        self.shown = Some(Ok(spec));
+                    }
+                    Err(why) => toast(Toast::failure("The ticket was not changed").detail(why), cx),
+                }
+                cx.notify();
+            }
+            Then::Departures { .. } => {
+                self.writing = false;
+                match answer {
+                    Ok(_) => {
+                        toast(
+                            Toast::success("Departures posted")
+                                .detail("Posted as a comment on the spec's tickets."),
+                            cx,
+                        );
+                        self.read(cx);
+                    }
+                    Err(why) => toast(Toast::failure("The comment was not posted").detail(why), cx),
+                }
+                cx.notify();
+            }
             Then::Listed { .. } | Then::New | Then::FromTicket { .. } => {}
         }
+    }
+
+    /// Takes the ticket's change into the spec, or (after its confirmation) writes over it.
+    pub fn choose(&mut self, choice: &'static str, cx: &mut Context<Self>) {
+        self.overwriting = false;
+        if self.writing {
+            return;
+        }
+        self.writing = true;
+        let then = Then::Ticket {
+            spec: self.spec,
+            choice,
+        };
+        ask(
+            &self.shell,
+            "spec.ticket",
+            json!({"spec": self.spec, "choice": choice}),
+            then,
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Posts the departures on the spec's tickets: the user's gesture alone.
+    pub fn post_departures(&mut self, cx: &mut Context<Self>) {
+        if self.writing {
+            return;
+        }
+        self.writing = true;
+        let then = Then::Departures { spec: self.spec };
+        ask(
+            &self.shell,
+            "spec.departures",
+            json!({"spec": self.spec, "post": true}),
+            then,
+            cx,
+        );
+        cx.notify();
     }
 
     /// Answers `question` with its option `option` (from 1), or with a text.
@@ -1329,6 +1454,73 @@ impl Render for SpecPage {
                 )
                 .gap(space::SM),
             );
+        // The ticket, in the mode "the ticket is the spec": what its last write became, and the
+        // user's choice when someone changed it since Flottille last read it.
+        let ticket_said = spec.as_ref().and_then(Spec::ticket_said);
+        let ticket_failed = spec
+            .as_ref()
+            .and_then(|spec| spec.ticket_write.as_ref())
+            .is_some_and(|(state, _)| state == "failed");
+        let changed = spec
+            .as_ref()
+            .and_then(|spec| spec.ticket_write.as_ref())
+            .is_some_and(|(state, _)| state == "changed");
+        let take = Button::secondary("spec-ticket-take", "Take the change")
+            .disabled(self.writing)
+            .on_click({
+                let this = this.clone();
+                move |_, _, cx| {
+                    this.update(cx, |this, cx| this.choose("take", cx)).ok();
+                }
+            });
+        let overwrite = Button::secondary("spec-ticket-overwrite", "Overwrite the ticket")
+            .disabled(self.writing)
+            .on_click({
+                let this = this.clone();
+                move |_, _, cx| {
+                    this.update(cx, |this, cx| {
+                        this.overwriting = true;
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            });
+        let ticket = div()
+            .flex()
+            .flex_col()
+            .child(
+                presence_of(
+                    "spec-ticket-said-block",
+                    ticket_said.map(SharedString::from),
+                    move |said| {
+                        changing("spec-ticket-words", said, move |said| {
+                            div()
+                                .id("spec-ticket-said")
+                                .aria_label(said.clone())
+                                .text_size(px(12.5))
+                                .text_color(if ticket_failed { p.fail } else { p.mute })
+                                .child(said)
+                                .test_support()
+                                .into_any_element()
+                        })
+                        .into_any_element()
+                    },
+                )
+                .gap(space::SM),
+            )
+            .child(
+                presence(
+                    "spec-ticket-choice-block",
+                    changed,
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(space::SM)
+                        .child(take)
+                        .child(overwrite),
+                )
+                .gap(space::SM),
+            );
         // The questions: the open ones, each answered in one click; the spec's own open ones.
         let listed: Vec<(String, Question, flottille_ui::Placement)> = self
             .questions
@@ -1480,6 +1672,55 @@ impl Render for SpecPage {
                     ))
                     .children((!verification.is_empty()).then(|| block(verification))),
             );
+        // Where an internal spec departs from its tickets: read by the user, offered at Done, posted
+        // by them alone.
+        let departures_text = spec
+            .as_ref()
+            .filter(|spec| spec.mode == "internal")
+            .map(|spec| spec.departures.clone())
+            .unwrap_or_default();
+        let posted = spec.as_ref().is_some_and(|spec| spec.departures_posted);
+        let offered = !posted
+            && !departures_text.trim().is_empty()
+            && spec.as_ref().is_some_and(|spec| spec.status == "done");
+        let posted_said = spec
+            .as_ref()
+            .filter(|_| posted)
+            .map(|spec| SharedString::from(format!("Posted on {}.", spec.tickets.join(", "))));
+        let has_departures = !departures_text.trim().is_empty();
+        let post = Button::secondary("spec-departures-post", "Post as a comment")
+            .disabled(self.writing)
+            .on_click({
+                let this = this.clone();
+                move |_, _, cx| {
+                    this.update(cx, |this, cx| this.post_departures(cx)).ok();
+                }
+            });
+        let departures = Section::new("spec-departures", "Departures from the tickets")
+            .sentence(
+                "Read by you, not validated: where the spec departs from its tickets. Offered at \
+                 Done, to post as a comment or not.",
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(paragraph("spec-departures-text", &departures_text, cx))
+                    .child(presence("spec-departures-post-block", offered, post).gap(space::MD))
+                    .child(
+                        presence_of("spec-departures-posted-block", posted_said, move |said| {
+                            div()
+                                .id("spec-departures-posted")
+                                .aria_label(said.clone())
+                                .text_size(px(12.5))
+                                .text_color(p.mute)
+                                .child(said)
+                                .test_support()
+                                .into_any_element()
+                        })
+                        .gap(space::MD),
+                    ),
+            );
         let writer = spec.as_ref().and_then(|spec| spec.writer.clone());
         let sessions = {
             let rows: Vec<ListRow> = writer
@@ -1521,6 +1762,33 @@ impl Render for SpecPage {
                     ListCard::new("spec-sessions-list").rows(rows),
                 ))
         };
+        let overwrite_confirm = Confirm::new(
+            "spec-ticket-confirm",
+            format!("Write {title} over the change of its ticket?"),
+        )
+        .sentence(
+            "What someone changed on the ticket since Flottille last read it is lost on the \
+             tracker. The spec stays Ready.",
+        )
+        .action("Overwrite the ticket")
+        .open(self.overwriting)
+        .on_confirm({
+            let this = this.clone();
+            move |_, cx| {
+                this.update(cx, |this, cx| this.choose("overwrite", cx))
+                    .ok();
+            }
+        })
+        .on_cancel({
+            let this = this.clone();
+            move |_, cx| {
+                this.update(cx, |this, cx| {
+                    this.overwriting = false;
+                    cx.notify();
+                })
+                .ok();
+            }
+        });
         let confirm = Confirm::new("spec-draft-confirm", format!("Send {title} back to Draft?"))
             .sentence(
                 "Its development session is told, and no amendment is taken while it is a Draft.",
@@ -1567,6 +1835,7 @@ impl Render for SpecPage {
                     .gap(space::LG)
                     .child(header)
                     .child(gestures)
+                    .child(ticket)
                     .child(presence_of("spec-failed-block", failed, move |why| {
                         div()
                             .id("spec-failed")
@@ -1599,6 +1868,11 @@ impl Render for SpecPage {
                         enter(key("out-of-scope"), 5, outside),
                     ))
                     .child(enter(key("found"), 6, found))
+                    .child(presence(
+                        "spec-departures-section-block",
+                        has_departures,
+                        enter(key("departures"), 6, departures),
+                    ))
                     .child(enter(key("sessions"), 7, sessions)),
             ));
         div()
@@ -1608,6 +1882,7 @@ impl Render for SpecPage {
             .overflow_y_scroll()
             .child(column)
             .child(confirm)
+            .child(overwrite_confirm)
     }
 }
 
