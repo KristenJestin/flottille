@@ -5558,6 +5558,16 @@ fn edit_of<'a>(
     width: f32,
     cx: &'a mut TestAppContext,
 ) -> (Entity<SessionPage>, usize, &'a mut VisualTestContext) {
+    edit_with(path, "c\nd\ne", width, cx)
+}
+
+/// [`edit_of`] where the agent wrote `new` in place of `a\nb`.
+fn edit_with<'a>(
+    path: &str,
+    new: &str,
+    width: f32,
+    cx: &'a mut TestAppContext,
+) -> (Entity<SessionPage>, usize, &'a mut VisualTestContext) {
     let user = team_user();
     let (lead, _mcp, _) = lead_in_w(&user);
     let (shell, cx) = open_session(&user, &lead, 1280., cx);
@@ -5574,7 +5584,7 @@ fn edit_of<'a>(
                 "agent.tool_call",
                 json!({"id": "e", "title": "fs_edit", "status": "in_progress",
                     "raw_input": {"path": path, "edits": [
-                        {"old": "a\nb", "new": "c\nd\ne"}]}}),
+                        {"old": "a\nb", "new": new}]}}),
             ),
             made_up(
                 2,
@@ -5650,13 +5660,48 @@ fn the_whole_path_is_in_the_tooltip(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn a_long_path_read_stays_inside_its_step(cx: &mut TestAppContext) {
+fn a_cut_diff_line_shows_its_whole_text_in_a_tooltip(cx: &mut TestAppContext) {
+    let long = "let recipients = sheet.recipients().filter(|recipient| recipient.is_active()).collect::<Vec<_>>();";
+    let (_page, at, cx) = edit_with("src/sheet.rs", long, 420., cx);
+    cx.update(|window, cx| window.click(format!("row-{at}-diff-toggle"), cx));
+    settle(cx);
+    let rest_on = |line: usize, cx: &mut VisualTestContext| {
+        cx.update(|window, cx| window.hover(format!("row-{at}-diff-line-{line}"), cx));
+        cx.executor()
+            .advance_clock(flottille_ui::motion::TOOLTIP + flottille_ui::motion::HOVER * 2);
+        cx.run_until_parked();
+        frame(cx);
+    };
+    // The removed `a` fits; the added line does not, and its padding is not room.
+    rest_on(0, cx);
+    cx.update(|window, _| {
+        assert!(
+            window
+                .try_find(format!("row-{at}-diff-line-0-tooltip"))
+                .is_none()
+        );
+    });
+    rest_on(2, cx);
+    cx.update(|window, _| {
+        assert_eq!(
+            window.find(format!("row-{at}-diff-line-2-tooltip")).label(),
+            Some(format!("+ {long}").as_str())
+        );
+    });
+}
+
+/// A session whose agent read `path`, in a window `width` wide: the read's row, its steps open.
+fn read_of<'a>(
+    path: &str,
+    width: f32,
+    cx: &'a mut TestAppContext,
+) -> (Entity<SessionPage>, usize, &'a mut VisualTestContext) {
     let user = team_user();
     let (lead, _mcp, _) = lead_in_w(&user);
     let (shell, cx) = open_session(&user, &lead, 1280., cx);
     let page = session_page(&shell, cx);
     settle(cx);
-    cx.simulate_resize(size(px(420.), px(800.)));
+    cx.simulate_resize(size(px(width), px(800.)));
     settle(cx);
     read_events(
         &page,
@@ -5665,7 +5710,7 @@ fn a_long_path_read_stays_inside_its_step(cx: &mut TestAppContext) {
                 1,
                 "agent.tool_call",
                 json!({"id": "r", "title": "fs_read", "status": "in_progress",
-                    "raw_input": {"path": DEEP_PATH}}),
+                    "raw_input": {"path": path}}),
             ),
             made_up(
                 2,
@@ -5683,6 +5728,12 @@ fn a_long_path_read_stays_inside_its_step(cx: &mut TestAppContext) {
     unfold(&page, at, cx);
     cx.update(|window, cx| window.click(format!("row-{at}-steps-toggle"), cx));
     settle(cx);
+    (page, at, cx)
+}
+
+#[gpui_kit::test]
+fn a_long_path_read_stays_inside_its_step(cx: &mut TestAppContext) {
+    let (_page, at, cx) = read_of(DEEP_PATH, 420., cx);
     let (step, folder, name) = cx.update(|window, _| {
         (
             window.find(format!("step-{at}-0")).bounds(),
@@ -5696,6 +5747,48 @@ fn a_long_path_read_stays_inside_its_step(cx: &mut TestAppContext) {
         folder.size.width < px(DEEP_PATH.len() as f32 * 6.),
         "{folder:?}"
     );
+}
+
+/// What the clipboard holds.
+fn copied(cx: &mut VisualTestContext) -> Option<String> {
+    cx.read_from_clipboard().and_then(|item| item.text())
+}
+
+/// What the newest toast says.
+fn newest_toast(cx: &mut VisualTestContext) -> Option<String> {
+    cx.update(|window, _| {
+        window
+            .try_find("toast-1")
+            .and_then(|toast| toast.label().map(str::to_owned))
+    })
+}
+
+#[gpui_kit::test]
+fn a_path_can_be_copied_whole(cx: &mut TestAppContext) {
+    // The edit card, in a window narrow enough to cut the path.
+    let (_page, at, cx) = edit_of(DEEP_PATH, 420., cx);
+    let shown = cx.update(|window, _| window.find(format!("row-{at}-diff-path")).bounds());
+    assert!(shown.size.width < px(DEEP_PATH.len() as f32 * 6.), "cut");
+    cx.update(|window, cx| window.click(format!("row-{at}-diff-copy"), cx));
+    settle(cx);
+    assert_eq!(copied(cx).as_deref(), Some(DEEP_PATH));
+    let toast = newest_toast(cx).expect("a toast says it was copied");
+    assert!(toast.contains("Path copied"), "{toast}");
+    cx.update(|window, _| {
+        assert!(
+            window.try_find(format!("row-{at}-diff-lines")).is_none(),
+            "the click on Copy did not open the edit"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn a_file_step_s_path_can_be_copied_whole(cx: &mut TestAppContext) {
+    let (_page, at, cx) = read_of(DEEP_PATH, 420., cx);
+    cx.update(|window, cx| window.click(format!("step-{at}-0-copy"), cx));
+    settle(cx);
+    assert_eq!(copied(cx).as_deref(), Some(DEEP_PATH));
+    assert!(newest_toast(cx).is_some_and(|toast| toast.contains("Path copied")));
 }
 
 #[gpui_kit::test]

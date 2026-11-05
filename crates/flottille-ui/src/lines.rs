@@ -15,6 +15,7 @@ use gpui_kit::{
 };
 
 use crate::color::mix;
+use crate::cut::tipped_when_cut;
 use crate::icons::{Icon, icon};
 use crate::interact::{hoverable, tint};
 use crate::menu::Menu;
@@ -131,8 +132,22 @@ impl CardHead {
 }
 
 impl RenderOnce for CardHead {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let p = palette(cx);
+        let title = tipped_when_cut(
+            div()
+                .id(ElementId::Name(format!("{}-title", self.id).into()))
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_size(px(13.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(self.title.clone()),
+            self.title.clone(),
+            window,
+            cx,
+        );
         let meta = self.meta.map(|meta| {
             div()
                 .id(ElementId::Name(format!("{}-meta", self.id).into()))
@@ -157,16 +172,7 @@ impl RenderOnce for CardHead {
             .ui_text()
             .text_color(p.text)
             .child(icon(self.glyph).size(px(14.)).text_color(p.faint))
-            .child(
-                div()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(px(13.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(self.title),
-            )
+            .child(title)
             .children(meta)
             .child(div().flex_1())
             .children(self.trailing)
@@ -218,9 +224,26 @@ impl ParentElement for LabelledLine {
 }
 
 impl RenderOnce for LabelledLine {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let p = palette(cx);
         let clickable = self.on_click.is_some();
+        let value = tipped_when_cut(
+            div()
+                .id(ElementId::Name(format!("{}-value", self.id).into()))
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .mono(12.)
+                .children(self.value),
+            self.said.clone(),
+            window,
+            cx,
+        );
         let mut line = div()
             .id(self.id)
             .aria_label(SharedString::from(format!("{} {}", self.label, self.said)))
@@ -241,19 +264,7 @@ impl RenderOnce for LabelledLine {
                     .child(icon(self.glyph).size(px(13.)).text_color(p.faint))
                     .child(self.label),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .mono(12.)
-                    .children(self.value),
-            );
+            .child(value);
         if let Some(on_click) = self.on_click {
             line = line
                 .cursor_pointer()
@@ -358,7 +369,7 @@ impl FlatRow {
 }
 
 impl RenderOnce for FlatRow {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let p = palette(cx);
         let id = self.id.clone();
         let mut row = div()
@@ -380,16 +391,20 @@ impl RenderOnce for FlatRow {
                     .justify_center()
                     .children(self.leading),
             )
-            .child(
+            .child(tipped_when_cut(
                 div()
+                    .id(ElementId::Name(format!("{id}-title").into()))
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
                     .font_weight(FontWeight::MEDIUM)
-                    .child(self.title),
-            )
+                    .child(self.title.clone()),
+                self.title,
+                window,
+                cx,
+            ))
             .when_some(self.meta, |d, meta| {
                 d.child(
                     div()
@@ -515,6 +530,7 @@ impl RenderOnce for StepRow {
                 .test_support()
         });
         let clickable = self.on_click.is_some();
+        let id = self.id.clone();
         let mut row = div()
             .id(self.id)
             .aria_label(SharedString::from(said))
@@ -546,14 +562,18 @@ impl RenderOnce for StepRow {
                     .whitespace_nowrap()
                     .child(self.verb)
                     .when_some(self.object, |d, object| {
-                        d.child(
+                        d.child(tipped_when_cut(
                             div()
+                                .id(ElementId::Name(format!("{id}-object").into()))
                                 .min_w_0()
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .mono(12.)
-                                .child(object),
-                        )
+                                .child(object.clone()),
+                            object,
+                            window,
+                            cx,
+                        ))
                     }),
             )
             .children(time);
