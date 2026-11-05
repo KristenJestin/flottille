@@ -38,7 +38,7 @@ fn user() -> User {
             {"usage": {"used": 82_000, "size": 200_000}}, {"say": "On it."}]},
         {"when": "tell me more", "do": [{"say": "There is more."}]},
         {"when": "start the docs session", "do": [{"mcp": {"tool": "agent_launch",
-            "arguments": {"title": "Docs", "brief": "Write the docs", "root": true,
+            "arguments": {"title": "Docs", "brief": "Write the docs", "follow": false, "root": true,
                 "workspace": "login"}}}]}
     ]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
@@ -237,6 +237,14 @@ fn open_session(shell: &Entity<Shell>, agent: &str, cx: &mut VisualTestContext) 
     });
     settle(cx);
     cx.update(|window, cx| window.click(session_id(agent), cx));
+    // The pointer leaves the window: resting on the sidebar, a row that moves under it when a
+    // session has news brings the tooltip of its cut title, still fading in when a test looks at
+    // the window at rest.
+    cx.simulate_mouse_move(
+        gpui_kit::point(px(1500.), px(900.)),
+        None,
+        Default::default(),
+    );
     until(
         shell,
         cx,

@@ -32,8 +32,15 @@ ignores them, as it does in the main checkout). A workspace that does not take t
 repository has a plain folder there.
 
 The name is 1 to 64 letters, digits, dots, dashes or underscores, starting with a letter or a
-digit. The branch is `<branch prefix>/<name>` unless `--branch` gives one, and the name alone when
-the project's branch prefix is empty (`docs/projects.md`); `git check-ref-format
+digit, and is not `main`: `main` names the project folder where a session for the user is
+started (`agent_launch` with `root`, `"workspace": "main"`, `docs/tools.md`, "Sessions for the
+user"), so creating a workspace under it is refused from the agent's `workspace create`, the
+command line, the window and the protocol alike (`main is reserved: it names the project folder,
+where a session works without a workspace; choose another name for the workspace`). A project
+that holds a workspace named `main`, made before the name was reserved, keeps it, with no
+migration: there `"workspace": "main"` names that workspace, as before, and the card says `the
+workspace main`. The branch is `<branch prefix>/<name>` unless `--branch` gives one, and the name
+alone when the project's branch prefix is empty (`docs/projects.md`); `git check-ref-format
 --branch` must accept it as it is. A repository that names its branches after tickets
 (`fix/ABC-12-login`) is followed by naming the branch: the agent's `workspace create` says to give
 `branch` when the repository has a naming convention (its `AGENTS.md`, `CONTRIBUTING`, or the
@@ -67,6 +74,29 @@ is, and each is read and written for its own. To work on another branch in a wor
 with git: the workspace follows. A repository on no branch (a detached HEAD) is read for the
 recorded branch, and `forge` `create` refuses it (`refused: <repository> is on no branch (detached
 at <hash>): switch to a branch first`).
+
+### Renaming the branch
+
+An agent that made a workspace on a branch which does not follow the repository's convention
+(`fix/ABC-12-login`) renames it before the first push: `workspace` `rename_branch {branch,
+repository?}` (`docs/tools.md`, "The workspace"; `workspace.rename_branch`, `docs/protocol.md`).
+It runs `git branch -m` in the worktree of `repository`, or of each repository of the workspace,
+and the record follows as for a `git switch` (`workspace.changed`); the window's rail says the new
+name, fading in. It is all or none, refused before anything is renamed when:
+
+- the workspace is being prepared;
+- the new name is not one `git check-ref-format --branch` accepts, is the branch a worktree is on
+  already, exists in a repository, or is checked out in a checkout of one (the main one or
+  another worktree);
+- a repository's branch was **resumed** by the workspace: it was the user's before it;
+- a repository's branch was **pushed**: a remote has it (its tracking ref as last fetched, or what
+  the remote lists; a remote that cannot be listed is taken for not having it), or it has a pull
+  request (any state): renaming would leave the remote branch or the pull request on the old
+  name;
+- a worktree is on no branch.
+
+Each refusal names the repository and says which of these it is. Renaming in one repository of
+several leaves the record as it is: the repositories are on different branches.
 
 ## The repositories it takes
 

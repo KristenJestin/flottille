@@ -716,8 +716,7 @@ async fn in_reader(net: &Net, kind: Body, page: &Page) -> Result<Extracted, Stri
     }
     let mut command = tokio::process::Command::from(command);
     command.kill_on_drop(true);
-    let mut child = command
-        .spawn()
+    let mut child = crate::children::spawn(&mut command)
         .map_err(|e| format!("its reader could not start: {e}"))?;
     // Still alive: it waits for its page.
     if let Some(pid) = child.id()

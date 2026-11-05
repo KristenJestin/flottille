@@ -731,13 +731,13 @@ What the three tools answer to a write decides what identifies the comment:
 | `gh pr close`, `gh pr reopen` (with a comment) | nothing that names the comment | the text's hash |
 | `bkt pr comment`, `bkt pr decline` (with a comment) | `✓ Commented on pull request #N`, nothing that names the comment | the text's hash |
 | `bkt pr create`, `bkt pr edit` (with a body) | the pull request's number | the item: a `body` |
-| `acli jira workitem comment create` | nothing read (`--json` is not asked) | the text's hash |
+| `acli jira workitem comment create` | nothing read (`--json` is not asked) | the id of the newest comment of its words that no record holds, read from the work item right after the post; the text's hash alone when that read fails |
 | `acli jira workitem create`, `edit` (with a body) | the work item's key | the item: a `body` |
 
 A comment read back is known as an agent's by its record:
 
-- with the id the forge gave it, when the record has one (GitHub): the same words under another
-  id are a person's;
+- with the id the forge gave it, when the record has one (GitHub, Jira): the same words under
+  another id are a person's;
 - else by the hash of its text, and a hash record is **one comment's**: the first comment of those
   words that was not written before the post (the comments are taken oldest first, by the time the
   forge gives: GitHub's `createdAt`, Bitbucket Cloud's `created_on`, Data Center's `createdDate`).
@@ -745,6 +745,10 @@ A comment read back is known as an agent's by its record:
   by more than five minutes (the clocks differ) is not it. Where a read gives no time the first of the
   words is taken: Jira's `created` (`2026-10-01T12:00:00.000+0000`) is not read as a time, so for
   Jira the post claims the first comment of its words.
+
+Only a record that holds a comment's id lets an agent edit or delete that comment (`tickets
+comment_edit`, `comment_delete`, `docs/tickets.md`): words alone never do, a person may write the
+same. An edit replaces the record of the id with the new words; a delete drops it.
 
 The hash is of the text as a read gives it: masked (the secrets of a text are masked on every
 read, the record hashes the masked text too), whitespace one space, only the first 500 characters

@@ -2892,7 +2892,7 @@ fn a_root_session_started_by_an_agent_appears_and_is_the_user_s() {
     let answer = mcp.call(
         "agent_launch",
         json!({"title": "Fix login", "brief": "The login fails: fix it.", "workspace": "login",
-            "root": true}),
+            "follow": false, "root": true}),
     );
     let number = held(&answer);
     assert_eq!(
@@ -2965,7 +2965,7 @@ fn a_root_session_in_auto_is_judged_by_the_judge_and_stays_in_auto() {
 
     let answer = mcp.call(
         "agent_launch",
-        json!({"title": "Docs", "brief": "Write the docs.", "root": true}),
+        json!({"title": "Docs", "brief": "Write the docs.", "follow": false, "root": true}),
     );
 
     assert!(
@@ -3005,7 +3005,7 @@ fn a_child_cannot_start_a_root_session() {
 
     let refused = child.call(
         "agent_launch",
-        json!({"title": "escape", "brief": "Work outside my tree.", "root": true}),
+        json!({"title": "escape", "brief": "Work outside my tree.", "follow": false, "root": true}),
     );
 
     assert!(refused.error, "{}", refused.text);
@@ -3066,7 +3066,7 @@ fn launched_root(user: &User, mode: &str, brief: &str) -> (String, String, Mcp) 
     let opened = user.received_requests("session/new").len();
     let answer = mcp.call(
         "agent_launch",
-        json!({"title": "Second", "brief": brief, "root": true}),
+        json!({"title": "Second", "brief": brief, "follow": false, "root": true}),
     );
     if mode == "ask" {
         allow(user, held(&answer));
@@ -3128,7 +3128,7 @@ fn a_root_started_by_an_agent_cannot_start_one_without_the_user() {
 
     let answer = mcp.call(
         "agent_launch",
-        json!({"title": "Third", "brief": "And the tests.", "root": true}),
+        json!({"title": "Third", "brief": "And the tests.", "follow": false, "root": true}),
     );
 
     held(&answer);
@@ -3154,7 +3154,7 @@ fn a_root_session_with_a_brief_longer_than_the_judge_sees_whole_is_refused() {
 
     let refused = mcp.call(
         "agent_launch",
-        json!({"title": "Long", "brief": "word ".repeat(2_000), "root": true}),
+        json!({"title": "Long", "brief": "word ".repeat(2_000), "follow": false, "root": true}),
     );
 
     assert!(refused.error, "{}", refused.text);
@@ -3183,7 +3183,7 @@ fn a_root_session_whose_brief_holds_a_secret_is_base() {
     let answer = mcp.call(
         "agent_launch",
         json!({"title": "Deploy", "brief": "Use ghp_abcdefghijklmnopqrstuvwxyz0123456789 to deploy.",
-            "root": true}),
+            "follow": false, "root": true}),
     );
 
     held(&answer);
@@ -3393,7 +3393,7 @@ fn a_session_in_a_new_workspace_with_a_brief_longer_than_the_judge_sees_whole_is
     let refused = lead.call(
         "agent_launch",
         json!({"title": "Long", "brief": "word ".repeat(2_000), "new_workspace": "long",
-            "root": true}),
+            "follow": false, "root": true}),
     );
 
     assert!(refused.error, "{}", refused.text);
@@ -3834,7 +3834,7 @@ fn lead_and_session(user: &User) -> (String, Mcp, String, Mcp) {
     let opened = user.received_requests("session/new").len();
     let answer = mcp.call(
         "agent_launch",
-        json!({"title": "Login", "brief": "Fix the login.", "workspace": "login", "root": true}),
+        json!({"title": "Login", "brief": "Fix the login.", "workspace": "login", "follow": false, "root": true}),
     );
     assert!(answer.text.contains("Started a session"), "{}", answer.text);
     let (url, authorization) = server_of(user, opened);
@@ -4072,7 +4072,7 @@ fn session_send_in_ask_is_a_card_that_shows_the_message_whole() {
         .unwrap();
     let launched = mcp.call(
         "agent_launch",
-        json!({"title": "Login", "brief": "Fix the login.", "workspace": "login", "root": true}),
+        json!({"title": "Login", "brief": "Fix the login.", "workspace": "login", "follow": false, "root": true}),
     );
     allow(&user, held(&launched));
     let session = agents(&user)
@@ -4852,7 +4852,7 @@ fn a_comment_that_closes_or_reopens_is_recorded_by_its_text_as_gh_and_bkt_give_n
 }
 
 #[test]
-fn every_post_of_an_agent_on_jira_is_recorded_by_its_text() {
+fn every_post_of_an_agent_on_jira_is_recorded_a_comment_by_the_id_read_after_it() {
     let user = user();
     on_jira(&user);
     jira_items(&user);
@@ -4879,6 +4879,167 @@ fn every_post_of_an_agent_on_jira_is_recorded_by_its_text() {
     assert_eq!(recorded(&user, "jira", "", "DEF-7"), [body_of(None)]);
     assert_eq!(
         recorded(&user, "jira", "", "ABC-1"),
-        [comment_of(None), body_of(None)]
+        [comment_of(Some("10100")), body_of(None)]
     );
+}
+
+// A root starts a session for the user in main (#408).
+
+/// The text of the one request held for the user.
+fn says_of_the_request(user: &User) -> String {
+    the_request(user)["says"].to_string()
+}
+
+#[test]
+fn a_root_in_a_workspace_starts_a_session_in_main() {
+    let user = user();
+    on_github(&user);
+    let (lead, mcp) = root_in(&user, Some("login"));
+    user.call("agent.mode", json!({"agent": lead, "mode": "ask"}))
+        .unwrap();
+
+    let number = held(&mcp.call(
+        "agent_launch",
+        json!({"title": "Study", "brief": "Read the code.", "workspace": "main", "root": true, "follow": false}),
+    ));
+    let done = allow(&user, number);
+
+    assert!(done.contains("Started a session for the user"), "{done}");
+    assert!(done.contains("main, the project folder"), "{done}");
+    let started = agents(&user)
+        .into_iter()
+        .find(|a| a["title"] == "Study")
+        .unwrap_or_else(|| panic!("no session started"));
+    let session = agent(&user, started["id"].as_str().unwrap());
+    assert_eq!(session.workspace, None, "the project folder is main");
+    assert_eq!(session.parent, None);
+    assert_eq!(session.launched_by.as_deref(), Some(lead.as_str()));
+    // No workspace was made for it.
+    assert!(!workspace_exists(&user, "main"));
+}
+
+#[test]
+fn the_gate_is_told_the_session_starts_in_main() {
+    let user = user();
+    on_github(&user);
+    let (lead, mcp) = root_in(&user, Some("login"));
+    user.call("agent.mode", json!({"agent": lead, "mode": "ask"}))
+        .unwrap();
+
+    held(&mcp.call(
+        "agent_launch",
+        json!({"title": "Study", "brief": "Read the code.", "workspace": "main", "root": true, "follow": false}),
+    ));
+
+    let says = says_of_the_request(&user);
+    assert!(
+        says.contains("Start a session for the user in main, the project folder: \\\"Study\\\""),
+        "{says}"
+    );
+    assert!(!says.contains("the workspace main"), "{says}");
+}
+
+#[test]
+fn a_workspace_cannot_be_named_main() {
+    let user = user();
+    on_github(&user);
+    let (lead, mcp) = root_in(&user, None);
+    user.call("agent.mode", json!({"agent": lead, "mode": "ask"}))
+        .unwrap();
+    let before = agents(&user).len();
+
+    // The agent's tool, and a launch that makes one: refused before the user is asked.
+    for (tool, call) in [
+        ("workspace", json!({"action": "create", "name": "main"})),
+        (
+            "agent_launch",
+            json!({"title": "Study", "brief": "Read.", "new_workspace": "main", "root": true, "follow": false}),
+        ),
+    ] {
+        let refused = mcp.call(tool, call);
+        assert!(refused.error, "{tool}: {}", refused.text);
+        assert!(
+            refused.text.contains("main is reserved")
+                && refused.text.contains("the project folder"),
+            "{tool}: {}",
+            refused.text
+        );
+    }
+    assert!(no_request(&user));
+    assert_eq!(agents(&user).len(), before);
+
+    // The protocol, which the window uses, and the command line.
+    let failure = user
+        .call(
+            "workspace.create",
+            json!({"project": "app", "name": "main"}),
+        )
+        .unwrap_err();
+    assert!(failure.1.contains("main is reserved"), "{failure:?}");
+    let output = user.run(&["workspace", "create", "app", "main"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("main is reserved"), "{stderr}");
+    assert!(!workspace_exists(&user, "main"));
+}
+
+#[test]
+fn a_project_with_an_old_workspace_named_main_keeps_it() {
+    let user = user();
+    on_github(&user);
+    // A workspace made before the name was reserved: the login one, under another name.
+    let mut old = store(&user).workspace("app", "login").unwrap().unwrap();
+    old.name = "main".into();
+    old.branch = "app/old-main".into();
+    old.steps.clear();
+    store(&user)
+        .create_workspace(&old, ("workspace.created", json!({"name": "main"})))
+        .unwrap();
+    let (lead, mcp) = root_in(&user, None);
+    user.call("agent.mode", json!({"agent": lead, "mode": "ask"}))
+        .unwrap();
+
+    let number = held(&mcp.call(
+        "agent_launch",
+        json!({"title": "Study", "brief": "Read the code.", "workspace": "main", "root": true, "follow": false}),
+    ));
+
+    let says = says_of_the_request(&user);
+    assert!(says.contains("the workspace main"), "{says}");
+    let done = allow(&user, number);
+    assert!(done.contains("Started a session"), "{done}");
+    let started = agents(&user)
+        .into_iter()
+        .find(|a| a["title"] == "Study")
+        .unwrap();
+    assert_eq!(
+        agent(&user, started["id"].as_str().unwrap())
+            .workspace
+            .as_deref(),
+        Some("main"),
+        "it names the workspace, not the project folder"
+    );
+}
+
+#[test]
+fn a_child_still_cannot_be_launched_in_main_from_a_workspace() {
+    let user = user();
+    on_github(&user);
+    let (_, lead) = root_in(&user, Some("login"));
+    let before = agents(&user).len();
+
+    let refused = lead.call(
+        "agent_launch",
+        json!({"title": "worker", "brief": "Read the code.", "workspace": "main"}),
+    );
+
+    assert!(refused.error, "{}", refused.text);
+    assert!(
+        refused
+            .text
+            .starts_with("refused: a child works where you work"),
+        "{}",
+        refused.text
+    );
+    assert_eq!(agents(&user).len(), before);
 }

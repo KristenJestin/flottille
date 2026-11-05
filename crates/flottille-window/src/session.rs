@@ -743,7 +743,21 @@ impl SessionPage {
         );
     }
 
-    /// What the daemon answered to a cancellation: why, when it refused.
+    /// The user resumes a paused following, as a message of theirs would: the daemon resumes it,
+    /// and the list follows its event.
+    pub fn resume_following(&mut self, subscription: &str, cx: &mut Context<Self>) {
+        let list = self.subscriptions(cx);
+        list.update(cx, |list, cx| list.failed(None, cx));
+        self.perform(
+            Command::ResumeFollowing {
+                session: self.opened.id.clone(),
+                subscription: subscription.to_owned(),
+            },
+            cx,
+        );
+    }
+
+    /// What the daemon answered to a cancellation or a resume: why, when it refused.
     pub fn subscription_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
         let list = self.subscriptions(cx);
         list.update(cx, |list, cx| list.failed(refused, cx));
@@ -5445,33 +5459,42 @@ impl Render for SessionRail {
                             .test_support(),
                     )
                     // Its branch, commits ahead, files not committed and setup played; it
-                    // unfolds once the daemon said.
+                    // unfolds once the daemon said, and fades back in when it says another
+                    // (a branch renamed).
                     .child(presence(
                         ElementId::Name(format!("rail-status-{name}-block").into()),
                         status.is_some(),
-                        tipped_when_cut(
-                            div()
-                                .id(ElementId::Name(format!("rail-status-{name}").into()))
-                                .pl(space::XL)
-                                .mono(11.5)
-                                .text_color(p.faint)
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .aria_label(SharedString::from(status.as_ref().map_or(
-                                    String::new(),
-                                    |s| match &s.note {
-                                        Some(note) => format!("{} · {note}", s.line()),
-                                        None => s.line(),
-                                    },
-                                )))
-                                .children(status.as_ref().map(|s| SharedString::from(s.line()))),
-                            SharedString::from(
+                        {
+                            let said = SharedString::from(
                                 status.as_ref().map(|s| s.line()).unwrap_or_default(),
-                            ),
-                            window,
-                            cx,
-                        ),
+                            );
+                            let line = tipped_when_cut(
+                                div()
+                                    .id(ElementId::Name(format!("rail-status-{name}").into()))
+                                    .pl(space::XL)
+                                    .mono(11.5)
+                                    .text_color(p.faint)
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .aria_label(SharedString::from(status.as_ref().map_or(
+                                        String::new(),
+                                        |s| match &s.note {
+                                            Some(note) => format!("{} · {note}", s.line()),
+                                            None => s.line(),
+                                        },
+                                    )))
+                                    .child(said.clone()),
+                                said.clone(),
+                                window,
+                                cx,
+                            );
+                            changing(
+                                ElementId::Name(format!("rail-status-{name}-change").into()),
+                                said,
+                                move |_| line,
+                            )
+                        },
                     ))
                     .test_support()
                     .into_any_element(),

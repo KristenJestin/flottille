@@ -6,6 +6,20 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// The name of the project folder as a place: `agent_launch` with `root` names it as a
+/// workspace, so no workspace is made under it (`docs/workspaces.md`, "Main").
+pub const MAIN: &str = "main";
+
+/// Why a workspace cannot be named `name`, if it cannot: the name is `main`'s.
+pub fn reserved(name: &str) -> Option<String> {
+    (name == MAIN).then(|| {
+        format!(
+            "{MAIN} is reserved: it names the project folder, where a session works without a \
+             workspace; choose another name for the workspace"
+        )
+    })
+}
+
 /// A workspace as the store keeps it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Workspace {

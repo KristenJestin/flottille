@@ -323,7 +323,7 @@ fn started(user: &User, title: &str) -> String {
 fn launch_root(mcp: &Mcp, title: &str) -> Answer {
     mcp.call(
         "agent_launch",
-        json!({"title": title, "brief": "Write the docs.", "root": true}),
+        json!({"title": title, "brief": "Write the docs.", "follow": false, "root": true}),
     )
 }
 

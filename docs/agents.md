@@ -832,7 +832,8 @@ starts; the agent that started it and the session write to each other with `sess
 Everything Flottille hands to an agent is a delivery: the user's messages (`user`), a brief
 (`brief`), the first message of a session an agent started for the user (`launched`, under a first
 line naming that agent: it is the agent's words, never the user's), a message another session
-wrote with `session_send` (`session`, under a first line naming its sender, never the user's), a
+wrote with `session_send` (`session`, under a first line naming its sender, never the user's), the end of a turn of a session
+the agent follows (`session-turn-ended`, `docs/tools.md`, "Sessions for the user"), a
 parent's message (`parent`), what happens to a child (`child-report`,
 `child-question`, `child-asks`, `child-failed`, `child-stuck`, `child-idle`, `child-replaced`,
 `children-status`), an approval's answer (`approval`), a reminder (`reminder`), a session's

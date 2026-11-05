@@ -2417,6 +2417,20 @@ impl Store {
         Ok(())
     }
 
+    /// Forgets the comment `comment_id` of an item: it was deleted, or its record is replaced.
+    pub fn drop_comment_posts(
+        &self,
+        (project, source, repository, key): (&str, &str, &str, &str),
+        comment_id: &str,
+    ) -> Result<()> {
+        self.connection.execute(
+            "DELETE FROM posts WHERE project = ?1 AND source = ?2 AND repository = ?3 \
+             AND key = ?4 AND kind = 'comment' AND comment_id = ?5",
+            params![project, source, repository, key, comment_id],
+        )?;
+        Ok(())
+    }
+
     /// What was posted on one item, oldest first.
     pub fn posts(
         &self,
