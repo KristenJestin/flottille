@@ -752,6 +752,57 @@ fn a_push_without_declared_checks_is_unchanged() {
     assert_eq!(seen(&user), "");
 }
 
+/// The remote's folder, as its URL.
+fn remote(user: &User) -> String {
+    user.path("remotes/app.git").to_str().unwrap().to_owned()
+}
+
+/// The keys that rewrite the remote for reads to the workspace itself, which has every commit,
+/// and for pushes to the remote.
+fn rewrites(user: &User) -> [String; 2] {
+    [
+        format!("url.{}.insteadOf", worktree(user).display()),
+        format!("url.{}.pushInsteadOf", remote(user)),
+    ]
+}
+
+#[test]
+fn a_push_past_the_wall_is_refused_naming_git_push() {
+    let user = User::with_fake_agent();
+    prepared(&user, |_| {});
+    let (passing, refusing) = two_checks(&user);
+    declare(&user, &[passing, refusing]);
+    let mcp = agent(&user);
+    committed_outside(&user, "bad.txt", "bad change");
+    let remote = remote(&user);
+    let branch = branch(&user);
+
+    for (command, push) in [
+        (
+            "send-pack",
+            format!("git send-pack {remote} HEAD:refs/heads/{branch}"),
+        ),
+        (
+            "http-push",
+            format!("git http-push http://127.0.0.1:9/app.git HEAD:refs/heads/{branch}"),
+        ),
+        ("remote-ext", format!("git remote-ext origin {remote}")),
+    ] {
+        let answer = mcp.call("run", json!({"line": push, "timeout": 30}));
+
+        assert!(answer.error, "{push}: {}", answer.text);
+        assert!(
+            answer.text.contains(&format!(
+                "refused: git {command} pushes past Flottille's wall; use git push"
+            )),
+            "{push}: {}",
+            answer.text
+        );
+    }
+    assert_eq!(remote_head(&user, &branch), None);
+    assert_eq!(seen(&user), "");
+}
+
 /// Whether the process `pid` still runs: a zombie has ended.
 fn alive(pid: &str) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {

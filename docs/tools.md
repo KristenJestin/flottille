@@ -1077,8 +1077,12 @@ says who answers a call to judge (`docs/design.md` §7.1).
      `core.gitProxy`, and every key of git's settings that run programs below but `remote.*`,
      `url.*`, `push.*` (any `alias.*`, `include.path`, `includeIf.*`, `credential.*`, drivers,
      filters, `protocol.allow`…); a program named for a remote: `--upload-pack`,
-     `--receive-pack`, `--exec` of `clone`, `fetch`, `pull`, `push`, `send-pack`, `ls-remote`,
-     `archive`, `git clone -u`, `git -c core.sshCommand`;
+     `--receive-pack`, `--exec` of `clone`, `fetch`, `pull`, `push`, `ls-remote`, `archive`,
+     `git clone -u`, `git -c core.sshCommand`;
+   - a push past the wall on pushes (below): `git send-pack`, `git http-push` and git's transport
+     helpers (`git remote-<name>`: `remote-https`, `remote-ext`, `remote-fd`…) connect to the URL
+     they are given, which `pushInsteadOf` does not rewrite: `refused: git send-pack pushes past
+     Flottille's wall; use git push`;
    - a launcher, which starts what it runs outside the daemon's tree of processes, later or on a
      host: `systemd-run`, `tmux`, `screen`, `zellij`, `dtach`, `abduco`, `setsid`, `at`,
      `batch`, `crontab`, `dbus-send`, `gdbus`, `busctl`, `ssh`, `scp`, `sftp`, `loginctl`,
@@ -1240,7 +1244,8 @@ says who answers a call to judge (`docs/design.md` §7.1).
    **Known gaps**, which no command gate closes: a script written with `fs_write` and then run
    (`./script.sh`, `sh script.sh`) is not read, so what it does is out of the gate's reach, but
    for a push, which the environment walls; a git alias in the user's own configuration
-   (`alias.<name> = push`) is run by git itself, and the gate sees only the alias's name.
+   (`alias.<name> = push`) is run by git itself, and the gate sees only the alias's name: the
+   wall stops such a push, but not one through an alias of `send-pack` or `http-push`.
    Running a script the agent wrote is itself a line to judge.
 
 The words of a line that name paths (every word but the program, an option's value after `=`,
