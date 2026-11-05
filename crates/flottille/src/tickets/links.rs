@@ -616,11 +616,11 @@ async fn owned(
             ticket.comments.len()
         )));
     };
-    if !found.agent {
+    if !found.own {
         return Err(Outcome::Refused(format!(
             "refused: the comment {named} of {reference} was not posted by an agent of \
-             Flottille (its records say it was not): an agent changes only its own comments; \
-             nothing was written"
+             Flottille (no record of its id says it was): an agent changes only its own \
+             comments; nothing was written"
         )));
     }
     let id = found.id.clone().unwrap_or_default();
@@ -665,7 +665,10 @@ pub(super) async fn comment(
                 ])
                 .await
                 {
-                    Ok(_) => Outcome::Done(done("deleted")),
+                    Ok(_) => {
+                        crate::posts::drop_comment(daemon, on, &id);
+                        Outcome::Done(done("deleted"))
+                    }
                     Err(why) => Outcome::Failed(why),
                 };
             }
@@ -690,12 +693,7 @@ pub(super) async fn comment(
             .await
             {
                 Ok(_) => {
-                    crate::posts::record_comment(
-                        daemon,
-                        on,
-                        Some(id.clone()),
-                        &crate::adf::round_trip(body),
-                    );
+                    crate::posts::replace_comment(daemon, on, &id, &crate::adf::round_trip(body));
                     Outcome::Done(done("changed"))
                 }
                 Err(why) => Outcome::Failed(why),
@@ -713,7 +711,10 @@ pub(super) async fn comment(
             let path = format!("repos/{}/issues/comments/{number}", forge.slug());
             if delete {
                 return match gh_api_bare(&path, "DELETE").await {
-                    Ok(_) => Outcome::Done(done("deleted")),
+                    Ok(_) => {
+                        crate::posts::drop_comment(daemon, on, &id);
+                        Outcome::Done(done("deleted"))
+                    }
                     Err(why) => Outcome::Failed(why),
                 };
             }
@@ -729,7 +730,7 @@ pub(super) async fn comment(
             .await
             {
                 Ok(_) => {
-                    crate::posts::record_comment(daemon, on, Some(id.clone()), body);
+                    crate::posts::replace_comment(daemon, on, &id, body);
                     Outcome::Done(done("changed"))
                 }
                 Err(why) => Outcome::Failed(why),

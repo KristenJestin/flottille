@@ -336,8 +336,9 @@ ticket itself.
 - **`show` lists the links** of a Jira work item, after its comments: `Links (3):` and a line each,
   `- is blocked by ABC-2 (In Progress): Add search`, `- web link: <title> <address>`. A link read
   that fails is said in its place and the rest is shown. GitHub's sub-issues are not listed yet.
-- **Comments**: `comment_edit` and `comment_delete` change only a comment Flottille recorded as
-  posted by an agent (`posts`, "What Flottille posts is recorded", `forges.md`), found by the id that
+- **Comments**: `comment_edit` and `comment_delete` change only a comment Flottille recorded by its
+  id as posted by an agent (`posts`, "What Flottille posts is recorded", `forges.md`; on Jira the id
+  is read right after the post, never later by its words), found by the id that
   `show` with `detail full` prints after its author (`[comment 10100]`, GitHub's `issuecomment-501`);
   any other comment, a person's or another tool's, is refused whatever its author's name, and a
   comment that cannot be found among the newest ones is said; both before the user is asked, and
@@ -345,8 +346,8 @@ ticket itself.
   update --key <K> --id <id> --body-adf <file>` (the text as ADF, as for `comment`; `update`'s
   `--body-file` takes plain text only) and `comment
   delete --key <K> --id <id>`; on GitHub, `gh api repos/<owner>/<name>/issues/comments/<id>
-  --method PATCH -f body=<text>` and `--method DELETE`. An edit records the id with the new words,
-  so that the comment stays the agent's.
+  --method PATCH -f body=<text>` and `--method DELETE`. An edit replaces the record of the id with the
+  new words, so that the comment stays the agent's and has one record; a delete drops it.
 - **`sprint {ticket, sprint}`** is refused, before anything is asked, saying why: `acli` 1.3.39 has
   no way to put a work item in a sprint (`workitem edit` has no sprint flag; `acli jira sprint`
   creates, updates, deletes, views and lists the work items of a sprint; `board list-sprints` lists

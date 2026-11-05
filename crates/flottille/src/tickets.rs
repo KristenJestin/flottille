@@ -84,6 +84,9 @@ pub struct Comment {
     pub agent: bool,
     /// The id the tracker gives it, where it gives one (GitHub's link names it).
     pub id: Option<String>,
+    /// A record of its id says an agent posted it: `comment_edit` and `comment_delete` take it.
+    /// Words alone never say it, a person may write the same.
+    pub own: bool,
 }
 
 impl Comment {
@@ -105,6 +108,7 @@ fn comment_of(author: String, at: Option<&str>, id: Option<String>, text: &str) 
         body: cut(body, COMMENT_CHARS),
         agent,
         id,
+        own: false,
     }
 }
 
@@ -186,7 +190,7 @@ impl Ticket {
                     .as_deref()
                     .map_or(String::new(), |at| format!(", {at}"));
                 // The id of a comment an agent posted: what `comment_edit` and `comment_delete` take.
-                let id = match (&comment.id, comment.agent) {
+                let id = match (&comment.id, comment.own) {
                     (Some(id), true) => format!(" [comment {id}]"),
                     _ => String::new(),
                 };
@@ -1786,10 +1790,11 @@ async fn write_work_item(
         args.push("--yes");
     }
     match acli_run(&args).await {
-        // `acli` prints nothing that names the comment it created: the record keeps its text.
         Ok(_) if action == "comment" => {
             if let Some(body) = body {
-                crate::posts::record_comment(daemon, on, None, &crate::adf::round_trip(body));
+                let posted = crate::adf::round_trip(body);
+                let id = posted_comment_id(daemon, on, site, &posted).await;
+                crate::posts::record_comment(daemon, on, id, &posted);
             }
             Outcome::Done(format!("The comment was posted on {key}."))
         }
@@ -1801,6 +1806,30 @@ async fn write_work_item(
         }
         Err(why) => Outcome::Failed(why),
     }
+}
+
+/// The id of the comment just posted with `text` on the work item `on`, from a read right after
+/// the post: `acli` prints nothing that names the comment it created. Bound now or never, since
+/// a person may write the same words later. None when the read fails or does not find it: the
+/// record then keeps the words alone, which mark the comment as the agent's in a read but never
+/// let an agent change it.
+async fn posted_comment_id(
+    daemon: &Daemon,
+    (project, source, repository, key): (&str, &str, &str, &str),
+    site: &str,
+    text: &str,
+) -> Option<String> {
+    let ticket = read_work_item(key, site).await.ok()?;
+    let read: Vec<crate::posts::Heard> = ticket
+        .comments
+        .iter()
+        .map(|comment| crate::posts::Heard {
+            id: comment.id.as_deref(),
+            at: None,
+            text: comment.body.as_str(),
+        })
+        .collect();
+    crate::posts::Known::of(daemon, project, source, repository, key).just_posted(&read, text)
 }
 
 /// A status of a Jira project: its name, and its category's key (`new`, `indeterminate`,

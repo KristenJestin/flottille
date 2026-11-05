@@ -4847,7 +4847,7 @@ fn a_comment_that_closes_or_reopens_is_recorded_by_its_text_as_gh_and_bkt_give_n
 }
 
 #[test]
-fn every_post_of_an_agent_on_jira_is_recorded_by_its_text() {
+fn every_post_of_an_agent_on_jira_is_recorded_a_comment_by_the_id_read_after_it() {
     let user = user();
     on_jira(&user);
     jira_items(&user);
@@ -4874,6 +4874,6 @@ fn every_post_of_an_agent_on_jira_is_recorded_by_its_text() {
     assert_eq!(recorded(&user, "jira", "", "DEF-7"), [body_of(None)]);
     assert_eq!(
         recorded(&user, "jira", "", "ABC-1"),
-        [comment_of(None), body_of(None)]
+        [comment_of(Some("10100")), body_of(None)]
     );
 }

@@ -842,3 +842,154 @@ fn a_comment_write_names_the_ticket_the_comment_and_its_words() {
         assert!(said.contains(missing), "{args}: {said}");
     }
 }
+
+/// The comment records of ABC-1: their ids.
+fn comment_records(user: &User, key: &str) -> Vec<Option<String>> {
+    store(user)
+        .posts("app", "jira", "", key)
+        .unwrap()
+        .into_iter()
+        .filter(|post| post.kind == "comment")
+        .map(|post| post.comment_id)
+        .collect()
+}
+
+/// Adds a person's comments to a work item of the script, after what the fake posted.
+fn people_write(user: &User, key: &str, comments: Value) {
+    let mut script: Value =
+        serde_json::from_str(&std::fs::read_to_string(user.path("acli/script.json")).unwrap())
+            .unwrap();
+    let item = &mut script["items"][key];
+    let summary = item["fields"]["summary"].as_str().unwrap().to_owned();
+    *item = commented(key, comments);
+    item["fields"]["summary"] = summary.into();
+    user.acli_script(script);
+}
+
+/// Long after the agent posted: the time does not tell a person's same words apart.
+fn later_person(id: &str, text: &str) -> Value {
+    json!({"id": id, "author": {"displayName": "Ana"}, "created": "2099-10-01T09:00:00.000+0000",
+        "body": document(text)})
+}
+
+#[test]
+fn a_person_s_comment_with_an_agent_s_words_is_not_the_agent_s() {
+    let user = user();
+    on_jira(&user);
+    jira_script(&user, json!({}));
+    let mcp = root_in(&user);
+    // The agent posts "On it" and edits it; a person then writes "On it".
+    written(
+        &user,
+        &mcp,
+        json!({"action": "comment", "ticket": "ABC-1", "body": "On it"}),
+    );
+    written(
+        &user,
+        &mcp,
+        json!({"action": "comment_edit", "ticket": "ABC-1", "comment": "10100", "body": "Fixed"}),
+    );
+    people_write(&user, "ABC-1", json!([later_person("20001", "On it")]));
+    // The agent posts "Thanks!" on ABC-2, the user deletes it in Jira, someone writes "Thanks!".
+    written(
+        &user,
+        &mcp,
+        json!({"action": "comment", "ticket": "ABC-2", "body": "Thanks!"}),
+    );
+    std::fs::write(
+        user.path("acli/posted.json"),
+        json!({"ABC-1": [document("Fixed")], "ABC-2": [null]}).to_string(),
+    )
+    .unwrap();
+    people_write(&user, "ABC-2", json!([later_person("20002", "Thanks!")]));
+
+    for (key, id, text) in [("ABC-1", "20001", "On it"), ("ABC-2", "20002", "Thanks!")] {
+        let shown = read(
+            &user,
+            &mcp,
+            json!({"action": "show", "ticket": key, "detail": "full"}),
+        );
+        let line = shown
+            .lines()
+            .find(|line| line.ends_with(&format!(": {text}")))
+            .unwrap_or_else(|| panic!("{shown}"));
+        assert!(!line.contains("[comment"), "{shown}");
+        assert!(!line.contains("by an agent"), "{shown}");
+        let said = refused_at_once(
+            &user,
+            &mcp,
+            json!({"action": "comment_delete", "ticket": key, "comment": id}),
+        );
+        assert!(said.contains("was not posted by an agent"), "{said}");
+    }
+    assert!(
+        !acli_calls(&user)
+            .iter()
+            .any(|c| c.contains("comment delete")),
+        "{:?}",
+        acli_calls(&user)
+    );
+}
+
+#[test]
+fn a_deleted_comment_s_record_is_dropped() {
+    let user = user();
+    on_jira(&user);
+    jira_script(&user, json!({}));
+    let mcp = root_in(&user);
+    written(
+        &user,
+        &mcp,
+        json!({"action": "comment", "ticket": "ABC-1", "body": "Thanks!"}),
+    );
+    assert_eq!(comment_records(&user, "ABC-1"), [Some("10100".to_owned())]);
+
+    written(
+        &user,
+        &mcp,
+        json!({"action": "comment_delete", "ticket": "ABC-1", "comment": "10100"}),
+    );
+
+    assert!(comment_records(&user, "ABC-1").is_empty());
+    // Someone's later "Thanks!" is theirs.
+    people_write(&user, "ABC-1", json!([later_person("20001", "Thanks!")]));
+    let said = refused_at_once(
+        &user,
+        &mcp,
+        json!({"action": "comment_delete", "ticket": "ABC-1", "comment": "20001"}),
+    );
+    assert!(said.contains("was not posted by an agent"), "{said}");
+}
+
+#[test]
+fn an_edited_comment_keeps_one_record() {
+    let user = user();
+    on_jira(&user);
+    jira_script(&user, json!({}));
+    let mcp = root_in(&user);
+    written(
+        &user,
+        &mcp,
+        json!({"action": "comment", "ticket": "ABC-1", "body": "On it"}),
+    );
+
+    for body in ["Fixed", "Fixed, rebased"] {
+        written(
+            &user,
+            &mcp,
+            json!({"action": "comment_edit", "ticket": "ABC-1", "comment": "10100", "body": body}),
+        );
+    }
+
+    assert_eq!(comment_records(&user, "ABC-1"), [Some("10100".to_owned())]);
+    let shown = read(
+        &user,
+        &mcp,
+        json!({"action": "show", "ticket": "ABC-1", "detail": "full"}),
+    );
+    let line = shown
+        .lines()
+        .find(|line| line.ends_with(": Fixed, rebased"))
+        .unwrap_or_else(|| panic!("{shown}"));
+    assert!(line.contains("[comment 10100]"), "{shown}");
+}
