@@ -59,7 +59,7 @@ use crate::model::Place;
 use crate::open::Opener;
 use crate::providers::Providers;
 use crate::queued::QueuedMessages;
-use crate::runs::{self, CommandList, CommandPanel, rail_label};
+use crate::runs::{self, CommandList, CommandPanel, EndedFold, ended_row, rail_label};
 use crate::session_link::{
     self, ForgeFacts, PlaceFacts, PullRequest, RepositoryFacts, Request, SessionLink,
     SessionUpdate, TicketFacts, TreeAgent, Where,
@@ -4365,13 +4365,6 @@ fn rail_rows(nodes: &[Node], open: &HashSet<String>) -> Vec<RailRow> {
     rows
 }
 
-/// The fold of the children behind one "ended" row.
-struct EndedFold {
-    motion: Motion,
-    /// The children's height, measured while they are drawn.
-    height: Rc<Cell<Pixels>>,
-}
-
 /// A count of tokens as the row says it: `812`, `45k`, `1.2M`.
 fn tokens(count: u64) -> String {
     match count {
@@ -4392,6 +4385,8 @@ pub struct SessionRail {
     ended_folds: HashMap<String, EndedFold>,
     /// How far the bar of each agent's gauge is filled, following the use.
     gauges: HashMap<String, Motion>,
+    /// How many task runs each agent last had going: its row says it while the count folds away.
+    last_runs: HashMap<String, usize>,
     selected: String,
     workspace: Option<String>,
     project: String,
@@ -4464,7 +4459,7 @@ impl SessionRail {
                 cx,
             )
         });
-        let commands = cx.new(|_| CommandList::new(page.clone()));
+        let commands = cx.new(|_| CommandList::new(page.clone()).of_agent(root.clone()));
         let subscriptions = cx.new(|_| SubscriptionList::new(page.clone()));
         let waiting = cx.new(|cx| Waiting::new(page.clone(), cx));
         Self {
@@ -4478,6 +4473,7 @@ impl SessionRail {
             open_ended: HashSet::new(),
             ended_folds: HashMap::new(),
             gauges: HashMap::new(),
+            last_runs: HashMap::new(),
             menu,
             agent_menu,
             selected: root,
@@ -4581,12 +4577,8 @@ impl SessionRail {
         let fold = self
             .ended_folds
             .entry(parent.to_owned())
-            .or_insert_with(|| EndedFold {
-                motion: Motion::settled(0.0),
-                height: Rc::new(Cell::new(px(0.))),
-            });
-        fold.motion
-            .animate(if open { 1.0 } else { 0.0 }, PANEL, now, reduce);
+            .or_insert_with(EndedFold::new);
+        fold.animate(open, now, reduce);
         cx.notify();
     }
 
@@ -4651,6 +4643,8 @@ impl SessionRail {
 
     fn set_selected(&mut self, selected: String, cx: &mut Context<Self>) {
         if self.selected != selected {
+            self.commands
+                .update(cx, |commands, cx| commands.show_agent(&selected, cx));
             self.selected = selected;
             cx.notify();
         }
@@ -4770,6 +4764,25 @@ impl Render for SessionRail {
                 (agent.id.clone(), bar)
             })
             .collect();
+        // The task runs each agent has going, said on its row in the list while another agent is
+        // shown: nothing running in the tree stays hidden.
+        let mut going: HashMap<String, usize> = HashMap::new();
+        for run in self.commands.read(cx).rows() {
+            if run.running() && run.is_task() {
+                *going.entry(run.agent.clone()).or_default() += 1;
+            }
+        }
+        self.last_runs.extend(going.clone());
+        let counts: HashMap<String, f32> = self
+            .agents
+            .iter()
+            .filter(|agent| agent.depth > 0)
+            .map(|agent| {
+                let on = agent.id != self.selected && going.contains_key(&agent.id);
+                let id = format!("rail-runs-count-fade-{}", agent.id);
+                (agent.id.clone(), fade(id, on, PANEL, window, cx))
+            })
+            .collect();
         let agent_row = |agent: &RailAgent| {
             let mark = self.marks[&agent.id].clone();
             let page = self.page.clone();
@@ -4799,6 +4812,43 @@ impl Render for SessionRail {
                 SharedString::from(match wakes.get(&agent.id) {
                     Some(at) => format!("waiting: wake at {}", clock(*at)),
                     None => agent.doing.clone(),
+                })
+            });
+            // A child with task runs going says how many; a click opens it with its Runs section.
+            let chip_t = counts.get(&agent.id).copied().unwrap_or_default();
+            let runs_chip = (kid && chip_t > 0.).then(|| {
+                let n = self.last_runs.get(&agent.id).copied().unwrap_or_default();
+                let said = SharedString::from(format!("{n} run{}", if n == 1 { "" } else { "s" }));
+                let (page, target) = (self.page.clone(), agent.id.clone());
+                let chip = div()
+                    .id(ElementId::Name(
+                        format!("rail-runs-count-{}", agent.id).into(),
+                    ))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(space::XS)
+                    .h(px(18.))
+                    .px(space::XS)
+                    .rounded(px(5.))
+                    .max_w(px(80.) * chip_t)
+                    .opacity(chip_t)
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .mono(10.5)
+                    .text_color(p.faint)
+                    .cursor_pointer()
+                    .aria_label(said.clone())
+                    .child(icon(Icon::Play).size(px(9.)))
+                    .child(said)
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        if let Some(page) = page.upgrade() {
+                            page.update(cx, |page, cx| page.select(&target, cx));
+                        }
+                    });
+                hoverable(chip, move |d, t| {
+                    d.bg(p.hover.opacity(t)).text_color(mix(p.faint, p.text, t))
                 })
             });
             let bar = bars.get(&agent.id).copied().unwrap_or_default();
@@ -4896,8 +4946,8 @@ impl Render for SessionRail {
                         .min_w_0()
                         .overflow_hidden()
                         .whitespace_nowrap()
-                        .child(
-                            div()
+                        .child({
+                            let name = div()
                                 .id(ElementId::Name(top_id.into()))
                                 .medium()
                                 .text_size(px(13.))
@@ -4905,8 +4955,18 @@ impl Render for SessionRail {
                                 .overflow_hidden()
                                 .aria_label(SharedString::from(name.clone()))
                                 .child(SharedString::from(name))
-                                .test_support(),
-                        )
+                                .test_support();
+                            match runs_chip {
+                                Some(chip) => div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(space::XS)
+                                    .child(name.flex_1().min_w_0())
+                                    .child(chip)
+                                    .into_any_element(),
+                                None => name.into_any_element(),
+                            }
+                        })
                         .children(said.map(|said| {
                             div()
                                 .id(ElementId::Name(format!("rail-runs-on-{}", agent.id).into()))
@@ -4993,30 +5053,16 @@ impl Render for SessionRail {
                 .map_or(1, |a| a.depth + 1);
             let indent = space::LG * depth as f32;
             let target = parent.to_owned();
-            let row = div()
-                .id(ElementId::Name(format!("rail-ended-{parent}").into()))
-                .aria_expanded(open)
-                .h(px(28.))
-                .flex()
-                .items_center()
-                .gap(space::SM)
-                .px(space::SM)
-                .rounded(px(7.))
-                .cursor_pointer()
-                .text_size(px(12.))
-                .child(
-                    icon(Icon::Chevron)
-                        .size(px(11.))
-                        .text_color(p.faint)
-                        .with_transformation(Transformation::rotate(radians(
-                            -FRAC_PI_2 * (1.0 - turn),
-                        ))),
-                )
-                .child(SharedString::from(format!("{count} ended")))
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle_ended(&target, cx)));
-            div().pl(indent).child(hoverable(row, move |d, t| {
-                d.bg(p.hover.opacity(t)).text_color(mix(p.faint, p.text, t))
-            }))
+            let said = SharedString::from(format!("{count} ended"));
+            div().pl(indent).child(ended_row(
+                ElementId::Name(format!("rail-ended-{parent}").into()),
+                said.clone(),
+                said,
+                open,
+                turn,
+                p,
+                cx.listener(move |this, _, _, cx| this.toggle_ended(&target, cx)),
+            ))
         };
         let mut rows: Vec<AnyElement> = Vec::new();
         let mut listed = listed.into_iter();
@@ -5402,10 +5448,6 @@ impl Render for SessionRail {
                 if !place.bases.is_empty() {
                     facts.push(("From", place.bases.join(", ")));
                 }
-                facts.push((
-                    "Prepared",
-                    place.prepared_ms.map_or("not yet".into(), seconds),
-                ));
             }
             (None, _) => facts.push(("Place", "the project folder".into())),
             _ => {}

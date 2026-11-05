@@ -1887,6 +1887,183 @@ fn a_codex_session_is_behind_while_its_list_is_not_the_one_it_started_with() {
     assert_eq!(said_outdated(&user, &id), [true, false]);
 }
 
+// A new build of Flottille whose tools changed (`docs/tools.md`, "When the tools change").
+
+/// The tool list the agent was last given, as stored with it.
+fn given(user: &User, id: &str) -> Value {
+    let store = Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let given = store.agent_tools_given(id).unwrap().expect("a list given");
+    serde_json::from_str(&given).unwrap()
+}
+
+/// The daemon stops, as an update stops it; `older` (when given) rewrites what the agent was last
+/// given, as an older build gave it.
+fn update(user: &User, id: &str, older: Option<&dyn Fn(&mut Value)>) {
+    eventually("the first turn ends", || shown(user, id)["state"] == "idle");
+    let mut was = given(user, id);
+    assert!(user.run(&["daemon", "stop"]).status.success());
+    if let Some(older) = older {
+        older(&mut was);
+        let mut store = Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+        store.set_agent_tools_given(id, &was.to_string()).unwrap();
+    }
+}
+
+/// The agent is sent a message after the update: the MCP server of its new process.
+fn next_process(user: &User, id: &str, provider: Option<&str>) -> (String, String) {
+    let resumes = || -> Vec<Value> {
+        let received = match provider {
+            Some(provider) => user.provider_received(provider),
+            None => user.received(),
+        };
+        received
+            .into_iter()
+            .filter(|entry| entry["received"]["method"] == "session/resume")
+            .map(|entry| entry["received"].clone())
+            .collect()
+    };
+    let reopened = resumes().len();
+    user.call("agent.send", json!({"agent": id, "message": "go on"}))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let server = loop {
+        if let Some(resumed) = resumes().get(reopened) {
+            break resumed["params"]["mcpServers"][0].clone();
+        }
+        assert!(Instant::now() < deadline, "the session was not resumed");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let authorization = server["headers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["name"] == "Authorization")
+        .unwrap()["value"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    (server["url"].as_str().unwrap().to_owned(), authorization)
+}
+
+#[test]
+fn an_agent_started_on_an_older_tool_list_is_told_they_changed() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (id, _, _) = agent(&user, json!({}));
+    // Same names, other descriptions or schemas: only the digest tells.
+    update(
+        &user,
+        &id,
+        Some(&|given: &mut Value| given["digest"] = "older".into()),
+    );
+
+    let (url, authorization) = next_process(&user, &id, None);
+    let client = Noticing::connect(&url, &authorization, ClientLifecycleMode::Initialize);
+    ok(client.call("fs_list", json!({"path": "."})));
+    assert_eq!(client.told(), 1, "told with the answer to its next call");
+    ok(client.call("fs_list", json!({"path": "."})));
+    assert_eq!(client.told(), 1, "told once");
+    assert_ne!(given(&user, &id)["digest"], "older", "the new list is kept");
+    // Only the digest changed, so no action is named and no delivery is sent.
+    eventually("the message is sent", || {
+        user.received_requests("session/prompt").len() == 2
+    });
+    let prompts = user.received_requests("session/prompt");
+    assert!(
+        !prompts[1].to_string().contains("[flottille:tools]"),
+        "{}",
+        prompts[1]
+    );
+}
+
+#[test]
+fn an_agent_whose_tools_did_not_change_is_not_told() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (id, _, _) = agent(&user, json!({}));
+    update(&user, &id, None);
+
+    let (url, authorization) = next_process(&user, &id, None);
+    let client = Noticing::connect(&url, &authorization, ClientLifecycleMode::Initialize);
+    ok(client.call("fs_list", json!({"path": "."})));
+    assert_eq!(client.told(), 0);
+}
+
+#[test]
+fn the_delivery_names_the_actions_added() {
+    let user = User::with_fake_providers();
+    user.write_providers("[codex]\nenabled = true\n");
+    project(&user);
+    declare(&user, true, false);
+    let answer = user
+        .call(
+            "agent.run",
+            json!({"project": "app", "message": "hello", "provider": "codex"}),
+        )
+        .unwrap();
+    let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+    // The build before gave `forge` no CI actions, and an action since gone.
+    update(
+        &user,
+        &id,
+        Some(&|given: &mut Value| {
+            given["digest"] = "older".into();
+            let forge = given["actions"]["forge"].as_array_mut().unwrap();
+            forge.retain(|action| action != "pipelines" && action != "run");
+            forge.push("rerun".into());
+        }),
+    );
+
+    next_process(&user, &id, Some("codex"));
+    let prompts = || -> Vec<String> {
+        user.provider_received("codex")
+            .iter()
+            .filter(|entry| entry["received"]["method"] == "session/prompt")
+            .map(|entry| entry["received"]["params"]["prompt"].to_string())
+            .collect()
+    };
+    eventually("the message is sent", || prompts().len() == 2);
+    let prompt = &prompts()[1];
+    assert!(prompt.contains("go on"), "with what woke it: {prompt}");
+    assert!(prompt.contains("[flottille:tools]"), "{prompt}");
+    assert!(
+        prompt.contains("forge: added pipelines, run; removed rerun"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("fs_list"), "only what changed: {prompt}");
+}
+
+#[test]
+fn a_claude_agent_is_told_the_actions_added_though_it_lists_again() {
+    // Seen on a real Claude session: it did not list its tools again, and the daemon accepted an
+    // action it had not been told of.
+    let user = User::with_fake_agent();
+    project(&user);
+    declare(&user, true, false);
+    let (id, _, _) = agent(&user, json!({}));
+    update(
+        &user,
+        &id,
+        Some(&|given: &mut Value| {
+            given["digest"] = "older".into();
+            let forge = given["actions"]["forge"].as_array_mut().unwrap();
+            forge.retain(|action| action != "pipelines" && action != "run");
+            forge.push("rerun".into());
+        }),
+    );
+
+    next_process(&user, &id, None);
+    eventually("the message is sent", || {
+        user.received_requests("session/prompt").len() == 2
+    });
+    let prompt = user.received_requests("session/prompt")[1].to_string();
+    assert!(prompt.contains("[flottille:tools]"), "{prompt}");
+    assert!(
+        prompt.contains("forge: added pipelines, run; removed rerun"),
+        "{prompt}"
+    );
+}
+
 #[test]
 fn a_permission_asked_after_a_change_is_answered_from_the_current_list() {
     let user = User::with_fake_agent();

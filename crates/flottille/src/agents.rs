@@ -1006,6 +1006,14 @@ async fn process(
     // A token of this process's own, which revokes the last one.
     let grant = mcp::grant_of(daemon, agent)?;
     let token = mcp::mint(daemon, grant, provider)?;
+    // What minting it queued (the tools a new build changed) goes with the prompt that woke the
+    // process: read before it answers, not a turn later.
+    if let Some(woke) = turns.queued.front_mut()
+        && let Some(more) = deliveries::pump(daemon, &agent.id)
+    {
+        woke.text = format!("{}\n\n{}", woke.text, more.text);
+        woke.images.extend(more.images);
+    }
     let mut command = Command::new(&launch.program);
     // The daemon's environment, less what the agent has no business with; what Flottille sets
     // comes after, so that it is not among the removed.
