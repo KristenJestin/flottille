@@ -612,13 +612,19 @@ fn unfold(page: &Entity<SessionPage>, at: usize, cx: &mut VisualTestContext) {
     }
 }
 
-/// Unfolds the group that holds the line of the request `number`.
+/// Unfolds the group that holds the line of the request `number`, once the page has read the
+/// conversation that holds it: a page knows a decision (an answer taken) before its conversation.
 fn unfold_request(shell: &Entity<Shell>, number: u64, cx: &mut VisualTestContext) {
     let page = session_page(shell, cx);
     let line = Block::Approval { number };
-    if let Some(at) = blocks(&page, cx).iter().position(|b| *b == line) {
-        unfold(&page, at, cx);
-    }
+    until(
+        shell,
+        cx,
+        "the request's line is in the conversation",
+        |cx| blocks(&page, cx).contains(&line),
+    );
+    let at = blocks(&page, cx).iter().position(|b| *b == line).unwrap();
+    unfold(&page, at, cx);
 }
 
 fn settle(cx: &mut VisualTestContext) {
@@ -1281,6 +1287,64 @@ fn slow_start(user: &User, delay: Duration, refuse: Option<&'static str>) -> Con
     })
 }
 
+/// The methods whose answers a relay of [`holding_answers`] keeps from the window.
+type Held = Arc<std::sync::Mutex<std::collections::HashSet<&'static str>>>;
+
+/// Connects to the user's daemon through a relay that keeps the answers to the `methods` from the
+/// window for as long as the test holds them: the daemon has answered, the window has not been
+/// told. All are held at first; the test lets a method through by removing it from the set.
+fn holding_answers(user: &User, methods: &[&'static str]) -> (Connect, Held) {
+    use std::collections::HashMap;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+    use std::sync::Mutex;
+    let connect = user.connector();
+    let held: Held = Arc::new(Mutex::new(methods.iter().copied().collect()));
+    let gates = held.clone();
+    let relay: Connect = Arc::new(move || {
+        let daemon = connect()?;
+        let (window_side, relay_side) = UnixStream::pair()?;
+        let asked: Arc<Mutex<HashMap<String, String>>> = Arc::default();
+        let (mut to_daemon, from_window) = (daemon.try_clone()?, relay_side.try_clone()?);
+        let marks = asked.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(from_window).lines() {
+                let Ok(line) = line else { return };
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+                if let Some(method) = request["method"].as_str() {
+                    marks
+                        .lock()
+                        .unwrap()
+                        .insert(request["id"].to_string(), method.to_owned());
+                }
+                if writeln!(to_daemon, "{line}").is_err() {
+                    return;
+                }
+            }
+        });
+        let (mut to_window, gates) = (relay_side, gates.clone());
+        std::thread::spawn(move || {
+            for line in BufReader::new(daemon).lines() {
+                let Ok(line) = line else { return };
+                let answer: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+                let method = asked.lock().unwrap().remove(&answer["id"].to_string());
+                let deadline = Instant::now() + Duration::from_secs(60);
+                while let Some(method) = &method
+                    && gates.lock().unwrap().contains(method.as_str())
+                    && Instant::now() < deadline
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                if writeln!(to_window, "{line}").is_err() {
+                    return;
+                }
+            }
+        });
+        Ok(window_side)
+    });
+    (relay, held)
+}
+
 /// Sends `task` from atlas's composer, to main.
 fn send_to_main(task: &str, cx: &mut VisualTestContext) {
     type_task(task, cx);
@@ -1622,7 +1686,18 @@ fn open_session<'a>(
     width: f32,
     cx: &'a mut TestAppContext,
 ) -> (Entity<Shell>, &'a mut VisualTestContext) {
-    let (shell, cx) = window(user, Arc::new(user.connector()), width, cx);
+    open_session_through(user, Arc::new(user.connector()), lead, width, cx)
+}
+
+/// [`open_session`], the window following the daemon through `connect`.
+fn open_session_through<'a>(
+    user: &User,
+    connect: Connect,
+    lead: &str,
+    width: f32,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    let (shell, cx) = window(user, connect, width, cx);
     until(&shell, cx, "the session is in the tree", |cx| {
         cx.update(|window, _| window.try_find(session_id(lead)).is_some())
     });
@@ -3455,6 +3530,63 @@ fn an_answer_given_on_one_session_s_page_is_not_applied_to_another(cx: &mut Test
             .read_with(cx, |p, _| p.id() == lead && p.decision(number).is_some())
     });
     // Answered, it is a step of the work, in its group.
+    settle(cx);
+    unfold_request(&shell, number, cx);
+    until(&shell, cx, "the record on its own page", |cx| {
+        cx.update(|window, _| {
+            window
+                .try_find(format!("approval-record-{number}"))
+                .is_some()
+        })
+    });
+}
+
+#[gpui_kit::test]
+fn an_answer_taken_before_a_page_has_read_its_conversation_finds_the_request_in_it(
+    cx: &mut TestAppContext,
+) {
+    let user = team_user();
+    let (lead, mcp, _) = lead_in_w(&user);
+    let other = start(&user, "app", None, "another task");
+    // The daemon's answer to the click, and what a page reads of the conversation, reach the
+    // window when the test lets them.
+    let (connect, held) = holding_answers(&user, &["approval.approve", "agent.show"]);
+    held.lock().unwrap().remove("agent.show");
+    let (shell, cx) = open_session_through(&user, connect, &lead, 1280., cx);
+    let number = held_number(mcp.call("fs_read", json!({"path": ".env"})));
+    until(&shell, cx, "the card is shown", |cx| {
+        cx.update(|window, _| window.try_find(format!("allow-{number}")).is_some())
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click(format!("allow-{number}"), cx));
+    eventually("the request is decided", || {
+        user.call("approval.list", json!({})).unwrap()["requests"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    });
+
+    // The session's page is opened again, its conversation not read yet; then the daemon's answer
+    // to the click reaches the window.
+    cx.update(|window, cx| window.click(session_id(&other), cx));
+    until(&shell, cx, "the other session's page", |cx| {
+        session_page(&shell, cx).read_with(cx, |p, _| p.id() == other)
+    });
+    settle(cx);
+    held.lock().unwrap().insert("agent.show");
+    cx.update(|window, cx| window.click(session_id(&lead), cx));
+    until(&shell, cx, "the session's page, not read", |cx| {
+        session_page(&shell, cx).read_with(cx, |p, _| p.id() == lead)
+    });
+    held.lock().unwrap().remove("approval.approve");
+    until(&shell, cx, "the decision on its own page", |cx| {
+        session_page(&shell, cx).read_with(cx, |p, _| p.decision(number).is_some())
+    });
+    let page = session_page(&shell, cx);
+    assert!(blocks(&page, cx).is_empty(), "the conversation is not read");
+
+    // Its conversation arrives, and the request's line is a step of the work, in its group.
+    held.lock().unwrap().remove("agent.show");
     settle(cx);
     unfold_request(&shell, number, cx);
     until(&shell, cx, "the record on its own page", |cx| {
