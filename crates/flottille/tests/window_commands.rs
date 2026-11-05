@@ -1887,3 +1887,44 @@ fn a_run_that_ends_slides_into_the_fold(cx: &mut TestAppContext) {
         "the run that ended left the running ones for the fold"
     );
 }
+
+#[gpui_kit::test]
+fn a_child_with_running_runs_says_so_in_the_agents_list(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, child, shell, cx) = with_a_child(&user, cx);
+    list_runs(
+        &shell,
+        vec![
+            run_of("r-a", &child, Some("server"), true, 1),
+            run_of("r-b", &child, Some("listener"), true, 2),
+            run_of("r-c", &child, Some("fails"), false, 3),
+            run_of("r-line", &child, None, true, 4),
+            run_of("r-root", &lead, Some("web"), true, 5),
+        ],
+        cx,
+    );
+
+    assert_eq!(
+        label(cx, &format!("rail-runs-count-{child}")).as_deref(),
+        Some("2 runs"),
+        "its task runs still going, counted"
+    );
+    assert!(has(cx, "command-r-root"), "the root's own runs are listed");
+    assert!(!has(cx, "command-r-a"));
+
+    cx.update(|window, cx| window.click(format!("rail-runs-count-{child}"), cx));
+    settle(cx);
+    let page = session_page(&shell, cx);
+    assert_eq!(page.read_with(cx, |page, _| page.shown().to_owned()), child);
+    assert!(has(cx, "command-r-a") && has(cx, "command-r-b"));
+
+    list_runs(
+        &shell,
+        vec![run_of("r-c", &child, Some("fails"), false, 3)],
+        cx,
+    );
+    assert!(
+        !has(cx, &format!("rail-runs-count-{child}")),
+        "nothing running: nothing said"
+    );
+}

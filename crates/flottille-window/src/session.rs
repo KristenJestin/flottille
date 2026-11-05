@@ -4359,6 +4359,8 @@ pub struct SessionRail {
     ended_folds: HashMap<String, EndedFold>,
     /// How far the bar of each agent's gauge is filled, following the use.
     gauges: HashMap<String, Motion>,
+    /// How many task runs each agent last had going: its row says it while the count folds away.
+    last_runs: HashMap<String, usize>,
     selected: String,
     workspace: Option<String>,
     project: String,
@@ -4445,6 +4447,7 @@ impl SessionRail {
             open_ended: HashSet::new(),
             ended_folds: HashMap::new(),
             gauges: HashMap::new(),
+            last_runs: HashMap::new(),
             menu,
             agent_menu,
             selected: root,
@@ -4614,11 +4617,11 @@ impl SessionRail {
 
     fn set_selected(&mut self, selected: String, cx: &mut Context<Self>) {
         if self.selected != selected {
+            self.commands
+                .update(cx, |commands, cx| commands.show_agent(&selected, cx));
             self.selected = selected;
             cx.notify();
         }
-            self.commands
-                .update(cx, |commands, cx| commands.show_agent(&selected, cx));
     }
 
     /// The place's facts; `None` when the daemon has none (the workspace was removed).
@@ -4735,6 +4738,25 @@ impl Render for SessionRail {
                 (agent.id.clone(), bar)
             })
             .collect();
+        // The task runs each agent has going, said on its row in the list while another agent is
+        // shown: nothing running in the tree stays hidden.
+        let mut going: HashMap<String, usize> = HashMap::new();
+        for run in self.commands.read(cx).rows() {
+            if run.running() && run.is_task() {
+                *going.entry(run.agent.clone()).or_default() += 1;
+            }
+        }
+        self.last_runs.extend(going.clone());
+        let counts: HashMap<String, f32> = self
+            .agents
+            .iter()
+            .filter(|agent| agent.depth > 0)
+            .map(|agent| {
+                let on = agent.id != self.selected && going.contains_key(&agent.id);
+                let id = format!("rail-runs-count-fade-{}", agent.id);
+                (agent.id.clone(), fade(id, on, PANEL, window, cx))
+            })
+            .collect();
         let agent_row = |agent: &RailAgent| {
             let mark = self.marks[&agent.id].clone();
             let page = self.page.clone();
@@ -4764,6 +4786,43 @@ impl Render for SessionRail {
                 SharedString::from(match wakes.get(&agent.id) {
                     Some(at) => format!("waiting: wake at {}", clock(*at)),
                     None => agent.doing.clone(),
+                })
+            });
+            // A child with task runs going says how many; a click opens it with its Runs section.
+            let chip_t = counts.get(&agent.id).copied().unwrap_or_default();
+            let runs_chip = (kid && chip_t > 0.).then(|| {
+                let n = self.last_runs.get(&agent.id).copied().unwrap_or_default();
+                let said = SharedString::from(format!("{n} run{}", if n == 1 { "" } else { "s" }));
+                let (page, target) = (self.page.clone(), agent.id.clone());
+                let chip = div()
+                    .id(ElementId::Name(
+                        format!("rail-runs-count-{}", agent.id).into(),
+                    ))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(space::XS)
+                    .h(px(18.))
+                    .px(space::XS)
+                    .rounded(px(5.))
+                    .max_w(px(80.) * chip_t)
+                    .opacity(chip_t)
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .mono(10.5)
+                    .text_color(p.faint)
+                    .cursor_pointer()
+                    .aria_label(said.clone())
+                    .child(icon(Icon::Play).size(px(9.)))
+                    .child(said)
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        if let Some(page) = page.upgrade() {
+                            page.update(cx, |page, cx| page.select(&target, cx));
+                        }
+                    });
+                hoverable(chip, move |d, t| {
+                    d.bg(p.hover.opacity(t)).text_color(mix(p.faint, p.text, t))
                 })
             });
             let bar = bars.get(&agent.id).copied().unwrap_or_default();
@@ -4861,8 +4920,8 @@ impl Render for SessionRail {
                         .min_w_0()
                         .overflow_hidden()
                         .whitespace_nowrap()
-                        .child(
-                            div()
+                        .child({
+                            let name = div()
                                 .id(ElementId::Name(top_id.into()))
                                 .medium()
                                 .text_size(px(13.))
@@ -4870,8 +4929,18 @@ impl Render for SessionRail {
                                 .overflow_hidden()
                                 .aria_label(SharedString::from(name.clone()))
                                 .child(SharedString::from(name))
-                                .test_support(),
-                        )
+                                .test_support();
+                            match runs_chip {
+                                Some(chip) => div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(space::XS)
+                                    .child(name.flex_1().min_w_0())
+                                    .child(chip)
+                                    .into_any_element(),
+                                None => name.into_any_element(),
+                            }
+                        })
                         .children(said.map(|said| {
                             div()
                                 .id(ElementId::Name(format!("rail-runs-on-{}", agent.id).into()))
