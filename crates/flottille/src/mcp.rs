@@ -349,6 +349,7 @@ const SERVED: [Definition; 28] = [
                 "delete_branch": {"type": "boolean", "description": "close: also delete the pull request's branch, unless a workspace is on it or it comes from a fork."},
                 "waive": {"type": "string", "description": "merge: the user's words letting a blocked pull request be merged; held for them."},
                 "method": {"type": "string", "enum": ["squash", "merge", "rebase"], "description": "merge: squash when left out."},
+                "message": {"type": "string", "description": "merge by squash: the squashed commit's message, its subject on the first line; the forge's own when left out."},
                 "events": {"type": "array", "items": {"enum": crate::forge::EVENTS}},
                 "from": {"enum": crate::subscriptions::FROM, "description": "subscribe: whose reviews and comments count: anyone (the default), or people (no bot nor agent)."},
                 "minutes": {"type": "integer", "minimum": 1, "maximum": crate::subscriptions::LONGEST_MINUTES, "description": "subscribe: how long it waits; sized by CI when left out, else 60."},

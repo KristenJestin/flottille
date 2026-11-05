@@ -391,6 +391,16 @@ pub async fn run(
         crate::mcp::started_run(&going.run.id);
         return Outcome::Done(describe(daemon, &going.run.id, None, None, true, false));
     }
+    // The project's checks of a commit's message, before git makes it.
+    let at = crate::message_checks::Where {
+        daemon,
+        place,
+        repository: &repository,
+        folder: &folder.path,
+    };
+    if let Err(refusal) = crate::message_checks::commits(&at, &words).await {
+        return Outcome::Refused(refusal);
+    }
     // Only a push the gate read, and that the user or the judge let through, goes out.
     let lift = approved && gate::is_push(&words);
     let env = match environment(daemon, place, &repository, lift) {
@@ -569,7 +579,7 @@ fn wait_for_end(daemon: &Daemon, id: &str) -> impl Future<Output = ()> + use<> {
 
 /// The environment of a run in the place: the daemon's, the place's variables filled, the forges
 /// and the daemon kept out of reach, and pushes too unless `lift`.
-fn environment(
+pub(crate) fn environment(
     daemon: &Daemon,
     place: &Place,
     repository: &str,
