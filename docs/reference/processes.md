@@ -33,8 +33,14 @@ When such a command ends (by itself, stopped, past its time limit, the daemon st
 left by a daemon that died), its group is killed, then every process of its session:
 `/proc` is read for the processes in that session, and each is sent `SIGKILL` through a pidfd
 opened before its session is read again, so a process that took the pid of one that ended
-meanwhile is never signalled. This is read again until none is found.
+meanwhile is never signalled. This is read again, after a pause of a few milliseconds that grows
+each time, until none is found, ten times at most: a process may start another as it is killed.
+`/proc` is read off the daemon's async workers and never while the store is held.
 
-This needs no cgroup, so it works the same in a container, as a systemd user service, or
-anywhere else. What escapes it: a process that starts a session of its own (`setsid`, a daemon
-that detaches). It keeps running; once it ends, the sweep waits for it.
+This needs no cgroup, only `pidfd_open` (Linux 5.3 and later), so it works in a container or as a
+systemd user service alike. Where `pidfd_open` is refused (an older kernel, a seccomp filter),
+the daemon says so once in its log and ends only the command's process group: nothing is ever
+signalled by its bare pid, so what a command left in a group of its own keeps running, and the
+sweep waits for it once it ends. What escapes it everywhere: a process that starts a session of
+its own (`setsid`, a daemon that detaches). It keeps running; once it ends, the sweep waits for
+it.
