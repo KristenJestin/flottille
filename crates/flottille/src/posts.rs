@@ -294,12 +294,7 @@ pub(crate) fn record_comment(
 }
 
 /// A comment an agent changed: one record of its id, with the new words.
-pub(crate) fn replace_comment(
-    daemon: &Daemon,
-    on: (&str, &str, &str, &str),
-    id: &str,
-    text: &str,
-) {
+pub(crate) fn replace_comment(daemon: &Daemon, on: (&str, &str, &str, &str), id: &str, text: &str) {
     drop_comment(daemon, on, id);
     record_comment(daemon, on, Some(id.to_owned()), text);
 }
