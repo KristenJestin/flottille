@@ -71,6 +71,24 @@
 //!   saying so otherwise. These are the work item's transitions as Jira would answer them: the
 //!   fake is the only place they are known, since the real `acli` lists none.
 //!
+//! The links (#365, `docs/tickets.md`, "Links and comments"), in the shape of Jira's REST API,
+//! which `acli`'s pages give no output for (assumed): `acli jira workitem link type --json`
+//! prints the script's `link_types` (`[{"id": "1", "name": "Blocks", "inward": "is blocked by",
+//! "outward": "blocks"}]`, `[]` without). `link create --out A --in B --type T --yes` ends with
+//! 0 for two work items of `items` and a type whose **outward wording** is T (the page says it
+//! accepts those), with 1 saying why otherwise, and keeps the link in `linked.json` numbered from
+//! 10000. `link list --key K --json` prints K's links, those of the script's `links` (`[{"id":
+//! "500", "type": "Blocks", "out": "ABC-2", "in": "ABC-1"}, {"id": "502", "web": {"title": …,
+//! "url": …}, "on": "ABC-1"}]`) and those created, as `{"id", "type": {name, inward, outward},
+//! "inwardIssue" | "outwardIssue": {"key", "fields": {summary, status}}}`: an `inwardIssue` when K
+//! is the outward end (K blocks it), an `outwardIssue` when K is the inward end; a web link is
+//! `{"id", "object": {"title", "url"}}`. `link delete --id N --yes` ends with 0 for a link that
+//! is there, 1 otherwise, and keeps the ids deleted in `unlinked.json`.
+//!
+//! `comment update --key K --id I (--body | --body-file)` and `comment delete --key K --id I`
+//! change the comments a `comment create` added, which are numbered from 10100 (`id`, in the
+//! views); the script's own comments take an `id` of their own.
+//!
 //! A transition that ends with 0 moves the work item: a later `view` shows the status as the
 //! script spells it in `transitions` (kept in `moved.json`). Three more script keys, each a list
 //! of work item keys (`die` a map of key to `"before"` or `"after"`), play what a real `acli` does:
@@ -240,6 +258,107 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
                 .collect();
             println!("{}", json!({"key": project, "issueTypes": types}));
             0
+        }
+        ["jira", "workitem", "link", "type", rest @ ..] if rest.contains(&"--json") => {
+            let types = match &script["link_types"] {
+                Value::Array(types) => types.clone(),
+                _ => Vec::new(),
+            };
+            println!("{}", Value::from(types));
+            0
+        }
+        ["jira", "workitem", "link", "create", rest @ ..] if rest.contains(&"--yes") => {
+            let (Some(out), Some(inward), Some(kind)) = (
+                value(rest, "--out"),
+                value(rest, "--in"),
+                value(rest, "--type"),
+            ) else {
+                return not_run(&words);
+            };
+            for key in [out, inward] {
+                if script["items"].get(key).is_none() {
+                    eprintln!("✗ Error: work item {key} does not exist");
+                    return 1;
+                }
+            }
+            let Some(found) = link_types(script).into_iter().find(|t| {
+                t["outward"]
+                    .as_str()
+                    .is_some_and(|outward| outward.eq_ignore_ascii_case(kind))
+            }) else {
+                eprintln!("✗ Error: link type {kind:?} not found");
+                return 1;
+            };
+            let mut made = links_file(dir, "linked.json");
+            let id = (10000 + made.len()).to_string();
+            made.push(json!({"id": id, "type": found["name"], "out": out, "in": inward}));
+            std::fs::write(dir.join("linked.json"), Value::from(made).to_string())
+                .expect("the links");
+            println!("✓ Link created {id}");
+            0
+        }
+        ["jira", "workitem", "link", "list", rest @ ..] if rest.contains(&"--json") => {
+            let Some(key) = value(rest, "--key") else {
+                return not_run(&words);
+            };
+            let gone = links_file(dir, "unlinked.json");
+            let all = script["links"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .cloned()
+                .chain(links_file(dir, "linked.json"))
+                .filter(|link| !gone.contains(&link["id"]));
+            let entries: Vec<Value> = all.filter_map(|link| link_of(script, &link, key)).collect();
+            println!("{}", Value::from(entries));
+            0
+        }
+        ["jira", "workitem", "link", "delete", rest @ ..] if rest.contains(&"--yes") => {
+            let Some(id) = value(rest, "--id") else {
+                return not_run(&words);
+            };
+            let mut gone = links_file(dir, "unlinked.json");
+            let there = script["links"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .cloned()
+                .chain(links_file(dir, "linked.json"))
+                .any(|link| link["id"] == id && !gone.contains(&link["id"]));
+            if !there {
+                eprintln!("✗ Error: link {id} does not exist");
+                return 1;
+            }
+            gone.push(Value::from(id));
+            std::fs::write(dir.join("unlinked.json"), Value::from(gone).to_string())
+                .expect("the links");
+            println!("✓ Link {id} deleted");
+            0
+        }
+        ["jira", "workitem", "comment", "update", rest @ ..]
+            if rest.contains(&"--body") || rest.contains(&"--body-file") =>
+        {
+            let done = known(script, rest);
+            let body = match value(rest, "--body") {
+                Some(text) => Some(Value::from(text)),
+                None => value(rest, "--body-file").and_then(file_text),
+            };
+            if let (0, Some(key), Some(id), Some(body)) =
+                (done, value(rest, "--key"), value(rest, "--id"), body)
+                && let Some(at) = posted_at(id)
+            {
+                change_post(dir, key, at, Some(body));
+            }
+            done
+        }
+        ["jira", "workitem", "comment", "delete", rest @ ..] => {
+            let done = known(script, rest);
+            if let (0, Some(key), Some(id)) = (done, value(rest, "--key"), value(rest, "--id"))
+                && let Some(at) = posted_at(id)
+            {
+                change_post(dir, key, at, None);
+            }
+            done
         }
         ["jira", "workitem", "comment", "create", rest @ ..]
             if rest.contains(&"--body") || rest.contains(&"--body-file") =>
@@ -464,6 +583,64 @@ fn post(dir: &Path, key: &str, body: Value) {
     std::fs::write(dir.join("posted.json"), Value::from(all).to_string()).expect("the comments");
 }
 
+/// The types the script gives for links.
+fn link_types(script: &Value) -> Vec<Value> {
+    script["link_types"].as_array().cloned().unwrap_or_default()
+}
+
+/// A list of links kept in `name` of the fake's folder.
+fn links_file(dir: &Path, name: &str) -> Vec<Value> {
+    std::fs::read_to_string(dir.join(name))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// One link as `link list --key K` prints it, none when K is not on it.
+fn link_of(script: &Value, link: &Value, key: &str) -> Option<Value> {
+    if let Some(web) = link.get("web") {
+        return (link["on"] == key).then(
+            || json!({"id": link["id"], "object": {"title": web["title"], "url": web["url"]}}),
+        );
+    }
+    let kind = link_types(script)
+        .into_iter()
+        .find(|t| t["name"] == link["type"])?;
+    let issue = |other: &Value| {
+        let item = &script["items"][other.as_str().unwrap_or_default()];
+        json!({"key": other, "fields": {"summary": item["fields"]["summary"],
+            "status": item["fields"]["status"]}})
+    };
+    let kind = json!({"name": kind["name"], "inward": kind["inward"], "outward": kind["outward"]});
+    if link["out"] == key {
+        Some(json!({"id": link["id"], "type": kind, "inwardIssue": issue(&link["in"])}))
+    } else if link["in"] == key {
+        Some(json!({"id": link["id"], "type": kind, "outwardIssue": issue(&link["out"])}))
+    } else {
+        None
+    }
+}
+
+/// The place in `posted.json` of a comment id handed out by the views (10100, 10101, …).
+fn posted_at(id: &str) -> Option<usize> {
+    id.parse::<usize>().ok()?.checked_sub(10100)
+}
+
+/// Replaces (or, for none, deletes) the comment created at `at` on `key`.
+fn change_post(dir: &Path, key: &str, at: usize, body: Option<Value>) {
+    let mut all = posted(dir);
+    let mut comments = all
+        .get(key)
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(slot) = comments.get_mut(at) {
+        *slot = body.unwrap_or(Value::Null);
+    }
+    all.insert(key.to_owned(), Value::from(comments));
+    std::fs::write(dir.join("posted.json"), Value::from(all).to_string()).expect("the comments");
+}
+
 /// Adds the comments created on `key` to the work item's, by the script's `user`.
 fn add_posted(dir: &Path, script: &Value, key: &str, item: &mut Value) {
     let Some(created) = posted(dir).get(key).and_then(Value::as_array).cloned() else {
@@ -474,10 +651,13 @@ fn add_posted(dir: &Path, script: &Value, key: &str, item: &mut Value) {
     if !comments.is_array() {
         *comments = json!([]);
     }
-    for body in created {
+    for (at, body) in created.into_iter().enumerate() {
+        if body.is_null() {
+            continue;
+        }
         comments.as_array_mut().expect("an array").push(
-            json!({"author": {"displayName": user}, "created": "2026-10-01T12:00:00.000+0000",
-                "body": body}),
+            json!({"id": (10100 + at).to_string(), "author": {"displayName": user},
+                "created": "2026-10-01T12:00:00.000+0000", "body": body}),
         );
     }
 }

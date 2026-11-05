@@ -902,7 +902,9 @@ fn ticket_read_returns_the_workspace_s_ticket_or_another_of_its_tracker_and_neve
     // Read only: every call either CLI got is one of the reads, and the gate held nothing.
     for call in calls(user.acli_received()) {
         assert!(
-            call == "jira auth status" || call.starts_with("jira workitem view "),
+            call == "jira auth status"
+                || call.starts_with("jira workitem view ")
+                || call.starts_with("jira workitem link list "),
             "{call}"
         );
     }

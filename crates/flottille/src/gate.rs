@@ -643,8 +643,8 @@ fn forge(call: &Call) -> Verdict {
 pub const FORGE_ACTIONS: &str = "list, show, subscribe, unsubscribe, create, comment, edit, merge, checks, close, reopen, \
      pipelines, runs, run_view, run_logs, run, stop and step";
 /// The actions of `tickets`, as a refusal names them.
-pub const TICKET_ACTIONS: &str = "list, search, show, types, subscribe, unsubscribe, create, comment, edit, close, reopen and \
-     status";
+pub const TICKET_ACTIONS: &str = "list, search, show, types, link_types, subscribe, unsubscribe, create, comment, edit, \
+     close, reopen, status, link, unlink, comment_edit, comment_delete and sprint";
 /// What `tickets close` closes for, as `gh issue close --reason` names it.
 pub const CLOSE_REASONS: [&str; 2] = ["completed", "not planned"];
 /// The arguments of `tickets` that belong to `edit` or `close` alone.
@@ -659,19 +659,39 @@ const TICKET_ONLY: [(&str, &str); 4] = [
 /// to the tracker are to judge.
 fn tickets(call: &Call) -> Verdict {
     let action = call.args["action"].as_str().unwrap_or_default();
+    let words = |key: &str| call.args[key].as_str().unwrap_or("?").trim().to_owned();
     let said = match action {
-        "list" | "search" | "show" | "types" | "subscribe" | "unsubscribe" => {
+        "list" | "search" | "show" | "types" | "link_types" | "subscribe" | "unsubscribe" => {
             return Verdict::Allow;
         }
-        "create" => "it opens a ticket on the tracker",
-        "comment" => "it comments on a ticket on the tracker",
+        // The link as the ticket named reads it, so that the card says its direction.
+        "link" => format!(
+            "it links two tickets on the tracker: {} {} {}",
+            words("ticket"),
+            words("kind"),
+            words("other")
+        ),
+        "unlink" => format!(
+            "it removes a link between two tickets on the tracker: {} {} {}",
+            words("ticket"),
+            words("kind"),
+            words("other")
+        ),
+        "comment_edit" => "it changes a comment an agent posted on a ticket of the tracker".into(),
+        "comment_delete" => {
+            "it deletes a comment an agent posted on a ticket of the tracker".into()
+        }
+        "sprint" => "it puts a ticket in a sprint on the tracker".into(),
+        "create" => "it opens a ticket on the tracker".into(),
+        "comment" => "it comments on a ticket on the tracker".into(),
         "edit" => {
             "it changes the title, the description, the labels or the assignees of a ticket on \
              the tracker"
+                .into()
         }
-        "close" => "it closes a ticket on the tracker",
-        "reopen" => "it reopens a ticket on the tracker",
-        "status" => "it moves a ticket to another status on the tracker",
+        "close" => "it closes a ticket on the tracker".into(),
+        "reopen" => "it reopens a ticket on the tracker".into(),
+        "status" => "it moves a ticket to another status on the tracker".into(),
         _ => {
             return Verdict::Deny(format!(
                 "refused: tickets has no action {action:?}: its actions are {TICKET_ACTIONS}"
@@ -679,8 +699,10 @@ fn tickets(call: &Call) -> Verdict {
         }
     };
     let none: &[&str] = match action {
-        "comment" => &["title"],
-        "close" | "reopen" | "status" => &["title", "body"],
+        "comment" | "comment_edit" => &["title"],
+        "close" | "reopen" | "status" | "link" | "unlink" | "comment_delete" | "sprint" => {
+            &["title", "body"]
+        }
         _ => &[],
     };
     if let Err(refused) = untexted("tickets", action, call.args, none) {
@@ -710,7 +732,7 @@ fn tickets(call: &Call) -> Verdict {
         ));
     }
     let mut found = Found::default();
-    found.judge(said.into());
+    found.judge(said);
     if let Err(refused) = texts(
         call.grant,
         call.args,
@@ -3910,6 +3932,7 @@ mod tests {
                 ("tickets", "list"),
                 ("tickets", "search"),
                 ("tickets", "show"),
+                ("tickets", "link_types"),
                 ("workspace", "list"),
             ] {
                 assert_eq!(
@@ -4087,7 +4110,19 @@ mod tests {
     #[test]
     fn to_judge_ticket_writes_are_judged_and_an_unknown_action_refused() {
         let fixture = Fixture::main();
-        for action in ["create", "comment", "edit", "close", "reopen", "status"] {
+        for action in [
+            "create",
+            "comment",
+            "edit",
+            "close",
+            "reopen",
+            "status",
+            "link",
+            "unlink",
+            "comment_edit",
+            "comment_delete",
+            "sprint",
+        ] {
             let verdict = fixture.judge(
                 "tickets",
                 json!({"action": action, "ticket": "#1"}),

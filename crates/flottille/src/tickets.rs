@@ -33,8 +33,10 @@ use crate::place::Place;
 use crate::projects::{self, Failure};
 
 mod events;
+mod links;
 
 pub use events::{EVENTS, offer, reference_of, target_named};
+pub use links::checked as checked_links;
 
 /// A call of `acli` is cut after this.
 const ACLI_TIME: Duration = Duration::from_secs(30);
@@ -183,8 +185,13 @@ impl Ticket {
                     .at
                     .as_deref()
                     .map_or(String::new(), |at| format!(", {at}"));
+                // The id of a comment an agent posted: what `comment_edit` and `comment_delete` take.
+                let id = match (&comment.id, comment.agent) {
+                    (Some(id), true) => format!(" [comment {id}]"),
+                    _ => String::new(),
+                };
                 text.push_str(&format!(
-                    "- {}{at}: {}\n",
+                    "- {}{id}{at}: {}\n",
                     comment.by(),
                     comment.body.replace('\n', "\n    ")
                 ));
@@ -480,7 +487,7 @@ fn work_item_comments(fields: &Value) -> Vec<Comment> {
             comment_of(
                 said(&comment["author"]["displayName"]),
                 comment["created"].as_str(),
-                None,
+                comment["id"].as_str().map(str::to_owned),
                 &masked(&document_text(&comment["body"])),
             )
         })
@@ -687,6 +694,15 @@ struct TicketsCall {
     from: Option<String>,
     /// subscribe: how long it waits at most.
     minutes: Option<u64>,
+    /// `link`, `unlink`: the other ticket, and the kind of link, read as `ticket kind other`.
+    other: Option<String>,
+    #[serde(rename = "kind")]
+    link_kind: Option<String>,
+    /// `comment_edit`, `comment_delete`: the id of a comment an agent posted.
+    comment: Option<String>,
+    /// `sprint`: refused, said why (`links::unwritable`).
+    #[allow(dead_code)]
+    sprint: Option<String>,
 }
 
 /// A field that is there even when it is `null`: `Some(None)` for `null`, `None` when left out.
@@ -713,7 +729,19 @@ impl TicketsCall {
 }
 
 /// The writes of `tickets`.
-const WRITES: [&str; 6] = ["create", "comment", "edit", "close", "reopen", "status"];
+const WRITES: [&str; 11] = [
+    "create",
+    "comment",
+    "edit",
+    "close",
+    "reopen",
+    "status",
+    "link",
+    "unlink",
+    "comment_edit",
+    "comment_delete",
+    "sprint",
+];
 
 /// Why a write of `tickets` cannot be done on the project's tracker, before anyone is asked: a
 /// ticket or a Jira project the tracker does not take, a status not named.
@@ -721,6 +749,9 @@ pub fn unwritable(project: &Project, args: &Value) -> Option<String> {
     let action = args["action"].as_str()?;
     if !WRITES.contains(&action) {
         return None;
+    }
+    if let Some(why) = links::unwritable(project, action, args) {
+        return Some(why);
     }
     let tracker = project.tracker.as_ref()?;
     if let Some(Err(why)) = args["ticket"].as_str().map(|text| accepted(project, text)) {
@@ -910,16 +941,22 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
         "list" | "search" => listed(daemon, &project, &asked).await,
         "show" => show(daemon, place, &project, &asked).await,
         "types" => types(&project, &asked).await,
+        "link_types" => links::types(&project).await,
         "subscribe" => events::subscribe(daemon, agent, place, &project, &asked).await,
         "unsubscribe" => events::unsubscribe(daemon, agent, &project, &asked),
         "create" => create(daemon, &project, &asked).await,
-        "comment" | "edit" | "close" | "reopen" | "status" => {
+        "comment" | "edit" | "close" | "reopen" | "status" | "link" | "unlink" | "comment_edit"
+        | "comment_delete" => {
             let key = match key_of(daemon, place, &project, &asked) {
                 Ok(key) => key,
                 Err(refusal) => return refusal,
             };
             match asked.action.as_str() {
                 "status" => status(daemon, &project, &asked, &key).await,
+                "link" | "unlink" => links::link(&project, &asked, &key).await,
+                "comment_edit" | "comment_delete" => {
+                    links::comment(daemon, &project, &asked, &key).await
+                }
                 _ => write(daemon, &project, &asked, &key).await,
             }
         }
@@ -1372,7 +1409,8 @@ async fn show(
             if held.is_some() {
                 events::remember(daemon, project, &key, &ticket);
             }
-            Outcome::Done(ticket.text(full, asked.ticket.as_deref()))
+            let links = links::section(project, &key).await;
+            Outcome::Done(ticket.text(full, asked.ticket.as_deref()) + &links)
         }
         Err(problem) => Outcome::Failed(format!(
             "the ticket {} could not be read: {problem}",
