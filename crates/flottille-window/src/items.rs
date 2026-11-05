@@ -12,7 +12,7 @@ use flottille_ui::motion::PANEL;
 use flottille_ui::{
     AgentState, Block, Button, Card, EmptyLine, FlatRow, Icon, LINE_GAP, LabelledLine, ListCard,
     ListRow, Listing, Modal, Section, Segmented, Select, SelectOption, StateIcon, Status, Switch,
-    Tabs, Type, enter, fade, icon, palette, presence, presence_of, space,
+    Tabs, Type, enter, fade, icon, palette, presence, presence_of, space, tipped,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -272,6 +272,8 @@ pub struct Source {
     pub target: String,
     /// Why its last round failed.
     pub problem: Option<String>,
+    /// Why it cannot tell which of its items are the user's.
+    pub mine_unknown: Option<String>,
 }
 
 /// What a read of the project's items gave: the items, their sources, and what the project
@@ -304,6 +306,7 @@ impl Read {
                     kind: source["kind"].as_str().unwrap_or_default().to_owned(),
                     target: source["target"].as_str().unwrap_or_default().to_owned(),
                     problem: source["problem"].as_str().map(str::to_owned),
+                    mine_unknown: source["mine_unknown"].as_str().map(str::to_owned),
                 })
                 .collect(),
             forges: settings["repositories"]
@@ -660,6 +663,27 @@ impl ProjectItems {
         cx.notify();
     }
 
+    /// Why "Mine only" means nothing on the tab of `kind`: none of its sources can tell the
+    /// user's items, each saying why. None while one of them can, or none was read yet.
+    pub fn mine_unknown(&self, kind: Kind) -> Option<String> {
+        let Some(Ok(read)) = &self.read else {
+            return None;
+        };
+        let sources: Vec<&Source> = read
+            .sources
+            .iter()
+            .filter(|source| source.kind == kind.word())
+            .collect();
+        let mut why: Vec<&str> = Vec::new();
+        for source in &sources {
+            let reason = source.mine_unknown.as_deref()?;
+            if !why.contains(&reason) {
+                why.push(reason);
+            }
+        }
+        (!why.is_empty()).then(|| format!("Who you are is not known: {}", why.join("; ")))
+    }
+
     /// The rows of `kind` the filters keep, the most recently changed first.
     fn kept(&self, kind: Kind) -> Vec<ItemRow> {
         let Some(Ok(read)) = &self.read else {
@@ -673,7 +697,7 @@ impl ProjectItems {
                 Shown::Closed => row.closed(),
                 Shown::All => true,
             })
-            .filter(|row| !self.mine || row.mine)
+            .filter(|row| !self.mine || self.mine_unknown(kind).is_some() || row.mine)
             .filter(|row| {
                 kind == Kind::Tickets
                     || self
@@ -856,7 +880,12 @@ impl ProjectItems {
 
     /// The filters of the chosen tab: the states, the user's own, and a repository for the pull
     /// requests of a project of several.
-    fn filters(&self, forges: &[String], cx: &mut Context<Self>) -> AnyElement {
+    fn filters(
+        &self,
+        forges: &[String],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let p = palette(cx);
         let this = cx.weak_entity();
         let chosen = SHOWN
@@ -876,12 +905,24 @@ impl ProjectItems {
                 this.update(cx, |this, cx| this.show(shown, cx)).ok();
             }
         });
-        let mine = Switch::new("project-items-mine", self.mine, "Mine only").on_click({
+        let unknown = self.mine_unknown(self.tab);
+        let mine = Switch::new(
+            "project-items-mine",
+            self.mine && unknown.is_none(),
+            "Mine only",
+        )
+        .disabled(unknown.is_some())
+        .on_click({
             let this = this.clone();
             move |_, _, cx| {
                 this.update(cx, |this, cx| this.toggle_mine(cx)).ok();
             }
         });
+        let mine = div().id("project-items-mine-switch").child(mine);
+        let mine = match unknown {
+            Some(why) => tipped(mine, why, 32., window, cx).into_any_element(),
+            None => mine.into_any_element(),
+        };
         let repository = (self.tab == Kind::Pulls && forges.len() > 1).then(|| {
             let options = std::iter::once(SelectOption::new("all", "All repositories")).chain(
                 forges.iter().map(|path| {
@@ -1342,7 +1383,7 @@ impl Render for ProjectItems {
                 "project-items-filters-block",
                 set == Some(true),
                 {
-                    let filters = self.filters(&forges, cx);
+                    let filters = self.filters(&forges, window, cx);
                     div().pb(space::MD).child(filters)
                 },
             ))
