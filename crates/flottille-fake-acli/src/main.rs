@@ -47,8 +47,8 @@
 //! the work items of the signed-in user. A search whose `--fields` is `key` alone prints `null`
 //! for each work item it finds, as the real one was seen to: `key` is no field of `fields`.
 //! Otherwise each work item is Jira's REST issue as a real site printed it: `key`, `id` and `self`
-//! at the top, the other parts (`changelog`, `names`, …) `null`; its `fields` are the script's
-//! whole, where the real one prints only those asked. With `--count` it prints `✓ Number of work items in the search: N` instead. The
+//! at the top, the other parts (`changelog`, `names`, …) `null`; its `fields` are those of the
+//! script that `--fields` asks (all of them without it). With `--count` it prints `✓ Number of work items in the search: N` instead. The
 //! script's `page` is how many a search prints at most without `--paginate`, none by default.
 //!
 //! `acli jira project view --key P --json` prints `{"key": P, "issueTypes": [{"name": …, "subtask":
@@ -225,9 +225,10 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
             if value(rest, "--fields") == Some("key") {
                 found = vec![Value::Null; found.len()];
             }
-            // Its `fields` are the script's whole: the real one prints only those asked, and
-            // `updated` is never among them (refused), which the comments' reads still count on.
+            // The real one prints only the fields asked, and `updated` is never among them
+            // (refused): a round learns a change from the search's window, not from a date.
             for item in found.iter_mut().filter(|item| item.is_object()) {
+                only_asked(rest, item);
                 enveloped(item);
             }
             println!("{}", Value::from(found));
