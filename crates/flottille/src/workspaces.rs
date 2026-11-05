@@ -1511,7 +1511,7 @@ async fn run_line(
         .stderr(writer)
         .process_group(0)
         .kill_on_drop(true);
-    let spawned = command.spawn();
+    let spawned = crate::children::spawn(&mut command);
     // The command holds the pipe's writing end: dropped, only the processes hold it.
     drop(command);
     let mut child = spawned.map_err(|error| format!("cannot run {}: {error}", words[0]))?;

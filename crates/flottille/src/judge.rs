@@ -707,17 +707,18 @@ async fn ask(daemon: &Daemon, judge: &Judge, prompt: &str) -> Result<String, Str
             command.env_remove(name);
         }
     }
-    let mut child = command
-        .envs(launch.env.iter().map(|(name, value)| (name, value)))
-        .args(&launch.args)
-        .current_dir(&folder)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| format!("cannot start {}: {e}", launch.program.display()))?;
+    let mut child = crate::children::spawn(
+        command
+            .envs(launch.env.iter().map(|(name, value)| (name, value)))
+            .args(&launch.args)
+            .current_dir(&folder)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .kill_on_drop(true),
+    )
+    .map_err(|e| format!("cannot start {}: {e}", launch.program.display()))?;
     let _group = child.id().map(Group);
     let stdin = child.stdin.take().ok_or("the judge has no stdin")?;
     let stdout = child.stdout.take().ok_or("the judge has no stdout")?;

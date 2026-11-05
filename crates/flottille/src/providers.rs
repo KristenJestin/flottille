@@ -496,13 +496,14 @@ fn version_of(program: &Path, ask: bool) -> Option<Option<String>> {
 }
 
 fn ask_version(program: &Path) -> Option<String> {
-    let mut child = Command::new(program)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+    let mut child = crate::children::spawn_std(
+        Command::new(program)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .ok()?;
     let deadline = Instant::now() + Duration::from_secs(5);
     while child.try_wait().ok()?.is_none() {
         if Instant::now() > deadline {

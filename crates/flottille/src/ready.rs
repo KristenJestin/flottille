@@ -188,17 +188,18 @@ fn spawn(
     let output = || {
         if piped { Stdio::piped() } else { Stdio::null() }
     };
-    tokio::process::Command::new(&words[0])
-        .args(&words[1..])
-        .env_clear()
-        .envs(env)
-        .current_dir(folder)
-        .stdin(Stdio::null())
-        .stdout(output())
-        .stderr(output())
-        .process_group(0)
-        .kill_on_drop(true)
-        .spawn()
+    crate::children::spawn(
+        tokio::process::Command::new(&words[0])
+            .args(&words[1..])
+            .env_clear()
+            .envs(env)
+            .current_dir(folder)
+            .stdin(Stdio::null())
+            .stdout(output())
+            .stderr(output())
+            .process_group(0)
+            .kill_on_drop(true),
+    )
 }
 
 /// Whether the line exits with 0 within the probe's limit; killed past it.

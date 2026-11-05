@@ -526,7 +526,7 @@ pub(crate) async fn acli(args: &[&str]) -> Result<(bool, String, String), Gh> {
         .stderr(Stdio::piped())
         .process_group(0)
         .kill_on_drop(true);
-    let child = command.spawn().map_err(|error| match error.kind() {
+    let child = crate::children::spawn(&mut command).map_err(|error| match error.kind() {
         std::io::ErrorKind::NotFound => Gh::Missing,
         _ => Gh::Failed(error.to_string()),
     })?;

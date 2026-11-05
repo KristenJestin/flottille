@@ -8,8 +8,8 @@ mod common;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use common::User;
 use common::mcp::{Answer, Mcp, server_of};
+use common::{User, fake_pnpm};
 use serde_json::{Value, json};
 
 /// The tasks the scenarios run: scripts of the workspace, written by `session`.
@@ -17,7 +17,10 @@ const CATALOGUE: &str = "\n[commands.ends]\nline = \"./ends.sh\"\n\
     [commands.quick]\nline = \"./quick.sh\"\n\
     [commands.server]\nline = \"./server.sh\"\nserve = true\n\
     [commands.stubborn]\nline = \"./stubborn.sh\"\nserve = true\n\
-    [commands.leak]\nline = \"./leak.sh\"\n";
+    [commands.leak]\nline = \"./leak.sh\"\n\
+    [commands.pnpm]\nline = \"./pnpm.sh\"\n\
+    [commands.pnpm-brief]\nline = \"./pnpm-brief.sh\"\n\
+    [commands.pnpm-waits]\nline = \"./pnpm-waits.sh\"\n";
 
 const SCRIPTS: [(&str, &str); 5] = [
     // Outlives a call that waits 1 s, then fails with a coloured last line.
@@ -1214,5 +1217,108 @@ fn a_probe_s_children_are_killed_when_the_run_ends() {
             "the probe's child {child} still runs"
         );
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+// What a launcher like pnpm leaves: a `sh` in a process group of its own, which it never waits
+// for, taken in by the daemon once the launcher ended.
+
+/// Writes the scripts of the tasks that go through the fake pnpm in the workspace: `pnpm` leaves
+/// a `sleep 300` behind and ends, `pnpm-brief` leaves one that ends by itself at once, and
+/// `pnpm-waits` leaves a `sleep 300` behind and runs 3 s more. Each writes the left shell's pid
+/// to `grandchild.<its own pid>`.
+fn launcher_scripts(workspace: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let launcher = fake_pnpm();
+    for (name, left, then) in [
+        ("pnpm.sh", "sleep 300", ""),
+        ("pnpm-brief.sh", "sleep 0.2", ""),
+        ("pnpm-waits.sh", "sleep 300", "sleep 3\n"),
+    ] {
+        let path = workspace.join(name);
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\n{} \"grandchild.$$\" '{left}'\n{then}",
+                launcher.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+/// The pids of the shells the fake pnpm left in the workspace, one per run, once `count` were.
+fn grandchildren(workspace: &std::path::Path, count: usize) -> Vec<u64> {
+    let mut pids = Vec::new();
+    eventually("the left shells' pids", || {
+        pids = std::fs::read_dir(workspace)
+            .unwrap()
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let name = entry.file_name().into_string().ok()?;
+                let rest = name.strip_prefix("grandchild.")?;
+                rest.parse::<u64>().ok()?;
+                std::fs::read_to_string(entry.path())
+                    .ok()?
+                    .trim()
+                    .parse()
+                    .ok()
+            })
+            .collect();
+        pids.len() == count
+    });
+    pids
+}
+
+/// The pid of the process's parent, from its `stat` (`ppid` comes after the name).
+fn parent_of(stat: &str) -> u64 {
+    let (_, after) = stat.rsplit_once(')').unwrap();
+    after.split_whitespace().nth(1).unwrap().parse().unwrap()
+}
+
+/// The daemon's children that ended and that nobody waited for.
+fn zombies_of(daemon: u64) -> Vec<u64> {
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u64>().ok())
+        .filter(|pid| {
+            std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+                let state = stat.rsplit_once(')').unwrap().1.trim_start();
+                state.starts_with('Z') && parent_of(&stat) == daemon
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn a_grandchild_in_its_own_group_is_reaped() {
+    let user = User::with_fake_agent();
+    let (_, mcp, workspace) = session(&user);
+    launcher_scripts(&workspace);
+    let daemon = user.status()["pid"].as_u64().unwrap();
+
+    let answer = ok(mcp.call("run", json!({"task": "pnpm-brief"})));
+
+    assert!(answer.contains("exited with code 0"), "{answer}");
+    let left = grandchildren(&workspace, 1)[0];
+    eventually("the left shell to be waited for", || {
+        !alive(left) && !zombies_of(daemon).contains(&left)
+    });
+}
+
+#[test]
+fn a_child_the_daemon_waits_itself_is_not_reaped_by_the_sweep() {
+    let user = User::with_fake_agent();
+    let (_, mcp, workspace) = session(&user);
+    launcher_scripts(&workspace);
+
+    // Each run's own end is read by its owner, while the strays the launcher leaves end around
+    // it and the daemon sweeps for them.
+    for _ in 0..15 {
+        let brief = ok(mcp.call("run", json!({"task": "pnpm-brief"})));
+        assert!(brief.contains("exited with code 0"), "{brief}");
+        let quick = ok(mcp.call("run", json!({"task": "quick"})));
+        assert!(quick.contains("exited with code 0"), "{quick}");
     }
 }
