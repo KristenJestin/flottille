@@ -1387,7 +1387,7 @@ async fn services_of(
         .ok()
         .and_then(|project| project.tasks.get(name).map(|task| task.needs.to_vec()))
         .unwrap_or_default();
-    crate::services::start_needed(daemon, &needs)
+    crate::services::start_needed(daemon, &needs, None)
         .await
         .map(|_| ())
         .map_err(|why| format!("task {name} cannot run: {why}"))

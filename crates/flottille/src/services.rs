@@ -539,13 +539,9 @@ fn now_of(daemon: &Daemon, name: &str) -> State {
     now(daemon, name).state
 }
 
-/// Whether the service runs now, Flottille's or outside it: starting it starts nothing.
-pub fn runs_now(daemon: &Daemon, name: &str) -> bool {
-    now_of(daemon, name).runs()
-}
-
-/// What a call starts before what it names, that does not run now: the services a task needs
-/// (`run`) or a service needs (`services start`), in the order they start.
+/// What a call may start before what it names, which Flottille does not run now: the services a
+/// task needs (`run`) or a service needs (`services start`), in the order they start. One seen
+/// running outside Flottille is among them: it is started if it no longer answers.
 pub fn started_first(daemon: &Daemon, place: &Place, tool: &str, args: &Value) -> Vec<String> {
     let Ok(services) = load(daemon) else {
         return Vec::new();
@@ -560,8 +556,14 @@ pub fn started_first(daemon: &Daemon, place: &Place, tool: &str, args: &Value) -
     };
     service::in_order(&services, &needs)
         .into_iter()
-        .filter(|name| Some(name.as_str()) != own && !runs_now(daemon, name))
+        .filter(|name| Some(name.as_str()) != own && !flottille_runs(daemon, name))
         .collect()
+}
+
+/// Whether Flottille runs the service now: what it started and has not ended.
+fn flottille_runs(daemon: &Daemon, name: &str) -> bool {
+    let known = daemon.services.known(name);
+    known.run.is_some_and(|id| runs::is_going(daemon, &id))
 }
 
 /// Probes again each service seen running outside Flottille: one that no longer answers is shown
@@ -605,8 +607,13 @@ async fn probed(daemon: &Arc<Daemon>, services: &BTreeMap<String, Service>) {
 
 /// Starts each service `needs` names that does not run, those it needs first, and waits for
 /// each that says when it is ready: the names of those it started. `Err` names the service that
-/// failed and why.
-pub async fn start_needed(daemon: &Arc<Daemon>, needs: &[String]) -> Result<Vec<String>, String> {
+/// failed and why. For an agent's call, `judged` holds what the gate judged it to start
+/// (`started_first`): any other service it would start stopped since, and is refused.
+pub async fn start_needed(
+    daemon: &Arc<Daemon>,
+    needs: &[String],
+    judged: Option<&[String]>,
+) -> Result<Vec<String>, String> {
     if needs.is_empty() {
         return Ok(Vec::new());
     }
@@ -619,7 +626,7 @@ pub async fn start_needed(daemon: &Arc<Daemon>, needs: &[String]) -> Result<Vec<
     }
     let mut started = Vec::new();
     for name in service::in_order(&services, needs) {
-        if start_one(daemon, &services, &name, true).await? {
+        if start_one(daemon, &services, &name, true, judged).await? {
             started.push(name);
         }
     }
@@ -627,13 +634,19 @@ pub async fn start_needed(daemon: &Arc<Daemon>, needs: &[String]) -> Result<Vec<
 }
 
 /// Starts the service, what it needs first and waited for: the names of those it started.
-pub async fn start(daemon: &Arc<Daemon>, name: &str) -> Result<Vec<String>, Failure> {
+/// `judged`, for an agent's call, as `start_needed`'s; the service itself is always judged.
+pub async fn start(
+    daemon: &Arc<Daemon>,
+    name: &str,
+    judged: Option<&[String]>,
+) -> Result<Vec<String>, Failure> {
     let services = load(daemon)?;
     find(&services, name)?;
     let mut started = Vec::new();
     for each in service::in_order(&services, &[name.to_owned()]) {
         let own = each == name;
-        if start_one(daemon, &services, &each, !own)
+        let judged = judged.filter(|_| !own);
+        if start_one(daemon, &services, &each, !own, judged)
             .await
             .map_err(Failure::refused)?
         {
@@ -651,6 +664,7 @@ async fn start_one(
     services: &BTreeMap<String, Service>,
     name: &str,
     wait: bool,
+    judged: Option<&[String]>,
 ) -> Result<bool, String> {
     let failed = |why: String| format!("the service {name} failed: {why}");
     let lock = daemon.services.lock_of(name);
@@ -659,6 +673,12 @@ async fn start_one(
     let going = known.run.as_ref().filter(|id| runs::is_going(daemon, id));
     let (started, run) = match going {
         Some(id) => (false, Some(id.clone())),
+        // Its lines, its probe's included, were not judged for this call: it ran then.
+        None if judged.is_some_and(|judged| !judged.iter().any(|each| each == name)) => {
+            return Err(format!(
+                "the service {name} stopped since the call was judged: call again"
+            ));
+        }
         None => {
             let service = &services[name];
             let home = flottille_core::place::home();
@@ -856,7 +876,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         }
         "service.start" => {
             let Named { name } = serde_json::from_value(params)?;
-            let started = start(&daemon, &name).await?;
+            let started = start(&daemon, &name, None).await?;
             let services = load(&daemon)?;
             Ok(json!({"service": to_json(&daemon, &services, &name), "started": started}))
         }
@@ -1104,7 +1124,16 @@ fn said_first(
                 true => ", written by an agent",
                 false => "",
             };
-            Some(format!("the service {name}{by}: {}", said(service)))
+            let outside = match now_of(daemon, name) {
+                State::Outside => {
+                    " (it runs outside Flottille now: started if it no longer answers)"
+                }
+                _ => "",
+            };
+            Some(format!(
+                "the service {name}{by}{outside}: {}",
+                said(service)
+            ))
         })
         .collect();
     match said.is_empty() {
@@ -1146,7 +1175,8 @@ fn said(service: &Service) -> String {
 }
 
 /// The `services` tool, once the gate let it through.
-pub async fn tool(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcome {
+/// `judged`, what the gate judged a start to start first.
+pub async fn tool(daemon: &Arc<Daemon>, grant: &Grant, args: Value, judged: &[String]) -> Outcome {
     let call = match tool_call(&args) {
         Ok(call) => call,
         Err(refusal) => return refusal,
@@ -1165,7 +1195,7 @@ pub async fn tool(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcome {
             Some(_) => Outcome::Done(show_text(daemon, &services, &name)),
             None => Outcome::Refused(format!("refused: there is no service {name}")),
         },
-        "start" => match start(daemon, &name).await {
+        "start" => match start(daemon, &name, Some(judged)).await {
             Ok(started) => {
                 let services = load(daemon).unwrap_or(services);
                 let mut text = match started.is_empty() {

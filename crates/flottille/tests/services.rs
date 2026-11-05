@@ -816,9 +816,8 @@ fn two_runs_of_a_serving_task_while_its_services_start_start_it_once() {
     assert_eq!(task_runs(&user, "api"), 1);
 }
 
-#[test]
-fn a_service_that_ran_outside_and_stopped_is_shown_stopped() {
-    let user = User::new();
+/// The fake server, started by hand outside Flottille: its process and its address.
+fn by_hand() -> (std::process::Child, String) {
     let mut by_hand = Command::new(common::fake_server())
         .args(["--listen", "0"])
         .stdout(Stdio::piped())
@@ -833,6 +832,13 @@ fn a_service_that_ran_outside_and_stopped_is_shown_stopped() {
         .strip_prefix("listening on ")
         .unwrap()
         .to_owned();
+    (by_hand, address)
+}
+
+#[test]
+fn a_service_that_ran_outside_and_stopped_is_shown_stopped() {
+    let user = User::new();
+    let (mut by_hand, address) = by_hand();
     services_file(
         &user,
         &format!(
@@ -1010,4 +1016,88 @@ fn an_agent_s_stop_of_a_service_that_does_not_run_is_refused_at_once() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn a_service_an_agent_wrote_seen_outside_then_stopped_is_judged_when_an_ask_agent_s_run_needs_it() {
+    let user = User::with_fake_agent();
+    project(&user, &[]);
+    workspace(&user, "one");
+    let (agent, mcp) = root(&user, Some("one"));
+    set_mode(&user, &agent, "full");
+    let (mut by_hand, address) = by_hand();
+    let mongo = folder(&user, "mongo");
+    done(mcp.call(
+        "services",
+        json!({"action": "add", "name": "mongo", "line": server(0), "folder": mongo,
+            "ready": {"url": address}}),
+    ));
+    done(mcp.call("services", json!({"action": "start", "name": "mongo"})));
+    assert_eq!(show(&user, "mongo")["state"], "outside");
+    user.call(
+        "task.edit",
+        json!({"project": "app", "name": "api", "needs": ["mongo"]}),
+    )
+    .unwrap();
+    set_mode(&user, &agent, "ask");
+    let _ = by_hand.kill();
+    let _ = by_hand.wait();
+
+    let number = held(&mcp.call("run", json!({"task": "api"})));
+
+    let asked = request(&user, number).to_string();
+    assert!(asked.contains("the service mongo"), "{asked}");
+    assert!(asked.contains("outside this agent's place"), "{asked}");
+    assert_eq!(service_runs(&user, "mongo"), 0);
+}
+
+#[test]
+fn a_service_that_stops_between_the_judgement_of_an_agent_s_run_and_its_start_is_refused() {
+    let user = User::with_fake_agent();
+    let ok = user.path("slow-ok");
+    services_file(
+        &user,
+        &format!(
+            "{}{}",
+            listening(&user, "db", 0, &[]),
+            ready_on(&user, "slow", &ok)
+        ),
+    );
+    project(&user, &[]);
+    user.call(
+        "task.edit",
+        json!({"project": "app", "name": "api", "line": server(0), "serve": true,
+            "needs": ["db", "slow"]}),
+    )
+    .unwrap();
+    user.call("service.start", json!({"name": "db"})).unwrap();
+    let (agent, mcp) = root(&user, None);
+    set_mode(&user, &agent, "full");
+
+    let (first, second) = std::thread::scope(|scope| {
+        // The first holds the task's lock while slow starts; the second is judged with db and
+        // slow running, then waits for it.
+        let first = scope.spawn(|| mcp.call("run", json!({"task": "api"})));
+        eventually("slow starting", || {
+            show(&user, "slow")["state"] == "starting"
+        });
+        let second = scope.spawn(|| mcp.call("run", json!({"task": "api"})));
+        std::thread::sleep(Duration::from_millis(500));
+        user.call("service.stop", json!({"name": "db"})).unwrap();
+        eventually("db stopped", || show(&user, "db")["state"] == "stopped");
+        user.call("service.stop", json!({"name": "slow"})).unwrap();
+        std::fs::write(&ok, "").unwrap();
+        (first.join().unwrap(), second.join().unwrap())
+    });
+
+    assert!(first.error, "the first ran: {}", first.text);
+    assert!(second.error, "the second ran: {}", second.text);
+    assert!(
+        second
+            .text
+            .contains("the service db stopped since the call was judged"),
+        "{}",
+        second.text
+    );
+    assert_eq!(service_runs(&user, "db"), 0);
 }

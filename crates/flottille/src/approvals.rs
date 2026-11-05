@@ -305,7 +305,8 @@ async fn performed(
         return not_executed(format!("the agent has no tool {tool}."));
     }
     // The situation may have changed since the request was made.
-    let changed = match mcp::classify(daemon, &grant, tool, &request.arguments) {
+    let (verdict, first) = mcp::judged(daemon, &grant, tool, &request.arguments);
+    let changed = match verdict {
         Verdict::Deny(why) => Some(why),
         Verdict::Ask(ask) => {
             let new: Vec<String> = ask
@@ -373,6 +374,7 @@ async fn performed(
         request.arguments.clone(),
         number,
         class,
+        &first,
         discarding,
     )
     .await;

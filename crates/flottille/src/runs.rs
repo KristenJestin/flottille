@@ -358,12 +358,14 @@ pub fn needs_of(daemon: &Daemon, place: &Place, args: &Value) -> Vec<String> {
 }
 
 /// `approved` when the user or the judge let the call through: it may then run outside the place.
+/// `judged`, the services the gate judged it to start first (`services::start_needed`).
 pub async fn run(
     daemon: &Arc<Daemon>,
     agent: &str,
     place: &Place,
     args: Value,
     approved: bool,
+    judged: &[String],
     cancelled: CancellationToken,
 ) -> Outcome {
     let args: RunArguments = match arguments("run", args) {
@@ -456,7 +458,7 @@ pub async fn run(
         }
     }
     let needed = tokio::select! {
-        needed = crate::services::start_needed(daemon, &needs) => needed,
+        needed = crate::services::start_needed(daemon, &needs, Some(judged)) => needed,
         () = cancelled.cancelled() => {
             return Outcome::Failed("the call was stopped before it ended".into());
         }
@@ -581,7 +583,7 @@ pub async fn run_for_user(
     {
         return Ok(going.run.id.clone());
     }
-    crate::services::start_needed(daemon, &task.needs)
+    crate::services::start_needed(daemon, &task.needs, None)
         .await
         .map_err(|why| format!("task {name} cannot run: {why}"))?;
     let place = Place::main(project, project.folder.clone());
@@ -1336,7 +1338,7 @@ pub async fn restart_by_user(
         }
     };
     // Run again is a run: what the task needs is started first.
-    crate::services::start_needed(daemon, &needs)
+    crate::services::start_needed(daemon, &needs, None)
         .await
         .map_err(|why| {
             format!(

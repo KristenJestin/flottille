@@ -2016,11 +2016,11 @@ async fn played_in(
         match crate::actions::prepared(daemon, grant, tool, &args).await {
             Err(refused) => refused,
             Ok(says) => {
-                let decided = classify(daemon, grant, tool, &args);
+                let (decided, first) = judged(daemon, grant, tool, &args);
                 verdict = Some(decided.word());
                 match decided {
                     gate::Verdict::Allow => {
-                        perform(daemon, grant, tool, args, cancelled, None, &reads).await
+                        perform(daemon, grant, tool, args, cancelled, None, &first, &reads).await
                     }
                     gate::Verdict::Deny(why) => Outcome::Refused(why),
                     gate::Verdict::Ask(ask) => {
@@ -2072,15 +2072,20 @@ async fn played_in(
                                     crate::actions::remove_losing(daemon, grant, args).await
                                 } else {
                                     let approved = Some(ask.class);
-                                    perform(daemon, grant, tool, args, cancelled, approved, &reads)
-                                        .await
+                                    perform(
+                                        daemon, grant, tool, args, cancelled, approved, &first,
+                                        &reads,
+                                    )
+                                    .await
                                 }
                             }
                             Some(judged) if judged.verdict == "allow" => {
                                 verdict = Some("judged");
                                 let approved = Some(gate::Class::Judge);
-                                perform(daemon, grant, tool, args, cancelled, approved, &reads)
-                                    .await
+                                perform(
+                                    daemon, grant, tool, args, cancelled, approved, &first, &reads,
+                                )
+                                .await
                             }
                             judged => {
                                 let (outcome, number) = approvals::ask(
@@ -2202,6 +2207,31 @@ fn removes_a_workspace(tool: &str, args: &Value) -> bool {
 
 /// The gate's verdict on a call of one of the agent's tools.
 pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gate::Verdict {
+    judged(daemon, grant, tool, args).0
+}
+
+/// The gate's verdict on a call, with the services it judged the call to start first
+/// (`services::started_first`): what the call may start, and nothing else.
+pub fn judged(
+    daemon: &Daemon,
+    grant: &Grant,
+    tool: &str,
+    args: &Value,
+) -> (gate::Verdict, Vec<String>) {
+    let first = match tool {
+        "run" | "services" => crate::services::started_first(daemon, &grant.place, tool, args),
+        _ => Vec::new(),
+    };
+    (verdict_of(daemon, grant, tool, args, &first), first)
+}
+
+fn verdict_of(
+    daemon: &Daemon,
+    grant: &Grant,
+    tool: &str,
+    args: &Value,
+    first: &[String],
+) -> gate::Verdict {
     if tool == "web" {
         return crate::web::classify(daemon, &grant.agent, args);
     }
@@ -2218,6 +2248,7 @@ pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gat
             grant,
             tool,
             args,
+            first,
             classified(daemon, grant, tool, args),
         );
     };
@@ -2234,12 +2265,13 @@ pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gat
             at + 1,
             crate::actions::step_said(step)
         );
-        match classified(
+        let verdict = classified(
             daemon,
             grant,
             "setup",
             &json!({"action": "add", "step": step}),
-        ) {
+        );
+        match verdict {
             gate::Verdict::Allow => {}
             gate::Verdict::Deny(why) => {
                 return gate::Verdict::Deny(format!("{why} ({said}, which it plays)"));
@@ -2406,6 +2438,7 @@ fn with_services(
     grant: &Grant,
     tool: &str,
     args: &Value,
+    first: &[String],
     verdict: gate::Verdict,
 ) -> gate::Verdict {
     if matches!(verdict, gate::Verdict::Deny(_))
@@ -2477,13 +2510,13 @@ fn with_services(
     {
         judged(name, &service.other_lines(), false, false);
     }
-    for name in crate::services::started_first(daemon, &grant.place, tool, args) {
+    for name in first {
         match (
-            services.get(&name),
-            crate::services::by_an_agent(daemon, &name),
+            services.get(name),
+            crate::services::by_an_agent(daemon, name),
         ) {
-            (Some(service), true) => judged(&name, &service.other_lines(), true, true),
-            (Some(_), false) => judged(&name, &[], false, true),
+            (Some(service), true) => judged(name, &service.other_lines(), true, true),
+            (Some(_), false) => judged(name, &[], false, true),
             (None, _) => {}
         }
     }
@@ -2566,7 +2599,8 @@ fn removes_own_workspace(grant: &Grant, tool: &str, args: &Value) -> bool {
 
 /// Performs a call the user allowed, of its class, recorded as the agent's: the request's answer.
 /// `discarding`, the losses of a workspace's removal the user said to make even with what would
-/// be lost.
+/// be lost. `first`, the services it was judged again to start first.
+#[allow(clippy::too_many_arguments)]
 pub async fn performed(
     daemon: &Arc<Daemon>,
     grant: &Arc<Grant>,
@@ -2574,6 +2608,7 @@ pub async fn performed(
     args: Value,
     request: u64,
     class: gate::Class,
+    first: &[String],
     discarding: Option<Vec<String>>,
 ) -> Outcome {
     let started = Instant::now();
@@ -2590,6 +2625,7 @@ pub async fn performed(
                 args,
                 cancelled,
                 Some(class),
+                first,
                 &Reads::default(),
             )
             .await
@@ -2685,7 +2721,9 @@ fn reached(
 }
 
 /// Performs a call the gate let through; `approved` with its class when the user or the judge
-/// allowed it, which lets its paths be outside the place.
+/// allowed it, which lets its paths be outside the place. `first`, the services it was judged to
+/// start first.
+#[allow(clippy::too_many_arguments)]
 async fn perform(
     daemon: &Arc<Daemon>,
     grant: &Arc<Grant>,
@@ -2693,17 +2731,18 @@ async fn perform(
     args: Value,
     cancelled: CancellationToken,
     approved: Option<gate::Class>,
+    first: &[String],
     reads: &Reads,
 ) -> Outcome {
     if !matches!(tool, "web" | "tickets" | "forge") {
-        return performed_once(daemon, grant, tool, args, cancelled, approved).await;
+        return performed_once(daemon, grant, tool, args, cancelled, approved, first).await;
     }
     // What a page, a search, a ticket or a pull request showed the agent, from its data and
     // never from the call's own arguments, it may read with `web`. The forge and tracker reads
     // it made are counted for the developer log.
     let (outcome, shown) = reads
         .counting(crate::web::showing(performed_once(
-            daemon, grant, tool, args, cancelled, approved,
+            daemon, grant, tool, args, cancelled, approved, first,
         )))
         .await;
     if let Outcome::Done(_) = &outcome {
@@ -2719,10 +2758,11 @@ async fn performed_once(
     args: Value,
     cancelled: CancellationToken,
     approved: Option<gate::Class>,
+    first: &[String],
 ) -> Outcome {
     match tool {
         "web" => crate::web::web(args).await,
-        "services" => crate::services::tool(daemon, grant, args).await,
+        "services" => crate::services::tool(daemon, grant, args, first).await,
         "run" => {
             runs::run(
                 daemon,
@@ -2730,6 +2770,7 @@ async fn performed_once(
                 &grant.place,
                 args,
                 approved.is_some(),
+                first,
                 cancelled,
             )
             .await
