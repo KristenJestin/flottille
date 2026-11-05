@@ -1642,6 +1642,7 @@ fn workspace_says(
             let name = named(&call.name, "workspace", action, "login")?;
             let mut says = create_says(
                 daemon,
+                &grant.place,
                 project,
                 name,
                 &call.repositories,
@@ -1724,9 +1725,10 @@ fn workspace_says(
 }
 
 /// What creating a workspace does, in words, or the refusal of one that cannot be made: the
-/// workspace, then each step of the setup it plays.
+/// workspace, then each step of the setup it plays and the services a task's step starts first.
 fn create_says(
     daemon: &Daemon,
+    place: &Place,
     project: &Project,
     name: &str,
     repositories: &Option<Vec<String>>,
@@ -1768,6 +1770,16 @@ fn create_says(
         false => {
             says.push("Its setup then runs, without the gate:".into());
             says.extend(numbered(&project.setup));
+            for (at, step) in project.setup.iter().enumerate() {
+                if let StepKind::Task(task) = step.kind() {
+                    let run = json!({"task": task});
+                    says.extend(
+                        crate::services::starts_said(daemon, place, "run", &run)
+                            .into_iter()
+                            .map(|said| format!("Step {}: {said}", at + 1)),
+                    );
+                }
+            }
         }
     }
     Ok(says)
@@ -1793,7 +1805,7 @@ fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<Strin
             let project = own(daemon, grant)?;
             let repositories: Option<Vec<String>> =
                 serde_json::from_value(args["repositories"].clone()).unwrap_or_default();
-            let mut says = create_says(daemon, &project, name, &repositories, None)?;
+            let mut says = create_says(daemon, &grant.place, &project, name, &repositories, None)?;
             let whose = match root {
                 true => "a session of the user's",
                 false => "a child",

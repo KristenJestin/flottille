@@ -2253,9 +2253,9 @@ fn verdict_of(
         );
     };
     // Making a workspace ready plays setup steps without the gate: each is judged as setting it
-    // is, run in the folders it would start in, and the strongest class wins. The copy and link
-    // steps only list their reasons: the user, or an agent through the gate, wrote them, and
-    // playing them is what the user configured.
+    // is, run in the folders it would start in, with the services its task starts first, and the
+    // strongest class wins. The copy and link steps only list their reasons: the user, or an
+    // agent through the gate, wrote them, and playing them is what the user configured.
     let mut base = Vec::new();
     let mut judge = Vec::new();
     let set = crate::actions::asked("setup");
@@ -2271,6 +2271,14 @@ fn verdict_of(
             "setup",
             &json!({"action": "add", "step": step}),
         );
+        let verdict = match step.kind() {
+            flottille_core::project::StepKind::Task(task) => {
+                let run = json!({"task": task});
+                let first = crate::services::started_first(daemon, &grant.place, "run", &run);
+                with_services(daemon, grant, "run", &run, &first, verdict)
+            }
+            _ => verdict,
+        };
         match verdict {
             gate::Verdict::Allow => {}
             gate::Verdict::Deny(why) => {

@@ -1101,6 +1101,7 @@ fn a_service_that_stops_between_the_judgement_of_an_agent_s_run_and_its_start_is
     );
     assert_eq!(service_runs(&user, "db"), 0);
 }
+
 #[test]
 fn a_list_of_the_services_runs_none_of_their_commands() {
     let user = User::new();
@@ -1126,4 +1127,63 @@ fn a_list_of_the_services_runs_none_of_their_commands() {
     show(&user, "db");
 
     assert!(!marker.exists(), "a list ran the service's ready command");
+}
+
+/// A root agent in `one` that wrote the service mongo in Full, which the task api needs and a
+/// setup step runs.
+fn agent_s_mongo_for_a_setup(user: &User) -> (String, Mcp) {
+    project(user, &[]);
+    workspace(user, "one");
+    let (agent, mcp) = root(user, Some("one"));
+    set_mode(user, &agent, "full");
+    let mongo = folder(user, "mongo");
+    done(mcp.call(
+        "services",
+        json!({"action": "add", "name": "mongo", "line": server(0), "folder": mongo}),
+    ));
+    user.call(
+        "task.edit",
+        json!({"project": "app", "name": "api", "needs": ["mongo"]}),
+    )
+    .unwrap();
+    user.call(
+        "setup.add",
+        json!({"project": "app", "step": {"task": "api"}}),
+    )
+    .unwrap();
+    (agent, mcp)
+}
+
+#[test]
+fn a_setup_step_whose_task_needs_an_agent_s_service_with_a_refused_line_is_refused() {
+    let user = User::with_fake_agent();
+    let (_, mcp) = agent_s_mongo_for_a_setup(&user);
+    let ssh = user.path("home/.ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    let file = user.path("config/flottille/services.toml");
+    let text = std::fs::read_to_string(&file).unwrap();
+    let mongo = folder(&user, "mongo").display().to_string();
+    std::fs::write(&file, text.replace(&mongo, &ssh.display().to_string())).unwrap();
+
+    let answer = mcp.call("workspace", json!({"action": "create", "name": "two"}));
+
+    assert!(answer.error, "not refused: {}", answer.text);
+    assert!(answer.text.contains(".ssh"), "{}", answer.text);
+    assert!(answer.text.contains("the service mongo"), "{}", answer.text);
+}
+
+#[test]
+fn a_setup_step_whose_task_needs_an_agent_s_service_is_held_naming_it_in_ask() {
+    let user = User::with_fake_agent();
+    let (agent, mcp) = agent_s_mongo_for_a_setup(&user);
+    set_mode(&user, &agent, "ask");
+
+    let number = held(&mcp.call("workspace", json!({"action": "create", "name": "two"})));
+
+    let asked = request(&user, number);
+    let reasons = asked["reasons"].to_string();
+    assert!(reasons.contains("the service mongo"), "{asked}");
+    assert!(reasons.contains("outside this agent's place"), "{asked}");
+    let says = asked["says"].to_string();
+    assert!(says.contains("the service mongo"), "{says}");
 }
