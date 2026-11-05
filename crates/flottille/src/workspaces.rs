@@ -1183,7 +1183,6 @@ fn kind_name(action: &Action) -> &'static str {
     }
 }
 
-/// Does one step: done, skipped, or its failure.
 /// A step that runs a task first starts the services the task needs, as the project's file says
 /// now (`services.rs`); a task no longer there needs none.
 async fn services_of(
@@ -1207,6 +1206,7 @@ async fn services_of(
         .map_err(|why| format!("task {name} cannot run: {why}"))
 }
 
+/// Does one step: done, skipped, or its failure.
 async fn run_step(
     workspace: &Workspace,
     step: &Step,
