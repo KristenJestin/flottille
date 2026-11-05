@@ -4903,6 +4903,55 @@ mod tests {
     }
 
     #[test]
+    fn the_last_activity_of_a_tree_is_its_latest_sign_but_for_what_the_daemon_says_alone() {
+        let mut store = Store::open_in_memory().unwrap();
+        // Created long ago, so that the clock decides what is later.
+        let agent = Agent {
+            created_at: 1_000,
+            updated_at: 1_000,
+            ..an_agent()
+        };
+        assert_eq!(
+            store
+                .last_activity_of(std::slice::from_ref(&agent.id))
+                .unwrap(),
+            None
+        );
+        store
+            .create_agent(&agent, ("agent.created", json!({})))
+            .unwrap();
+        let ids = [agent.id.clone()];
+        let created = store.last_activity_of(&ids).unwrap().unwrap();
+        assert!(created > agent.created_at);
+
+        // The daemon's own words are no activity.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        for name in ["agent.tools_outdated", "agent.released"] {
+            store
+                .append_agent_event(&agent.id, name, json!({}), false)
+                .unwrap();
+        }
+        assert_eq!(store.last_activity_of(&ids).unwrap(), Some(created));
+
+        // A message of the conversation, then a request, is.
+        let message = store
+            .append_agent_event(&agent.id, "agent.message", json!({}), true)
+            .unwrap();
+        assert_eq!(store.last_activity_of(&ids).unwrap(), Some(message.at));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let (asked, _) = store.ask(&a_request(Some("toolu_01"))).unwrap();
+        assert!(asked.created_at > message.at);
+        assert_eq!(
+            store.last_activity_of(&ids).unwrap(),
+            Some(asked.created_at)
+        );
+        assert_eq!(
+            store.last_activity_of(&["somebody-else".into()]).unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn the_pending_requests_an_ended_agent_made_or_holds_are_cancelled_with_their_event() {
         let mut store = Store::open_in_memory().unwrap();
         let agent = an_agent();
