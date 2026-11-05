@@ -222,3 +222,54 @@ fn the_window_draws_no_frame_at_rest_on_settings(cx: &mut TestAppContext) {
         "(frames drawn, frames asked)"
     );
 }
+
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_session_with_a_leave(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let x = idle_session(&user);
+    let opened = user.received_requests("session/new").len();
+    let answer = user
+        .call("agent.start", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let writer = answer["agent"]["id"].as_str().unwrap().to_owned();
+    let (url, authorization) = common::mcp::server_of(&user, opened);
+    let idle = |id: &str| {
+        user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["state"] == "idle"
+    };
+    eventually("the writer's first turn ends", || idle(&writer));
+    let mcp = common::mcp::Mcp::initialize(&url, &authorization);
+    let held = mcp.call("session_send", json!({"session": x, "text": "Hello."}));
+    let number: u64 = held
+        .text
+        .strip_prefix("Waiting for the user's approval, request #")
+        .and_then(|rest| rest.split_once('.'))
+        .map(|(number, _)| number.parse().unwrap())
+        .unwrap_or_else(|| panic!("not held: {}", held.text));
+    user.call("approval.approve", json!({"number": number}))
+        .unwrap();
+    eventually("the leave", || {
+        user.call("leave.list", json!({"session": x})).unwrap()["leaves"] != json!([])
+    });
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&x)).is_some())
+    });
+    eventually("both sessions idle", || idle(&x) && idle(&writer));
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click(session_id(&x), cx));
+    until(&shell, cx, "the rail lists the leave", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .session_page()
+                .is_some_and(|page| !page.read(cx).leaves(cx).read(cx).rows().is_empty())
+        })
+    });
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}

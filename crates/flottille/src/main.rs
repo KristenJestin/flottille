@@ -34,6 +34,7 @@ mod inbox;
 mod inbox_command;
 mod items;
 mod judge;
+mod leaves;
 mod mcp;
 mod message_checks;
 mod models;

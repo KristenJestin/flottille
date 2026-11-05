@@ -53,6 +53,7 @@ use crate::conversation::{
     Activity, Block, Call, CallState, Change, Conversation, DiffLine, Ending, STARTED_SESSION_KIND,
     Summary, USER, WOKEN_BY_KIND, asks_the_user, in_sight,
 };
+use crate::leaves::LeaveList;
 use crate::link::{Connect, Update};
 use crate::mode::ModeSwitch;
 use crate::model::Place;
@@ -434,6 +435,11 @@ impl SessionPage {
         self.rail.read(cx).subscriptions.clone()
     }
 
+    /// The rail's Write access section.
+    pub fn leaves(&self, cx: &gpui_kit::App) -> Entity<LeaveList> {
+        self.rail.read(cx).leaves.clone()
+    }
+
     /// The rail's "Waiting for you" section.
     pub fn waiting(&self, cx: &gpui_kit::App) -> Entity<Waiting> {
         self.rail.read(cx).waiting.clone()
@@ -743,6 +749,28 @@ impl SessionPage {
         );
     }
 
+    /// The user withdraws a leave: the daemon takes it back, and the list follows its event.
+    pub fn withdraw_leave(&mut self, writer: &str, session: &str, cx: &mut Context<Self>) {
+        self.perform(
+            Command::WithdrawLeave {
+                session: self.opened.id.clone(),
+                writer: writer.to_owned(),
+                leave_session: session.to_owned(),
+            },
+            cx,
+        );
+    }
+
+    /// What the daemon answered to a withdrawal: why, in a toast, when it refused.
+    pub fn leave_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
+        if let Some(why) = refused {
+            toast(
+                Toast::failure("The write access was not withdrawn").detail(why),
+                cx,
+            );
+        }
+    }
+
     /// The user resumes a paused following, as a message of theirs would: the daemon resumes it,
     /// and the list follows its event.
     pub fn resume_following(&mut self, subscription: &str, cx: &mut Context<Self>) {
@@ -976,6 +1004,10 @@ impl SessionPage {
             }
             SessionUpdate::Subscriptions(rows) => {
                 let list = self.subscriptions(cx);
+                list.update(cx, |list, cx| list.set(rows, cx));
+            }
+            SessionUpdate::Leaves(rows) => {
+                let list = self.leaves(cx);
                 list.update(cx, |list, cx| list.set(rows, cx));
             }
             SessionUpdate::CommandOutput(output) => {
@@ -2698,6 +2730,19 @@ pub struct ApprovalCard {
 }
 
 impl ApprovalCard {
+    /// Why a base card always comes back: a session's first message to another asks a leave,
+    /// which the daemon's reason names.
+    pub fn always_says(&self) -> &'static str {
+        let leave = self
+            .why
+            .as_deref()
+            .is_some_and(|why| why.contains("has not written to that one before"));
+        match leave {
+            true => LEAVE_SAYS,
+            false => BASE_SAYS,
+        }
+    }
+
     /// The one-line record a decided card folds into.
     pub fn record(&self) -> Option<String> {
         let said = match self.decision.as_deref()? {
@@ -4458,6 +4503,12 @@ impl Row {
 pub const BASE_SAYS: &str = "Flottille always asks you for this, in Ask and in Auto: it may lose \
                              work or reach what must stay private, so no judge decides it.";
 
+/// Why the first message of a session to another always comes back, said on its card instead of
+/// `BASE_SAYS`: what it asks is a lasting leave, in every mode.
+pub const LEAVE_SAYS: &str = "Flottille always asks you this, in every mode: allowing it lets \
+                              this session write to that one until either ends or you withdraw \
+                              it.";
+
 /// The time a thought took, or has taken so far: it ticks only while the thought runs.
 pub struct ThinkingTimer {
     since: u64,
@@ -4656,6 +4707,8 @@ pub struct SessionRail {
     commands: Entity<CommandList>,
     /// What the agents of the session's tree wait for outside Flottille.
     subscriptions: Entity<SubscriptionList>,
+    /// The leaves that let the session write to another, or another to write to it.
+    leaves: Entity<LeaveList>,
     /// The requests that wait for the user, pinned at the rail's bottom.
     waiting: Entity<Waiting>,
     /// The scroll of the sections above what waits.
@@ -4715,11 +4768,13 @@ impl SessionRail {
         });
         let commands = cx.new(|_| CommandList::new(page.clone()).of_agent(root.clone()));
         let subscriptions = cx.new(|_| SubscriptionList::new(page.clone()));
+        let leaves = cx.new(|_| LeaveList::new(page.clone(), root.clone()));
         let waiting = cx.new(|cx| Waiting::new(page.clone(), cx));
         Self {
             page,
             commands,
             subscriptions,
+            leaves,
             waiting,
             scroll: ScrollHandle::new(),
             agents: Vec::new(),
@@ -5861,6 +5916,7 @@ impl Render for SessionRail {
                     .child(agents)
                     .child(workspace)
                     .child(self.subscriptions.clone())
+                    .child(self.leaves.clone())
                     .child(self.commands.clone()),
             )
             .child(

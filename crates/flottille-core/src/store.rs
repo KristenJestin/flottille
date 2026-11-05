@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 
 use crate::agent::{Agent, AgentState, Choices, GateMode, TurnUsage, Used};
-use crate::approval::{Decision, Delivery, Forward, Judgement, Kind, Request, RequestState};
+use crate::approval::{Decision, Delivery, Forward, Judgement, Kind, Leave, Request, RequestState};
 use crate::item::{Check, Cursor, Filter, Item, Post};
 use crate::protocol::Event;
 use crate::run::{Readiness, Run, RunState};
@@ -648,6 +648,19 @@ const MIGRATIONS: &[&str] = &[
         agent  TEXT NOT NULL
     ) STRICT;
 ",
+    "
+    -- The user's leave for a session to write to another it did not start, one way, given once
+    -- for the pair (`docs/tools.md`, \"Sessions that talk to each other\"): it goes with the end
+    -- of either session.
+    CREATE TABLE session_leaves (
+        writer     TEXT NOT NULL REFERENCES agents (id) ON DELETE CASCADE,
+        session    TEXT NOT NULL REFERENCES agents (id) ON DELETE CASCADE,
+        request    INTEGER NOT NULL,
+        granted_at INTEGER NOT NULL,
+        PRIMARY KEY (writer, session)
+    ) STRICT;
+    CREATE INDEX session_leaves_session ON session_leaves (session);
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -1197,6 +1210,13 @@ impl Store {
                     state.is_final(),
                     now
                 ],
+            )?;
+        }
+        // A leave lasts while both sessions do: one that ends, even to be resumed, takes it.
+        if change.state.is_some_and(AgentState::is_final) {
+            transaction.execute(
+                "DELETE FROM session_leaves WHERE writer = ?1 OR session = ?1",
+                params![id],
             )?;
         }
         if let Some(native_id) = change.native_id {
@@ -2185,6 +2205,98 @@ impl Store {
             .connection
             .execute("DELETE FROM subscriptions WHERE id = ?1", params![id])?
             > 0)
+    }
+
+    /// The user lets `writer` write to `session`, with the request it was asked in, and its
+    /// `leave.granted` event; `None` when it was given already or either session has ended.
+    pub fn grant_leave(
+        &mut self,
+        writer: &str,
+        session: &str,
+        request: u64,
+    ) -> Result<(Option<Leave>, Option<Event>)> {
+        let transaction = self.connection.transaction()?;
+        let leave = Leave {
+            writer: writer.to_owned(),
+            session: session.to_owned(),
+            request,
+            granted_at: now_ms(),
+        };
+        // Checked in the same write as `change_agent`'s DELETE, so a session ended between the
+        // approval and here never keeps a leave a resume would find.
+        let added = transaction.execute(
+            "INSERT OR IGNORE INTO session_leaves (writer, session, request, granted_at) \
+             SELECT ?1, ?2, ?3, ?4 WHERE (SELECT count(*) FROM agents \
+             WHERE id IN (?1, ?2) AND state NOT IN ('ended', 'failed')) = 2",
+            params![writer, session, request, leave.granted_at],
+        )?;
+        if added == 0 {
+            return Ok((None, None));
+        }
+        let event = append_event(&transaction, "leave.granted", leave.to_json())?;
+        transaction.commit()?;
+        Ok((Some(leave), Some(event)))
+    }
+
+    /// Whether the user let `writer` write to `session`.
+    pub fn has_leave(&self, writer: &str, session: &str) -> Result<bool> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT 1 FROM session_leaves WHERE writer = ?1 AND session = ?2",
+                params![writer, session],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// The leaves that name `agent`, as the writer or as the session written to, oldest first.
+    pub fn leaves_of(&self, agent: &str) -> Result<Vec<Leave>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT writer, session, request, granted_at FROM session_leaves \
+             WHERE writer = ?1 OR session = ?1 ORDER BY granted_at, rowid",
+        )?;
+        let rows = statement.query_map(params![agent], |row| {
+            Ok(Leave {
+                writer: row.get(0)?,
+                session: row.get(1)?,
+                request: row.get(2)?,
+                granted_at: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The user takes the leave back, with its `leave.withdrawn` event; `None` when there was
+    /// none.
+    pub fn withdraw_leave(
+        &mut self,
+        writer: &str,
+        session: &str,
+    ) -> Result<(Option<Leave>, Option<Event>)> {
+        let transaction = self.connection.transaction()?;
+        let leave = transaction
+            .query_row(
+                "DELETE FROM session_leaves WHERE writer = ?1 AND session = ?2 \
+                 RETURNING request, granted_at",
+                params![writer, session],
+                |row| {
+                    Ok(Leave {
+                        writer: writer.to_owned(),
+                        session: session.to_owned(),
+                        request: row.get(0)?,
+                        granted_at: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?;
+        let Some(leave) = leave else {
+            return Ok((None, None));
+        };
+        let event = append_event(&transaction, "leave.withdrawn", leave.to_json())?;
+        transaction.commit()?;
+        Ok((Some(leave), Some(event)))
     }
 
     /// The project's items that `filter` keeps, with their checks, the most recently changed
@@ -3866,6 +3978,33 @@ mod tests {
 
         assert_eq!(ids(store.live_agents().unwrap()), ["running00000"]);
         assert_eq!(ids(store.kept_sessions().unwrap()), ["kept00000000"]);
+    }
+
+    #[test]
+    fn a_leave_is_granted_only_while_both_sessions_are_live() {
+        let mut store = Store::open_in_memory().unwrap();
+        let writer = an_agent();
+        let mut session = an_agent();
+        session.id = "session00000".into();
+        for agent in [&writer, &session] {
+            store
+                .create_agent(agent, ("agent.created", json!({})))
+                .unwrap();
+        }
+        let ended = AgentChange {
+            state: Some(AgentState::Ended),
+            ..AgentChange::default()
+        };
+        store.change_agent(&session.id, ended, None).unwrap();
+
+        let granted = store.grant_leave(&writer.id, &session.id, 7).unwrap();
+
+        assert_eq!(granted, (None, None));
+        store.resume_agent(&session.id).unwrap().unwrap();
+        assert!(!store.has_leave(&writer.id, &session.id).unwrap());
+        let (leave, event) = store.grant_leave(&writer.id, &session.id, 8).unwrap();
+        assert_eq!(leave.map(|l| l.request), Some(8));
+        assert_eq!(event.unwrap().name, "leave.granted");
     }
 
     #[test]

@@ -833,6 +833,13 @@ impl Shell {
                     page.update(cx, |page, cx| page.subscription_answered(refused, cx));
                 }
             }
+            Outcome::LeaveWithdrawn { session, refused } => {
+                if let Some(page) = self.session_page.clone()
+                    && page.read(cx).id() == session
+                {
+                    page.update(cx, |page, cx| page.leave_answered(refused, cx));
+                }
+            }
             Outcome::Interrupted { session, refused } => {
                 if let Some(reply) = self.replies.get(&session).cloned() {
                     reply.update(cx, |reply, cx| reply.interrupted(refused, cx));
