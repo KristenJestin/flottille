@@ -1644,6 +1644,9 @@ fn create_says(
              dashes or underscores, starting with a letter or a digit"
         )));
     }
+    if let Some(why) = flottille_core::workspace::reserved(name) {
+        return Err(Outcome::Refused(format!("refused: {why}")));
+    }
     if let Ok(Some(_)) = daemon.read(|store| store.workspace(&project.name, name)) {
         return Err(Outcome::Refused(format!(
             "refused: project {} already has a workspace named {name}: choose another name",
@@ -1705,12 +1708,14 @@ fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<Strin
             says
         }
         _ if root => {
-            let place = match args["workspace"]
-                .as_str()
-                .or(grant.place.workspace.as_deref())
-            {
-                Some(name) => format!("the workspace {name}"),
-                None => "main, the project folder".to_owned(),
+            let named = args["workspace"].as_str();
+            let main = match named {
+                Some(name) => crate::tree::names_main(daemon, &own(daemon, grant)?.name, name),
+                None => false,
+            };
+            let place = match named.or(grant.place.workspace.as_deref()) {
+                Some(name) if !main => format!("the workspace {name}"),
+                _ => "main, the project folder".to_owned(),
             };
             vec![format!(
                 "Start a session for the user in {place}: \"{title}\", theirs, not a child of \
