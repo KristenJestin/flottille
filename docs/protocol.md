@@ -710,7 +710,9 @@ no such project.
 `{"project", "kind"?, "state"?, "repository"?, "mine"?}`: `kind` is `pull` or `ticket`, `state`
 one of an item's states (`open`, `draft`, `merged`, `closed`), `repository` a path of the
 project's (a Jira work item has none), `mine` true for the user's own. Answers `{project, items,
-sources}`, the items most recently changed first, from the store: nothing is read.
+sources}`, the items most recently changed first, from the store: nothing is read. Each source
+has its `mine_unknown`: why its last round could not tell which items are the user's, `null`
+when it could.
 
 #### `items.show`
 

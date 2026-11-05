@@ -52,7 +52,12 @@ tracker.
   only the `Site:` line is read). While GitHub or Cloud does not say who the user is (`gh api
   user` failing), an item keeps the `mine` it had, a new one is not `mine`, and the user is asked
   again at the next round; once it is known, the stored items it was not said of are said again. Bitbucket Data Center says no user in what `bkt` gives: its
-  pull requests are never `mine`, and its source's `note` says so.
+  pull requests are never `mine`, and its source's `note` says so. A Jira search that answers
+  only `null`s fails the round (never "none of them"), one with some has them left out and
+  counted in the developer log (`developer.md`, `items`). When the source cannot tell which items
+  are the user's (Data Center; GitHub or Cloud not saying who; Jira's `currentUser()` search
+  failing), `items.list` says why in the source's `mine_unknown`, and the window's "Mine only"
+  is disabled with that reason.
 - Every text is masked before it is stored, as every output is (`flottille_core::secrets`).
 - A project's items and cursors go once its file is gone (`project.remove`, or by hand), and a
   source's once the project no longer declares it (a repository removed, its forge or the tracker
@@ -85,7 +90,7 @@ what was left, its cursor not having moved.
 | GitHub issues | `gh issue list -R … --state all --limit 1000 [--search "updated:>=<cursor>"] --json number,title,state,author,assignees,labels,url,updatedAt,createdAt`; only the tracker's repository's issues are kept, as `tickets list` keeps them | `gh issue view <n> --json comments,body` |
 | Bitbucket Cloud | `bkt api /repositories/<w>/<r>/pullrequests --param pagelen=50 --param sort=-updated_on --param state=OPEN --param state=MERGED --param state=DECLINED --param state=SUPERSEDED [--param q=updated_on>="<cursor>"]`, page after page up to 1,000, the filter and the order as `--param`, never in the path (#245) | as `forge show` reads it (its commit statuses, reviewers, comments, conflicts) |
 | Bitbucket Data Center | no filter in what `bkt` reads: every **open** pull request, `bkt api /rest/api/1.0/projects/<p>/repos/<r>/pull-requests` page after page (`limit`, `start`) up to 1,000; one stored open that left the list is read by itself (`…/pull-requests/<id>`) to say whether it was merged or declined, a 404 making it removed | as `forge show` reads it, only when its `version` or `updatedDate` moved since it was stored |
-| Jira | for each project of the tracker, `acli jira workitem search --jql 'project = "<KEY>" [AND updated >= "-<n>m"] ORDER BY updated DESC' --fields key,summary,status,assignee,reporter,labels,issuetype,priority --json --limit 1000`, once `acli` is checked to be on the tracker's site (`tickets.md`, "The Jira site"), then the same search with `currentUser()` and `--fields key` for `mine` | `acli jira workitem view <KEY> --json --fields comment`, read as `forge show` reads a work item's comments (`tickets.md`), **only for a work item a subscription to its comments follows** (one open or changed, as for any item), the search holding the rest |
+| Jira | for each project of the tracker, `acli jira workitem search --jql 'project = "<KEY>" [AND updated >= "-<n>m"] ORDER BY updated DESC' --fields key,summary,status,assignee,reporter,labels,issuetype,priority --json --paginate --limit 10000`, once `acli` is checked to be on the tracker's site (`tickets.md`, "The Jira site"), then the same search with `AND (assignee = currentUser() OR reporter = currentUser()) ORDER BY updated DESC` and `--fields key,summary` for `mine` (asked `key` alone, `acli` prints `null` for each work item). Every page is read up to 10,000 work items a project; beyond, the source's `note` says the list is cut, as do the developer log (`cut`) and `tickets list` | `acli jira workitem view <KEY> --json --fields comment`, read as `forge show` reads a work item's comments (`tickets.md`), **only for a work item a subscription to its comments follows** (one open or changed, as for any item), the search holding the rest |
 
 - **The checks of an open pull request whose CI still runs** are read again at every round, even
   when the pull request did not change, whether its list showed it again or not (Data Center
@@ -106,7 +111,7 @@ what was left, its cursor not having moved.
   found (its checks, its comments) while its own page is found keeps what is stored of it, and is
   said in the daemon's log.
 - **A list cut at its cap** (GitHub's search gives 1,000 results at most; Bitbucket's pages stop at
-  1,000) says so in its source's `note`. An item first seen later, once the history moved, is
+  1,000; Jira's at 10,000 a project) says so in its source's `note`, which `tickets list` repeats. An item first seen later, once the history moved, is
   stored without `item.opened` when it was made before its source's first round (`first_at`).
 - **The cursor is a time** in milliseconds on the daemon's clock. GitHub and Bitbucket take it as
   RFC 3339 in UTC (`2026-11-01T10:00:00Z`). Jira takes it as **minutes before now**
@@ -122,7 +127,9 @@ what was left, its cursor not having moved.
   filter takes `updated_on>="<RFC 3339>"`; that Cloud's pull request object says
   `author.display_name`, `updated_on` and `created_on`, and `/user` says `display_name`; that Data
   Center's says `version`, `updatedDate` and `createdDate` in milliseconds; that `acli … search
-  --limit 1000` reads up to that many, takes `currentUser()`, and its fields hold `reporter`,
+  --paginate --limit 10000` reads every page up to that many (`acli` documents no page size, nor
+  how the two flags meet; a real site was seen to take `currentUser()` and to print, with
+  `--fields key,summary`, Jira's REST issue with `key` at its top), and its fields hold `reporter`,
   `issuetype` and `priority` in Jira's REST shape (`updated` and `created` are refused by
   `--fields`: a work item has a date only when `acli` prints one, `tickets.md`); that `gh api user` prints
   the user's `login`; that `gh pr view` and `gh issue view` say "Could not resolve to" for a
@@ -229,7 +236,8 @@ again on its own (#257):
 
 - `items.list {project, kind?, state?, repository?, mine?}`: the stored items, the most recently
   changed first, each with its checks and `seen_at` but without its `description` and
-  `discussion` (`items.show`'s), and the project's `sources`, each with its cursor and problem.
+  `discussion` (`items.show`'s), and the project's `sources`, each with its cursor and problem,
+  and `mine_unknown`: why its last round could not tell the user's items, `null` when it could.
 - `items.show {project, kind, id, repository?}`: one stored item, its texts included.
 - `items.refresh {project}`: a round now; answers the sources as they stand after it.
 
