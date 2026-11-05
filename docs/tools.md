@@ -306,8 +306,9 @@ own while the judge thought), it is refused (`refused: X: the path changed since
 
 | Tool | Arguments | |
 |---|---|---|
-| `tasks` | `action list \| show \| add \| edit \| remove`, `name?`, `line?`, `repository?`, `serve?`, `check?`, `read_only?`, `ask_before_running?`, `ready?`, `url?` | The project's tasks (`docs/projects.md`, "Tasks"). `list` gives one line each: `name: line`, and where it runs, whether it keeps running, is a check, changes nothing, is judged each time it runs, when it is ready and where it answers; `show` gives one. `ready` is `{"line"}`, `{"url"}` or `{"command"}`, `url` an address or `{"command"}`, `null` removing either; a `command` line is judged as a run of it, as the task's own line is. Every agent reads them; a root writes them ("The project"): `add` takes `name` and `line` and the flags, `edit` changes what it is given (`repository: null` puts the task back at the place's top), `remove` removes it, refused while a setup step runs it. A child's write is refused, pointing it to `ask_parent`. |
+| `tasks` | `action list \| show \| add \| edit \| remove`, `name?`, `line?`, `repository?`, `serve?`, `check?`, `read_only?`, `ask_before_running?`, `ready?`, `url?`, `needs?` | The project's tasks (`docs/projects.md`, "Tasks"). `list` gives one line each: `name: line`, and where it runs, whether it keeps running, is a check, changes nothing, is judged each time it runs, when it is ready and where it answers; `show` gives one. `ready` is `{"line"}`, `{"url"}` or `{"command"}`, `url` an address or `{"command"}`, `null` removing either; a `command` line is judged as a run of it, as the task's own line is. Every agent reads them; a root writes them ("The project"): `add` takes `name` and `line` and the flags, `edit` changes what it is given (`repository: null` puts the task back at the place's top), `remove` removes it, refused while a setup step runs it. A child's write is refused, pointing it to `ask_parent`. |
 | `run` | `task` or `line` (exactly one), `repository?`, `timeout? 1..600`, `notify? "ready"`, `why?` | Runs a task (`refused: the project has no task X: list them with tasks {"action": "list"}`) or one line, in the repository's folder (the task's, or the one named) or the place's top. Its description holds a call of each form: `{"task": "test"}`, `{"task": "dev", "notify": "ready"}`, `{"line": "cargo test -p core", "repository": "api", "timeout": 120}`. With `notify: "ready"`, for a task that says when it is ready, the agent is told when it is (below); on a task that does not, or a line, it is refused with a sentence. |
+| `services` | `action list \| show \| start \| stop \| add \| edit \| remove`, `name?`, `folder?`, `line?`, `needs?`, `ready?`, `url?`, `ask_before_running?` | The services of the machine (`docs/projects.md`, "Services"), for every agent. `list` gives one line each: `- <name>: <state> in <folder>`, why it failed, its address, and what it needs that is not running; `show` gives one with its line and the last 20 lines of its output. `list` and `show` run no command: they try again only a service seen outside Flottille whose `ready` is an address. `start` starts it, what it needs first and waited for, and answers with what it started (`Nothing started: the service X runs.` when it runs); it is judged as a run of its line in its folder, which is outside the place, as any line outside the place is; each service it starts first that Flottille does not run (one seen outside Flottille included) is held when marked `ask_before_running`, and one an agent wrote has its lines judged in the caller's mode as runs in its folder (as are the `ready` and `url` commands of a service an agent wrote and starts itself); one Flottille ran when the call was judged and that stopped since refuses it, to be called again. `stop` of a service that does not run, or runs outside Flottille, is refused at once. **`stop` is held for the user every time, in every mode, Full included**: a service is shared by every project. The call is answered at once that it is held, the result comes later as a delivery, and the request names the service and the projects' tasks that need it. A root's `add`, `edit` and `remove` are judged as a write of `tasks` is, the line (and its ready's and address's commands) as a run of it in its folder; `folder`, `ready` and `url` take `null` to remove them; `remove` is refused while a service or a project's task needs it. A child's write is refused, pointing it to `ask_parent`. Its description holds `{"action": "start", "name": "mongo"}`, `{"action": "stop", "name": "mongo"}` and an `add`. |
 | `run_status` | `run`, `action? output \| stop \| notify`, `when? "ready"`, `tail? 1..1000`, `start?` | `action output` (the default): the run's state and lines of its output, the last `tail` (40 by default), or `tail` lines from line `start`. `run` may also be the id of a cut result ("Long results"), read by lines with `start`, never stopped. `action stop`: stops the run and everything in its process group, `SIGTERM`, then `SIGKILL` 5 s later, and answers once it ended; `tail` and `start` are refused with it. `action notify` with `when: "ready"`: the agent is told when a run already started is ready, as `notify` on `run` does; refused for a run of a task that says no ready. |
 
 Until #131 these were `commands_list`, `commands_run` (its `command` now `task`) and
@@ -347,6 +348,19 @@ pending requests.
   that would need single quotes but holds one cannot be one word, and the refusal says to split
   it. A line naming a shell as its program is split like any other; the gate judges the line a
   shell runs with `-c` (below).
+- **The services a task needs** (its `needs`, `docs/projects.md`, "Services") are started before
+  it, those they need first, and waited for until each that says when it is ready is; the answer
+  then starts with `started the services it needs: <names>`. A service that fails, or is not ready
+  within 120 s, refuses the run: `refused: task T cannot run: the service S failed: <why>`. The
+  gate judges the run with them: each that Flottille does not run (one seen running outside it
+  included, started if it no longer answers) is held when marked `ask_before_running`, and the
+  lines of one an agent wrote are judged in the caller's mode as runs in its folder; the user's
+  are not judged again. The request of a held run says the services it starts first. The run
+  starts only those it was judged on: one Flottille ran then and that stopped since refuses it,
+  `refused: task T cannot run: the service S stopped since the call was judged: call again`. A
+  run stopped while they start starts nothing after them. A workspace an agent creates judges
+  the services each of its setup's task steps starts first the same way, and its request says
+  them.
 - **Waiting**: the call waits `timeout` seconds (30 by default) for the end. A task
   that keeps running (`serve`) answers at once, and one already running for the agent is joined.
   A call stopped by its client stops its run.
@@ -455,7 +469,7 @@ pending requests.
 
 | Tool | |
 |---|---|
-| `forge {action, workspace?, repository?, number?, state?, branch?, detail?, fresh?, title?, body?, draft?, waive?, method?, message?, events?, from?, minutes?, pipeline?, variables?, run?, step?, do?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
+| `forge {action, workspace?, repository?, number?, state?, branch?, detail?, fresh?, title?, body?, draft?, reviewers?, labels?, delete_branch_on_merge?, delete_branch?, reviewers_add?, reviewers_remove?, labels_add?, labels_remove?, base?, waive?, method?, message?, events?, from?, minutes?, pipeline?, variables?, run?, step?, do?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
 
 - **The repositories** are those of the agent's place: its workspace's, or the project's in
   `main`. One the place does not take is refused (`refused: X is not a repository of this
@@ -526,7 +540,36 @@ pending requests.
   --subject … --body …`, `bkt pr merge --message …`; the forge's own when left out; refused by the
   gate with another method, `refused: forge merge by merge takes no message: …`, or on another
   action), or re-runs the failed jobs of its last
-  commit's pipelines (`docs/commands.md`, "`forge`"). The branch is the one the repository's
+  commit's pipelines (`docs/commands.md`, "`forge`"). **`create`** also takes `reviewers`
+  (added to the project's, none twice), `labels` (GitHub only: Bitbucket has no labels on pull
+  requests, and the call is refused saying so, before anything is opened) and
+  `delete_branch_on_merge`. On Bitbucket that one is the pull request's own "close source branch"
+  (`bkt pr create --close-source`); GitHub has no such flag per pull request, so Flottille keeps
+  the wish for that pull request (the store's `posts`, kind `delete_branch`) and applies it at
+  its merge, and the answer reads the repository's own "automatically delete head branches"
+  setting and says it (`the repository's own setting deletes head branches after a merge`). A
+  `create` with `delete_branch_on_merge` on a branch the workspace resumed, or one another
+  workspace is on, is refused naming why, before anything is opened (`refused:
+  delete_branch_on_merge: the branch app/login is never deleted: it existed before the workspace;
+  nothing was opened`), on GitHub and on Bitbucket alike: the forge's own close of the source
+  branch would delete the user's branch at a merge Flottille does not make. The card says what
+  the forge does: on GitHub that Flottille deletes the branch when it merges the pull request and
+  that a merge by anyone else leaves it, on Bitbucket that the merge deletes it.
+  **`merge`** takes `delete_branch`: the source branch is deleted on the forge once merged
+  (GitHub `gh pr merge --delete-branch`, run with `-R` so that no local branch of a checkout is
+  touched; Bitbucket `bkt pr merge --close-source=true`, else `=false` as before). Left out, it
+  follows the pull request's `delete_branch_on_merge`, else the repository's project setting
+  "Delete the branch on merge" (`docs/projects.md`), else the branch is kept; `delete_branch:
+  false` keeps it whatever they say. It never deletes a branch the workspace resumed (it existed
+  before, so it was the user's: `its branch app/login was left: it existed before the workspace`)
+  nor one another workspace of the project is on; the answer says the branch was deleted or left,
+  except on GitHub when the repository's own "automatically delete head branches" is on: `gh`
+  cannot stop that, and the answer says GitHub deletes it (`the repository's own setting deletes
+  head branches: GitHub deletes app/login although it existed before the workspace; gh cannot stop
+  it`). The repository `merge` acts on is, as for `create`, the one named, else the workspace's
+  only one, and its card says the deletion the call, the project's setting or what `create` asked
+  for will do (`if the pull request asked for it when it was opened`), or that the merge leaves the
+  branch, and why. The branch is the one the repository's
   worktree is on now (`docs/workspaces.md`, "The branch"); `create` on a detached HEAD is refused
   (`refused: api is on no branch (detached at 1a2b3c4): switch to a branch first`). `create`
   never pushes: it reads, without fetching, whether the remote-tracking ref of the branch
@@ -541,9 +584,25 @@ pending requests.
   `… refused the squash message …; nothing was merged`), naming the check and the end of its
   output.
 - **`comment {number, repository?, body}`** posts a comment on a pull request of a repository of
-  the place; **`edit {number, repository?, title?, body?}`** changes its title or description, at
-  least one of them (`gh pr comment`, `gh pr edit`; `bkt pr comment --text`, `bkt pr edit --title
-  --description`). `edit` of a pull request that is not open is refused once allowed, before
+  the place; **`edit {number, repository?, title?, body?, draft?, reviewers_add?,
+  reviewers_remove?, labels_add?, labels_remove?, base?}`** changes it, at least one field
+  (refused at once otherwise, and for a reviewer or a label that would be an option of the command
+  line: empty, starting with `-`, holding a comma, a reviewer holding a space too; and for a
+  `base`, anything git's reference rules refuse in a branch name: a space, `..`, `~`, `^`, `:`,
+  `?`, `*`, `[`, `\`, `@{`, `//`, a leading `-` or `/`, a trailing `/`, `.` or `.lock`, and `#`,
+  which would change the address it is read at). GitHub: one
+  `gh pr edit --title --body --add-reviewer --remove-reviewer --add-label --remove-label --base`,
+  then `gh pr ready` for `draft: false` or `gh pr ready --undo` for `draft: true`; a `base` the
+  remote does not have is refused (`gh api repos/<repository>/branches/<base>`) before anything is
+  written. Bitbucket: `bkt pr edit --title --description --reviewer --remove-reviewer`, `bkt pr
+  publish [--undo]` for the draft, labels refused (`refused: Bitbucket has no labels on pull
+  requests`), and a `base` on Cloud only, through the API (`bkt api … --method PUT` with the new
+  destination, after its branch was checked to exist); Data Center is refused for `base`, `bkt`
+  having no way to move a destination there. The steps are not one write: when a later one fails
+  (`gh pr ready` after `gh pr edit`, `bkt pr publish` or the destination after `bkt pr edit`),
+  the answer says the failure and which earlier command had already changed the pull request.
+  `draft` is for `create` and `edit` (on `merge` it is refused at once). A comment is `gh pr comment`, `bkt pr comment
+  --text`. `edit` of a pull request that is not open is refused once allowed, before
   anything is written (`refused: the pull request #7 of acme/app is merged, not open; nothing was
   written: …`). A `title` on `comment` is refused before anything is asked (`refused: forge
   comment takes no title: title is for edit and create`).
@@ -572,7 +631,7 @@ pending requests.
 
 `list`, `show`, `subscribe`, `unsubscribe`, `pipelines`, `runs`, `run_view` and `run_logs` go
 through the gate like every call, which allows them in every mode; `create`, `comment`, `edit`,
-`merge`, `checks`, `close`, `reopen`, `run`, `stop` and `step` are to judge, and a merge that waives the checks base. A write is done only once the repository's remote is checked to lead where its forge is declared. **What a
+`merge`, `checks`, `close`, `reopen`, `run`, `stop` and `step` are to judge, and a merge that waives the checks base. **What a write asks is on the card**: besides its title and body, its reviewers (`Its reviewers, besides the project's: …`), labels, `It adds the reviewers: …`, `It removes the labels: …`, `It moves it onto the base release`, `It marks it ready for review`, `It makes it a draft`, `It deletes the branch when the pull request is merged`, and for a merge `It deletes the source branch on the forge after the merge` (with `(the project's setting Delete the branch on merge)` when that is why). A write is done only once the repository's remote is checked to lead where its forge is declared. **What a
 write posts is shown whole**: its request says `Its title: …`, `Its body: …` and `Its message: …` in full (the
 arguments recorded are cut at 500 characters), and the judge is given them whole. A title or a
 body longer than the 8,000 characters the judge is given whole is refused (`refused: the body is

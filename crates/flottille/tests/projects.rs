@@ -1201,3 +1201,62 @@ fn a_repository_that_cannot_be_added_or_removed_leaves_the_file_as_it_was() {
     let after = std::fs::read_to_string(user.project_file("app")).unwrap();
     assert!(after.contains("path = \"api\""), "{after}");
 }
+
+#[test]
+fn the_project_setting_delete_the_branch_on_merge_is_saved_in_the_file_and_shown() {
+    let user = User::new();
+    let app = user.path("work/app");
+    user.git_init(&app);
+    user.git(
+        &app,
+        &["remote", "add", "origin", "git@github.com:acme/app.git"],
+    );
+    add(&user, &app);
+    user.call(
+        "project.set_settings",
+        json!({"name": "app", "repositories": [{"path": ".",
+            "forge": {"kind": "github", "repository": "acme/app"}}]}),
+    )
+    .unwrap();
+    let shown = |user: &User| {
+        let settings = user
+            .call("project.settings", json!({"name": "app"}))
+            .unwrap();
+        settings["repositories"][0]["delete_branch_on_merge"].clone()
+    };
+    assert_eq!(shown(&user), json!(false));
+
+    // What is left out is kept: the forge too.
+    let saved = user
+        .call(
+            "project.set_settings",
+            json!({"name": "app", "repositories": [{"path": ".",
+                "forge": {"kind": "github", "repository": "acme/app"},
+                "delete_branch_on_merge": true}]}),
+        )
+        .unwrap();
+    assert_eq!(saved["repositories"][0]["delete_branch_on_merge"], true);
+    let file = std::fs::read_to_string(user.project_file("app")).unwrap();
+    assert!(file.contains("delete_branch_on_merge = true"), "{file}");
+    assert_eq!(shown(&user), json!(true));
+
+    let kept = user
+        .call(
+            "project.set_settings",
+            json!({"name": "app", "repositories": [{"path": ".",
+                "forge": {"kind": "github", "repository": "acme/app"}}]}),
+        )
+        .unwrap();
+    assert_eq!(kept["repositories"][0]["delete_branch_on_merge"], true);
+
+    // Off again: the key leaves the file.
+    user.call(
+        "project.set_settings",
+        json!({"name": "app", "repositories": [{"path": ".",
+            "forge": {"kind": "github", "repository": "acme/app"},
+            "delete_branch_on_merge": false}]}),
+    )
+    .unwrap();
+    let file = std::fs::read_to_string(user.project_file("app")).unwrap();
+    assert!(!file.contains("delete_branch_on_merge"), "{file}");
+}

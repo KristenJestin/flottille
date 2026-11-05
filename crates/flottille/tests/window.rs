@@ -7840,6 +7840,128 @@ fn slash_lists_the_commands_and_filters_them_as_the_user_types(cx: &mut TestAppC
     );
 }
 
+/// The height of the `/` list's frame, once a frame is drawn; `None` when it is not drawn at all.
+fn slash_height(cx: &mut VisualTestContext) -> Option<f32> {
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        let frame = window.try_find("slash-panel")?;
+        Some(f32::from(frame.bounds().size.height))
+    })
+}
+
+#[gpui_kit::test]
+fn the_command_menu_unfolds_when_slash_is_typed_and_folds_away_when_closed(
+    cx: &mut TestAppContext,
+) {
+    let user = user_with_commands();
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    settle(cx);
+
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("/");
+    until(&shell, cx, "the list offers the commands", |cx| {
+        slash_offered(&shell, cx).len() == 2
+    });
+    let first = slash_height(cx).expect("drawn from the first frame");
+    run_for(Duration::from_millis(60), cx);
+    let part_way = slash_height(cx).unwrap();
+    run_for(Duration::from_millis(600), cx);
+    let open = slash_height(cx).unwrap();
+    assert!(
+        first < part_way && part_way < open,
+        "it unfolds: {first} then {part_way} then {open}"
+    );
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+
+    // Escape: it folds away, still drawn part way, gone once the fold ended.
+    cx.simulate_keystrokes("escape");
+    run_for(Duration::from_millis(60), cx);
+    let leaving = slash_height(cx).expect("still drawn, leaving");
+    assert!(
+        leaving < open && leaving > 0.,
+        "it folds: {leaving} of {open}"
+    );
+    run_for(Duration::from_millis(600), cx);
+    assert_eq!(slash_height(cx), None, "gone once the fold ended");
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+}
+
+#[gpui_kit::test]
+fn the_command_menu_s_height_follows_its_rows_smoothly(cx: &mut TestAppContext) {
+    let user = user_with_commands();
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    settle(cx);
+
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("/");
+    until(&shell, cx, "the list offers the commands", |cx| {
+        slash_offered(&shell, cx).len() == 2
+    });
+    run_for(Duration::from_millis(600), cx);
+    let two = slash_height(cx).unwrap();
+
+    // A row that no longer matches folds away: the height goes down by steps of a frame.
+    cx.simulate_input("op");
+    run_for(Duration::from_millis(60), cx);
+    let part_way = slash_height(cx).unwrap();
+    cx.update(|window, _| {
+        assert!(
+            window.try_find("slash-close").is_some(),
+            "the row that left is still drawn, folding"
+        )
+    });
+    run_for(Duration::from_millis(600), cx);
+    let one = slash_height(cx).unwrap();
+    assert!(
+        one < part_way && part_way < two,
+        "it shrinks: {two} then {part_way} then {one}"
+    );
+    cx.update(|window, _| assert!(window.try_find("slash-close").is_none()));
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+
+    // A row that comes back unfolds.
+    cx.simulate_keystrokes("backspace backspace");
+    run_for(Duration::from_millis(60), cx);
+    let growing = slash_height(cx).unwrap();
+    run_for(Duration::from_millis(600), cx);
+    let again = slash_height(cx).unwrap();
+    assert!(
+        one < growing && growing < again,
+        "it grows: {one} then {growing} then {again}"
+    );
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+}
+
+#[gpui_kit::test]
+fn the_highlight_moves_with_a_fade(cx: &mut TestAppContext) {
+    let user = user_with_commands();
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    settle(cx);
+
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("/");
+    until(&shell, cx, "the list offers the commands", |cx| {
+        slash_offered(&shell, cx).len() == 2
+    });
+    run_for(Duration::from_millis(600), cx);
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+
+    // The arrow moves the highlight: its fill is on its way, not there at once.
+    cx.simulate_keystrokes("down");
+    assert!(
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.simulate_next_frame(cx)
+        }) > 0,
+        "the fill moves over a few frames"
+    );
+    run_for(Duration::from_millis(600), cx);
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+}
+
 #[gpui_kit::test]
 fn picking_a_command_with_slash_puts_its_name_in_the_field_and_sends_nothing(
     cx: &mut TestAppContext,
