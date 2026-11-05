@@ -675,6 +675,7 @@ pub(super) async fn list_pulls(
             note: more
                 .then(|| format!("only the {ALL} most recently changed pull requests are listed")),
             details: true,
+            log: Vec::new(),
         });
     }
     let base = format!("/rest/api/1.0/projects/{owner}/repos/{name}/pull-requests");
@@ -717,6 +718,7 @@ pub(super) async fn list_pulls(
         items,
         note: Some(notes.join("; ")),
         details: true,
+        log: Vec::new(),
     })
 }
 
@@ -1501,12 +1503,11 @@ pub(super) async fn write(
                 }
             }
             // `bkt` closes the source branch unless told not to; `gh pr merge` leaves it.
-            let args = command(
-                forge,
-                context,
-                &["pr", "merge", &number],
-                &["--strategy", strategy, "--close-source=false"],
-            );
+            let mut flags = vec!["--strategy", strategy, "--close-source=false"];
+            if let Some(message) = &asked.message {
+                flags.extend(["--message", message.as_str()]);
+            }
+            let args = command(forge, context, &["pr", "merge", &number], &flags);
             match text(&args).await {
                 Ok(_) => Outcome::Done(format!(
                     "The pull request #{number} of {branch} was merged by {method} into {base} \

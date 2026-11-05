@@ -974,6 +974,51 @@ fn a_source_removed_from_the_settings_has_its_rows_fold_away_when_its_items_are_
     assert_eq!(pending, 0, "nothing moves at rest");
 }
 
+#[gpui_kit::test]
+fn mine_only_is_disabled_with_its_reason_when_who_the_user_is_is_not_known(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, &["api"]);
+    let mut theirs = issue(6, "Typo on the page", "OPEN", OLD);
+    theirs["assignees"] = json!([]);
+    user.gh_script(json!({
+        "user_fail": "HTTP 502: Bad Gateway",
+        "issues": {"acme/api": {"5": issue(5, "Users cannot sign in", "OPEN", OLD), "6": theirs}}
+    }));
+    declare(&user, &["api"], true);
+    refresh(&user);
+    let (_shell, items, cx) = open_page(&user, cx);
+    click(cx, "project-items-tabs-tickets");
+    settle(cx);
+    let why = items.read_with(cx, |items, _| items.mine_unknown(Kind::Tickets));
+    assert!(
+        why.as_deref()
+            .is_some_and(|why| why.contains("did not say whom you are signed in as")),
+        "{why:?}"
+    );
+
+    // A click does nothing: the list is not emptied of the user's own.
+    click(cx, "project-items-mine");
+    settle(cx);
+    let mut shown = keys(&items, cx);
+    shown.sort();
+    assert_eq!(shown, ["5", "6"]);
+
+    // The pointer leaves it, then rests on it: the reason comes as its tooltip.
+    cx.simulate_mouse_move(
+        gpui_kit::point(px(1270.), px(890.)),
+        None,
+        Default::default(),
+    );
+    settle(cx);
+    cx.update(|window, cx| window.hover("project-items-mine-switch", cx));
+    settle(cx);
+    settle(cx);
+    let tip = label(cx, "project-items-mine-switch-tooltip");
+    assert_eq!(tip, why, "the tooltip says why");
+}
+
 // The list scrolls inside its section (#446).
 
 /// The project's `count` open pull requests of `api`, the most recently changed first (number

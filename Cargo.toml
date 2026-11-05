@@ -11,3 +11,8 @@ repository = "https://github.com/KristenJestin/flottille"
 # The release tests sum a 1.4 GB debug binary: unoptimised, that takes 25 s a sum.
 [profile.dev.package.sha2]
 opt-level = 3
+
+# The GPUI dependencies are most of every test binary's debug info; line tables keep a panic's
+# file and line, and the workspace's own crates keep the full debug info.
+[profile.dev.package."*"]
+debug = "line-tables-only"

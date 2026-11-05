@@ -85,35 +85,70 @@ overwritten, and a file already imported is `imported`. The methods are `command
 
 ## Sending one
 
-`/name` at the start of a message sends the command: the session's agent gets a short header,
-then the command's instructions, then what the message holds after the name:
+`/name` in a message sends the command when `name` is one of the project's commands, `/name` stands
+at the start of the message or after whitespace, and whitespace or the end follows it: "test
+/deploy-preview" uses it, `/usr/bin`, an address and an unknown name stay text. A message may use
+several. The session's agent gets the context the commands share once, then each command, in the
+order of its first use, with its description and its instructions (a command used twice is given
+once), then the message as it was written, each command marked `[command <name>]` at its place:
 
 ```
-The command open-prs of project shop: Open the pull requests of the workspace
-It runs in workspace login (branch shop/login), whose repositories are, by dependency level:
+The message below uses the commands open-prs, close of project shop: their instructions follow, in the order they are used, then the message as it was written.
+
+It runs in workspace login (branch shop/login).
+
+Its repositories, by dependency level (a level is built on the levels before it):
 - level 1: lib (base main, on origin)
 - level 2: api (base main, on origin), web (base main, on origin)
+
 A pull request's title follows the project's format: type(TICKET): subject
+
 ---
+
+The command open-prs of project shop: Open the pull requests of the workspace
 
 Report each repository's state…
 
-and the docs too
+---
+
+The command close of project shop: Close the workspace once nothing in it would be lost
+
+…
+
+---
+
+The message, each command marked [command <name>] where it was written:
+
+[command open-prs] and the docs too, then [command close]
 ```
 
-The header says the workspace and its repositories by dependency level (each with its base and
+The context says the workspace and its repositories by dependency level (each with its base and
 its remote, the levels read from the project's `depends_on`: a repository is one level after the
 deepest of those it depends on among the workspace's), what the project says of its pull requests
-(below) and the workspace's ticket when it is linked to one; a session in `main` gets the command's
-name and description only. A `/word` that names no command is sent as it is written.
+(below) and the workspace's ticket when it is linked to one; a session in `main` gets the commands'
+names and descriptions only. A command that points at a file reads it when the message is sent; if
+one cannot be read, nothing is sent and the answer says which.
+
+The marker is not escaped: a message that holds the text `[command deploy]` itself is read by the
+agent as that command marked at that place. It grants nothing, the sender wrote it, and no
+instructions are given for it unless the message also used `/deploy`.
+
+The daemon keeps both texts with the message (`docs/events.md`, `agent.prompted`): what the agent
+received, and what was typed with the names of the commands it used. Both are masked. The window
+shows the typed text, each command as a chip, and what the agent received in a fold, "What the
+agent received", closed at first; the queued message shows the typed text too, and taking it back
+(`agent.unqueue`) gives the typed text back. The judge reads the recorded names, never the text: it
+is shown what the user typed as their words and what the agent received as the project's text,
+apart.
 
 It works wherever a message is sent to an agent: the window's composer, `flottille agent send`,
 the message of `agent start` and `agent run`, and an agent's own `agent_send` to its child. Nothing
 starts that the user did not start: a command is a message, sent to a session that exists.
 
-In the window, `/` at the start of a message in a session's composer lists the project's commands,
-filtered as the user types; picking one puts `/name ` in the field, for the user to add what it is
-about, and Enter sends it. The commands are edited in the project's Settings, section Commands.
+In the window, a word at the cursor that starts with `/`, anywhere in the message of a session's
+composer, lists the project's commands, filtered as the user types; picking one completes that word
+into `/name `, for the user to add what it is about, and Enter sends it. The commands are edited in
+the project's Settings, section Commands.
 
 **The environment.** An agent's runs get their environment without forge tokens: a push goes with
 the user's own git credentials (an SSH key, a credential helper that needs no forge command line).
@@ -152,7 +187,9 @@ act on a pull request by its number, and are in `docs/tools.md`:
 - `merge`: the open pull request of the workspace's branch from the repository itself
   (not from a fork, which can have a branch of the same name) into its base, by `method`:
   `squash` (the default), `merge` or `rebase`, `gh pr merge <n> -R … --squash` (`--merge`,
-  `--rebase`); another method is refused by the gate, and so is a `method` on another action. None
+  `--rebase`); another method is refused by the gate, and so is a `method` on another action. A
+  squash takes `message`, the squashed commit's message (`--subject` its first line, `--body` the
+  rest), refused with another method; left out, the forge writes its own. None
   open is refused. So is one no check ran on (`refused: the pull request #n of … is not merged: no
   check ran on this pull request…`), one whose checks were all skipped or neutral (`… all its
   checks were skipped (build), none passed…`), and one `gh` or `bkt` answers in a shape that

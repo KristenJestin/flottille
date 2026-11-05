@@ -289,6 +289,15 @@ own branches when it has no such remote), or a dependency is on the repository i
 project lacks or closes a cycle (`projects/app.toml: repositories[0].depends_on: cycle web -> api
 -> web; nothing was saved`).
 
+#### `project.set_message_checks`
+
+`{"name", "checks"}`. Writes the project's message checks (`docs/projects.md`, "Message checks"),
+every one in order, in its file where they stand: `message_checks`, removed when `checks` is empty
+(a blank line is left out). Answers `{"name", "message_checks"}`. `refused`, nothing written, when a
+line cannot be split without a shell or does not name `{message}` (`the check `lint x` cannot be
+used: must name {message}, the file that holds the message it checks; nothing was saved`). It is the
+user's alone: no tool of an agent writes the checks, which Flottille runs outside the gate.
+
 #### `project.ticket`
 
 `{"project", "ticket"}`. Reads a ticket of the project's tracker before any workspace has it, for
@@ -710,7 +719,9 @@ no such project.
 `{"project", "kind"?, "state"?, "repository"?, "mine"?}`: `kind` is `pull` or `ticket`, `state`
 one of an item's states (`open`, `draft`, `merged`, `closed`), `repository` a path of the
 project's (a Jira work item has none), `mine` true for the user's own. Answers `{project, items,
-sources}`, the items most recently changed first, from the store: nothing is read.
+sources}`, the items most recently changed first, from the store: nothing is read. Each source
+has its `mine_unknown`: why its last round could not tell which items are the user's, `null`
+when it could.
 
 #### `items.show`
 
@@ -966,7 +977,7 @@ images of an agent go with it: when it ends for good, or 7 days after a root tha
 `{"agent", "delivery", "images"?}`. Takes back a message the user wrote to a root that still waits
 for the root to read it (`queued` of `agent.tree`): `{"agent", "delivery", "text", "images"}`. The
 root never reads it, and `delivery.withdrawn` is its event (`docs/events.md`). `text` is the
-message as it is stored (masked); `images` are its pictures, `{"mime", "data"}` as `agent.send`
+message as it is stored (masked), as the user typed it for one that used commands; `images` are its pictures, `{"mime", "data"}` as `agent.send`
 takes them, when the request says `"images": true`, else empty (the picture files are deleted
 either way). The check and the withdrawal are one transaction: `refused` with "already read by
 the agent" when the root took the message first (nothing changes), "that message was withdrawn
@@ -1061,7 +1072,10 @@ report (`agent.usage`), in percent, `null` before one and while the window's siz
 `context_tokens`, the tokens its context holds at that report, `null` before one; `queued`, for the root, the messages the
 user wrote to it that wait for it to read them between its turns, the oldest first, each
 `{"delivery", "text", "images", "pictures", "at"}` (its text masked as it is stored, how many pictures go with
-it and their names, which `agent.image` reads back, when it was written), empty for a child.
+it and their names, which `agent.image` reads back, when it was written), empty for a child. For a
+message that used commands (`docs/commands.md`), `text` is what the user typed, `commands` the
+names of the commands, in the order of their first use, and `received` what the agent will receive
+for it.
 
 #### `agent.read`
 
