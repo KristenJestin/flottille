@@ -129,6 +129,10 @@ deepest of those it depends on among the workspace's), what the project says of 
 names and descriptions only. A command that points at a file reads it when the message is sent; if
 one cannot be read, nothing is sent and the answer says which.
 
+The marker is not escaped: a message that holds the text `[command deploy]` itself is read by the
+agent as that command marked at that place. It grants nothing, the sender wrote it, and no
+instructions are given for it unless the message also used `/deploy`.
+
 The daemon keeps both texts with the message (`docs/events.md`, `agent.prompted`): what the agent
 received, and what was typed with the names of the commands it used. Both are masked. The window
 shows the typed text, each command as a chip, and what the agent received in a fold, "What the
