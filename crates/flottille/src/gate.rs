@@ -642,7 +642,8 @@ fn forge(call: &Call) -> Verdict {
 }
 
 /// The arguments of `forge` that belong to some actions alone, and those.
-const FORGE_ONLY: [(&str, &[&str]); 9] = [
+const FORGE_ONLY: [(&str, &[&str]); 10] = [
+    ("draft", &["create", "edit"]),
     ("reviewers", &["create"]),
     ("labels", &["create"]),
     ("delete_branch_on_merge", &["create"]),
