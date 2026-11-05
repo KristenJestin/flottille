@@ -78,6 +78,7 @@ pub fn ask(
     if now.is_some_and(|now| now != place) {
         return (Outcome::Refused(format!("refused: {}", left(&place))), None);
     }
+    let leave = gate::asks_leave(&ask);
     let asked = Request {
         number: 0,
         agent: grant.agent.clone(),
@@ -105,7 +106,34 @@ pub fn ask(
         decided_at: None,
         place: Some(place),
     };
-    match daemon.write(|store| store.ask(&asked)) {
+    // Two first messages of a pair at once ask the user once: the second finds the first's
+    // request in the same lock that writes it.
+    let written = daemon.write(|store| {
+        if leave && let Some(number) = asking_leave(store, &asked)? {
+            return Ok((Err(number), None));
+        }
+        let (request, event) = store.ask(&asked)?;
+        Ok((Ok(request), event))
+    });
+    let written = match written {
+        Ok(Err(number)) => {
+            let session = asked.arguments["session"].as_str().unwrap_or_default();
+            let named = match daemon.read(|store| store.agent(session)) {
+                Ok(Some(agent)) => tree::named(&agent),
+                _ => format!("agent {session}"),
+            };
+            return (
+                Outcome::Refused(format!(
+                    "refused: request #{number} already asks the user to let you write to \
+                     {named}; this message was not sent: send it once its answer came"
+                )),
+                None,
+            );
+        }
+        Ok(Ok(request)) => Ok(request),
+        Err(error) => Err(error),
+    };
+    match written {
         Ok(request) if request.held_by == approval::USER => {
             (Outcome::Held(waiting(request.number)), Some(request.number))
         }
@@ -131,6 +159,24 @@ pub fn ask(
             )
         }
     }
+}
+
+/// The request that already asks the user's leave for the pair `asked` asks it for, other than
+/// the one its own call key made: pending, or allowed and still being performed, since the leave
+/// is kept only once its first message went.
+fn asking_leave(store: &Store, asked: &Request) -> flottille_core::Result<Option<u64>> {
+    Ok(store
+        .pending_requests(approval::USER)?
+        .into_iter()
+        .chain(store.unsettled_requests()?)
+        .find(|request| {
+            request.agent == asked.agent
+                && request.tool == asked.tool
+                && request.arguments["session"] == asked.arguments["session"]
+                && request.reasons.iter().any(|reason| reason == gate::LEAVE)
+                && (request.call_key.is_none() || request.call_key != asked.call_key)
+        })
+        .map(|request| request.number))
 }
 
 /// An agent's place as a request keeps it: `main`, or `workspace <name>`.
@@ -378,6 +424,14 @@ async fn performed(
         discarding,
     )
     .await;
+    // The user allowed the first message of a pair: the leave is the pair's from now on.
+    if matches!(outcome, Outcome::Done(_))
+        && tool == "session_send"
+        && request.reasons.iter().any(|reason| reason == gate::LEAVE)
+        && let Some(session) = request.arguments["session"].as_str()
+    {
+        tree::grant_leave(daemon, &request.agent, session, number);
+    }
     let approved = "was approved by the user";
     let (word, body) = match outcome {
         Outcome::Done(text) => (
@@ -449,4 +503,97 @@ pub fn waiting_for_user(daemon: &Daemon) -> flottille_core::Result<usize> {
     agents.sort();
     agents.dedup();
     Ok(agents.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flottille_core::agent::{Agent, AgentState, Choices, GateMode};
+
+    fn a_session(id: &str) -> Agent {
+        Agent {
+            id: id.into(),
+            provider: "claude".into(),
+            role: "lead".into(),
+            project: "app".into(),
+            workspace: Some("login".into()),
+            folder: "/data/workspaces/app/login".into(),
+            state: AgentState::Starting,
+            state_reason: None,
+            created_at: 1_792_843_730_808,
+            updated_at: 1_792_843_730_808,
+            active_at: None,
+            exchanged_at: None,
+            ended_at: None,
+            chosen: Choices {
+                model: Some("haiku".into()),
+                ..Choices::default()
+            },
+            taken: Choices::default(),
+            pending: Choices::default(),
+            native_id: None,
+            agent_version: None,
+            instructions: "shared\n\n__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__\n\nsession".into(),
+            tools: vec!["mcp__flottille__fs_read".into()],
+            parent: None,
+            depth: 0,
+            epoch: 0,
+            title: None,
+            brief: Some("hello".into()),
+            reported_at: None,
+            quiet_turns: 0,
+            waiting_on_answer: false,
+            reopens: false,
+            images: None,
+            gate_mode: GateMode::Auto,
+            launched_by: None,
+        }
+    }
+
+    fn a_first_message(writer: &str, session: &str, key: &str) -> Request {
+        Request {
+            number: 0,
+            agent: writer.into(),
+            call_key: Some(key.into()),
+            tool: "session_send".into(),
+            arguments: json!({"session": session, "text": "Hello."}),
+            shown: json!({"session": session, "text": "Hello."}),
+            reasons: vec![gate::LEAVE.into(), gate::SESSION_SEND.into()],
+            base: true,
+            kind: Kind::Action,
+            says: Vec::new(),
+            judgement: None,
+            held_by: approval::USER.into(),
+            forwards: Vec::new(),
+            state: RequestState::Pending,
+            decision: None,
+            created_at: 0,
+            decided_at: None,
+            place: None,
+        }
+    }
+
+    #[test]
+    fn a_leave_allowed_and_being_performed_is_not_asked_twice() {
+        let mut store = Store::open_in_memory().unwrap();
+        for id in ["writer000000", "session00000"] {
+            store
+                .create_agent(&a_session(id), ("agent.created", json!({})))
+                .unwrap();
+        }
+        let (first, _) = store
+            .ask(&a_first_message("writer000000", "session00000", "toolu_01"))
+            .unwrap();
+        let again = a_first_message("writer000000", "session00000", "toolu_02");
+        assert_eq!(asking_leave(&store, &again).unwrap(), Some(first.number));
+
+        let (allowed, _) = store
+            .decide(first.number, Decision::Once, approval::USER)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(asking_leave(&store, &again).unwrap(), Some(first.number));
+        store.settle(&allowed, "done", "Sent.").unwrap();
+        assert_eq!(asking_leave(&store, &again).unwrap(), None);
+    }
 }

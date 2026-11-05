@@ -488,6 +488,11 @@ pub fn root_launch(grant: &Grant, args: &Value) -> Verdict {
 pub const SESSION_SEND: &str = "it writes to another session, the user's, as this agent: what it \
     sends steers that session's work";
 
+/// Why the first message of a session to another it did not start comes to the user, in every
+/// mode: what the user allows with it is every later one of the pair.
+pub const LEAVE: &str = "this session has not written to that one before: the user lets it, \
+    once for the pair and one way, in every mode, Full included";
+
 /// Why the gate holds `session_read`: each read of another session is judged.
 pub const SESSION_READ: &str = "it reads another session's conversation: what the user said to \
     that session's agent, and what that agent answered, which this agent was not told";
@@ -501,6 +506,24 @@ fn session_send(grant: &Grant, args: &Value) -> Verdict {
         return refused;
     }
     found.verdict(Kind::Action)
+}
+
+/// The first `session_send` of a session to another it did not start: the user's leave, asked
+/// with the message, which never reaches the judge and which Full does not let through
+/// (`asks_leave`).
+pub fn session_leave(grant: &Grant, args: &Value) -> Verdict {
+    let mut found = Found::default();
+    found.base(LEAVE.into());
+    found.judge(SESSION_SEND.into());
+    if let Err(refused) = texts(grant, args, &["text"], &mut found) {
+        return refused;
+    }
+    found.verdict(Kind::Action)
+}
+
+/// Whether a held call asks the user's leave for a pair of sessions: only the user answers it.
+pub fn asks_leave(ask: &Ask) -> bool {
+    ask.reasons.iter().any(|reason| reason == LEAVE)
 }
 
 /// The texts a write posts or sends, which the user's card and the judge show whole: one longer

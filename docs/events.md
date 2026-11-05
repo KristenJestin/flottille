@@ -756,6 +756,22 @@ The user dismissed a command that ended (`run.dismiss`): it is no longer listed.
 |---|---|
 | `agent`, `run` | |
 
+### The events of a leave
+
+The user's leave for a session to write to another it did not start (`docs/tools.md`, "Sessions
+that talk to each other"). Each has `writer` and `session`, the two agents' ids, `request`, the
+number of the request it was given in, and `granted_at`. A leave also goes, with no event of its
+own, when either session ends: `agent.ended` (or `agent.failed`) says it.
+
+#### `leave.granted`
+
+The user allowed the first message of `writer` to `session`: the writer's next messages to it
+are judged as a write is, never asked again for the pair.
+
+#### `leave.withdrawn`
+
+The user took it back (`leave.withdraw`): the writer's next message to that session asks again.
+
 ### The events of a service
 
 The services of the machine (`docs/projects.md`, "Services"). Their runs also emit the events of a
