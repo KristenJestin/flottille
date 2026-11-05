@@ -884,7 +884,7 @@ async fn agent_task(daemon: Arc<Daemon>, id: String, orders: mpsc::UnboundedRece
 /// more, and what their tools printed goes with them.
 pub fn forget_kept_sessions(daemon: &Daemon) {
     let now = now_ms();
-    for agent in daemon.read(Store::agents).unwrap_or_default() {
+    for agent in daemon.read(Store::kept_sessions).unwrap_or_default() {
         let Some(ended_at) = agent.ended_at else {
             continue;
         };
