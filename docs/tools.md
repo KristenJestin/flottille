@@ -307,6 +307,15 @@ Until #131 these were `commands_list`, `commands_run` (its `command` now `task`)
 is `tasks` with `action list`), and the store renamed them in the agents' fixed lists and their
 pending requests.
 
+- **A line that only prints a part of a file is an `fs_read`.** A `run` of exactly `sed -n <range>p
+  <file>` (`5p`, `5,20p`, `5,$p`), `head [-n N] <file>`, `tail [-n N] <file>` or `cat <file>`, with
+  no `task`, `timeout` or `notify`, is read from the words the splitter below makes of it. When
+  the gate lets the `fs_read` of that file through at once (a path in the place, no sensitive
+  place, no link leading out) and the lines fit one page, it is served, recorded and gated as
+  that `fs_read`, with no process and no judge, in every mode. The answer starts with
+  `read with fs_read {"path": …, "range": {"offset": …, "length": …}}: use it directly`, then the
+  page. Any other line, a file that is not there or has no such lines, a range longer than a page
+  is a `run` as below.
 - **No shell, ever.** A line is split as `flottille_core::command` does (the setup's `run` steps
   too): words on whitespace, a quoted part kept whole, a backslash literal. What a shell expands
   inside double quotes too (a newline, a backtick, `$(`, `${`, `$VAR`, `%VAR%`) is refused outside
