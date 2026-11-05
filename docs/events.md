@@ -422,6 +422,21 @@ activity.
 | `request` | For a call the user allowed, performed once they did: the request's number; else `null`. |
 | `cut` | Only when the result was cut at the source (`docs/tools.md`, "Long results"): `{"result", "chars", "left_out"}`, the id the whole text is read by, its length and how many characters the agent was not shown. |
 
+#### `agent.link_shown`
+
+The agent handed the user a link (`web` `show_link`, `docs/tools.md`, "Showing a link"). Nothing
+was opened: the window turns it into a toast with an Open button and a card in the conversation,
+and the user's click opens it with the system's default handler.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `kind` | `url`, or `file` for a file of the agent's place. |
+| `target` | What Open opens: the `http(s)` URL as the agent gave it, or the file's absolute real path. |
+| `title` | The few words the agent gave, masked; `null` when it gave none. |
+| `host` | The URL's host; `null` for a file. |
+| `shown` | Only for a file: its path as the place shows it, relative to the place. |
+
 #### `agent.tools_changed`
 
 The agent was given the tools its role has now: its project declared or dropped a forge or a

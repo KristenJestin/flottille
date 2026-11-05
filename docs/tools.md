@@ -889,7 +889,7 @@ it at once.
 
 | Tool | |
 |---|---|
-| `web {action, url?, query?, why?}` | A page read or a search, through the daemon: the only way an agent reaches the web (`docs/design.md` §4.2). Every agent has it, in `main` as in a workspace. |
+| `web {action, url?, query?, why?, path?, title?}` | A page read or a search, through the daemon: the only way an agent reaches the web (`docs/design.md` §4.2); `show_link`, a link put in front of the user ("Showing a link", below). Every agent has it, in `main` as in a workspace. |
 
 - **`read {url}`**: fetches the page and answers its main content: HTML as Markdown (the `dom_smoothie`
   crate, Readability ported to Rust, its navigation, banners and footers left out), a PDF as its
@@ -963,6 +963,32 @@ it at once.
   longer than the 8,000 characters the judge is given whole is refused.
 - **A search** sends its words to the search provider only: it is to judge in Ask (a card),
   and passes in Auto and Full.
+
+### Showing a link
+
+`web {"action": "show_link", "url": "https://…", "title"?}` (or `"path"` instead of `"url"`) puts a
+link in front of the user. It is the way to show a ticket just created, a report, a page: an
+agent never drives the user's desktop through a program (`run` has no graphical session, so
+`xdg-open <url>` ends without error and shows nothing; the gate refuses `xdg-open`, `open` and
+`start` in a line, a task or a step, whatever wraps them, with a sentence that points here).
+
+- **The daemon opens nothing.** It checks the link, says it in `agent.link_shown`
+  (`docs/events.md`) and answers at once (`Shown to the user: <title or host>. They open it with a
+  click; nothing opened by itself.`): no call waits for the user. Only the window opens it, after
+  the user's click on **Open**, with the system's default handler (the code that opens a run's
+  address or a pull request).
+- **What may be shown**: an `http` or `https` URL with a host (no `file:`, `javascript:`, `ftp:`,
+  `mailto:`; at most 2,000 characters; one that holds what the masking takes for a secret is
+  refused), or a file inside the agent's place, its workspace or checkout, where it really leads
+  once `..` and links are followed: a path outside is refused saying so (`refused: … is not inside
+  your place …; nothing was shown`), and so is one that is not a file. The URL and the path are
+  exclusive, and a title is at most 120 characters. The tool's own address check is not `web
+  read`'s: a link is for the user's eyes, so `localhost` (a dev server) is allowed.
+- **The gate lets it through in every mode**, with no card: like a read it changes nothing, and
+  the user decides by clicking. A link that fails the checks above is refused in every mode.
+- **In the window**: a toast `The agent shares a link: <title or host>` with an Open button, and a
+  small card in the agent's conversation (title, host or path, Open), so that a toast missed is
+  not lost.
 
 ## The gate
 
@@ -1050,6 +1076,10 @@ says who answers a call to judge (`docs/design.md` §7.1).
      (the first word after `uv`, `poetry`, `pipenv`, `pdm`, `hatch`, `rye`, `pixi`, `conda`,
      `mamba` `run`; `npm`, `pnpm`, `yarn`, `bundle`, `mise` `exec` or `x`; `bun x`; after `--`
      of `cargo run`). Anywhere else its name is a plain word;
+   - a program that opens a link on the desktop: `xdg-open`, `open`, `start`. A run has no
+     graphical session, so nothing would show; it is refused in the same places as a launcher
+     (a line's program, behind a wrapper, what a runner runs, a task's or a step's line) with a
+     sentence that points to `web` `show_link` ("Showing a link");
    - a container's bind mount: the source of each `-v`, `--volume`, `--mount` (`source=`,
      `src=`) of `docker`, `podman` or `nerdctl` `run` or `create` that names a path is a path the
      line writes, refused as above. A named volume, and a container itself, are not.

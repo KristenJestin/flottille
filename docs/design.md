@@ -529,6 +529,10 @@ line names, every program a wrapper or a runner runs included:
   pushes go (`remote.*`, `url.*`, `push.*`) stays base. A program named to run for a remote,
   which may be this machine, is refused too: `--upload-pack`, `--receive-pack`, `--exec`,
   `git clone -u`, `git -c core.sshCommand`;
+- **a program that opens a link on the desktop** (`xdg-open`, `open`, `start`): a run has no
+  graphical session, so nothing would show. Refused where a launcher is, with a sentence that
+  points to `web` `show_link`, which hands the user the link and lets the window open it after
+  their click (`docs/tools.md`, "Showing a link");
 - **a launcher** that starts what it runs outside the daemon's tree, later or on a host:
   `systemd-run`, `tmux`, `screen`, `zellij`, `dtach`, `abduco`, `setsid`, `at`, `batch`,
   `crontab`, `dbus-send`, `gdbus`, `busctl`, `loginctl`, `systemctl` but for its reads (`status`,
