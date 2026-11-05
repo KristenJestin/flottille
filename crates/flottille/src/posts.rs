@@ -161,6 +161,25 @@ impl Known {
         marked
     }
 
+    /// Whether a record carries the comment id `id`: only such a record says that comment is an
+    /// agent's to change, since a record of words may be claimed by a person's same words.
+    pub(crate) fn owns(&self, id: &str) -> bool {
+        self.0
+            .iter()
+            .any(|post| post.kind == "comment" && post.comment_id.as_deref() == Some(id))
+    }
+
+    /// The id of the comment just posted with `text`, among those read right after the post: the
+    /// newest of its words whose id no record holds yet.
+    pub(crate) fn just_posted(&self, read: &[Heard], text: &str) -> Option<String> {
+        let print = fingerprint(text);
+        read.iter()
+            .rev()
+            .filter_map(|heard| heard.id.filter(|id| !self.owns(id)).map(|id| (id, heard)))
+            .find(|(_, heard)| fingerprint(heard.text) == print)
+            .map(|(id, _)| id.to_owned())
+    }
+
     /// Whether the item's own text, as it reads now, is one an agent posted: the user may have
     /// edited it since.
     pub(crate) fn body(&self, text: &str) -> bool {
@@ -228,6 +247,7 @@ impl Known {
         let marks = self.marks(&read);
         for (comment, mark) in ticket.comments.iter_mut().zip(marks) {
             comment.agent |= mark;
+            comment.own = comment.id.as_deref().is_some_and(|id| self.owns(id));
         }
     }
 
@@ -271,6 +291,22 @@ pub(crate) fn record_comment(
         daemon,
         post(project, source, repository, key, "comment", id, text),
     );
+}
+
+/// A comment an agent changed: one record of its id, with the new words.
+pub(crate) fn replace_comment(daemon: &Daemon, on: (&str, &str, &str, &str), id: &str, text: &str) {
+    drop_comment(daemon, on, id);
+    record_comment(daemon, on, Some(id.to_owned()), text);
+}
+
+/// A comment an agent deleted: its record goes, so that no later comment is taken for it.
+pub(crate) fn drop_comment(daemon: &Daemon, on: (&str, &str, &str, &str), id: &str) {
+    if let Err(error) = daemon.read(|store| store.drop_comment_posts(on, id)) {
+        eprintln!(
+            "flottille daemon: the record of the comment {id} on {} could not be dropped: {error}",
+            on.3
+        );
+    }
 }
 
 /// The text of the item itself (its description), posted by an agent.

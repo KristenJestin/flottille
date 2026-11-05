@@ -374,24 +374,24 @@ const SERVED: [Definition; 28] = [
     Definition {
         name: "tickets",
         title: "Tickets",
-        description: "The tickets of the project's tracker (GitHub issues #123, Jira ABC-123), \
-            through the user's own gh or acli (no sign-in here: never run them). list: every \
-            ticket of a state (open by default), by label and assignee, as the daemon last read \
-            them; search: the same, with words of the title; show: a workspace's linked ticket \
-            (in main, name workspace) or ticket, read now, detail full adds the comments; \
-            types: a Jira project's work item types: read them when unsure of a type, a guess \
-            is refused. Writes, judged, answered at once, the result maybe later: create, \
-            comment, edit, close, reopen, status. Nothing is assigned unless you ask, and a \
-            tracker may assign a new work item itself: assignee \"@me\" gives it to the user \
-            (Jira create, edit; null on edit removes it; GitHub edit: assignees). Markdown body, \
-            converted for Jira. subscribe: the next events of a ticket wake you once (from \
-            people: no bot nor agent; minutes: 60 by default); unsubscribe. {\"action\": \"comment\", \"ticket\": \"#12\", \"body\": \"...\"}",
+        description: "The tickets of the project's tracker (GitHub #123, Jira ABC-123), through the user's own \
+            gh or acli (never run them). list, search (title words): the tickets of a state (open by \
+            default), by label and assignee, as last read; show: a workspace's linked ticket (in \
+            main, name workspace) or ticket, read now, with its links; detail full adds the \
+            comments, with the id of those you posted; types: a Jira project's work item types; \
+            link_types: the kinds of link. Writes, judged, answered at once, the result maybe later: \
+            create, comment, edit, close, reopen, status, link and unlink (ticket kind other: ABC-2 \
+            blocks ABC-1), comment_edit and comment_delete (your own comments only). Nothing is \
+            assigned unless you ask: assignee \"@me\" gives it to the user (Jira create, edit; null \
+            on edit removes it; GitHub edit: assignees). subscribe: the next events of a ticket wake you once (from people: no bot nor agent; \
+            minutes: 60 by default); unsubscribe. {\"action\": \"comment\", \"ticket\": \"#12\", \
+            \"body\": \"...\"}",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "search", "show", "types", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status"]},
+                "action": {"type": "string", "enum": ["list", "search", "show", "types", "link_types", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "sprint"]},
                 "ticket": {"type": "string", "description": "#123 or ABC-123; the workspace's when left out."},
                 "workspace": {"type": "string"},
                 "query": {"type": "string", "description": "search: words."},
@@ -401,13 +401,17 @@ const SERVED: [Definition; 28] = [
                 "detail": {"type": "string", "enum": ["short", "full"]},
                 "fresh": {"type": "boolean", "description": "show: read the ticket again; one read in the last 30 s is given again otherwise (detail full always reads)."},
                 "title": {"type": "string"},
-                "body": {"type": "string", "description": "create, edit: description; comment: the comment."},
+                "body": {"type": "string", "description": "create, edit: description; comment, comment_edit: the comment. Markdown, converted for Jira."},
                 "labels": {"type": "array", "items": {"type": "string"}, "description": "create, edit: labels to add (GitHub)."},
                 "reason": {"enum": ["completed", "not planned"], "description": "close: completed or not planned (GitHub)."},
                 "remove_labels": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to remove (GitHub)."},
                 "assignees": {"type": "array", "items": {"type": "string"}, "description": "edit: logins to add (GitHub), \"@me\" for the user."},
                 "remove_assignees": {"type": "array", "items": {"type": "string"}, "description": "edit: logins to remove (GitHub)."},
                 "status": {"type": "string", "description": "status: its name."},
+                "other": {"type": "string", "description": "link, unlink: the other ticket. The link reads ticket, kind, other: ABC-2 blocks ABC-1 is ticket ABC-2, kind blocks, other ABC-1."},
+                "kind": {"type": "string", "description": "link, unlink: a kind link_types lists (blocks, is blocked by, relates to; GitHub: parent of, sub-task of)."},
+                "comment": {"type": "string", "description": "comment_edit, comment_delete: the id show (detail full) gives a comment an agent posted; no one else's."},
+                "sprint": {"type": "string", "description": "sprint: refused, acli cannot do it."},
                 "project": {"type": "string", "description": "create, types on Jira: the tracker's project; status: the board."},
                 "type": {"type": "string", "description": "create on Jira: work item type, one of those types lists."},
                 "events": {"type": "array", "items": {"enum": crate::tickets::EVENTS}},
