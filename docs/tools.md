@@ -513,7 +513,8 @@ pending requests.
   said; so does its time, said. Subscribing again to the same pull request replaces the agent's
   subscription. A pull request merged or closed, a repository with no forge or no pull request,
   and `number` are refused. **`unsubscribe {workspace?, repository?}`** cancels the agent's
-  subscriptions to them, every one when it names none.
+  subscriptions to them, every one when it names none; **`unsubscribe {session}`** stops following a
+  session the agent started ("Following a session", under "The tree's tools").
 - **`create`, `merge`, `checks` `{workspace?, repository?, …}`** (`repository` is needed when the
   workspace has several, and the refusal lists them): opens the pull request of a
   workspace's branch (`title`, `body`, `draft`, with the project's reviewers), merges it by
@@ -605,7 +606,7 @@ It is the agent's own bookkeeping: the gate allows it in every mode, never held.
 
 | Tool | |
 |---|---|
-| `workspace {action: list \| show \| create \| prepare \| link_ticket \| remove, name?, repositories?, ticket?}` | The project's workspaces, as the window manages them (`docs/workspaces.md`). `list` gives each one's state, branch, repositories and ticket; `show {name?}` one whole, each step of its preparation with its state and why a failed one failed. `create {name, repositories?, branch?, ticket?}` makes one as `workspace.create` does: its worktrees, answered once they are made, then its setup in the background; `branch` is `<branch prefix>/<name>` when left out (the name alone when the project's prefix is empty), and an existing branch is checked out (its description: "to resume a branch, name it"). Its description also says to name the branch the way the repository does (its `AGENTS.md`, `CONTRIBUTING`, or the branches it already has), with the ticket's key when the workspace has a ticket, the default being the fallback. `prepare {name?}` resumes a failed preparation (`workspace.prepare`); `link_ticket {name?, ticket}` links its ticket, and unlinks it with `ticket: null` (`workspace.link_ticket`). `name` is the agent's own workspace when left out, but for `create`; in `main` it names one. Every agent has it. Its description says, in one line, that to work on another branch in a workspace an agent switches with git and the workspace follows (`docs/workspaces.md`, "The branch"). A child reads the workspaces; its writes, `remove` included, are refused (`refused: the agent the user talks to manages the project's workspaces; … ask your parent (ask_parent)`). |
+| `workspace {action: list \| show \| create \| prepare \| link_ticket \| rename_branch \| remove, name?, repositories?, branch?, ticket?, repository?}` | The project's workspaces, as the window manages them (`docs/workspaces.md`). `list` gives each one's state, branch, repositories and ticket; `show {name?}` one whole, each step of its preparation with its state and why a failed one failed. `create {name, repositories?, branch?, ticket?}` makes one as `workspace.create` does: its worktrees, answered once they are made, then its setup in the background; `branch` is `<branch prefix>/<name>` when left out (the name alone when the project's prefix is empty), and an existing branch is checked out (its description: "to resume a branch, name it"). Its description also says to name the branch the way the repository does (its `AGENTS.md`, `CONTRIBUTING`, or the branches it already has), with the ticket's key when the workspace has a ticket, the default being the fallback. `prepare {name?}` resumes a failed preparation (`workspace.prepare`); `link_ticket {name?, ticket}` links its ticket, and unlinks it with `ticket: null` (`workspace.link_ticket`). `rename_branch {name?, branch, repository?}` renames the workspace's branch in each of its repositories, or in `repository` alone (`workspace.rename_branch`): only while the branch was never pushed (no remote branch, no pull request) and the workspace did not resume it, to a name git accepts that no repository has and no checkout holds; each refusal says which repository and why (`docs/workspaces.md`, "Renaming the branch"), and comes before the request is held. It is judged as a write: a card in Ask (`Rename the branch of the workspace login from app/login to fix/ABC-12-login in api, web`), the judge in Auto, through in Full. `name` is the agent's own workspace when left out, but for `create`; in `main` it names one. Every agent has it. Its description says, in one line, that to work on another branch in a workspace an agent switches with git and the workspace follows (`docs/workspaces.md`, "The branch"). A child reads the workspaces; its writes, `remove` included, are refused (`refused: the agent the user talks to manages the project's workspaces; … ask your parent (ask_parent)`). |
 | `remove {name}` | Removes a workspace of the project, as `flottille workspace remove` does (`docs/workspaces.md`, "Removal"), **always held for the user**, whatever the mode and the judge: a request whose card says what would be lost, each repository's uncommitted files and commits on no remote (`This would be lost, and the workspace is removed only if your answer says to discard it:`, `api has commits on no remote, on its branch shop/login: 1a2b3c4 Add the login`), or `Nothing would be lost`. Allowed, it is refused, nothing touched, while something would be lost, unless the user's answer said to discard it (`flottille approve <n> --discard`), and while another agent than the caller works in the workspace, of its tree or not, or a command run not the tree's own runs there (`refused: workspace … is not removed, nothing was touched: the agent …, outside this agent's tree, works in it…`, `the agent …, of this agent's tree, works in it`), each named; then deletes, in each repository, the workspace's local branch once its work has landed (no commit of its own, or its pull request merged, as the forge says), never the remote one, and keeps the others, its answer saying each and why (`docs/workspaces.md`, "Removal"). A root removes the workspace it works in too, named or left out, once its work is done, held whatever the mode, Full included: its card also says the commands of its tree running in it, stopped first as `run.stop` stops one (`Stop the commands of this session running in it: pnpm dev:api, pnpm dev:front`), and `This session then goes on in the project's folder (main)`; once it is removed, the session goes on in `main` (its place, its grant and its record, in the write that forgets the workspace), and the answer says so (`The workspace login is removed; you now work in the project's folder (main), …`; `docs/workspaces.md`, "Its own workspace"). Its requests still waiting are then cancelled and answered as not run, and while the removal is carried out its `run`, `agent_launch`, `fs_write` and `fs_edit` are refused (`refused: the workspace login is being removed: …`). A child removes none. Until #141 it was the tool `workspace_remove {workspace?}`, still answered for one release. |
 
 `list` and `show` run at once. `remove` is base (above). `create`, `prepare` and `link_ticket` are to judge, as any
@@ -631,7 +632,7 @@ reasons.
 
 | Tool | |
 |---|---|
-| `tickets {action, ticket?, workspace?, query?, state?, label?, assignee?, detail?, fresh?, title?, body?, labels?, reason?, remove_labels?, assignees?, remove_assignees?, status?, project?, type?, events?, from?, minutes?}` | The tickets of the project's tracker, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
+| `tickets {action, ticket?, workspace?, query?, state?, label?, assignee?, detail?, fresh?, title?, body?, labels?, reason?, remove_labels?, assignees?, remove_assignees?, status?, other?, kind?, comment?, sprint?, project?, type?, events?, from?, minutes?}` | The tickets of the project's tracker, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
 
 - **`list {state?, label?, assignee?}`**: every ticket of a state, in one call, a line each (`-
   #12 open: The login fails [bug] (ana)  <link>`): `state` is `open` (the default), `closed` or
@@ -697,6 +698,17 @@ reasons.
   the title and the body whole, and a long one or one holding a secret is refused or base, as
   for the forge's writes ("The forge"). Locks, a project or a tracker kept read only, are
   planned as their own feature.
+- **Links and comments**: `link_types` (a read, never held) lists the kinds of link the tracker has;
+  `link {ticket, kind, other}` and `unlink {ticket, kind, other}` make and remove a link;
+  `comment_edit {ticket, comment, body}` and `comment_delete {ticket, comment}` change or delete a
+  comment, **only one Flottille recorded as posted by an agent** (`show` with `detail full` gives
+  the id of those, `[comment 10100]`); `sprint {ticket, sprint}` is always refused, saying why. A
+  link reads `ticket kind other`, so the card the user is shown says its direction in words (`ABC-2
+  blocks ABC-1`). `ticket` is required, never the workspace's. On Jira, the kinds are the site's
+  own link types, in the outward or the inward wording; on GitHub, `parent of`, `sub-task of`,
+  `blocks` and `blocked by`, and any other kind is refused, naming why. A kind unknown to the
+  site is refused before anything is asked, naming the ones it has. `show` lists a Jira work
+  item's links ([`tickets.md`](tickets.md), "Links and comments").
 - **`types {project?}`**: the work item types of a Jira project (`acli jira project view --key
   <P> --json`, its `issueTypes`), kept five minutes; `project` is left out when the tracker has
   one. On GitHub it answers that issues have no type. A Jira `create` that `acli` refuses for its
@@ -800,15 +812,15 @@ Two of them take an `action`, as the tools of a family do: `agent_status` (`stat
 
 | Tool | |
 |---|---|
-| `agent_launch {title, brief, provider?, model?, effort?, role?, workspace?, new_workspace?, repositories?, root?}` | Starts a session for the user in a workspace with `root: true` ("Sessions for the user", below), or a child on one task, in the caller's own place, and answers at once with its id. A child never works in another place than its parent's: `workspace` and `new_workspace` are the session's, and a child launch that names another workspace than the caller's own, or a new one, is refused before anything is asked, naming the session form (`refused: a child works where you work: workspace and new_workspace are for a session for the user, … "root": true, "workspace": "login" …`); naming the caller's own workspace is its own place. Its description leads with the session form, for work that belongs in a workspace. `provider` is the caller's when left out, and the child's for life; `model` and `effort` the provider's defaults when left out (`docs/agents.md`, "Providers"): a provider not enabled or not ready, or a model or an effort it is known not to offer, is refused naming those that are (`refused: provider opencode is not enabled (…); the ready providers are claude`). `role` is `worker` (by default) or `lead`; with `root`, `workspace` is an existing workspace's name (`main` for the project folder), `new_workspace` the name of a new one (made at once, with `repositories` as its repositories, the session's first message sent once it is prepared; a workspace that fails fails the session; the launch is judged as `workspace create` is, "The workspace"), neither for the caller's own place; both are plain optional fields, and a mix is refused naming the field to use (`refused: workspace and new_workspace are exclusive: …`, `refused: repositories goes with new_workspace, …`). Its description holds a call of each form. Refused, never queued, above the project's children cap (`refused: N children already run in project P, its cap: do the work yourself, or wait for one of them to end (agent_stop ends one of yours)`). Only a root has this tool: a child, whatever its role, has none of the `agent_*` tools (no depth). **`root: true`** starts a session for the user instead of a child ("Sessions for the user", below). |
+| `agent_launch {title, brief, provider?, model?, effort?, role?, workspace?, new_workspace?, repositories?, root?, follow?}` | Starts a session for the user in a workspace with `root: true` ("Sessions for the user", below), or a child on one task, in the caller's own place, and answers at once with its id. A child never works in another place than its parent's: `workspace` and `new_workspace` are the session's, and a child launch that names another workspace than the caller's own, or a new one, is refused before anything is asked, naming the session form (`refused: a child works where you work: workspace and new_workspace are for a session for the user, … "root": true, "workspace": "login" …`); naming the caller's own workspace is its own place. Its description leads with the session form, for work that belongs in a workspace. `provider` is the caller's when left out, and the child's for life; `model` and `effort` the provider's defaults when left out (`docs/agents.md`, "Providers"): a provider not enabled or not ready, or a model or an effort it is known not to offer, is refused naming those that are (`refused: provider opencode is not enabled (…); the ready providers are claude`). `role` is `worker` (by default) or `lead`; with `root`, `workspace` is an existing workspace's name (`main` for the project folder), `new_workspace` the name of a new one (made at once, with `repositories` as its repositories, the session's first message sent once it is prepared; a workspace that fails fails the session; the launch is judged as `workspace create` is, "The workspace"), neither for the caller's own place; both are plain optional fields, and a mix is refused naming the field to use (`refused: workspace and new_workspace are exclusive: …`, `refused: repositories goes with new_workspace, …`). Its description holds a call of each form. Refused, never queued, above the project's children cap (`refused: N children already run in project P, its cap: do the work yourself, or wait for one of them to end (agent_stop ends one of yours)`). Only a root has this tool: a child, whatever its role, has none of the `agent_*` tools (no depth). **`root: true`** starts a session for the user instead of a child ("Sessions for the user", below), and then **`follow`** (a boolean) is required: a launch without it is refused, naming the field and what each value does; a child launch refuses it. |
 | `session_send {session, text}` (a root) | A message to a session the caller started (`agent_launch` with `root`), or to the agent that started the caller's session ("Sessions for the user", below). |
 | `session_read {session?, last?, since?, until?, cursor?}` (a root) | A page of the conversation of another session of the caller's project, framed as that session's data, with the mode of its tree; without `session`, the caller's own id, role and mode ("Sessions that read each other", below). |
 | `agent_send {agent_id, message, model?, effort?}` | A message to a child, urgent: on its next tool result in a turn, a new turn otherwise. It answers the child's question. With `model` or `effort` it also changes the child's, as `agent.options` does for the user (`docs/agents.md`, "The options"): checked as at `agent_launch` (a model or an effort its provider is known not to offer is refused, naming those it offers, and nothing is sent), then set between its turns, before its next prompt. The provider never changes. |
 | `agent_status {agent_id?, action? status \| conversation, detail? short \| full, after?}` | `action status` (the default): one line per child (or for the one named): what it does (in a turn, `running \`<line>\` for 12 min`, `waiting for approval #3`, `waiting on the provider`, idle, reported, ended or failed with why), the time since its last sign of activity, its context use. For all the children it stops there (`detail short`) and says how to get more; for the one named, or with `detail full`, each also has its last three messages. `action conversation` (with `agent_id`; `after` pages): a page of the child's conversation, oldest first, one line per event that says something (`#<n> sent: …`, `said: …` for a whole reply, its streamed pieces joined and masked, two messages apart, `tool call: …`, a tool served and its outcome, a turn's end, a replacement, a report), each line of 2,000 characters at most (a longer reply goes on, whole, on the next lines), the page under 30,000; it ends with the `after` to pass for the next page. |
 | `agent_stop {agent_id}` | Stops the child and its own children, deepest first; what was queued for them is superseded; their runs are stopped. Their workspaces stay. |
 | `report {text}` | The caller is done. At most 10,000 characters, so that it rides whole on its parent's results; a longer one is refused, asking for fewer words and a file that holds the details. A child's report goes to its parent at once (`child-report`, with its workspace, its branch and the last commit of each repository), and the child ends when its turn does (or two minutes later, if its turn goes on). A root's report is shown to the user (`agent.reported`) and the root stays. |
-| `ask_user {question}` (a root) | A question to the user (`agent.asked`), answered later as a message. |
-| `ask_parent {question}` (a child) | A question to its parent (`child-question`), answered with `agent_send`. Until then the child shows as waiting on its parent. |
+| `ask_user {question}` (a root) | A question to the user (`agent.asked`), answered later as a message. For a decision only the user can take (commit, push, scope, a choice); see "Where a question goes", below. |
+| `ask_parent {question}` (a child) | A question to its parent (`child-question`), answered with `agent_send`. Until then the child shows as waiting on its parent. What a child needs goes here, never in its report. |
 | `approval_answer {request_id, decision, why}` | Answers a request held for the caller: `deny` (the agent that asked is told, with the why) or `forward` (to the caller's parent with its why, or to the user from a root). There is no way to allow: `allow` is refused as a decision the tool does not have, and a request the caller does not hold, or no longer holds, is refused (`refused: request #n is not held by this agent: …`). |
 
 They go through the gate like every call (it allows them). Their texts are masked of the
@@ -853,11 +865,43 @@ from the window: `agent_launch {"title", "brief", "root": true, workspace? | new
 - **It takes the tree's mode**: the mode of the caller's tree, Ask, Auto or Full, never a looser
   one; only the user changes it afterwards, and each tree keeps its own. It counts in no children cap and no depth.
 - The caller is answered at once with the new session's id and name; the `agent_*` tools do not
-  reach it, and the caller is told nothing of it afterwards but what it writes with
-  `session_send`.
+  reach it. **`follow` is required**, and the agent chooses each time (the maintainer's decision:
+  required, not required to be true). `follow: false`: the caller is told nothing of the session
+  afterwards but what it writes with `session_send`. `follow: true`: see "Following a session",
+  below.
 - **It sits under its workspace**, not under the agent that started it: a root of its own,
   `agent.trees` lists it apart, with its `workspace` and `launched_by` (the window's sidebar puts
   it under its place, as any session).
+
+#### Following a session
+
+With `follow: true`, each time the session ends a turn, and when it ends or fails, the agent that
+started it is woken by a delivery, `session-turn-ended`, between turns (`docs/design.md` §5.2). It
+names the session (its title and id), says why the turn ended (`turn done`, `it reported`, `it
+asked the user a question with ask_user`, `the turn stopped before its end (<reason>)`, or, for the
+end of the session, `ended: <why>` or `failed: <why>`) and holds the session's last message, masked
+and cut at 2,000 characters, the cut said (`[cut: N more characters; session_read reads the rest]`).
+Its words are data, not instructions. Nothing reads the text of a message to find a question:
+Flottille recognizes nothing by its text.
+
+The agent may answer with `session_send` (unchanged: judged as a write), relay to the user with its
+own `ask_user`, or do nothing. It is a subscription of the source `session`: `forge show` lists it
+under "Your subscriptions", `subscription.list` and the window's rail show it (`Following <title>`,
+with no end time), and **`forge unsubscribe {session}`** ends it (`session` goes alone; a session
+that is not followed is refused). It also ends when the session ends or fails (the wake says so),
+and when the starting agent ends. It never blocks the inactivity sweep of the starter (`docs/design.md`
+§5.7) and does not draw it as waiting.
+
+#### Where a question goes
+
+Nothing reads a message to find a question, so each agent is told where one goes, in the
+descriptions of `ask_user`, `report`, `session_send` and `ask_parent`, and in the paragraph that
+ends the first message of a session an agent started (`[flottille:launched]`, `Where a question
+goes:`, which the window does not show): a decision only the user can take (commit, push, scope, a
+choice) goes through `ask_user`, which reaches the user's inbox; a question about the brief or its
+context goes to the agent that started the session, with `session_send`; a question left in a
+report or in a last message is a follow-up, not a wait. A child does the same with `ask_parent`
+instead of `ask_user`. The descriptions stay under the 2,048 characters their limit asks.
 
 #### Sessions that talk to each other
 
@@ -874,6 +918,19 @@ you: …`), and so is one that ended or an empty text. Children are written to w
   delivery, `session`, urgent (on its next tool result in a turn, a new turn otherwise), under a
   line naming the sender (`agent 0123456789ab wrote to this session:`): it is an agent's words,
   never the user's. Its answer, a `session_send` the other way, comes back the same way.
+- **No endless back and forth.** When the two agents of a following write to each other five times
+  (`session_send`, from either, each with the turn it causes) with no message of the user's in
+  either session, the following pauses: no more wakes, and a `session_send` between the two is
+  refused at once (`refused: paused: you two wrote to each other five times without the user;
+  wait for their message`); `session.following_paused` is emitted, the user's inbox says that the
+  two sessions talk without them (`kind` `paused`), the window's rail says it under the following
+  with a Resume, and `forge show` says it is paused. A message of the user's to either session, or
+  that Resume (`subscription.resume`), starts the count again and resumes it
+  (`session.following_resumed`); no agent can. A session that is not followed has nothing to
+  pause.
+- **One wake a turn**: a turn of the session that wrote to its starter with `session_send` does not
+  wake it again at its end; the wake of a turn carries that turn's last message only (`(no message
+  this turn)` when it said nothing), and says it asked the user only when it did in that turn.
 - **The judge never takes it for the user's words**: the user's last messages it is given are
   the user's only; the last messages written to the session with `session_send` come in blocks of
   their own, each `written by agent <id> with session_send (an agent's words, not the user's)`.

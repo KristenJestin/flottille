@@ -353,6 +353,7 @@ const SERVED: [Definition; 28] = [
                 "events": {"type": "array", "items": {"enum": crate::forge::EVENTS}},
                 "from": {"enum": crate::subscriptions::FROM, "description": "subscribe: whose reviews and comments count: anyone (the default), or people (no bot nor agent)."},
                 "minutes": {"type": "integer", "minimum": 1, "maximum": crate::subscriptions::LONGEST_MINUTES, "description": "subscribe: how long it waits; sized by CI when left out, else 60."},
+                "session": {"type": "string", "description": "unsubscribe: a session you follow, by its agent id, to stop following it."},
                 "pipeline": {"type": "string", "description": "run: as pipelines lists it (Bitbucket default, custom: <name>, branches: <pattern>; GitHub a workflow's file)."},
                 "variables": {"type": "array", "description": "run: Bitbucket variables, GitHub inputs.", "items": {"type": "object", "properties": {
                     "key": {"type": "string"}, "value": {"type": "string"}, "secured": {"type": "boolean"}
@@ -366,24 +367,24 @@ const SERVED: [Definition; 28] = [
     Definition {
         name: "tickets",
         title: "Tickets",
-        description: "The tickets of the project's tracker (GitHub issues #123, Jira ABC-123), \
-            through the user's own gh or acli (no sign-in here: never run them). list: tickets \
-            of a state (open by default), by label and assignee, as last read; search: the \
-            same, with words of the title; show: a workspace's linked ticket (in main, name \
-            workspace) or ticket, read now, detail full adds the comments; Jira images and \
-            files are named, not shown (the user can paste one); types: a Jira project's work \
-            item types (a guess is refused). Writes, judged, answered at once, the result \
-            maybe later: create, comment, edit, close, reopen, status. Nothing is assigned \
-            unless you ask (a tracker may assign a new item itself): assignee \"@me\" is the \
-            user (Jira create, edit; null on edit removes it; GitHub edit: assignees). \
-            Markdown body, converted for Jira. subscribe: the next events of a ticket wake you once (from \
-            people: no bot nor agent; minutes: 60 by default); unsubscribe. {\"action\": \"comment\", \"ticket\": \"#12\", \"body\": \"...\"}",
+        description: "The project's tracker tickets (GitHub #123, Jira ABC-123), via the user's gh or acli \
+            (never run them). list, search (title words): tickets by state (default open), label, \
+            assignee, as last read; show: a workspace's linked ticket (in main, name workspace) or \
+            ticket, read now, with its links; detail full adds the comments, with the id of yours; \
+            Jira images and files are named, not shown (the user can paste one); types: a Jira \
+            project's work item types (read them when unsure; a guess is refused); link_types: link \
+            kinds. Writes, judged, answered at once, the result maybe later: create, comment, edit, close, \
+            reopen, status, link and unlink (ticket kind other: ABC-2 blocks ABC-1), comment_edit \
+            and comment_delete (yours only). Assign only when asked: assignee \"@me\" is the user \
+            (Jira create, edit; null on edit removes; GitHub edit: assignees). subscribe: a ticket's \
+            next events wake you once (people only; minutes: default 60); unsubscribe. \
+            {\"action\": \"comment\", \"ticket\": \"#12\", \"body\": \"...\"}",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "search", "show", "types", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status"]},
+                "action": {"type": "string", "enum": ["list", "search", "show", "types", "link_types", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "sprint"]},
                 "ticket": {"type": "string", "description": "#123 or ABC-123; the workspace's when left out."},
                 "workspace": {"type": "string"},
                 "query": {"type": "string", "description": "search: words."},
@@ -393,13 +394,17 @@ const SERVED: [Definition; 28] = [
                 "detail": {"type": "string", "enum": ["short", "full"]},
                 "fresh": {"type": "boolean", "description": "show: read the ticket again; one read in the last 30 s is given again otherwise (detail full always reads)."},
                 "title": {"type": "string"},
-                "body": {"type": "string", "description": "create, edit: description; comment: the comment."},
+                "body": {"type": "string", "description": "create, edit: description; comment, comment_edit: the comment. Markdown, converted for Jira."},
                 "labels": {"type": "array", "items": {"type": "string"}, "description": "create, edit: labels to add (GitHub)."},
                 "reason": {"enum": ["completed", "not planned"], "description": "close: completed or not planned (GitHub)."},
                 "remove_labels": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to remove (GitHub)."},
                 "assignees": {"type": "array", "items": {"type": "string"}, "description": "edit: logins to add (GitHub), \"@me\" for the user."},
                 "remove_assignees": {"type": "array", "items": {"type": "string"}, "description": "edit: logins to remove (GitHub)."},
                 "status": {"type": "string", "description": "status: its name."},
+                "other": {"type": "string", "description": "link, unlink: the other ticket. The link reads ticket, kind, other: ABC-2 blocks ABC-1 is ticket ABC-2, kind blocks, other ABC-1."},
+                "kind": {"type": "string", "description": "link, unlink: a kind link_types lists (blocks, is blocked by, relates to; GitHub: parent of, sub-task of)."},
+                "comment": {"type": "string", "description": "comment_edit, comment_delete: the id show (detail full) gives a comment an agent posted; no one else's."},
+                "sprint": {"type": "string", "description": "sprint: refused, acli cannot do it."},
                 "project": {"type": "string", "description": "create, types on Jira: the tracker's project; status: the board."},
                 "type": {"type": "string", "description": "create on Jira: work item type, one of those types lists."},
                 "events": {"type": "array", "items": {"enum": crate::tickets::EVENTS}},
@@ -506,7 +511,9 @@ const SERVED: [Definition; 28] = [
         description: "The project's workspaces. list and show read them. A root's writes, \
             judged: create makes one (worktrees, then setup, judged as a run of each step; to \
             resume a branch, name it; name new ones by the repository's naming convention), prepare resumes a failed setup, link_ticket links a \
-            ticket (null unlinks); remove, always held for the user, its request saying what \
+            ticket (null unlinks), rename_branch {branch, repository?} renames the workspace's \
+            branch in each of its repositories (or the one named), only while no remote nor pull \
+            request has it and the workspace did not resume it; remove, always held for the user, its request saying what \
             would be lost: yours too once its work is done, your commands in it stopped, and you \
             go on in main. name: yours when left out, but for create. To work on another branch in this workspace, switch with git: the \
             workspace follows the branch its worktrees are on. {\"action\": \"create\", \
@@ -516,10 +523,11 @@ const SERVED: [Definition; 28] = [
         destructive: true,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "show", "create", "prepare", "link_ticket", "remove"]},
+                "action": {"type": "string", "enum": ["list", "show", "create", "prepare", "link_ticket", "rename_branch", "remove"]},
                 "name": {"type": "string"},
                 "repositories": {"type": "array", "items": {"type": "string"}, "description": "create: by path."},
-                "branch": {"type": "string", "description": "create: give it when the repository has a naming convention (its AGENTS.md, CONTRIBUTING, or the branches it already has to read), with the ticket's key when the workspace has a ticket (fix/ABC-12-login). Left out, <branch prefix>/<name> is the fallback (the name alone when the project has no prefix). An existing branch is checked out."},
+                "branch": {"type": "string", "description": "create: give it when the repository has a naming convention (its AGENTS.md, CONTRIBUTING, or the branches it already has to read), with the ticket's key when the workspace has a ticket (fix/ABC-12-login). Left out, <branch prefix>/<name> is the fallback (the name alone when the project has no prefix). An existing branch is checked out. rename_branch: the new name."},
+                "repository": {"type": "string", "description": "rename_branch: by path; every repository of the workspace when left out."},
                 "ticket": {"type": ["string", "null"], "description": "#123 or ABC-123."}
             }, "required": ["action"], "additionalProperties": false})
         },
@@ -548,16 +556,17 @@ const SERVED: [Definition; 28] = [
         name: "agent_launch",
         title: "Start a session, or launch a child",
         description: "Work that belongs in a workspace is a session for the user: root: true \
-            with workspace (an existing one; main is the project folder) or new_workspace (made \
-            for it, repositories picks them), judged; theirs, not your child, the brief its first message; you write to it, \
+            with workspace (existing; main is the project folder) or new_workspace (made \
+            for it, repositories picks them), judged; theirs, not your child, the brief its first \
+            message; follow (required): true wakes you when each turn ends; you write to it, \
             and it answers you, with session_send. A root only. Without root: a child agent on \
             one precise task, in your own place (workspace and new_workspace are refused), \
             answered at once with its agent_id; it works on its own and you are told when it \
             reports, asks, fails, is stuck or idles, so never poll. The brief is all it knows: \
-            the task, what to read, the checks, the deliverable. provider: yours when left out; \
-            a refusal names the ready ones. A child launch is refused above the children cap. {\"title\": \"Fix login\", \"brief\": \"...\", \"root\": true, \
-            \"workspace\": \"login\"}; {\"title\": \"Add API\", \"brief\": \"...\", \"root\": \
-            true, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}; {\"title\": \
+            the task, what to read, the checks, the deliverable. A child launch is refused above \
+            the children cap. {\"title\": \"Fix login\", \"brief\": \"...\", \"root\": true, \
+            \"workspace\": \"login\", \"follow\": true}; {\"title\": \"Add API\", \"brief\": \
+            \"...\", \"root\": true, \"follow\": false, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}; {\"title\": \
             \"Write the tests\", \"brief\": \"...\"}",
         read_only: false,
         idempotent: false,
@@ -573,7 +582,8 @@ const SERVED: [Definition; 28] = [
                 "workspace": {"type": "string", "description": "With root: an existing workspace of the project, for the session to work in; main is the project folder. A child works in your place."},
                 "new_workspace": {"type": "string", "description": "With root: the name of a new workspace to make for the session. Not with workspace."},
                 "repositories": {"type": "array", "items": {"type": "string"}, "description": "With new_workspace: its repositories, by path; the project's when left out."},
-                "root": {"type": "boolean", "description": "A session for the user, in a workspace or your place, not a child."}
+                "root": {"type": "boolean", "description": "A session for the user, in a workspace or your place, not a child."},
+                "follow": {"type": "boolean", "description": "Required with root: true, refused without it. true: you are woken at each end of a turn of the session (and when it ends), with its last message. false: you are told nothing of it."}
             }, "required": ["title", "brief"], "additionalProperties": false})
         },
     },
@@ -656,7 +666,9 @@ const SERVED: [Definition; 28] = [
         description: "Says you are done: your report goes at once to your parent (to the user for \
             a root), and a child's session ends with this turn. Give the result, each point done \
             or skipped and why, what was not verified, open questions. Call it once, as your \
-            last action.",
+            last action. A question left in a report is a follow-up, not a wait: a decision \
+            only the user can take goes through ask_user (ask_parent for a child), a question \
+            about the brief to the agent that started your session, with session_send.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -671,7 +683,10 @@ const SERVED: [Definition; 28] = [
         title: "Ask the user",
         description: "Puts a question to the user. It does not wait: the answer comes later as a \
             message. Go on with what does not depend on it, or end your turn saying what you \
-            wait for.",
+            wait for. What goes here is a decision only the user can take (commit, push, scope, a \
+            choice): a question about the brief or its context goes to the agent that started \
+            your session, with session_send. A question left in a report or a last message is a \
+            follow-up, not a wait.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -686,7 +701,8 @@ const SERVED: [Definition; 28] = [
         title: "Ask your parent",
         description: "Puts a question to the agent that launched you. It does not wait: the \
             answer comes later as [flottille:parent]. Go on with what does not depend on it, or \
-            end your turn saying what you wait for.",
+            end your turn saying what you wait for. What you need from your parent goes here, \
+            never in a report or a last message: that is a follow-up, not a wait.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -720,7 +736,10 @@ const SERVED: [Definition; 28] = [
         description: "Writes to a session you started (agent_launch with root), or to the agent \
             that started yours. It does not wait: it reaches it on its next tool result, or as \
             a new turn, labelled with your name; its answer comes later as [flottille:session]. \
-            Judged, as a write is. Your children are written to with agent_send.",
+            Judged, as a write is. Your children are written to with agent_send. A question \
+            about the brief or its context to the agent that started your session goes here; a \
+            decision only the user can take goes through ask_user, and one left in a last \
+            message is a follow-up, not a wait.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -2971,7 +2990,7 @@ mod tests {
             (
                 "agent_launch",
                 None,
-                "{\"title\": \"Add API\", \"brief\": \"...\", \"root\": true, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}",
+                "{\"title\": \"Add API\", \"brief\": \"...\", \"root\": true, \"follow\": false, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}",
             ),
             (
                 "agent_launch",

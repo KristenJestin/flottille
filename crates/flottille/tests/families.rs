@@ -2256,7 +2256,7 @@ fn a_jira_work_item_shows_its_attachments_and_names_the_images_of_its_texts() {
     assert!(!shown.contains("attachment/content"), "{shown}");
     assert!(
         words(user.acli_received())
-            .contains(&"jira workitem view ABC-1 --json --fields summary,status,description,comment,attachment".to_owned()),
+            .contains(&"jira workitem view ABC-1 --json --fields summary,status,description,comment,issuelinks,attachment".to_owned()),
         "{:?}",
         user.acli_received()
     );
@@ -2933,7 +2933,7 @@ fn a_root_session_started_by_an_agent_appears_and_is_the_user_s() {
     let answer = mcp.call(
         "agent_launch",
         json!({"title": "Fix login", "brief": "The login fails: fix it.", "workspace": "login",
-            "root": true}),
+            "follow": false, "root": true}),
     );
     let number = held(&answer);
     assert_eq!(
@@ -3006,7 +3006,7 @@ fn a_root_session_in_auto_is_judged_by_the_judge_and_stays_in_auto() {
 
     let answer = mcp.call(
         "agent_launch",
-        json!({"title": "Docs", "brief": "Write the docs.", "root": true}),
+        json!({"title": "Docs", "brief": "Write the docs.", "follow": false, "root": true}),
     );
 
     assert!(
@@ -3046,7 +3046,7 @@ fn a_child_cannot_start_a_root_session() {
 
     let refused = child.call(
         "agent_launch",
-        json!({"title": "escape", "brief": "Work outside my tree.", "root": true}),
+        json!({"title": "escape", "brief": "Work outside my tree.", "follow": false, "root": true}),
     );
 
     assert!(refused.error, "{}", refused.text);
@@ -3107,7 +3107,7 @@ fn launched_root(user: &User, mode: &str, brief: &str) -> (String, String, Mcp) 
     let opened = user.received_requests("session/new").len();
     let answer = mcp.call(
         "agent_launch",
-        json!({"title": "Second", "brief": brief, "root": true}),
+        json!({"title": "Second", "brief": brief, "follow": false, "root": true}),
     );
     if mode == "ask" {
         allow(user, held(&answer));
@@ -3169,7 +3169,7 @@ fn a_root_started_by_an_agent_cannot_start_one_without_the_user() {
 
     let answer = mcp.call(
         "agent_launch",
-        json!({"title": "Third", "brief": "And the tests.", "root": true}),
+        json!({"title": "Third", "brief": "And the tests.", "follow": false, "root": true}),
     );
 
     held(&answer);
@@ -3195,7 +3195,7 @@ fn a_root_session_with_a_brief_longer_than_the_judge_sees_whole_is_refused() {
 
     let refused = mcp.call(
         "agent_launch",
-        json!({"title": "Long", "brief": "word ".repeat(2_000), "root": true}),
+        json!({"title": "Long", "brief": "word ".repeat(2_000), "follow": false, "root": true}),
     );
 
     assert!(refused.error, "{}", refused.text);
@@ -3224,7 +3224,7 @@ fn a_root_session_whose_brief_holds_a_secret_is_base() {
     let answer = mcp.call(
         "agent_launch",
         json!({"title": "Deploy", "brief": "Use ghp_abcdefghijklmnopqrstuvwxyz0123456789 to deploy.",
-            "root": true}),
+            "follow": false, "root": true}),
     );
 
     held(&answer);
@@ -3434,7 +3434,7 @@ fn a_session_in_a_new_workspace_with_a_brief_longer_than_the_judge_sees_whole_is
     let refused = lead.call(
         "agent_launch",
         json!({"title": "Long", "brief": "word ".repeat(2_000), "new_workspace": "long",
-            "root": true}),
+            "follow": false, "root": true}),
     );
 
     assert!(refused.error, "{}", refused.text);
@@ -3875,7 +3875,7 @@ fn lead_and_session(user: &User) -> (String, Mcp, String, Mcp) {
     let opened = user.received_requests("session/new").len();
     let answer = mcp.call(
         "agent_launch",
-        json!({"title": "Login", "brief": "Fix the login.", "workspace": "login", "root": true}),
+        json!({"title": "Login", "brief": "Fix the login.", "workspace": "login", "follow": false, "root": true}),
     );
     assert!(answer.text.contains("Started a session"), "{}", answer.text);
     let (url, authorization) = server_of(user, opened);
@@ -4113,7 +4113,7 @@ fn session_send_in_ask_is_a_card_that_shows_the_message_whole() {
         .unwrap();
     let launched = mcp.call(
         "agent_launch",
-        json!({"title": "Login", "brief": "Fix the login.", "workspace": "login", "root": true}),
+        json!({"title": "Login", "brief": "Fix the login.", "workspace": "login", "follow": false, "root": true}),
     );
     allow(&user, held(&launched));
     let session = agents(&user)
@@ -4893,7 +4893,7 @@ fn a_comment_that_closes_or_reopens_is_recorded_by_its_text_as_gh_and_bkt_give_n
 }
 
 #[test]
-fn every_post_of_an_agent_on_jira_is_recorded_by_its_text() {
+fn every_post_of_an_agent_on_jira_is_recorded_a_comment_by_the_id_read_after_it() {
     let user = user();
     on_jira(&user);
     jira_items(&user);
@@ -4920,7 +4920,7 @@ fn every_post_of_an_agent_on_jira_is_recorded_by_its_text() {
     assert_eq!(recorded(&user, "jira", "", "DEF-7"), [body_of(None)]);
     assert_eq!(
         recorded(&user, "jira", "", "ABC-1"),
-        [comment_of(None), body_of(None)]
+        [comment_of(Some("10100")), body_of(None)]
     );
 }
 
@@ -4941,7 +4941,7 @@ fn a_root_in_a_workspace_starts_a_session_in_main() {
 
     let number = held(&mcp.call(
         "agent_launch",
-        json!({"title": "Study", "brief": "Read the code.", "workspace": "main", "root": true}),
+        json!({"title": "Study", "brief": "Read the code.", "workspace": "main", "root": true, "follow": false}),
     ));
     let done = allow(&user, number);
 
@@ -4969,7 +4969,7 @@ fn the_gate_is_told_the_session_starts_in_main() {
 
     held(&mcp.call(
         "agent_launch",
-        json!({"title": "Study", "brief": "Read the code.", "workspace": "main", "root": true}),
+        json!({"title": "Study", "brief": "Read the code.", "workspace": "main", "root": true, "follow": false}),
     ));
 
     let says = says_of_the_request(&user);
@@ -4994,7 +4994,7 @@ fn a_workspace_cannot_be_named_main() {
         ("workspace", json!({"action": "create", "name": "main"})),
         (
             "agent_launch",
-            json!({"title": "Study", "brief": "Read.", "new_workspace": "main", "root": true}),
+            json!({"title": "Study", "brief": "Read.", "new_workspace": "main", "root": true, "follow": false}),
         ),
     ] {
         let refused = mcp.call(tool, call);
@@ -5042,7 +5042,7 @@ fn a_project_with_an_old_workspace_named_main_keeps_it() {
 
     let number = held(&mcp.call(
         "agent_launch",
-        json!({"title": "Study", "brief": "Read the code.", "workspace": "main", "root": true}),
+        json!({"title": "Study", "brief": "Read the code.", "workspace": "main", "root": true, "follow": false}),
     ));
 
     let says = says_of_the_request(&user);

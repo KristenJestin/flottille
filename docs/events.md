@@ -218,7 +218,8 @@ The workspace was linked to a ticket, or unlinked ([`tickets.md`](tickets.md)).
 ### `workspace.changed`
 
 Every worktree made of the workspace is on one branch other than the recorded one (a `git switch`
-in it), and the record took it ([`workspaces.md`](workspaces.md), "The branch").
+in it, or `workspace.rename_branch`), and the record took it ([`workspaces.md`](workspaces.md),
+"The branch").
 
 | Field | |
 |---|---|
@@ -754,9 +755,24 @@ ends first, `cancelled`.
 | Field | |
 |---|---|
 | `agent`, `subscription` | |
-| `source` | What produces its events: `forge`, or `timer` for a wake. |
+| `source` | What produces its events: `forge`, `tickets`, `timer` for a wake, or `session` for the following of a session the agent started for the user. |
 | `named` | What it watches in a few words, as the agent reads it (`pull request #12 of api, workspace login`; `wake: <why>`). |
 | `events` | The events it waits for. |
+
+#### `session.following_paused`, `session.following_resumed`
+
+The two sessions of a following (`docs/tools.md`, "Sessions that talk to each other") wrote to each
+other five times with no message of the user's in either: the following pauses, and wakes nobody
+until it resumes, and the `session_send` between the two are refused. A message of the user's to
+either session, or the window's Resume (`subscription.resume`), resumes it.
+
+| Field | |
+|---|---|
+| `agent` | The session that is followed, a root: the user's. |
+| `follower` | The agent that started it and follows it. |
+| `exchanges` | (`paused` only) How many were written: 5. |
+
+`flottille inbox` lists a pause as an entry of kind `paused` (`docs/protocol.md`, `inbox.list`).
 
 #### `subscription.ended`
 
@@ -765,5 +781,5 @@ A subscription is over, once.
 | Field | |
 |---|---|
 | `agent`, `subscription` | |
-| `why` | `delivered` (an event it waited for, or the end of its target, or a wake's time, was delivered), `expired` (its time was up, said to the agent), `cancelled` (the agent's `unsubscribe`, the user's `subscription.cancel`, or a new subscription to the same target), `agent-ended` (its agent ended), `unavailable` (until #257, when a subscription held a watch of its own: the daemon could not watch its target again after a restart). Only the first two wake the agent. |
+| `why` | `delivered` (an event it waited for, or the end of its target, or a wake's time, was delivered), `expired` (its time was up, said to the agent), `cancelled` (the agent's `unsubscribe`, the user's `subscription.cancel`, or a new subscription to the same target), `agent-ended` (its agent ended), `session-ended` (the session it followed ended or failed, said to the agent), `unavailable` (until #257, when a subscription held a watch of its own: the daemon could not watch its target again after a restart). Only the first two wake the agent. |
 

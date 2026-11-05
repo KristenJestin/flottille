@@ -34,8 +34,10 @@ use crate::projects::{self, Failure};
 use crate::reads::{self, Reads};
 
 mod events;
+mod links;
 
 pub use events::{EVENTS, offer, reference_of, target_named};
+pub use links::checked as checked_links;
 
 /// A call of `acli` is cut after this.
 const ACLI_TIME: Duration = Duration::from_secs(30);
@@ -46,7 +48,7 @@ pub(crate) const COMMENTS: usize = 30;
 /// What `gh issue view` is asked for.
 const GH_FIELDS: &str = "number,title,state,body,comments,url";
 /// What `acli jira workitem view` is asked for.
-const ACLI_FIELDS: &str = "summary,status,description,comment,attachment";
+const ACLI_FIELDS: &str = "summary,status,description,comment,issuelinks,attachment";
 
 /// A ticket as its tracker said it, its texts masked.
 #[derive(Clone, Debug, PartialEq)]
@@ -70,6 +72,8 @@ pub struct Ticket {
     pub comments: Vec<Comment>,
     /// How many older comments are not kept.
     pub older: usize,
+    /// A Jira work item's links, one line each, read with it and kept with it; none for GitHub.
+    pub links: Vec<String>,
     /// The files attached to a Jira work item, named only: Flottille never fetches one.
     pub attachments: Vec<Attachment>,
 }
@@ -95,6 +99,9 @@ pub struct Comment {
     pub agent: bool,
     /// The id the tracker gives it, where it gives one (GitHub's link names it).
     pub id: Option<String>,
+    /// A record of its id says an agent posted it: `comment_edit` and `comment_delete` take it.
+    /// Words alone never say it, a person may write the same.
+    pub own: bool,
 }
 
 impl Comment {
@@ -116,6 +123,7 @@ fn comment_of(author: String, at: Option<&str>, id: Option<String>, text: &str) 
         body: cut(body, COMMENT_CHARS),
         agent,
         id,
+        own: false,
     }
 }
 
@@ -206,11 +214,22 @@ impl Ticket {
                     .at
                     .as_deref()
                     .map_or(String::new(), |at| format!(", {at}"));
+                // The id of a comment an agent posted: what `comment_edit` and `comment_delete` take.
+                let id = match (&comment.id, comment.own) {
+                    (Some(id), true) => format!(" [comment {id}]"),
+                    _ => String::new(),
+                };
                 text.push_str(&format!(
-                    "- {}{at}: {}\n",
+                    "- {}{id}{at}: {}\n",
                     comment.by(),
                     comment.body.replace('\n', "\n    ")
                 ));
+            }
+        }
+        if !self.links.is_empty() {
+            text.push_str(&format!("\nLinks ({}):\n", self.links.len()));
+            for link in &self.links {
+                text.push_str(&format!("- {link}\n"));
             }
         }
         if !self.attachments.is_empty() {
@@ -379,6 +398,7 @@ async fn read_issue(forge: &Forge, number: u64) -> Result<Ticket, String> {
         description_by_agent,
         older: comments.len().saturating_sub(COMMENTS),
         comments: newest(comments),
+        links: Vec::new(),
         attachments: Vec::new(),
     })
 }
@@ -535,6 +555,7 @@ fn work_item(key: &str, item: &Value, site: &str) -> Ticket {
         description_by_agent,
         older: comments.len().saturating_sub(COMMENTS),
         comments: newest(comments),
+        links: links::said_in(item),
         attachments: attachments_of(fields),
     }
 }
@@ -550,7 +571,7 @@ fn work_item_comments(fields: &Value) -> Vec<Comment> {
             comment_of(
                 said(&comment["author"]["displayName"]),
                 comment["created"].as_str(),
-                None,
+                comment["id"].as_str().map(str::to_owned),
                 &masked(&attached_text(&comment["body"], fields)),
             )
         })
@@ -807,6 +828,15 @@ struct TicketsCall {
     from: Option<String>,
     /// subscribe: how long it waits at most.
     minutes: Option<u64>,
+    /// `link`, `unlink`: the other ticket, and the kind of link, read as `ticket kind other`.
+    other: Option<String>,
+    #[serde(rename = "kind")]
+    link_kind: Option<String>,
+    /// `comment_edit`, `comment_delete`: the id of a comment an agent posted.
+    comment: Option<String>,
+    /// `sprint`: refused, said why (`links::unwritable`).
+    #[allow(dead_code)]
+    sprint: Option<String>,
 }
 
 /// A field that is there even when it is `null`: `Some(None)` for `null`, `None` when left out.
@@ -833,7 +863,19 @@ impl TicketsCall {
 }
 
 /// The writes of `tickets`.
-const WRITES: [&str; 6] = ["create", "comment", "edit", "close", "reopen", "status"];
+const WRITES: [&str; 11] = [
+    "create",
+    "comment",
+    "edit",
+    "close",
+    "reopen",
+    "status",
+    "link",
+    "unlink",
+    "comment_edit",
+    "comment_delete",
+    "sprint",
+];
 
 /// Why a write of `tickets` cannot be done on the project's tracker, before anyone is asked: a
 /// ticket or a Jira project the tracker does not take, a status not named.
@@ -841,6 +883,9 @@ pub fn unwritable(project: &Project, args: &Value) -> Option<String> {
     let action = args["action"].as_str()?;
     if !WRITES.contains(&action) {
         return None;
+    }
+    if let Some(why) = links::unwritable(project, action, args) {
+        return Some(why);
     }
     let tracker = project.tracker.as_ref()?;
     if let Some(Err(why)) = args["ticket"].as_str().map(|text| accepted(project, text)) {
@@ -1030,6 +1075,7 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
         "list" | "search" => listed(daemon, &project, &asked).await,
         "show" => show(daemon, place, &project, &asked).await,
         "types" => types(&project, &asked).await,
+        "link_types" => links::types(&project).await,
         "subscribe" => events::subscribe(daemon, agent, place, &project, &asked).await,
         "unsubscribe" => events::unsubscribe(daemon, agent, &project, &asked),
         "create" => {
@@ -1037,13 +1083,18 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
             daemon.kept_tickets.drop_all();
             created
         }
-        "comment" | "edit" | "close" | "reopen" | "status" => {
+        "comment" | "edit" | "close" | "reopen" | "status" | "link" | "unlink" | "comment_edit"
+        | "comment_delete" => {
             let key = match key_of(daemon, place, &project, &asked) {
                 Ok(key) => key,
                 Err(refusal) => return refusal,
             };
             let written = match asked.action.as_str() {
                 "status" => status(daemon, &project, &asked, &key).await,
+                "link" | "unlink" => links::link(&project, &asked, &key).await,
+                "comment_edit" | "comment_delete" => {
+                    links::comment(daemon, &project, &asked, &key).await
+                }
                 _ => write(daemon, &project, &asked, &key).await,
             };
             daemon.kept_tickets.drop_all();
@@ -1883,10 +1934,11 @@ async fn write_work_item(
         args.push("--yes");
     }
     match acli_run(&args).await {
-        // `acli` prints nothing that names the comment it created: the record keeps its text.
         Ok(_) if action == "comment" => {
             if let Some(body) = body {
-                crate::posts::record_comment(daemon, on, None, &crate::adf::round_trip(body));
+                let posted = crate::adf::round_trip(body);
+                let id = posted_comment_id(daemon, on, site, &posted).await;
+                crate::posts::record_comment(daemon, on, id, &posted);
             }
             Outcome::Done(format!("The comment was posted on {key}."))
         }
@@ -1898,6 +1950,30 @@ async fn write_work_item(
         }
         Err(why) => Outcome::Failed(why),
     }
+}
+
+/// The id of the comment just posted with `text` on the work item `on`, from a read right after
+/// the post: `acli` prints nothing that names the comment it created. Bound now or never, since
+/// a person may write the same words later. None when the read fails or does not find it: the
+/// record then keeps the words alone, which mark the comment as the agent's in a read but never
+/// let an agent change it.
+async fn posted_comment_id(
+    daemon: &Daemon,
+    (project, source, repository, key): (&str, &str, &str, &str),
+    site: &str,
+    text: &str,
+) -> Option<String> {
+    let ticket = read_work_item(key, site).await.ok()?;
+    let read: Vec<crate::posts::Heard> = ticket
+        .comments
+        .iter()
+        .map(|comment| crate::posts::Heard {
+            id: comment.id.as_deref(),
+            at: None,
+            text: comment.body.as_str(),
+        })
+        .collect();
+    crate::posts::Known::of(daemon, project, source, repository, key).just_posted(&read, text)
 }
 
 /// A status of a Jira project: its name, and its category's key (`new`, `indeterminate`,
