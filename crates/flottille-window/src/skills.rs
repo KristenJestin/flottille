@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use flottille_ui::{
     Button, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, RadioChoices,
-    Section, Toast, Type, growing, hoverable, icon, palette, presence, space, toast,
+    Section, Toast, Type, follow_theme, growing, hoverable, icon, palette, presence, space, toast,
 };
 use gpui_kit::base::input::{Enter, Input, InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -25,7 +25,7 @@ use gpui_kit::{
 
 use crate::actions::{ClaudeKind, Command, SkillWrite};
 use crate::claude::{Found, found_block};
-use crate::commands::{boxed, editor_style, line_field, menu_of, perform_later, problem_line};
+use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line};
 use crate::shell::Shell;
 
 /// How many entries of a folder the picker lists.
@@ -312,7 +312,7 @@ impl SkillsSection {
                     .auto_grow(1, DESCRIPTION_ROWS)
                     .submit_on_enter(true)
                     .placeholder("writing code");
-                field.set_editor_style(editor_style(cx));
+                follow_theme(&mut field, cx);
                 field
             });
             let path = line_field("docs/STYLE.md", window, cx);
@@ -320,7 +320,7 @@ impl SkillsSection {
                 let mut field = TextareaState::new(window, cx)
                     .auto_grow(6, 14)
                     .placeholder("The text, in Markdown");
-                field.set_editor_style(editor_style(cx));
+                follow_theme(&mut field, cx);
                 field
             });
             for input in [&name, &path] {

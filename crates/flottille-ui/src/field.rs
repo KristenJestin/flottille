@@ -6,14 +6,49 @@
 
 use std::sync::Arc;
 
+use gpui_kit::base::input::{InputBaseState, InputEditorStyle, InputModeKind};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, ElementId, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    RenderOnce, SharedString, StatefulInteractiveElement, Styled, TestSupportExt, Window, div, px,
+    AnyElement, App, Context, ElementId, FontWeight, InteractiveElement, IntoElement,
+    ParentElement, RenderOnce, SharedString, StatefulInteractiveElement, Styled, TestSupportExt,
+    Window, div, px,
 };
 
 use crate::reveal::presence_of;
-use crate::theme::palette;
+use crate::theme::{Theme, palette};
+
+/// The style of a text field in the palette of now: its ink and placeholder, its selection and
+/// its caret, the accent as the focus ring is.
+pub fn field_style(cx: &App) -> InputEditorStyle {
+    let p = palette(cx);
+    InputEditorStyle {
+        foreground: p.text,
+        muted_foreground: p.faint,
+        selection: p.run.opacity(0.35),
+        caret: p.acc,
+        ..Default::default()
+    }
+}
+
+/// What [`follow_theme`] styles: a text field of gpui-kit, or a probe in a test.
+pub trait StyledField {
+    fn set_field_style(&mut self, style: InputEditorStyle);
+}
+
+impl<M: InputModeKind> StyledField for InputBaseState<M> {
+    fn set_field_style(&mut self, style: InputEditorStyle) {
+        self.set_editor_style(style);
+    }
+}
+
+/// Gives `field` the style of the palette now and again each time the palette changes, a frame
+/// at a time through the theme's cross-fade, so that it fades with the window. Every text field
+/// of the window is made through this, never with an `InputEditorStyle` of its own.
+pub fn follow_theme<T: StyledField + 'static>(field: &mut T, cx: &mut Context<T>) {
+    field.set_field_style(field_style(cx));
+    cx.observe_global::<Theme>(|field, cx| field.set_field_style(field_style(cx)))
+        .detach();
+}
 
 #[derive(IntoElement)]
 pub struct Field {

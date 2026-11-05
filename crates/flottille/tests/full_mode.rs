@@ -811,6 +811,28 @@ fn in_full_a_launcher_behind_a_wrapper_a_runner_or_a_desktop_is_refused() {
 }
 
 #[test]
+fn in_full_a_push_past_the_wall_is_refused_naming_git_push() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (id, mcp, _) = session(&user);
+    set_mode(&user, &id, "full");
+
+    for (command, line) in [
+        ("send-pack", "git send-pack ../r HEAD:refs/heads/x"),
+        ("http-push", "git http-push https://example.com/r.git x"),
+        ("remote-ext", "git remote-ext origin 'git-receive-pack r'"),
+    ] {
+        let said = refused(mcp.call("run", json!({ "line": line })));
+        assert!(
+            said.contains(&format!(
+                "git {command} pushes past Flottille's wall; use git push"
+            )),
+            "{line}: {said}"
+        );
+    }
+    assert!(no_request(&user));
+}
+
+#[test]
 fn in_ask_a_text_word_or_a_launcher_s_name_as_an_argument_is_held_not_refused() {
     let user = User::with_fake_agent().with_fake_launchers();
     let (id, mcp, _) = session(&user);
