@@ -204,9 +204,11 @@ Flottille's own tools:
   belongs in a workspace is a session, and the tool's description leads with that form. Without
   it, starts a child in the caller's own place, never another (a workspace named is refused,
   naming `root: true`), and answers at once with its id. Refused (never queued) above the caps.
-- `session_send {session, text}` (a root): a message to a session the caller started, or to the
-  agent that started it, judged as a write is; it arrives as a delivery labelled with its sender,
-  never as the user's, and the answer comes back the same way.
+- `session_send {session, text}` (a root): a message to a session the caller started, to the
+  agent that started it, or to any other session of its project once the user gave their leave
+  for that pair (asked with the first message, in every mode, §7.2), judged as a write is; it
+  arrives as a delivery labelled with its sender, never as the user's, and the answer comes back
+  the same way.
 - `session_read {session?, last?, since?, until?, cursor?}` (a root): a page of the conversation
   of another session of the caller's project (the user's messages to it and its agent's replies,
   with their times), the last messages or those between two dates, with a cursor to the next page,
@@ -486,7 +488,9 @@ with says so. Reading another session says the mode of that session's tree too.
   base calls never reach it.
 - In **Full**, nothing is asked: the agent acts as the user. Every call the gate would hold
   passes at once, base calls included (a forced push, a workspace removed with what it would
-  lose, inline interpreter code, a script the agent wrote), with no request and no judge. Bare mode
+  lose, inline interpreter code, a script the agent wrote), with no request and no judge, but for
+  the first message of a session to another it did not start, whose leave only the user gives
+  (§7.2). Bare mode
   stays: the agent has only Flottille's tools, and every refusal below stays a refusal, those that
   keep the user's logins and Flottille itself included. Each call it let through is recorded as
   allowed by Full mode (`gate` `full` in its `agent.tool_served` event and in the developer log),
@@ -624,7 +628,13 @@ waiting…"). A tool call never waits for a human or an agent. Who holds the req
 who asked:
 
 - **A root's request is the user's.** It appears in the window, in `flottille approvals`, and in
-  the event stream. The user allows it once or denies it: there is no lasting grant.
+  the event stream. The user allows it once or denies it: there is no lasting grant, but one.
+  **The leave of a pair of sessions**: the first `session_send` of a session to another it did
+  not start (nor was started by) is held for the user in every mode, Full included, and never
+  reaches the judge; allowing it delivers the message and lets that session write to the other
+  from then on, one way, each message then judged as a write is, until either session ends or
+  the user withdraws it where the session's rights are shown (`docs/tools.md`, "Sessions that
+  talk to each other").
 - **A child's request is held by its parent**, as a `child-asks` delivery. The parent denies it or
   forwards it with one sentence of why (`approval_answer`); forwarding passes it to the parent's
   own parent, one level at a time, and from the root to the user, with every reason given on the
