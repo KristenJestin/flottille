@@ -111,13 +111,28 @@ impl Registry {
     /// Checks the text of a project's file as `load` would read it.
     pub fn parse(&self, name: &str, text: &str) -> std::result::Result<Project, ConfigError> {
         let default = self.place();
+        let services = self.service_names();
         let places = Places {
             config: Some(&self.config),
             data: &self.data,
             home: self.home.as_deref(),
             default: &default,
+            services: services.as_deref(),
         };
         Project::parse_in(name, text, &places)
+    }
+
+    /// The names of the services of the machine, which a task's `needs` names; none when their
+    /// file cannot be used, which the services' own methods say: a project is not refused for it.
+    fn service_names(&self) -> Option<Vec<String>> {
+        let text = match std::fs::read_to_string(self.config.join(crate::service::FILE)) {
+            Ok(text) => text,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Some(Vec::new()),
+            Err(_) => return None,
+        };
+        crate::service::parse(&text)
+            .ok()
+            .map(|services| services.into_keys().collect())
     }
 
     /// Writes the project's file, which must not exist yet. A reader sees the whole file or none.
@@ -178,6 +193,29 @@ mod tests {
 
     fn project(name: &str) -> Project {
         Project::parse(name, TEXT, std::path::Path::new("/data")).unwrap()
+    }
+
+    #[test]
+    fn an_unknown_service_in_needs_is_refused_naming_it() {
+        let (dir, registry) = registry();
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        std::fs::write(
+            dir.path().join("config/services.toml"),
+            "[services.mongo]\nline = \"mongod\"\n",
+        )
+        .unwrap();
+        let text =
+            |needs: &str| format!("{TEXT}[tasks.api]\nline = \"npm start\"\nneeds = {needs}\n");
+
+        let api = registry.parse("app", &text("[\"mongo\"]")).unwrap();
+        assert_eq!(*api.tasks["api"].needs, ["mongo"]);
+        let refused = registry
+            .parse("app", &text("[\"mongo\", \"auth\"]"))
+            .unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            "projects/app.toml: tasks.api.needs: unknown service \"auth\""
+        );
     }
 
     #[test]

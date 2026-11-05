@@ -194,7 +194,7 @@ fn quiet_since(daemon: &Daemon, root: &Agent) -> Option<u64> {
         .read(Store::subscriptions)
         .ok()?
         .iter()
-        .any(|s| ids.contains(&s.agent))
+        .any(|s| ids.contains(&s.agent) && s.source != crate::subscriptions::SESSION)
     {
         return None;
     }

@@ -75,6 +75,29 @@ with git: the workspace follows. A repository on no branch (a detached HEAD) is 
 recorded branch, and `forge` `create` refuses it (`refused: <repository> is on no branch (detached
 at <hash>): switch to a branch first`).
 
+### Renaming the branch
+
+An agent that made a workspace on a branch which does not follow the repository's convention
+(`fix/ABC-12-login`) renames it before the first push: `workspace` `rename_branch {branch,
+repository?}` (`docs/tools.md`, "The workspace"; `workspace.rename_branch`, `docs/protocol.md`).
+It runs `git branch -m` in the worktree of `repository`, or of each repository of the workspace,
+and the record follows as for a `git switch` (`workspace.changed`); the window's rail says the new
+name, fading in. It is all or none, refused before anything is renamed when:
+
+- the workspace is being prepared;
+- the new name is not one `git check-ref-format --branch` accepts, is the branch a worktree is on
+  already, exists in a repository, or is checked out in a checkout of one (the main one or
+  another worktree);
+- a repository's branch was **resumed** by the workspace: it was the user's before it;
+- a repository's branch was **pushed**: a remote has it (its tracking ref as last fetched, or what
+  the remote lists; a remote that cannot be listed is taken for not having it), or it has a pull
+  request (any state): renaming would leave the remote branch or the pull request on the old
+  name;
+- a worktree is on no branch.
+
+Each refusal names the repository and says which of these it is. Renaming in one repository of
+several leaves the record as it is: the repositories are on different branches.
+
 ## The repositories it takes
 
 The project's default set (`default_repositories`, all of them unless the file says otherwise),

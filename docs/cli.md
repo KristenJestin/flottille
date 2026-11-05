@@ -811,6 +811,50 @@ Stops the command if it runs and starts the same line again in the same place, a
 stays the agent's, if an agent started it; the agent is told (`run.restart`). A command of an agent
 that ended restarts as yours, which the command says.
 
+### `flottille service list`
+
+The services of the machine (`docs/projects.md`, "Services"), one line each: its name, its state,
+its folder, its address and why it failed, and what it needs that is not running.
+
+```
+$ flottille service list
+auth ready (~/work/auth-api) at http://localhost:3001
+mongo ready (~/tools/docker/mongo)
+```
+
+### `flottille service show <name>`
+
+One service: its line as above, then its keys.
+
+### `flottille service add <name> --line <line> [--folder F] [--needs a,b] [--ready-line T | --ready-url U | --ready-command C] [--url U] [--ask-before-running true]`
+
+Writes it in `services.toml`, what is around it kept (`service.add`).
+
+### `flottille service edit <name> [the same options]`
+
+Changes what is given (`service.edit`): `--folder ""` puts it back in the home, `--needs ""`
+leaves it needing nothing.
+
+### `flottille service remove <name>`
+
+Removes it from `services.toml`, refused while a service or a project's task needs it
+(`service.remove`).
+
+### `flottille service start <name>`
+
+Starts it, what it needs first and waited for: `Started mongo, auth.`, or `Nothing started: auth
+runs.`, then its line (`service.start`).
+
+### `flottille service stop <name>`
+
+Stops it and what it started; what it needs and what needs it go on (`service.stop`).
+
+### `flottille service output <name> [--tail N]`
+
+The end of what it wrote, masked, without the colours the program wrote (`service.output`).
+
+Each takes `--json` and prints what the daemon answered.
+
 ### `flottille approvals`
 
 The requests of your agents that wait for your answer: the call, its class, why the gate held it,

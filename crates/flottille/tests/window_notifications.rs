@@ -38,7 +38,7 @@ fn user() -> User {
             {"usage": {"used": 82_000, "size": 200_000}}, {"say": "On it."}]},
         {"when": "tell me more", "do": [{"say": "There is more."}]},
         {"when": "start the docs session", "do": [{"mcp": {"tool": "agent_launch",
-            "arguments": {"title": "Docs", "brief": "Write the docs", "root": true,
+            "arguments": {"title": "Docs", "brief": "Write the docs", "follow": false, "root": true,
                 "workspace": "login"}}}]}
     ]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();

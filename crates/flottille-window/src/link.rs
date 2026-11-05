@@ -362,6 +362,8 @@ fn matters(event: &Event) -> bool {
         Some("project" | "approval" | "daemon" | "workspace") => true,
         // A subscription opening or ending moves the session from waiting to rest.
         Some("subscription") => true,
+        // A following that pauses or resumes shows on its row in the rail.
+        Some("session") => name.starts_with("session.following_"),
         // A command starting or ending shows in the tree; its output is no event.
         Some("run") => true,
         Some("agent") => matches!(

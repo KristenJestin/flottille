@@ -20,6 +20,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
+use crate::forge::write_target;
 use crate::mcp::{Grant, Outcome, arguments, workspace_named};
 use crate::place::{Place, Resolved};
 use crate::projects::{self, Failure};
@@ -65,6 +66,8 @@ struct TasksCall {
     ready: Option<Option<Box<Ready>>>,
     #[serde(default, deserialize_with = "present")]
     url: Option<Option<Box<TaskUrl>>>,
+    /// The services it needs, all of them; left out: unchanged.
+    needs: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -108,10 +111,13 @@ struct WorkspaceCall {
     name: Option<String>,
     repositories: Option<Vec<String>>,
     /// create: the branch, `<branch prefix>/<name>` when left out; an existing one is resumed.
+    /// rename_branch: its new name.
     branch: Option<String>,
     /// link_ticket: `null` unlinks.
     #[serde(default, deserialize_with = "present")]
     ticket: Option<Option<String>>,
+    /// rename_branch: only this repository's branch; every one of the workspace's when left out.
+    repository: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -145,6 +151,8 @@ impl RepositorySetting {
             forge,
             base: self.base.clone(),
             depends_on: self.depends_on.clone(),
+            // An agent does not set it: the project's own setting, for the user (docs/projects.md).
+            delete_branch_on_merge: None,
         }
     }
 }
@@ -168,6 +176,8 @@ pub fn family(tool: &str, args: &Value) -> Option<&'static str> {
         ("project", "set_rules") => Some("rules"),
         ("workspace", "create" | "prepare") => Some("workspace"),
         ("workspace", "link_ticket") => Some("ticket"),
+        ("services", "add" | "edit" | "remove") => Some("services"),
+        ("workspace", "rename_branch") => Some("branch"),
         _ => None,
     }
 }
@@ -185,6 +195,10 @@ pub fn asked(family: &str) -> String {
              judged as its run"
         }
         "ticket" => "it links a workspace to a ticket, which its agents then read",
+        "services" => {
+            "it adds, changes or removes a service of the machine, which every project shares"
+        }
+        "branch" => "it renames the branch of a workspace, which its pull requests then follow",
         _ => "it changes the project's settings",
     }
     .into()
@@ -196,6 +210,7 @@ pub fn line_of<'a>(tool: &str, args: &'a Value) -> Option<&'a str> {
     match (tool, args["action"].as_str()?) {
         ("tasks", "add" | "edit") => args["line"].as_str(),
         ("setup", "add" | "edit") => args["step"]["run"].as_str(),
+        ("services", "add" | "edit") => args["line"].as_str(),
         _ => None,
     }
 }
@@ -226,6 +241,7 @@ pub fn sets(tasks: &BTreeMap<String, Task>, tool: &str, args: &Value) -> Option<
                     read_only: false,
                     ask_before_running: false,
                     added_by: None,
+                    needs: Box::default(),
                     ready: None,
                     url: None,
                 },
@@ -250,6 +266,7 @@ pub fn sets(tasks: &BTreeMap<String, Task>, tool: &str, args: &Value) -> Option<
                         read_only: false,
                         ask_before_running: false,
                         added_by: None,
+                        needs: Box::default(),
                         ready: None,
                         url: None,
                     },
@@ -319,7 +336,26 @@ pub async fn prepared(
         return Ok(posted_says(args));
     }
     if tool == "forge" {
-        return Ok(posted_says(args));
+        // What no forge could do is refused at once: the user is not asked for it.
+        if let Ok(call) = serde_json::from_value::<crate::forge::ForgeCall>(args.clone())
+            && let Some(why) = call.malformed()
+        {
+            return Err(Outcome::Refused(why));
+        }
+        let mut says = posted_says(args);
+        says.extend(forge_says(daemon, grant, args));
+        return Ok(says);
+    }
+    if tool == "services" {
+        return crate::services::says(daemon, &grant.place, is_root(daemon, grant), args);
+    }
+    if tool == "run" {
+        return Ok(crate::services::starts_said(
+            daemon,
+            &grant.place,
+            tool,
+            args,
+        ));
     }
     if !TOOLS.contains(&tool) {
         return Ok(Vec::new());
@@ -349,6 +385,9 @@ pub async fn prepared(
             if call.action == "remove" {
                 return removal_says(daemon, grant, &call).await;
             }
+            if call.action == "rename_branch" {
+                return rename_says(daemon, grant, &call).await;
+            }
             workspace_says(daemon, grant, &project, &call)
         }
         _ => {
@@ -362,6 +401,33 @@ pub async fn prepared(
             }
         }
     }
+}
+
+/// What renaming a workspace's branch does, in words, or why it cannot be done: checked as the
+/// daemon will check it, so that a refusal never waits for an answer.
+async fn rename_says(
+    daemon: &Daemon,
+    grant: &Grant,
+    call: &WorkspaceCall,
+) -> Result<Vec<String>, Outcome> {
+    let workspace = named_workspace(daemon, grant, call.name.as_deref())?;
+    let Some(branch) = &call.branch else {
+        return Err(Outcome::Refused(
+            "refused: rename_branch needs branch: {\"action\": \"rename_branch\", \"name\": \
+             \"login\", \"branch\": \"fix/ABC-12-login\"}"
+                .into(),
+        ));
+    };
+    let asked = protocol::WorkspaceRenameBranch {
+        project: workspace.project,
+        name: workspace.name,
+        branch: branch.clone(),
+        repository: call.repository.clone(),
+    };
+    let renaming = crate::workspaces::renaming(daemon, &asked)
+        .await
+        .map_err(refusal)?;
+    Ok(vec![renaming.says()])
 }
 
 /// What a removal names and does: the workspace, what removing it would lose and, when it is the
@@ -497,6 +563,123 @@ fn posted_says(args: &Value) -> Vec<String> {
     says
 }
 
+/// What a write of `forge` asks besides its title and body, in words: the reviewers, the labels,
+/// the draft, the base, and what becomes of the source branch.
+fn forge_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Vec<String> {
+    let names = |key: &str| -> Option<String> {
+        let list: Vec<&str> = args[key]
+            .as_array()?
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        (!list.is_empty()).then(|| list.join(", "))
+    };
+    let target = || {
+        let (_, path) = write_target(
+            daemon,
+            &grant.place,
+            args["workspace"].as_str(),
+            args["repository"].as_str(),
+        )?;
+        let project = projects::load_project(daemon, &grant.place.project).ok()?;
+        project.repositories.into_iter().find(|r| r.path == path)
+    };
+    let mut says = Vec::new();
+    let mut say = |text: Option<String>| says.extend(text);
+    match args["action"].as_str() {
+        Some("create") => {
+            say(names("reviewers").map(|n| format!("Its reviewers, besides the project's: {n}")));
+            say(names("labels").map(|n| format!("Its labels: {n}")));
+            if args["delete_branch_on_merge"] == true {
+                // GitHub has no such flag per pull request: only a merge by Flottille deletes.
+                let github = matches!(
+                    target().and_then(|repository| repository.forge),
+                    Some(RepositoryForge::Github { .. })
+                );
+                say(Some(match github {
+                    true => "Flottille deletes the branch when it merges the pull request \
+                             (GitHub has no such flag: a merge by anyone else leaves it)"
+                        .to_owned(),
+                    false => "It deletes the branch when the pull request is merged".to_owned(),
+                }));
+            }
+        }
+        Some("edit") => {
+            say(match args["draft"].as_bool() {
+                Some(false) => Some("It marks it ready for review".to_owned()),
+                Some(true) => Some("It makes it a draft".to_owned()),
+                None => None,
+            });
+            say(names("reviewers_add").map(|n| format!("It adds the reviewers: {n}")));
+            say(names("reviewers_remove").map(|n| format!("It removes the reviewers: {n}")));
+            say(names("labels_add").map(|n| format!("It adds the labels: {n}")));
+            say(names("labels_remove").map(|n| format!("It removes the labels: {n}")));
+            say(args["base"]
+                .as_str()
+                .map(|base| format!("It moves it onto the base {base}")));
+        }
+        Some("merge") => say(merge_says(daemon, grant, args)),
+        _ => {}
+    }
+    says
+}
+
+/// What a `merge` does with the source branch, in words, for the repository `forge` takes: the
+/// one named, else the workspace's only one. The branch kept whatever is said is said as kept.
+fn merge_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Option<String> {
+    let (workspace, path) = write_target(
+        daemon,
+        &grant.place,
+        args["workspace"].as_str(),
+        args["repository"].as_str(),
+    )?;
+    let project = projects::load_project(daemon, &grant.place.project).ok()?;
+    let repository = project.repositories.iter().find(|r| r.path == path)?;
+    let source = match repository.forge {
+        Some(RepositoryForge::Github { .. }) => "github",
+        _ => "bitbucket",
+    };
+    let asked_at_create = || {
+        let on = (grant.place.project.as_str(), source, path.as_str());
+        crate::posts::delete_branch_asked(daemon, on, &workspace.branch)
+    };
+    let (deleted, explicit) = match args["delete_branch"].as_bool() {
+        Some(true) => (
+            "It deletes the source branch on the forge after the merge",
+            true,
+        ),
+        Some(false) => return None,
+        None if repository.delete_branch_on_merge => (
+            "It deletes the source branch on the forge after the merge (the project's setting \
+             Delete the branch on merge)",
+            false,
+        ),
+        None if asked_at_create() => (
+            "It deletes the source branch on the forge after the merge if the pull request \
+             asked for it when it was opened",
+            false,
+        ),
+        None => return None,
+    };
+    let left = crate::forge::keep_because(
+        daemon,
+        &grant.place.project,
+        &workspace,
+        &path,
+        &workspace.branch,
+    );
+    Some(match (left, explicit) {
+        (None, _) => deleted.to_owned(),
+        (Some(why), true) => {
+            format!("It asks to delete the source branch, but the merge leaves it: {why}")
+        }
+        (Some(why), false) => format!(
+            "The merge leaves the source branch, although the project or the pull request would \
+             have it deleted: {why}"
+        ),
+    })
+}
+
 /// Whether the agent is a root, the agent the user talks to.
 fn is_root(daemon: &Daemon, grant: &Grant) -> bool {
     daemon
@@ -527,6 +710,9 @@ fn task_said(task: &Task) -> String {
     }
     if let Some(url) = &task.url {
         notes.push(url.said());
+    }
+    if !task.needs.is_empty() {
+        notes.push(format!("needs the services {}", task.needs.join(", ")));
     }
     match notes.is_empty() {
         true => format!("`{}`", task.line),
@@ -576,6 +762,7 @@ fn tasks_says(project: &Project, call: &TasksCall) -> Result<Vec<String>, Outcom
                 read_only: false,
                 ask_before_running: false,
                 added_by: None,
+                needs: Box::default(),
                 ready: None,
                 url: None,
             },
@@ -649,6 +836,9 @@ fn edited(task: &Task, call: &TasksCall) -> Task {
     }
     if let Some(url) = &call.url {
         task.url = url.clone();
+    }
+    if let Some(needs) = &call.needs {
+        task.needs = needs.clone().into();
     }
     task
 }
@@ -1347,6 +1537,27 @@ async fn performed(
                         None => format!("Workspace {} is linked to no ticket.", workspace.name),
                     })
                 }
+                "rename_branch" => {
+                    let workspace = named_workspace(daemon, grant, call.name.as_deref())?;
+                    let renamed = answer(
+                        "workspace.rename_branch",
+                        json!({"project": name, "name": workspace.name, "branch": call.branch,
+                            "repository": call.repository}),
+                    )
+                    .await?;
+                    let repositories: Vec<&str> = renamed["renamed"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .collect();
+                    Ok(format!(
+                        "The branch of workspace {} is now {} in {}.",
+                        workspace.name,
+                        call.branch.unwrap_or_default(),
+                        repositories.join(", ")
+                    ))
+                }
                 "remove" => {
                     let removed = crate::workspaces::workspace_remove(
                         daemon,
@@ -1415,7 +1626,8 @@ async fn performed(
 
 // The workspaces.
 
-const WORKSPACE_ACTIONS: &str = "list, show, create, prepare, link_ticket and remove";
+const WORKSPACE_ACTIONS: &str =
+    "list, show, create, prepare, link_ticket, rename_branch and remove";
 
 /// What a child is told of the writes of the `workspace` family but `remove`, which are not its
 /// own.
@@ -1539,7 +1751,17 @@ fn workspace_says(
     call: &WorkspaceCall,
 ) -> Result<Vec<String>, Outcome> {
     let action = call.action.as_str();
-    if !["list", "show", "create", "prepare", "link_ticket", "remove"].contains(&action) {
+    if ![
+        "list",
+        "show",
+        "create",
+        "prepare",
+        "link_ticket",
+        "rename_branch",
+        "remove",
+    ]
+    .contains(&action)
+    {
         return Err(unknown("workspace", action, WORKSPACE_ACTIONS));
     }
     match action {
@@ -1548,6 +1770,7 @@ fn workspace_says(
             let name = named(&call.name, "workspace", action, "login")?;
             let mut says = create_says(
                 daemon,
+                &grant.place,
                 project,
                 name,
                 &call.repositories,
@@ -1630,9 +1853,10 @@ fn workspace_says(
 }
 
 /// What creating a workspace does, in words, or the refusal of one that cannot be made: the
-/// workspace, then each step of the setup it plays.
+/// workspace, then each step of the setup it plays and the services a task's step starts first.
 fn create_says(
     daemon: &Daemon,
+    place: &Place,
     project: &Project,
     name: &str,
     repositories: &Option<Vec<String>>,
@@ -1674,6 +1898,16 @@ fn create_says(
         false => {
             says.push("Its setup then runs, without the gate:".into());
             says.extend(numbered(&project.setup));
+            for (at, step) in project.setup.iter().enumerate() {
+                if let StepKind::Task(task) = step.kind() {
+                    let run = json!({"task": task});
+                    says.extend(
+                        crate::services::starts_said(daemon, place, "run", &run)
+                            .into_iter()
+                            .map(|said| format!("Step {}: {said}", at + 1)),
+                    );
+                }
+            }
         }
     }
     Ok(says)
@@ -1699,7 +1933,7 @@ fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<Strin
             let project = own(daemon, grant)?;
             let repositories: Option<Vec<String>> =
                 serde_json::from_value(args["repositories"].clone()).unwrap_or_default();
-            let mut says = create_says(daemon, &project, name, &repositories, None)?;
+            let mut says = create_says(daemon, &grant.place, &project, name, &repositories, None)?;
             let whose = match root {
                 true => "a session of the user's",
                 false => "a child",

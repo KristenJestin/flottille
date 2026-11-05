@@ -2247,6 +2247,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "flottille-fake-pnpm"
+version = "0.1.0"
+
+[[package]]
 name = "flottille-fake-server"
 version = "0.1.0"
 

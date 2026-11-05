@@ -589,10 +589,10 @@ fn a_lead_lists_the_agent_tools_ask_user_and_approval_answer_and_a_worker_none_o
     for family in ["skills", "commands", "setup", "project", "workspace"] {
         assert!(names.iter().any(|n| n == family), "{family}");
     }
-    assert_eq!(names.len(), 25);
+    assert_eq!(names.len(), 26);
 
     let names = worker.names();
-    assert_eq!(names.len(), 14, "{names:?}");
+    assert_eq!(names.len(), 15, "{names:?}");
     assert!(!names.iter().any(|n| n.starts_with("agent_")));
     assert!(!names.iter().any(|n| n == "approval_answer"));
     assert!(!names.iter().any(|n| n == "ask_user"));
@@ -762,7 +762,7 @@ fn a_sub_agent_has_no_agent_launching_tool_whatever_its_role() {
         );
         let text = refused(child.call(
             "agent_launch",
-            json!({"title": "deeper", "brief": "no", "root": true, "workspace": "w"}),
+            json!({"title": "deeper", "brief": "no", "follow": false, "root": true, "workspace": "w"}),
         ));
         assert!(text.contains("has no tool agent_launch"), "{role}: {text}");
         let text = refused(child.call("agent_launch", json!({"title": "e", "brief": "deep"})));
@@ -1066,7 +1066,7 @@ fn a_daemon_restarted_while_a_new_workspace_prepares_still_delivers_the_brief() 
     let answer = ok(lead.call(
         "agent_launch",
         json!({"title": "slow", "brief": "HANG once the workspace is ready", "new_workspace": "slow",
-            "root": true}),
+            "follow": false, "root": true}),
     ));
     let number = answer
         .strip_prefix("Waiting for the user's approval, request #")
@@ -1210,7 +1210,7 @@ fn agent_launch_refuses_a_mixed_workspace_with_a_sentence_naming_the_field() {
     // once the user allows it.
     let text = ok(lead.call(
         "agent_launch",
-        json!({"title": "fresh", "brief": "HANG two", "new_workspace": "fresh", "root": true}),
+        json!({"title": "fresh", "brief": "HANG two", "new_workspace": "fresh", "follow": false, "root": true}),
     ));
     let number = text
         .strip_prefix("Waiting for the user's approval, request #")

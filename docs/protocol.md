@@ -686,6 +686,20 @@ the tracker's text is masked. Nothing is kept: every call reads again.
 `null`, and answers as `workspace.ticket` does. `refused` when `ticket` is not `#123`, `123` or a
 Jira key (`ABC-123`, any case). Emits `workspace.ticket` (`docs/events.md`).
 
+#### `workspace.rename_branch`
+
+`{"project", "name", "branch", "repository"?}`. Renames the workspace's branch to `branch` in the
+repository named, or in each repository of the workspace, and answers the workspace as
+`workspace.show` does without the git reads, with `"renamed": ["<repository>", ...]`
+(`docs/workspaces.md`, "Renaming the branch"). All or none: it is `refused`, nothing renamed, when
+the workspace is being prepared; when `branch` is not a name `git check-ref-format --branch`
+accepts, is the branch a worktree is on already, exists in a repository or is checked out in a
+checkout of one; when a worktree is on no branch; when a repository's branch was resumed by the
+workspace, has a remote branch (the tracking ref, or what the remote lists) or has a pull request.
+Each refusal says which repository and why. Emits `workspace.changed` (`docs/events.md`) when
+every worktree made is on the new branch, and the record follows; renaming one repository of
+several leaves the record as it is.
+
 #### `workspace.prepare`
 
 `{"project", "name"}`. Resumes the preparation (`docs/workspaces.md`) and answers the workspace
@@ -787,7 +801,7 @@ matter's or the first line of its text).
 
 A project's tasks (`docs/projects.md`, "Tasks"), as its Settings edit them. A task in a result is
 `{"name", "line", "repository", "serve", "check", "read_only", "ask_before_running", "ready",
-"url"}`, `repository` `null` for the place's top, `ready` `null` or `{"line"}`, `{"url"}` or
+"url", "needs"}`, `repository` `null` for the place's top, `needs` the services it needs (none: `[]`), `ready` `null` or `{"line"}`, `{"url"}` or
 `{"command"}`, `url` `null`, an address or `{"command"}` (`docs/projects.md`, "Tasks"). Each write is checked as the file is, and written under
 `[tasks.<name>]` where it stands, what is around it kept, a flag that is off left out.
 `not-found` for a project or a task that does not exist, `refused` for a task the file would
@@ -804,13 +818,13 @@ refuse, `invalid-config` when the project's file cannot be used.
 #### `task.add`
 
 `{"project", "name", "line", "repository"?, "serve"?, "check"?, "read_only"?,
-"ask_before_running"?, "ready"?, "url"?}`: the task. `refused` when the project has one of that
-name.
+"ask_before_running"?, "ready"?, "url"?, "needs"?}`: the task. `refused` when the project has one of that
+name, or `needs` names a service `services.toml` does not hold.
 
 #### `task.edit`
 
 `{"project", "name", "line"?, "repository"?, "serve"?, "check"?, "read_only"?,
-"ask_before_running"?, "ready"?, "url"?}`: what is given replaces what the task had
+"ask_before_running"?, "ready"?, "url"?, "needs"?}`: what is given replaces what the task had
 (`repository: null` puts it back at the top; `ready` or `url` `null` or `""` removes it). Answers
 the task.
 
@@ -823,7 +837,84 @@ the task.
 `{"project", "name"}`: `{"project", "name", "run"}`, at once. The user runs the task in the
 project folder with the project's variables, as a run of no agent: no gate, no delivery
 (`docs/tools.md`, "Tasks and runs"). A task that keeps running (`serve`) and already runs for the
-user is joined: its run is answered. It is followed with the run methods.
+user is joined: its run is answered. It is followed with the run methods. The services the task
+needs are started first and waited for (`docs/projects.md`, "Services"): `refused` naming the
+service that failed, or was not ready in time, and why.
+
+### The service methods
+
+The services of the machine (`docs/projects.md`, "Services"), kept in `services.toml`. A service in
+a result:
+
+```json
+{
+  "name": "auth",
+  "folder": "/home/me/work/auth-api",
+  "line": "npm run start:dev",
+  "needs": ["mongo"],
+  "ready": {"url": "{url}"},
+  "url": "http://localhost:3001",
+  "ask_before_running": false,
+  "state": "ready",
+  "why": null,
+  "run": "5d2c0f1a9b3e",
+  "address": "http://localhost:3001",
+  "needs_stopped": []
+}
+```
+
+`folder` is where it runs, absolute (the home when the file names none); `ready` and `url` are
+as the file says them. `state` is `stopped`, `starting`, `ready`, `running` (it says no ready),
+`outside` (it answered before Flottille started it) or `failed`, `why` then the line that says why.
+`run` is its run, going on or the last one, read with the run methods' `run.output` too; a
+service's run has an empty `project` and is not listed by `run.list`. `address` is its run's
+address, or the file's. `needs_stopped` lists what it needs that does not run. `not-found` for a
+service the file does not hold, `invalid-config` when the file cannot be used, `refused` for a
+write the file would refuse (nothing is written).
+
+#### `service.list`
+
+`{}`: `{"services": [...]}`, by name.
+
+#### `service.show`
+
+`{"name"}`: the service.
+
+#### `service.add`
+
+`{"name", "line", "folder"?, "needs"?, "ready"?, "url"?, "ask_before_running"?}`: the service,
+written under `[services.<name>]`, what is around it kept. `refused` when there is one of that
+name. Emits `service.changed`.
+
+#### `service.edit`
+
+`{"name", "line"?, "folder"?, "needs"?, "ready"?, "url"?, "ask_before_running"?}`: what is given
+replaces what the service had (`folder`, `ready` or `url` `null` or `""` removes it). Answers the
+service. Emits `service.changed`.
+
+#### `service.remove`
+
+`{"name"}`: `{"removed": "<name>"}`. `refused` while another service or a project's task needs
+it, naming them. Emits `service.changed`.
+
+#### `service.start`
+
+`{"name"}`: `{"service": {...}, "started": [names]}`, once it started: what it needs first, each
+waited for until it is ready, then the service itself, not waited for. A service that runs is not
+started again (`started` is empty), nor one that answers already (its state is then `outside`).
+`refused` naming the service that failed and why. Emits `service.started` for each it starts.
+
+#### `service.stop`
+
+`{"name"}`: `{"service": {...}}`, once it ended: its whole process group, as `run.stop` does.
+What it needs and what needs it go on. `refused` when it is not running, or runs outside
+Flottille, which does not stop it.
+
+#### `service.output`
+
+`{"name", "tail"?}`: `{"service", "run", "output", "earlier"}`, the last `tail` lines (200 by
+default, 1 to 1000) of what its run wrote, masked, `earlier` whether lines before them were left
+out; `run` and an empty `output` when it never ran.
 
 ### The setup methods
 
@@ -1213,19 +1304,29 @@ it. The agent's own way is the `forge` and `tickets` tools (`docs/tools.md`).
 
 `{"tree"?}`. `{"subscriptions": [...]}`, the open ones, the oldest first. With `tree`, an agent's id,
 those of the agents of its root's tree (`not-found` when it names no agent); without, every one. Each
-is `{"id", "agent", "source", "named", "target", "events", "from", "created_at", "expires_at"}`: `named`
+is `{"id", "agent", "source", "named", "target", "events", "from", "created_at", "expires_at", "paused"}`: `named`
 says what it watches (`pull request #12 of api, workspace login`, a repository that is the project's
 folder named by the project; `ticket #5 of api`, `ticket ABC-1`; `wake: <why>`), `target` is the
 source's own (`forge`: `project`, `workspace`, `repository`, `number`; `tickets`: `project`,
 `repository`, the tracker's, empty for Jira, and `key`, `5` or `ABC-1`; `timer`: `why`,
-`expires_at` being when it wakes), `from` is `anyone` or `people`, the times are in milliseconds since the Unix
-epoch.
+`expires_at` being when it wakes; `session`: `session` and `title`, the session followed, with no
+end of its own), `from` is `anyone` or `people`, the times are in milliseconds since the Unix
+epoch. `paused` is true for a following paused because its two sessions wrote to each other
+without the user (`docs/tools.md`, "Sessions that talk to each other"), false otherwise.
 
 #### `subscription.cancel`
 
 `{"subscription"}`. `{"subscription": {...}}`: the subscription ends as the agent's `forge unsubscribe`
 (or `tickets unsubscribe`) ends it, without a word to the agent, and `subscription.ended` is emitted with `why` `cancelled`.
 `not-found` when it is not open.
+
+#### `subscription.resume`
+
+`{"subscription"}`. `{"subscription": {...}}`: a paused following resumes as a message of the
+user's to either session resumes it: its count starts again, its wakes and the `session_send`
+between the two come back, and `session.following_resumed` is emitted. The user's alone: no tool
+of an agent does it. `not-found` when it is no open following; `invalid-params` when it is not
+paused.
 
 ### `provider.list`
 
@@ -1341,7 +1442,10 @@ changes when the judge was not picked.
 `{"after"?, "limit"?}`. What the root agents sent to the user: `{"entries": [...]}`, oldest first.
 An entry is `{"seq", "at", "kind", "agent", "project", "workspace", "text"}`, made from an event of
 a root agent (`docs/events.md`): `report` (`agent.reported`, `text` its report), `question`
-(`agent.asked` to the user, `text` its question) or `failure` (`agent.failed`, `text` its reason).
+(`agent.asked` to the user, `text` its question), `failure` (`agent.failed`, `text` its reason) or
+`paused` (`session.following_paused`: two sessions talk to each other without the user, `text` says
+which and how to resume; `agent` is the followed session). A pause that resumed since is
+`"resolved": true`, its `text` ending `It has resumed since.`
 A child's own go to its parent and are not here. Without `after`, the last `limit` entries (50 by
 default); with it, the first `limit` entries numbered after it. Nothing is marked read: the inbox
 is a view of the stored events.

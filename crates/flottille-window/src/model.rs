@@ -333,6 +333,7 @@ impl News {
             "agent.message" if data["replay"] != true => Self::MESSAGE,
             "agent.reported" => "a report",
             "delivery.queued" if data["kind"] == "subscription" => "a subscription woke the agent",
+            "session.following_paused" => "it and the agent that started it talk without you",
             _ => return None,
         };
         Some(News {
