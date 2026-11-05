@@ -108,6 +108,15 @@ fn until(
     }
 }
 
+/// Runs the window until it shows the session `agent` from the daemon. The window subscribes to
+/// the daemon's events before it reads what it shows, and an event emitted before it subscribed
+/// never reaches it: an offline window already has its frame, so its elements say nothing of it.
+fn following(shell: &Entity<Shell>, agent: &str, cx: &mut VisualTestContext) {
+    until(shell, cx, "the window follows the daemon", |cx| {
+        has(session_id(agent), cx)
+    });
+}
+
 fn settle(cx: &mut VisualTestContext) {
     for _ in 0..40 {
         cx.executor().advance_clock(Duration::from_millis(16));
@@ -203,12 +212,10 @@ fn toast_said(cx: &mut VisualTestContext) -> Vec<String> {
 #[gpui_kit::test]
 fn show_link_puts_a_toast_with_open_in_the_window(cx: &mut TestAppContext) {
     let user = user();
-    let (_, mcp) = lead(&user);
+    let (agent, mcp) = lead(&user);
     let (shell, cx) = window(&user, cx);
     let opened = faked_opener(&shell, cx);
-    until(&shell, cx, "the window follows the daemon", |cx| {
-        cx.update(|window, _| window.elements().len() > 3)
-    });
+    following(&shell, &agent, cx);
 
     show(
         &mcp,
@@ -242,8 +249,9 @@ fn show_link_puts_a_toast_with_open_in_the_window(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn a_toast_for_a_link_without_a_title_says_its_host(cx: &mut TestAppContext) {
     let user = user();
-    let (_, mcp) = lead(&user);
+    let (agent, mcp) = lead(&user);
     let (shell, cx) = window(&user, cx);
+    following(&shell, &agent, cx);
 
     show(
         &mcp,
