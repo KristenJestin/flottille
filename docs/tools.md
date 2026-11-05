@@ -396,10 +396,13 @@ pending requests.
   and the answer names the check, how it ended and the end of its output, masked. A commit
   whose message cannot be known before it is made (an editor, `-C`, `--amend --no-edit`,
   `--fixup`, a merge without `-m`, a `git revert` without `--no-commit`) is refused then,
-  saying to give it with `-m` or `-F`, or to commit with `git commit -m`. The commits of
-  `git cherry-pick`, `git am`, `git rebase` and `git pull` are not checked, and what git adds
-  to a message after the checks (`--trailer`, `--signoff`, `--cleanup`) is not in what they
-  read; the `-F` file is read once for the checks and again by git. A call given up stops its
+  saying to give it with `-m` or `-F`, or to commit with `git commit -m`; so is a git command
+  that is neither a command git has, an alias nor a `git-<command>` on the `PATH`, which git
+  could correct into a commit (`help.autocorrect`). A `git push` the user or the judge let
+  through has each commit it sends (those its refs lead to that no ref of the remote has, as
+  the remote lists them) checked before it goes, however the commit was made (a cherry-pick, a
+  rebase, a raw object): a failing one refuses the push, naming its short sha, its subject and
+  what the check said, and nothing is pushed. A call given up stops its
   checks. The checks are the user's lines, run by the daemon in the run's folder and
   environment, never a hook of the repository: git still runs none.
 - **A push is the gate's**: `git push` is a call to judge, a forced one base, and only the push
