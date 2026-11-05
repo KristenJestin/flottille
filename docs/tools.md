@@ -372,14 +372,15 @@ pending requests.
   cannot push from a script the gate never read. A push from a workspace is also refused, before
   git runs, when a repository's remote no longer leads where it did when the workspace was made
   (`docs/commands.md`, "Where the remote leads").
-- **A stop ends the run's process group, not every descendant.** `run_status` with `action stop`, a timeout of
-  the call's client and the daemon's stop signal the group the run was spawned in (`SIGTERM`,
-  then `SIGKILL` after 5 s), and what the run left in its group is killed when its own process
-  ends. A process that left the group (`setsid`, a daemon that forks and detaches) escapes all
-  of this and keeps running; Flottille does not stop it. It stays the daemon's descendant,
-  though: the daemon is the subreaper of what it starts, so a process orphaned there is taken in
-  by the daemon rather than by init, waited for when it ends, and refused if it connects to the
-  socket.
+- **A stop ends the run's session, not every descendant.** A run starts in a session of its own
+  (`docs/reference/processes.md`). `run_status` with `action stop`, a timeout of the call's client
+  and the daemon's stop signal the run's process group (`SIGTERM`, then `SIGKILL` after 5 s), and
+  what the run left in its session is killed when its own process ends, even in a process group
+  of its own (what pnpm starts). A process that left the session (`setsid`, a daemon that forks
+  and detaches) escapes all of this and keeps running; Flottille does not stop it. It stays the
+  daemon's descendant, though: the daemon is the subreaper of what it starts, so a process
+  orphaned there is taken in by the daemon rather than by init, waited for when it ends, and
+  refused if it connects to the socket.
 - **The agent is told when a command that outlived its call ends.** A call that answered with the
   command still running (a command that `serve`s, or one past the call's `timeout`) is followed by
   a `command-ended` delivery to the agent that started it when the command ends, urgent like a
