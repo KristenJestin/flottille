@@ -721,7 +721,11 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   and going with `items.forgotten`; a project with no forge or no tracker says so with a link to
   its Settings, a source that fails says why; a click opens the item's detail in a dialog: its
   description in Markdown, its branches, its checks with their links, its reviews and comments,
-  an agent's marked "posted by an agent", and Open in browser), and its tasks, each with Run, which runs it in
+  an agent's marked "posted by an agent", and Open in browser; while Specs is on in the project, a
+  third tab, Specs, lists each spec with its status, its tickets and its open questions, with "New
+  spec", and a ticket's row offers "Write the spec", or "Open the spec" once it has one; a spec's
+  page shows the spec, its questions each answered in one click, Ready and Back to draft, and the
+  sessions that worked on it, `docs/extensions.md`, "Specs"), and its tasks, each with Run, which runs it in
   the project folder, listed below with the rail's rows and output panel; its Settings: each
   repository's forge and the tracker, each saying whether the command line it needs (`gh`, `bkt`,
   `acli`) is found, its version and whether it is signed in, and when it is not, how to install it
@@ -732,9 +736,13 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   edited, removed and reordered, each with its kind, where it is done and its time limit), then
   its Rules (the global rules above, read-only and folded, with a link to edit them; a switch,
   "Use only this project's rules"; the project's text editor, Reset to default, and a line saying
-  a change reaches the agents created from now on);
-- Settings, in tabs (Judge, Providers, Rules, Appearance, Developer mode: one tab shown at a time, as in a project's settings; the first, the Judge, is
-  the one it opens on, and a link to a section opens its tab): the Judge tab holds the Auto judge (two lines on Auto: the rules pass what is known to be harmless, a
+  a change reaches the agents created from now on), and, while Specs is on globally, its Specs
+  section: the project's own switch and its language;
+- Settings, in tabs (Judge, Specs, Providers, Rules, Appearance, Developer mode: one tab shown at a time, as in a project's settings; the first, the Judge, is
+  the one it opens on, and a link to a section opens its tab; the tab of a part of Flottille the
+  user can turn off, Specs, comes after the Judge's, drawn from what it declares: its switch at
+  the top with its one sentence, and nothing else while it is off; on, its settings, which fold
+  away and unfold with the switch, `docs/extensions.md`, "In the window"): the Judge tab holds the Auto judge (two lines on Auto: the rules pass what is known to be harmless, a
   small model on the user's own quota decides the rest, base calls always come to the user; "No
   judge (Auto asks like Ask)" among its choices) and, under it with its own heading, the Judge
   guidance (its editor, Reset to default, Save and its line on when a change applies; a link to the
