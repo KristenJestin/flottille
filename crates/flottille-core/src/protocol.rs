@@ -167,6 +167,19 @@ pub struct WorkspaceName {
     pub name: String,
 }
 
+/// The parameters of `workspace.rename_branch`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceRenameBranch {
+    pub project: String,
+    pub name: String,
+    /// The new name of the branch.
+    pub branch: String,
+    /// Only this repository's; every repository of the workspace when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+}
+
 /// The parameters of `workspace.forge`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
