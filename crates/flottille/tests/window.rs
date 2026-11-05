@@ -6037,8 +6037,17 @@ fn a_reply_of_thousands_of_lines_streams_in_pieces_that_stay_cheap(cx: &mut Test
     );
     frame(cx);
 
-    // 3,000 lines in 100 pieces of 30: a list item with bold and code on each.
-    let (mut applied, mut whole) = (Vec::new(), Vec::new());
+    // 3,000 lines in 100 pieces of 30: a list item with bold and code on each. What a piece
+    // costs is counted in the work done, never timed: the bytes the parser is handed again and
+    // the pieces of Markdown drawn in the frame, which a busy machine cannot change.
+    let counts = |cx: &mut VisualTestContext| {
+        page.read_with(cx, |p, cx| {
+            let row = p.conversation().read(cx).rows()[0].clone();
+            let row = row.read(cx);
+            (row.parsed(), row.pieces_drawn(cx))
+        })
+    };
+    let (mut parsed, mut drawn) = (Vec::new(), Vec::new());
     for piece in 0..100u64 {
         let text: String = (0..30)
             .map(|line| {
@@ -6046,16 +6055,25 @@ fn a_reply_of_thousands_of_lines_streams_in_pieces_that_stay_cheap(cx: &mut Test
                 format!("- line **{n}** of the reply, with `code {n}`\n")
             })
             .collect();
-        let started = Instant::now();
+        let (before, drawn_before) = counts(cx);
         live(
             &page,
             made_up(2 + piece, "agent.message", json!({"text": text})),
             cx,
         );
-        applied.push(started.elapsed());
+        let (after, _) = counts(cx);
+        // The bound is on the cost of a piece at the start and at the end alike: the parser is
+        // handed the last Markdown piece of the reply again (cut at 4,096 bytes) and the piece
+        // streamed, never the reply, which is over 150,000 bytes when the last piece comes.
+        assert!(
+            after - before <= 4096 + 30 * 50,
+            "the parser is handed the last piece again, not the reply: {} bytes for piece {piece}",
+            after - before
+        );
+        parsed.push(after - before);
         // The parse, in the background in the window, runs here before the frame.
         frame(cx);
-        whole.push(started.elapsed());
+        drawn.push(counts(cx).1 - drawn_before);
     }
 
     let shown = rendered(&page, 0, cx);
@@ -6064,23 +6082,21 @@ fn a_reply_of_thousands_of_lines_streams_in_pieces_that_stay_cheap(cx: &mut Test
         "the last line is drawn"
     );
     assert!(!shown.contains("**"));
-    let mean = |costs: &[Duration]| costs.iter().sum::<Duration>() / costs.len() as u32;
     eprintln!(
-        "a piece of 30 lines, on the window's thread then with its parse and frame: \
-         {:?}, {:?} at the start; {:?}, {:?} past 2,700 lines",
-        mean(&applied[..10]),
-        mean(&whole[..10]),
-        mean(&applied[90..]),
-        mean(&whole[90..])
+        "a piece of 30 lines: {:?} bytes parsed again at the start, {:?} past 2,700 lines; \
+         {:?} Markdown pieces drawn at the start, {:?} past 2,700 lines",
+        &parsed[..3],
+        &parsed[97..],
+        &drawn[..3],
+        &drawn[97..]
     );
     // What matters is that the cost does not grow with the reply (4.8 s a piece past 2,700
-    // lines when the reply was one view). An absolute bound fails on a slower machine, so the
-    // cost past 2,700 lines is compared with the start of the same run, which is floored at a
-    // few milliseconds so a very fast start cannot make the test fail. A spike reached 6 times the
-    // start on a busy machine; the regression was over a hundred.
-    let bound = |start: &[Duration]| mean(start).max(Duration::from_millis(5)) * 10;
-    assert!(mean(&applied[90..]) <= bound(&applied[..10]));
-    assert!(mean(&whole[90..]) <= bound(&whole[..10]));
+    // lines when the reply was one view). The frame draws the pieces in view and no more: four
+    // is the tail of the reply and the one before it, which the list draws half of.
+    assert!(
+        drawn.iter().all(|pieces| *pieces <= 4),
+        "a frame draws the pieces in view, not more as the reply grows: {drawn:?}"
+    );
 }
 
 // Forges (#75): each repository's pull request in the session's WORKSPACE section and on the
