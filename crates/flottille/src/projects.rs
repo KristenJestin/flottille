@@ -258,6 +258,7 @@ async fn settings_of(project: &Project) -> Value {
             "remote": repository.remote,
             "base": repository.base,
             "depends_on": repository.depends_on,
+            "delete_branch_on_merge": repository.delete_branch_on_merge,
             "url": url,
             "forge": repository.forge,
             "proposal": proposal,
@@ -453,6 +454,15 @@ pub async fn set_settings(
                         "base",
                         toml_edit::value(base.iter().collect::<toml_edit::Array>()),
                     );
+                }
+                match setting.delete_branch_on_merge {
+                    Some(true) => {
+                        entry.insert("delete_branch_on_merge", toml_edit::value(true));
+                    }
+                    Some(false) => {
+                        entry.remove("delete_branch_on_merge");
+                    }
+                    None => {}
                 }
                 match &setting.depends_on {
                     Some(paths) if !paths.is_empty() => {

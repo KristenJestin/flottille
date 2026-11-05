@@ -1,0 +1,10 @@
+[package]
+name = "flottille-fake-pnpm"
+description = "A launcher that leaves its subcommand behind in a group of its own, as pnpm does, for the tests of Flottille's runs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]

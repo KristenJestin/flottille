@@ -20,6 +20,7 @@ pub mod provider;
 pub mod registry;
 pub mod run;
 pub mod secrets;
+pub mod service;
 pub mod store;
 pub mod subscription;
 pub mod ticket;

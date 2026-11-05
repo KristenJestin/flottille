@@ -741,6 +741,31 @@ The user dismissed a command that ended (`run.dismiss`): it is no longer listed.
 |---|---|
 | `agent`, `run` | |
 
+### The events of a service
+
+The services of the machine (`docs/projects.md`, "Services"). Their runs also emit the events of a
+run, with an empty `project`.
+
+#### `service.started`
+
+`{"service", "run", "line", "folder", "ready"}`: the daemon started it, for the user, an agent or
+a task that needs it. `ready` is `"starting"` for a service that says when it is ready, else
+`null`.
+
+#### `service.ready`
+
+`{"service", "run", "url"}`: it is ready.
+
+#### `service.ended`
+
+`{"service", "run", "state", "why"}`: its run ended; `state` is `stopped` (the user, an agent the
+user allowed, or the daemon stopping) or `failed`, `why` the line that says why.
+
+#### `service.changed`
+
+`{"service", "change"}`: `added`, `edited` or `removed` in `services.toml` through Flottille, or
+`outside`: it answered before it was started, and Flottille started nothing.
+
 ### The events of a subscription
 
 A subscription (`docs/design.md` §5.6) opens and ends; each event has `agent`, the agent it wakes,

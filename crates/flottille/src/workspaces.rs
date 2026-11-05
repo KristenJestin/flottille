@@ -1260,7 +1260,7 @@ async fn prepare(daemon: Arc<Daemon>, id: i64, mut made: Option<oneshot::Sender<
 }
 
 async fn prepare_steps(
-    daemon: &Daemon,
+    daemon: &Arc<Daemon>,
     id: i64,
     made: &mut Option<oneshot::Sender<()>>,
 ) -> Result<(), Failure> {
@@ -1318,7 +1318,13 @@ async fn prepare_steps(
             .lock()
             .unwrap()
             .insert((id, step.position), live.clone());
-        let outcome = run_step(&workspace, &step, &live).await;
+        let outcome = match services_of(daemon, &workspace, &step).await {
+            Ok(()) => run_step(&workspace, &step, &live).await,
+            Err(why) => Err(StepFailure {
+                doing: step.doing(),
+                output: why,
+            }),
+        };
 
         let (state, failure, name) = match outcome {
             Ok(StepState::Skipped) => (StepState::Skipped, None, "workspace.step_skipped"),
@@ -1362,6 +1368,29 @@ fn kind_name(action: &Action) -> &'static str {
         Action::RootEntries { .. } => "root_entries",
         Action::Run { .. } => "run",
     }
+}
+
+/// A step that runs a task first starts the services the task needs, as the project's file says
+/// now (`services.rs`); a task no longer there needs none.
+async fn services_of(
+    daemon: &Arc<Daemon>,
+    workspace: &Workspace,
+    step: &Step,
+) -> Result<(), String> {
+    let Action::Run {
+        task: Some(name), ..
+    } = &step.action
+    else {
+        return Ok(());
+    };
+    let needs = projects::load_project(daemon, &workspace.project)
+        .ok()
+        .and_then(|project| project.tasks.get(name).map(|task| task.needs.to_vec()))
+        .unwrap_or_default();
+    crate::services::start_needed(daemon, &needs, None)
+        .await
+        .map(|_| ())
+        .map_err(|why| format!("task {name} cannot run: {why}"))
 }
 
 /// Does one step: done, skipped, or its failure.
@@ -1699,9 +1728,8 @@ async fn run_line(
                 .map_err(|error| format!("cannot run it: {error}"))?,
         )
         .stderr(writer)
-        .process_group(0)
         .kill_on_drop(true);
-    let spawned = command.spawn();
+    let spawned = crate::children::spawn(crate::children::in_own_session(&mut command));
     // The command holds the pipe's writing end: dropped, only the processes hold it.
     drop(command);
     let mut child = spawned.map_err(|error| format!("cannot run {}: {error}", words[0]))?;
@@ -1723,12 +1751,14 @@ async fn run_line(
         }
     };
     // What it left in the background holds the pipe and would keep the step running: it ends
-    // with the step, and what is already in the pipe is read without waiting for it.
+    // with the step, even in a group of its own, and what is already in the pipe is read
+    // without waiting for it.
     if let Some(group) = group {
-        // SAFETY: kill has no precondition; the group is the step's own (process_group(0)).
+        // SAFETY: kill has no precondition; the group is the step's own (it leads its session).
         unsafe {
             libc::kill(-(group as i32), libc::SIGKILL);
         }
+        crate::children::end_session(group).await;
     }
     while let Ok(read) = reader.try_read(&mut buffer) {
         if read == 0 {

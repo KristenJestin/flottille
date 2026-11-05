@@ -925,6 +925,18 @@ pub fn fake_bkt() -> PathBuf {
     path
 }
 
+/// The fake pnpm launcher's binary (`crates/flottille-fake-pnpm`), built beside Flottille's as
+/// the fake agent is.
+pub fn fake_pnpm() -> PathBuf {
+    let path = Path::new(env!("CARGO_BIN_EXE_flottille")).with_file_name("flottille-fake-pnpm");
+    assert!(
+        path.exists(),
+        "{} is missing: run the tests from the workspace's root, or `cargo build -p flottille-fake-pnpm` first",
+        path.display()
+    );
+    path
+}
+
 /// The fake `acli`'s binary, built beside Flottille's as the fake agent is.
 pub fn fake_acli() -> PathBuf {
     let path = Path::new(env!("CARGO_BIN_EXE_flottille")).with_file_name("flottille-fake-acli");

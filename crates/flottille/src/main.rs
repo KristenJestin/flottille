@@ -1,3 +1,6 @@
+// The tool schemas are large `json!` literals: the default limit of 128 is too low for them.
+#![recursion_limit = "256"]
+
 mod acp;
 mod actions;
 mod adf;
@@ -8,6 +11,7 @@ mod approval_command;
 mod approvals;
 mod bridge;
 mod chat;
+mod children;
 mod claude;
 mod claude_import;
 mod client;
@@ -52,6 +56,8 @@ mod rules;
 mod run_methods;
 mod runs;
 mod runs_command;
+mod service_command;
+mod services;
 mod session_read;
 mod setup;
 mod skill_command;
@@ -80,6 +86,7 @@ use crate::client::Client;
 use crate::command_command::CommandAction;
 use crate::project_command::ProjectAction;
 use crate::runs_command::RunsAction;
+use crate::service_command::ServiceAction;
 use crate::skill_command::SkillAction;
 use crate::workspace_command::WorkspaceAction;
 
@@ -141,6 +148,11 @@ enum Command {
     Runs {
         #[command(subcommand)]
         action: RunsAction,
+    },
+    /// The services of the machine, shared by every project: listed, written, started, stopped
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
     },
     /// Allow a request: its call is checked again, performed, and its result handed to the agent
     Approve {
@@ -368,6 +380,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             }
         }
         Command::Runs { action } => runs_command::run(&paths, action)?,
+        Command::Service { action } => service_command::run(&paths, action)?,
         Command::Approvals { json } => approval_command::approvals(&paths, json)?,
         Command::Approve { number, discard } => approval_command::approve(&paths, number, discard)?,
         Command::Deny { number } => approval_command::deny(&paths, number)?,
