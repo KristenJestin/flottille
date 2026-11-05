@@ -219,6 +219,9 @@ const LAUNCHERS: [&str; 20] = [
     "swaymsg",
     "i3-msg",
 ];
+/// Programs that open a link or a file on the user's desktop. A run has no graphical session, so
+/// nothing would show: `web show_link` hands the user the link, and only the window opens it.
+const OPENERS: [&str; 3] = ["xdg-open", "open", "start"];
 /// Programs whose words are text, never a file they write (`tr / _`).
 const TEXT: [&str; 4] = ["tr", "printf", "expr", "seq"];
 /// Password managers and keyrings: whatever they do, they read or write the user's logins.
@@ -854,7 +857,7 @@ fn run(call: &Call) -> Verdict {
     if let Some(why) = layers
         .iter()
         .filter_map(|layer| runs(layer))
-        .find_map(|program| launches(base(program)))
+        .find_map(|program| launches(base(program)).or_else(|| opens(base(program))))
     {
         return Verdict::Deny(why);
     }
@@ -1233,7 +1236,7 @@ impl Line {
 fn refusal(layer: &[String]) -> Option<String> {
     let program = base(&layer[0]);
     let args = &layer[1..];
-    if let Some(why) = launches(program) {
+    if let Some(why) = launches(program).or_else(|| opens(program)) {
         return Some(why);
     }
     if KEYRINGS.contains(&program)
@@ -1567,6 +1570,18 @@ fn launches(program: &str) -> Option<String> {
             "refused: {program} starts what it runs outside Flottille's tree of processes, later \
              or on a host, where the gate sees nothing of it: an agent runs its programs itself, \
              in any mode"
+        )
+    })
+}
+
+/// The refusal of a program that opens a link on the desktop, pointing to the tool that does.
+fn opens(program: &str) -> Option<String> {
+    OPENERS.contains(&program).then(|| {
+        format!(
+            "refused: {program} opens things on the user's desktop, which a run has no session \
+             of: nothing would show. To put a link in front of the user, call web with \
+             {{\"action\": \"show_link\", \"url\": \"https://…\"}} (or \"path\" for a file of \
+             your place): the window offers it with an Open button, and the user's click opens it"
         )
     })
 }
@@ -6409,6 +6424,40 @@ mod tests {
             "nice systemd-run --user true",
         ] {
             assert!(denied(&workspace.run(line)), "{line}");
+        }
+    }
+
+    #[test]
+    fn run_refuses_xdg_open_and_points_to_show_link() {
+        let fixture = Fixture::workspace().command("show", "xdg-open https://example.org", |_| {});
+        for line in [
+            "xdg-open https://example.org",
+            "/usr/bin/xdg-open https://example.org",
+            "open https://example.org",
+            "start https://example.org",
+            "nice xdg-open https://example.org",
+            "env A=b open https://example.org",
+            "timeout 5 xdg-open https://example.org",
+            "uv run xdg-open https://example.org",
+            "npm exec -- open https://example.org",
+            "cargo run -- xdg-open https://example.org",
+            "find . -exec xdg-open {} +",
+        ] {
+            match fixture.run(line) {
+                Verdict::Deny(why) => assert!(why.contains("show_link"), "{line}: {why}"),
+                other => panic!("{line}: {other:?}"),
+            }
+        }
+        // A task whose line opens a link is refused too, and so is a step that sets one.
+        assert!(denied(&fixture.task("show")));
+        // The name is refused only where a program runs, as the launchers are.
+        for line in [
+            "git commit -m open",
+            "cargo test open",
+            "grep -r xdg-open src",
+            "echo start",
+        ] {
+            assert!(!denied(&fixture.run(line)), "{line}");
         }
     }
 }
