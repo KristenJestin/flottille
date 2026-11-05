@@ -11,6 +11,7 @@ mod approval_command;
 mod approvals;
 mod bridge;
 mod chat;
+mod children;
 mod claude;
 mod claude_import;
 mod client;

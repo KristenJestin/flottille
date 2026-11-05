@@ -22,6 +22,7 @@ use tokio::task::JoinSet;
 use crate::VERSION;
 use crate::agents::{self, Live};
 use crate::approvals;
+use crate::children;
 use crate::commands;
 use crate::deliveries;
 use crate::developer;
@@ -371,7 +372,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     agents::settle_at_start(&daemon);
     tree::brief_at_start(&daemon);
     crate::subscriptions::resume_at_start(&daemon);
-    runs::settle_at_start(&daemon);
+    runs::settle_at_start(&daemon).await;
     approvals::settle_at_start(&daemon);
     projects::migrate_files(&daemon);
     let picking = daemon.clone();
@@ -405,13 +406,13 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
             },
             Some(_) = connections.join_next(), if !connections.is_empty() => {}
             _ = stop_requested.wait_for(|stopping| *stopping) => break "request",
-            _ = child_ended.recv() => reap_strays(),
+            _ = child_ended.recv() => children::reap_strays(),
             _ = socket_check.tick() => {
                 if judge(socket_identity(&socket), ours) == Socket::Gone {
                     break "socket";
                 }
                 // `/proc`'s list of children may miss one that changed while it was read.
-                reap_strays();
+                children::reap_strays();
             }
             _ = terminate.recv() => break "signal",
             _ = interrupt.recv() => break "signal",
@@ -438,10 +439,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
 
 /// The fields of `/proc/<pid>/stat` the daemon reads.
 struct Stat {
-    state: char,
     parent: u32,
-    group: u32,
-    session: u32,
     /// In clock ticks after boot.
     started: u64,
 }
@@ -451,10 +449,7 @@ fn stat(pid: u32) -> Option<Stat> {
     // The command name, field 2, is in parentheses and may hold spaces.
     let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
     Some(Stat {
-        state: fields.first()?.chars().next()?,
         parent: fields.get(1)?.parse().ok()?,
-        group: fields.get(2)?.parse().ok()?,
-        session: fields.get(3)?.parse().ok()?,
         started: fields.get(19)?.parse().ok()?,
     })
 }
@@ -520,40 +515,6 @@ async fn refuse(stream: UnixStream) {
         }
     })
     .await;
-}
-
-/// Waits for the processes the daemon took in as their subreaper and that ended, which nobody
-/// else waits for. The children the daemon started are waited for by whoever started them
-/// (tokio, `std::process`), by their pid: waiting for one of them here would take its status
-/// away. Each of those leads its own process group (agents, runs, git, the forges' command lines)
-/// or stays in the daemon's (a provider's `--version`), in the daemon's session; a process taken
-/// in is in another session (it detached), or in a group led by another (the group of the command
-/// it came from). One that made a group of its own in the daemon's session is not told apart, and
-/// stays a zombie until the daemon exits.
-fn reap_strays() {
-    let daemon = std::process::id();
-    let Some(own) = stat(daemon) else { return };
-    let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
-        return;
-    };
-    for task in tasks.flatten() {
-        let Ok(children) = std::fs::read_to_string(task.path().join("children")) else {
-            continue;
-        };
-        for pid in children
-            .split_whitespace()
-            .filter_map(|pid| pid.parse().ok())
-        {
-            if let Some(child) = stat(pid)
-                && child.state == 'Z'
-                && (child.session != own.session
-                    || (child.group != pid && child.group != own.group))
-            {
-                // SAFETY: waitpid has no memory precondition with a null status.
-                unsafe { libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), libc::WNOHANG) };
-            }
-        }
-    }
 }
 
 async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
