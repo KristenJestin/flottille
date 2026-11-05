@@ -760,13 +760,13 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   its Rules (the global rules above, read-only and folded, with a link to edit them; a switch,
   "Use only this project's rules"; the project's text editor, Reset to default, and a line saying
   a change reaches the agents created from now on);
-- Settings, in tabs (Judge, Providers, Rules, Appearance, Developer mode: one tab shown at a time, as in a project's settings; the first, the Judge, is
+- Settings, in tabs (Judge, Providers, Rules, Sessions, Appearance, Developer mode: one tab shown at a time, as in a project's settings; the first, the Judge, is
   the one it opens on, and a link to a section opens its tab): the Judge tab holds the Auto judge (two lines on Auto: the rules pass what is known to be harmless, a
   small model on the user's own quota decides the rest, base calls always come to the user; "No
   judge (Auto asks like Ask)" among its choices) and, under it with its own heading, the Judge
   guidance (its editor, Reset to default, Save and its line on when a change applies; a link to the
   guidance opens this tab with the guidance in view), then the providers, the
-  Rules for every project, edited the same way as the guidance, the Appearance (the window's colours: Omarchy
+  Rules for every project, edited the same way as the guidance, the Sessions (a switch, "End inactive sessions", off by default; switched on it chooses 7 days and a select of the days unfolds under it: 1, 3, 7, 14, 30, 60 or 90, and what a file edited by hand says; `sessions.set`, §5.7), the Appearance (the window's colours: Omarchy
   or Flottille, and for Flottille Light or Dark, each a segmented choice; off an Omarchy desktop
   the Omarchy choice is shown disabled with one line saying why), and last the Developer mode, a
   switch with the path of its log (`developer.md`: what the daemon decides and why, off by default); a judge
