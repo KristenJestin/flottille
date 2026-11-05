@@ -176,6 +176,25 @@ impl Request {
     }
 }
 
+/// The user's leave for a session to write to another it did not start (`session_send`), one way:
+/// given once, in answer to the first message, it lasts until either session ends or the user
+/// takes it back.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Leave {
+    pub writer: String,
+    pub session: String,
+    /// The request the user allowed it in.
+    pub request: u64,
+    pub granted_at: u64,
+}
+
+impl Leave {
+    pub fn to_json(&self) -> Value {
+        json!({"writer": self.writer, "session": self.session, "request": self.request,
+            "granted_at": self.granted_at})
+    }
+}
+
 /// A message Flottille hands to an agent, stored before it is sent (`docs/design.md` §5.2,
 /// `docs/agents.md`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

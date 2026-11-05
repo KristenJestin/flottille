@@ -24,6 +24,7 @@ use crate::forge::write_target;
 use crate::mcp::{Grant, Outcome, arguments, workspace_named};
 use crate::place::{Place, Resolved};
 use crate::projects::{self, Failure};
+use crate::tree::Relation;
 
 /// The tools of this module.
 pub const TOOLS: [&str; 6] = [
@@ -1967,7 +1968,8 @@ fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<Strin
     Ok(says)
 }
 
-/// What `session_send` does, in words: the session written to and the text whole, or the
+/// What `session_send` does, in words: the session written to and the text whole, or, for its
+/// first message to a session it did not start, the leave it asks with that message; or the
 /// refusal of a session the caller may not write to, before anything is asked.
 fn session_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<String>, Outcome> {
     let asked: crate::tree::SessionSend = arguments("session_send", args.clone())?;
@@ -1975,10 +1977,21 @@ fn session_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<Stri
         .read(|store| store.agent(&grant.agent))
         .map_err(|error| Outcome::Failed(error.to_string()))?
         .ok_or_else(|| Outcome::Failed(format!("there is no agent {}", grant.agent)))?;
-    let (session, started) = crate::tree::session_of(daemon, &caller, &asked)?;
-    let whose = match started {
-        true => "which you started",
-        false => "the agent that started this session",
+    let (session, relation) = crate::tree::session_of(daemon, &caller, &asked)?;
+    let whose = match relation {
+        Relation::Started => "which you started",
+        Relation::StartedYou => "the agent that started this session",
+        Relation::Leave => "which the user let you write to",
+        Relation::NoLeave => {
+            return Ok(vec![
+                format!(
+                    "Let the session {} write to {}",
+                    crate::tree::named(&caller),
+                    crate::tree::other_session(daemon, &session)
+                ),
+                format!("Its first message: {}", asked.text),
+            ]);
+        }
     };
     Ok(vec![format!(
         "Send to the session {}, {whose}: {}",

@@ -668,6 +668,7 @@ checks. A Bitbucket pull request also has `reviewers`, each `{"name", "state"}` 
   "description": "Users cannot sign in.",
   "comments": [{"author": "alice", "at": "2026-10-01T10:00:00Z", "body": "I can reproduce"}],
   "older_comments": 0,
+  "attachments": [],
   "read_at": 1792843730808,
   "problem": null
 }
@@ -678,7 +679,9 @@ checks. A Bitbucket pull request also has `reviewers`, each `{"name", "state"}` 
 is in, `null` for Jira; `state` is `open` or `closed` for GitHub and Jira's own status name for
 Jira. When the ticket cannot be read (`gh` or `acli` missing, not signed in, no such ticket, a call
 that failed), `problem` says why and with what to do, and the fields of the ticket are absent. All
-the tracker's text is masked. Nothing is kept: every call reads again.
+the tracker's text is masked. `attachments` are the files of a Jira work item, `[{"name", "type",
+"bytes", "author", "at"}]`, named only (Flottille never fetches one), empty for GitHub. Nothing is
+kept: every call reads again.
 
 #### `workspace.link_ticket`
 
@@ -1327,6 +1330,25 @@ user's to either session resumes it: its count starts again, its wakes and the `
 between the two come back, and `session.following_resumed` is emitted. The user's alone: no tool
 of an agent does it. `not-found` when it is no open following; `invalid-params` when it is not
 paused.
+
+### The leave methods
+
+The user's leaves for a session to write to another it did not start (`docs/tools.md`, "Sessions
+that talk to each other"), as the window lists them where a session's rights are shown and lets the
+user take one back. A leave is given only by allowing the first message of the pair
+(`approval.approve`).
+
+#### `leave.list`
+
+`{"session"}`. `{"leaves": [...]}`, the leaves that name that agent as the writer or as the session
+written to, the oldest first (`not-found` when it names no agent). Each is `{"writer", "session",
+"request", "granted_at"}`: `writer` and `session` are `{"id", "title", "state"}`, `request` the
+number of the request the user allowed it in, `granted_at` in milliseconds since the Unix epoch.
+
+#### `leave.withdraw`
+
+`{"writer", "session"}`. `{"leave": {...}}`: the writer's next message to that session asks the
+user's leave again, and `leave.withdrawn` is emitted. `not-found` when there is no such leave.
 
 ### `provider.list`
 

@@ -2222,6 +2222,47 @@ fn a_jira_description_read_back_is_the_markdown_written() {
 }
 
 #[test]
+fn a_jira_work_item_shows_its_attachments_and_names_the_images_of_its_texts() {
+    let user = user();
+    on_jira(&user);
+    let mut item = in_status(
+        work_item("ABC-1", "The login fails", "example.atlassian.net"),
+        "To Do",
+        "new",
+    );
+    item["fields"]["description"] = json!({"type": "doc", "version": 1, "content": [
+        {"type": "mediaSingle", "content": [{"type": "media", "attrs": {
+            "alt": "image-20260101-120000.png", "type": "file",
+            "id": "00000000-0000-4000-8000-000000000001"}}]}]});
+    item["fields"]["attachment"] = json!([{"id": "10001", "filename": "image-20260101-120000.png",
+        "mimeType": "image/png", "size": 97717, "created": "2026-01-01T12:00:00.000+0100",
+        "author": {"displayName": "Ana Example"},
+        "content": "https://example.atlassian.net/rest/api/3/attachment/content/10001"}]);
+    user.acli_script(json!({"items": {"ABC-1": item}}));
+    let (_, mcp) = root_in(&user, None);
+
+    let shown = read(
+        &user,
+        mcp.call("tickets", json!({"action": "show", "ticket": "ABC-1"})),
+    );
+
+    for part in [
+        "[image: image-20260101-120000.png, not shown: ask the user to paste it if it matters]",
+        "Attachments (1)",
+        "- image-20260101-120000.png, image/png, 95.4 KiB, by Ana Example, 2026-01-01T12:00:00.000+0100",
+    ] {
+        assert!(shown.contains(part), "{part} in {shown}");
+    }
+    assert!(!shown.contains("attachment/content"), "{shown}");
+    assert!(
+        words(user.acli_received())
+            .contains(&"jira workitem view ABC-1 --json --fields summary,status,description,comment,issuelinks,attachment".to_owned()),
+        "{:?}",
+        user.acli_received()
+    );
+}
+
+#[test]
 fn a_post_flottille_wrote_on_jira_is_still_recognised() {
     // The text of a comment that Jira keeps as a tree, with a link, a table and marks, is found
     // by the record after the round trip, not by the Markdown typed.
@@ -4019,11 +4060,9 @@ fn session_send_from_the_starter_reaches_the_session_labelled_and_its_answer_com
 }
 
 #[test]
-fn session_send_to_any_other_session_is_refused() {
+fn session_send_to_a_child_or_to_itself_is_refused() {
     let user = judged_user();
     let (lead, mcp, session, second) = lead_and_session(&user);
-    // A session the user started, which neither of them started.
-    let (other, _) = root_in(&user, None);
     // A child of the lead's.
     let child = mcp.call(
         "agent_launch",
@@ -4039,28 +4078,23 @@ fn session_send_to_any_other_session_is_refused() {
         .to_owned();
     let judged = judge_prompts(&user).len();
 
-    for (from, to) in [
-        (&mcp, &other),
-        (&mcp, &child),
-        (&mcp, &lead),
-        (&second, &other),
-        (&second, &session),
+    for (from, to, said) in [
+        (&mcp, &child, "is one of your children"),
+        (&second, &child, "is a child of another session"),
+        (&mcp, &lead, "is your own session"),
+        (&second, &session, "is your own session"),
     ] {
         let refused = from.call("session_send", json!({"session": to, "text": "Hello."}));
         assert!(refused.error, "{to}: {}", refused.text);
         assert!(
-            refused.text.starts_with(&format!(
-                "refused: {to} is neither a session you started nor the agent that started you"
-            )),
+            refused.text.starts_with(&format!("refused: {to} {said}")),
             "{}",
             refused.text
         );
     }
     assert_eq!(judge_prompts(&user).len(), judged, "the judge was asked");
     assert!(no_request(&user));
-    for agent in [&other, &child] {
-        assert!(delivered(&user, agent, "session").is_empty());
-    }
+    assert!(delivered(&user, &child, "session").is_empty());
 }
 
 #[test]

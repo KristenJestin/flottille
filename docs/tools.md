@@ -410,10 +410,13 @@ pending requests.
   and the answer names the check, how it ended and the end of its output, masked. A commit
   whose message cannot be known before it is made (an editor, `-C`, `--amend --no-edit`,
   `--fixup`, a merge without `-m`, a `git revert` without `--no-commit`) is refused then,
-  saying to give it with `-m` or `-F`, or to commit with `git commit -m`. The commits of
-  `git cherry-pick`, `git am`, `git rebase` and `git pull` are not checked, and what git adds
-  to a message after the checks (`--trailer`, `--signoff`, `--cleanup`) is not in what they
-  read; the `-F` file is read once for the checks and again by git. A call given up stops its
+  saying to give it with `-m` or `-F`, or to commit with `git commit -m`; so is a git command
+  that is neither a command git has, an alias nor a `git-<command>` on the `PATH`, which git
+  could correct into a commit (`help.autocorrect`). A `git push` the user or the judge let
+  through has each commit it sends (those its refs lead to that no ref of the remote has, as
+  the remote lists them) checked before it goes, however the commit was made (a cherry-pick, a
+  rebase, a raw object): a failing one refuses the push, naming its short sha, its subject and
+  what the check said, and nothing is pushed. A call given up stops its
   checks. The checks are the user's lines, run by the daemon in the run's folder and
   environment, never a hook of the repository: git still runs none.
 - **A push is the gate's**: `git push` is a call to judge, a forced one base, and only the push
@@ -715,7 +718,7 @@ reasons.
   another ticket of the same tracker by its key (`#123` or `ABC-123`): its reference, tracker,
   state, title, link and description, masked, and how many comments it has with the newest one's
   author (`Comments: 12, … read them with tickets {"action": "show", "detail": "full"}`); `detail
-  full` gives the comments (the newest 30). A ticket read in the last 30 s is given again, saying
+  full` gives the comments (the newest 30). A Jira work item's attachments are listed at the end (the first 30), named and not shown, and an image in a text is a line saying so; the description says the user can paste one into the conversation ([`tickets.md`](tickets.md), "Attachments"). A ticket read in the last 30 s is given again, saying
   how old it is (`fresh: true` and `detail full` read it again; [`tickets.md`](tickets.md), "How
   fast it is read"). A key of the other tracker is refused (`refused:
   ABC-123 is a Jira ticket, and this workspace's tracker is GitHub issues (#123): …`), and nothing
@@ -873,7 +876,7 @@ Two of them take an `action`, as the tools of a family do: `agent_status` (`stat
 | Tool | |
 |---|---|
 | `agent_launch {title, brief, provider?, model?, effort?, role?, workspace?, new_workspace?, repositories?, root?, follow?}` | Starts a session for the user in a workspace with `root: true` ("Sessions for the user", below), or a child on one task, in the caller's own place, and answers at once with its id. A child never works in another place than its parent's: `workspace` and `new_workspace` are the session's, and a child launch that names another workspace than the caller's own, or a new one, is refused before anything is asked, naming the session form (`refused: a child works where you work: workspace and new_workspace are for a session for the user, … "root": true, "workspace": "login" …`); naming the caller's own workspace is its own place. Its description leads with the session form, for work that belongs in a workspace. `provider` is the caller's when left out, and the child's for life; `model` and `effort` the provider's defaults when left out (`docs/agents.md`, "Providers"): a provider not enabled or not ready, or a model or an effort it is known not to offer, is refused naming those that are (`refused: provider opencode is not enabled (…); the ready providers are claude`). `role` is `worker` (by default) or `lead`; with `root`, `workspace` is an existing workspace's name (`main` for the project folder), `new_workspace` the name of a new one (made at once, with `repositories` as its repositories, the session's first message sent once it is prepared; a workspace that fails fails the session; the launch is judged as `workspace create` is, "The workspace"), neither for the caller's own place; both are plain optional fields, and a mix is refused naming the field to use (`refused: workspace and new_workspace are exclusive: …`, `refused: repositories goes with new_workspace, …`). Its description holds a call of each form. Refused, never queued, above the project's children cap (`refused: N children already run in project P, its cap: do the work yourself, or wait for one of them to end (agent_stop ends one of yours)`). Only a root has this tool: a child, whatever its role, has none of the `agent_*` tools (no depth). **`root: true`** starts a session for the user instead of a child ("Sessions for the user", below), and then **`follow`** (a boolean) is required: a launch without it is refused, naming the field and what each value does; a child launch refuses it. |
-| `session_send {session, text}` (a root) | A message to a session the caller started (`agent_launch` with `root`), or to the agent that started the caller's session ("Sessions for the user", below). |
+| `session_send {session, text}` (a root) | A message to a session the caller started (`agent_launch` with `root`), to the agent that started the caller's session ("Sessions for the user", below), or to any other session of its project with the user's leave, asked once per pair ("Sessions that talk to each other"). |
 | `session_read {session?, last?, since?, until?, cursor?}` (a root) | A page of the conversation of another session of the caller's project, framed as that session's data, with the mode of its tree; without `session`, the caller's own id, role and mode ("Sessions that read each other", below). |
 | `agent_send {agent_id, message, model?, effort?}` | A message to a child, urgent: on its next tool result in a turn, a new turn otherwise. It answers the child's question. With `model` or `effort` it also changes the child's, as `agent.options` does for the user (`docs/agents.md`, "The options"): checked as at `agent_launch` (a model or an effort its provider is known not to offer is refused, naming those it offers, and nothing is sent), then set between its turns, before its next prompt. The provider never changes. |
 | `agent_status {agent_id?, action? status \| conversation, detail? short \| full, after?}` | `action status` (the default): one line per child (or for the one named): what it does (in a turn, `running \`<line>\` for 12 min`, `waiting for approval #3`, `waiting on the provider`, idle, reported, ended or failed with why), the time since its last sign of activity, its context use. For all the children it stops there (`detail short`) and says how to get more; for the one named, or with `detail full`, each also has its last three messages. `action conversation` (with `agent_id`; `after` pages): a page of the child's conversation, oldest first, one line per event that says something (`#<n> sent: …`, `said: …` for a whole reply, its streamed pieces joined and masked, two messages apart, `tool call: …`, a tool served and its outcome, a turn's end, a replacement, a report), each line of 2,000 characters at most (a longer reply goes on, whole, on the next lines), the page under 30,000; it ends with the `after` to pass for the next page. |
@@ -965,15 +968,33 @@ instead of `ask_user`. The descriptions stay under the 2,048 characters their li
 
 #### Sessions that talk to each other
 
-`session_send {session, text}` (a root's tool) writes to a session the caller started, or to the
-agent that started the caller's session, and to no other agent: any other is refused before
-anything is asked (`refused: <id> is neither a session you started nor the agent that started
-you: …`), and so is one that ended or an empty text. Children are written to with `agent_send`.
+`session_send {session, text}` (a root's tool) writes to another live root of the caller's
+project: a session the caller started, the agent that started the caller's session, or any other
+session of the project with the user's leave. A child is refused before anything is asked (`refused:
+<id> is a child of another session: it is written to by its parent, …`; the caller's own are written
+to with `agent_send`), and so are a session of another project (`refused: <id> is a session of
+another project, <p>, not of <q>: …`), the caller's own session, an id that names no agent, a
+session that ended and an empty text.
 
-- **It is to judge**, as a write is (a card in Ask, the judge in Auto), as an `action` request
-  whose words name the session and give the text whole (`Send to the session "Login" (agent …),
-  which you started: …`). The judge is given the text whole: one longer than its 8,000
-  characters is refused, and one that holds what the masking takes for a secret is base.
+- **The user's leave, once per pair.** Between a session and one it started, or the one that
+  started it, nothing is asked beyond the judging below. To any other session, the first message
+  from A to X is held for the user, in every mode, **Full included**, and never reaches the judge:
+  it is the user's other conversation. Its request is an `action` of class `base` whose words name
+  both sessions and give the text (`Let the session "A" (agent …) write to the session "X" (agent
+  …) (started by you, not by this agent)`, then `Its first message: …`); the call is answered at
+  once that it is held. Allowed, the text is delivered and A writes to X from then on without the
+  user's leave (`leave.granted`, kept only if both sessions still run); refused, nothing is sent
+  and A is told so. While it waits, and while its message is being sent once allowed, another
+  message from A to X is refused, naming the request, so that two first messages ask the user
+  once. The leave is one way (A to X, not X to A) and lasts until either session ends (one
+  resumed asks again) or the user withdraws it, in the window's Write access section of either
+  session or with `leave.withdraw` (`leave.withdrawn`). A message the judge allows after the
+  user withdrew the leave, or after X ended, is refused, saying which, and is not sent.
+- **It is to judge**, as a write is (a card in Ask, the judge in Auto, through in Full), as an
+  `action` request whose words name the session and give the text whole (`Send to the session
+  "Login" (agent …), which you started: …`; `…, which the user let you write to: …` once the leave
+  is given). The judge is given the text whole: one longer than its 8,000 characters is refused,
+  and one that holds what the masking takes for a secret is base.
 - **No call waits**: the caller is answered at once; the text reaches the other session as a
   delivery, `session`, urgent (on its next tool result in a turn, a new turn otherwise), under a
   line naming the sender (`agent 0123456789ab wrote to this session:`): it is an agent's words,
@@ -1196,8 +1217,12 @@ says who answers a call to judge (`docs/design.md` §7.1).
      `core.gitProxy`, and every key of git's settings that run programs below but `remote.*`,
      `url.*`, `push.*` (any `alias.*`, `include.path`, `includeIf.*`, `credential.*`, drivers,
      filters, `protocol.allow`…); a program named for a remote: `--upload-pack`,
-     `--receive-pack`, `--exec` of `clone`, `fetch`, `pull`, `push`, `send-pack`, `ls-remote`,
-     `archive`, `git clone -u`, `git -c core.sshCommand`;
+     `--receive-pack`, `--exec` of `clone`, `fetch`, `pull`, `push`, `ls-remote`, `archive`,
+     `git clone -u`, `git -c core.sshCommand`;
+   - a push past the wall on pushes (below): `git send-pack`, `git http-push` and git's transport
+     helpers (`git remote-<name>`: `remote-https`, `remote-ext`, `remote-fd`…) connect to the URL
+     they are given, which `pushInsteadOf` does not rewrite: `refused: git send-pack pushes past
+     Flottille's wall; use git push`;
    - a launcher, which starts what it runs outside the daemon's tree of processes, later or on a
      host: `systemd-run`, `tmux`, `screen`, `zellij`, `dtach`, `abduco`, `setsid`, `at`,
      `batch`, `crontab`, `dbus-send`, `gdbus`, `busctl`, `ssh`, `scp`, `sftp`, `loginctl`,
@@ -1359,7 +1384,8 @@ says who answers a call to judge (`docs/design.md` §7.1).
    **Known gaps**, which no command gate closes: a script written with `fs_write` and then run
    (`./script.sh`, `sh script.sh`) is not read, so what it does is out of the gate's reach, but
    for a push, which the environment walls; a git alias in the user's own configuration
-   (`alias.<name> = push`) is run by git itself, and the gate sees only the alias's name.
+   (`alias.<name> = push`) is run by git itself, and the gate sees only the alias's name: the
+   wall stops such a push, but not one through an alias of `send-pack` or `http-push`.
    Running a script the agent wrote is itself a line to judge.
 
 The words of a line that name paths (every word but the program, an option's value after `=`,
