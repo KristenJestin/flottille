@@ -168,6 +168,24 @@ impl Place {
         }
     }
 
+    /// A workspace, whose folder is `root`: its repositories' worktrees, its branch and its
+    /// variables, frozen when it was made.
+    pub fn of_workspace(workspace: &flottille_core::workspace::Workspace, root: PathBuf) -> Place {
+        Place {
+            project: workspace.project.clone(),
+            workspace: Some(workspace.name.clone()),
+            root,
+            repositories: workspace
+                .repositories
+                .iter()
+                .map(|r| (r.path.clone(), workspace.folder_of(&r.path)))
+                .collect(),
+            branch: workspace.branch.clone(),
+            variables: workspace.variables.clone(),
+            home: std::env::var_os("HOME").map(Into::into),
+        }
+    }
+
     /// Where relative paths start: the repository's folder, or the place's.
     pub fn base(&self, repository: Option<&str>) -> Result<(&str, &Path), String> {
         self.base_for(repository, Folder::Path)

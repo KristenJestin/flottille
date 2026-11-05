@@ -150,6 +150,20 @@ fn open_session<'a>(
     agent: &str,
     cx: &'a mut TestAppContext,
 ) -> (Entity<SessionPage>, &'a mut VisualTestContext) {
+    let (_, page, cx) = open_session_in_shell(user, agent, cx);
+    (page, cx)
+}
+
+/// `open_session`, with the shell the window holds, which a test polls to see what comes later.
+fn open_session_in_shell<'a>(
+    user: &User,
+    agent: &str,
+    cx: &'a mut TestAppContext,
+) -> (
+    Entity<Shell>,
+    Entity<SessionPage>,
+    &'a mut VisualTestContext,
+) {
     let (shell, cx) = window(user, cx);
     until(&shell, cx, "the session is in the tree", |cx| {
         has(session_id(agent), cx)
@@ -171,7 +185,7 @@ fn open_session<'a>(
         })
     });
     settle(cx);
-    (page(cx).unwrap(), cx)
+    (shell.clone(), page(cx).unwrap(), cx)
 }
 
 /// The text regions of the user's message and of the reply.
@@ -307,4 +321,90 @@ fn at_rest_with_a_selection_no_frame_is_pending(cx: &mut TestAppContext) {
         0,
         "nothing is drawn while the pointer rests over a selection"
     );
+}
+
+/// What the user typed with a command in it, a list and a code block around it.
+const COMMANDED: &str = "lead the work: check these, then /ship\n\n- the first item\n- the second \
+    item\n\n```\nlet shown = \"as typed\";\n```";
+
+/// The user sent `message`, which uses a command of the project: the row of the message once
+/// it shows, and the region of the reply that came after it.
+fn after_a_command_message(
+    user: &User,
+    lead: &str,
+    message: &str,
+    shell: &Entity<Shell>,
+    page: &Entity<SessionPage>,
+    cx: &mut VisualTestContext,
+) -> (usize, String) {
+    user.call(
+        "command.add",
+        json!({"project": "app", "name": "ship", "description": "Ship it",
+            "instructions": "Push the branch, then open its pull request."}),
+    )
+    .unwrap();
+    user.call("agent.send", json!({"agent": lead, "message": message}))
+        .unwrap();
+    let found = std::cell::Cell::new(None);
+    until(shell, cx, "the command message and its reply show", |cx| {
+        found.set(page.read_with(cx, |page, cx| {
+            let blocks = page.conversation().read(cx).blocks().to_vec();
+            let mine = blocks.iter().position(|b| {
+                matches!(
+                    b,
+                    Block::Message {
+                        commands: Some(_),
+                        ..
+                    }
+                )
+            })?;
+            let reply = blocks
+                .iter()
+                .rposition(|b| matches!(b, Block::Text { text } if text == REPLY))?;
+            (reply > mine).then_some((mine, reply))
+        }));
+        found.get().is_some()
+    });
+    settle(cx);
+    let (mine, reply) = found.get().unwrap();
+    (mine, format!("row-{reply}-text-region"))
+}
+
+#[gpui_kit::test]
+fn selecting_text_in_a_command_message_keeps_its_highlight_drawn(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    let (shell, page, cx) = open_session_in_shell(&user, &lead, cx);
+    let (at, reply) = after_a_command_message(&user, &lead, COMMANDED, &shell, &page, cx);
+    let mine = format!("row-{at}-message-region");
+
+    assert!(
+        has(mine.clone(), cx),
+        "the typed text is a selectable region"
+    );
+    let seen = drag(&mine, &reply, cx);
+    assert_held_in_its_message(&seen);
+}
+
+#[gpui_kit::test]
+fn selecting_text_in_what_the_agent_received_keeps_its_highlight_drawn(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    let (shell, page, cx) = open_session_in_shell(&user, &lead, cx);
+    let (at, reply) =
+        after_a_command_message(&user, &lead, "lead the work, then /ship", &shell, &page, cx);
+    cx.update(|window, cx| window.click(format!("row-{at}-received-toggle"), cx));
+    for _ in 0..40 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        frame(cx);
+    }
+    settle(cx);
+    let received = format!("row-{at}-received-region");
+
+    assert!(
+        has(received.clone(), cx),
+        "what the agent received is a selectable region"
+    );
+    let seen = drag(&received, &reply, cx);
+    assert_held_in_its_message(&seen);
 }

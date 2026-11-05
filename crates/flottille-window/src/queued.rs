@@ -10,7 +10,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use flottille_ui::{Button, Icon, Item, Listing, Placement, icon, palette, space, tipped};
+use flottille_ui::{
+    Button, Icon, Item, Listing, Placement, commanded_text, icon, palette, space, tipped,
+};
 use gpui_kit::{
     AnyElement, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Render,
     SharedString, StatefulInteractiveElement as _, Styled, StyledImage as _, TestSupportExt as _,
@@ -18,6 +20,7 @@ use gpui_kit::{
 };
 
 use crate::actions::Command;
+use crate::session::command_chips;
 use crate::session_link::Queued;
 use crate::shell::Shell;
 
@@ -200,6 +203,16 @@ impl Render for QueuedMessages {
                             .test_support()
                         }))
                 });
+                // What the user typed, each command a chip in it.
+                let shown = match message.commands.is_empty() {
+                    true => text.clone().into_any_element(),
+                    false => commanded_text(
+                        &message.text,
+                        &command_chips(&message.text, &message.commands),
+                        cx,
+                    )
+                    .into_any_element(),
+                };
                 let waits_id = ElementId::Name(format!("queued-{key}-waits").into());
                 let waits = tipped(
                     div()
@@ -236,11 +249,13 @@ impl Render for QueuedMessages {
                     .children(thumbs)
                     .child(
                         div()
+                            .id(ElementId::Name(format!("queued-{key}-text").into()))
                             .max_h(px(60.))
                             .overflow_hidden()
                             .text_size(px(13.5))
                             .text_color(p.mute)
-                            .child(text),
+                            .child(shown)
+                            .test_support(),
                     )
                     .child(waits)
                     .test_support();
