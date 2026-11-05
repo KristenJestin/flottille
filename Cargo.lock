@@ -2161,6 +2161,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "image",
  "libc",
  "markdown",
  "pdf_oxide",
@@ -2186,6 +2187,7 @@ dependencies = [
 name = "flottille-core"
 version = "0.1.0"
 dependencies = [
+ "image",
  "libc",
  "rusqlite",
  "serde",

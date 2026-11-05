@@ -428,7 +428,7 @@ pending requests.
 
 | Tool | |
 |---|---|
-| `forge {action, workspace?, repository?, number?, state?, branch?, detail?, title?, body?, draft?, waive?, method?, events?, from?, minutes?, pipeline?, variables?, run?, step?, do?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
+| `forge {action, workspace?, repository?, number?, state?, branch?, detail?, fresh?, title?, body?, draft?, waive?, method?, events?, from?, minutes?, pipeline?, variables?, run?, step?, do?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
 
 - **The repositories** are those of the agent's place: its workspace's, or the project's in
   `main`. One the place does not take is refused (`refused: X is not a repository of this
@@ -457,7 +457,9 @@ pending requests.
   "show", "workspace": "login", "detail": "full"}`); `detail full` gives their texts, cut and
   under the result limit. **`show {number, repository?, detail?}`**: that pull request of a
   repository of the place, the same way; `repository` is needed when the place has several.
-  `show` reads the forge now, and stores what it read over what the rounds keep of it. A merged,
+  `show` reads the forge now, or gives the pull request as it was read in the last 30 s, saying how
+  old that is (`fresh: true` and `detail full` read again; [`forges.md`](forges.md), "How fast
+  `forge show` is read"), and stores what it read over what the rounds keep of it. A merged,
   declined or closed pull request also gives `closing comment (<author>): …`, the comment it was
   closed with (not an older one of its closer), when the forge has it ([`forges.md`](forges.md),
   "The closing comment").
@@ -593,7 +595,7 @@ reasons.
 
 | Tool | |
 |---|---|
-| `tickets {action, ticket?, workspace?, query?, state?, label?, assignee?, detail?, title?, body?, labels?, reason?, remove_labels?, assignees?, remove_assignees?, status?, project?, type?, events?, from?, minutes?}` | The tickets of the project's tracker, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
+| `tickets {action, ticket?, workspace?, query?, state?, label?, assignee?, detail?, fresh?, title?, body?, labels?, reason?, remove_labels?, assignees?, remove_assignees?, status?, project?, type?, events?, from?, minutes?}` | The tickets of the project's tracker, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
 
 - **`list {state?, label?, assignee?}`**: every ticket of a state, in one call, a line each (`-
   #12 open: The login fails [bug] (ana)  <link>`): `state` is `open` (the default), `closed` or
@@ -616,7 +618,9 @@ reasons.
   another ticket of the same tracker by its key (`#123` or `ABC-123`): its reference, tracker,
   state, title, link and description, masked, and how many comments it has with the newest one's
   author (`Comments: 12, … read them with tickets {"action": "show", "detail": "full"}`); `detail
-  full` gives the comments (the newest 30). A key of the other tracker is refused (`refused:
+  full` gives the comments (the newest 30). A ticket read in the last 30 s is given again, saying
+  how old it is (`fresh: true` and `detail full` read it again; [`tickets.md`](tickets.md), "How
+  fast it is read"). A key of the other tracker is refused (`refused:
   ABC-123 is a Jira ticket, and this workspace's tracker is GitHub issues (#123): …`), and nothing
   is asked of any tracker. A workspace with no ticket and no key is refused (`refused: workspace X
   is linked to no ticket: …`). An unreadable ticket (`gh` or `acli` missing or signed out, no such

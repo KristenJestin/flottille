@@ -52,6 +52,7 @@ use crate::judge;
 use crate::place::{Place, Resolved};
 use crate::projects;
 use crate::providers::{self, Provider};
+use crate::reads::Reads;
 use crate::runs;
 use crate::skills;
 use crate::tree;
@@ -340,6 +341,7 @@ const SERVED: [Definition; 28] = [
                 "state": {"type": "string", "enum": ["open", "closed", "merged", "all"]},
                 "branch": {"type": "string", "description": "list: its source branch."},
                 "detail": {"type": "string", "enum": ["short", "full"]},
+                "fresh": {"type": "boolean", "description": "show: read the pull request again; one read in the last 30 s is given again otherwise (detail full always reads)."},
                 "title": {"type": "string", "description": "create, edit: the pull request's title. create needs the branch pushed first (git push -u origin <branch>)."},
                 "body": {"type": "string", "description": "create, edit: description; comment: the comment."},
                 "draft": {"type": "boolean"},
@@ -388,6 +390,7 @@ const SERVED: [Definition; 28] = [
                 "label": {"type": "string"},
                 "assignee": {"type": ["string", "null"], "description": "list, search: only those assigned to them. create, edit on Jira: whom to assign, \"@me\" (the user signed in to acli), an email or an account id; edit: null removes the assignee."},
                 "detail": {"type": "string", "enum": ["short", "full"]},
+                "fresh": {"type": "boolean", "description": "show: read the ticket again; one read in the last 30 s is given again otherwise (detail full always reads)."},
                 "title": {"type": "string"},
                 "body": {"type": "string", "description": "create, edit: description; comment: the comment."},
                 "labels": {"type": "array", "items": {"type": "string"}, "description": "create, edit: labels to add (GitHub)."},
@@ -1908,6 +1911,16 @@ fn cut_long(
     }
 }
 
+tokio::task_local! {
+    /// The run the call in progress started, for the developer log's line of the call to name.
+    static RUN_STARTED: Mutex<Option<String>>;
+}
+
+/// Says that the call in progress started, or joined, this run.
+pub fn started_run(id: &str) {
+    let _ = RUN_STARTED.try_with(|run| *run.lock().unwrap() = Some(id.to_owned()));
+}
+
 async fn played(
     daemon: &Arc<Daemon>,
     grant: &Arc<Grant>,
@@ -1916,7 +1929,24 @@ async fn played(
     key: Option<&str>,
     cancelled: CancellationToken,
 ) -> (String, bool) {
+    RUN_STARTED
+        .scope(
+            Mutex::default(),
+            played_in(daemon, grant, tool, args, key, cancelled),
+        )
+        .await
+}
+
+async fn played_in(
+    daemon: &Arc<Daemon>,
+    grant: &Arc<Grant>,
+    tool: &str,
+    args: Value,
+    key: Option<&str>,
+    cancelled: CancellationToken,
+) -> (String, bool) {
     let started = Instant::now();
+    let reads = Reads::default();
     let recorded = record_of(&args, &grant.place);
     let reads_a_result = reads_a_result(tool, &args);
     let mut verdict = None;
@@ -1945,7 +1975,7 @@ async fn played(
                 verdict = Some(decided.word());
                 match decided {
                     gate::Verdict::Allow => {
-                        perform(daemon, grant, tool, args, cancelled, None).await
+                        perform(daemon, grant, tool, args, cancelled, None, &reads).await
                     }
                     gate::Verdict::Deny(why) => Outcome::Refused(why),
                     gate::Verdict::Ask(ask) => {
@@ -1996,13 +2026,15 @@ async fn played(
                                     crate::actions::remove_losing(daemon, grant, args).await
                                 } else {
                                     let approved = Some(ask.class);
-                                    perform(daemon, grant, tool, args, cancelled, approved).await
+                                    perform(daemon, grant, tool, args, cancelled, approved, &reads)
+                                        .await
                                 }
                             }
                             Some(judged) if judged.verdict == "allow" => {
                                 verdict = Some("judged");
                                 let approved = Some(gate::Class::Judge);
-                                perform(daemon, grant, tool, args, cancelled, approved).await
+                                perform(daemon, grant, tool, args, cancelled, approved, &reads)
+                                    .await
                             }
                             judged => {
                                 let (outcome, number) = approvals::ask(
@@ -2028,7 +2060,7 @@ async fn played(
     if logging {
         log_call(
             daemon, grant, tool, key, &recorded, verdict, held, judged_log, &outcome, request,
-            started,
+            started, &reads,
         );
     }
     record(
@@ -2073,6 +2105,7 @@ fn log_call(
     outcome: &Outcome,
     request: Option<u64>,
     started: Instant,
+    reads: &Reads,
 ) {
     let (class, reasons) = match held {
         Some((class, reasons)) => (Some(class), reasons),
@@ -2094,8 +2127,10 @@ fn log_call(
             "gate": verdict, "allowed_by": allowed_by(verdict), "class": class,
             "reasons": reasons, "judge": judge,
             "outcome": outcome.word(), "request": request, "error": error,
+            "run": RUN_STARTED.try_with(|run| run.lock().unwrap().clone()).ok().flatten(),
             "result_chars": text.chars().count(),
-            "duration_ms": started.elapsed().as_millis() as u64}),
+            "duration_ms": started.elapsed().as_millis() as u64,
+            "reads": reads.to_json()}),
         &grant.place.secret_values(),
     );
 }
@@ -2333,7 +2368,18 @@ pub async fn performed(
     let cancelled = CancellationToken::new();
     let outcome = match discarding {
         Some(losses) => crate::actions::remove_discarding(daemon, grant, args, &losses).await,
-        None => perform(daemon, grant, tool, args, cancelled, Some(class)).await,
+        None => {
+            perform(
+                daemon,
+                grant,
+                tool,
+                args,
+                cancelled,
+                Some(class),
+                &Reads::default(),
+            )
+            .await
+        }
     };
     let (outcome, cut) = cut_long(daemon, grant, tool, reads_a_result, outcome);
     let verdict = Some("allow");
@@ -2433,16 +2479,19 @@ async fn perform(
     args: Value,
     cancelled: CancellationToken,
     approved: Option<gate::Class>,
+    reads: &Reads,
 ) -> Outcome {
     if !matches!(tool, "web" | "tickets" | "forge") {
         return performed_once(daemon, grant, tool, args, cancelled, approved).await;
     }
     // What a page, a search, a ticket or a pull request showed the agent, from its data and
-    // never from the call's own arguments, it may read with `web`.
-    let (outcome, shown) = crate::web::showing(performed_once(
-        daemon, grant, tool, args, cancelled, approved,
-    ))
-    .await;
+    // never from the call's own arguments, it may read with `web`. The forge and tracker reads
+    // it made are counted for the developer log.
+    let (outcome, shown) = reads
+        .counting(crate::web::showing(performed_once(
+            daemon, grant, tool, args, cancelled, approved,
+        )))
+        .await;
     if let Outcome::Done(_) = &outcome {
         daemon.mcp.seen.saw(&grant.agent, shown);
     }

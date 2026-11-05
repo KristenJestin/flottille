@@ -31,6 +31,7 @@ use crate::forge::{self, Checkout, Forge, Gh, masked};
 use crate::mcp::{Outcome, arguments, full_detail, workspace_named};
 use crate::place::Place;
 use crate::projects::{self, Failure};
+use crate::reads::{self, Reads};
 
 mod events;
 
@@ -125,7 +126,7 @@ impl Ticket {
 
     /// What `tickets show` answers: the comments themselves only when `full`, otherwise their
     /// number and the way to get them, for the ticket that was named when one was.
-    fn text(&self, full: bool, named: Option<&str>) -> String {
+    fn text(&self, full: bool, named: Option<&str>, age: Option<u64>) -> String {
         let again = match named {
             Some(ticket) => format!(
                 "{{\"action\": \"show\", \"ticket\": {}, \"detail\": \"full\"}}",
@@ -151,6 +152,12 @@ impl Ticket {
         );
         if let Some(url) = &self.url {
             text.push_str(&format!("  {url}\n"));
+        }
+        if let Some(age) = age {
+            text.push_str(&format!(
+                "  ({}; \"fresh\": true reads it again)\n",
+                reads::age_text(age)
+            ));
         }
         if self.description.is_empty() {
             text.push_str("\nNo description.\n");
@@ -230,6 +237,27 @@ pub async fn read_known(daemon: &Daemon, project: &Project, key: &Key) -> Result
     Ok(ticket)
 }
 
+/// `read_known`, or what was read of `key` in the last 30 s and how many milliseconds ago, unless
+/// `again`. What is read is kept for the next call, `tickets show` and the window's alike.
+async fn read_or_kept(
+    daemon: &Daemon,
+    project: &Project,
+    key: &Key,
+    again: bool,
+) -> (Result<Ticket, String>, Option<u64>) {
+    let kept = format!("{}/{}", project.name, key.text());
+    if !again && let Some((ticket, age)) = daemon.kept_tickets.get(&kept) {
+        Reads::from_cache();
+        return (Ok(ticket), Some(age));
+    }
+    let generation = daemon.kept_tickets.generation();
+    let read = read_known(daemon, project, key).await;
+    if let Ok(ticket) = &read {
+        daemon.kept_tickets.put(kept, ticket.clone(), generation);
+    }
+    (read, None)
+}
+
 /// Reads `key` on the project's tracker. `Err` says why it cannot be read, masked, with what to
 /// do.
 pub async fn read(project: &Project, key: &Key) -> Result<Ticket, String> {
@@ -273,18 +301,22 @@ async fn github_of(project: &Project, path: &str) -> Result<Forge, String> {
 }
 
 async fn read_issue(forge: &Forge, number: u64) -> Result<Ticket, String> {
-    forge::signed_in().await?;
     let slug = forge.slug();
-    let issue = forge::gh_json(&[
+    // The sign-in check and the issue are read together; the check's problem is said first.
+    let number_text = number.to_string();
+    let repository = forge.gh_repository();
+    let view = [
         "issue",
         "view",
-        &number.to_string(),
+        &number_text,
         "-R",
-        &forge.gh_repository(),
+        &repository,
         "--json",
         GH_FIELDS,
-    ])
-    .await?;
+    ];
+    let (signed_in, issue) = futures::join!(forge::signed_in(), forge::gh_json(&view));
+    signed_in?;
+    let issue = issue?;
     let comments: Vec<Comment> = issue["comments"]
         .as_array()
         .into_iter()
@@ -378,9 +410,10 @@ async fn jira_site(site: &str, nothing: &str) -> Result<(), String> {
 }
 
 async fn read_work_item(key: &str, site: &str) -> Result<Ticket, String> {
-    jira_site(site, "read").await?;
-    let item = viewed(key, site, ACLI_FIELDS).await?;
-    Ok(work_item(key, &item, site))
+    // The sign-in check and the work item are read together; the check's problem is said first.
+    let (checked, item) = futures::join!(jira_site(site, "read"), viewed(key, site, ACLI_FIELDS));
+    checked?;
+    Ok(work_item(key, &item?, site))
 }
 
 /// `acli jira workitem view KEY --json --fields <fields>`, once `acli` is checked to be signed in
@@ -573,15 +606,17 @@ async fn state_of(daemon: &Daemon, workspace: &Workspace) -> Value {
     let Some(text) = &workspace.ticket else {
         return state;
     };
-    let read = match projects::load_project(daemon, &workspace.project) {
-        Err(failure) => Err(failure.message),
+    let (read, age) = match projects::load_project(daemon, &workspace.project) {
+        Err(failure) => (Err(failure.message), None),
         Ok(project) => match Key::parse(text) {
-            Ok(key) => read(&project, &key).await,
-            Err(why) => Err(why),
+            Ok(key) => read_or_kept(daemon, &project, &key, false).await,
+            Err(why) => (Err(why), None),
         },
     };
     match read {
         Ok(ticket) => {
+            // What a session link is given may be a read of the last 30 s: it says when.
+            state["read_at"] = now_ms().saturating_sub(age.unwrap_or(0)).into();
             if let (Value::Object(state), Value::Object(read)) = (&mut state, ticket.to_json()) {
                 state.extend(read);
             }
@@ -668,6 +703,9 @@ struct TicketsCall {
     #[serde(default, deserialize_with = "present")]
     assignee: Option<Option<String>>,
     detail: Option<String>,
+    /// show: read the ticket again even if it was read in the last 30 s.
+    #[serde(default)]
+    fresh: bool,
     title: Option<String>,
     body: Option<String>,
     labels: Option<Vec<String>>,
@@ -912,16 +950,22 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
         "types" => types(&project, &asked).await,
         "subscribe" => events::subscribe(daemon, agent, place, &project, &asked).await,
         "unsubscribe" => events::unsubscribe(daemon, agent, &project, &asked),
-        "create" => create(daemon, &project, &asked).await,
+        "create" => {
+            let created = create(daemon, &project, &asked).await;
+            daemon.kept_tickets.drop_all();
+            created
+        }
         "comment" | "edit" | "close" | "reopen" | "status" => {
             let key = match key_of(daemon, place, &project, &asked) {
                 Ok(key) => key,
                 Err(refusal) => return refusal,
             };
-            match asked.action.as_str() {
+            let written = match asked.action.as_str() {
                 "status" => status(daemon, &project, &asked, &key).await,
                 _ => write(daemon, &project, &asked, &key).await,
-            }
+            };
+            daemon.kept_tickets.drop_all();
+            written
         }
         action => Outcome::Refused(format!(
             "refused: tickets has no action {action:?}: its actions are {}",
@@ -1367,12 +1411,14 @@ async fn show(
     };
     // A round of the project running stores a read of its own; none starts during this one.
     let held = crate::items::held_now(daemon, &project.name);
-    match read_known(daemon, project, &key).await {
+    // `detail: full` and `fresh` read again, and keep what they read for the next show.
+    let (read, age) = read_or_kept(daemon, project, &key, full || asked.fresh).await;
+    match read {
         Ok(ticket) => {
-            if held.is_some() {
+            if held.is_some() && age.is_none() {
                 events::remember(daemon, project, &key, &ticket);
             }
-            Outcome::Done(ticket.text(full, asked.ticket.as_deref()))
+            Outcome::Done(ticket.text(full, asked.ticket.as_deref(), age))
         }
         Err(problem) => Outcome::Failed(format!(
             "the ticket {} could not be read: {problem}",

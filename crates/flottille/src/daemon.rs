@@ -166,6 +166,9 @@ pub struct Daemon {
     pub launching: Mutex<HashMap<String, usize>>,
     /// What the forges said of each workspace, and who watches them.
     pub forges: forge::Forges,
+    /// The tickets read in the last 30 s, for the next `tickets show` and the window's session
+    /// link (`reads`).
+    pub kept_tickets: crate::reads::Kept<crate::tickets::Ticket>,
     /// The rounds of the items, the windows connected (`docs/items.md`).
     pub items: items::Items,
     /// The developer mode's log (`docs/developer.md`).
@@ -213,10 +216,29 @@ impl Daemon {
         &self,
         write: impl FnOnce(&mut Store) -> flottille_core::Result<(T, E)>,
     ) -> flottille_core::Result<T> {
+        self.written(true, write)
+    }
+
+    /// `write`, the event left out of the developer log when a line of it says more already. The
+    /// subscribers see it all the same.
+    pub fn write_unlogged<T, E: Into<Option<Event>>>(
+        &self,
+        write: impl FnOnce(&mut Store) -> flottille_core::Result<(T, E)>,
+    ) -> flottille_core::Result<T> {
+        self.written(false, write)
+    }
+
+    fn written<T, E: Into<Option<Event>>>(
+        &self,
+        logged: bool,
+        write: impl FnOnce(&mut Store) -> flottille_core::Result<(T, E)>,
+    ) -> flottille_core::Result<T> {
         let mut events = self.events.lock().unwrap();
         let (value, event) = write(&mut events.store)?;
         if let Some(event) = event.into() {
-            self.developer.event(&event);
+            if logged {
+                self.developer.event(&event);
+            }
             if let Some(bus) = &events.bus {
                 let _ = bus.send(event);
             }
@@ -321,6 +343,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         judge_chose_none: Mutex::new(None),
         launching: Mutex::new(HashMap::new()),
         forges: forge::Forges::default(),
+        kept_tickets: crate::reads::Kept::default(),
         items: items::Items::default(),
         developer: developer::Log::open(paths),
         stopping: watch::Sender::new(false),

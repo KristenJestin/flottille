@@ -7,6 +7,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+# Already built for the window (and GPUI): PNG and JPEG, to scale a picture down before it is kept.
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 libc = "0.2.191"
 rusqlite = { version = "0.41.0", features = ["bundled", "fallible_uint"] }
 serde = { version = "1.0.229", features = ["derive"] }
