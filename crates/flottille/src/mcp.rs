@@ -315,18 +315,18 @@ const SERVED: [Definition; 28] = [
     Definition {
         name: "forge",
         title: "Pull requests",
-        description: "The pull requests of the project's repositories on their forge, through \
-            the user's own gh or bkt (no forge sign-in here: never run them). list: by state \
-            (open by default) and branch, as last read. show: a workspace's branch's (yours; in main, name \
+        description: "Pull requests and CI of the project's repositories, through the user's \
+            own gh or bkt (no forge sign-in here: never run them). list: by state (open by \
+            default) and branch, as last read. show: a workspace's branch's (yours; in main, name \
             it), or number's, with checks (the log's end of each failed job), review and comment \
             counts; detail full adds texts. Writes, judged, answered at once, the result maybe \
             later: create, merge (method, squash by default; refused with no check, while checks \
             fail or a review asks for changes unless waive gives the user's words) and checks \
             (re-run failed) act on a workspace's branch; comment, edit, close (comment first), \
-            reopen on number. subscribe: the next events of a workspace's pull request wakes you \
-            once, by a delivery (from people: no bot nor agent; minutes: sized by CI, else 60); \
-            unsubscribe. CI: pipelines, runs, run_view, run_logs; judged run, stop, step. \
-            {\"action\": \"create\", \"repository\": \"api\", \"title\": \
+            reopen on number. subscribe: a workspace's pull request's next events wake you once, \
+            by a delivery; unsubscribe. CI: pipelines lists what can be run; run starts one by \
+            name (custom: <name>) with its variables; runs, run_view, run_logs read; run, stop, \
+            step judged. {\"action\": \"create\", \"repository\": \"api\", \"title\": \
             \"fix: ...\", \"body\": \"...\"}",
         read_only: false,
         idempotent: false,
@@ -348,8 +348,8 @@ const SERVED: [Definition; 28] = [
                 "waive": {"type": "string", "description": "merge: the user's words letting a blocked pull request be merged; held for them."},
                 "method": {"type": "string", "enum": ["squash", "merge", "rebase"], "description": "merge: squash when left out."},
                 "events": {"type": "array", "items": {"enum": crate::forge::EVENTS}},
-                "from": {"enum": crate::subscriptions::FROM},
-                "minutes": {"type": "integer", "minimum": 1, "maximum": crate::subscriptions::LONGEST_MINUTES},
+                "from": {"enum": crate::subscriptions::FROM, "description": "subscribe: whose reviews and comments count: anyone (the default), or people (no bot nor agent)."},
+                "minutes": {"type": "integer", "minimum": 1, "maximum": crate::subscriptions::LONGEST_MINUTES, "description": "subscribe: how long it waits; sized by CI when left out, else 60."},
                 "pipeline": {"type": "string", "description": "run: as pipelines lists it (Bitbucket default, custom: <name>, branches: <pattern>; GitHub a workflow's file)."},
                 "variables": {"type": "array", "description": "run: Bitbucket variables, GitHub inputs.", "items": {"type": "object", "properties": {
                     "key": {"type": "string"}, "value": {"type": "string"}, "secured": {"type": "boolean"}
@@ -2790,6 +2790,19 @@ mod tests {
                 .unwrap_or_else(|| panic!("{tool} has no described parameter {name}"))
                 .to_owned(),
         }
+    }
+
+    #[test]
+    fn the_forge_description_says_what_the_ci_actions_do() {
+        let forge = definition("forge").unwrap().description;
+        for said in [
+            "pipelines lists what can be run",
+            "run starts one by name (custom: <name>) with its variables",
+        ] {
+            assert!(forge.contains(said), "{said:?} in {forge}");
+        }
+        // The limit every description stays under.
+        assert!(forge.len() < 1000, "{}", forge.len());
     }
 
     #[test]
