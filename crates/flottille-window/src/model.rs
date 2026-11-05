@@ -343,6 +343,40 @@ impl News {
     }
 }
 
+/// A link an agent handed the user (`agent.link_shown`, `docs/events.md`): the window offers it
+/// in a toast and in the conversation, and opens it only when the user clicks Open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkShown {
+    pub agent: String,
+    /// What Open opens: the address, or the file's absolute path.
+    pub target: String,
+    /// The few words the agent gave.
+    pub title: Option<String>,
+    /// The address's host, or the file's path in the place.
+    pub whence: String,
+}
+
+impl LinkShown {
+    pub fn of(event: &flottille_core::protocol::Event) -> Option<LinkShown> {
+        if event.name != "agent.link_shown" {
+            return None;
+        }
+        let data = &event.data;
+        let text = |field: &str| data[field].as_str().filter(|text| !text.is_empty());
+        Some(LinkShown {
+            agent: text("agent")?.to_owned(),
+            target: text("target")?.to_owned(),
+            title: text("title").map(str::to_owned),
+            whence: text("host").or_else(|| text("shown"))?.to_owned(),
+        })
+    }
+
+    /// What names the link: the title, else where it leads.
+    pub fn name(&self) -> &str {
+        self.title.as_deref().unwrap_or(&self.whence)
+    }
+}
+
 /// What the daemon answered, the raw results of each method.
 pub struct Answers<'a> {
     /// `project.list`
