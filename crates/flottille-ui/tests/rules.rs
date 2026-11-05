@@ -351,6 +351,36 @@ fn a_failure_stays_until_it_is_dismissed_and_several_stack(cx: &mut TestAppConte
     assert_eq!(pending_frames(cx), 0);
 }
 
+#[gpui_kit::test]
+fn a_toast_with_an_action_runs_it_on_a_click_and_leaves(cx: &mut TestAppContext) {
+    let (_, cx) = toasts(cx);
+    let opened = Rc::new(Cell::new(0));
+    let ran = opened.clone();
+    cx.update(|_, cx| {
+        toast(
+            Toast::success("The agent shares a link: example.org")
+                .action("Open", move |_, _| ran.set(ran.get() + 1)),
+            cx,
+        );
+    });
+    advance(cx, ENTER * 2);
+    assert!(shown("toast-1-action", cx), "the button is in the toast");
+    let (toast_box, button) = (bounds("toast-1", cx), bounds("toast-1-action", cx));
+    assert!(
+        toast_box.contains(&button.origin) && toast_box.contains(&button.bottom_right()),
+        "the button sits inside the toast"
+    );
+    assert_eq!(opened.get(), 0, "nothing runs by itself");
+    cx.update(|window, cx| window.click("toast-1-action", cx));
+    assert_eq!(opened.get(), 1);
+    advance(cx, PANEL * 2);
+    assert!(
+        !shown("toast-1", cx),
+        "the toast leaves once its action ran"
+    );
+    assert_eq!(pending_frames(cx), 0);
+}
+
 // ── 4. Every control has a visible label ───────────────────────────────────────────────────────
 
 #[gpui_kit::test]

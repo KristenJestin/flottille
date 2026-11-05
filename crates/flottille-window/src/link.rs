@@ -58,6 +58,8 @@ pub enum Update {
     Forged(model::Forged),
     /// An agent said something, reported, or was woken: news for its session.
     News(model::News),
+    /// An agent handed the user a link: a toast offers it.
+    Link(model::LinkShown),
     /// An item of the project changed (`item.*`, which names it), or what it declares
     /// (`project.changed`): its pull requests and tickets are read again.
     Items {
@@ -192,6 +194,9 @@ fn follow(
         }
         if let Some(news) = model::News::of(event) {
             let _ = updates.unbounded_send(Update::News(news));
+        }
+        if let Some(link) = model::LinkShown::of(event) {
+            let _ = updates.unbounded_send(Update::Link(link));
         }
         if let Some((project, item)) = items_of(event) {
             let _ = updates.unbounded_send(Update::Items { project, item });
