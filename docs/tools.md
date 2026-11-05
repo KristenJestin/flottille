@@ -410,10 +410,13 @@ pending requests.
   and the answer names the check, how it ended and the end of its output, masked. A commit
   whose message cannot be known before it is made (an editor, `-C`, `--amend --no-edit`,
   `--fixup`, a merge without `-m`, a `git revert` without `--no-commit`) is refused then,
-  saying to give it with `-m` or `-F`, or to commit with `git commit -m`. The commits of
-  `git cherry-pick`, `git am`, `git rebase` and `git pull` are not checked, and what git adds
-  to a message after the checks (`--trailer`, `--signoff`, `--cleanup`) is not in what they
-  read; the `-F` file is read once for the checks and again by git. A call given up stops its
+  saying to give it with `-m` or `-F`, or to commit with `git commit -m`; so is a git command
+  that is neither a command git has, an alias nor a `git-<command>` on the `PATH`, which git
+  could correct into a commit (`help.autocorrect`). A `git push` the user or the judge let
+  through has each commit it sends (those its refs lead to that no ref of the remote has, as
+  the remote lists them) checked before it goes, however the commit was made (a cherry-pick, a
+  rebase, a raw object): a failing one refuses the push, naming its short sha, its subject and
+  what the check said, and nothing is pushed. A call given up stops its
   checks. The checks are the user's lines, run by the daemon in the run's folder and
   environment, never a hook of the repository: git still runs none.
 - **A push is the gate's**: `git push` is a call to judge, a forced one base, and only the push
@@ -1196,8 +1199,12 @@ says who answers a call to judge (`docs/design.md` §7.1).
      `core.gitProxy`, and every key of git's settings that run programs below but `remote.*`,
      `url.*`, `push.*` (any `alias.*`, `include.path`, `includeIf.*`, `credential.*`, drivers,
      filters, `protocol.allow`…); a program named for a remote: `--upload-pack`,
-     `--receive-pack`, `--exec` of `clone`, `fetch`, `pull`, `push`, `send-pack`, `ls-remote`,
-     `archive`, `git clone -u`, `git -c core.sshCommand`;
+     `--receive-pack`, `--exec` of `clone`, `fetch`, `pull`, `push`, `ls-remote`, `archive`,
+     `git clone -u`, `git -c core.sshCommand`;
+   - a push past the wall on pushes (below): `git send-pack`, `git http-push` and git's transport
+     helpers (`git remote-<name>`: `remote-https`, `remote-ext`, `remote-fd`…) connect to the URL
+     they are given, which `pushInsteadOf` does not rewrite: `refused: git send-pack pushes past
+     Flottille's wall; use git push`;
    - a launcher, which starts what it runs outside the daemon's tree of processes, later or on a
      host: `systemd-run`, `tmux`, `screen`, `zellij`, `dtach`, `abduco`, `setsid`, `at`,
      `batch`, `crontab`, `dbus-send`, `gdbus`, `busctl`, `ssh`, `scp`, `sftp`, `loginctl`,
@@ -1359,7 +1366,8 @@ says who answers a call to judge (`docs/design.md` §7.1).
    **Known gaps**, which no command gate closes: a script written with `fs_write` and then run
    (`./script.sh`, `sh script.sh`) is not read, so what it does is out of the gate's reach, but
    for a push, which the environment walls; a git alias in the user's own configuration
-   (`alias.<name> = push`) is run by git itself, and the gate sees only the alias's name.
+   (`alias.<name> = push`) is run by git itself, and the gate sees only the alias's name: the
+   wall stops such a push, but not one through an alias of `send-pack` or `http-push`.
    Running a script the agent wrote is itself a line to judge.
 
 The words of a line that name paths (every word but the program, an option's value after `=`,
