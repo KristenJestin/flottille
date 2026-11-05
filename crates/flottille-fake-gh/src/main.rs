@@ -274,7 +274,11 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             println!("{{}}");
             0
         }
-        ["api", path] if path.starts_with("repos/") && path.matches('/').count() == 4 => {
+        ["api", path]
+            if path.starts_with("repos/")
+                && path.contains("/issues/")
+                && path.matches('/').count() == 4 =>
+        {
             let parts: Vec<&str> = path.split('/').collect();
             let [_, owner, name, "issues", number] = parts[..] else {
                 eprintln!("fake gh: api {path} is not a call Flottille makes");
