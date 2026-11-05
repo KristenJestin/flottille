@@ -93,7 +93,7 @@ impl Command {
 /// start of the text or after whitespace, with whitespace or the end after it, as the byte range
 /// of the whole `/name`, and the name. Anything else after a slash (a path, an address, an
 /// unknown name) is text.
-pub fn used<'t>(text: &'t str, known: impl Fn(&str) -> bool) -> Vec<(Range<usize>, &'t str)> {
+pub fn used(text: &str, known: impl Fn(&str) -> bool) -> Vec<(Range<usize>, &str)> {
     let mut found = Vec::new();
     let mut previous: Option<char> = None;
     for (at, c) in text.char_indices() {

@@ -2254,7 +2254,7 @@ fn a_command_message_shows_what_the_user_typed(cx: &mut TestAppContext) {
     );
     assert_eq!(
         flottille_window::session::command_chips(&text, &commanded.names),
-        [19..24],
+        vec![19..24usize],
         "the chip is the /ship"
     );
     assert!(has(format!("row-{at}-message-text"), cx));
