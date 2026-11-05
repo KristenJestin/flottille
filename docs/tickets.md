@@ -353,8 +353,9 @@ ticket itself.
 **Assumed, as `acli` prints no sample of it**: `link type --json` an array of `{name, inward,
 outward}` (or Jira's `{"issueLinkTypes": […]}`), `link list --json` an array of Jira's `issuelinks`
 (`{id, type: {name, inward, outward}, inwardIssue | outwardIssue: {key, fields: {summary,
-status}}}`, an `inwardIssue` being the item the listed one blocks, and an `outwardIssue` the one
-that blocks it), a web link `{id, object: {url, title}}`, and comments with their `id` in the view.
+status}}}`; the field names the wording the listed item reads the link with, as Atlassian's
+"Issue linking model" page says: with an `outwardIssue` the listed one blocks it, with an
+`inwardIssue` it is blocked by it), a web link `{id, object: {url, title}}`, and comments with their `id` in the view.
 The maintainer checks it on their site; a different shape shows as no link listed.
 
 ### Types and assignment

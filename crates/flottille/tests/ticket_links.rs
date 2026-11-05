@@ -371,6 +371,43 @@ fn show_lists_an_item_s_links() {
 }
 
 #[test]
+fn a_link_made_one_way_reads_the_same_from_both_items() {
+    let user = user();
+    on_jira(&user);
+    jira_script(&user, json!({}));
+    let mcp = root_in(&user);
+
+    written(
+        &user,
+        &mcp,
+        json!({"action": "link", "ticket": "ABC-2", "kind": "blocks", "other": "ABC-1"}),
+    );
+
+    let from_two = read(&user, &mcp, json!({"action": "show", "ticket": "ABC-2"}));
+    assert!(
+        from_two.contains("- blocks ABC-1 (To Do): The login fails"),
+        "{from_two}"
+    );
+    let from_one = read(&user, &mcp, json!({"action": "show", "ticket": "ABC-1"}));
+    assert!(
+        from_one.contains("- is blocked by ABC-2 (In Progress): Add search"),
+        "{from_one}"
+    );
+    // Removed as the other end reads it.
+    let removed = written(
+        &user,
+        &mcp,
+        json!({"action": "unlink", "ticket": "ABC-1", "kind": "is blocked by", "other": "ABC-2"}),
+    );
+    assert!(removed.contains("The link was removed"), "{removed}");
+    assert!(
+        acli_calls(&user).contains(&"jira workitem link delete --id 10000 --yes".to_owned()),
+        "{:?}",
+        acli_calls(&user)
+    );
+}
+
+#[test]
 fn a_link_with_an_unknown_kind_is_refused_naming_the_known_ones() {
     let user = user();
     on_jira(&user);

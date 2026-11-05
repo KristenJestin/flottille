@@ -335,9 +335,9 @@ impl Seen {
 
 /// The links of `key`. Assumed, as Jira's REST gives an issue's `issuelinks` (`acli`'s page
 /// gives no output): `{id, type: {name, inward, outward}, inwardIssue | outwardIssue: {key,
-/// fields: {summary, status: {name}}}}`; an `inwardIssue` is the item `key` is on the outward end
-/// of (it blocks it), an `outwardIssue` the other way round. A web link is `{id, object: {url,
-/// title}}`.
+/// fields: {summary, status: {name}}}}`. The field names the wording `key` reads the link with,
+/// as Atlassian's "Issue linking model" page says: with an `outwardIssue`, `key` blocks it; with
+/// an `inwardIssue`, `key` is blocked by it. A web link is `{id, object: {url, title}}`.
 async fn seen_on(key: &str) -> Result<Vec<Seen>, String> {
     let said = acli_run(&["jira", "workitem", "link", "list", "--key", key, "--json"]).await?;
     let parsed: Value = serde_json::from_str(&said).map_err(|error| {
@@ -366,8 +366,8 @@ async fn seen_on(key: &str) -> Result<Vec<Seen>, String> {
                 });
             }
             let (issue, wording) = match (link["inwardIssue"].is_object(), &link["type"]) {
-                (true, kind) => (&link["inwardIssue"], &kind["outward"]),
-                (false, kind) => (&link["outwardIssue"], &kind["inward"]),
+                (true, kind) => (&link["inwardIssue"], &kind["inward"]),
+                (false, kind) => (&link["outwardIssue"], &kind["outward"]),
             };
             Some(Seen {
                 id,

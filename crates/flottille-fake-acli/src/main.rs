@@ -80,8 +80,9 @@
 //! 10000. `link list --key K --json` prints K's links, those of the script's `links` (`[{"id":
 //! "500", "type": "Blocks", "out": "ABC-2", "in": "ABC-1"}, {"id": "502", "web": {"title": …,
 //! "url": …}, "on": "ABC-1"}]`) and those created, as `{"id", "type": {name, inward, outward},
-//! "inwardIssue" | "outwardIssue": {"key", "fields": {summary, status}}}`: an `inwardIssue` when K
-//! is the outward end (K blocks it), an `outwardIssue` when K is the inward end; a web link is
+//! "inwardIssue" | "outwardIssue": {"key", "fields": {summary, status}}}`: an `outwardIssue` when K
+//! is the outward end (K blocks it), an `inwardIssue` when K is the inward end (K is blocked by
+//! it), as Atlassian's "issue linking model" page says (the field names the label); a web link is
 //! `{"id", "object": {"title", "url"}}`. `link delete --id N --yes` ends with 0 for a link that
 //! is there, 1 otherwise, and keeps the ids deleted in `unlinked.json`.
 //!
@@ -612,10 +613,12 @@ fn link_of(script: &Value, link: &Value, key: &str) -> Option<Value> {
             "status": item["fields"]["status"]}})
     };
     let kind = json!({"name": kind["name"], "inward": kind["inward"], "outward": kind["outward"]});
+    // As Jira's REST: the other end's field names the wording K reads it with (`outwardIssue`:
+    // K blocks it; `inwardIssue`: K is blocked by it).
     if link["out"] == key {
-        Some(json!({"id": link["id"], "type": kind, "inwardIssue": issue(&link["in"])}))
+        Some(json!({"id": link["id"], "type": kind, "outwardIssue": issue(&link["in"])}))
     } else if link["in"] == key {
-        Some(json!({"id": link["id"], "type": kind, "outwardIssue": issue(&link["out"])}))
+        Some(json!({"id": link["id"], "type": kind, "inwardIssue": issue(&link["out"])}))
     } else {
         None
     }
