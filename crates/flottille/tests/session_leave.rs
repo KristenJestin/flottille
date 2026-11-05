@@ -439,7 +439,7 @@ fn a_started_session_needs_no_leave() {
     let opened = user.received_requests("session/new").len();
     let launched = mcp.call(
         "agent_launch",
-        json!({"title": "Login", "brief": "Fix the login.", "root": true}),
+        json!({"title": "Login", "brief": "Fix the login.", "root": true, "follow": false}),
     );
     assert!(
         launched.text.contains("Started a session"),

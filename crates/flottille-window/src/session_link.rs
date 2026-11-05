@@ -769,6 +769,12 @@ impl Link {
                 stale.leaves = true;
                 stale.since.get_or_insert_with(Instant::now);
             }
+            // A following that pauses or resumes is the follower's subscription.
+            let following = name.starts_with("session.following_");
+            let agent = match following {
+                true => data["follower"].as_str().unwrap_or_default(),
+                false => agent,
+            };
             let ours = tree.contains(agent)
                 || (name == "agent.created"
                     && data["parent"].as_str().is_some_and(|p| tree.contains(p)));
@@ -780,7 +786,7 @@ impl Link {
             }
             let approval = name.starts_with("approval.");
             // A subscription opened or ended changes the list, and whether the agent waits.
-            let subscription = name.starts_with("subscription.");
+            let subscription = name.starts_with("subscription.") || following;
             stale.subscriptions |= subscription;
             stale.mark(
                 TREE_EVENTS.contains(&name) || approval || subscription,

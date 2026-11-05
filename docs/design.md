@@ -293,6 +293,13 @@ running, or ran past the call's wait) delivers `command-ended` to the agent that
 ends: the line, the exit code, the duration and the last lines of the output, masked
 (`docs/tools.md`, "Commands").
 
+An agent that starts a session for the user chooses, with `follow`, whether it hears of it: with
+`follow: true` it is woken, between turns, by `session-turn-ended` at each end of a turn of that
+session (and when the session ends), a delivery that names the session, says why the turn ended
+(turn done, a report, a question with `ask_user`, a failure) and holds its last message, masked and
+cut. It is a following, a subscription that has no end of its own (§5.6, `docs/tools.md`, "Sessions
+for the user"). Two sessions that write to each other five times without the user pause it.
+
 ### 5.3 What the parent is told
 
 | Event of a child | Delivery to the parent |
@@ -346,6 +353,11 @@ review) subscribes to it instead of reading again and again. Four parts, each it
   waited for), when
   its time is up (an hour by default, 100 hours at most, said), when the agent ends, or when the agent unsubscribes.
   Nothing is delivered of what does not change: each delivery costs the agent a turn.
+- **A following** is a subscription whose source is a session the agent started for the user
+  (`agent_launch` with `root` and `follow: true`): it is not one shot and has no time, and ends
+  when the agent unsubscribes (`forge unsubscribe` with `session`), when the session ends or
+  fails, or when the agent ends. It wakes the agent at each end of a turn of the session, never
+  more than once for a turn.
 - **Delivering** is the existing path (§5.2): a `subscription` delivery, masked, its forge texts
   framed as data and not instructions, wakes the agent as a child's report does.
 
@@ -354,7 +366,10 @@ the rounds' for a subscription that needs it.
 
 The window shows them: the session page's rail lists the session's open subscriptions (the pull
 request or the ticket, the events, since when and until when; a wake, `Wake: <why>` and when it is due), each with a Cancel that ends it through the daemon
-(`subscription.cancel`), an agent between turns that waits on one is drawn waiting, not idle, in the
+(`subscription.cancel`); the following of a session an agent started, `Following <title>`, since
+when, and, paused because the two sessions wrote to each other five times without the user, a line
+that says so with a Resume (`subscription.resume`), unfolding when it pauses and folding away when
+it resumes; an agent between turns that waits on one is drawn waiting, not idle, in the
 left tree and in the rail (`Waiting: wake at 10:42` for a wake), and the delivery that wakes the
 agent is a folded step saying what woke it (`woken by the timer: <why>`).
 Opening and ending are events (`subscription.opened`, `subscription.ended`, `docs/events.md`).

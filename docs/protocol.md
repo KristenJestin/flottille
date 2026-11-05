@@ -686,6 +686,20 @@ the tracker's text is masked. Nothing is kept: every call reads again.
 `null`, and answers as `workspace.ticket` does. `refused` when `ticket` is not `#123`, `123` or a
 Jira key (`ABC-123`, any case). Emits `workspace.ticket` (`docs/events.md`).
 
+#### `workspace.rename_branch`
+
+`{"project", "name", "branch", "repository"?}`. Renames the workspace's branch to `branch` in the
+repository named, or in each repository of the workspace, and answers the workspace as
+`workspace.show` does without the git reads, with `"renamed": ["<repository>", ...]`
+(`docs/workspaces.md`, "Renaming the branch"). All or none: it is `refused`, nothing renamed, when
+the workspace is being prepared; when `branch` is not a name `git check-ref-format --branch`
+accepts, is the branch a worktree is on already, exists in a repository or is checked out in a
+checkout of one; when a worktree is on no branch; when a repository's branch was resumed by the
+workspace, has a remote branch (the tracking ref, or what the remote lists) or has a pull request.
+Each refusal says which repository and why. Emits `workspace.changed` (`docs/events.md`) when
+every worktree made is on the new branch, and the record follows; renaming one repository of
+several leaves the record as it is.
+
 #### `workspace.prepare`
 
 `{"project", "name"}`. Resumes the preparation (`docs/workspaces.md`) and answers the workspace
@@ -1213,19 +1227,29 @@ it. The agent's own way is the `forge` and `tickets` tools (`docs/tools.md`).
 
 `{"tree"?}`. `{"subscriptions": [...]}`, the open ones, the oldest first. With `tree`, an agent's id,
 those of the agents of its root's tree (`not-found` when it names no agent); without, every one. Each
-is `{"id", "agent", "source", "named", "target", "events", "from", "created_at", "expires_at"}`: `named`
+is `{"id", "agent", "source", "named", "target", "events", "from", "created_at", "expires_at", "paused"}`: `named`
 says what it watches (`pull request #12 of api, workspace login`, a repository that is the project's
 folder named by the project; `ticket #5 of api`, `ticket ABC-1`; `wake: <why>`), `target` is the
 source's own (`forge`: `project`, `workspace`, `repository`, `number`; `tickets`: `project`,
 `repository`, the tracker's, empty for Jira, and `key`, `5` or `ABC-1`; `timer`: `why`,
-`expires_at` being when it wakes), `from` is `anyone` or `people`, the times are in milliseconds since the Unix
-epoch.
+`expires_at` being when it wakes; `session`: `session` and `title`, the session followed, with no
+end of its own), `from` is `anyone` or `people`, the times are in milliseconds since the Unix
+epoch. `paused` is true for a following paused because its two sessions wrote to each other
+without the user (`docs/tools.md`, "Sessions that talk to each other"), false otherwise.
 
 #### `subscription.cancel`
 
 `{"subscription"}`. `{"subscription": {...}}`: the subscription ends as the agent's `forge unsubscribe`
 (or `tickets unsubscribe`) ends it, without a word to the agent, and `subscription.ended` is emitted with `why` `cancelled`.
 `not-found` when it is not open.
+
+#### `subscription.resume`
+
+`{"subscription"}`. `{"subscription": {...}}`: a paused following resumes as a message of the
+user's to either session resumes it: its count starts again, its wakes and the `session_send`
+between the two come back, and `session.following_resumed` is emitted. The user's alone: no tool
+of an agent does it. `not-found` when it is no open following; `invalid-params` when it is not
+paused.
 
 ### The leave methods
 
@@ -1360,7 +1384,10 @@ changes when the judge was not picked.
 `{"after"?, "limit"?}`. What the root agents sent to the user: `{"entries": [...]}`, oldest first.
 An entry is `{"seq", "at", "kind", "agent", "project", "workspace", "text"}`, made from an event of
 a root agent (`docs/events.md`): `report` (`agent.reported`, `text` its report), `question`
-(`agent.asked` to the user, `text` its question) or `failure` (`agent.failed`, `text` its reason).
+(`agent.asked` to the user, `text` its question), `failure` (`agent.failed`, `text` its reason) or
+`paused` (`session.following_paused`: two sessions talk to each other without the user, `text` says
+which and how to resume; `agent` is the followed session). A pause that resumed since is
+`"resolved": true`, its `text` ending `It has resumed since.`
 A child's own go to its parent and are not here. Without `after`, the last `limit` entries (50 by
 default); with it, the first `limit` entries numbered after it. Nothing is marked read: the inbox
 is a view of the stored events.

@@ -357,6 +357,7 @@ const SERVED: [Definition; 28] = [
                 "events": {"type": "array", "items": {"enum": crate::forge::EVENTS}},
                 "from": {"enum": crate::subscriptions::FROM, "description": "subscribe: whose reviews and comments count: anyone (the default), or people (no bot nor agent)."},
                 "minutes": {"type": "integer", "minimum": 1, "maximum": crate::subscriptions::LONGEST_MINUTES, "description": "subscribe: how long it waits; sized by CI when left out, else 60."},
+                "session": {"type": "string", "description": "unsubscribe: a session you follow, by its agent id, to stop following it."},
                 "pipeline": {"type": "string", "description": "run: as pipelines lists it (Bitbucket default, custom: <name>, branches: <pattern>; GitHub a workflow's file)."},
                 "variables": {"type": "array", "description": "run: Bitbucket variables, GitHub inputs.", "items": {"type": "object", "properties": {
                     "key": {"type": "string"}, "value": {"type": "string"}, "secured": {"type": "boolean"}
@@ -514,7 +515,9 @@ const SERVED: [Definition; 28] = [
         description: "The project's workspaces. list and show read them. A root's writes, \
             judged: create makes one (worktrees, then setup, judged as a run of each step; to \
             resume a branch, name it; name new ones by the repository's naming convention), prepare resumes a failed setup, link_ticket links a \
-            ticket (null unlinks); remove, always held for the user, its request saying what \
+            ticket (null unlinks), rename_branch {branch, repository?} renames the workspace's \
+            branch in each of its repositories (or the one named), only while no remote nor pull \
+            request has it and the workspace did not resume it; remove, always held for the user, its request saying what \
             would be lost: yours too once its work is done, your commands in it stopped, and you \
             go on in main. name: yours when left out, but for create. To work on another branch in this workspace, switch with git: the \
             workspace follows the branch its worktrees are on. {\"action\": \"create\", \
@@ -524,10 +527,11 @@ const SERVED: [Definition; 28] = [
         destructive: true,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "show", "create", "prepare", "link_ticket", "remove"]},
+                "action": {"type": "string", "enum": ["list", "show", "create", "prepare", "link_ticket", "rename_branch", "remove"]},
                 "name": {"type": "string"},
                 "repositories": {"type": "array", "items": {"type": "string"}, "description": "create: by path."},
-                "branch": {"type": "string", "description": "create: give it when the repository has a naming convention (its AGENTS.md, CONTRIBUTING, or the branches it already has to read), with the ticket's key when the workspace has a ticket (fix/ABC-12-login). Left out, <branch prefix>/<name> is the fallback (the name alone when the project has no prefix). An existing branch is checked out."},
+                "branch": {"type": "string", "description": "create: give it when the repository has a naming convention (its AGENTS.md, CONTRIBUTING, or the branches it already has to read), with the ticket's key when the workspace has a ticket (fix/ABC-12-login). Left out, <branch prefix>/<name> is the fallback (the name alone when the project has no prefix). An existing branch is checked out. rename_branch: the new name."},
+                "repository": {"type": "string", "description": "rename_branch: by path; every repository of the workspace when left out."},
                 "ticket": {"type": ["string", "null"], "description": "#123 or ABC-123."}
             }, "required": ["action"], "additionalProperties": false})
         },
@@ -556,16 +560,17 @@ const SERVED: [Definition; 28] = [
         name: "agent_launch",
         title: "Start a session, or launch a child",
         description: "Work that belongs in a workspace is a session for the user: root: true \
-            with workspace (an existing one; main is the project folder) or new_workspace (made \
-            for it, repositories picks them), judged; theirs, not your child, the brief its first message; you write to it, \
+            with workspace (existing; main is the project folder) or new_workspace (made \
+            for it, repositories picks them), judged; theirs, not your child, the brief its first \
+            message; follow (required): true wakes you when each turn ends; you write to it, \
             and it answers you, with session_send. A root only. Without root: a child agent on \
             one precise task, in your own place (workspace and new_workspace are refused), \
             answered at once with its agent_id; it works on its own and you are told when it \
             reports, asks, fails, is stuck or idles, so never poll. The brief is all it knows: \
-            the task, what to read, the checks, the deliverable. provider: yours when left out; \
-            a refusal names the ready ones. A child launch is refused above the children cap. {\"title\": \"Fix login\", \"brief\": \"...\", \"root\": true, \
-            \"workspace\": \"login\"}; {\"title\": \"Add API\", \"brief\": \"...\", \"root\": \
-            true, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}; {\"title\": \
+            the task, what to read, the checks, the deliverable. A child launch is refused above \
+            the children cap. {\"title\": \"Fix login\", \"brief\": \"...\", \"root\": true, \
+            \"workspace\": \"login\", \"follow\": true}; {\"title\": \"Add API\", \"brief\": \
+            \"...\", \"root\": true, \"follow\": false, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}; {\"title\": \
             \"Write the tests\", \"brief\": \"...\"}",
         read_only: false,
         idempotent: false,
@@ -581,7 +586,8 @@ const SERVED: [Definition; 28] = [
                 "workspace": {"type": "string", "description": "With root: an existing workspace of the project, for the session to work in; main is the project folder. A child works in your place."},
                 "new_workspace": {"type": "string", "description": "With root: the name of a new workspace to make for the session. Not with workspace."},
                 "repositories": {"type": "array", "items": {"type": "string"}, "description": "With new_workspace: its repositories, by path; the project's when left out."},
-                "root": {"type": "boolean", "description": "A session for the user, in a workspace or your place, not a child."}
+                "root": {"type": "boolean", "description": "A session for the user, in a workspace or your place, not a child."},
+                "follow": {"type": "boolean", "description": "Required with root: true, refused without it. true: you are woken at each end of a turn of the session (and when it ends), with its last message. false: you are told nothing of it."}
             }, "required": ["title", "brief"], "additionalProperties": false})
         },
     },
@@ -664,7 +670,9 @@ const SERVED: [Definition; 28] = [
         description: "Says you are done: your report goes at once to your parent (to the user for \
             a root), and a child's session ends with this turn. Give the result, each point done \
             or skipped and why, what was not verified, open questions. Call it once, as your \
-            last action.",
+            last action. A question left in a report is a follow-up, not a wait: a decision \
+            only the user can take goes through ask_user (ask_parent for a child), a question \
+            about the brief to the agent that started your session, with session_send.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -679,7 +687,10 @@ const SERVED: [Definition; 28] = [
         title: "Ask the user",
         description: "Puts a question to the user. It does not wait: the answer comes later as a \
             message. Go on with what does not depend on it, or end your turn saying what you \
-            wait for.",
+            wait for. What goes here is a decision only the user can take (commit, push, scope, a \
+            choice): a question about the brief or its context goes to the agent that started \
+            your session, with session_send. A question left in a report or a last message is a \
+            follow-up, not a wait.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -694,7 +705,8 @@ const SERVED: [Definition; 28] = [
         title: "Ask your parent",
         description: "Puts a question to the agent that launched you. It does not wait: the \
             answer comes later as [flottille:parent]. Go on with what does not depend on it, or \
-            end your turn saying what you wait for.",
+            end your turn saying what you wait for. What you need from your parent goes here, \
+            never in a report or a last message: that is a follow-up, not a wait.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -730,7 +742,10 @@ const SERVED: [Definition; 28] = [
             not wait: it reaches it on its next tool result, or as a new turn, labelled with \
             your name; its answer comes later as [flottille:session]. Judged, as a write is; \
             the first message to a session you did not start asks the user's leave, in every \
-            mode, once for that session. Your children are written to with agent_send.",
+            mode, once for that session. Your children are written to with agent_send. A \
+            question about the brief or its context to the agent that started your session goes \
+            here; a decision only the user can take goes through ask_user, and one left in a last \
+            message is a follow-up, not a wait.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -2991,7 +3006,7 @@ mod tests {
             (
                 "agent_launch",
                 None,
-                "{\"title\": \"Add API\", \"brief\": \"...\", \"root\": true, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}",
+                "{\"title\": \"Add API\", \"brief\": \"...\", \"root\": true, \"follow\": false, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}",
             ),
             (
                 "agent_launch",

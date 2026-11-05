@@ -122,7 +122,17 @@ struct Launch {
     /// A session for the user rather than a child (`docs/tools.md`, "The tree's tools").
     #[serde(default)]
     root: bool,
+    /// With `root`: whether the starting agent is woken at each end of a turn of the session. The
+    /// agent chooses each time; a child launch does not take it.
+    follow: Option<bool>,
 }
+
+/// What a root launch without `follow`, or a child launch with it, is told.
+const FOLLOW_REQUIRED: &str = "refused: follow is required with root: true: say true to be woken \
+    at each end of a turn of that session (and when it ends), with its last message, or false to \
+    hear nothing of it afterwards but what you write to it with session_send";
+const CHILD_FOLLOW: &str = "refused: a child launch does not take follow: it is for a session for \
+    the user (root: true); a child reports to you when it is done";
 
 /// Where a child works: an existing workspace, a new one, or its parent's place. The workspace
 /// fields are plain and optional, and a mix of them is refused with the field to use.
@@ -139,8 +149,8 @@ enum WorkspaceChoice {
 /// session's (`docs/tools.md`, "Sessions for the user").
 pub const CHILD_PLACES: &str = "refused: a child works where you work: workspace and \
     new_workspace are for a session for the user, which works there on its own, \
-    agent_launch {\"title\": \"Fix login\", \"brief\": \"...\", \"root\": true, \"workspace\": \
-    \"login\"} (or \"new_workspace\": \"login\"), judged; leave them out for a child in your own \
+    agent_launch {\"title\": \"Fix login\", \"brief\": \"...\", \"root\": true, \"follow\": \
+    true, \"workspace\": \"login\"} (or \"new_workspace\": \"login\"), judged; leave them out for a child in your own \
     place";
 
 /// Whether `name`, given as the workspace of a session for the user, is the project folder:
@@ -157,10 +167,21 @@ pub fn names_main(daemon: &Daemon, project: &str, name: &str) -> bool {
 /// the gate is asked, and again when the launch is performed.
 pub fn launch_refusal(workspace: Option<&str>, args: &Value) -> Result<(), Outcome> {
     let asked: Launch = arguments("agent_launch", args.clone())?;
+    asked.follows()?;
     asked.place(workspace).map(|_| ())
 }
 
 impl Launch {
+    /// Whether the session is followed: asked of a session for the user, never of a child.
+    fn follows(&self) -> Result<bool, Outcome> {
+        match (self.root, self.follow) {
+            (true, Some(follow)) => Ok(follow),
+            (true, None) => Err(refused(FOLLOW_REQUIRED)),
+            (false, Some(_)) => Err(refused(CHILD_FOLLOW)),
+            (false, None) => Ok(false),
+        }
+    }
+
     /// Where the agent launched works: a session anywhere, a child only in its parent's place,
     /// which it may name.
     fn place(&self, own: Option<&str>) -> Result<WorkspaceChoice, Outcome> {
@@ -206,6 +227,7 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     if asked.root && caller.parent.is_some() {
         return Err(refused(crate::actions::CHILD_ROOTS));
     }
+    let follow = asked.follows()?;
     let choice = asked.place(caller.workspace.as_deref())?;
     if !asked.root && caller.depth + 1 > DEPTH_LIMIT {
         return Err(refused(format!(
@@ -290,6 +312,10 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
         },
     )
     .map_err(|f| refused(format!("refused: {}", f.message)))?;
+    // Before its first message, so that the end of its first turn is followed too.
+    if follow {
+        crate::subscriptions::follow(daemon, &caller.id, &child).map_err(failed)?;
+    }
     if preparing {
         tokio::spawn(brief_once_ready(daemon.clone(), child.clone()));
     } else {
@@ -304,8 +330,16 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
         return Ok(Outcome::Done(format!(
             "Started a session for the user, {}, in {place}. It is the user's, not your child: \
              the user follows it in the window and the agent_* tools do not reach it. You can \
-             write to it with session_send; its answers come back to you as deliveries.",
-            named(&child)
+             write to it with session_send; its answers come back to you as deliveries.{}",
+            named(&child),
+            if follow {
+                " You follow it: each time it ends a turn (and when it ends), a delivery \
+                 [flottille:session-turn-ended] wakes you with its last message. You may answer \
+                 with session_send, relay to the user with ask_user, or do nothing; \
+                 forge unsubscribe with its session stops it."
+            } else {
+                ""
+            }
         )));
     }
     Ok(Outcome::Done(format!(
@@ -419,7 +453,24 @@ pub fn first_message(daemon: &Daemon, agent: &Agent) -> (&'static str, String) {
         Ok(Some(launcher)) => named(&launcher),
         _ => format!("agent {launcher}"),
     };
-    ("launched", format!("{who}{LAUNCHED}\n\n{brief}"))
+    let guide = where_questions_go(launcher);
+    ("launched", format!("{who}{LAUNCHED}\n\n{brief}\n\n{guide}"))
+}
+
+/// What opens the paragraph of a session's first message that says where a question goes: the
+/// window shows the message without it.
+pub const WHERE_QUESTIONS_GO: &str = "Where a question goes:";
+
+/// Where a question of a session an agent started goes (`docs/tools.md`, "Sessions for the
+/// user"): nothing reads the text of a message to find one, so the session is told.
+fn where_questions_go(starter: &str) -> String {
+    format!(
+        "{WHERE_QUESTIONS_GO} a decision only the user can take (commit, push, scope, a choice) \
+         goes through ask_user, which reaches the user's inbox; a question about the brief or its \
+         context goes to agent {starter}, which started this session, with session_send \
+         {{\"session\": \"{starter}\", \"text\": \"…\"}}. A question left in a report or in your \
+         last message is a follow-up, not a wait: nobody is told to answer it."
+    )
 }
 
 /// The brief of a child whose new workspace is being prepared, once it is ready; a workspace
@@ -655,7 +706,18 @@ pub const SESSION_WROTE: &str = " wrote to this session:";
 /// The delivery's id names the sender, for the judge (`judge::session_messages`).
 fn session_send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     let asked: SessionSend = arguments("session_send", args)?;
-    let (session, _) = session_of(daemon, caller, &asked)?;
+    let (session, relation) = session_of(daemon, caller, &asked)?;
+    // A following ties a session to the one that started it; two sessions a leave joins have none.
+    let following = match relation {
+        Relation::Started => Some((caller.id.as_str(), &session)),
+        Relation::StartedYou => Some((session.id.as_str(), caller)),
+        Relation::Leave | Relation::NoLeave => None,
+    };
+    if let Some((starter, followed)) = following
+        && crate::subscriptions::paused(daemon, starter, &followed.id)
+    {
+        return Err(refused(crate::subscriptions::PAUSED));
+    }
     let id = flottille_core::agent::new_id().map_err(failed)?;
     deliveries::deliver(
         daemon,
@@ -665,6 +727,10 @@ fn session_send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
         &format!("{}{SESSION_WROTE}\n\n{}", named(caller), asked.text),
         approval::URGENT,
     );
+    if let Some((starter, followed)) = following {
+        let answered = relation == Relation::StartedYou;
+        crate::subscriptions::exchanged(daemon, starter, followed, answered);
+    }
     Ok(Outcome::Done(format!(
         "Sent to {}: it reaches it on its next tool result, or as a new turn. An answer comes \
          as a [flottille:session] message.",
@@ -883,10 +949,16 @@ fn beside_the_recorder(name: &str) -> bool {
 }
 
 /// The agent's last messages, each whole (its pieces joined) and masked, the oldest first.
-fn last_messages(daemon: &Daemon, agent: &str) -> Vec<String> {
-    let events = daemon
+pub fn last_messages(daemon: &Daemon, agent: &str) -> Vec<String> {
+    last_messages_after(daemon, agent, 0)
+}
+
+/// [`last_messages`], of those after the event `after` only.
+pub fn last_messages_after(daemon: &Daemon, agent: &str, after: u64) -> Vec<String> {
+    let mut events = daemon
         .read(|store| store.last_agent_events(agent, "agent.message", 200))
         .unwrap_or_default();
+    events.retain(|event| event.seq > after);
     // Pieces of one message share its id: an event the daemon recorded between them does not
     // split it. Without an id, the pieces of one follow each other: a gap in the numbers starts
     // another message.
@@ -1498,6 +1570,11 @@ fn end(daemon: &Arc<Daemon>, id: &str, state: AgentState, reason: &str) -> bool 
     });
     deliveries::forget(daemon, id);
     crate::subscriptions::ended(daemon, id);
+    let why = match state {
+        AgentState::Failed => format!("failed: {reason}"),
+        _ => format!("ended: {reason}"),
+    };
+    crate::subscriptions::followed_ended(daemon, &agent, &why);
     agents::tell(daemon, id, Order::Stop);
     let (daemon, id) = (daemon.clone(), id.to_owned());
     tokio::spawn(async move { crate::runs::stop_runs_of(&daemon, &id).await });
@@ -1511,7 +1588,11 @@ pub fn after_turn(daemon: &Arc<Daemon>, id: &str, stop_reason: &str) {
     let Ok(Some(agent)) = daemon.read(|store| store.agent(id)) else {
         return;
     };
-    if agent.state.is_final() || agent.parent.is_none() {
+    if agent.state.is_final() {
+        return;
+    }
+    if agent.parent.is_none() {
+        crate::subscriptions::turn_ended(daemon, &agent, stop_reason);
         return;
     }
     if agent.reported_at.is_some() {
