@@ -45,6 +45,8 @@
 //! `read_delay_ms` makes every call but `context list` wait that long first, as a slow network
 //! does; each record in `received.jsonl` then also holds `at`, the milliseconds since the epoch
 //! the call started at, so that a test sees which calls ran together.
+//! `step_fail` (`{"acme/api": {"publish": "Error: 502 Bad Gateway"}}`) makes `pr comment`,
+//! `edit`, `decline` or `publish` of that repository alone fail that way.
 //! `pipeline_fail` makes `pipeline list` alone fail that way, and `checks_fail`
 //! (`{"acme/api": {"12": "Error: 404 Not Found"}}`) `pr checks` of that pull request alone.
 //!
@@ -327,6 +329,10 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 .any(|pull| id.parse().ok() == pull["id"].as_u64());
             if !held {
                 eprintln!("Error: 404 Not Found: pull request {id}");
+                return 1;
+            }
+            if let Some(failure) = script["step_fail"][&key][*verb].as_str() {
+                eprintln!("{failure}");
                 return 1;
             }
             if *verb == "publish" {

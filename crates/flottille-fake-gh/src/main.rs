@@ -47,6 +47,9 @@
 //! drafts included; `closed`, `merged`, `all`) and of `--head` when given, newest first, at most
 //! `--limit`; each with the fields `--json` asks that it has, `headRefName` being its branch.
 //!
+//! `step_fail` (`{"acme/app": {"ready": "HTTP 502: Bad Gateway"}}`) makes `pr comment`, `edit`,
+//! `close`, `reopen` or `ready` of that repository alone fail that way, as a write that ends
+//! half way does.
 //! `view_fail` (`{"acme/app": {"12": "HTTP 502: Bad Gateway"}}`) makes `pr view` and `issue view`
 //! of that number alone fail that way; `list_delay_ms` makes `pr list` wait that long first,
 //! `listing_delay_ms` a `pr list` of every branch alone (a round's, not a branch's `--head`),
@@ -444,7 +447,10 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 eprintln!("fake gh: no -R");
                 return 2;
             };
-            if let Some(failure) = script["fail"][repository].as_str() {
+            if let Some(failure) = script["fail"][repository]
+                .as_str()
+                .or(script["step_fail"][repository][words[1]].as_str())
+            {
                 eprintln!("{failure}");
                 return 1;
             }

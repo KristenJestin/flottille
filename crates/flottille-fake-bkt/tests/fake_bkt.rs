@@ -520,3 +520,25 @@ fn a_draft_is_published_and_a_destination_is_put_through_the_api() {
     assert!(moved.status.success());
     assert!(!nameless.status.success());
 }
+
+#[test]
+fn step_fail_makes_one_pull_request_write_fail_and_the_others_work() {
+    let dir = tempfile::tempdir().unwrap();
+    script(
+        dir.path(),
+        json!({"pulls": {"acme/api": [{"id": 12, "state": "OPEN"}]},
+            "step_fail": {"acme/api": {"publish": "Error: 502 Bad Gateway"}}}),
+    );
+    let run = |args: &[&str]| {
+        let mut all = args.to_vec();
+        all.extend(["--context", "cloud", "--workspace", "acme", "--repo", "api"]);
+        fake(dir.path()).args(all).output().unwrap()
+    };
+
+    let edited = run(&["pr", "edit", "12", "--reviewer", "carol"]);
+    let published = run(&["pr", "publish", "12"]);
+
+    assert!(edited.status.success());
+    assert!(!published.status.success());
+    assert!(String::from_utf8_lossy(&published.stderr).contains("502"));
+}

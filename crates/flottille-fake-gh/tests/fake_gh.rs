@@ -556,3 +556,23 @@ fn a_pull_request_is_made_ready_and_a_branch_is_found_only_when_the_script_lists
         json!({"deleteBranchOnMerge": true})
     );
 }
+
+#[test]
+fn step_fail_makes_one_pull_request_write_fail_and_the_others_work() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        json!({"pulls": {"acme/api": {"app/x": {"number": 4}}},
+            "step_fail": {"acme/api": {"ready": "HTTP 502: Bad Gateway"}}})
+        .to_string(),
+    )
+    .unwrap();
+    let run = |args: &[&str]| fake(dir.path()).args(args).output().unwrap();
+
+    let edited = run(&["pr", "edit", "4", "-R", "acme/api", "--title", "T"]);
+    let ready = run(&["pr", "ready", "4", "-R", "acme/api"]);
+
+    assert!(edited.status.success());
+    assert!(!ready.status.success());
+    assert!(String::from_utf8_lossy(&ready.stderr).contains("HTTP 502"));
+}
