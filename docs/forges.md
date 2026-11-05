@@ -203,6 +203,40 @@ The state is kept in the daemon's memory, not in the store. When a read finds it
 last one (its time aside), the daemon emits `workspace.forge` with the whole state
 (`docs/events.md`); a workspace with no forge to read says nothing.
 
+## How fast `forge show` is read
+
+A pull request is several reads of its forge, and on Bitbucket each is a round trip through `bkt`
+(10 to 14 s were measured for one Cloud pull request, read one call after the other). Two things
+make `forge show` fast, neither of which changes what is read or how a failure is said:
+
+- **What does not depend on another read runs together.** Once the pull request is found, its
+  checks, its conflicts, its page and its comments (Data Center: its activities) are read at the
+  same time, then the logs of its failed checks, how long its CI takes and its closing comment
+  are. The logs of the failed checks are read together as well, and the bounds of "Why a check
+  failed" are applied in the checks' order, as they are when the logs come one by one. A read
+  that fails fails alone: the best-effort ones (conflicts, CI, closing comment, a log) are still
+  left out, and the failure said is still the first of the checks, the page and the comments.
+  What is asked of the user's `gh` or `bkt` first (that it is there, and signed in) still is:
+  nothing else is asked of a program that is not.
+- **What was read is given again for 30 s.** The daemon keeps the last pull request `forge show`
+  read, by its forge and its number, and the next `forge show` of it (with or without `number`:
+  the one without keeps what it read too) is answered from it without a call, saying so (`(as read
+  12 s ago; "fresh": true reads it again)`). `fresh: true` and `detail: full` read it again and keep
+  what they read. A read that fails is never kept. Any write through Flottille (`forge create`,
+  `comment`, `edit`, `merge`, `checks`, `close`, `reopen`, a pipeline's `run`, `stop` or `step`)
+  drops everything kept, and a read that began before the write does not put back what it read.
+  Time is the daemon's clock (`FLOTTILLE_TEST_CLOCK`, as everywhere).
+
+The window's session link does not read a pull request by its number: it asks `workspace.forge`,
+which reads the workspace's branch, answers from its own state of up to a minute
+("When it is read" above), and is made of no logs nor CI times. It does not share this cache; the
+tickets it shows are shared ([`tickets.md`](tickets.md), "How fast it is read").
+
+The developer log ([`developer.md`](developer.md)) records, for each `forge` and `tickets` call,
+`reads`: how many command lines ran (`ran`), the sum of their durations (`total_ms`), the slowest
+(`slowest_ms`) and whether the cache answered (`cached`). A call whose `duration_ms` is near
+`slowest_ms` and far under `total_ms` ran its reads together.
+
 ## The protocol and the command line
 
 - `workspace.forge {project, name, watch?}` answers the workspace's forge state
@@ -760,3 +794,8 @@ a script first on the same `PATH`, resolves the SSH aliases a test names and ser
 from the throwaway bare repositories, so that no test reads the user's SSH configuration. The fake
 `bkt` answers in the shapes of the table above, needs `--context` and the repository's flags as
 the real one does, and is itself tested (`crates/flottille-fake-bkt/tests`).
+
+The timing scenarios make the fakes slow: `read_delay_ms` makes every read of the fake `bkt` (and of
+the fake `gh`) wait that long, `view_delay_ms` a view of the fake `acli`, and the fake `bkt` records
+the millisecond each call started at, so that a test sees which reads ran together without
+depending on how loaded the machine is; the time it checks has a wide margin.

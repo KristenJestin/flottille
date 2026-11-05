@@ -41,6 +41,7 @@ mod programs;
 mod project_command;
 mod projects;
 mod providers;
+mod read_commands;
 mod reads;
 mod ready;
 mod results;

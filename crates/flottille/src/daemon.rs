@@ -165,6 +165,9 @@ pub struct Daemon {
     pub launching: Mutex<HashMap<String, usize>>,
     /// What the forges said of each workspace, and who watches them.
     pub forges: forge::Forges,
+    /// The tickets read in the last 30 s, for the next `tickets show` and the window's session
+    /// link (`reads`).
+    pub kept_tickets: crate::reads::Kept<crate::tickets::Ticket>,
     /// The rounds of the items, the windows connected (`docs/items.md`).
     pub items: items::Items,
     /// The developer mode's log (`docs/developer.md`).
@@ -339,6 +342,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         judge_chose_none: Mutex::new(None),
         launching: Mutex::new(HashMap::new()),
         forges: forge::Forges::default(),
+        kept_tickets: crate::reads::Kept::default(),
         items: items::Items::default(),
         developer: developer::Log::open(paths),
         stopping: watch::Sender::new(false),

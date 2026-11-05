@@ -1,201 +1,148 @@
-//! A `run` line that only prints a part of a file, answered as the `fs_read` it is
-//! (`docs/tools.md`, "Running"): `sed -n <range>p <file>`, `head [-n N] <file>`,
-//! `tail [-n N] <file>` and `cat <file>`.
-//!
-//! Only these exact shapes are read, from the words the no-shell splitter makes of the line, and
-//! only when the gate lets the `fs_read` of that file through at once: a path outside the
-//! workspace, a sensitive place or a link leading out is left to what a `run` is today.
+//! What the daemon reads of a forge or a tracker for a call: how many command lines ran and how
+//! long they took (the developer log says it, `docs/developer.md`), and the short cache that
+//! gives the next call what was just read (`docs/forges.md`, "How fast it is read").
 
+use std::collections::HashMap;
+use std::future::Future;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use flottille_core::store::now_ms;
 use serde_json::{Value, json};
 
-use crate::daemon::Daemon;
-use crate::files::{self, Lines};
-use crate::gate::{Ask, Class, Verdict};
-use crate::mcp::{self, Grant};
+/// How long what was read is given again: a pull request or a ticket is read again after it.
+pub const KEPT_MS: u64 = 30_000;
 
-/// The `fs_read` a `run` call is, with the line that says so to the agent; `None` for any call
-/// that is not such a read.
-pub async fn as_read(
-    daemon: &Daemon,
-    grant: &Grant,
-    tool: &str,
-    args: &Value,
-) -> Option<(Value, String)> {
-    if tool != "run" || !grant.tools.contains(&"fs_read") {
-        return None;
-    }
-    // A task, a timeout or a notification makes it a run, not a read.
-    let object = args.as_object()?;
-    if object
-        .keys()
-        .any(|key| !["line", "repository", "why"].contains(&key.as_str()))
-    {
-        return None;
-    }
-    let words = flottille_core::command::split_line(object.get("line")?.as_str()?).ok()?;
-    let (path, lines) = read_of(&words)?;
-    let mut read = json!({"path": path});
-    if let Some(repository) = object.get("repository") {
-        read["repository"] = repository.clone();
-    }
-    // The file is opened only once the gate lets a read of it through, and does not hold the
-    // line as a run either: what a rule of the user holds or refuses, such as a program of the
-    // project's never list, stays held or refused whatever the line prints.
-    if !matches!(
-        mcp::classify(daemon, grant, "fs_read", &read),
-        Verdict::Allow
-    ) || matches!(
-        mcp::classify(daemon, grant, "run", args),
-        Verdict::Deny(_)
-            | Verdict::Ask(Ask {
-                class: Class::Base,
-                ..
-            })
-    ) {
-        return None;
-    }
-    let resolved = files::reaches(&grant.place, "fs_read", &read)
-        .into_iter()
-        .next()?;
-    let repository = match &read["repository"] {
-        Value::Null => String::new(),
-        repository => format!(r#", "repository": {repository}"#),
-    };
-    let said = |offset: u64, length: u64| {
-        format!(
-            r#"read with fs_read {{"path": {}{repository}, "range": {{"offset": {offset}, "length": {length}}}}}: use it directly"#,
-            Value::from(path)
-        )
-    };
-    // The line goes before the page in the result, which is not cut: it takes its room of the
-    // page, counted with the widest numbers it can hold.
-    let room = files::page_budget(daemon).saturating_sub(said(u64::MAX, u64::MAX).len());
-    // The scan of a big file is not on the thread of the call.
-    let (offset, length) =
-        tokio::task::spawn_blocking(move || files::line_span(&resolved, lines, room))
-            .await
-            .ok()?
-            .ok()??;
-    read["range"] = json!({"offset": offset, "length": length});
-    Some((read, said(offset, length)))
+#[derive(Default)]
+struct Counted {
+    ran: u64,
+    total_ms: u64,
+    slowest_ms: u64,
+    cached: bool,
 }
 
-/// The file and the lines a command line prints, when it is one of the shapes and nothing else.
-fn read_of(words: &[String]) -> Option<(&str, Lines)> {
-    let words: Vec<&str> = words.iter().map(String::as_str).collect();
-    let (path, lines) = match words[..] {
-        ["cat", path] => (
-            path,
-            Lines::From {
-                first: 1,
-                last: None,
-            },
-        ),
-        ["sed", "-n", range, path] => (path, sed_range(range)?),
-        ["head", path] => (
-            path,
-            Lines::From {
-                first: 1,
-                last: Some(10),
-            },
-        ),
-        ["head", "-n", count, path] => (
-            path,
-            Lines::From {
-                first: 1,
-                last: Some(number(count)?),
-            },
-        ),
-        ["tail", path] => (path, Lines::Last(10)),
-        ["tail", "-n", count, path] => (path, Lines::Last(number(count)?)),
-        _ => return None,
-    };
-    // A word that starts with `-` is an option, and `~` is the home folder to a file tool.
-    (!path.starts_with(['-', '~'])).then_some((path, lines))
+tokio::task_local! {
+    static CURRENT: Reads;
 }
 
-/// `5p`, `5,20p` or `5,$p`: from a first line to a last, or to the end.
-fn sed_range(range: &str) -> Option<Lines> {
-    let range = range.strip_suffix('p')?;
-    let (first, last) = match range.split_once(',') {
-        Some((first, "$")) => (number(first)?, None),
-        Some((first, last)) => (number(first)?, Some(number(last)?)),
-        None => (number(range)?, Some(number(range)?)),
-    };
-    (last.is_none_or(|last| first <= last)).then_some(Lines::From { first, last })
-}
+/// The reads of one call. Its tool scopes it (`counting`), and the command lines `gh`, `bkt` and
+/// `acli` note themselves in the one of the task they run in: reads run together by `join!` are
+/// in that task, and a read nobody scoped is not counted.
+#[derive(Clone, Default)]
+pub struct Reads(Arc<Mutex<Counted>>);
 
-/// A count of lines or a line's number: digits alone, one at least.
-fn number(text: &str) -> Option<u64> {
-    if !text.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
+impl Reads {
+    /// Runs `work` with this as the reads it counts.
+    pub async fn counting<F: Future>(&self, work: F) -> F::Output {
+        CURRENT.scope(self.clone(), work).await
     }
-    text.parse().ok().filter(|n| *n > 0)
+
+    /// One command line that took `time`, noted in the reads of the call it belongs to.
+    pub fn ran(time: Duration) {
+        let _ = CURRENT.try_with(|reads| {
+            let mut counted = reads.0.lock().unwrap();
+            let ms = time.as_millis() as u64;
+            counted.ran += 1;
+            counted.total_ms += ms;
+            counted.slowest_ms = counted.slowest_ms.max(ms);
+        });
+    }
+
+    /// The call was given what an earlier one read.
+    pub fn from_cache() {
+        let _ = CURRENT.try_with(|reads| reads.0.lock().unwrap().cached = true);
+    }
+
+    /// What the developer log says: how many reads ran, the sum of their durations and the
+    /// slowest (the call's own duration is the sum when they ran one after the other, the slowest
+    /// when they ran together), and whether the cache answered. None for a call that read nothing.
+    pub fn to_json(&self) -> Option<Value> {
+        let counted = self.0.lock().unwrap();
+        (counted.ran > 0 || counted.cached).then(|| {
+            json!({"ran": counted.ran, "total_ms": counted.total_ms,
+                "slowest_ms": counted.slowest_ms, "cached": counted.cached})
+        })
+    }
+}
+
+/// What was read, by key, for `KEPT_MS`. A write drops it all; a read that began before that drop
+/// does not put back what it read (`generation`).
+pub struct Kept<T> {
+    inner: Mutex<Inner<T>>,
+}
+
+struct Inner<T> {
+    generation: u64,
+    entries: HashMap<String, (u64, T)>,
+}
+
+impl<T> Default for Kept<T> {
+    fn default() -> Self {
+        Kept {
+            inner: Mutex::new(Inner {
+                generation: 0,
+                entries: HashMap::new(),
+            }),
+        }
+    }
+}
+
+impl<T: Clone> Kept<T> {
+    /// What was read for `key` less than `KEPT_MS` ago, and how many milliseconds ago.
+    pub fn get(&self, key: &str) -> Option<(T, u64)> {
+        let now = now_ms();
+        let mut inner = self.inner.lock().unwrap();
+        inner
+            .entries
+            .retain(|_, (at, _)| now.saturating_sub(*at) < KEPT_MS);
+        inner
+            .entries
+            .get(key)
+            .map(|(at, kept)| (kept.clone(), now.saturating_sub(*at)))
+    }
+
+    /// The generation to hand to `put`, taken before the read begins.
+    pub fn generation(&self) -> u64 {
+        self.inner.lock().unwrap().generation
+    }
+
+    /// Keeps `value` for `key`, unless something was dropped since `generation`.
+    pub fn put(&self, key: String, value: T, generation: u64) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.generation == generation {
+            inner.entries.insert(key, (now_ms(), value));
+        }
+    }
+
+    /// Drops everything kept, and keeps what the reads that are running find: they began before
+    /// what changed.
+    pub fn drop_all(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.generation += 1;
+        inner.entries.clear();
+    }
+}
+
+/// The age of a cached read, as the result says it.
+pub fn age_text(age_ms: u64) -> String {
+    format!("as read {} s ago", age_ms / 1000)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn read(line: &str) -> Option<(String, Vec<u64>)> {
-        let words = flottille_core::command::split_line(line).unwrap();
-        read_of(&words).map(|(path, lines)| {
-            let numbers = match lines {
-                Lines::From { first, last } => vec![first, last.unwrap_or(0)],
-                Lines::Last(n) => vec![n],
-            };
-            (path.to_owned(), numbers)
-        })
-    }
-
     #[test]
-    fn the_shapes_that_only_print_a_part_of_a_file_are_read() {
-        let shapes = [
-            (
-                "sed -n 295,316p docs/README.md",
-                "docs/README.md",
-                vec![295, 316],
-            ),
-            ("sed -n 5p a", "a", vec![5, 5]),
-            ("sed -n '5,$p' a", "a", vec![5, 0]),
-            ("head a", "a", vec![1, 10]),
-            ("head -n 3 a", "a", vec![1, 3]),
-            ("tail a", "a", vec![10]),
-            ("tail -n 3 a", "a", vec![3]),
-            ("cat a", "a", vec![1, 0]),
-        ];
-        for (line, path, lines) in shapes {
-            assert_eq!(read(line), Some((path.to_owned(), lines)), "{line}");
-        }
-    }
+    fn a_drop_stops_the_read_that_began_before_it_from_being_kept() {
+        let kept: Kept<u8> = Kept::default();
+        kept.put("acme/api#12".into(), 1, kept.generation());
+        let began = kept.generation();
+        kept.drop_all();
 
-    #[test]
-    fn anything_else_is_not_a_read() {
-        for line in [
-            "sed -i s/a/b/ a",
-            "sed -n 5p",
-            "sed -n 5,3p a",
-            "sed -n 0p a",
-            "sed -n '5,$p' a b",
-            "sed -n /x/p a",
-            "sed -n 5d a",
-            "sed -n +5p a",
-            "sed 5p a",
-            "head -c 5 a",
-            "head -n -3 a",
-            "head -n 0 a",
-            "head -n 3 a b",
-            "tail -n +3 a",
-            "tail -f a",
-            "cat -n a",
-            "cat a b",
-            "cat -- a",
-            "cat '~/a'",
-            "cat '-'",
-            "/usr/bin/cat a",
-            "cat",
-        ] {
-            assert_eq!(read(line), None, "{line}");
-        }
+        kept.put("acme/api#12".into(), 1, began);
+
+        assert!(kept.get("acme/api#12").is_none());
+        kept.put("acme/api#12".into(), 2, kept.generation());
+        assert_eq!(kept.get("acme/api#12").map(|(value, _)| value), Some(2));
     }
 }
