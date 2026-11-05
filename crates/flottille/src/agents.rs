@@ -148,6 +148,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 deliveries::discard_images(&daemon.paths, &agent.id, &images);
                 Failure::new("unavailable", "the message could not be stored")
             })?;
+            crate::subscriptions::user_wrote(daemon, &agent.id);
             Ok(json!({"agent": agent.to_json(), "after": after, "delivery": delivery}))
         }
         "agent.unqueue" => {

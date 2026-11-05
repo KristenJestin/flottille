@@ -414,6 +414,11 @@ pub enum Command {
         session: String,
         subscription: String,
     },
+    /// Resumes a paused following of the session's agents, as a message of the user's does.
+    ResumeFollowing {
+        session: String,
+        subscription: String,
+    },
     /// The user's answer to a request they hold, given on the page of the session of `session`
     /// (its root agent).
     Answer {
@@ -878,7 +883,8 @@ pub enum Outcome {
         session: String,
         answer: RunAnswer,
     },
-    /// A subscription was cancelled as asked, or the daemon refused with why.
+    /// A subscription was cancelled, or a following resumed, as asked, or the daemon refused with
+    /// why.
     SubscriptionCancelled {
         session: String,
         refused: Option<String>,
@@ -1899,6 +1905,21 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             let refused = match ask_alone(
                 connect,
                 "subscription.cancel",
+                json!({"subscription": subscription}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::SubscriptionCancelled { session, refused }
+        }
+        Command::ResumeFollowing {
+            session,
+            subscription,
+        } => {
+            let refused = match ask_alone(
+                connect,
+                "subscription.resume",
                 json!({"subscription": subscription}),
                 bounds.quick,
             ) {

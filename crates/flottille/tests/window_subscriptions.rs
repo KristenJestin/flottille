@@ -611,3 +611,132 @@ fn a_repository_that_is_the_project_folder_is_named_by_the_project_in_the_rail(
         "#12 of app"
     );
 }
+
+/// One step of the window as the platform would run it; how many animation frames were asked.
+fn step(shell: &Entity<Shell>, by: Duration, cx: &mut VisualTestContext) -> usize {
+    shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+    cx.executor().advance_clock(by);
+    cx.run_until_parked();
+    let asked = cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    asked
+}
+
+/// What the window drew and asked for over ten seconds of its clock: the frames drawn, the
+/// animation frames asked.
+fn frames_at_rest(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> (u64, usize) {
+    cx.update(|window, _| window.reset_layout_stats());
+    let mut asked = 0;
+    let mut gone = Duration::ZERO;
+    while gone < Duration::from_secs(10) {
+        asked += step(shell, Duration::from_millis(16), cx);
+        gone += Duration::from_millis(16);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let drawn = cx.update(|window, _| window.layout_stats().frames);
+    (drawn, asked)
+}
+
+/// Lets every motion and every late answer of the daemon end, in real time too.
+fn rest(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    let began = Instant::now();
+    while began.elapsed() < Duration::from_secs(2) {
+        step(shell, Duration::from_millis(16), cx);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[gpui_kit::test]
+fn a_paused_following_says_so_in_the_rail_and_resume_resumes_it(cx: &mut TestAppContext) {
+    let user = user();
+    script(&user, pull());
+    let (lead, mcp) = lead(&user);
+    // Nothing is judged: the launch starts the session at once.
+    user.call("agent.mode", json!({"agent": lead, "mode": "full"}))
+        .unwrap();
+    let opened = user.received_requests("session/new").len();
+    let launched = mcp.call(
+        "agent_launch",
+        json!({"title": "Docs", "brief": "Write the docs.", "root": true, "follow": true}),
+    );
+    assert!(!launched.error, "{}", launched.text);
+    let (url, authorization) = server_of(&user, opened);
+    let second = Mcp::initialize(&url, &authorization);
+    let session = user.call("agent.list", json!({})).unwrap()["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["title"] == "Docs")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (shell, cx) = open_session(&user, &lead, cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the rail lists the following", |cx| {
+        rows(&page, cx).iter().any(|row| row.following)
+    });
+    settle(cx);
+    let id = rows(&page, cx)[0].id.clone();
+    assert_eq!(
+        label(cx, &format!("subscription-pull-{id}")).unwrap(),
+        "Following Docs"
+    );
+    let times = label(cx, &format!("subscription-times-{id}")).unwrap();
+    assert!(
+        times.starts_with("since") && !times.contains("expires"),
+        "{times}"
+    );
+    assert!(!present(cx, &format!("subscription-paused-{id}")));
+
+    for (from, to) in [(&mcp, &session), (&second, &lead)]
+        .into_iter()
+        .cycle()
+        .take(5)
+    {
+        let sent = from.call("session_send", json!({"session": to, "text": "again"}));
+        assert!(!sent.error, "{}", sent.text);
+    }
+
+    until(&shell, cx, "the rail says the following paused", |cx| {
+        rows(&page, cx).iter().any(|row| row.paused)
+            && present(cx, &format!("subscription-paused-{id}"))
+    });
+    settle(cx);
+    assert_eq!(
+        label(cx, &format!("subscription-paused-{id}")).unwrap(),
+        flottille_window::subscriptions::PAUSED
+    );
+    assert_eq!(
+        label(cx, &format!("subscription-resume-{id}")).unwrap(),
+        "Resume"
+    );
+
+    cx.update(|window, cx| window.click(format!("subscription-resume-{id}"), cx));
+
+    until(&shell, cx, "the following resumed", |cx| {
+        !rows(&page, cx).iter().any(|row| row.paused)
+    });
+    rest(&shell, cx);
+    assert!(
+        !present(cx, &format!("subscription-paused-{id}")),
+        "the pause folded away"
+    );
+    let listed = user
+        .call("subscription.list", json!({"tree": lead}))
+        .unwrap();
+    assert_eq!(listed["subscriptions"][0]["paused"], false, "{listed}");
+    eventually("the agents at rest", || {
+        user.call("agent.list", json!({})).unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|a| a["state"] != "working" && a["state"] != "starting")
+    });
+    rest(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
