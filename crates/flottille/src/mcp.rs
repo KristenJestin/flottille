@@ -511,7 +511,9 @@ const SERVED: [Definition; 28] = [
         description: "The project's workspaces. list and show read them. A root's writes, \
             judged: create makes one (worktrees, then setup, judged as a run of each step; to \
             resume a branch, name it; name new ones by the repository's naming convention), prepare resumes a failed setup, link_ticket links a \
-            ticket (null unlinks); remove, always held for the user, its request saying what \
+            ticket (null unlinks), rename_branch {branch, repository?} renames the workspace's \
+            branch in each of its repositories (or the one named), only while no remote nor pull \
+            request has it and the workspace did not resume it; remove, always held for the user, its request saying what \
             would be lost: yours too once its work is done, your commands in it stopped, and you \
             go on in main. name: yours when left out, but for create. To work on another branch in this workspace, switch with git: the \
             workspace follows the branch its worktrees are on. {\"action\": \"create\", \
@@ -521,10 +523,11 @@ const SERVED: [Definition; 28] = [
         destructive: true,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "show", "create", "prepare", "link_ticket", "remove"]},
+                "action": {"type": "string", "enum": ["list", "show", "create", "prepare", "link_ticket", "rename_branch", "remove"]},
                 "name": {"type": "string"},
                 "repositories": {"type": "array", "items": {"type": "string"}, "description": "create: by path."},
-                "branch": {"type": "string", "description": "create: give it when the repository has a naming convention (its AGENTS.md, CONTRIBUTING, or the branches it already has to read), with the ticket's key when the workspace has a ticket (fix/ABC-12-login). Left out, <branch prefix>/<name> is the fallback (the name alone when the project has no prefix). An existing branch is checked out."},
+                "branch": {"type": "string", "description": "create: give it when the repository has a naming convention (its AGENTS.md, CONTRIBUTING, or the branches it already has to read), with the ticket's key when the workspace has a ticket (fix/ABC-12-login). Left out, <branch prefix>/<name> is the fallback (the name alone when the project has no prefix). An existing branch is checked out. rename_branch: the new name."},
+                "repository": {"type": "string", "description": "rename_branch: by path; every repository of the workspace when left out."},
                 "ticket": {"type": ["string", "null"], "description": "#123 or ABC-123."}
             }, "required": ["action"], "additionalProperties": false})
         },

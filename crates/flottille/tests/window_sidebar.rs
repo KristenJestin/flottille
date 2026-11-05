@@ -1,7 +1,8 @@
 //! The scenarios of #136: one spinner where the work is, nothing left spinning once an agent
 //! ended, "Ended" at the bottom of the sidebar, a session ended or resumed and a session started
 //! from a row, Stop in Send's place, the user's own messages selectable; and of #375, a session
-//! that removed its own workspace going on under main. On GPUI's test platform
+//! that removed its own workspace going on under main; and of #482, the composer focused when
+//! "New session" opens. On GPUI's test platform
 //! in front of a real daemon whose agents are the fake ACP agent, with a throwaway user. No window
 //! opens on a screen.
 
@@ -24,8 +25,9 @@ use flottille_window::shell::Selection;
 use flottille_window::tree::{
     ended_id, project_id, session_end_id, session_id, session_menu_id, session_resume_id,
 };
+use gpui_kit::base::input::Position;
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
+use gpui_kit::{Entity, Focusable as _, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
 
 /// A user whose fake agent works while it is told to.
@@ -667,6 +669,133 @@ fn a_new_session_in_a_place_of_the_project_page_starts_there_with_the_field_focu
         composer.read_with(cx, |c, _| c.choice().clone()),
         Choice::Main
     );
+}
+
+/// Whether the composer of `project` has the window's focus.
+fn composer_focused(shell: &Entity<Shell>, project: &str, cx: &mut VisualTestContext) -> bool {
+    let composer = shell
+        .read_with(cx, |s, _| s.composer_of(project).cloned())
+        .expect("the project's composer exists");
+    let field = composer.read_with(cx, |c, _| c.field().clone());
+    cx.update(|window, cx| field.read(cx).focus_handle(cx).is_focused(window))
+}
+
+/// The composer's text and where its caret stands, in bytes.
+fn draft_of(shell: &Entity<Shell>, project: &str, cx: &mut VisualTestContext) -> (String, usize) {
+    let composer = shell
+        .read_with(cx, |s, _| s.composer_of(project).cloned())
+        .expect("the project's composer exists");
+    composer.read_with(cx, |c, cx| {
+        let field = c.field().read(cx);
+        (field.value().to_string(), field.cursor())
+    })
+}
+
+/// Opens the session's page from the tree, so that "New session" has to come back to a project.
+fn open_row(id: &str, cx: &mut VisualTestContext) {
+    cx.update(|window, cx| window.click(session_id(id), cx));
+    settle(cx);
+}
+
+#[gpui_kit::test]
+fn new_session_focuses_the_composer(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let id = start(&user, "app", "hello");
+    let (shell, cx) = tree_of(&user, &[&id], cx);
+    open_row(&id, cx);
+
+    cx.update(|window, cx| window.click("new-session", cx));
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(Selection::Project("app".into()))
+    );
+    assert!(composer_focused(&shell, "app", cx), "right away");
+
+    // Nothing takes it away: the sections of the page show up, one after the other.
+    settle(cx);
+    assert!(
+        composer_focused(&shell, "app", cx),
+        "once the page is drawn"
+    );
+}
+
+#[gpui_kit::test]
+fn a_project_s_new_session_focuses_the_composer(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    workspace(&user, "app", "login");
+    let id = start(&user, "app", "hello");
+    let (shell, cx) = tree_of(&user, &[&id], cx);
+    cx.update(|window, cx| window.click(project_id("app"), cx));
+    settle(cx);
+    // The user clicked somewhere else on the page.
+    let focus = shell.read_with(cx, |s, _| s.focus_handle());
+    cx.update(|window, cx| window.focus(&focus, cx));
+    assert!(!composer_focused(&shell, "app", cx));
+
+    cx.update(|window, cx| window.click("new-session-in-login", cx));
+    assert!(composer_focused(&shell, "app", cx), "in a workspace");
+    let focus = shell.read_with(cx, |s, _| s.focus_handle());
+    cx.update(|window, cx| window.focus(&focus, cx));
+    cx.update(|window, cx| window.click("new-session-in-main", cx));
+    assert!(composer_focused(&shell, "app", cx), "in main");
+    settle(cx);
+    assert!(
+        composer_focused(&shell, "app", cx),
+        "once the page is drawn"
+    );
+}
+
+#[gpui_kit::test]
+fn typing_right_after_new_session_writes_in_the_composer(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let id = start(&user, "app", "hello");
+    let (shell, cx) = tree_of(&user, &[&id], cx);
+    open_row(&id, cx);
+
+    cx.update(|window, cx| window.click("new-session", cx));
+    cx.simulate_input("fix the login");
+    assert_eq!(draft_of(&shell, "app", cx).0, "fix the login");
+
+    // Also from a page that is not a project's, and with the page still drawing.
+    cx.update(|window, cx| window.click("new-session", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    cx.update(|window, cx| window.click("new-session", cx));
+    cx.simulate_input(" now");
+    assert_eq!(draft_of(&shell, "app", cx).0, "fix the login now");
+}
+
+#[gpui_kit::test]
+fn coming_back_to_a_kept_draft_puts_the_caret_at_its_end(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let id = start(&user, "app", "hello");
+    let (shell, cx) = tree_of(&user, &[&id], cx);
+    open_row(&id, cx);
+    cx.update(|window, cx| window.click("new-session", cx));
+    cx.simulate_input("fix the login");
+    // The caret was left at the start of the draft.
+    let composer = shell
+        .read_with(cx, |s, _| s.composer_of("app").cloned())
+        .unwrap();
+    let field = composer.read_with(cx, |c, _| c.field().clone());
+    cx.update(|window, cx| {
+        field.update(cx, |field, cx| {
+            field.set_cursor_position(Position::new(0, 0), window, cx)
+        })
+    });
+    assert_eq!(draft_of(&shell, "app", cx).1, 0);
+
+    open_row(&id, cx);
+    cx.update(|window, cx| window.click("new-session", cx));
+    let (text, caret) = draft_of(&shell, "app", cx);
+    assert_eq!(text, "fix the login");
+    assert_eq!(caret, text.len(), "at the end of the draft");
+    settle(cx);
+    assert_eq!(draft_of(&shell, "app", cx).1, text.len(), "and it stays");
 }
 
 #[gpui_kit::test]

@@ -5459,33 +5459,42 @@ impl Render for SessionRail {
                             .test_support(),
                     )
                     // Its branch, commits ahead, files not committed and setup played; it
-                    // unfolds once the daemon said.
+                    // unfolds once the daemon said, and fades back in when it says another
+                    // (a branch renamed).
                     .child(presence(
                         ElementId::Name(format!("rail-status-{name}-block").into()),
                         status.is_some(),
-                        tipped_when_cut(
-                            div()
-                                .id(ElementId::Name(format!("rail-status-{name}").into()))
-                                .pl(space::XL)
-                                .mono(11.5)
-                                .text_color(p.faint)
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .aria_label(SharedString::from(status.as_ref().map_or(
-                                    String::new(),
-                                    |s| match &s.note {
-                                        Some(note) => format!("{} · {note}", s.line()),
-                                        None => s.line(),
-                                    },
-                                )))
-                                .children(status.as_ref().map(|s| SharedString::from(s.line()))),
-                            SharedString::from(
+                        {
+                            let said = SharedString::from(
                                 status.as_ref().map(|s| s.line()).unwrap_or_default(),
-                            ),
-                            window,
-                            cx,
-                        ),
+                            );
+                            let line = tipped_when_cut(
+                                div()
+                                    .id(ElementId::Name(format!("rail-status-{name}").into()))
+                                    .pl(space::XL)
+                                    .mono(11.5)
+                                    .text_color(p.faint)
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .aria_label(SharedString::from(status.as_ref().map_or(
+                                        String::new(),
+                                        |s| match &s.note {
+                                            Some(note) => format!("{} · {note}", s.line()),
+                                            None => s.line(),
+                                        },
+                                    )))
+                                    .child(said.clone()),
+                                said.clone(),
+                                window,
+                                cx,
+                            );
+                            changing(
+                                ElementId::Name(format!("rail-status-{name}-change").into()),
+                                said,
+                                move |_| line,
+                            )
+                        },
                     ))
                     .test_support()
                     .into_any_element(),
