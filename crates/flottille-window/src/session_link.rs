@@ -85,6 +85,8 @@ pub struct Queued {
     pub text: String,
     /// How many pictures go with it.
     pub images: usize,
+    /// Their names, which `agent.image` reads back.
+    pub pictures: Vec<String>,
     pub at: u64,
 }
 
@@ -124,6 +126,12 @@ impl TreeAgent {
                     delivery: text(&queued["delivery"]).unwrap_or_default(),
                     text: text(&queued["text"]).unwrap_or_default(),
                     images: queued["images"].as_u64().unwrap_or(0) as usize,
+                    pictures: queued["pictures"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|name| name.as_str().map(str::to_owned))
+                        .collect(),
                     at: queued["at"].as_u64().unwrap_or(0),
                 })
                 .collect(),

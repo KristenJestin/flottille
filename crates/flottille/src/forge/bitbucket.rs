@@ -492,7 +492,44 @@ async fn detailed_with(
     found: Listed,
 ) -> Result<(Pull, Vec<Value>), String> {
     let id = found.id.to_string();
-    let statuses = statuses_of(forge, context, &id).await?;
+    // The statuses, the conflicts and what people said do not depend on one another: read
+    // together, a failure is still the first of the statuses, the page and the comments, as when
+    // they were read one after the other.
+    let people = async {
+        if cloud(forge) {
+            let base = cloud_page(forge, &id);
+            let comments_path = format!("{base}/comments");
+            let page_args = ["api", &base, "--context", context];
+            let (page, comments) = futures::join!(
+                json(&page_args),
+                cloud_values(context, &comments_path, COMMENTS)
+            );
+            let page = page?;
+            let (comments, _) = comments?;
+            let closing = cloud_closing(found.state, &page);
+            Ok::<_, String>((cloud_reviewers(&page), cloud_comments(&comments), closing))
+        } else {
+            let Forge::Bitbucket { owner, name, .. } = forge else {
+                unreachable!()
+            };
+            let activities = dc_values(
+                context,
+                &format!(
+                    "/rest/api/1.0/projects/{owner}/repos/{name}/pull-requests/{id}/activities"
+                ),
+                COMMENTS,
+            )
+            .await?;
+            let closing = dc_closing(found.state, &activities);
+            Ok((found.reviewers.clone(), dc_comments(&activities), closing))
+        }
+    };
+    let (statuses, mergeable, people) = futures::join!(
+        statuses_of(forge, context, &id),
+        mergeable(forge, context, &id),
+        people
+    );
+    let statuses = statuses?;
     let checks: Vec<_> = statuses.iter().map(check_of).collect();
     let not_started = match (&found.head_commit, found.updated) {
         (Some(head), Some(updated)) if checks.is_empty() => {
@@ -500,26 +537,7 @@ async fn detailed_with(
         }
         _ => None,
     };
-    let mergeable = mergeable(forge, context, &id).await;
-    let (reviewers, comments, closing) = if cloud(forge) {
-        let base = cloud_page(forge, &id);
-        let pull = json(&["api", &base, "--context", context]).await?;
-        let (comments, _) = cloud_values(context, &format!("{base}/comments"), COMMENTS).await?;
-        let closing = cloud_closing(found.state, &pull);
-        (cloud_reviewers(&pull), cloud_comments(&comments), closing)
-    } else {
-        let Forge::Bitbucket { owner, name, .. } = forge else {
-            unreachable!()
-        };
-        let activities = dc_values(
-            context,
-            &format!("/rest/api/1.0/projects/{owner}/repos/{name}/pull-requests/{id}/activities"),
-            COMMENTS,
-        )
-        .await?;
-        let closing = dc_closing(found.state, &activities);
-        (found.reviewers, dc_comments(&activities), closing)
-    };
+    let (reviewers, comments, closing) = people?;
     let jobs = statuses
         .iter()
         .zip(&checks)

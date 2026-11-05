@@ -28,7 +28,8 @@
 //! ```
 //!
 //! `site` (`example.atlassian.net` by default) is the `Site:` line `acli jira auth status` prints, none
-//! with `site_line: false`; `delay_ms` makes that command slow, as one waiting on a network.
+//! with `site_line: false`; `delay_ms` makes that command slow, as one waiting on a network, and
+//! `view_delay_ms` does the same for `workitem view`.
 //! `signed_in: false` makes `acli jira auth status` end with 1. `items` gives, by key, what
 //! `acli jira workitem view KEY --json` prints; a key with none ends with 1. `fail` makes the view
 //! of that key end with 1, saying its text. With `--fields a,b`, the view prints the work item's
@@ -148,6 +149,9 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
             0
         }
         ["jira", "workitem", "view", key, rest @ ..] if rest.contains(&"--json") => {
+            if let Some(ms) = script["view_delay_ms"].as_u64() {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+            }
             if let Some(failure) = script["fail"][*key].as_str() {
                 eprintln!("{failure}");
                 return 1;
