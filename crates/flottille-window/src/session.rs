@@ -28,12 +28,12 @@ use flottille_ui::motion::{HOVER, Motion, PANEL};
 use flottille_ui::{
     AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Listing, Menu, Modal, Palette, Pill,
     PulsingLabel, Side, Skeleton, StateIcon, Status, Toast, Type, awaiting, changing, enter, fade,
-    fold_frame, hoverable, icon, palette, path_line, presence, presence_of, section_label,
-    selectable, space, text_region, tipped_when_cut, toast, turning,
+    fold_frame, follow_theme, hoverable, icon, palette, path_line, presence, presence_of,
+    section_label, selectable, space, text_region, tipped_when_cut, toast, turning,
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{
-    Escape, Input, InputEditorStyle, InputEvent, InputState, MoveDown, MoveUp, Paste, TextareaState,
+    Escape, Input, InputEvent, InputState, MoveDown, MoveUp, Paste, TextareaState,
 };
 use gpui_kit::base::text::{TextView, TextViewState, TextViewStyle};
 use gpui_kit::base::{ElementExt as _, TextSelection, TextSelectionScopeId};
@@ -5561,13 +5561,7 @@ impl Render for SessionRail {
         if self.workspace.is_some() && self.ticket_field.is_none() {
             let field = cx.new(|cx| {
                 let mut field = InputState::new(window, cx).placeholder("#123 or ABC-123");
-                field.set_editor_style(InputEditorStyle {
-                    foreground: p.text,
-                    muted_foreground: p.faint,
-                    selection: p.run.opacity(0.35),
-                    caret: p.text,
-                    ..Default::default()
-                });
+                follow_theme(&mut field, cx);
                 field
             });
             self._ticket_subscription =
@@ -6092,14 +6086,7 @@ impl Reply {
                 .auto_grow(1, REPLY_MAX_ROWS)
                 .submit_on_enter(true)
                 .placeholder(REPLY_PLACEHOLDER);
-            let p = palette(cx);
-            field.set_editor_style(InputEditorStyle {
-                foreground: p.text,
-                muted_foreground: p.faint,
-                selection: p.run.opacity(0.35),
-                caret: p.text,
-                ..Default::default()
-            });
+            follow_theme(&mut field, cx);
             field
         });
         let subscriptions = vec![cx.subscribe_in(

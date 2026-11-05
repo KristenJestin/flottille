@@ -16,10 +16,10 @@ use flottille_core::declared::{ProjectTracker, RepositoryForge};
 use flottille_core::project::cycle_sentence;
 use flottille_ui::{
     Button, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, PageHeader, Section,
-    Select, SelectOption, Switch, Tabs, Toast, Type, enter, hoverable, icon, palette, presence,
-    presence_of, space, toast,
+    Select, SelectOption, Switch, Tabs, Toast, Type, enter, follow_theme, hoverable, icon, palette,
+    presence, presence_of, space, toast,
 };
-use gpui_kit::base::input::{Input, InputEditorStyle, InputEvent, InputState};
+use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
     App, AppContext as _, ClickEvent, Context, ElementId, Entity, InteractiveElement, IntoElement,
     ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Subscription,
@@ -46,15 +46,8 @@ pub fn styled_input(
     window: &mut Window,
     cx: &mut Context<InputState>,
 ) -> InputState {
-    let p = palette(cx);
     let mut field = InputState::new(window, cx).placeholder(placeholder.to_owned());
-    field.set_editor_style(InputEditorStyle {
-        foreground: p.text,
-        muted_foreground: p.faint,
-        selection: p.run.opacity(0.35),
-        caret: p.text,
-        ..Default::default()
-    });
+    follow_theme(&mut field, cx);
     field
 }
 
