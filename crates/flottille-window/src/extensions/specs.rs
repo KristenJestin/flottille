@@ -945,15 +945,32 @@ impl SpecPage {
                 let ready = matches!(then, Then::Ready { .. });
                 match answer {
                     Ok(spec) => {
-                        self.shown = Some(Ok(Spec::of(&spec)));
-                        let (title, detail) = match ready {
-                            true => ("Spec ready", "No agent writes it any more."),
-                            false => (
-                                "Spec back to Draft",
-                                "The session writing it is told; it may write it again.",
+                        let spec = Spec::of(&spec);
+                        let state = spec.ticket_write.as_ref().map(|(state, _)| state.as_str());
+                        match (ready, state) {
+                            // Nothing reached its ticket, whether it failed or someone changed it.
+                            (true, Some("failed" | "changed")) => toast(
+                                Toast::failure("The ticket was not written")
+                                    .detail(spec.ticket_said().unwrap_or_default()),
+                                cx,
                             ),
-                        };
-                        toast(Toast::success(title).detail(detail), cx);
+                            (true, Some(_)) => toast(
+                                Toast::success("Spec ready")
+                                    .detail(spec.ticket_said().unwrap_or_default()),
+                                cx,
+                            ),
+                            (true, None) => toast(
+                                Toast::success("Spec ready").detail("No agent writes it any more."),
+                                cx,
+                            ),
+                            (false, _) => toast(
+                                Toast::success("Spec back to Draft").detail(
+                                    "The session writing it is told; it may write it again.",
+                                ),
+                                cx,
+                            ),
+                        }
+                        self.shown = Some(Ok(spec));
                     }
                     Err(why) => {
                         let title = match ready {

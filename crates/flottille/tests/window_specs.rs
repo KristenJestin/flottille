@@ -734,7 +734,7 @@ fn a_changed_ticket_offers_take_and_overwrite_on_the_spec_page(cx: &mut TestAppC
     open_spec(&shell, cx, spec);
     at_rest(cx);
     let said = label(cx, "spec-ticket-said").unwrap_or_default();
-    assert!(said.contains("#5 changed on its tracker"), "{said}");
+    assert!(said.contains("has not read #5 yet"), "{said}");
     assert!(found(cx, "spec-ticket-take") && found(cx, "spec-ticket-overwrite"));
 
     // Overwrite asks first: a person's change is lost on the tracker.
@@ -839,4 +839,89 @@ fn the_departures_are_offered_at_done_and_posted_with_one_click(cx: &mut TestApp
         label(cx, "spec-departures-posted").is_some_and(|said| said.contains("#6"))
             && !found(cx, "spec-departures-post")
     });
+}
+
+/// The toasts shown now, as `(is_failure, title, second line)`.
+fn toasts(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<(bool, String, String)> {
+    shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .map(|t| {
+                (
+                    t.is_failure(),
+                    t.title().to_owned(),
+                    t.second_line().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect()
+    })
+}
+
+#[gpui_kit::test]
+fn the_ready_toast_follows_what_became_of_the_ticket(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    turn(&user, true, None);
+    // Read at "Write the spec": Ready writes it.
+    let written = user
+        .call(
+            "spec.from_ticket",
+            json!({"project": "app", "ticket": "#5", "mode": "ticket"}),
+        )
+        .unwrap()["spec"]["spec"]
+        .as_u64()
+        .unwrap();
+    // Never read: Ready writes nothing and the user chooses.
+    let unread = user
+        .call(
+            "spec.new",
+            json!({"project": "app", "title": "Typo", "mode": "ticket", "tickets": ["#6"]}),
+        )
+        .unwrap()["spec"]
+        .as_u64()
+        .unwrap();
+    // Not on the tracker: its read fails.
+    let failing = user
+        .call(
+            "spec.new",
+            json!({"project": "app", "title": "Gone", "mode": "ticket", "tickets": ["#9"]}),
+        )
+        .unwrap()["spec"]
+        .as_u64()
+        .unwrap();
+    for spec in [written, unread, failing] {
+        complete(&user, spec);
+    }
+    let (shell, cx) = window(&user, cx);
+
+    for (spec, failure, title, said) in [
+        (written, false, "Spec ready", "written to #5"),
+        (
+            unread,
+            true,
+            "The ticket was not written",
+            "has not read #6",
+        ),
+        (
+            failing,
+            true,
+            "The ticket was not written",
+            "#9 could not be read",
+        ),
+    ] {
+        open_spec(&shell, cx, spec);
+        settle(cx);
+        click(cx, "spec-ready");
+        until(
+            &shell,
+            cx,
+            "the toast says what became of the ticket",
+            |cx| {
+                toasts(&shell, cx)
+                    .iter()
+                    .any(|(f, t, s)| *f == failure && t == title && s.contains(said))
+            },
+        );
+    }
 }
