@@ -2902,3 +2902,256 @@ fn forge_show_reads_live_and_the_store_is_updated() {
     );
     assert_eq!(stored(&user, "item.commented").len(), 1);
 }
+
+// The reads of `forge show` (`docs/forges.md`, "How fast it is read"): a pull request's parts are
+// read together, and what was read is kept for 30 s.
+
+/// How long the fake `bkt` takes over each read of the tests below.
+const SLOW: u64 = 700;
+
+/// The Cloud pull request #12 of `api`, every read of the fake `bkt` taking `delay` ms.
+fn slow_cloud(user: &User, delay: u64) {
+    bitbucket_fixture(user);
+    cloud_script(
+        user,
+        &now_text(),
+        json!([{"state": "SUCCESSFUL", "key": "build", "name": "build", "url": "https://x"}]),
+        json!([]),
+    );
+    let mut script: Value =
+        serde_json::from_str(&std::fs::read_to_string(user.path("bkt/script.json")).unwrap())
+            .unwrap();
+    script["read_delay_ms"] = json!(delay);
+    user.bkt_script(script);
+}
+
+/// The reads the fake `bkt` was asked, with the millisecond each started at; its `context list`
+/// is not one (it reads the user's own configuration).
+fn bkt_reads(user: &User) -> Vec<(String, u64)> {
+    user.bkt_received()
+        .iter()
+        .map(|call| {
+            let args: Vec<&str> = call["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a.as_str().unwrap())
+                .collect();
+            (args.join(" "), call["at"].as_u64().unwrap())
+        })
+        .filter(|(call, _)| !call.starts_with("context list"))
+        .collect()
+}
+
+fn show_12() -> Value {
+    json!({"action": "show", "repository": "api", "number": 12})
+}
+
+/// An agent of the workspace, which may write at once (the full mode).
+fn writer_in(user: &User) -> Mcp {
+    let (id, mcp) = agent_in(user, Some("login"));
+    let output = user.run(&["agent", "mode", &id, "full"]);
+    assert!(output.status.success(), "{output:?}");
+    mcp
+}
+
+#[test]
+fn forge_show_reads_a_pull_request_s_parts_at_once() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    slow_cloud(&user, SLOW);
+    let (_, mcp) = agent_in(&user, Some("login"));
+
+    let started = Instant::now();
+    let answer = mcp.call("forge", show_12());
+    let took = started.elapsed();
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("pull request #12, open"),
+        "{}",
+        answer.text
+    );
+    let reads = bkt_reads(&user);
+    // The list, the checks, the conflicts, the page, the comments and the CI's runs.
+    assert!(reads.len() >= 6, "{reads:?}");
+    // Several reads started together, not one after the other (not a matter of the load)...
+    let together = reads
+        .iter()
+        .map(|(_, at)| {
+            reads
+                .iter()
+                .filter(|(_, other)| other >= at && other - at < SLOW / 2)
+                .count()
+        })
+        .max()
+        .unwrap();
+    assert!(together >= 4, "{together} together in {reads:?}");
+    // ...so the call is far from their sum, which is 6 delays at least.
+    assert!(
+        took < Duration::from_millis(SLOW * 5),
+        "{took:?} for {} reads of {SLOW} ms",
+        reads.len()
+    );
+}
+
+#[test]
+fn a_second_show_within_the_cache_time_reads_nothing_again() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    slow_cloud(&user, 0);
+    let (_, mcp) = agent_in(&user, Some("login"));
+    let first = mcp.call("forge", show_12());
+    assert!(!first.error, "{}", first.text);
+    assert!(!first.text.contains("as read"), "{}", first.text);
+    let before = bkt_reads(&user).len();
+
+    let second = mcp.call("forge", show_12());
+
+    assert!(!second.error, "{}", second.text);
+    assert_eq!(bkt_reads(&user).len(), before, "{:?}", bkt_reads(&user));
+    assert!(second.text.contains("as read 0 s ago"), "{}", second.text);
+    assert!(
+        second.text.contains("pull request #12, open"),
+        "{}",
+        second.text
+    );
+    assert!(
+        second.text.contains("fresh"),
+        "how to read again: {}",
+        second.text
+    );
+}
+
+#[test]
+fn a_comment_through_flottille_drops_the_cached_pull_request() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    slow_cloud(&user, 0);
+    let mcp = writer_in(&user);
+    mcp.call("forge", show_12());
+    let cached = bkt_reads(&user).len();
+    mcp.call("forge", show_12());
+    assert_eq!(bkt_reads(&user).len(), cached, "cached before the write");
+
+    let written = mcp.call(
+        "forge",
+        json!({"action": "comment", "repository": "api", "number": 12, "body": "Rebased"}),
+    );
+    assert!(!written.error, "{}", written.text);
+    let after_write = bkt_reads(&user).len();
+    let shown = mcp.call("forge", show_12());
+
+    assert!(!shown.error, "{}", shown.text);
+    assert!(
+        bkt_reads(&user).len() > after_write,
+        "read again: {:?}",
+        bkt_reads(&user)
+    );
+    assert!(!shown.text.contains("as read"), "{}", shown.text);
+}
+
+#[test]
+fn fresh_reads_again() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    slow_cloud(&user, 0);
+    let (_, mcp) = agent_in(&user, Some("login"));
+    mcp.call("forge", show_12());
+    let first = bkt_reads(&user).len();
+
+    let mut asked = show_12();
+    asked["fresh"] = json!(true);
+    let again = mcp.call("forge", asked);
+
+    assert!(!again.error, "{}", again.text);
+    assert_eq!(bkt_reads(&user).len(), first * 2, "{:?}", bkt_reads(&user));
+    assert!(!again.text.contains("as read"), "{}", again.text);
+    // What it read is what the next show is given.
+    let after = bkt_reads(&user).len();
+    let next = mcp.call("forge", show_12());
+    assert_eq!(bkt_reads(&user).len(), after);
+    assert!(next.text.contains("as read"), "{}", next.text);
+}
+
+#[test]
+fn a_full_detail_reads_again_and_a_cached_read_is_dropped_after_thirty_seconds() {
+    let user = User::with_fake_agent()
+        .with_fake_bkt()
+        .with_env("FLOTTILLE_TEST_CLOCK", "1");
+    slow_cloud(&user, 0);
+    let (_, mcp) = agent_in(&user, Some("login"));
+    mcp.call("forge", show_12());
+    let first = bkt_reads(&user).len();
+
+    let mut full = show_12();
+    full["detail"] = json!("full");
+    let answer = mcp.call("forge", full);
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(bkt_reads(&user).len(), first * 2, "{:?}", bkt_reads(&user));
+
+    user.call("test.advance", json!({"ms": 31_000})).unwrap();
+    let late = mcp.call("forge", show_12());
+    assert!(!late.error, "{}", late.text);
+    assert_eq!(bkt_reads(&user).len(), first * 3, "{:?}", bkt_reads(&user));
+    assert!(!late.text.contains("as read"), "{}", late.text);
+}
+
+#[test]
+fn an_error_is_never_cached() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    slow_cloud(&user, 0);
+    let (_, mcp) = agent_in(&user, Some("login"));
+    // The checks cannot be read once.
+    let mut script: Value =
+        serde_json::from_str(&std::fs::read_to_string(user.path("bkt/script.json")).unwrap())
+            .unwrap();
+    script["checks_fail"] = json!({"acme/api": {"12": "Error: 502 Bad Gateway"}});
+    user.bkt_script(script.clone());
+    let failed = mcp.call("forge", show_12());
+    assert!(failed.error, "{}", failed.text);
+    script["checks_fail"] = Value::Null;
+    user.bkt_script(script);
+
+    let read = mcp.call("forge", show_12());
+
+    assert!(!read.error, "{}", read.text);
+    assert!(
+        read.text.contains("pull request #12, open"),
+        "{}",
+        read.text
+    );
+    assert!(!read.text.contains("as read"), "{}", read.text);
+}
+
+#[test]
+fn the_developer_log_says_how_many_reads_a_forge_call_ran_and_how_long() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    slow_cloud(&user, 300);
+    let output = user.run(&["developer", "on"]);
+    assert!(output.status.success(), "{output:?}");
+    let (_, mcp) = agent_in(&user, Some("login"));
+
+    mcp.call("forge", show_12());
+    mcp.call("forge", show_12());
+
+    let logged = std::fs::read_to_string(user.path("state/flottille/developer.log")).unwrap();
+    let calls: Vec<Value> = logged
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|line| line["kind"] == "call" && line["tool"] == "forge")
+        .collect();
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    let read = &calls[0]["reads"];
+    // The list, the checks, the conflicts, the page, the comments and the CI's runs.
+    assert!(read["ran"].as_u64().unwrap() >= 6, "{read}");
+    assert_eq!(read["cached"], false, "{read}");
+    let slowest = read["slowest_ms"].as_u64().unwrap();
+    let total = read["total_ms"].as_u64().unwrap();
+    assert!(slowest >= 300, "{read}");
+    // They ran together, so the call took less than their sum: the log shows both.
+    assert!(
+        calls[0]["duration_ms"].as_u64().unwrap() < total,
+        "{}",
+        calls[0]
+    );
+    let again = &calls[1]["reads"];
+    assert_eq!(again["ran"], 0, "{again}");
+    assert_eq!(again["cached"], true, "{again}");
+}

@@ -192,8 +192,8 @@ JSON: the same, with the tracker's own first line, masked. The rest of Flottille
 
 **On demand**: `workspace.ticket {project, name}` (and so `flottille workspace show` and the
 window's `WORKSPACE` section, when a page opens or the ticket is linked or unlinked) and
-`tickets` `show` read it now, one call; a workspace keeps only the reference, and what it shows
-is as fresh as the call.
+`tickets` `show` read it now, or give the read of the last 30 s ("How fast it is read" below); a
+workspace keeps only the reference, and what it shows is as fresh as that read.
 
 **And continuously**: every ticket of a declared tracker is read by the daemon on its own,
 incrementally, its title, state, assignee, labels and status kept in the store and its changes
@@ -202,6 +202,24 @@ except those of a Jira work item a subscription follows (below).
 `tickets` `list` and `search` answer from that store once a round of the tracker worked, saying
 its age; `show` reads live and stores what it read; a subscription to a ticket hears those
 events.
+
+## How fast it is read
+
+- **Together.** The check that the program is signed in (to the right site, for Jira) and the read
+  of the ticket itself are asked at the same time, not one after the other. When the check says
+  no, its problem is the one said and nothing of what the tracker answered is shown, as before;
+  the ticket was asked of the tracker meanwhile, which used to be avoided and is not now (a
+  Jira work item is still checked to come from the declared site).
+- **Given again for 30 s.** The daemon keeps the last read of each ticket, by project and key,
+  and gives it to the next `tickets` `show` of it and to `workspace.ticket` (so to the window's
+  session link, and to linking a ticket then opening its page), saying how old it is on `show`
+  (`(as read 12 s ago; "fresh": true reads it again)`) and by `read_at` in `workspace.ticket`.
+  `fresh: true` and `detail: full` read it again, and keep what they read. A read that fails is
+  never kept. A write through Flottille (`tickets` `create`, `comment`, `edit`, `close`, `reopen`,
+  `status`) drops everything kept. A subscription's own reads never use it.
+
+[`forges.md`](forges.md), "How fast `forge show` is read", has the same for pull requests and the
+developer log's `reads`.
 
 ## The protocol and the command line
 

@@ -32,7 +32,9 @@ const TITLE: &str = "Write a README that says what the project is for and how to
 const SLOW_MS: u64 = 3000;
 
 fn user() -> User {
-    User::with_fake_agent().with_fake_gh()
+    User::with_fake_agent()
+        .with_fake_gh()
+        .with_env("FLOTTILLE_TEST_CLOCK", "1")
 }
 
 fn eventually(what: &str, check: impl Fn() -> bool) {
@@ -335,6 +337,9 @@ fn the_whole_workspace_and_runs_sections_wait_as_skeletons_before_their_first_an
 fn a_failed_part_says_why_in_place_of_its_skeleton(cx: &mut TestAppContext) {
     let user = user();
     let lead = lead(&user);
+    // Linking the ticket read it, and a read is given again for 30 s (`docs/tickets.md`): the
+    // window opens later than that.
+    user.call("test.advance", json!({"ms": 31_000})).unwrap();
     let (shell, cx) = open(&user, &lead, (1500, Some("HTTP 502: Bad Gateway")), cx);
 
     until(&shell, cx, "the repository in the rail", |cx| {
