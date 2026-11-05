@@ -42,6 +42,9 @@
 //! API says `ref_name`; seen with v0.37.0), `steps` the `steps` of `bkt pipeline view <build>
 //! --json` and `logs` what `bkt pipeline logs <build> [--step <uuid>]` prints (the last step's by
 //! default), and `fail` makes every call on that repository end with 1, saying its text.
+//! `read_delay_ms` makes every call but `context list` wait that long first, as a slow network
+//! does; each record in `received.jsonl` then also holds `at`, the milliseconds since the epoch
+//! the call started at, so that a test sees which calls ran together.
 //! `pipeline_fail` makes `pipeline list` alone fail that way, and `checks_fail`
 //! (`{"acme/api": {"12": "Error: 404 Not Found"}}`) `pr checks` of that pull request alone.
 //!
@@ -102,7 +105,10 @@ fn main() {
         .expect("the record");
     // One `write` of the whole line: `writeln!` on a `File` writes the JSON piece by piece, and
     // the pieces of two processes appending together would mix (#325).
-    let line = format!("{}\n", json!({"args": args, "env": env}));
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_millis() as u64);
+    let line = format!("{}\n", json!({"args": args, "env": env, "at": at}));
     record.write_all(line.as_bytes()).expect("the record");
     let script: Value = std::fs::read_to_string(dir.join("script.json"))
         .ok()
@@ -122,6 +128,13 @@ fn contexts(script: &Value) -> Vec<Value> {
 /// A script's `delay_ms` makes the sign-in check slow, as a program that hangs on the network.
 fn wait(script: &Value) {
     if let Some(ms) = script["delay_ms"].as_u64() {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
+/// A script's `read_delay_ms` makes every read slow, as a network does.
+fn wait_to_read(script: &Value) {
+    if let Some(ms) = script["read_delay_ms"].as_u64() {
         std::thread::sleep(std::time::Duration::from_millis(ms));
     }
 }
@@ -169,6 +182,7 @@ fn answer(script: &Value, args: &[String]) -> i32 {
         );
         return 1;
     };
+    wait_to_read(script);
     let cloud = context["host"] == "bitbucket.org";
     let (owner_flag, owner_key) = match cloud {
         true => ("--workspace", "workspace"),

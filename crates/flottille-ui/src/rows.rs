@@ -15,6 +15,7 @@ use gpui_kit::{
 };
 
 use crate::color::mix;
+use crate::cut::tipped_when_cut;
 use crate::icons::{Icon, icon};
 use crate::interact::{choose, fade, feel, wire, wire_with};
 use crate::listing::{Item, Placement};
@@ -202,13 +203,19 @@ impl RenderOnce for TreeRow {
             TreeLevel::Workspace => row = row.child(icon(Icon::Branch).text_color(p.faint)),
             TreeLevel::Project | TreeLevel::Session => {}
         }
-        let title = div()
-            .flex_1()
-            .min_w_0()
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .text_ellipsis()
-            .child(self.title.clone());
+        let title = tipped_when_cut(
+            div()
+                .id(ElementId::Name(format!("{}-title", self.id).into()))
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child(self.title.clone()),
+            self.title.clone(),
+            window,
+            cx,
+        );
         let trailing = self
             .trailing
             .map(|trailing| div().flex_none().flex().items_center().child(trailing));
@@ -559,7 +566,9 @@ impl RenderOnce for ListRow {
                     .children(self.leading),
             )
             .child({
+                let mut whole = self.title.clone();
                 let name = div()
+                    .id(ElementId::Name(format!("{}-title", self.id).into()))
                     .font_weight(FontWeight::MEDIUM)
                     .text_ellipsis()
                     .overflow_hidden()
@@ -583,12 +592,14 @@ impl RenderOnce for ListRow {
                                 })
                                 .collect();
                             let text: String = pieces.into_iter().map(|(piece, _)| piece).collect();
+                            whole = text.clone().into();
                             StyledText::new(text)
                                 .with_highlights(marks)
                                 .into_any_element()
                         }
                         None => self.title.clone().into_any_element(),
                     });
+                let name = tipped_when_cut(name, whole, window, cx);
                 let title = div()
                     .flex()
                     .items_baseline()
@@ -602,7 +613,7 @@ impl RenderOnce for ListRow {
                     });
                 let mono_line = self.mono_line;
                 let line = self.line.map(|line| {
-                    div()
+                    let said = div()
                         .id(ElementId::Name(format!("{}-line", self.id).into()))
                         .aria_label(line.clone())
                         .text_size(px(12.5))
@@ -611,8 +622,8 @@ impl RenderOnce for ListRow {
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .text_ellipsis()
-                        .child(line)
-                        .test_support()
+                        .child(line.clone());
+                    tipped_when_cut(said, line, window, cx)
                 });
                 div()
                     .flex_1()

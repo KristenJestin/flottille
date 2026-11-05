@@ -1711,10 +1711,15 @@ fn acli_signed_in_to_another_site_reads_nothing_for_a_listing_a_search_or_a_show
             answer.text
         );
     }
+    // A list and a search ask nothing more; a show asks the work item with the check, and shows
+    // nothing of it.
     assert!(
-        user.acli_received()
-            .iter()
-            .all(|call| call["args"] == json!(["jira", "auth", "status"])),
+        user.acli_received().iter().all(|call| {
+            call["args"] == json!(["jira", "auth", "status"])
+                || call["args"].as_array().is_some_and(|args| {
+                    args.starts_with(&[json!("jira"), json!("workitem"), json!("view")])
+                })
+        }),
         "{:?}",
         user.acli_received()
     );
