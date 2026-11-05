@@ -1527,11 +1527,14 @@ pub(crate) async fn create_ticket(
     body: &str,
 ) -> Result<Key, String> {
     let args = json!({"action": "create", "title": title, "body": body});
-    let said = written_for_user(daemon, project, args).await?;
+    let said = written_for_user(daemon, project, args)
+        .await
+        .map_err(|why| format!("no ticket was created: {why}"))?;
     // Both trackers' answers end with the new ticket's link, whose last part is its key.
     let last = said.trim().rsplit('/').next().unwrap_or_default();
-    accepted(project, last)
-        .map_err(|_| format!("the ticket was opened, and its key could not be read: {said}"))
+    accepted(project, last).map_err(|_| {
+        "a ticket was opened but its key could not be read: link it with `spec link`".to_owned()
+    })
 }
 
 /// `acli <args>` for a write, or a search a write needs: what it printed, or why it failed,

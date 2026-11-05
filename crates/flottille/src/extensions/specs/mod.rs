@@ -92,6 +92,11 @@ pub const EXTENSION: Extension = Extension {
     -- When the user posted the comment of where an internal spec departs from its ticket.
     ALTER TABLE ext_specs_specs ADD COLUMN departures_posted_at INTEGER;
     ",
+        "
+    -- When the comment of the departures was posted on this ticket: a post that failed on one of
+    -- a spec's tickets is not made again on those it reached.
+    ALTER TABLE ext_specs_tickets ADD COLUMN departures_posted_at INTEGER;
+    ",
     ],
     methods: Methods {
         prefix: "spec",
@@ -1582,40 +1587,55 @@ fn record_write(
     Ok(spec.to_json())
 }
 
+/// What became of a write to the spec's tickets: see `record_write`.
+type Written = (TicketWrite, String, Option<String>, Vec<(String, String)>);
+
+/// What the tracker holds of `key` now, to keep as its last read; what was sent when it cannot be
+/// read again.
+async fn held(project: &Project, key: &flottille_core::ticket::Key, sent: &str) -> String {
+    match tickets::read(project, key).await {
+        Ok(read) => read_print(&read.description),
+        Err(_) => sent.to_owned(),
+    }
+}
+
 /// The spec written to its tickets, in the mode "the ticket is the spec", at its Ready or when
 /// the user chose to overwrite: each ticket is read again first, and when one of them is no longer
 /// as Flottille last read or wrote it, nothing is written and the user chooses (unless they chose
-/// to overwrite). A spec with no ticket yet creates it. The spec stays Ready whatever happens.
+/// to overwrite). A spec with no ticket yet creates it. The spec stays Ready whatever happens, and
+/// whatever fails is the write's state, never an error of the call.
 async fn to_ticket(
     daemon: &Arc<Daemon>,
     id: u64,
     overwrite: bool,
 ) -> std::result::Result<Value, Failure> {
+    let (state, said, created, reads) = match write_to_tickets(daemon, id, overwrite).await {
+        Ok(written) => written,
+        Err(why) => (TicketWrite::Failed, why.message, None, Vec::new()),
+    };
+    record_write(daemon, id, (state, said), created.as_deref(), &reads)
+}
+
+async fn write_to_tickets(
+    daemon: &Arc<Daemon>,
+    id: u64,
+    overwrite: bool,
+) -> std::result::Result<Written, Failure> {
     let (spec, project) = active_spec(daemon, id)?;
     let body = markdown(&spec);
     let printed = written_print(&body);
     if spec.tickets.is_empty() {
-        return match tickets::create_ticket(daemon, &project, &spec.title, &body).await {
-            Ok(key) => {
-                let ticket = key.text();
-                let reads = [(ticket.clone(), printed)];
-                let said = format!("written to {ticket}, created with the spec");
-                record_write(
-                    daemon,
-                    id,
-                    (TicketWrite::Written, said),
-                    Some(&ticket),
-                    &reads,
-                )
-            }
-            Err(why) => record_write(
-                daemon,
-                id,
-                (TicketWrite::Failed, format!("no ticket was created: {why}")),
-                None,
-                &[],
-            ),
-        };
+        return Ok(
+            match tickets::create_ticket(daemon, &project, &spec.title, &body).await {
+                Ok(key) => {
+                    let ticket = key.text();
+                    let reads = vec![(ticket.clone(), held(&project, &key, &printed).await)];
+                    let said = format!("written to {ticket}, created with the spec");
+                    (TicketWrite::Written, said, Some(ticket), reads)
+                }
+                Err(why) => (TicketWrite::Failed, why, None, Vec::new()),
+            },
+        );
     }
     let last = daemon.write(|store| {
         let space = store.space(EXTENSION.name)?;
@@ -1633,33 +1653,44 @@ async fn to_ticket(
         keys.push((ticket.clone(), key));
     }
     if !overwrite {
-        let mut changed = Vec::new();
+        let (mut changed, mut unread) = (Vec::new(), Vec::new());
         for (ticket, key) in &keys {
             let read = match tickets::read(&project, key).await {
                 Ok(read) => read,
                 Err(why) => {
                     let said = format!("{ticket} could not be read: {why}");
-                    return record_write(daemon, id, (TicketWrite::Failed, said), None, &[]);
+                    return Ok((TicketWrite::Failed, said, None, Vec::new()));
                 }
             };
             let was = last
                 .iter()
                 .find(|(t, _)| t == ticket)
                 .and_then(|(_, p)| p.as_deref());
-            if was != Some(read_print(&read.description).as_str()) {
-                changed.push(ticket.clone());
+            match was {
+                None => unread.push(ticket.clone()),
+                Some(was) if was != read_print(&read.description) => changed.push(ticket.clone()),
+                Some(_) => {}
             }
         }
+        let mut said = Vec::new();
         if !changed.is_empty() {
-            let said = format!(
-                "{} changed on its tracker since Flottille last read it: nothing was written; take \
-                 the change into the spec, or write over it",
+            said.push(format!(
+                "{} changed on its tracker since Flottille last read it",
                 changed.join(", ")
+            ));
+        }
+        if !unread.is_empty() {
+            said.push(format!("Flottille has not read {} yet", unread.join(", ")));
+        }
+        if !said.is_empty() {
+            let said = format!(
+                "{}: nothing was written; take the ticket's text into the spec, or write over it",
+                said.join("; ")
             );
-            return record_write(daemon, id, (TicketWrite::Changed, said), None, &[]);
+            return Ok((TicketWrite::Changed, said, None, Vec::new()));
         }
     }
-    let mut written = Vec::new();
+    let mut written: Vec<(String, String)> = Vec::new();
     for (ticket, key) in &keys {
         if let Err(why) = tickets::edit_description(daemon, &project, key, &body).await {
             let done = match written.is_empty() {
@@ -1668,18 +1699,18 @@ async fn to_ticket(
                     " ({} written)",
                     written
                         .iter()
-                        .map(|(t, _): &(String, String)| t.as_str())
+                        .map(|(t, _)| t.as_str())
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
             };
             let said = format!("{ticket}{done}: {why}");
-            return record_write(daemon, id, (TicketWrite::Failed, said), None, &written);
+            return Ok((TicketWrite::Failed, said, None, written));
         }
-        written.push((ticket.clone(), printed.clone()));
+        written.push((ticket.clone(), held(&project, key, &printed).await));
     }
     let said = format!("written to {}", spec.tickets.join(", "));
-    record_write(daemon, id, (TicketWrite::Written, said), None, &written)
+    Ok((TicketWrite::Written, said, None, written))
 }
 
 /// `spec.ticket {spec, choice}`: the user's choice once the ticket changed since Flottille last
@@ -1778,7 +1809,18 @@ async fn departures(daemon: Arc<Daemon>, asked: Departures) -> std::result::Resu
             spec.tickets.join(", ")
         )));
     }
-    for ticket in &spec.tickets {
+    let posted: Vec<String> = daemon.write(|store| {
+        let space = store.space(EXTENSION.name)?;
+        let mut statement = space.tables().prepare(
+            "SELECT ticket FROM ext_specs_tickets \
+             WHERE spec = ?1 AND departures_posted_at IS NOT NULL",
+        )?;
+        let posted = statement
+            .query_map([id], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok((posted, None::<Event>))
+    })?;
+    for ticket in spec.tickets.iter().filter(|t| !posted.contains(t)) {
         let key = tickets::accepted(&project, ticket).map_err(Failure::refused)?;
         tickets::post_comment(&daemon, &project, &key, &spec.content.departures)
             .await
@@ -1788,6 +1830,16 @@ async fn departures(daemon: Arc<Daemon>, asked: Departures) -> std::result::Resu
                     format!("the departures were not posted on {ticket}: {why}"),
                 )
             })?;
+        daemon.write(|store| {
+            let space = store.space(EXTENSION.name)?;
+            space.tables().execute(
+                "UPDATE ext_specs_tickets SET departures_posted_at = ?3 \
+                 WHERE spec = ?1 AND ticket = ?2",
+                params![id, ticket, now_ms()],
+            )?;
+            space.commit()?;
+            Ok(((), None::<Event>))
+        })?;
     }
     let spec = daemon.write(|store| {
         let space = store.space(EXTENSION.name)?;

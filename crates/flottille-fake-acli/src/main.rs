@@ -17,6 +17,7 @@
 //!   again at every call;
 //! - `received.jsonl`, written by the fake: one `{"args": [...], "env": {...}}` per call;
 //! - `moved.json`, written by the fake: the status each moved work item is in;
+//! - `edited.json`, written by the fake: the description each edited work item holds (below);
 //! - `posted.json`, written by the fake: the comments `comment create` added to each work item.
 //!
 //! # The script
@@ -46,7 +47,9 @@
 //! the work items of the signed-in user.
 //!
 //! The writes change nothing but the status a transition moves and the comments a `comment
-//! create` adds: the test reads them in the record.
+//! create` adds: the test reads them in the record. One more script key, `links_lose_their_url:
+//! true`, makes an `edit --description` change what the next views show, as Jira's document format
+//! does: the text written, each Markdown link `[text](url)` kept as its `text` alone.
 //!
 //! - `acli jira workitem create --project P --summary S … --json` prints `{"key": …}`, the
 //!   script's `created` (`P-1` without it); without `--project` or `--summary` it ends with 2.
@@ -140,6 +143,11 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
                     if let Some(status) = moved.get(*key) {
                         item["fields"]["status"]["name"] = status.clone();
                     }
+                    if let Some(text) = edited(dir).get(*key).and_then(Value::as_str) {
+                        item["fields"]["description"] = json!({"type": "doc", "version": 1,
+                            "content": [{"type": "paragraph",
+                                "content": [{"type": "text", "text": text}]}]});
+                    }
                     add_posted(dir, script, key, &mut item);
                     only_asked(rest, &mut item);
                     println!("{item}");
@@ -206,7 +214,21 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
             }
             done
         }
-        ["jira", "workitem", "edit", rest @ ..] if rest.contains(&"--yes") => known(script, rest),
+        ["jira", "workitem", "edit", rest @ ..] if rest.contains(&"--yes") => {
+            let done = known(script, rest);
+            if let (0, true, Some(key), Some(text)) = (
+                done,
+                script["links_lose_their_url"] == true,
+                value(rest, "--key"),
+                value(rest, "--description"),
+            ) {
+                let mut all = edited(dir);
+                all.insert(key.to_owned(), Value::from(without_urls(text)));
+                std::fs::write(dir.join("edited.json"), Value::from(all).to_string())
+                    .expect("the edits");
+            }
+            done
+        }
         ["jira", "workitem", "transition", rest @ ..] if rest.contains(&"--yes") => {
             let (Some(key), Some(status)) = (value(rest, "--key"), value(rest, "--status")) else {
                 return not_run(&words);
@@ -248,6 +270,36 @@ fn moved(dir: &Path) -> Map<String, Value> {
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default()
+}
+
+/// The descriptions `edit` changed, by work item: `edited.json`, written by the fake.
+fn edited(dir: &Path) -> Map<String, Value> {
+    std::fs::read_to_string(dir.join("edited.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// `text` with each Markdown link `[label](url)` reduced to its label.
+fn without_urls(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        let linked = rest[open..].find("](").and_then(|middle| {
+            let close = rest[open + middle..].find(')')?;
+            Some((open + middle, open + middle + close))
+        });
+        match linked {
+            Some((middle, close)) => {
+                out.push_str(&rest[..open]);
+                out.push_str(&rest[open + 1..middle]);
+                rest = &rest[close + 1..];
+            }
+            None => break,
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The comments `comment create` added, by work item: `posted.json`, written by the fake.

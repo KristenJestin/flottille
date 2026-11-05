@@ -207,7 +207,11 @@ fn make_done(user: &User, spec: u64) {
 #[test]
 fn ready_writes_the_spec_to_its_ticket_recorded_as_flottille_s() {
     let user = jira_user();
-    ticket_says(&user, "Users want to sign in without a password.");
+    // The fake keeps what is written, as the tracker does.
+    user.acli_script(json!({
+        "items": {"ABC-7": work_item("ABC-7", "Users want to sign in without a password.")},
+        "links_lose_their_url": true
+    }));
     let (spec, _) = from_ticket(&user, "ticket");
     complete(&user, spec);
     assert!(
@@ -243,10 +247,8 @@ fn ready_writes_the_spec_to_its_ticket_recorded_as_flottille_s() {
         "recorded by the ticket's key, not by its text alone"
     );
 
-    // What was written is the last read: written again at the next Ready, nobody having changed
-    // it (the tracker now holds what was written).
-    let written = description.to_owned();
-    ticket_says(&user, &written);
+    // What the tracker holds after the write is the last read: written again at the next Ready,
+    // nobody having changed it.
     user.call("spec.draft", json!({"spec": spec})).unwrap();
     let again = user.call("spec.ready", json!({"spec": spec})).unwrap();
     assert_eq!(again["ticket_write"]["state"], "written", "{again}");
@@ -579,4 +581,161 @@ fn a_ticket_that_changes_tells_the_session_working_on_its_spec() {
     assert!(told.contains("nothing was applied"), "{told}");
     // Nothing of the spec moved.
     assert_eq!(show(&user, spec)["status"], "draft");
+}
+
+/// How many comments the fake `acli` was asked to create on `key`.
+fn comments_on(user: &User, key: &str) -> usize {
+    user.acli_received()
+        .iter()
+        .filter(|call| call["args"][2] == "comment" && call["args"][5] == key)
+        .count()
+}
+
+#[test]
+fn the_last_read_is_what_the_tracker_holds_not_what_was_sent() {
+    let user = jira_user();
+    // Jira keeps a link as its text alone.
+    user.acli_script(json!({
+        "items": {"ABC-7": work_item("ABC-7", "Users want to sign in without a password.")},
+        "links_lose_their_url": true
+    }));
+    let (spec, _) = from_ticket(&user, "ticket");
+    complete(&user, spec);
+    user.call(
+        "spec.write",
+        json!({"spec": spec, "section": "notes",
+            "content": "See [the RFC](https://example.com/rfc) for the format."}),
+    )
+    .unwrap();
+
+    let first = user.call("spec.ready", json!({"spec": spec})).unwrap();
+    assert_eq!(first["ticket_write"]["state"], "written", "{first}");
+    user.call("spec.draft", json!({"spec": spec})).unwrap();
+    let again = user.call("spec.ready", json!({"spec": spec})).unwrap();
+
+    assert_eq!(
+        again["ticket_write"]["state"], "written",
+        "nobody changed the ticket: {again}"
+    );
+    assert_eq!(acli_writes(&user).len(), 2);
+}
+
+#[test]
+fn a_departures_post_that_failed_on_one_ticket_is_not_posted_again_on_the_others() {
+    let user = jira_user();
+    let item = work_item("ABC-7", "Users want to sign in without a password.");
+    // ABC-8 is unknown to the fake: a comment on it is refused.
+    user.acli_script(json!({"items": {"ABC-7": item}}));
+    let (spec, writer) = from_ticket(&user, "internal");
+    complete(&user, spec);
+    user.call("spec.link", json!({"spec": spec, "ticket": "ABC-8"}))
+        .unwrap();
+    let departures = "The ticket asks for a passkey too: left out, decided in D1.";
+    let answer = writer.call(
+        "spec",
+        json!({"action": "write", "spec": spec, "section": "departures", "content": departures}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    user.call("spec.ready", json!({"spec": spec})).unwrap();
+    make_done(&user, spec);
+
+    let failed = user
+        .call("spec.departures", json!({"spec": spec, "post": true}))
+        .unwrap_err();
+
+    assert!(failed.1.contains("ABC-8"), "{failed:?}");
+    assert!(show(&user, spec)["departures_posted_at"].is_null());
+    assert_eq!(comments_on(&user, "ABC-7"), 1);
+    user.acli_script(json!({"items": {
+        "ABC-7": work_item("ABC-7", "x"), "ABC-8": work_item("ABC-8", "y")}}));
+    let posted = user
+        .call("spec.departures", json!({"spec": spec, "post": true}))
+        .unwrap();
+    assert!(posted["posted_at"].is_u64(), "{posted}");
+    assert_eq!(
+        comments_on(&user, "ABC-7"),
+        1,
+        "ABC-7 is not commented twice"
+    );
+    assert_eq!(comments_on(&user, "ABC-8"), 2, "one refused, one posted");
+}
+
+#[test]
+fn a_ticket_the_tracker_no_longer_takes_is_a_failed_write_not_an_error() {
+    let user = jira_user();
+    ticket_says(&user, "Users want to sign in without a password.");
+    let (spec, _) = from_ticket(&user, "ticket");
+    complete(&user, spec);
+    // The user switches the project's tracker away, after the spec was linked.
+    user.git(
+        &user.path("work/app"),
+        &["remote", "add", "origin", "git@github.com:acme/api.git"],
+    );
+    user.call(
+        "project.set_settings",
+        json!({"name": "app",
+            "repositories": [{"path": ".",
+                "forge": {"kind": "github", "repository": "acme/api"}}],
+            "tracker": {"kind": "github", "repository": "."}}),
+    )
+    .unwrap();
+
+    let ready = user.call("spec.ready", json!({"spec": spec})).unwrap();
+
+    assert_eq!(ready["status"], "ready", "{ready}");
+    assert_eq!(ready["ticket_write"]["state"], "failed", "{ready}");
+    let problem = ready["ticket_write"]["problem"].as_str().unwrap();
+    assert!(problem.contains("ABC-7"), "{problem}");
+    assert!(acli_writes(&user).is_empty());
+}
+
+#[test]
+fn a_ticket_flottille_never_read_is_said_unread_not_changed() {
+    let user = jira_user();
+    user.acli_script(json!({"items": {"ABC-8": work_item("ABC-8", "Something.")}}));
+    let made = user
+        .call(
+            "spec.new",
+            json!({"project": "app", "title": "Other", "mode": "ticket", "tickets": ["ABC-8"]}),
+        )
+        .unwrap();
+    let spec = made["spec"].as_u64().unwrap();
+    complete(&user, spec);
+
+    let ready = user.call("spec.ready", json!({"spec": spec})).unwrap();
+
+    assert_eq!(ready["ticket_write"]["state"], "changed", "{ready}");
+    let problem = ready["ticket_write"]["problem"].as_str().unwrap();
+    assert!(
+        problem.contains("Flottille has not read ABC-8 yet"),
+        "{problem}"
+    );
+    assert!(!problem.contains("changed on its tracker"), "{problem}");
+    assert!(acli_writes(&user).is_empty());
+}
+
+#[test]
+fn a_created_ticket_whose_key_cannot_be_read_says_to_link_it() {
+    let user = jira_user();
+    user.acli_script(json!({"created": "not a key"}));
+    let made = user
+        .call(
+            "spec.new",
+            json!({"project": "app", "title": "Sign in with a link", "mode": "ticket"}),
+        )
+        .unwrap();
+    let spec = made["spec"].as_u64().unwrap();
+    complete(&user, spec);
+
+    let ready = user.call("spec.ready", json!({"spec": spec})).unwrap();
+
+    assert_eq!(ready["ticket_write"]["state"], "failed", "{ready}");
+    let problem = ready["ticket_write"]["problem"].as_str().unwrap();
+    assert!(
+        problem.contains(
+            "a ticket was opened but its key could not be read: link it with `spec link`"
+        ),
+        "{problem}"
+    );
+    assert!(!problem.contains("no ticket was created"), "{problem}");
 }
