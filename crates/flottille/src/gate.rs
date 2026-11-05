@@ -350,7 +350,7 @@ pub fn decide(call: &Call) -> Verdict {
         // The task as the write leaves it: a line it already held runs in the folder the write
         // may move it to.
         let other_lines = match (call.tool, call.command) {
-            ("tasks", Some((_, task))) => task.other_lines(),
+            ("tasks" | "services", Some((_, task))) => task.other_lines(),
             _ => Vec::new(),
         };
         for line in other_lines {
@@ -405,6 +405,13 @@ pub fn decide(call: &Call) -> Verdict {
             .verdict(Kind::Action)
         }
         "run" => run(call),
+        // A service is shared by every project: only the user stops it, in every mode.
+        "services" if call.args["action"] == "stop" => Found {
+            base: vec![crate::services::stop_reason(call.args)],
+            judge: Vec::new(),
+        }
+        .verdict(Kind::Action),
+        "services" if call.args["action"] == "start" => run(call),
         tool if FILES.contains(&tool) => files(call),
         // Reads, the tree's tools, the outputs of the agent's own runs.
         _ => Verdict::Allow,
@@ -1062,16 +1069,19 @@ fn run(call: &Call) -> Verdict {
         }
     }
     if let Some((name, command)) = call.command {
+        // A service runs in its own folder, never the project's.
+        let service = call.tool == "services";
+        let what = if service { "service" } else { "task" };
         if command.ask_before_running {
-            found.judge(format!("the task {name} is marked to ask before it runs"));
+            found.judge(format!("the {what} {name} is marked to ask before it runs"));
         }
         if let Some(shell) = call.words.first().filter(|w| SHELLS.contains(&base(w))) {
             found.judge(format!(
-                "the task {name} runs a shell ({}), whose line the gate does not read",
+                "the {what} {name} runs a shell ({}), whose line the gate does not read",
                 base(shell)
             ));
         }
-        if main {
+        if main && !service {
             found.judge(format!(
                 "the task {name} runs in the project folder (main), the user's own \
                  checkout, not in a workspace"
@@ -3857,6 +3867,7 @@ mod tests {
                 read_only: false,
                 ask_before_running: false,
                 added_by: None,
+                needs: Box::default(),
                 ready: None,
                 url: None,
             };

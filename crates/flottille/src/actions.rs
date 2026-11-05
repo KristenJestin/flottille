@@ -66,6 +66,8 @@ struct TasksCall {
     ready: Option<Option<Box<Ready>>>,
     #[serde(default, deserialize_with = "present")]
     url: Option<Option<Box<TaskUrl>>>,
+    /// The services it needs, all of them; left out: unchanged.
+    needs: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -174,6 +176,7 @@ pub fn family(tool: &str, args: &Value) -> Option<&'static str> {
         ("project", "set_rules") => Some("rules"),
         ("workspace", "create" | "prepare") => Some("workspace"),
         ("workspace", "link_ticket") => Some("ticket"),
+        ("services", "add" | "edit" | "remove") => Some("services"),
         ("workspace", "rename_branch") => Some("branch"),
         _ => None,
     }
@@ -192,6 +195,9 @@ pub fn asked(family: &str) -> String {
              judged as its run"
         }
         "ticket" => "it links a workspace to a ticket, which its agents then read",
+        "services" => {
+            "it adds, changes or removes a service of the machine, which every project shares"
+        }
         "branch" => "it renames the branch of a workspace, which its pull requests then follow",
         _ => "it changes the project's settings",
     }
@@ -204,6 +210,7 @@ pub fn line_of<'a>(tool: &str, args: &'a Value) -> Option<&'a str> {
     match (tool, args["action"].as_str()?) {
         ("tasks", "add" | "edit") => args["line"].as_str(),
         ("setup", "add" | "edit") => args["step"]["run"].as_str(),
+        ("services", "add" | "edit") => args["line"].as_str(),
         _ => None,
     }
 }
@@ -234,6 +241,7 @@ pub fn sets(tasks: &BTreeMap<String, Task>, tool: &str, args: &Value) -> Option<
                     read_only: false,
                     ask_before_running: false,
                     added_by: None,
+                    needs: Box::default(),
                     ready: None,
                     url: None,
                 },
@@ -258,6 +266,7 @@ pub fn sets(tasks: &BTreeMap<String, Task>, tool: &str, args: &Value) -> Option<
                         read_only: false,
                         ask_before_running: false,
                         added_by: None,
+                        needs: Box::default(),
                         ready: None,
                         url: None,
                     },
@@ -336,6 +345,17 @@ pub async fn prepared(
         let mut says = posted_says(args);
         says.extend(forge_says(daemon, grant, args));
         return Ok(says);
+    }
+    if tool == "services" {
+        return crate::services::says(daemon, &grant.place, is_root(daemon, grant), args);
+    }
+    if tool == "run" {
+        return Ok(crate::services::starts_said(
+            daemon,
+            &grant.place,
+            tool,
+            args,
+        ));
     }
     if !TOOLS.contains(&tool) {
         return Ok(Vec::new());
@@ -691,6 +711,9 @@ fn task_said(task: &Task) -> String {
     if let Some(url) = &task.url {
         notes.push(url.said());
     }
+    if !task.needs.is_empty() {
+        notes.push(format!("needs the services {}", task.needs.join(", ")));
+    }
     match notes.is_empty() {
         true => format!("`{}`", task.line),
         false => format!("`{}` ({})", task.line, notes.join(", ")),
@@ -739,6 +762,7 @@ fn tasks_says(project: &Project, call: &TasksCall) -> Result<Vec<String>, Outcom
                 read_only: false,
                 ask_before_running: false,
                 added_by: None,
+                needs: Box::default(),
                 ready: None,
                 url: None,
             },
@@ -812,6 +836,9 @@ fn edited(task: &Task, call: &TasksCall) -> Task {
     }
     if let Some(url) = &call.url {
         task.url = url.clone();
+    }
+    if let Some(needs) = &call.needs {
+        task.needs = needs.clone().into();
     }
     task
 }
@@ -1743,6 +1770,7 @@ fn workspace_says(
             let name = named(&call.name, "workspace", action, "login")?;
             let mut says = create_says(
                 daemon,
+                &grant.place,
                 project,
                 name,
                 &call.repositories,
@@ -1825,9 +1853,10 @@ fn workspace_says(
 }
 
 /// What creating a workspace does, in words, or the refusal of one that cannot be made: the
-/// workspace, then each step of the setup it plays.
+/// workspace, then each step of the setup it plays and the services a task's step starts first.
 fn create_says(
     daemon: &Daemon,
+    place: &Place,
     project: &Project,
     name: &str,
     repositories: &Option<Vec<String>>,
@@ -1869,6 +1898,16 @@ fn create_says(
         false => {
             says.push("Its setup then runs, without the gate:".into());
             says.extend(numbered(&project.setup));
+            for (at, step) in project.setup.iter().enumerate() {
+                if let StepKind::Task(task) = step.kind() {
+                    let run = json!({"task": task});
+                    says.extend(
+                        crate::services::starts_said(daemon, place, "run", &run)
+                            .into_iter()
+                            .map(|said| format!("Step {}: {said}", at + 1)),
+                    );
+                }
+            }
         }
     }
     Ok(says)
@@ -1894,7 +1933,7 @@ fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<Strin
             let project = own(daemon, grant)?;
             let repositories: Option<Vec<String>> =
                 serde_json::from_value(args["repositories"].clone()).unwrap_or_default();
-            let mut says = create_says(daemon, &project, name, &repositories, None)?;
+            let mut says = create_says(daemon, &grant.place, &project, name, &repositories, None)?;
             let whose = match root {
                 true => "a session of the user's",
                 false => "a child",

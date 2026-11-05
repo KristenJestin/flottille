@@ -83,6 +83,27 @@ pub fn check_also(template: &str, extra: &[&str]) -> Result<(), String> {
     })
 }
 
+/// Whether every name of `template` is one of `names`, and none of Flottille's: for what runs in
+/// no workspace (a service).
+pub fn check_only(template: &str, names: &[&str]) -> Result<(), String> {
+    walk(template, |piece| match piece {
+        Piece::Name(name) if !names.contains(&name) => Err(match names {
+            [] => {
+                format!("“{{{name}}}” is not a name Flottille fills here: write {{{{ for a brace")
+            }
+            names => format!(
+                "“{{{name}}}” is not a name Flottille fills here: use {}, or {{{{ for a brace",
+                names
+                    .iter()
+                    .map(|name| format!("{{{name}}}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }),
+        _ => Ok(()),
+    })
+}
+
 fn unknown(name: &str, extra: &[&str]) -> String {
     format!(
         "“{{{name}}}” is not a name Flottille fills: use {}, or {{{{ for a brace",
