@@ -583,7 +583,7 @@ reasons.
 
 | Tool | |
 |---|---|
-| `tickets {action, ticket?, workspace?, query?, state?, label?, assignee?, detail?, title?, body?, labels?, reason?, remove_labels?, assignees?, remove_assignees?, status?, project?, type?, events?, from?, minutes?}` | The tickets of the project's tracker, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
+| `tickets {action, ticket?, workspace?, query?, state?, label?, assignee?, detail?, title?, body?, labels?, reason?, remove_labels?, assignees?, remove_assignees?, status?, other?, kind?, comment?, sprint?, project?, type?, events?, from?, minutes?}` | The tickets of the project's tracker, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
 
 - **`list {state?, label?, assignee?}`**: every ticket of a state, in one call, a line each (`-
   #12 open: The login fails [bug] (ana)  <link>`): `state` is `open` (the default), `closed` or
@@ -647,6 +647,17 @@ reasons.
   the title and the body whole, and a long one or one holding a secret is refused or base, as
   for the forge's writes ("The forge"). Locks, a project or a tracker kept read only, are
   planned as their own feature.
+- **Links and comments**: `link_types` (a read, never held) lists the kinds of link the tracker has;
+  `link {ticket, kind, other}` and `unlink {ticket, kind, other}` make and remove a link;
+  `comment_edit {ticket, comment, body}` and `comment_delete {ticket, comment}` change or delete a
+  comment, **only one Flottille recorded as posted by an agent** (`show` with `detail full` gives
+  the id of those, `[comment 10100]`); `sprint {ticket, sprint}` is always refused, saying why. A
+  link reads `ticket kind other`, so the card the user is shown says its direction in words (`ABC-2
+  blocks ABC-1`). `ticket` is required, never the workspace's. On Jira, the kinds are the site's
+  own link types, in the outward or the inward wording; on GitHub, `parent of`, `sub-task of`,
+  `blocks` and `blocked by`, and any other kind is refused, naming why. A kind unknown to the
+  site is refused before anything is asked, naming the ones it has. `show` lists a Jira work
+  item's links ([`tickets.md`](tickets.md), "Links and comments").
 - **`types {project?}`**: the work item types of a Jira project (`acli jira project view --key
   <P> --json`, its `issueTypes`), kept five minutes; `project` is left out when the tracker has
   one. On GitHub it answers that issues have no type. A Jira `create` that `acli` refuses for its

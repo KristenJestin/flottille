@@ -64,12 +64,13 @@ user's), so that the user's own sign-in works; a call is cut after 30 s.
   status`, `acli jira workitem view <KEY> --json --fields summary,status,description,comment`
   (`--fields status` or `--fields comment` alone for the status of a write and the rounds'
   comments), and `acli jira workitem search --jql <JQL> --fields key,summary,status,assignee,labels --json
-  --limit 200`; its writes (`workitem create`, `comment create`, `edit`, `transition`, below) run
+  --limit 200`, `workitem link type --json` and `link list --key <KEY> --json` (the link types and an item's links); its writes (`workitem create`, `comment create`, `comment update`, `comment delete`, `edit`, `transition`, `link create`, `link delete`, below) run
   only for a `tickets` call the gate let through, and the tests look at every call the fake
   received. Of `gh`, the reads are `gh issue view <n> -R github.com/owner/name --json
   number,title,state,body,comments,url` and `gh issue list` (`docs/tools.md`, "The tickets"); its
-  writes (`issue create`, `comment`, `edit`, `close`, `reopen`, and for a status `project list`,
-  `field-list` and `item-edit`) run only for a `tickets` call the gate let through. A key is parsed first, so it is a number or `ABC-123`, and a JQL filter is
+  writes (`issue create`, `comment`, `edit`, `close`, `reopen`, for a status `project list`,
+  `field-list` and `item-edit`, and for links and comments `gh api` on the issue's `sub_issues`,
+  `dependencies/blocked_by` and `issues/comments/<id>`, read first with `gh api` on the issue for its id) run only for a `tickets` call the gate let through. A key is parsed first, so it is a number or `ABC-123`, and a JQL filter is
   quoted, never spliced. A text written is passed as one argument, never through a shell.
 - **Agents never get that sign-in.** An agent's own command runs have the forge tokens emptied and
   `GH_CONFIG_DIR` pointed at an empty folder (`docs/tools.md`), so `gh` has no login there.
@@ -299,6 +300,62 @@ runtime folder that only the user can open (`0700`, the file `0600`), and both a
 base for the gate, and nothing is masked in what is sent); the Markdown parser is the `markdown` crate,
 already in the tree for the window. **The summary, the description and the assignee of `create`
 and `edit` are built in one place** (`work_item_fields`).
+
+### Links and comments
+
+The family of what ties tickets together, and of an agent's own comments (#365). Every write of it
+goes through the gate like the others; `link_types` and what `show` adds are reads.
+
+**A link reads `ticket kind other`**: `{"action": "link", "ticket": "ABC-2", "kind": "blocks",
+"other": "ABC-1"}` is `ABC-2 blocks ABC-1`, and `kind: "is blocked by"` with the two swapped is the
+same link. The gate's card says it in those words (`it links two tickets on the tracker: ABC-2
+blocks ABC-1`), and so does the result, from both ends (`The link was made: ABC-2 blocks ABC-1
+(ABC-1 is blocked by ABC-2).`). `ticket` is always named, never the workspace's, so that a card
+cannot say a link of a ticket it does not name; `other` is a ticket of the same tracker, not the
+ticket itself.
+
+- **On Jira**: `link_types` is `acli jira workitem link type --json`, each type as its outward
+  wording and its inward one (`blocks (is blocked by) [Blocks]`). `link` finds the kind among the
+  outward wordings (or a type's name: `ticket` is on the outward end), then the inward ones (`ticket`
+  is on the inward end), in any case, and runs `acli jira workitem link create --out <the outward
+  item> --in <the inward item> --type <the outward wording> --yes` (`--out` is the item the
+  outward wording applies to: `A blocks B` is out A, in B; the page of `--type` says it accepts the
+  outward descriptions). A kind the site does not have is refused before the user is asked, naming
+  the ones it has (`"devours" is not a link type of example.atlassian.net: its kinds are blocks, is
+  blocked by, relates to, …`). `unlink` reads `acli jira workitem link list --key <ticket> --json`,
+  finds the link to `other` with that wording and deletes it by its id (`link delete --id <id>
+  --yes`, which takes ids and not items); none is refused, saying the item's links. A parent
+  (`parent of`, `sub-task of`) is refused on Jira: `acli jira workitem edit` has no flag for a
+  parent, only `workitem create --parent` has.
+- **On GitHub**: `parent of`, `sub-task of` (also `sub-issue of`), `blocks` and `blocked by`, through
+  `gh api repos/<owner>/<name>/issues/<n>/sub_issues` and `…/dependencies/blocked_by` (a
+  `--method POST`, a `DELETE` to unlink), with the id of the issue that the endpoint takes, read
+  with `gh api repos/<owner>/<name>/issues/<n>`. No other relation exists in its API (a pull
+  request closes an issue with `Closes #n` in its description, which is `forge edit`): the other
+  kinds are refused, naming that.
+- **`show` lists the links** of a Jira work item, after its comments: `Links (3):` and a line each,
+  `- is blocked by ABC-2 (In Progress): Add search`, `- web link: <title> <address>`. A link read
+  that fails is said in its place and the rest is shown. GitHub's sub-issues are not listed yet.
+- **Comments**: `comment_edit` and `comment_delete` change only a comment Flottille recorded as
+  posted by an agent (`posts`, "What Flottille posts is recorded", `forges.md`), found by the id that
+  `show` with `detail full` prints after its author (`[comment 10100]`, GitHub's `issuecomment-501`);
+  any other comment, a person's or another tool's, is refused whatever its author's name, and a
+  comment that cannot be found among the newest ones is said. On Jira, `acli jira workitem comment
+  update --key <K> --id <id> --body-file <file>` (the text as ADF, as for `comment`) and `comment
+  delete --key <K> --id <id>`; on GitHub, `gh api repos/<owner>/<name>/issues/comments/<id>
+  --method PATCH -f body=<text>` and `--method DELETE`. An edit records the id with the new words,
+  so that the comment stays the agent's.
+- **`sprint {ticket, sprint}`** is refused, before anything is asked, saying why: `acli` 1.3.39 has
+  no way to put a work item in a sprint (`workitem edit` has no sprint flag; `acli jira sprint`
+  creates, updates, deletes, views and lists the work items of a sprint; `board list-sprints` lists
+  them), so the user puts it there on the board.
+
+**Assumed, as `acli` prints no sample of it**: `link type --json` an array of `{name, inward,
+outward}` (or Jira's `{"issueLinkTypes": […]}`), `link list --json` an array of Jira's `issuelinks`
+(`{id, type: {name, inward, outward}, inwardIssue | outwardIssue: {key, fields: {summary,
+status}}}`, an `inwardIssue` being the item the listed one blocks, and an `outwardIssue` the one
+that blocks it), a web link `{id, object: {url, title}}`, and comments with their `id` in the view.
+The maintainer checks it on their site; a different shape shows as no link listed.
 
 ### Types and assignment
 
