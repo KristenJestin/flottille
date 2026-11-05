@@ -448,9 +448,11 @@ has no workspace, so its templates fill only `{url}`, in `ready`'s `url` and `li
   same moment share one start, each waiting for it to be ready.
 - **Running outside Flottille.** Before it starts one with a `ready` it can try (an address that
   answers, a command that passes), the daemon tries it once: answered, the service runs outside
-  Flottille (started by hand), nothing is started, and its state says `outside`; listing or showing the services tries it
-  again (5 seconds at most), so that one stopped since is shown stopped. A service with no
-  `ready`, or one that waits for a line of its own output, is started.
+  Flottille (started by hand), nothing is started, and its state says `outside`. Listing or
+  showing the services tries again one whose `ready` is an address (a connection, 5 seconds at
+  most, its `url` given or none), so that one stopped since is shown stopped; a `ready` or `url`
+  command is never run by a read, which no gate judged: such a service is tried at its next
+  start. A service with no `ready`, or one that waits for a line of its own output, is started.
 - **On demand.** Nothing starts with the daemon. A service runs until the user stops it, or an
   agent the user allowed; when the daemon stops, its services stop with it, their process groups
   as a run's are. Stopping a service does not stop what it needs nor what needs it: the state of
@@ -469,17 +471,22 @@ has no workspace, so its templates fill only `{url}`, in `ready`'s `url` and `li
   makes that project's file unreadable until the task's `needs` is changed: the daemon refuses
   such a removal itself (`service.remove`), but not an edit of the file.
 - **Who wrote it, and what an agent's start is judged on.** The daemon keeps, in its store and
-  not in the file, which agent last wrote each service through `services` (and the mode of its
-  tree then); a write of the user (`flottille service`, the window) makes it the user's again,
-  and so is every service written by hand. An agent's `services start` is judged as a run of the
+  not in the file, which agent last wrote each service through `services`; a write of the user
+  (`flottille service`, the window) makes it the user's again, whatever it changed (even
+  `ask_before_running` alone: the user wrote it last, and owns its lines from then), and so is
+  every service written by hand. An agent's `services start` is judged as a run of the
   service's line in its folder. Every service an agent's call starts first (the needs of a task
-  it runs, of a service it starts) that does not run is held when it is marked
-  `ask_before_running`; one an agent wrote has its lines (`line`, `ready`'s and `url`'s
-  `command`) judged in the caller's mode as a run of them in its folder, as is the `ready` and
-  `url` of a service an agent wrote and starts itself. A service the user wrote is not judged
-  again: the user decided what it runs. The request of a held call says the services it starts
-  first, their lines and folders. What the user starts (the Run button, Run again, `service
-  start`, a setup step) is never judged.
+  it runs, of a service it starts, of a task a setup step of a workspace it creates runs) that
+  Flottille does not run is held when it is marked `ask_before_running`; one an agent wrote has
+  its lines (`line`, `ready`'s and `url`'s `command`) judged in the caller's mode as a run of
+  them in its folder, as is the `ready` and `url` of a service an agent wrote and starts itself.
+  One seen running outside Flottille is judged too: it is started if it no longer answers. A
+  service the user wrote is not judged again: the user decided what it runs. The request of a
+  held call says the services it starts first, their lines and folders. The call then starts
+  only the services it was judged on: one that Flottille ran when it was judged and that has
+  stopped since refuses it (`the service S stopped since the call was judged: call again`).
+  What the user starts (the Run button, Run again, `service start`, a setup step of a
+  workspace the user creates) is never judged.
 - **Its folder** is the home when left out: as for any place, the run's output is masked with the
   `.env` files of its folder, those of the home then.
 
