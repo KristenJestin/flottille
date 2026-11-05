@@ -42,6 +42,9 @@ jobs:
   # repositories (see AGENTS.md, Testing). Skipped until the Cargo workspace exists.
   verify:
     runs-on: ubuntu-latest
+    env:
+      # An incremental cache is only written here, never reused by the next run.
+      CARGO_INCREMENTAL: 0
     steps:
       - uses: actions/checkout@v4
       - name: Is there a Cargo workspace yet
