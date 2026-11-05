@@ -61,6 +61,8 @@ pub static PROVIDER: Provider = Provider {
     session_meta,
     // Its permissions, written when its process starts, deny every tool they do not name.
     takes_new_tools: false,
+    // Told the list changed, it lists the tools again since its pull request #5913.
+    lists_tools_again: true,
     unready: providers::ready_here,
     forget_process,
     forget_session,

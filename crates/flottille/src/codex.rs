@@ -60,6 +60,8 @@ pub static PROVIDER: Provider = Provider {
     // The server's `enabled_tools`, set when its thread starts, filter out every tool they do not
     // name.
     takes_new_tools: false,
+    // It keeps the list it first read: `notifications/tools/list_changed` is not taken by default.
+    lists_tools_again: false,
     unready,
     forget_process,
     forget_session,
