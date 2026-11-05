@@ -92,6 +92,10 @@ pub struct Definition {
 /// all of them, since the tool list it speaks of differs by agent only in which tools it holds.
 const GUIDE: &str = include_str!("../roles/guide.md");
 
+/// A `session_send` the judge allowed while the user withdrew the leave it was judged under.
+const LEAVE_WITHDRAWN: &str = "refused: the user withdrew your leave to write to that session \
+    while this message was judged; send it again to ask them";
+
 /// What a call of a session that was replaced is answered.
 /// What a call is answered when its process ended while it was on its way.
 const GONE: &str = "refused: this session's process has ended: its token no longer works; stop \
@@ -2039,10 +2043,22 @@ async fn played_in(
                                 }
                             }
                             Some(judged) if judged.verdict == "allow" => {
-                                verdict = Some("judged");
-                                let approved = Some(gate::Class::Judge);
-                                perform(daemon, grant, tool, args, cancelled, approved, &reads)
-                                    .await
+                                // The judge takes seconds: a leave the user withdrew meanwhile,
+                                // or a session ended, stops the message it was judging.
+                                let lost = (tool == "session_send")
+                                    .then(|| crate::tree::needs_leave(daemon, grant, &args));
+                                match lost {
+                                    Some(Err(why)) => Outcome::Refused(why),
+                                    Some(Ok(true)) => Outcome::Refused(LEAVE_WITHDRAWN.into()),
+                                    _ => {
+                                        verdict = Some("judged");
+                                        let approved = Some(gate::Class::Judge);
+                                        perform(
+                                            daemon, grant, tool, args, cancelled, approved, &reads,
+                                        )
+                                        .await
+                                    }
+                                }
                             }
                             judged => {
                                 let (outcome, number) = approvals::ask(
@@ -2167,8 +2183,12 @@ pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gat
     if tool == "web" {
         return crate::web::classify(daemon, &grant.agent, args);
     }
-    if tool == "session_send" && crate::tree::needs_leave(daemon, grant, args) {
-        return gate::session_leave(grant, args);
+    if tool == "session_send" {
+        match crate::tree::needs_leave(daemon, grant, args) {
+            Err(why) => return gate::Verdict::Deny(why),
+            Ok(true) => return gate::session_leave(grant, args),
+            Ok(false) => {}
+        }
     }
     // A new workspace's launch is classified by its steps below, but its brief is held to the
     // judge's limit like any other launch's.

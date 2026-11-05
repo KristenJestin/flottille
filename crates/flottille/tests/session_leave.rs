@@ -488,3 +488,54 @@ fn the_description_of_session_send_says_the_leave() {
         "{description}"
     );
 }
+
+#[test]
+fn a_leave_withdrawn_while_a_send_is_judged_stops_it() {
+    let user = User::with_fake_agent().with_judge(json!([
+        {"wait": 1500},
+        {"say": "{\"verdict\": \"allow\", \"reason\": \"It fits the task.\"}"}
+    ]));
+    project(&user, "app");
+    let (a, mcp) = root(&user, "app");
+    let (x, _) = root(&user, "app");
+    allowed_pair(&user, &mcp, &x);
+
+    let judged = std::thread::scope(|scope| {
+        let sending = scope.spawn(|| send(&mcp, &x, "Second."));
+        eventually("the judge asked", || judge_prompts(&user) > 0);
+        user.call("leave.withdraw", json!({"writer": a, "session": x}))
+            .unwrap();
+        sending.join().unwrap()
+    });
+
+    assert!(judged.error, "{}", judged.text);
+    assert!(
+        judged.text.contains("withdrew your leave"),
+        "{}",
+        judged.text
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        !written_to(&user, &x)
+            .iter()
+            .any(|body| body.contains("Second.")),
+        "delivered after the withdrawal"
+    );
+}
+
+#[test]
+fn a_send_allowed_after_its_session_ended_says_it_ended() {
+    let user = user();
+    let (a, mcp) = root(&user, "app");
+    let (x, _) = root(&user, "app");
+    allowed_pair(&user, &mcp, &x);
+    set_mode(&user, &a, "ask");
+    let number = held(&send(&mcp, &x, "Third."));
+    user.call("agent.stop", json!({"agent": x})).unwrap();
+
+    let said = answer(&user, number, "approval.approve");
+
+    assert!(said.contains("was not executed"), "{said}");
+    assert!(said.contains(&x) && said.contains(" has ended"), "{said}");
+    assert!(!said.contains("situation changed"), "{said}");
+}

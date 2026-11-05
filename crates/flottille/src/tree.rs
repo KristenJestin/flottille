@@ -604,22 +604,23 @@ pub fn session_of(
 }
 
 /// Whether a `session_send` asks the user's leave: anything but a session the caller started,
-/// the one that started it, or one the user let it write to. A call that names no such session
-/// asks it too, so that nothing passes on a doubt.
-pub fn needs_leave(daemon: &Daemon, grant: &Grant, args: &Value) -> bool {
-    let Ok(asked) = serde_json::from_value::<SessionSend>(args.clone()) else {
-        return true;
+/// the one that started it, or one the user let it write to. A call that names no session it may
+/// write to is the refusal that says why (an ended session, a child), so that nothing passes on a
+/// doubt and the agent reads what changed.
+pub fn needs_leave(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<bool, String> {
+    let asked = serde_json::from_value::<SessionSend>(args.clone())
+        .map_err(|error| format!("refused: session_send: {error}"))?;
+    let caller = match daemon.read(|store| store.agent(&grant.agent)) {
+        Ok(Some(caller)) => caller,
+        Ok(None) => return Err("refused: the agent that writes no longer exists".into()),
+        Err(error) => return Err(format!("failed: {error}")),
     };
-    let Ok(Some(caller)) = daemon.read(|store| store.agent(&grant.agent)) else {
-        return true;
-    };
-    !matches!(
-        session_of(daemon, &caller, &asked),
-        Ok((
-            _,
-            Relation::Started | Relation::StartedYou | Relation::Leave
-        ))
-    )
+    match session_of(daemon, &caller, &asked) {
+        Ok((_, relation)) => Ok(relation == Relation::NoLeave),
+        Err(
+            Outcome::Refused(why) | Outcome::Failed(why) | Outcome::Held(why) | Outcome::Done(why),
+        ) => Err(why),
+    }
 }
 
 /// A session another agent acts on, as the user reads it on a request: its name, and who started
