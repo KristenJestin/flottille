@@ -8,7 +8,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use flottille_core::agent::GateMode;
 use flottille_core::project::{Ready, TaskUrl};
 use flottille_core::run::{Readiness, RunState};
 use flottille_core::service::{self, Service};
@@ -317,13 +316,13 @@ impl Keys {
 }
 
 /// Adds the service (`edit` false) or changes it, and says so (`service.changed`): `by` the agent
-/// that wrote it and the mode of its tree, `None` for the user.
+/// that wrote it, `None` for the user.
 fn put(
     daemon: &Daemon,
     name: &str,
     keys: &Keys,
     edit: bool,
-    by: Option<(&str, GateMode)>,
+    by: Option<&str>,
 ) -> Result<Service, Failure> {
     let services = rewrite(daemon, |services, document| {
         let was = services.get(name);
@@ -385,7 +384,7 @@ fn remove(daemon: &Daemon, name: &str) -> Result<(), Failure> {
     Ok(())
 }
 
-fn written_by(daemon: &Daemon, name: &str, by: Option<(&str, GateMode)>) -> Result<(), Failure> {
+fn written_by(daemon: &Daemon, name: &str, by: Option<&str>) -> Result<(), Failure> {
     daemon
         .write(|store| {
             store
@@ -1215,7 +1214,7 @@ pub async fn tool(daemon: &Arc<Daemon>, grant: &Grant, args: Value, judged: &[St
             &name,
             &call.keys,
             action == "edit",
-            Some((&grant.agent, crate::judge::mode(daemon, &grant.agent))),
+            Some(&grant.agent),
         ) {
             Ok(_) => Outcome::Done(format!(
                 "The service {name} is {}: services {{\"action\": \"start\", \"name\": \
