@@ -396,12 +396,17 @@ list of `{"id", "text"}` (`C1`…), `decisions` of `{"id", "question", "decision
 `C`, `questions` of texts; `asked` the questions the writing session asked, each `{"question" (its
 number), "text", "options", "recommended", "reason", "state" (`open` or `answered`), "decision"
 (the `D` it became, `null` while open)}`; `writer` the agent id of the session that writes it,
-`null` for a spec no session was started for.
+`null` for a spec no session was started for; `ticket_write` what became of its last write to its
+ticket (mode `ticket`), `{"state": "written" | "changed" | "failed", "problem"}` (what it says:
+where it was written, which ticket changed, why it failed), `null` before a Ready wrote or since a
+Back to draft; `departures` an internal spec's draft comment of where it departs from its tickets,
+and `departures_posted_at` when the user posted it, `null` before.
 
 - `spec.new {project, title?, idea?, mode?, tickets?}`: a Draft in the project's `language` (its
   own, else the one of `extensions.toml`, else the user's locale), kept with it. `alone` takes no
   ticket, `internal` and `ticket` one at least; the mode is `alone` without tickets and
-  `internal` with unless given. A ticket is written as the project's tracker takes it
+  `internal` with unless given; a spec `ticket` with no ticket, in a project with a tracker,
+  creates it at its first Ready. A ticket is written as the project's tracker takes it
   (`docs/tickets.md`); one another spec covers is refused, naming that spec. With `idea` ("New
   spec"), the title is the idea's first line unless given, and a `lead` session is started for the
   user in the project's main checkout to write it, its first message Flottille's: the method, then
@@ -419,29 +424,43 @@ number), "text", "options", "recommended", "reason", "state" (`open` or `answere
   question is answered, and the writing session is told with a delivery (`[flottille:specs]`).
   `refused` for a question already answered, and past Draft. Answers the spec.
 - `spec.list {project?, status?}` answers `{"specs"}`, each `{"spec", "project", "title", "mode",
-  "status", "tickets", "questions", "updated_at"}` (`questions` counts the open ones), of the
+  "status", "tickets", "questions", "updated_at", "ticket_write"}` (`questions` counts the open
+  ones), of the
   projects where Specs is active.
 - `spec.show {spec}` answers the spec.
 - `spec.write {spec, section, content}` writes one section whole and answers the spec:
   `problem` and `notes` take a text, `behaviour` a list of `{"id"?, "text"}`, `decisions` of
   `{"id"?, "question", "decision", "set_aside"?}`, `out_of_scope` of `{"text", "reason"?,
   "ticket"?}` (one of the two at least), `verification` of `{"id", "text"}` naming a `C` the spec
-  has, `questions` a list of texts. An item without `id` gets the next number; one with an `id`
+  has, `questions` a list of texts, `departures` a text, for an internal spec only. An item without `id` gets the next number; one with an `id`
   names one the spec has now; an identifier removed is never given again, and a `C` removed takes
   its verification with it.
 - `spec.link {spec, ticket}` and `spec.unlink {spec, ticket}` cover one more ticket, or one no
   more; the last ticket of a spec `internal` or `ticket` stays.
 - `spec.ready {spec}` moves a Draft to Ready: `refused` while a question is open (one of
-  `questions`, or one asked and not answered) or `behaviour` is empty. `spec.draft {spec}` moves a
-  Ready spec back to Draft, and tells its writing session with a delivery.
+  `questions`, or one asked and not answered) or `behaviour` is empty. In the mode `ticket`, it
+  then reads each ticket again and writes the spec to it (`docs/tickets.md`, "What a spec
+  writes"), or creates its ticket when it has none, and answers once that is done: the spec, with
+  `ticket_write`. A ticket changed since Flottille last read it is not written (`changed`); a
+  write that fails says why (`failed`); the spec stays Ready either way. `spec.draft {spec}` moves
+  a Ready spec back to Draft, and tells its writing session with a delivery.
+- `spec.ticket {spec, choice: "take" | "overwrite"}`: the user's choice once `ticket_write` is
+  `changed`. `take` moves the spec back to Draft, keeps the tickets' texts read now as the last
+  read and tells the writing session those texts, framed as data; `overwrite` writes the spec over
+  the change. `refused` for a spec of another mode and while nothing changed; `unavailable` when a
+  ticket cannot be read to be taken, nothing changed. Answers the spec.
+- `spec.departures {spec, post?}`: an internal spec's departures, `{"spec", "departures",
+  "offered" (Done, and something to post), "posted_at", "tickets"}`. With `post`, posts them on each
+  of its tickets as a comment through the tracker's own write, once: `refused` before Done, when
+  empty or already posted, and for a spec of another mode; `unavailable` when the tracker refuses.
 
 **The lock.** Past Draft, every write to a spec (`spec.write`, `spec.link`, `spec.unlink`,
 `spec.answer`, and the `spec` tool's `write` and `ask`) is refused, whoever asks, the user's door
 included: `spec 3 is Ready: it is locked; send it back to Draft first`. Every write passes one
 check, in the same transaction as the write.
 
-`spec.new` and `spec.from_ticket` emit `spec.created`; a write, a question asked or answered and the
-writing session recorded `spec.changed`; `spec.ready` and `spec.draft` `spec.status_changed`. The
+`spec.new` and `spec.from_ticket` emit `spec.created`; a write, a question asked or answered, the
+writing session recorded, a write to the ticket and the departures posted `spec.changed`; `spec.ready` and `spec.draft` `spec.status_changed`. The
 user's door alone reaches these methods: an agent has the `spec` tool (`docs/tools.md`, "Specs"),
 whose actions make no spec Ready nor Draft.
 

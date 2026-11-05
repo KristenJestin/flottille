@@ -164,12 +164,13 @@ A spec was started (`spec.new`, `spec.from_ticket`).
 
 ### `spec.changed`
 
-A Draft was written: a section, its tickets, its questions, or the session that writes it.
+A Draft was written: a section, its tickets, its questions, or the session that writes it; or a
+Ready spec was written to its ticket, or its departures posted.
 
 | Field | |
 |---|---|
 | `spec`, `project` | |
-| `what` | The section written (`problem`, `behaviour`, `decisions`, `out_of_scope`, `notes`, `verification`, `questions`), `tickets`, `asked` (the writing session asked a wave of questions), `answered` (the user answered one: a `D` was added), or `writer` (the session started to write it). |
+| `what` | The section written (`problem`, `behaviour`, `decisions`, `out_of_scope`, `notes`, `verification`, `questions`), `tickets`, `asked` (the writing session asked a wave of questions), `answered` (the user answered one: a `D` was added), `writer` (the session started to write it), `ticket` (a write to its ticket, in the mode `ticket`, with `ticket_write`: `written`, `changed` or `failed`), or `departures` (the user posted them). |
 
 ### `spec.status_changed`
 

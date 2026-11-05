@@ -216,6 +216,32 @@ and a button unlinks it. The form that makes a workspace has an optional ticket 
 typed**: once typing rests (300 ms) it asks `project.ticket` and shows the tracker and the title,
 or why the ticket is not taken, before anything is created.
 
+## What a spec writes
+
+With Specs on (`docs/extensions.md`, "Specs"), the user's gestures on a spec write to the tracker,
+through the same writes as the agents' `tickets` (below: `gh issue edit`, `create`, `comment`;
+`acli jira workitem edit`, `create`, `comment create`), recorded the same way, and nothing of
+Flottille in them: no marker, no footer, no "by an agent". They are the user's gestures, so the
+gate is not asked; nothing else writes a ticket for a spec.
+
+- **The ticket is the spec.** At each Ready the spec's tickets are read again (`gh issue view`,
+  `acli jira workitem view`). Each one whose description is as Flottille last read or wrote it (a
+  hash of its whole text, masked, whitespace and the markup a tracker rewrites left out, as for
+  the record of a post) gets the spec as its description, in Markdown: its sections in their
+  order, `C` and `D` numbered. What was written becomes the last read, and the description is
+  recorded as Flottille's by the ticket's key ([`forges.md`](forges.md), "What Flottille posts is
+  recorded"). A ticket Flottille never read (a spec made with `spec new --ticket`) is not known to
+  be as it last read it: the user chooses, as when it changed. A spec with no ticket creates one
+  with its title, in the tracker's only Jira project (with several, the creation fails and says
+  so). A failure says why on the spec, which stays Ready.
+- **Internal.** The ticket is read, never written. The comment of where the spec departs from it
+  is posted at Done only by the user (`spec.departures {post}`), on each ticket, and recorded by
+  the id GitHub gives it, or by its text on Jira, as an agent's comment is.
+
+The rounds keep no description, so a description a spec wrote emits no event. A comment the user
+posts for a spec is recorded as an agent's is: it shows `posted by an agent`, and `from: people`
+leaves it out.
+
 ## The agent's tool `tickets`
 
 `tickets {action, …}` (`docs/tools.md`, "The tickets"): `list` every ticket of a state in one call

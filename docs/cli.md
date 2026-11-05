@@ -230,7 +230,8 @@ back as it was.
 
 Starts a spec, a Draft, in the project's language (`docs/extensions.md`, "Specs"). The mode is
 `alone` (no ticket) without `--ticket` and `internal` (tickets read, never written) with;
-`ticket` (the ticket is the spec) is chosen. `internal` and `ticket` cover one ticket at least,
+`ticket` (the ticket is the spec) is chosen. `internal` covers one ticket at least, and `ticket`
+too unless the project has a tracker, where its first Ready creates it,
 each written as the project's tracker takes it (`docs/tickets.md`); a ticket that another spec
 covers is refused, naming that spec. `--json` prints the spec.
 
@@ -299,6 +300,27 @@ Covers it no more; the last ticket of a spec `internal` or `ticket` stays.
 
 Says the spec is Ready: refused while it has an open question or no expected behaviour. A Ready
 spec is locked: every write to it is refused, whoever asks.
+
+In the mode `ticket`, Ready then reads each ticket again and writes the spec to its description
+through the tracker's own write (`docs/tickets.md`, "What a spec writes"), unless someone changed it
+since Flottille last read it: nothing is written then, and `spec show` says so with the two ways
+out (`spec ticket`). A spec of that mode with no ticket yet creates it. A write that fails says
+why (`Not written to its ticket: …`), and the spec stays Ready; Back to draft then Ready tries
+again.
+
+### `flottille spec ticket <spec> take|overwrite`
+
+Once a ticket changed since Flottille last read it (mode `ticket`): `take` sends the spec back to
+Draft and tells its writing session the ticket's new text, framed as data, which is now the last
+read; `overwrite` writes the spec over the change. Refused when nothing changed, and for a spec of
+another mode.
+
+### `flottille spec departures <spec> [--post] [--json]`
+
+Where an internal spec departs from its tickets (a case left out, a rule decided otherwise), as
+the writing session keeps it with `spec` `write` `departures`: read by you, not validated. At Done
+it is offered; `--post` posts it on each of the spec's tickets as a comment, once, carrying nothing
+of Flottille. Nothing posts it but you: refused before Done, when empty, and when already posted.
 
 ### `flottille spec draft <spec>`
 
