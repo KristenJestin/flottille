@@ -159,6 +159,7 @@ fn the_exact_claude_code_options_are_sent() {
         "skill_read",
         "workspace",
         "web",
+        "services",
         "agent_launch",
         "agent_send",
         "agent_status",

@@ -350,7 +350,7 @@ pub fn decide(call: &Call) -> Verdict {
         // The task as the write leaves it: a line it already held runs in the folder the write
         // may move it to.
         let other_lines = match (call.tool, call.command) {
-            ("tasks", Some((_, task))) => task.other_lines(),
+            ("tasks" | "services", Some((_, task))) => task.other_lines(),
             _ => Vec::new(),
         };
         for line in other_lines {
@@ -405,6 +405,13 @@ pub fn decide(call: &Call) -> Verdict {
             .verdict(Kind::Action)
         }
         "run" => run(call),
+        // A service is shared by every project: only the user stops it, in every mode.
+        "services" if call.args["action"] == "stop" => Found {
+            base: vec![crate::services::stop_reason(call.args)],
+            judge: Vec::new(),
+        }
+        .verdict(Kind::Action),
+        "services" if call.args["action"] == "start" => run(call),
         tool if FILES.contains(&tool) => files(call),
         // Reads, the tree's tools, the outputs of the agent's own runs.
         _ => Verdict::Allow,
@@ -575,7 +582,10 @@ fn forge(call: &Call) -> Verdict {
         | "run_logs" => return Verdict::Allow,
         "create" => "it opens a pull request on the forge",
         "comment" => "it comments on a pull request on the forge",
-        "edit" => "it changes the title or the description of a pull request on the forge",
+        "edit" => {
+            "it changes a pull request on the forge: its title, its description, whether it is a \
+             draft, its reviewers, its labels or its base"
+        }
         "merge" => merged.as_str(),
         "checks" => "it re-runs the failed jobs of a pipeline on the forge",
         "close" => "it closes a pull request on the forge",
@@ -599,15 +609,14 @@ fn forge(call: &Call) -> Verdict {
     if let Err(refused) = untexted("forge", action, call.args, none) {
         return refused;
     }
-    if action != "close"
-        && call
-            .args
-            .get("delete_branch")
-            .is_some_and(|d| !d.is_null() && d != false)
-    {
-        return Verdict::Deny(format!(
-            "refused: forge {action} takes no delete_branch: delete_branch is for close"
-        ));
+    for (key, takers) in FORGE_ONLY {
+        let given = call.args.get(key).is_some_and(|value| !value.is_null());
+        if given && !takers.contains(&action) {
+            let takers = takers.join(" and ");
+            return Verdict::Deny(format!(
+                "refused: forge {action} takes no {key}: {key} is for {takers}"
+            ));
+        }
     }
     if by != methods[0] && call.args.get("message").is_some_and(|m| !m.is_null()) {
         return Verdict::Deny(format!(
@@ -646,6 +655,20 @@ fn forge(call: &Call) -> Verdict {
     }
     found.verdict(Kind::Call)
 }
+
+/// The arguments of `forge` that belong to some actions alone, and those.
+const FORGE_ONLY: [(&str, &[&str]); 10] = [
+    ("draft", &["create", "edit"]),
+    ("reviewers", &["create"]),
+    ("labels", &["create"]),
+    ("delete_branch_on_merge", &["create"]),
+    ("delete_branch", &["close", "merge"]),
+    ("reviewers_add", &["edit"]),
+    ("reviewers_remove", &["edit"]),
+    ("labels_add", &["edit"]),
+    ("labels_remove", &["edit"]),
+    ("base", &["edit"]),
+];
 
 /// The actions of `forge`, as a refusal names them.
 pub const FORGE_ACTIONS: &str = "list, show, subscribe, unsubscribe, create, comment, edit, merge, checks, close, reopen, \
@@ -1046,16 +1069,19 @@ fn run(call: &Call) -> Verdict {
         }
     }
     if let Some((name, command)) = call.command {
+        // A service runs in its own folder, never the project's.
+        let service = call.tool == "services";
+        let what = if service { "service" } else { "task" };
         if command.ask_before_running {
-            found.judge(format!("the task {name} is marked to ask before it runs"));
+            found.judge(format!("the {what} {name} is marked to ask before it runs"));
         }
         if let Some(shell) = call.words.first().filter(|w| SHELLS.contains(&base(w))) {
             found.judge(format!(
-                "the task {name} runs a shell ({}), whose line the gate does not read",
+                "the {what} {name} runs a shell ({}), whose line the gate does not read",
                 base(shell)
             ));
         }
-        if main {
+        if main && !service {
             found.judge(format!(
                 "the task {name} runs in the project folder (main), the user's own \
                  checkout, not in a workspace"
@@ -3841,6 +3867,7 @@ mod tests {
                 read_only: false,
                 ask_before_running: false,
                 added_by: None,
+                needs: Box::default(),
                 ready: None,
                 url: None,
             };
@@ -4130,7 +4157,7 @@ mod tests {
             ("merge", json!({"comment": "x"})),
             ("create", json!({"comment": "x"})),
             ("reopen", json!({"delete_branch": true})),
-            ("merge", json!({"delete_branch": true})),
+            ("edit", json!({"delete_branch": true})),
             ("close", json!({"body": "x"})),
             ("close", json!({"title": "x"})),
         ] {
@@ -4147,6 +4174,13 @@ mod tests {
             Some(&fixture.never),
         );
         assert!(to_judge(&fine));
+        // A merge deletes the branch of its pull request too.
+        let merged = fixture.judge(
+            "forge",
+            json!({"action": "merge", "repository": ".", "delete_branch": true}),
+            Some(&fixture.never),
+        );
+        assert!(to_judge(&merged));
     }
 
     #[test]

@@ -45,6 +45,8 @@
 //! `read_delay_ms` makes every call but `context list` wait that long first, as a slow network
 //! does; each record in `received.jsonl` then also holds `at`, the milliseconds since the epoch
 //! the call started at, so that a test sees which calls ran together.
+//! `step_fail` (`{"acme/api": {"publish": "Error: 502 Bad Gateway"}}`) makes `pr comment`,
+//! `edit`, `decline` or `publish` of that repository alone fail that way.
 //! `pipeline_fail` makes `pipeline list` alone fail that way, and `checks_fail`
 //! (`{"acme/api": {"12": "Error: 404 Not Found"}}`) `pr checks` of that pull request alone.
 //!
@@ -156,7 +158,9 @@ fn answer(script: &Value, args: &[String]) -> i32 {
         let mut found = Vec::new();
         let mut at = 0;
         while let Some(word) = words.get(at) {
-            if word.starts_with("--") && !word.contains('=') && *word != "--json" {
+            // The flags that take no value.
+            let alone = ["--json", "--undo", "--close-source", "--draft"];
+            if word.starts_with("--") && !word.contains('=') && !alone.contains(word) {
                 at += 2;
                 continue;
             }
@@ -313,7 +317,11 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             );
             return 0;
         }
-        ["pr", verb @ ("comment" | "edit" | "decline"), id] => {
+        [
+            "pr",
+            verb @ ("comment" | "edit" | "decline" | "publish"),
+            id,
+        ] => {
             let held = script["pulls"][&key]
                 .as_array()
                 .into_iter()
@@ -323,7 +331,13 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 eprintln!("Error: 404 Not Found: pull request {id}");
                 return 1;
             }
-            if *verb == "decline" {
+            if let Some(failure) = script["step_fail"][&key][*verb].as_str() {
+                eprintln!("{failure}");
+                return 1;
+            }
+            if *verb == "publish" {
+                println!("✓ Published pull request #{id}");
+            } else if *verb == "decline" {
                 println!("Declined pull request #{id}");
             } else if *verb == "comment" {
                 if option("--text").is_none_or(str::is_empty) {
@@ -332,9 +346,16 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 }
                 println!("✓ Commented on pull request #{id}");
             } else {
-                if option("--title").is_none() && option("--description").is_none() {
+                let flags = [
+                    "--title",
+                    "--description",
+                    "--reviewer",
+                    "--remove-reviewer",
+                ];
+                if flags.iter().all(|flag| option(flag).is_none()) {
                     eprintln!(
-                        "Error: at least one of --title, --body, or --description is required"
+                        "Error: at least one of --title, --body, --description or a reviewer is \
+                         required"
                     );
                     return 1;
                 }
@@ -503,6 +524,20 @@ fn posted(script: &Value, method: &str, path: &str, input: Option<&str>) -> i32 
                 json!({"type": "pipeline", "uuid": format!("{{{number}}}"),
                     "build_number": number, "state": {"name": "PENDING"}, "target": target,
                     "repository": {"full_name": format!("{owner}/{repo}")}})
+            );
+            0
+        }
+        ("PUT", [_, _, "pullrequests", id]) => {
+            let body: Value = input
+                .and_then(|input| serde_json::from_str(input).ok())
+                .unwrap_or(Value::Null);
+            if body["destination"]["branch"]["name"].as_str().is_none() {
+                eprintln!("Error: 400 Bad Request: a destination needs a branch");
+                return 1;
+            }
+            println!(
+                "{}",
+                json!({"id": id.parse::<u64>().unwrap_or(0), "state": "OPEN"})
             );
             0
         }

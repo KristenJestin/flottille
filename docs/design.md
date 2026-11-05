@@ -21,7 +21,9 @@ window toolkit is in [`reference/gpui.md`](reference/gpui.md).
 **It is:**
 
 - A **daemon** that owns projects, workspaces (worktrees), agent processes, their conversations
-  and their tree, and everything they asked for.
+  and their tree, everything they asked for, and the services of the machine: the programs every
+  project shares (a database, an API the apps call), each run once on demand (`projects.md`,
+  "Services").
 - A **command line** (`flottille …`) that drives all of it, with `--json` outputs and a `watch`
   event stream (one JSON object per line). Other programs (a desktop shell, a status bar, a
   script) integrate Flottille through these, never by reading its database.
@@ -175,6 +177,9 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
   temp file + rename, all-or-nothing edits);
 - tasks and runs: `tasks` (the project's tasks, written by a root only), `run` (a task or one
   line, **never a shell**), `run_status` (a run's output, or its stop);
+- the services of the machine (every agent): `services`, which lists them with their state and
+  starts one, judged as a run of its line in its folder; its stop is always held for the user,
+  in every mode, and a root's writes are judged as a task's (`tools.md`, "Services");
 - forges (every agent of a project whose repositories declare a forge, in `main` as in a
   workspace): `forge`, which lists and reads the pull requests of the place's repositories and
   their checks (`forges.md`), and opens, comments, edits or merges them or re-runs a failed

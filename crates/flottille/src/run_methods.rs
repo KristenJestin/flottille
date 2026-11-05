@@ -137,8 +137,10 @@ fn list(daemon: &Daemon, asked: List) -> Answer {
         (Some(_), _) => {}
         (None, Some(project)) => commands.extend(users(project, asked.ended)?),
         (None, None) => {
+            // A service's run is no project's: the service methods show it.
             for stored in daemon.read(Store::running_runs)? {
                 if stored.agent.is_none()
+                    && !stored.project.is_empty()
                     && let Some(view) = runs::view(daemon, &stored.id)
                 {
                     let tail = tail_lines(end_of(&view.output, TAIL_CHARS));
