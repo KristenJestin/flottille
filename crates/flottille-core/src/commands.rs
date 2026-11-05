@@ -324,7 +324,10 @@ mod tests {
             }))
         );
         assert_eq!(
-            expanded("ship it\n/ship", &commands, own).unwrap().unwrap().marked,
+            expanded("ship it\n/ship", &commands, own)
+                .unwrap()
+                .unwrap()
+                .marked,
             "ship it\n[command ship]"
         );
     }
@@ -332,7 +335,11 @@ mod tests {
     #[test]
     fn two_commands_keep_the_order_of_their_first_use() {
         let commands = ship_and_deploy();
-        let read = expanded("first /ship, no: /ship then /deploy-preview", &commands, own);
+        let read = expanded(
+            "first /ship, no: /ship then /deploy-preview",
+            &commands,
+            own,
+        );
         // `/ship,` is not a command: a comma follows the name.
         assert_eq!(
             read,
@@ -344,9 +351,14 @@ mod tests {
                 marked: "first /ship, no: [command ship] then [command deploy-preview]".into(),
             }))
         );
-        let read = expanded("/deploy-preview /ship", &commands, own).unwrap().unwrap();
+        let read = expanded("/deploy-preview /ship", &commands, own)
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            read.commands.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
+            read.commands
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
             ["deploy-preview", "ship"],
             "in the order of their first use, not the file's"
         );
