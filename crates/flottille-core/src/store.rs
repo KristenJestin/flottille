@@ -633,7 +633,8 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE deliveries ADD COLUMN commands TEXT NOT NULL DEFAULT '[]';
     UPDATE deliveries
         SET commands = json_array(substr(body, 13, instr(body, ' of project ') - 13))
-        WHERE body LIKE 'The command % of project %: %'
+        WHERE kind IN ('user', 'parent')
+            AND body GLOB 'The command * of project *: *'
             AND instr(body, ' of project ') > 13
             AND instr(substr(body, 13, instr(body, ' of project ') - 13), ' ') = 0;
 ",
@@ -4491,7 +4492,10 @@ mod tests {
              ('d1', 'a', 'user', 'The command open-prs of project app: Open them\n\n---\n\nDo it.', \
               'sent', 1), \
              ('d2', 'a', 'user', 'The command is broken, look', 'sent', 2), \
-             ('d3', 'a', 'user', 'plain words', 'sent', 3);",
+             ('d3', 'a', 'user', 'plain words', 'sent', 3), \
+             ('d4', 'a', 'child-report', 'The command deploy of project app: hi', 'sent', 4), \
+             ('d5', 'a', 'user', 'THE COMMAND deploy OF PROJECT app: hi', 'sent', 5), \
+             ('d6', 'a', 'parent', 'The command deploy of project app: hi', 'sent', 6);",
         )
         .unwrap();
         drop(old);
@@ -4501,7 +4505,9 @@ mod tests {
         let d1 = store.delivery("d1").unwrap().unwrap();
         assert!(d1.body.ends_with("Do it."), "its text as the agent got it");
         assert_eq!((d1.typed, d1.commands), (None, vec!["open-prs".to_owned()]));
-        for id in ["d2", "d3"] {
+        let d6 = store.delivery("d6").unwrap().unwrap();
+        assert_eq!(d6.commands, ["deploy"], "a parent's message is one too");
+        for id in ["d2", "d3", "d4", "d5"] {
             let plain = store.delivery(id).unwrap().unwrap();
             assert_eq!(
                 (plain.typed, plain.commands),
