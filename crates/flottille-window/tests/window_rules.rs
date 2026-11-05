@@ -274,3 +274,42 @@ fn every_state_mark_of_the_window_is_an_icon() {
         found.join("\n")
     );
 }
+
+// ── Words: the window never says "extension" ───────────────────────────────────────────────────
+
+/// The string literals of the code that say "extension" in words: a text the window shows. A
+/// method or a key the daemon names (`"extension.list"`, `"extensions"`) has no space, and is no
+/// sentence.
+fn says_extension(source: &str) -> Vec<(usize, String)> {
+    code(source)
+        .filter(|(_, line)| {
+            line.split('"')
+                .skip(1)
+                .step_by(2)
+                .any(|text| text.contains(' ') && text.to_lowercase().contains("extension"))
+        })
+        .map(|(at, line)| (at, line.to_owned()))
+        .collect()
+}
+
+#[test]
+fn a_text_that_says_extension_is_found() {
+    let sample = "Section::new(\"specs\", \"Specs\").sentence(\"An extension of Flottille.\")";
+    assert_eq!(says_extension(sample).len(), 1);
+    assert_eq!(
+        says_extension("toast(Toast::failure(\"Extensions not read\"), cx)").len(),
+        1
+    );
+    assert!(says_extension("ask(\"extension.list\", json!({}))").is_empty());
+    assert!(says_extension("let all = listed[\"extensions\"].as_array();").is_empty());
+}
+
+#[test]
+fn the_window_never_says_extension() {
+    let found = offenders(says_extension);
+    assert!(
+        found.is_empty(),
+        "the word \"extension\" never appears in the window (`docs/extensions.md`):\n{}",
+        found.join("\n")
+    );
+}
