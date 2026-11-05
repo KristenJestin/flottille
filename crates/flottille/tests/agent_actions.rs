@@ -366,6 +366,26 @@ fn in_full_an_agent_s_base_branches_are_changed_at_once_and_checked_all_the_same
 }
 
 #[test]
+fn an_agent_cannot_set_the_delete_branch_on_merge_of_a_repository() {
+    // The setting is the user's (`docs/projects.md`): a call that carries it is refused as an
+    // unknown field, even in full mode, and the file is left as it was.
+    let user = User::with_fake_agent();
+    project(&user);
+    let (id, mcp) = root(&user, None);
+    cli(&user, &["agent", "mode", &id, "full"]).unwrap();
+    let before = file(&user);
+
+    let said = refused(mcp.call(
+        "project",
+        json!({"action": "set_settings",
+            "repositories": [{"path": ".", "delete_branch_on_merge": true}]}),
+    ));
+
+    assert!(said.contains("delete_branch_on_merge"), "{said}");
+    assert_eq!(file(&user), before);
+}
+
+#[test]
 fn a_base_branch_missing_on_the_remote_given_by_an_agent_is_refused_with_its_reason() {
     let user = User::with_fake_agent();
     project(&user);
