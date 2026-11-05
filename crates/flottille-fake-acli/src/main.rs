@@ -41,8 +41,10 @@
 //!
 //! `acli jira workitem search --jql Q --json [--limit N]` prints the script's `search` (an array
 //! of work items, Jira's REST shape assumed as for `view`), or every item of `items` without it,
-//! at most `--limit`. A `--fields` with a field the real one refuses (`updated`, `created`, …) ends
-//! with 1, saying `✗ Error: fields '<those>' are not allowed`. The fake does not read the JQL: the test reads it in the record. Without
+//! at most `--limit`. Without `search`, the items are those the JQL finds (`found_by`): its
+//! `project in`, `text ~`, `comment ~` and `updated >= "-Nd"`; a scripted `search` is printed as
+//! it is. A `--fields` with a field the real one refuses (`updated`, `created`, …) ends
+//! with 1, saying `✗ Error: fields '<those>' are not allowed`. The test reads the JQL in the record. Without
 //! `--jql` (or `--filter`) or `--json` it ends with 2, as a call Flottille never makes.
 //!
 //! A JQL that names `currentUser()` is answered with the script's `mine_search`, none without:
@@ -142,6 +144,132 @@ fn main() {
     std::process::exit(answer(&dir, &script, &args));
 }
 
+/// Whether a work item of the script's `items` is one the JQL finds, read as a real site does,
+/// enough for the tests: `project in ("A", …)` by the key's project, `text ~ "w …"` by every word
+/// in its summary, description or comments, `comment ~ "w …"` in its comments only, and
+/// `updated >= "-Nd"` by its `fields.updated` (`YYYY-MM-DDTHH:MM:SS`, read in UTC). The rest of
+/// the JQL is not read.
+fn found_by(jql: &str, item: &Value) -> bool {
+    let fields = &item["fields"];
+    let mut comments = String::new();
+    for comment in fields["comment"]["comments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        texts(&comment["body"], &mut comments);
+    }
+    let mut all = String::new();
+    texts(&fields["summary"], &mut all);
+    texts(&fields["description"], &mut all);
+    all.push_str(&comments);
+    let holds = |text: &str, words: &str| {
+        let text = text.to_lowercase();
+        words
+            .split_whitespace()
+            .all(|word| text.contains(&word.to_lowercase()))
+    };
+    if let Some(list) = jql
+        .split_once("project in (")
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map(|(list, _)| list)
+    {
+        let project = item["key"]
+            .as_str()
+            .unwrap_or("")
+            .split('-')
+            .next()
+            .unwrap_or("");
+        if !list
+            .split(',')
+            .any(|p| p.trim().trim_matches('"') == project)
+        {
+            return false;
+        }
+    }
+    if let Some(words) = quoted_after(jql, "text ~ ")
+        && !holds(&all, &words)
+    {
+        return false;
+    }
+    if let Some(words) = quoted_after(jql, "comment ~ ")
+        && !holds(&comments, &words)
+    {
+        return false;
+    }
+    if let Some(days) = jql
+        .split_once("updated >= ")
+        .map(|(_, rest)| rest.trim_start_matches('"'))
+        .and_then(|rest| rest.strip_prefix('-'))
+        .and_then(|rest| rest.split_once('d'))
+        .and_then(|(n, _)| n.parse::<u64>().ok())
+    {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let at = fields["updated"].as_str().and_then(seconds_of);
+        if at.is_none_or(|at| at < now.saturating_sub(days * 86_400)) {
+            return false;
+        }
+    }
+    true
+}
+
+/// The text of a field: a string as it is, an Atlassian Document Format tree as its text nodes.
+fn texts(field: &Value, into: &mut String) {
+    match field {
+        Value::String(text) => {
+            into.push_str(text);
+            into.push(' ');
+        }
+        Value::Object(node) => {
+            if let Some(text) = node.get("text").and_then(Value::as_str) {
+                into.push_str(text);
+                into.push(' ');
+            }
+            for child in node
+                .get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                texts(child, into);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The JQL string quoted right after `before`, its `\"` and `\\` read back.
+fn quoted_after(jql: &str, before: &str) -> Option<String> {
+    let rest = jql.split_once(before)?.1.strip_prefix('"')?;
+    let mut text = String::new();
+    let mut chars = rest.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => text.extend(chars.next()),
+            '"' => return Some(text),
+            c => text.push(c),
+        }
+    }
+    None
+}
+
+/// The seconds since 1970 of `YYYY-MM-DDTHH:MM:SS…`, read in UTC.
+fn seconds_of(at: &str) -> Option<u64> {
+    let number = |range: std::ops::Range<usize>| at.get(range)?.parse::<i64>().ok();
+    let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
+    let (hour, minute, second) = (number(11..13)?, number(14..16)?, number(17..19)?);
+    // Howard Hinnant's `days_from_civil`.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
+    u64::try_from(days * 86_400 + hour * 3600 + minute * 60 + second).ok()
+}
+
 /// A script's `delay_ms` makes the sign-in check slow, as a program that hangs on the network.
 fn wait(script: &Value) {
     if let Some(ms) = script["delay_ms"].as_u64() {
@@ -233,11 +361,15 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
             {
                 Value::Array(items) => items.clone(),
                 _ if theirs => Vec::new(),
-                _ => script["items"]
-                    .as_object()
-                    .into_iter()
-                    .flat_map(|items| items.values().cloned())
-                    .collect(),
+                _ => {
+                    let jql = value(rest, "--jql").unwrap_or_default();
+                    script["items"]
+                        .as_object()
+                        .into_iter()
+                        .flat_map(|items| items.values().cloned())
+                        .filter(|item| found_by(jql, item))
+                        .collect()
+                }
             };
             // A page at most, unless `--paginate` reads them all.
             if let Some(page) = script["page"].as_u64()

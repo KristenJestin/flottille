@@ -695,19 +695,38 @@ reasons.
 
 | Tool | |
 |---|---|
-| `tickets {action, ticket?, workspace?, query?, state?, label?, assignee?, detail?, fresh?, title?, body?, labels?, reason?, remove_labels?, assignees?, remove_assignees?, status?, other?, kind?, comment?, sprint?, project?, type?, events?, from?, minutes?}` | The tickets of the project's tracker, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
+| `tickets {action, ticket?, workspace?, query?, updated_within?, in_comments?, jql?, state?, label?, assignee?, detail?, fresh?, title?, body?, labels?, reason?, remove_labels?, assignees?, remove_assignees?, status?, other?, kind?, comment?, sprint?, project?, type?, events?, from?, minutes?}` | The tickets of the project's tracker, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
 
-- **`list {state?, label?, assignee?}`**: every ticket of a state, in one call, a line each (`-
-  #12 open: The login fails [bug] (ana)  <link>`): `state` is `open` (the default), `closed` or
-  `all`; up to 200, the newest, and the answer says when there may be more. **`search {query,
-  …}`**: the same, with words. Once a round of the daemon read the tracker, both answer from what
-  it stored, saying its age (`(as of 3 min ago)`), a search finding every word in the titles
-  ([`tickets.md`](tickets.md), "The agent's tool `tickets`"). Before, on GitHub, `gh issue list -R github.com/<owner/name> --state …
-  --limit 200 [--label] [--assignee] [--search] --json number,title,state,labels,assignees,url`;
-  on Jira, `acli jira workitem search --jql <JQL> --fields key,summary,status,assignee,labels
-  --json --limit 200`, the JQL being the tracker's projects, the state as a status category
-  (`statusCategory != Done`), each filter quoted, and the words as `text ~`. An item that says
-  another site than the tracker's is left out, and counted; one that says no site is kept.
+- **`list {state?, label?, assignee?, updated_within?}`**: every ticket of a state, in one call, a
+  line each (`- #12 open: The login fails [bug] (ana)  <link>`): `state` is `open` (the default),
+  `closed` or `all`; up to 200, the newest, and the answer says when there may be more.
+  `updated_within` (days, 1 to 365) keeps those updated in that many days. **`search {query?,
+  in_comments?, jql?, …}`**: the same, with words looked for in the titles, descriptions and
+  comments (the answer says so), always asked of the tracker; the same search within 30 s is given
+  what the first read, and a write forgets it. On Jira only: `in_comments`, words of the comments
+  alone (who commented is not something JQL asks without an add-on: none is tried), and `jql`, a
+  query of the agent's own (below). A search needs `query`, `in_comments` or `jql`. A `list`
+  without `updated_within`, once a round of the daemon read the tracker, answers from what it
+  stored, saying its age (`(as of 3 min ago)`; [`tickets.md`](tickets.md), "The agent's tool
+  `tickets`"); otherwise, on GitHub, `gh issue list -R github.com/<owner/name> --state … --limit
+  200 [--label] [--assignee] [--search "<words> in:title,body,comments updated:>=<time>"] --json
+  number,title,state,labels,assignees,url`; on Jira, `acli jira workitem search --jql <JQL>
+  --fields key,summary,status,assignee,labels --json --limit 200`, the JQL being the tracker's
+  projects, the state as a status category (`statusCategory != Done`), each filter quoted, the
+  words as `text ~`, `in_comments` as `comment ~`, `updated_within` as `updated >= "-<n>d"`, and the
+  agent's `jql` last. An item that says another site than the tracker's, or whose key is of another project than
+  its `projects`, is left out, and counted; one that says no site is kept. A `list` given `jql`
+  or `in_comments` is refused, naming `search`.
+- **`jql`** is confined to the tracker's projects: `project in (…) AND … AND (<the agent's JQL>)`,
+  its `ORDER BY` kept at the end (`ORDER BY created DESC` without one); `state` applies to it as to
+  any search (`all` to leave it out). Read outside its quoted texts, a JQL that closes a
+  parenthesis it did not open, leaves a parenthesis or a quote open, holds a backslash, or has
+  anything but field names, commas, `ASC` and `DESC` after its `ORDER BY` is refused, saying which,
+  and nothing is asked: it could leave the parentheses, and so the projects. A query `acli`
+  refuses comes back with `acli`'s words. On GitHub `jql` and `in_comments` are refused, naming
+  `query`. The answers stay in the tracker's projects; what a query may refer to is not checked
+  (`parent = XYZ-1`, a link function, an add-on's: it can tell that something exists elsewhere on
+  the same site).
   **A search stays in the tracker's repository**: on GitHub a `query` holding `repo:`, `org:`,
   `user:`, `is:pr` or `type:pr`, in any case, is refused (`refused: tickets search looks in the
   tracker's repository only: …`), and of what `gh` answers only the issues whose link is the

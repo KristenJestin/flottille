@@ -380,18 +380,18 @@ const SERVED: [Definition; 29] = [
     Definition {
         name: "tickets",
         title: "Tickets",
-        description: "The project's tracker tickets (GitHub #123, Jira ABC-123), via the user's gh or acli \
-            (never run them). list, search (title words): tickets by state (default open), label, \
-            assignee, as last read; show: a workspace's linked ticket (in main, name workspace) or \
-            ticket, read now, with its links; detail full adds the comments, with the id of yours; \
-            Jira images and files are named, not shown (the user can paste one); types: a Jira \
-            project's work item types (read them when unsure; a guess is refused); link_types: link \
-            kinds. Writes, judged, answered at once, the result maybe later: create, comment, edit, close, \
-            reopen, status, link and unlink (ticket kind other: ABC-2 blocks ABC-1), comment_edit \
-            and comment_delete (yours only). Assign only when asked: assignee \"@me\" is the user \
-            (Jira create, edit; null on edit removes; GitHub edit: assignees). subscribe: a ticket's \
-            next events wake you once (people only; minutes: default 60); unsubscribe. \
-            {\"action\": \"comment\", \"ticket\": \"#12\", \"body\": \"...\"}",
+        description: "The tracker's tickets (GitHub #123, Jira ABC-123), via the user's gh or acli \
+            (never run them). list: tickets by state (default open), label, assignee, updated_within, \
+            as last read; search asks the tracker: {\"action\": \"search\", \"query\": \"x\"}, \
+            on Jira also in_comments, jql; show: a workspace's ticket (in \
+            main, name workspace) or ticket, read now, with its links; detail full adds the comments, \
+            with the id of yours; Jira images and files are named, not shown (the user can paste one); \
+            types: a Jira project's work item types (a guess is refused); link_types: link kinds. \
+            Writes, judged, answered at once, the result maybe later: create, comment, edit, close, \
+            reopen, status, link and unlink (ticket kind other: ABC-2 blocks ABC-1), comment_edit and \
+            comment_delete (yours only). Assign only when asked: assignee \"@me\" is the user (Jira \
+            create, edit; null on edit removes; GitHub edit: assignees). subscribe: a ticket's next \
+            events wake you once (people only; minutes: default 60); unsubscribe.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -401,6 +401,9 @@ const SERVED: [Definition; 29] = [
                 "ticket": {"type": "string", "description": "#123 or ABC-123; the workspace's when left out."},
                 "workspace": {"type": "string"},
                 "query": {"type": "string", "description": "search: words."},
+                "updated_within": {"type": "integer", "minimum": 1, "maximum": 365, "description": "list, search: updated in the last that many days."},
+                "in_comments": {"type": "string", "description": "search on Jira: words of the comments (not by author). Not for list."},
+                "jql": {"type": "string", "description": "search on Jira: a JQL query, answered only within the tracker's projects (what it may refer to is not checked); ORDER BY allowed. Not for list."},
                 "state": {"type": "string", "enum": ["open", "closed", "all"]},
                 "label": {"type": "string"},
                 "assignee": {"type": ["string", "null"], "description": "list, search: only those assigned to them. create, edit on Jira: whom to assign, \"@me\" (the user signed in to acli), an email or an account id; edit: null removes the assignee."},
