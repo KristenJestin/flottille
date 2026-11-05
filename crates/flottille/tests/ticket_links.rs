@@ -654,9 +654,20 @@ fn an_agent_edits_its_own_comment() {
         acli_calls(&user)
             .iter()
             .any(|c| c
-                .starts_with("jira workitem comment update --key ABC-1 --id 10100 --body-file ")),
+                .starts_with("jira workitem comment update --key ABC-1 --id 10100 --body-adf ")),
         "{:?}",
         acli_calls(&user)
+    );
+    // What the file held: a document, which `--body-adf` takes and `--body-file` would post as
+    // its raw text.
+    let posted: Value =
+        serde_json::from_str(&std::fs::read_to_string(user.path("acli/posted.json")).unwrap())
+            .unwrap();
+    let held = &posted["ABC-1"][0];
+    assert_eq!(held["type"], "doc", "{held}");
+    assert!(
+        held.to_string().contains("\"Fixed on app/login, rebased\""),
+        "{held}"
     );
     // Still the agent's after the edit, and the record follows the new words.
     let shown = read(

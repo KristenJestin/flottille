@@ -341,7 +341,8 @@ ticket itself.
   `show` with `detail full` prints after its author (`[comment 10100]`, GitHub's `issuecomment-501`);
   any other comment, a person's or another tool's, is refused whatever its author's name, and a
   comment that cannot be found among the newest ones is said. On Jira, `acli jira workitem comment
-  update --key <K> --id <id> --body-file <file>` (the text as ADF, as for `comment`) and `comment
+  update --key <K> --id <id> --body-adf <file>` (the text as ADF, as for `comment`; `update`'s
+  `--body-file` takes plain text only) and `comment
   delete --key <K> --id <id>`; on GitHub, `gh api repos/<owner>/<name>/issues/comments/<id>
   --method PATCH -f body=<text>` and `--method DELETE`. An edit records the id with the new words,
   so that the comment stays the agent's.

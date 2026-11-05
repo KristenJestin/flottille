@@ -658,7 +658,8 @@ pub(super) async fn comment(
                 key,
                 "--id",
                 &id,
-                "--body-file",
+                // `update` takes a document with `--body-adf` only: its `--body-file` is plain text.
+                "--body-adf",
                 file.path(),
             ])
             .await

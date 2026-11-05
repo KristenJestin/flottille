@@ -86,7 +86,8 @@
 //! `{"id", "object": {"title", "url"}}`. `link delete --id N --yes` ends with 0 for a link that
 //! is there, 1 otherwise, and keeps the ids deleted in `unlinked.json`.
 //!
-//! `comment update --key K --id I (--body | --body-file)` and `comment delete --key K --id I`
+//! `comment update --key K --id I (--body | --body-file | --body-adf)` (the first two plain text,
+//! the last a document, refused when it is none) and `comment delete --key K --id I`
 //! change the comments a `comment create` added, which are numbered from 10100 (`id`, in the
 //! views); the script's own comments take an `id` of their own.
 //!
@@ -337,13 +338,28 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
             0
         }
         ["jira", "workitem", "comment", "update", rest @ ..]
-            if rest.contains(&"--body") || rest.contains(&"--body-file") =>
+            if ["--body", "--body-file", "--body-adf"]
+                .iter()
+                .any(|flag| rest.contains(flag)) =>
         {
-            let done = known(script, rest);
-            let body = match value(rest, "--body") {
-                Some(text) => Some(Value::from(text)),
-                None => value(rest, "--body-file").and_then(file_text),
+            // `--body` and `--body-file` are plain text, `--body-adf` a document, as its page says.
+            let body = match (
+                value(rest, "--body"),
+                value(rest, "--body-file"),
+                value(rest, "--body-adf"),
+            ) {
+                (Some(text), _, _) => Some(Value::from(text)),
+                (_, Some(path), _) => std::fs::read_to_string(path).ok().map(Value::from),
+                (_, _, Some(path)) => match file_text(path) {
+                    Some(doc) if check(&doc).is_ok() => Some(doc),
+                    _ => {
+                        eprintln!("✗ Error: --body-adf holds no Atlassian Document Format");
+                        return 1;
+                    }
+                },
+                _ => None,
             };
+            let done = known(script, rest);
             if let (0, Some(key), Some(id), Some(body)) =
                 (done, value(rest, "--key"), value(rest, "--id"), body)
                 && let Some(at) = posted_at(id)
