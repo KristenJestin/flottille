@@ -171,6 +171,7 @@ fn the_leave_is_listed_on_both_sessions_and_can_be_withdrawn(cx: &mut TestAppCon
         label(cx, &format!("leave-said-{key}")).unwrap(),
         format!("agent {writer} may write here")
     );
+    assert_eq!(label(cx, "rail-leaves-title").unwrap(), "Write access");
     assert!(
         label(cx, &format!("leave-since-{key}"))
             .unwrap()
@@ -267,7 +268,7 @@ fn a_refused_withdrawal_is_said_in_a_toast(cx: &mut TestAppContext) {
     assert_eq!(
         toasts,
         [(
-            "The leave was not withdrawn".to_owned(),
+            "The write access was not withdrawn".to_owned(),
             "there is no such leave".to_owned()
         )]
     );

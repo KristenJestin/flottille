@@ -1,9 +1,9 @@
-//! The rail's Leaves section, where the session's rights over other sessions are shown: each
-//! leave the user gave for one session to write to another it did not start (`session_send`,
-//! `docs/tools.md`, "Sessions that talk to each other"), the session's own to write and the
-//! others' to write to it, each with a Withdraw that the daemon carries out (`leave.withdraw`).
-//! Nothing is drawn while there is none; a row unfolds when a leave is given and folds away when
-//! it ends, withdrawn or with either session.
+//! The rail's Write access section, where the session's rights over other sessions are shown:
+//! each leave the user gave for one session to write to another it did not start
+//! (`session_send`, `docs/tools.md`, "Sessions that talk to each other"), the session's own to
+//! write and the others' to write to it, each with a Withdraw that the daemon carries out
+//! (`leave.withdraw`). Nothing is drawn while there is none; a row unfolds when a leave is given
+//! and folds away when it ends, withdrawn or with either session.
 
 use flottille_ui::{Button, Icon, Item, Listing, Palette, Type, icon, palette, presence, space};
 use gpui_kit::{
@@ -64,7 +64,7 @@ impl LeaveRow {
     }
 }
 
-/// The rail's Leaves section.
+/// The rail's Write access section.
 pub struct LeaveList {
     page: WeakEntity<SessionPage>,
     /// The session's root, whose side each row is said from.
@@ -201,8 +201,8 @@ impl Render for LeaveList {
             .child(
                 div()
                     .id("rail-leaves-title")
-                    .aria_label("Leaves")
-                    .child(rail_label("Leaves", None, cx))
+                    .aria_label("Write access")
+                    .child(rail_label("Write access", None, cx))
                     .test_support(),
             )
             .children(rows)

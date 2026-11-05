@@ -435,7 +435,7 @@ impl SessionPage {
         self.rail.read(cx).subscriptions.clone()
     }
 
-    /// The rail's Leaves section.
+    /// The rail's Write access section.
     pub fn leaves(&self, cx: &gpui_kit::App) -> Entity<LeaveList> {
         self.rail.read(cx).leaves.clone()
     }
@@ -764,7 +764,10 @@ impl SessionPage {
     /// What the daemon answered to a withdrawal: why, in a toast, when it refused.
     pub fn leave_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
         if let Some(why) = refused {
-            toast(Toast::failure("The leave was not withdrawn").detail(why), cx);
+            toast(
+                Toast::failure("The write access was not withdrawn").detail(why),
+                cx,
+            );
         }
     }
 
