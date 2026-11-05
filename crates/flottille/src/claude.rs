@@ -49,6 +49,9 @@ pub static PROVIDER: Provider = Provider {
     // `--allowedTools` is fixed with its process, but the tools it lacks ask permission of the
     // bridge, which the daemon answers from the role's list as it is now.
     takes_new_tools: true,
+    // Told the list changed, it does not list the tools again: seen on a real session, where it
+    // said an action was missing while the daemon accepted it.
+    lists_tools_again: false,
     unready: providers::ready_here,
     forget_process: forget_bridge,
     forget_session: forget_history,
