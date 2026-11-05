@@ -607,7 +607,7 @@ bridge runs one session.
   when the throttle held it back. Its `result` ends it: first a
   `usage_update` (the context in use, as the last message or compaction said, the model's
   context window, and the cost in USD of this `claude` process so far: it counts from zero again
-  in each process, after a release or a replacement, and is not the session's), then the prompt's answer with its usage and its stop reason:
+  in each process, after a release or a replacement, and is not the session's), then the prompt's answer with its usage, what each model used in the turn (`_meta.flottille.usage`, `docs/reference/acp.md`, "What a turn used"), and its stop reason:
   `cancelled` after a cancel, `refusal` or `max_tokens` as `claude` says, `max_turn_requests` for
   a result `error_max_turns`, `error_max_budget_usd` or `error_max_structured_output_retries`,
   `end_turn` otherwise. A result that is an error ends the turn `end_turn` too, after a
@@ -683,7 +683,7 @@ servers are Flottille's HTTP one alone). One bridge runs one session.
   the effort (left out when the model has none) and `environments: []`; any other block is
   refused. `turn/completed` ends it: first a
   `usage_update` (the context of the last request and the model's context window, as
-  `thread/tokenUsage/updated` said; unless the last one sent during the turn said the same), then the answer with the turn's tokens and its stop reason:
+  `thread/tokenUsage/updated` said; unless the last one sent during the turn said the same), then the answer with the turn's tokens, what it used with its model (`_meta.flottille.usage`, `docs/reference/acp.md`, "What a turn used"), and its stop reason:
   `cancelled` for an interrupted turn, `end_turn` otherwise. A failed turn ends `end_turn` too,
   after a `sessionFailure` of severity `error` with its message, category `limit` for
   `usageLimitExceeded` and `rateLimitExceeded`, `service` otherwise; only a signed-out Codex
@@ -836,7 +836,8 @@ wrote with `session_send` (`session`, under a first line naming its sender, neve
 parent's message (`parent`), what happens to a child (`child-report`,
 `child-question`, `child-asks`, `child-failed`, `child-stuck`, `child-idle`, `child-replaced`,
 `children-status`), an approval's answer (`approval`), a reminder (`reminder`), a session's
-restart (`resume`). It is stored before it is sent, under an id that makes it idempotent, and it
+restart (`resume`), what a new build changed in its tools (`tools`, `docs/tools.md`, "When the
+tools change"). It is stored before it is sent, under an id that makes it idempotent, and it
 is the only thing that wakes an agent.
 
 - **As the agent reads it**: `[flottille:<kind>]` on a line, then the body. Bodies are data: a

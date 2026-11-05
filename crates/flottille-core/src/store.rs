@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 
-use crate::agent::{Agent, AgentState, Choices, GateMode};
+use crate::agent::{Agent, AgentState, Choices, GateMode, TurnUsage, Used};
 use crate::approval::{Decision, Delivery, Forward, Judgement, Kind, Request, RequestState};
 use crate::item::{Check, Cursor, Filter, Item, Post};
 use crate::protocol::Event;
@@ -588,6 +588,41 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE runs ADD COLUMN ready TEXT;
     ALTER TABLE runs ADD COLUMN url TEXT;
     ALTER TABLE runs ADD COLUMN url_error TEXT;
+",
+    "
+    -- What each turn used, one row per model the turn used (`docs/reference/acp.md`, \"What a
+    -- turn used\"). History, not state: no reference to the agents or the workspaces, so that
+    -- their removal neither takes the rows nor is held by them; the ids and names are those of
+    -- the time. A count the agent did not give is NULL, never 0. Times in milliseconds.
+    CREATE TABLE turn_usage (
+        id           INTEGER PRIMARY KEY,
+        agent        TEXT NOT NULL,
+        title        TEXT,
+        session      TEXT NOT NULL,
+        project      TEXT NOT NULL,
+        workspace    TEXT,
+        provider     TEXT NOT NULL,
+        role         TEXT NOT NULL,
+        model        TEXT,
+        started_at   INTEGER NOT NULL,
+        ended_at     INTEGER NOT NULL,
+        stop_reason  TEXT NOT NULL,
+        input        INTEGER,
+        output       INTEGER,
+        cache_read   INTEGER,
+        cache_write  INTEGER,
+        reasoning    INTEGER,
+        cost_usd     REAL
+    ) STRICT;
+    -- The statistics read a span of time, of everything or of one project, by day, model or
+    -- kind of agent.
+    CREATE INDEX turn_usage_by_time ON turn_usage (started_at);
+    CREATE INDEX turn_usage_by_project ON turn_usage (project, started_at);
+",
+    "
+    -- The tool list an agent's last process was given (`docs/tools.md`, \"When the tools
+    -- change\"): its digest and the actions of each tool, as JSON; NULL before its first process.
+    ALTER TABLE agents ADD COLUMN tools_given TEXT;
 ",
 ];
 
@@ -1209,6 +1244,28 @@ impl Store {
         let event = append_agent_event(&transaction, agent, "agent.tools_changed", data)?;
         transaction.commit()?;
         Ok(event)
+    }
+
+    /// The tool list the agent's last process was given, as `set_agent_tools_given` kept it.
+    pub fn agent_tools_given(&self, agent: &str) -> Result<Option<String>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT tools_given FROM agents WHERE id = ?1",
+                params![agent],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// Keeps the tool list the agent's process is given.
+    pub fn set_agent_tools_given(&mut self, agent: &str, given: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE agents SET tools_given = ?2 WHERE id = ?1",
+            params![agent, given],
+        )?;
+        Ok(())
     }
 
     /// An event of the agent's conversation; `activity` says it is a sign of activity, which
@@ -2321,6 +2378,76 @@ impl Store {
                 comment_id: row.get(1)?,
                 fingerprint: row.get(2)?,
                 posted_at: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Records what a turn used, one row per model.
+    pub fn record_turn_usage(&mut self, rows: &[TurnUsage]) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        {
+            let mut statement = transaction.prepare_cached(
+                "INSERT INTO turn_usage (agent, title, session, project, workspace, provider, \
+                 role, model, started_at, ended_at, stop_reason, input, output, cache_read, \
+                 cache_write, reasoning, cost_usd) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            )?;
+            for row in rows {
+                let used = &row.used;
+                statement.execute(params![
+                    row.agent,
+                    row.title,
+                    row.session,
+                    row.project,
+                    row.workspace,
+                    row.provider,
+                    row.role,
+                    used.model,
+                    row.started_at,
+                    row.ended_at,
+                    row.stop_reason,
+                    used.input,
+                    used.output,
+                    used.cache_read,
+                    used.cache_write,
+                    used.reasoning,
+                    used.cost_usd
+                ])?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Every row of the turns' usage, in the order they were recorded.
+    pub fn turn_usage(&self) -> Result<Vec<TurnUsage>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT agent, title, session, project, workspace, provider, role, model, started_at, \
+             ended_at, stop_reason, input, output, cache_read, cache_write, reasoning, cost_usd \
+             FROM turn_usage ORDER BY id",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(TurnUsage {
+                agent: row.get(0)?,
+                title: row.get(1)?,
+                session: row.get(2)?,
+                project: row.get(3)?,
+                workspace: row.get(4)?,
+                provider: row.get(5)?,
+                role: row.get(6)?,
+                started_at: row.get(8)?,
+                ended_at: row.get(9)?,
+                stop_reason: row.get(10)?,
+                used: Used {
+                    model: row.get(7)?,
+                    input: row.get(11)?,
+                    output: row.get(12)?,
+                    cache_read: row.get(13)?,
+                    cache_write: row.get(14)?,
+                    reasoning: row.get(15)?,
+                    cost_usd: row.get(16)?,
+                },
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -5345,5 +5472,45 @@ mod tests {
         assert_eq!(keys(&store, Filter::default()), ["1", "3"]);
         assert!(store.items("other", &Filter::default()).unwrap().is_empty());
         assert!(store.cursors("app").unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_usage_of_a_removed_session_is_kept() {
+        let mut store = Store::open_in_memory().unwrap();
+        let agent = an_agent();
+        store
+            .create_agent(&agent, ("agent.created", json!({})))
+            .unwrap();
+        let row = TurnUsage {
+            agent: agent.id.clone(),
+            title: None,
+            session: agent.id.clone(),
+            project: "app".into(),
+            workspace: Some("login".into()),
+            provider: "claude".into(),
+            role: "lead".into(),
+            started_at: 1_792_843_730_808,
+            ended_at: 1_792_843_731_808,
+            stop_reason: "end_turn".into(),
+            used: Used {
+                model: Some("claude-fake-1".into()),
+                input: Some(100),
+                output: Some(20),
+                cache_read: Some(1000),
+                cache_write: Some(50),
+                reasoning: None,
+                cost_usd: Some(0.0125),
+            },
+        };
+        store.record_turn_usage(std::slice::from_ref(&row)).unwrap();
+
+        // Nothing removes an agent yet: the rows must neither hold its removal nor go with it.
+        store
+            .connection
+            .execute("DELETE FROM agents WHERE id = ?1", params![agent.id])
+            .unwrap();
+
+        assert_eq!(store.agent(&agent.id).unwrap(), None);
+        assert_eq!(store.turn_usage().unwrap(), [row]);
     }
 }
