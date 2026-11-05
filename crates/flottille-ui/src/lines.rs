@@ -5,13 +5,14 @@
 //! Each part that is clicked fades its hover; none draws a separator: the [`Card`](crate::Card)
 //! draws them between its blocks.
 
+use std::ops::Range;
 use std::rc::Rc;
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, ClickEvent, ElementId, Entity, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement, Styled,
-    TestSupportExt, Window, div, px,
+    AnyElement, App, ClickEvent, ElementId, Entity, FontWeight, HighlightStyle, InteractiveElement,
+    IntoElement, ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement,
+    Styled, StyledText, TestSupportExt, Window, div, px,
 };
 
 use crate::color::mix;
@@ -628,4 +629,19 @@ impl RenderOnce for FooterAction {
             d.bg(p.hover.opacity(t)).text_color(mix(p.faint, p.text, t))
         })
     }
+}
+
+/// A message as it was typed, each command it used (`commands`, byte ranges of `/name`) drawn as
+/// an accent chip in its line: the accent's ink, medium, on the accent's faint fill. A chip is a
+/// run of the text, so that the line wraps as the words do.
+pub fn commanded_text(text: &str, commands: &[Range<usize>], cx: &App) -> StyledText {
+    let p = palette(cx);
+    let chip = HighlightStyle {
+        color: Some(p.acc),
+        background_color: Some(p.acc.opacity(0.14)),
+        font_weight: Some(FontWeight::MEDIUM),
+        ..Default::default()
+    };
+    StyledText::new(text.to_owned())
+        .with_highlights(commands.iter().map(|range| (range.clone(), chip)))
 }
