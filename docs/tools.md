@@ -119,7 +119,7 @@ documentation, changelogs and published source, never by running one):
 
 | Agent | Honours `list_changed` | In Flottille |
 |---|---|---|
-| Claude Code (`claude`, checked at 2.1.295) | Yes: in `-p` mode it lists the tools again, its v2 runtime over its listen stream | Takes the new tools: the bridge's `--allowedTools` is the start's, but a tool it lacks asks permission of the bridge, which the daemon answers from the role's list as it is now |
+| Claude Code (`claude`, checked at 2.1.295) | Not in practice: its changelog says it lists them again, but on a real session it did not, and said an action was missing while the daemon accepted it. It gets the `tools` delivery | Takes the new tools: the bridge's `--allowedTools` is the start's, but a tool it lacks asks permission of the bridge, which the daemon answers from the role's list as it is now |
 | Codex (`codex app-server`, checked at 0.162.0) | Not by default: its own issues say it keeps the list it first read; an opt-in feature, `mcp_tool_list_changed`, was proposed | Runs an older list until its next process: the server's `enabled_tools`, set when its thread starts, filter out every tool they do not name |
 | OpenCode (`opencode acp`, checked at 1.19.0) | Yes, since its pull request #5913 (December 2025) | Runs an older list until its next process: its permissions, written when its process starts, deny every tool they do not name |
 

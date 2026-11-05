@@ -1964,7 +1964,7 @@ fn an_agent_started_on_an_older_tool_list_is_told_they_changed() {
     ok(client.call("fs_list", json!({"path": "."})));
     assert_eq!(client.told(), 1, "told once");
     assert_ne!(given(&user, &id)["digest"], "older", "the new list is kept");
-    // Claude Code lists its tools again: no delivery.
+    // Only the digest changed, so no action is named and no delivery is sent.
     eventually("the message is sent", || {
         user.received_requests("session/prompt").len() == 2
     });
@@ -2031,6 +2031,37 @@ fn the_delivery_names_the_actions_added() {
         "{prompt}"
     );
     assert!(!prompt.contains("fs_list"), "only what changed: {prompt}");
+}
+
+#[test]
+fn a_claude_agent_is_told_the_actions_added_though_it_lists_again() {
+    // Seen on a real Claude session: it did not list its tools again, and the daemon accepted an
+    // action it had not been told of.
+    let user = User::with_fake_agent();
+    project(&user);
+    declare(&user, true, false);
+    let (id, _, _) = agent(&user, json!({}));
+    update(
+        &user,
+        &id,
+        Some(&|given: &mut Value| {
+            given["digest"] = "older".into();
+            let forge = given["actions"]["forge"].as_array_mut().unwrap();
+            forge.retain(|action| action != "pipelines" && action != "run");
+            forge.push("rerun".into());
+        }),
+    );
+
+    next_process(&user, &id, None);
+    eventually("the message is sent", || {
+        user.received_requests("session/prompt").len() == 2
+    });
+    let prompt = user.received_requests("session/prompt")[1].to_string();
+    assert!(prompt.contains("[flottille:tools]"), "{prompt}");
+    assert!(
+        prompt.contains("forge: added pipelines, run; removed rerun"),
+        "{prompt}"
+    );
 }
 
 #[test]
