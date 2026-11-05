@@ -54,6 +54,10 @@ jobs:
         run: rustup component add rustfmt clippy
       - if: steps.cargo.outputs.present == 'true'
         uses: Swatinem/rust-cache@v2
+        with:
+          # The key does not follow Cargo.toml: bump this one when a profile changes, or the
+          # cache keeps the artefacts of the old profiles and never saves the new ones.
+          prefix-key: v1-rust
       # The window links against fontconfig and freetype; GPUI loads Wayland and Vulkan at run
       # time and opens no window here: its tests use GPUI's own test platform.
       - name: Have the window's system libraries
