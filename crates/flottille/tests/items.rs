@@ -1513,7 +1513,11 @@ fn mine_is_right_beyond_the_first_two_hundred_items() {
         .map(|n| work_item(&format!("ABC-{n}"), "An item", "To Do"))
         .collect();
     let theirs: Vec<Value> = [3, 230, 250].iter().map(|n| items[n - 1].clone()).collect();
-    jira_project(&user, json!({"search": items, "mine_search": theirs}));
+    // `acli` prints a page of 200 unless asked every page.
+    jira_project(
+        &user,
+        json!({"search": items, "mine_search": theirs, "page": 200}),
+    );
     assert_eq!(list(&user, json!({"kind": "ticket"})).len(), 250);
     assert_eq!(mine_keys(&user), ["ABC-230", "ABC-250", "ABC-3"]);
 }
@@ -1553,4 +1557,51 @@ fn a_jira_round_says_in_the_developer_log_how_many_items_the_mine_search_found()
     assert_eq!(line["nulls"], 0, "{line}");
     assert_eq!(line["project"], "app", "{line}");
     assert!(line["agent"].is_null(), "{line}");
+}
+
+#[test]
+fn every_work_item_beyond_a_page_and_the_old_limit_is_stored_and_every_one_of_the_users_is_mine() {
+    let user = user();
+    assert!(user.run(&["developer", "on"]).status.success());
+    let items: Vec<Value> = (1..=2100)
+        .map(|n| work_item(&format!("ABC-{n}"), "An item", "To Do"))
+        .collect();
+    // The user's: one in seven, the newest and the oldest among them.
+    let theirs: Vec<Value> = items.iter().step_by(7).cloned().collect();
+    let started = Instant::now();
+    jira_project(
+        &user,
+        json!({"search": items, "mine_search": theirs, "page": 100}),
+    );
+    let took = started.elapsed();
+    let stored = list(&user, json!({"kind": "ticket"}));
+    assert_eq!(stored.len(), 2100);
+    let mine = list(&user, json!({"kind": "ticket", "mine": true}));
+    assert_eq!(mine.len(), 300);
+    assert!(
+        mine.iter().any(|i| i["key"] == "ABC-2003"),
+        "beyond a thousand"
+    );
+    let searches: Vec<String> = calls(user.acli_received())
+        .into_iter()
+        .filter(|c| c.starts_with("jira workitem search"))
+        .collect();
+    assert!(
+        searches.iter().all(|c| c.contains("--paginate")),
+        "{searches:?}"
+    );
+    let text = std::fs::read_to_string(user.path("state/flottille/developer.log")).unwrap();
+    let line = text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|line| line["kind"] == "items")
+        .unwrap_or_else(|| panic!("{text}"));
+    assert_eq!(line["cut"], false, "{line}");
+    let size: u64 = std::fs::read_dir(user.path("state/flottille"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().contains(".db"))
+        .map(|entry| entry.metadata().unwrap().len())
+        .sum();
+    eprintln!("first read of 2100 work items: {took:?}, store files {size} bytes");
 }

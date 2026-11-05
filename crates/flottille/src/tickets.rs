@@ -1044,6 +1044,10 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
             " ({})",
             crate::items::as_of(cursor.cursor.unwrap_or_default())
         ));
+        // A read cut at its bound: the stored tickets are not all of the tracker's.
+        if let Some(note) = &cursor.note {
+            text.push_str(&format!("; {note}"));
+        }
         if let Some(problem) = &cursor.problem {
             text.push_str(&format!("; its last read failed: {problem}"));
         }
@@ -2199,6 +2203,9 @@ const LIST_FIELDS: &str = "number,title,state,author,assignees,labels,url,update
 /// in `--fields` (`docs/tickets.md`): a date is read when its output holds one, never asked for.
 const ITEM_JIRA_FIELDS: &str = "key,summary,status,assignee,reporter,labels,issuetype,priority";
 const ALL_COUNT: usize = 1000;
+/// How many work items of a Jira project a round reads at most, page after page (`--paginate`):
+/// a project of a few thousand is read whole, one beyond is cut, and its note says so.
+const JIRA_ALL: usize = 10_000;
 
 /// The tickets of a project's tracker as the items read them (`docs/items.md`): its sign-in
 /// checked once.
@@ -2257,7 +2264,10 @@ impl Tickets {
                     items.extend(found);
                     log.push(said);
                     if cut {
-                        notes.push(format!("only {ALL_COUNT} work items of {key} are listed"));
+                        notes.push(format!(
+                            "only the {JIRA_ALL} most recently updated work items of {key} are \
+                             listed, and which are yours among them"
+                        ));
                     }
                 }
                 return Ok(crate::items::Listing {
@@ -2449,8 +2459,13 @@ async fn changed_work_items(
     }
     let (items, nulls) =
         jira_search(&format!("{query} ORDER BY updated DESC"), ITEM_JIRA_FIELDS).await?;
+    // In the list's order: cut at the same bound, both keep the most recently updated, so that
+    // each listed item of the user's is among those the second finds.
     let (theirs, mine_nulls) = jira_search(
-        &format!("{query} AND (assignee = currentUser() OR reporter = currentUser())"),
+        &format!(
+            "{query} AND (assignee = currentUser() OR reporter = currentUser()) ORDER BY updated \
+             DESC"
+        ),
         "key,summary",
     )
     .await
@@ -2459,9 +2474,9 @@ async fn changed_work_items(
         .iter()
         .filter_map(|item| item["key"].as_str().map(masked))
         .collect();
+    let cut = items.len() >= JIRA_ALL || mine.len() >= JIRA_ALL;
     let logged = json!({"tracker": key, "listed": items.len(), "mine": mine.len(),
-        "nulls": nulls + mine_nulls});
-    let cut = items.len() >= ALL_COUNT;
+        "nulls": nulls + mine_nulls, "cut": cut, "bound": JIRA_ALL});
     let fetched = items
         .iter()
         // An item whose `self` names another site is not the tracker's (`list_work_items`).
@@ -2522,8 +2537,12 @@ async fn changed_work_items(
 /// told (`items::mine_unknown`).
 pub const MINE_UNKNOWN: &str = "which work items are yours could not be read";
 
-/// `acli jira workitem search` of `query`: the items, and how many it answered `null` (`searched`).
+/// `acli jira workitem search` of `query`, every page of it up to `JIRA_ALL`: the items, and how
+/// many it answered `null` (`searched`). `acli` documents no page size, nor whether `--limit`
+/// alone reads past one page: `--paginate` is asked with it, assumed to stop at the limit, and
+/// more than asked is cut here.
 async fn jira_search(query: &str, fields: &str) -> Result<(Vec<Value>, usize), String> {
+    let limit = JIRA_ALL.to_string();
     let (ok, stdout, stderr) = match acli(&[
         "jira",
         "workitem",
@@ -2533,8 +2552,9 @@ async fn jira_search(query: &str, fields: &str) -> Result<(Vec<Value>, usize), S
         "--fields",
         fields,
         "--json",
+        "--paginate",
         "--limit",
-        forge::ALL,
+        &limit,
     ])
     .await
     {
@@ -2551,7 +2571,9 @@ async fn jira_search(query: &str, fields: &str) -> Result<(Vec<Value>, usize), S
     }
     let found: Value = serde_json::from_str(&stdout)
         .map_err(|error| format!("acli jira workitem search answered what is not JSON: {error}"))?;
-    searched(&found)
+    let (mut items, nulls) = searched(&found)?;
+    items.truncate(JIRA_ALL);
+    Ok((items, nulls))
 }
 
 /// The work items of a search's answer, and how many it said as `null`, which are left out:
