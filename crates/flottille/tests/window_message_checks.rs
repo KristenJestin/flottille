@@ -201,6 +201,8 @@ fn the_settings_field_saves_the_message_checks(cx: &mut TestAppContext) {
         checks.read_with(cx, |c, _| c.saved().is_some_and(Vec::is_empty))
     });
     assert!(!file(&user).contains("message_checks"), "{}", file(&user));
+    settle(cx);
+    assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 0);
     let shown = user.call("project.show", json!({"name": "desk"})).unwrap();
     assert!(shown.get("message_checks").is_none(), "{shown}");
 }

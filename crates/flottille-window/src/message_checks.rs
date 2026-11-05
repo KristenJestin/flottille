@@ -3,7 +3,7 @@
 //! title and a squash message. The window writes nothing itself: Save is the daemon's
 //! (`project.set_message_checks`), and the field shows what the daemon says next.
 
-use flottille_ui::{Button, Field, Section, Toast, Type as _, palette, space, toast};
+use flottille_ui::{Button, Field, Section, Toast, Type as _, growing, palette, space, toast};
 use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::{
     AppContext as _, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement,
@@ -192,6 +192,8 @@ impl Render for MessageChecks {
             .line_height(px(20.))
             .child(field)
             .test_support();
+        // The field grows by a line as a check is added, and its height eases there.
+        let text = growing(id("text-height"), text);
         let save = div().flex().justify_end().child(
             Button::primary(id("save"), "Save")
                 .disabled(!self.savable(cx))
