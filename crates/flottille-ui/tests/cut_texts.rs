@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{Desktop, advance, init};
+use common::{Desktop, advance, init, pending_frames};
 use flottille_ui::motion::{HOVER, TOOLTIP};
 use flottille_ui::{ListRow, TreeLevel, TreeRow};
 use gpui_kit::test::TestWindowExt;
@@ -63,6 +63,7 @@ fn a_cut_row_shows_its_whole_text_in_a_tooltip(cx: &mut TestAppContext) {
             assert!(tip.bounds().right() <= px(800.), "inside the window");
         });
     }
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
 }
 
 #[gpui_kit::test]
