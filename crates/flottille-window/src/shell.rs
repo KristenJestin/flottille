@@ -1649,7 +1649,11 @@ impl Shell {
         flottille_ui::toast(
             flottille_ui::Toast::success(format!("The agent shares a link: {}", link.name()))
                 .action("Open", move |_, cx| {
-                    shell.update(cx, |shell, _| shell.open_link(&target)).ok();
+                    shell
+                        .update(cx, |shell, cx| {
+                            crate::open::shown(&shell.follow.opener, &target, cx)
+                        })
+                        .ok();
                 }),
             cx,
         );

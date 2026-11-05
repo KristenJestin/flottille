@@ -4002,7 +4002,10 @@ impl Render for Row {
                                 .child(div().flex_none().child(
                                     Button::secondary(id("link-open"), "Open").on_click(
                                         move |_, _, cx| {
-                                            page.update(cx, |page, _| page.open_link(&target)).ok();
+                                            page.update(cx, |page, cx| {
+                                                crate::open::shown(&page.follow.opener, &target, cx)
+                                            })
+                                            .ok();
                                         },
                                     ),
                                 )),

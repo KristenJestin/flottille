@@ -31,3 +31,16 @@ pub fn system() -> Opener {
         }
     })
 }
+
+/// Opens what an agent showed the user (`web show_link`), checked again right before: the file
+/// may have become a program since the agent showed it. If it did, nothing opens and a failure
+/// toast says why.
+pub fn shown(opener: &Opener, target: &str, cx: &mut gpui_kit::App) {
+    match flottille_core::shown::openable(target) {
+        Ok(()) => opener(Path::new(target)),
+        Err(why) => flottille_ui::toast(
+            flottille_ui::Toast::failure(format!("Not opened: {why}")),
+            cx,
+        ),
+    }
+}

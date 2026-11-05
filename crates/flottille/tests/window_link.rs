@@ -334,3 +334,52 @@ fn show_link_of_a_file_opens_the_file_from_its_card(cx: &mut TestAppContext) {
     let real = std::fs::canonicalize(user.path("work/app/report.html")).unwrap();
     assert_eq!(*opened.lock().unwrap(), [real]);
 }
+
+#[gpui_kit::test]
+fn a_file_made_executable_after_it_was_shown_does_not_open(cx: &mut TestAppContext) {
+    use std::os::unix::fs::PermissionsExt;
+    let user = user();
+    let (agent, mcp) = lead(&user);
+    let file = user.path("work/app/report.html");
+    std::fs::write(&file, "<p>report</p>").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let (shell, cx) = window(&user, cx);
+    let opened = faked_opener(&shell, cx);
+    open_session(&shell, &agent, cx);
+    let page = session_page(&shell, cx);
+
+    show(&mcp, json!({"action": "show_link", "path": "report.html"}));
+    until(&shell, cx, "the toast and the card are in sight", |cx| {
+        has("toast-1-action", cx)
+            && blocks(&page, cx)
+                .iter()
+                .any(|block| matches!(block, Block::Link { .. }))
+    });
+    settle(cx);
+    let at = blocks(&page, cx)
+        .iter()
+        .position(|block| matches!(block, Block::Link { .. }))
+        .unwrap();
+
+    // Between the call and the click, the file became a program.
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    cx.update(|window, cx| window.click("toast-1-action", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click(format!("row-{at}-link-open"), cx));
+    settle(cx);
+
+    assert!(
+        opened.lock().unwrap().is_empty(),
+        "{:?}",
+        opened.lock().unwrap()
+    );
+    let failures: Vec<String> = every_label(cx)
+        .into_iter()
+        .filter(|label| label.starts_with("Not opened"))
+        .collect();
+    assert!(!failures.is_empty(), "{:?}", every_label(cx));
+    assert!(
+        failures.iter().all(|label| label.contains("executable")),
+        "{failures:?}"
+    );
+}
