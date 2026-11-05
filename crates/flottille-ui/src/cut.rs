@@ -3,15 +3,16 @@
 //!
 //! GPUI lays out the element and clips its text, but never says whether it did. A probe, an
 //! empty canvas laid over the element, shapes the whole text in the element's own font once the
-//! frame is laid out and compares it with the room it has. The answer is kept for the next frame,
+//! frame is laid out and compares it with the room it has (its width less its horizontal
+//! padding). The answer is kept for the next frame,
 //! so the tooltip comes one frame after the text got cut (or whole again), which a pointer
 //! resting for [`TOOLTIP`](crate::motion::TOOLTIP) never sees.
 
 use std::sync::Arc;
 
 use gpui_kit::{
-    AnyElement, App, Div, ElementId, InteractiveElement, IntoElement, ParentElement, Pixels,
-    SharedString, Stateful, Styled, TestSupportExt, Window, canvas, px,
+    AnyElement, App, DefiniteLength, Div, ElementId, InteractiveElement, IntoElement,
+    ParentElement, Pixels, SharedString, Stateful, Styled, TestSupportExt, Window, canvas, px,
 };
 
 use crate::button::tipped;
@@ -23,8 +24,7 @@ struct Seen {
     height: Pixels,
 }
 
-/// `element`, a one-line text clipped by its frame (`overflow_hidden` and `text_ellipsis`, no
-/// padding of its own), with `text` for its tooltip when `text` is wider than the element. It
+/// `element`, a one-line text clipped by its frame (`overflow_hidden` and `text_ellipsis`), with `text` for its tooltip when `text` is wider than the element. It
 /// needs an id; the tooltip is `<id>-tooltip`.
 pub fn tipped_when_cut(
     mut element: Stateful<Div>,
@@ -38,6 +38,8 @@ pub fn tipped_when_cut(
         .clone()
         .expect("an element with a tooltip has an id");
     let text: SharedString = text.into();
+    // The probe covers the padding box: the text's room is what the padding leaves.
+    let padding = element.style().padding.clone();
     let key = ElementId::NamedChild(Arc::new(id), "cut".into());
     let seen = window.use_keyed_state(key, cx, |_, _| Seen::default());
     let now = *seen.read(cx);
@@ -54,9 +56,15 @@ pub fn tipped_when_cut(
                     .text_system()
                     .shape_line(line.clone(), font_size, &[style.to_run(line.len())], None)
                     .width;
+                let rem = window.rem_size();
+                let pad = |side: Option<DefiniteLength>| match side {
+                    Some(DefiniteLength::Absolute(length)) => length.to_pixels(rem),
+                    _ => px(0.),
+                };
+                let room = bounds.size.width - pad(padding.left) - pad(padding.right);
                 let found = Seen {
                     // Half a pixel of rounding is not a cut.
-                    cut: whole > bounds.size.width + px(0.5),
+                    cut: whole > room + px(0.5),
                     height: bounds.size.height,
                 };
                 if *seen.read(cx) != found {

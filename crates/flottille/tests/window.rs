@@ -5558,6 +5558,16 @@ fn edit_of<'a>(
     width: f32,
     cx: &'a mut TestAppContext,
 ) -> (Entity<SessionPage>, usize, &'a mut VisualTestContext) {
+    edit_with(path, "c\nd\ne", width, cx)
+}
+
+/// [`edit_of`] where the agent wrote `new` in place of `a\nb`.
+fn edit_with<'a>(
+    path: &str,
+    new: &str,
+    width: f32,
+    cx: &'a mut TestAppContext,
+) -> (Entity<SessionPage>, usize, &'a mut VisualTestContext) {
     let user = team_user();
     let (lead, _mcp, _) = lead_in_w(&user);
     let (shell, cx) = open_session(&user, &lead, 1280., cx);
@@ -5574,7 +5584,7 @@ fn edit_of<'a>(
                 "agent.tool_call",
                 json!({"id": "e", "title": "fs_edit", "status": "in_progress",
                     "raw_input": {"path": path, "edits": [
-                        {"old": "a\nb", "new": "c\nd\ne"}]}}),
+                        {"old": "a\nb", "new": new}]}}),
             ),
             made_up(
                 2,
@@ -5645,6 +5655,37 @@ fn the_whole_path_is_in_the_tooltip(cx: &mut TestAppContext) {
         assert_eq!(
             window.find(format!("{line}-tooltip")).label(),
             Some(DEEP_PATH)
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn a_cut_diff_line_shows_its_whole_text_in_a_tooltip(cx: &mut TestAppContext) {
+    let long = "let recipients = sheet.recipients().filter(|recipient| recipient.is_active()).collect::<Vec<_>>();";
+    let (_page, at, cx) = edit_with("src/sheet.rs", long, 420., cx);
+    cx.update(|window, cx| window.click(format!("row-{at}-diff-toggle"), cx));
+    settle(cx);
+    let rest_on = |line: usize, cx: &mut VisualTestContext| {
+        cx.update(|window, cx| window.hover(format!("row-{at}-diff-line-{line}"), cx));
+        cx.executor()
+            .advance_clock(flottille_ui::motion::TOOLTIP + flottille_ui::motion::HOVER * 2);
+        cx.run_until_parked();
+        frame(cx);
+    };
+    // The removed `a` fits; the added line does not, and its padding is not room.
+    rest_on(0, cx);
+    cx.update(|window, _| {
+        assert!(
+            window
+                .try_find(format!("row-{at}-diff-line-0-tooltip"))
+                .is_none()
+        );
+    });
+    rest_on(2, cx);
+    cx.update(|window, _| {
+        assert_eq!(
+            window.find(format!("row-{at}-diff-line-2-tooltip")).label(),
+            Some(format!("+ {long}").as_str())
         );
     });
 }
