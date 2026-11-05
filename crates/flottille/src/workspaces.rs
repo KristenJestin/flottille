@@ -521,6 +521,9 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
             asked.name
         )));
     }
+    if let Some(why) = flottille_core::workspace::reserved(&asked.name) {
+        return Err(Failure::refused(why));
+    }
     let taken = taken_repositories(&project, asked.repositories.as_deref())?;
     if let Some(other) = asked.bases.keys().find(|path| !taken.contains(path)) {
         return Err(Failure::refused(format!(

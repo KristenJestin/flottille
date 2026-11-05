@@ -288,7 +288,8 @@ do not see it yet, and so miss what happens before their next one: the tracker h
 round (it never worked), or the item is not stored (a Jira work item whose status Jira gives no
 category for). **A Jira work item's comments are read by the rounds only while a subscription
 to its `commented` follows it** (`acli jira workitem view <KEY> --json --fields comment`, one
-call per work item that changed), since a tracker's every work item would cost one call each;
+call per followed work item that changed: the one the round's search lists in its window, since a
+search never prints `updated`, below), since a tracker's every work item would cost one call each;
 a comment is then an `item.commented` as on GitHub, and an agent's own, known by its record,
 is said `posted by an agent` and left out of `from: people`. Subscribing again to the same
 ticket replaces the agent's subscription; **`unsubscribe {ticket?}`** cancels those to the ticket
@@ -420,7 +421,11 @@ and `created` are therefore not asked: the items read `fields.updated` and `fiel
 the output holds them, and a work item without them is listed without a date (the search's own
 order, `ORDER BY updated DESC`, stays). `workitem view` is not run for the dates of a thousand
 work items; if the maintainer finds that `acli` prints them under another flag, that is a
-follow-up. The maintainer checks the Tickets tab of a Jira project on their machine.
+follow-up. A search prints only the fields asked (`key` alone prints `null` per work item), and
+`workitem view K --fields updated,comment` gives `fields.updated` and `fields.comment.total`. A
+round after the first searches `updated >= "-<minutes>m"` since its last, so **a work item it lists
+changed**: a followed one is then read for its comments, and a followed one the window does not
+list is not read at all. No search is sent for the followed items alone, and none asks `updated`. The maintainer checks the Tickets tab of a Jira project on their machine.
 
 ## Tests
 

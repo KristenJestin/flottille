@@ -548,15 +548,14 @@ const SERVED: [Definition; 28] = [
         name: "agent_launch",
         title: "Start a session, or launch a child",
         description: "Work that belongs in a workspace is a session for the user: root: true \
-            with workspace (an existing one) or new_workspace (made for it, repositories picks \
-            them), judged; theirs, not your child, the brief its first message; you write to it, \
+            with workspace (an existing one; main is the project folder) or new_workspace (made \
+            for it, repositories picks them), judged; theirs, not your child, the brief its first message; you write to it, \
             and it answers you, with session_send. A root only. Without root: a child agent on \
             one precise task, in your own place (workspace and new_workspace are refused), \
             answered at once with its agent_id; it works on its own and you are told when it \
             reports, asks, fails, is stuck or idles, so never poll. The brief is all it knows: \
             the task, what to read, the checks, the deliverable. provider: yours when left out; \
-            a refusal names the ready ones. Only a root has this tool, never a child; a \
-            child launch is refused above the children cap. {\"title\": \"Fix login\", \"brief\": \"...\", \"root\": true, \
+            a refusal names the ready ones. A child launch is refused above the children cap. {\"title\": \"Fix login\", \"brief\": \"...\", \"root\": true, \
             \"workspace\": \"login\"}; {\"title\": \"Add API\", \"brief\": \"...\", \"root\": \
             true, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}; {\"title\": \
             \"Write the tests\", \"brief\": \"...\"}",
@@ -571,7 +570,7 @@ const SERVED: [Definition; 28] = [
                 "model": {"type": "string", "description": "The model; the provider's default when left out."},
                 "effort": {"type": "string", "description": "The model's effort; its default when left out."},
                 "role": {"type": "string", "enum": ["worker", "lead"], "description": "worker by default."},
-                "workspace": {"type": "string", "description": "With root: an existing workspace of the project, for the session to work in. A child works in your place."},
+                "workspace": {"type": "string", "description": "With root: an existing workspace of the project, for the session to work in; main is the project folder. A child works in your place."},
                 "new_workspace": {"type": "string", "description": "With root: the name of a new workspace to make for the session. Not with workspace."},
                 "repositories": {"type": "array", "items": {"type": "string"}, "description": "With new_workspace: its repositories, by path; the project's when left out."},
                 "root": {"type": "boolean", "description": "A session for the user, in a workspace or your place, not a child."}
