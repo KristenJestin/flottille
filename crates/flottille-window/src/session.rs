@@ -5376,10 +5376,6 @@ impl Render for SessionRail {
                 if !place.bases.is_empty() {
                     facts.push(("From", place.bases.join(", ")));
                 }
-                facts.push((
-                    "Prepared",
-                    place.prepared_ms.map_or("not yet".into(), seconds),
-                ));
             }
             (None, _) => facts.push(("Place", "the project folder".into())),
             _ => {}

@@ -263,7 +263,7 @@ fn the_workspace_shows_before_the_forge_and_the_ticket(cx: &mut TestAppContext) 
     let (shell, cx) = open(&user, &lead, (SLOW_MS, None), cx);
 
     until(&shell, cx, "the repository in the rail", |cx| {
-        present(cx, "rail-repository-api") && present(cx, "rail-fact-Prepared")
+        present(cx, "rail-repository-api") && present(cx, "rail-fact-Machine")
     });
     assert!(
         !present(cx, "rail-ticket") && !present(cx, "rail-pull-api"),
@@ -325,7 +325,7 @@ fn the_whole_workspace_and_runs_sections_wait_as_skeletons_before_their_first_an
     assert!(present(cx, "rail-workspace-skeleton"), "Workspace waits");
     assert!(present(cx, "rail-runs-skeleton"), "Runs waits");
     until(&shell, cx, "the facts and the run", |cx| {
-        present(cx, "rail-fact-Prepared") && present(cx, "rail-runs")
+        present(cx, "rail-fact-Machine") && present(cx, "rail-runs")
     });
     settle(cx);
     assert!(!present(cx, "rail-workspace-skeleton") && !present(cx, "rail-runs-skeleton"));
