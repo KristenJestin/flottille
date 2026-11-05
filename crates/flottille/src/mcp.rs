@@ -1725,6 +1725,12 @@ async fn call(
         .find_map(|provider| provider.tool_of(name))
         .unwrap_or(name);
     let (tool, args) = current(tool, args);
+    // A line that only prints part of a file is the read it is: served and recorded as such.
+    let (tool, args, said) = match crate::reads::as_read(daemon, &grant, &tool, &args) {
+        Some((args, said)) => ("fs_read".to_owned(), args, Some(said)),
+        None => (tool, args, None),
+    };
+    let said = said.as_deref();
     let Some(key) = key else {
         if daemon
             .mcp
@@ -1739,7 +1745,7 @@ async fn call(
                 grant.agent
             );
         }
-        return played(daemon, &grant, &tool, args, None, cancelled).await;
+        return played(daemon, &grant, &tool, args, None, said, cancelled).await;
     };
     let slot = (grant.agent.clone(), key.clone());
     let first = {
@@ -1761,7 +1767,7 @@ async fn call(
     };
     match first {
         Ok(sender) => {
-            let answer = played(daemon, &grant, &tool, args, Some(&key), cancelled).await;
+            let answer = played(daemon, &grant, &tool, args, Some(&key), said, cancelled).await;
             sender.send_replace(Some(answer.clone()));
             answer
         }
@@ -1807,6 +1813,7 @@ async fn played(
     tool: &str,
     args: Value,
     key: Option<&str>,
+    said: Option<&str>,
     cancelled: CancellationToken,
 ) -> (String, bool) {
     let started = Instant::now();
@@ -1916,6 +1923,11 @@ async fn played(
             "refused: this agent has no tool {tool}: its tools are {}",
             grant.tools.join(", ")
         ))
+    };
+    // What a `run` line was answered as, said before what it read.
+    let outcome = match (outcome, said) {
+        (Outcome::Done(text), Some(said)) => Outcome::Done(format!("{said}\n{text}")),
+        (outcome, _) => outcome,
     };
     let (outcome, cut) = cut_long(daemon, grant, tool, reads_a_result, outcome);
     if logging {

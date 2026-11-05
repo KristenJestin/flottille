@@ -363,6 +363,78 @@ pub fn fs_read(cx: &Context, args: Value) -> Outcome {
     }
 }
 
+/// The lines of a file a command that only prints some of it asks for.
+pub enum Lines {
+    /// From line `first` to line `last`, the end of the file without one.
+    From { first: u64, last: Option<u64> },
+    /// The last `n` lines.
+    Last(u64),
+}
+
+/// How far into a file the start of a range of lines is looked for.
+const SCAN_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Where `lines` are in the file `path`, as the offset and the length of a page of `fs_read`;
+/// `None` when the file has no such lines or they do not fit in a page, which is for the caller to
+/// leave to something else. Nothing is returned of the file itself.
+pub fn line_span(path: &Resolved, lines: Lines) -> std::io::Result<Option<(u64, u64)>> {
+    let mut file = open_regular(&path.path)?;
+    let size = file.metadata()?.len();
+    let span = |start: u64, end: u64| {
+        (start < end && end - start <= READ_PAGE_BYTES).then_some((start, end - start))
+    };
+    let (first, last) = match lines {
+        Lines::From { first, last } => (first, last),
+        Lines::Last(count) => {
+            let from = size.saturating_sub(READ_PAGE_BYTES + 1);
+            file.seek(SeekFrom::Start(from))?;
+            let mut window = Vec::new();
+            file.by_ref().take(size - from).read_to_end(&mut window)?;
+            let body = window.strip_suffix(b"\n").unwrap_or(&window);
+            let ends = body.iter().rev().enumerate();
+            let start = match ends
+                .filter(|(_, byte)| **byte == b'\n')
+                .nth(count as usize - 1)
+            {
+                Some((back, _)) => from + (body.len() - back) as u64,
+                None if from == 0 => 0,
+                None => return Ok(None),
+            };
+            return Ok(span(start, size));
+        }
+    };
+    let mut start = (first == 1).then_some(0);
+    let mut line = 1;
+    let mut position = 0;
+    let mut buffer = vec![0; CHUNK];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(start.and_then(|start| span(start, size)));
+        }
+        for (at, byte) in buffer[..read].iter().enumerate() {
+            if *byte != b'\n' {
+                continue;
+            }
+            let after = position + at as u64 + 1;
+            if let Some(start) = start
+                && last == Some(line)
+            {
+                return Ok(span(start, after));
+            }
+            line += 1;
+            if line == first {
+                start = Some(after);
+            }
+        }
+        position += read as u64;
+        let too_long = start.is_some_and(|start| position - start > READ_PAGE_BYTES);
+        if too_long || (start.is_none() && position > SCAN_BYTES) {
+            return Ok(None);
+        }
+    }
+}
+
 /// A page of a file, its text at most `budget` bytes. `cx` is the session that read it, which
 /// then knows its fingerprint (what lets it write the file); `None` for a read that grants
 /// nothing, such as a reference's.
