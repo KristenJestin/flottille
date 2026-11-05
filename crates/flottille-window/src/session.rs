@@ -29,7 +29,7 @@ use flottille_ui::{
     AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Listing, Menu, Modal, Palette, Pill,
     PulsingLabel, Side, Skeleton, StateIcon, Status, Toast, Type, awaiting, changing, enter, fade,
     fold_frame, hoverable, icon, palette, path_line, presence, presence_of, section_label,
-    selectable, space, text_region, toast, turning,
+    selectable, space, text_region, tipped_when_cut, toast, turning,
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{
@@ -1361,7 +1361,7 @@ impl SessionPage {
 }
 
 impl Render for SessionPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
         let p = palette(cx);
         let narrow = self.layout == Layout::Narrow;
@@ -1379,7 +1379,7 @@ impl Render for SessionPage {
             .gap(space::MD)
             .border_b_1()
             .border_color(p.line)
-            .child(
+            .child(tipped_when_cut(
                 div()
                     .id("session-title")
                     .min_w_0()
@@ -1389,9 +1389,11 @@ impl Render for SessionPage {
                     .text_size(px(14.))
                     .semibold()
                     .aria_label(SharedString::from(self.opened.title.clone()))
-                    .child(SharedString::from(self.opened.title.clone()))
-                    .test_support(),
-            )
+                    .child(SharedString::from(self.opened.title.clone())),
+                SharedString::from(self.opened.title.clone()),
+                window,
+                cx,
+            ))
             .child(
                 div()
                     .id("session-place")
@@ -1418,17 +1420,21 @@ impl Render for SessionPage {
             )
             .children(self.opened.started_by.clone().map(|by| {
                 let said = SharedString::from(format!("started by {by}"));
-                div()
-                    .id("session-started-by")
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(px(12.))
-                    .text_color(p.faint)
-                    .aria_label(said.clone())
-                    .child(said)
-                    .test_support()
+                tipped_when_cut(
+                    div()
+                        .id("session-started-by")
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(px(12.))
+                        .text_color(p.faint)
+                        .aria_label(said.clone())
+                        .child(said.clone()),
+                    said,
+                    window,
+                    cx,
+                )
             }))
             .child(div().flex_1())
             .children(self.end_error.clone().map(|error| {
@@ -3271,6 +3277,17 @@ fn said(
     )
 }
 
+/// The button that copies a file's whole path, the one a line cut with an ellipsis stands for.
+/// Its click is its own: it neither opens the edit nor folds the steps.
+fn copy_path(id: ElementId, path: &str) -> Button {
+    let path = path.to_owned();
+    Button::icon(id, Icon::Copy, "Copy the path").on_click(move |_, _, cx| {
+        cx.stop_propagation();
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(path.clone()));
+        toast(Toast::success("Path copied").detail(path.clone()), cx);
+    })
+}
+
 fn call_state(call: &Call) -> AgentState {
     match call.state {
         CallState::Running => AgentState::Running,
@@ -3763,6 +3780,12 @@ impl Render for Row {
                                         ),
                                     )),
                             )
+                            .children(call.path.as_ref().map(|path| {
+                                copy_path(
+                                    ElementId::Name(format!("step-{}-{at}-copy", self.at).into()),
+                                    path,
+                                )
+                            }))
                             .child(div().flex_none().mono(11.).text_color(p.faint).child(
                                 SharedString::from(call.duration_ms().map_or("…".into(), seconds)),
                             ))
@@ -4036,6 +4059,7 @@ impl Render for Row {
                                     .cursor_pointer()
                                     .child(icon(Icon::File).flex_none().text_color(p.faint))
                                     .child(path_line(id("diff-path"), path, 12.5, window, cx))
+                                    .child(copy_path(id("diff-copy"), path))
                                     .child(
                                         div()
                                             .id(id("diff-chevron"))
@@ -4065,7 +4089,7 @@ impl Render for Row {
                                     .id(id("diff-lines"))
                                     .py(space::SM)
                                     .mono(12.)
-                                    .children(lines.iter().map(|line| {
+                                    .children(lines.iter().enumerate().map(|(at, line)| {
                                         let (text, bg, ink) = match line {
                                             DiffLine::Removed(text) => {
                                                 (format!("- {text}"), p.del, p.fail)
@@ -4074,14 +4098,21 @@ impl Render for Row {
                                                 (format!("+ {text}"), p.add, p.ok)
                                             }
                                         };
-                                        div()
-                                            .px(space::LG)
-                                            .bg(bg)
-                                            .text_color(ink)
-                                            .overflow_hidden()
-                                            .whitespace_nowrap()
-                                            .text_ellipsis()
-                                            .child(SharedString::from(text))
+                                        let text = SharedString::from(text);
+                                        tipped_when_cut(
+                                            div()
+                                                .id(id(&format!("diff-line-{at}")))
+                                                .px(space::LG)
+                                                .bg(bg)
+                                                .text_color(ink)
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .text_ellipsis()
+                                                .child(text.clone()),
+                                            text,
+                                            window,
+                                            cx,
+                                        )
                                     }))
                                     .test_support(),
                             )),
@@ -4089,7 +4120,7 @@ impl Render for Row {
                     .test_support()
                     .into_any_element()
             }
-            Block::Approval { number } => self.render_card(*number, cx).into_any_element(),
+            Block::Approval { number } => self.render_card(*number, window, cx).into_any_element(),
             Block::Answered { .. } => div().into_any_element(),
             // One line; a click opens the output in the panel the rail opens.
             Block::Command(result) => {
@@ -4124,7 +4155,12 @@ impl Row {
     /// .env", which lights its card in the rail; once answered, the record of the outcome. The
     /// card, with Allow and Deny, is in the rail: the page says that the user is needed there,
     /// once.
-    fn render_card(&mut self, number: u64, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_card(
+        &mut self,
+        number: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let p = palette(cx);
         let Some(card) = self.card.clone() else {
             return div()
@@ -4151,15 +4187,21 @@ impl Row {
             .text_size(px(13.))
             .aria_label(SharedString::from(said.clone()))
             .child(div().flex_none().size(px(8.)).rounded_full().bg(ink))
-            .child(
+            .child(tipped_when_cut(
                 div()
+                    .id(ElementId::Name(
+                        format!("approval-line-{number}-said").into(),
+                    ))
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_ellipsis()
-                    .child(SharedString::from(said)),
-            )
+                    .child(SharedString::from(said.clone())),
+                SharedString::from(said),
+                window,
+                cx,
+            ))
             .child(
                 div()
                     .flex_none()
@@ -4784,7 +4826,7 @@ impl Render for SessionRail {
                 (agent.id.clone(), fade(id, on, PANEL, window, cx))
             })
             .collect();
-        let agent_row = |agent: &RailAgent| {
+        let agent_row = |agent: &RailAgent, window: &mut Window, cx: &mut App| {
             let mark = self.marks[&agent.id].clone();
             let page = self.page.clone();
             let target = agent.id.clone();
@@ -4948,36 +4990,47 @@ impl Render for SessionRail {
                         .overflow_hidden()
                         .whitespace_nowrap()
                         .child({
-                            let name = div()
-                                .id(ElementId::Name(top_id.into()))
-                                .medium()
-                                .text_size(px(13.))
-                                .text_ellipsis()
-                                .overflow_hidden()
-                                .aria_label(SharedString::from(name.clone()))
-                                .child(SharedString::from(name))
-                                .test_support();
+                            let name = tipped_when_cut(
+                                div()
+                                    .id(ElementId::Name(top_id.into()))
+                                    .medium()
+                                    .text_size(px(13.))
+                                    .text_ellipsis()
+                                    .overflow_hidden()
+                                    .aria_label(SharedString::from(name.clone()))
+                                    .when(runs_chip.is_some(), |d| d.flex_1().min_w_0())
+                                    .child(SharedString::from(name.clone())),
+                                SharedString::from(name),
+                                window,
+                                cx,
+                            );
                             match runs_chip {
                                 Some(chip) => div()
                                     .flex()
                                     .items_center()
                                     .gap(space::XS)
-                                    .child(name.flex_1().min_w_0())
+                                    .child(name)
                                     .child(chip)
                                     .into_any_element(),
                                 None => name.into_any_element(),
                             }
                         })
                         .children(said.map(|said| {
-                            div()
-                                .id(ElementId::Name(format!("rail-runs-on-{}", agent.id).into()))
-                                .mono(11.)
-                                .text_color(p.faint)
-                                .text_ellipsis()
-                                .overflow_hidden()
-                                .aria_label(SharedString::from(said.clone()))
-                                .child(SharedString::from(said))
-                                .test_support()
+                            tipped_when_cut(
+                                div()
+                                    .id(ElementId::Name(
+                                        format!("rail-runs-on-{}", agent.id).into(),
+                                    ))
+                                    .mono(11.)
+                                    .text_color(p.faint)
+                                    .text_ellipsis()
+                                    .overflow_hidden()
+                                    .aria_label(SharedString::from(said.clone()))
+                                    .child(SharedString::from(said.clone())),
+                                SharedString::from(said),
+                                window,
+                                cx,
+                            )
                         }))
                         // What the root waits for between turns, folding in and away with it.
                         .when(!kid, |d| {
@@ -5046,7 +5099,7 @@ impl Render for SessionRail {
                 ))
                 .test_support()
         };
-        let ended_row = |parent: &str, count: usize, open: bool, turn: f32| {
+        let ended_row = |parent: &str, count: usize, open: bool, turn: f32, cx: &Context<Self>| {
             let depth = self
                 .agents
                 .iter()
@@ -5074,7 +5127,7 @@ impl Render for SessionRail {
                         self.agents
                             .iter()
                             .find(|a| a.id == id)
-                            .map(|agent| agent_row(agent).into_any_element()),
+                            .map(|agent| agent_row(agent, window, cx).into_any_element()),
                     );
                 }
                 RailRow::Ended {
@@ -5088,6 +5141,7 @@ impl Render for SessionRail {
                             count,
                             self.open_ended.contains(&parent),
                             turns.get(&parent).copied().unwrap_or(0.0),
+                            cx,
                         )
                         .into_any_element(),
                     );
@@ -5101,7 +5155,7 @@ impl Render for SessionRail {
                         .filter_map(|row| match row {
                             RailRow::Agent(id) => {
                                 let agent = self.agents.iter().find(|a| a.id == id)?;
-                                Some(agent_row(agent).into_any_element())
+                                Some(agent_row(agent, window, cx).into_any_element())
                             }
                             RailRow::Ended { .. } => None,
                         })
@@ -5253,23 +5307,29 @@ impl Render for SessionRail {
                     .child(presence(
                         ElementId::Name(format!("rail-status-{name}-block").into()),
                         status.is_some(),
-                        div()
-                            .id(ElementId::Name(format!("rail-status-{name}").into()))
-                            .pl(space::XL)
-                            .mono(11.5)
-                            .text_color(p.faint)
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .aria_label(SharedString::from(status.as_ref().map_or(
-                                String::new(),
-                                |s| match &s.note {
-                                    Some(note) => format!("{} · {note}", s.line()),
-                                    None => s.line(),
-                                },
-                            )))
-                            .children(status.as_ref().map(|s| SharedString::from(s.line())))
-                            .test_support(),
+                        tipped_when_cut(
+                            div()
+                                .id(ElementId::Name(format!("rail-status-{name}").into()))
+                                .pl(space::XL)
+                                .mono(11.5)
+                                .text_color(p.faint)
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .aria_label(SharedString::from(status.as_ref().map_or(
+                                    String::new(),
+                                    |s| match &s.note {
+                                        Some(note) => format!("{} · {note}", s.line()),
+                                        None => s.line(),
+                                    },
+                                )))
+                                .children(status.as_ref().map(|s| SharedString::from(s.line()))),
+                            SharedString::from(
+                                status.as_ref().map(|s| s.line()).unwrap_or_default(),
+                            ),
+                            window,
+                            cx,
+                        ),
                     ))
                     .test_support()
                     .into_any_element(),
@@ -5397,13 +5457,17 @@ impl Render for SessionRail {
                         .flex_none()
                         .child(SharedString::from(ticket.reference.clone())),
                 )
-                .child(
+                .child(tipped_when_cut(
                     div()
+                        .id("rail-ticket-title")
                         .min_w_0()
                         .text_ellipsis()
                         .overflow_hidden()
-                        .child(SharedString::from(said)),
-                )
+                        .child(SharedString::from(said.clone())),
+                    SharedString::from(said),
+                    window,
+                    cx,
+                ))
                 .on_click(move |_, _, cx| {
                     if let Some(url) = &url {
                         page.update(cx, |page, _| page.open_link(url)).ok();
@@ -5542,15 +5606,21 @@ impl Render for SessionRail {
                             .flex_col()
                             .children(facts.into_iter().map(|(key, value)| {
                                 let said = SharedString::from(value.clone());
-                                let value = div()
-                                    .id(ElementId::Name(format!("rail-fact-{key}-value").into()))
-                                    .min_w_0()
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .mono(FACT_SIZE)
-                                    .child(SharedString::from(value))
-                                    .test_support();
+                                let value = tipped_when_cut(
+                                    div()
+                                        .id(ElementId::Name(
+                                            format!("rail-fact-{key}-value").into(),
+                                        ))
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .mono(FACT_SIZE)
+                                        .child(SharedString::from(value)),
+                                    said.clone(),
+                                    window,
+                                    cx,
+                                );
                                 fact_line(format!("rail-fact-{key}"), None, key, said, value, p)
                             }))
                             .test_support(),
@@ -6772,31 +6842,39 @@ impl Render for StatusLine {
         } else {
             self.leaving = None;
         }
-        let line = |id: &'static str, text: SharedString, opacity: f32| {
-            div()
-                .id(id)
-                .aria_label(text.clone())
-                .text_size(px(12.5))
-                .text_color(p.faint)
-                .overflow_hidden()
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .opacity(opacity)
-                .child(text)
-                .test_support()
+        let line = |id: &'static str,
+                    text: SharedString,
+                    opacity: f32,
+                    window: &mut Window,
+                    cx: &mut App| {
+            tipped_when_cut(
+                div()
+                    .id(id)
+                    .aria_label(text.clone())
+                    .text_size(px(12.5))
+                    .text_color(p.faint)
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .opacity(opacity)
+                    .child(text.clone()),
+                text,
+                window,
+                cx,
+            )
         };
         // The new words take the room; the old ones leave over them, from the same edge.
+        let current = self
+            .current
+            .clone()
+            .map(|text| line("reply-status", text, t, window, cx));
         div()
             .relative()
             .flex()
             .justify_end()
-            .children(
-                self.current
-                    .clone()
-                    .map(|text| line("reply-status", text, t)),
-            )
+            .children(current)
             .children(self.leaving.clone().map(|text| {
-                let leaving = line("reply-status-leaving", text, 1.0 - t);
+                let leaving = line("reply-status-leaving", text, 1.0 - t, window, cx);
                 match self.current.is_some() {
                     true => div().absolute().right_0().child(leaving).into_any_element(),
                     false => leaving.into_any_element(),

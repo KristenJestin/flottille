@@ -64,24 +64,49 @@ impl Skeleton {
 }
 
 /// What the block redraws: its own small view, so that a pulse never draws the screen around it.
+/// It pulses only while it is drawn: a page the window keeps but no longer shows keeps its
+/// skeletons' views alive, and their ticks would draw the window ten times a second each.
 struct Pulse {
+    /// Whether it pulses at all (not under reduced motion).
+    moves: bool,
+    /// The ticker, and whether it still runs: one that stopped is replaced at the next draw.
     ticker: Option<Task<()>>,
+    ticking: bool,
+    /// Drawn since the last tick: a tick that finds it not drawn stops the ticker, and the next
+    /// draw starts it again.
+    drawn: bool,
     height: Pixels,
 }
 
 impl Pulse {
     fn new(height: Pixels, cx: &mut Context<Self>) -> Self {
-        let ticker = (!cx.reduce_motion()).then(|| {
-            cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor().timer(PULSE_FRAME).await;
-                    if this.update(cx, |_, cx| cx.notify()).is_err() {
-                        break;
+        Self {
+            moves: !cx.reduce_motion(),
+            ticker: None,
+            ticking: false,
+            drawn: false,
+            height,
+        }
+    }
+
+    fn tick(&mut self, cx: &mut Context<Self>) {
+        self.ticking = true;
+        self.ticker = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(PULSE_FRAME).await;
+                let goes_on = this.update(cx, |pulse, cx| {
+                    if !std::mem::take(&mut pulse.drawn) {
+                        pulse.ticking = false;
+                        return false;
                     }
+                    cx.notify();
+                    true
+                });
+                if !matches!(goes_on, Ok(true)) {
+                    break;
                 }
-            })
-        });
-        Self { ticker, height }
+            }
+        }));
     }
 }
 
@@ -105,12 +130,16 @@ impl Render for Pulse {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         DRAWN.with(|drawn| drawn.set(drawn.get() + 1));
-        let opacity = match self.ticker {
-            Some(_) => {
+        self.drawn = true;
+        if self.moves && !self.ticking {
+            self.tick(cx);
+        }
+        let opacity = match self.moves {
+            true => {
                 let now = cx.background_executor().now();
                 pulse_opacity(now.saturating_duration_since(epoch(now)))
             }
-            None => (FAINTEST + BRIGHTEST) / 2.0,
+            false => (FAINTEST + BRIGHTEST) / 2.0,
         };
         div()
             .w_full()
