@@ -540,3 +540,474 @@ fn the_cli_lists_starts_and_stops_a_service() {
 
     assert_eq!(stopped, format!("db stopped ({})\n", db.display()));
 }
+
+/// A ready command that answers once `file` exists.
+fn ready_once(file: &std::path::Path) -> String {
+    format!("ready = {{ command = \"test -e {}\" }}\n", file.display())
+}
+
+/// A service that listens once started and is ready once `ok` exists.
+fn ready_on(user: &User, name: &str, ok: &std::path::Path) -> String {
+    format!(
+        "[services.{name}]\nfolder = \"{}\"\nline = \"{}\"\n{}",
+        folder(user, name).display(),
+        server(0),
+        ready_once(ok)
+    )
+}
+
+/// The runs of the project's task, going on now.
+fn task_runs(user: &User, name: &str) -> usize {
+    Store::open(&user.path("state/flottille/flottille.db"))
+        .unwrap()
+        .running_runs()
+        .unwrap()
+        .into_iter()
+        .filter(|run| run.project == "app" && run.name.as_deref() == Some(name))
+        .count()
+}
+
+/// A workspace `name` of `app`, ready.
+fn workspace(user: &User, name: &str) -> PathBuf {
+    user.call("workspace.create", json!({"project": "app", "name": name}))
+        .unwrap();
+    let show = || {
+        user.call("workspace.show", json!({"project": "app", "name": name}))
+            .unwrap()
+    };
+    eventually("the workspace", || show()["state"] != "preparing");
+    let shown = show();
+    assert_eq!(shown["state"], "ready", "{shown}");
+    PathBuf::from(shown["folder"].as_str().unwrap())
+}
+
+#[test]
+fn an_agent_s_start_of_a_service_outside_its_place_is_held_in_ask() {
+    let user = User::with_fake_agent();
+    services_file(&user, &listening(&user, "db", 0, &[]));
+    project(&user, &[]);
+    let (agent, mcp) = root(&user, None);
+    set_mode(&user, &agent, "ask");
+
+    let number = held(&mcp.call("services", json!({"action": "start", "name": "db"})));
+
+    let asked = request(&user, number).to_string();
+    assert!(asked.contains("outside this agent's place"), "{asked}");
+    assert_eq!(show(&user, "db")["state"], "stopped");
+}
+
+#[test]
+fn an_agent_s_start_of_a_service_in_a_login_s_place_is_refused() {
+    let user = User::with_fake_agent();
+    let ssh = user.path("home/.ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    services_file(
+        &user,
+        &format!(
+            "[services.db]\nfolder = \"{}\"\nline = \"{}\"\n",
+            ssh.display(),
+            server(0)
+        ),
+    );
+    project(&user, &[]);
+    let (agent, mcp) = root(&user, None);
+    set_mode(&user, &agent, "full");
+
+    let answer = mcp.call("services", json!({"action": "start", "name": "db"}));
+
+    assert!(answer.error, "not refused: {}", answer.text);
+    assert!(answer.text.contains(".ssh"), "{}", answer.text);
+    assert_eq!(service_runs(&user, "db"), 0);
+}
+
+#[test]
+fn an_agent_s_start_of_a_service_marked_to_ask_is_held_even_when_its_line_alone_would_pass() {
+    let user = User::with_fake_agent();
+    let app = project(&user, &[]);
+    let service = |name: &str, ask: bool| {
+        format!(
+            "[services.{name}]\nfolder = \"{}\"\nline = \"git status --short\"\nask_before_running = {ask}\n",
+            app.display()
+        )
+    };
+    services_file(
+        &user,
+        &format!("{}{}", service("plain", false), service("asked", true)),
+    );
+    let (agent, mcp) = root(&user, None);
+    set_mode(&user, &agent, "ask");
+
+    done(mcp.call("services", json!({"action": "start", "name": "plain"})));
+    let number = held(&mcp.call("services", json!({"action": "start", "name": "asked"})));
+
+    let asked = request(&user, number).to_string();
+    assert!(
+        asked.contains("the service asked is marked to ask before it runs"),
+        "{asked}"
+    );
+    assert!(!asked.contains("project folder (main)"), "{asked}");
+}
+
+#[test]
+fn a_need_marked_to_ask_holds_an_agent_s_run_of_the_task() {
+    let user = User::with_fake_agent();
+    services_file(
+        &user,
+        &format!(
+            "{}{}ask_before_running = true\n",
+            listening(&user, "cache", 0, &[]),
+            listening(&user, "mongo", 0, &[])
+        ),
+    );
+    project(&user, &["mongo"]);
+    user.call(
+        "task.add",
+        json!({"project": "app", "name": "web", "line": "git status --short", "needs": ["cache"]}),
+    )
+    .unwrap();
+    workspace(&user, "one");
+    let (agent, mcp) = root(&user, Some("one"));
+    set_mode(&user, &agent, "ask");
+
+    let ran = done(mcp.call("run", json!({"task": "web"})));
+    assert!(
+        ran.starts_with("started the services it needs: cache\n"),
+        "{ran}"
+    );
+    let number = held(&mcp.call("run", json!({"task": "api"})));
+
+    let asked = request(&user, number).to_string();
+    assert!(
+        asked.contains("the service mongo is marked to ask before it runs"),
+        "{asked}"
+    );
+    assert_eq!(show(&user, "mongo")["state"], "stopped");
+}
+
+#[test]
+fn a_need_marked_to_ask_holds_an_agent_s_start_of_the_service_that_needs_it() {
+    let user = User::with_fake_agent();
+    project(&user, &[]);
+    let one = workspace(&user, "one");
+    services_file(
+        &user,
+        &format!(
+            "{}ask_before_running = true\n[services.auth]\nfolder = \"{}\"\nline = \"git status --short\"\nneeds = [\"mongo\"]\n",
+            listening(&user, "mongo", 0, &[]),
+            one.display()
+        ),
+    );
+    let (agent, mcp) = root(&user, Some("one"));
+    set_mode(&user, &agent, "ask");
+
+    let number = held(&mcp.call("services", json!({"action": "start", "name": "auth"})));
+
+    let asked = request(&user, number).to_string();
+    assert!(
+        asked.contains("the service mongo is marked to ask before it runs"),
+        "{asked}"
+    );
+    assert_eq!(show(&user, "mongo")["state"], "stopped");
+}
+
+#[test]
+fn a_service_an_agent_wrote_started_as_a_need_by_an_ask_agent_is_held() {
+    let user = User::with_fake_agent();
+    project(&user, &[]);
+    workspace(&user, "one");
+    let (agent, mcp) = root(&user, Some("one"));
+    set_mode(&user, &agent, "full");
+    let mongo = folder(&user, "mongo");
+    done(mcp.call(
+        "services",
+        json!({"action": "add", "name": "mongo", "line": server(0), "folder": mongo}),
+    ));
+    user.call(
+        "task.edit",
+        json!({"project": "app", "name": "api", "needs": ["mongo"]}),
+    )
+    .unwrap();
+    set_mode(&user, &agent, "ask");
+
+    let number = held(&mcp.call("run", json!({"task": "api"})));
+
+    let asked = request(&user, number).to_string();
+    assert!(asked.contains("the service mongo"), "{asked}");
+    assert!(asked.contains("outside this agent's place"), "{asked}");
+    assert_eq!(show(&user, "mongo")["state"], "stopped");
+}
+
+#[test]
+fn a_service_the_user_wrote_started_as_a_need_is_not_judged_again() {
+    let user = User::with_fake_agent();
+    services_file(&user, &listening(&user, "mongo", 0, &[]));
+    project(&user, &["mongo"]);
+    workspace(&user, "one");
+    let (agent, mcp) = root(&user, Some("one"));
+    set_mode(&user, &agent, "ask");
+
+    let ran = done(mcp.call("run", json!({"task": "api"})));
+
+    assert!(
+        ran.starts_with("started the services it needs: mongo\n"),
+        "{ran}"
+    );
+}
+
+#[test]
+fn a_run_stopped_while_its_services_start_starts_nothing_after_them() {
+    let user = User::with_fake_agent();
+    let ok = user.path("db-ok");
+    services_file(&user, &ready_on(&user, "db", &ok));
+    project(&user, &[]);
+    user.call(
+        "task.edit",
+        json!({"project": "app", "name": "api", "line": server(0), "needs": ["db"]}),
+    )
+    .unwrap();
+    let (agent, mcp) = root(&user, None);
+    set_mode(&user, &agent, "full");
+    let watch = user.watch(&[]);
+
+    mcp.call_given_up("run", json!({"task": "api"}), || {
+        show(&user, "db")["state"] == "starting"
+    });
+    std::fs::write(&ok, "").unwrap();
+    eventually("db ready", || show(&user, "db")["state"] == "ready");
+
+    let events = watch.within(Duration::from_millis(800));
+    let api = events
+        .iter()
+        .find(|e| e["name"] == "run.started" && e["data"]["name"] == "api");
+    assert!(
+        api.is_none(),
+        "the task ran after its call was stopped: {api:?}"
+    );
+}
+
+#[test]
+fn two_runs_of_a_serving_task_while_its_services_start_start_it_once() {
+    let user = User::with_fake_agent();
+    let ok = user.path("db-ok");
+    services_file(&user, &ready_on(&user, "db", &ok));
+    project(&user, &[]);
+    user.call(
+        "task.edit",
+        json!({"project": "app", "name": "api", "line": server(0), "serve": true, "needs": ["db"]}),
+    )
+    .unwrap();
+
+    let ran: Vec<Value> = std::thread::scope(|scope| {
+        let runs: Vec<_> = (0..2)
+            .map(|_| {
+                scope.spawn(|| {
+                    user.call("task.run", json!({"project": "app", "name": "api"}))
+                        .unwrap()
+                })
+            })
+            .collect();
+        eventually("db starting", || show(&user, "db")["state"] == "starting");
+        std::thread::sleep(Duration::from_millis(300));
+        std::fs::write(&ok, "").unwrap();
+        runs.into_iter().map(|run| run.join().unwrap()).collect()
+    });
+
+    assert_eq!(ran[0], ran[1], "one run, joined by the other");
+    assert_eq!(task_runs(&user, "api"), 1);
+}
+
+#[test]
+fn a_service_that_ran_outside_and_stopped_is_shown_stopped() {
+    let user = User::new();
+    let mut by_hand = Command::new(common::fake_server())
+        .args(["--listen", "0"])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut said = String::new();
+    BufReader::new(by_hand.stdout.take().unwrap())
+        .read_line(&mut said)
+        .unwrap();
+    let address = said
+        .trim()
+        .strip_prefix("listening on ")
+        .unwrap()
+        .to_owned();
+    services_file(
+        &user,
+        &format!(
+            "[services.db]\nfolder = \"{}\"\nline = \"{}\"\nready = {{ url = \"{address}\" }}\n",
+            folder(&user, "db").display(),
+            server(0)
+        ),
+    );
+    let started = user.call("service.start", json!({"name": "db"})).unwrap();
+    assert_eq!(started["service"]["state"], "outside", "{started}");
+
+    let _ = by_hand.kill();
+    let _ = by_hand.wait();
+
+    assert_eq!(show(&user, "db")["state"], "stopped");
+    let listed = user.call("service.list", json!({})).unwrap();
+    assert_eq!(listed["services"][0]["state"], "stopped", "{listed}");
+}
+
+#[test]
+fn two_starts_at_once_start_one_instance_since_the_second_waits_for_the_first() {
+    let user = User::new();
+    let marks = user.path("marks");
+    std::fs::create_dir_all(&marks).unwrap();
+    // Its first probe holds until the test releases it; it never answers.
+    let probe = marks.join("probe.sh");
+    std::fs::write(
+        &probe,
+        format!(
+            "if [ ! -e {m}/probing ]; then\n  touch {m}/probing\n  while [ ! -e {m}/release ]; do sleep 0.05; done\nfi\nexit 1\n",
+            m = marks.display()
+        ),
+    )
+    .unwrap();
+    let serve = marks.join("serve.sh");
+    std::fs::write(
+        &serve,
+        format!(
+            "echo started >> {}/starts.txt\nexec {} --listen 0\n",
+            marks.display(),
+            common::fake_server().display()
+        ),
+    )
+    .unwrap();
+    services_file(
+        &user,
+        &format!(
+            "[services.db]\nfolder = \"{}\"\nline = \"sh {}\"\nready = {{ command = \"sh {}\" }}\n",
+            folder(&user, "db").display(),
+            serve.display(),
+            probe.display()
+        ),
+    );
+
+    std::thread::scope(|scope| {
+        let first = scope.spawn(|| user.call("service.start", json!({"name": "db"})).unwrap());
+        eventually("the first probe", || marks.join("probing").exists());
+        let second = scope.spawn(|| user.call("service.start", json!({"name": "db"})).unwrap());
+        std::thread::sleep(Duration::from_millis(200));
+        std::fs::write(marks.join("release"), "").unwrap();
+        first.join().unwrap();
+        second.join().unwrap();
+    });
+
+    eventually("the start", || marks.join("starts.txt").exists());
+    std::thread::sleep(Duration::from_millis(300));
+    let starts = std::fs::read_to_string(marks.join("starts.txt")).unwrap();
+    assert_eq!(starts.lines().count(), 1, "{starts}");
+}
+
+#[test]
+fn a_setup_step_running_a_task_starts_the_services_it_needs() {
+    let user = User::with_fake_agent();
+    services_file(&user, &listening(&user, "db", 0, &[]));
+    project(&user, &["db"]);
+    user.call(
+        "setup.add",
+        json!({"project": "app", "step": {"task": "api"}}),
+    )
+    .unwrap();
+
+    workspace(&user, "one");
+
+    assert_eq!(show(&user, "db")["state"], "ready");
+}
+
+#[test]
+fn a_setup_step_whose_service_fails_fails_naming_it() {
+    let user = User::with_fake_agent();
+    services_file(
+        &user,
+        &format!(
+            "[services.db]\nfolder = \"{}\"\nline = \"{} --print 'port 27017 is already in use' --exit 1\"\nready = {{ line = \"listening on\" }}\n",
+            folder(&user, "db").display(),
+            common::fake_server().display()
+        ),
+    );
+    project(&user, &["db"]);
+    user.call(
+        "setup.add",
+        json!({"project": "app", "step": {"task": "api"}}),
+    )
+    .unwrap();
+
+    user.call("workspace.create", json!({"project": "app", "name": "one"}))
+        .unwrap();
+    let show_one = || {
+        user.call("workspace.show", json!({"project": "app", "name": "one"}))
+            .unwrap()
+    };
+    eventually("the setup's end", || show_one()["state"] != "preparing");
+
+    let shown = show_one();
+    assert_eq!(shown["state"], "failed", "{shown}");
+    let said = shown.to_string();
+    assert!(said.contains("the service db failed"), "{said}");
+    assert!(said.contains("port 27017 is already in use"), "{said}");
+}
+
+#[test]
+fn a_restart_of_a_task_starts_the_services_it_needs() {
+    let user = User::with_fake_agent();
+    services_file(&user, &listening(&user, "db", 0, &[]));
+    project(&user, &[]);
+    user.call(
+        "task.edit",
+        json!({"project": "app", "name": "api", "line": server(0), "serve": true, "needs": ["db"]}),
+    )
+    .unwrap();
+    let run = user
+        .call("task.run", json!({"project": "app", "name": "api"}))
+        .unwrap();
+    user.call("service.stop", json!({"name": "db"})).unwrap();
+    eventually("db stopped", || show(&user, "db")["state"] == "stopped");
+
+    user.call("run.restart", json!({"run": run["run"]}))
+        .unwrap();
+
+    assert_eq!(show(&user, "db")["state"], "ready");
+}
+
+#[test]
+fn a_held_run_says_the_services_it_starts() {
+    let user = User::with_fake_agent();
+    services_file(&user, &listening(&user, "db", 0, &[]));
+    project(&user, &["db"]);
+    let (agent, mcp) = root(&user, None);
+    set_mode(&user, &agent, "ask");
+
+    let number = held(&mcp.call("run", json!({"task": "api"})));
+
+    let says = request(&user, number)["says"].to_string();
+    assert!(says.contains("the service db"), "{says}");
+    assert!(says.contains(&server(0)), "{says}");
+    assert!(
+        says.contains(&folder(&user, "db").display().to_string()),
+        "{says}"
+    );
+}
+
+#[test]
+fn an_agent_s_stop_of_a_service_that_does_not_run_is_refused_at_once() {
+    let user = User::with_fake_agent();
+    services_file(&user, &listening(&user, "db", 0, &[]));
+    project(&user, &[]);
+    let (_, mcp) = root(&user, None);
+
+    let answer = mcp.call("services", json!({"action": "stop", "name": "db"}));
+
+    assert!(answer.error, "not refused: {}", answer.text);
+    assert!(answer.text.contains("not running"), "{}", answer.text);
+    assert!(
+        user.call("approval.list", json!({})).unwrap()["requests"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}

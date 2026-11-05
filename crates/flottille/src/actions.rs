@@ -331,7 +331,15 @@ pub async fn prepared(
         return Ok(posted_says(args));
     }
     if tool == "services" {
-        return crate::services::says(daemon, is_root(daemon, grant), args);
+        return crate::services::says(daemon, &grant.place, is_root(daemon, grant), args);
+    }
+    if tool == "run" {
+        return Ok(crate::services::starts_said(
+            daemon,
+            &grant.place,
+            tool,
+            args,
+        ));
     }
     if !TOOLS.contains(&tool) {
         return Ok(Vec::new());

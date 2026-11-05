@@ -76,6 +76,29 @@ pub struct Live {
     runs: Mutex<HashMap<String, Arc<Going>>>,
     /// The runs a `run.restart` is working on.
     restarting: Mutex<HashSet<String>>,
+    /// One start at a time of each task that keeps running, by its owner (an agent, or none for
+    /// the user), its project and its name: a second waits while the services it needs start,
+    /// then joins the first.
+    serving: Mutex<HashMap<Serving, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+/// A task that keeps running, by its owner, its project and its name.
+type Serving = (Option<String>, String, String);
+
+impl Live {
+    fn serving(
+        &self,
+        agent: Option<&str>,
+        project: &str,
+        name: &str,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        let key = (
+            agent.map(str::to_owned),
+            project.to_owned(),
+            name.to_owned(),
+        );
+        self.serving.lock().unwrap().entry(key).or_default().clone()
+    }
 }
 
 /// A run going on.
@@ -325,6 +348,15 @@ pub fn reaches(
         })
 }
 
+/// The services a call to `run` would start first: those its task needs; none for a call that does
+/// not fit.
+pub fn needs_of(daemon: &Daemon, place: &Place, args: &Value) -> Vec<String> {
+    serde_json::from_value::<RunArguments>(args.clone())
+        .ok()
+        .and_then(|args| request(daemon, place, args).ok())
+        .map_or_else(Vec::new, |request| request.needs)
+}
+
 /// `approved` when the user or the judge let the call through: it may then run outside the place.
 pub async fn run(
     daemon: &Arc<Daemon>,
@@ -381,6 +413,14 @@ pub async fn run(
         return Outcome::Refused(refusal);
     }
     // A server already running for the agent is joined, not started twice.
+    let serving = match (serve, name.as_deref()) {
+        (true, Some(task)) => Some(daemon.mcp.runs.serving(Some(agent), &place.project, task)),
+        _ => None,
+    };
+    let _serving = match &serving {
+        Some(lock) => Some(lock.lock().await),
+        None => None,
+    };
     if serve
         && let Some(going) = daemon
             .mcp
@@ -415,7 +455,13 @@ pub async fn run(
             return Outcome::Failed("the call was stopped before it ended".into());
         }
     }
-    let started = match crate::services::start_needed(daemon, &needs).await {
+    let needed = tokio::select! {
+        needed = crate::services::start_needed(daemon, &needs) => needed,
+        () = cancelled.cancelled() => {
+            return Outcome::Failed("the call was stopped before it ended".into());
+        }
+    };
+    let started = match needed {
         Ok(started) => started,
         Err(why) => {
             return Outcome::Refused(format!(
@@ -507,8 +553,9 @@ pub async fn run(
 
 /// A task the user runs from the window, in the project folder (`main`): a run of no agent's,
 /// which the gate does not see, since the user asked for it, in the environment an agent's run
-/// gets. It is not waited for: the window follows it in the project's list of commands. A task
-/// that keeps running and already runs for the user is joined, not started twice.
+/// gets. The services it needs are started and waited for first (up to `services::READY_LIMIT`);
+/// the run itself is not waited for: the window follows it in the project's list of commands. A
+/// task that keeps running and already runs for the user is joined, not started twice.
 pub async fn run_for_user(
     daemon: &Arc<Daemon>,
     project: &flottille_core::project::Project,
@@ -518,6 +565,13 @@ pub async fn run_for_user(
         .tasks
         .get(name)
         .ok_or_else(|| format!("project {} has no task named {name}", project.name))?;
+    let serving = task
+        .serve
+        .then(|| daemon.mcp.runs.serving(None, &project.name, name));
+    let _serving = match &serving {
+        Some(lock) => Some(lock.lock().await),
+        None => None,
+    };
     if task.serve
         && let Some(going) = daemon.mcp.runs.runs.lock().unwrap().values().find(|g| {
             g.run.agent.is_none()
@@ -1235,7 +1289,7 @@ pub async fn restart_by_user(
         .iter()
         .find(|(_, folder)| here(folder) == here(&old.folder))
         .map(|(path, _)| path.clone());
-    let (name, line, words, repository, ready, url) = match &old.name {
+    let (name, line, words, repository, ready, url, needs) = match &old.name {
         Some(name) => {
             let args = RunArguments {
                 task: Some(name.clone()),
@@ -1246,7 +1300,15 @@ pub async fn restart_by_user(
                 why: None,
             };
             match request(daemon, &place, args) {
-                Ok(r) => (r.name, r.line, r.words, r.repository, r.ready, r.url),
+                Ok(r) => (
+                    r.name,
+                    r.line,
+                    r.words,
+                    r.repository,
+                    r.ready,
+                    r.url,
+                    r.needs,
+                ),
                 Err(Outcome::Refused(why) | Outcome::Failed(why) | Outcome::Held(why)) => {
                     return Err(why);
                 }
@@ -1269,9 +1331,19 @@ pub async fn restart_by_user(
                 repository.unwrap_or_else(|| ".".into()),
                 None,
                 None,
+                Vec::new(),
             )
         }
     };
+    // Run again is a run: what the task needs is started first.
+    crate::services::start_needed(daemon, &needs)
+        .await
+        .map_err(|why| {
+            format!(
+                "task {} cannot run: {why}",
+                name.as_deref().unwrap_or_default()
+            )
+        })?;
     let env = environment(daemon, &place, &repository, false)?;
     let secret_values = place.secret_values();
     let (url, url_error, probe) = readied(

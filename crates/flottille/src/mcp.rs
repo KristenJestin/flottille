@@ -18,7 +18,7 @@ use std::time::Instant;
 use bytes::Bytes;
 use flottille_core::agent::{Agent, GateMode};
 use flottille_core::approval::{Judgement, Kind};
-use flottille_core::project::Project;
+use flottille_core::project::{Project, Task};
 use flottille_core::secrets;
 use flottille_core::store::Store;
 use http::{Request, Response, StatusCode};
@@ -538,7 +538,9 @@ const SERVED: [Definition; 29] = [
             ready, running, outside: started by someone else, failed and why), folder and \
             address; show: one, with the end of its output. start: starts it, what it needs \
             first, judged as a run of its line in its folder: {\"action\": \"start\", \
-            \"name\": \"mongo\"}. stop is always held for the user, whatever the mode: you are \
+            \"name\": \"mongo\"}. Each service a start or a task's run starts first is held \
+            when marked ask_before_running, and one an agent wrote has its lines (line, ready and \
+            url commands) judged in your mode as a run of them in its folder. stop is always held for the user, whatever the mode: you are \
             answered at once, the result comes later: {\"action\": \"stop\", \"name\": \
             \"mongo\"}. A root's add, edit and remove are judged as a task's write: \
             {\"action\": \"add\", \"name\": \"redis\", \"line\": \"redis-server\", \
@@ -560,7 +562,7 @@ const SERVED: [Definition; 29] = [
                     {"type": "string"}, {"type": "null"},
                     {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"], "additionalProperties": false}
                 ]},
-                "ask_before_running": {"type": "boolean", "description": "add, edit: judged each time an agent starts it."}
+                "ask_before_running": {"type": "boolean", "description": "add, edit: held for approval each time an agent starts it, itself or as a need."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -2208,7 +2210,13 @@ pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gat
         return refused;
     }
     let Some(steps) = crate::actions::plays(daemon, grant, tool, args) else {
-        return classified(daemon, grant, tool, args);
+        return with_services(
+            daemon,
+            grant,
+            tool,
+            args,
+            classified(daemon, grant, tool, args),
+        );
     };
     // Making a workspace ready plays setup steps without the gate: each is judged as setting it
     // is, run in the folders it would start in, and the strongest class wins. The copy and link
@@ -2314,6 +2322,30 @@ fn classified(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gate:
             .map(|(name, task)| (name.as_str(), task)),
         (_, None) => None,
     };
+    decided(
+        daemon,
+        grant,
+        project.as_ref(),
+        tool,
+        args,
+        (&words, &paths, command),
+        sets.is_some(),
+    )
+}
+
+/// The gate's verdict on a call as it was resolved: the words of the line it starts, the folders
+/// it reaches and the task it runs; `sets` when it writes a task or a setup step.
+fn decided(
+    daemon: &Daemon,
+    grant: &Grant,
+    project: Option<&Project>,
+    tool: &str,
+    args: &Value,
+    (words, paths, command): (&[String], &[Resolved], Option<(&str, &Task)>),
+    sets: bool,
+) -> gate::Verdict {
+    let no_tasks = BTreeMap::new();
+    let tasks = project.map_or(&no_tasks, |project| &project.tasks);
     let paths_of = &daemon.paths;
     let own = [
         paths_of.data.clone(),
@@ -2321,12 +2353,12 @@ fn classified(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gate:
         paths_of.state.clone(),
         paths_of.runtime.clone(),
     ];
-    let pushed = rewrites(&words) && pushed(&grant.place, paths.first());
+    let pushed = rewrites(words) && pushed(&grant.place, paths.first());
     // The repository a run is in: the one whose folder it runs in.
     let place = &grant.place;
     let repository = paths
         .first()
-        .filter(|_| tool == "run" || sets.is_some())
+        .filter(|_| tool == "run" || sets)
         .and_then(|folder| {
             place
                 .repositories
@@ -2336,7 +2368,7 @@ fn classified(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gate:
         .map_or(".", |(path, _)| path.as_str());
     let search = runs::search_path(place, repository);
     let mut writable = vec![grant.place.root.clone()];
-    if let Some(project) = &project {
+    if let Some(project) = project {
         writable.extend([project.folder.clone(), project.workspaces_root.clone()]);
     }
     let real: Vec<_> = writable
@@ -2349,16 +2381,142 @@ fn classified(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gate:
         grant,
         tool,
         args,
-        words: &words,
-        paths: &paths,
+        words,
+        paths,
         command,
         tasks,
-        never: project.as_ref().map(|project| project.never.as_slice()),
+        never: project.map(|project| project.never.as_slice()),
         own: &own,
         pushed,
         search: search.as_deref(),
         writable: &writable,
         groups: &groups,
+    })
+}
+
+/// The verdict on a call with what it starts first (`docs/projects.md`, "Services"): each service
+/// it needs that does not run, held when it is marked to ask, and an agent's lines judged in this
+/// agent's mode as a run of them in the service's folder; the user's are not judged again. A
+/// service an agent started itself has its other lines (`ready`, `url`) judged as well.
+fn with_services(
+    daemon: &Daemon,
+    grant: &Grant,
+    tool: &str,
+    args: &Value,
+    verdict: gate::Verdict,
+) -> gate::Verdict {
+    if matches!(verdict, gate::Verdict::Deny(_))
+        || !(tool == "run" || (tool == "services" && args["action"] == "start"))
+    {
+        return verdict;
+    }
+    let Ok(services) = crate::services::load(daemon) else {
+        return verdict;
+    };
+    let project = projects::load_project(daemon, &grant.place.project).ok();
+    let mut found: Vec<(String, gate::Verdict)> = Vec::new();
+    let mut judged = |name: &str, lines: &[&str], with_line: bool, flag: bool| {
+        let Some(service) = services.get(name) else {
+            return;
+        };
+        let Ok(folder) = service.folder_in(grant.place.home.as_deref()) else {
+            return;
+        };
+        let folder = [grant.place.resolve(&folder, ".")];
+        let task = service.as_task();
+        let said = format!(
+            "it starts the service {name} it needs (`{}` in {})",
+            service.line, folder[0].shown
+        );
+        if with_line {
+            let words = flottille_core::command::split_line(&service.line).unwrap_or_default();
+            let start = json!({"action": "start", "name": name});
+            let verdict = decided(
+                daemon,
+                grant,
+                project.as_ref(),
+                "services",
+                &start,
+                (&words, &folder, Some((name, &task))),
+                false,
+            );
+            found.push((said.clone(), verdict));
+        } else if flag && service.ask_before_running {
+            let ask = gate::Ask {
+                reasons: vec![format!(
+                    "the service {name} is marked to ask before it runs"
+                )],
+                class: gate::Class::Judge,
+                kind: Kind::Call,
+            };
+            found.push((said.clone(), gate::Verdict::Ask(ask)));
+        }
+        for line in lines {
+            let words = flottille_core::command::split_line(line).unwrap_or_default();
+            let run = json!({"line": line});
+            let verdict = decided(
+                daemon,
+                grant,
+                project.as_ref(),
+                "run",
+                &run,
+                (&words, &folder, None),
+                false,
+            );
+            let said = format!("{said}, its line `{line}`");
+            found.push((said, verdict));
+        }
+    };
+    if tool == "services"
+        && let Some(name) = args["name"].as_str()
+        && crate::services::by_an_agent(daemon, name)
+        && let Some(service) = services.get(name)
+    {
+        judged(name, &service.other_lines(), false, false);
+    }
+    for name in crate::services::started_first(daemon, &grant.place, tool, args) {
+        match (
+            services.get(&name),
+            crate::services::by_an_agent(daemon, &name),
+        ) {
+            (Some(service), true) => judged(&name, &service.other_lines(), true, true),
+            (Some(_), false) => judged(&name, &[], false, true),
+            (None, _) => {}
+        }
+    }
+    let (mut base, mut judge, kind) = match verdict {
+        gate::Verdict::Ask(ask) if ask.class == gate::Class::Base => {
+            (ask.reasons, Vec::new(), ask.kind)
+        }
+        gate::Verdict::Ask(ask) => (Vec::new(), ask.reasons, ask.kind),
+        _ => (Vec::new(), Vec::new(), Kind::Call),
+    };
+    for (said, verdict) in found {
+        match verdict {
+            gate::Verdict::Allow => {}
+            gate::Verdict::Deny(why) => return gate::Verdict::Deny(format!("{why} ({said})")),
+            gate::Verdict::Ask(ask) => {
+                let reasons = ask
+                    .reasons
+                    .into_iter()
+                    .map(|reason| format!("{said}: {reason}"));
+                match ask.class {
+                    gate::Class::Base => base.extend(reasons),
+                    gate::Class::Judge => judge.extend(reasons),
+                }
+            }
+        }
+    }
+    let class = match base.is_empty() {
+        true if judge.is_empty() => return gate::Verdict::Allow,
+        true => gate::Class::Judge,
+        false => gate::Class::Base,
+    };
+    base.extend(judge);
+    gate::Verdict::Ask(gate::Ask {
+        reasons: base,
+        class,
+        kind,
     })
 }
 

@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use flottille_core::agent::GateMode;
 use flottille_core::project::{Ready, TaskUrl};
 use flottille_core::run::{Readiness, RunState};
 use flottille_core::service::{self, Service};
@@ -315,8 +316,15 @@ impl Keys {
     }
 }
 
-/// Adds the service (`edit` false) or changes it, and says so (`service.changed`).
-fn put(daemon: &Daemon, name: &str, keys: &Keys, edit: bool) -> Result<Service, Failure> {
+/// Adds the service (`edit` false) or changes it, and says so (`service.changed`): `by` the agent
+/// that wrote it and the mode of its tree, `None` for the user.
+fn put(
+    daemon: &Daemon,
+    name: &str,
+    keys: &Keys,
+    edit: bool,
+    by: Option<(&str, GateMode)>,
+) -> Result<Service, Failure> {
     let services = rewrite(daemon, |services, document| {
         let was = services.get(name);
         match (edit, was) {
@@ -333,6 +341,7 @@ fn put(daemon: &Daemon, name: &str, keys: &Keys, edit: bool) -> Result<Service, 
         let service = keys.applied(was).map_err(Failure::refused)?;
         write(document, name, &service)
     })?;
+    written_by(daemon, name, by)?;
     let change = if edit { "edited" } else { "added" };
     let _ = daemon.emit(
         "service.changed",
@@ -368,11 +377,28 @@ fn remove(daemon: &Daemon, name: &str) -> Result<(), Failure> {
         }
         Ok(())
     })?;
+    written_by(daemon, name, None)?;
     let _ = daemon.emit(
         "service.changed",
         json!({"service": name, "change": "removed"}),
     );
     Ok(())
+}
+
+fn written_by(daemon: &Daemon, name: &str, by: Option<(&str, GateMode)>) -> Result<(), Failure> {
+    daemon
+        .write(|store| {
+            store
+                .set_service_writer(name, by)
+                .map(|()| ((), None::<flottille_core::protocol::Event>))
+        })
+        .map_err(|error| Failure::new("unavailable", error.to_string()))
+}
+
+/// Whether an agent wrote the service last: its lines are judged again when another agent's call
+/// starts it. One that cannot be read is taken as an agent's.
+pub fn by_an_agent(daemon: &Daemon, name: &str) -> bool {
+    !matches!(daemon.read(|store| store.service_writer(name)), Ok(None))
 }
 
 /// The projects' tasks that need the service, through other services too: `app (api:dev)`.
@@ -511,6 +537,68 @@ fn to_json(daemon: &Daemon, services: &BTreeMap<String, Service>, name: &str) ->
 
 fn now_of(daemon: &Daemon, name: &str) -> State {
     now(daemon, name).state
+}
+
+/// Whether the service runs now, Flottille's or outside it: starting it starts nothing.
+pub fn runs_now(daemon: &Daemon, name: &str) -> bool {
+    now_of(daemon, name).runs()
+}
+
+/// What a call starts before what it names, that does not run now: the services a task needs
+/// (`run`) or a service needs (`services start`), in the order they start.
+pub fn started_first(daemon: &Daemon, place: &Place, tool: &str, args: &Value) -> Vec<String> {
+    let Ok(services) = load(daemon) else {
+        return Vec::new();
+    };
+    let (needs, own) = match tool {
+        "run" => (runs::needs_of(daemon, place, args), None),
+        "services" if args["action"] == "start" => match args["name"].as_str() {
+            Some(name) if services.contains_key(name) => (vec![name.to_owned()], Some(name)),
+            _ => return Vec::new(),
+        },
+        _ => return Vec::new(),
+    };
+    service::in_order(&services, &needs)
+        .into_iter()
+        .filter(|name| Some(name.as_str()) != own && !runs_now(daemon, name))
+        .collect()
+}
+
+/// Probes again each service seen running outside Flottille: one that no longer answers is shown
+/// as it is, stopped. A service being started is left to its start.
+async fn probed(daemon: &Arc<Daemon>, services: &BTreeMap<String, Service>) {
+    let home = flottille_core::place::home();
+    for (name, service) in services {
+        let lock = daemon.services.lock_of(name);
+        let Ok(_starting) = lock.try_lock() else {
+            continue;
+        };
+        let known = daemon.services.known(name);
+        if !known.outside
+            || known
+                .run
+                .as_ref()
+                .is_some_and(|id| runs::is_going(daemon, id))
+        {
+            continue;
+        }
+        let answers = match service.folder_in(home.as_deref()) {
+            Ok(folder) => match runs::service_start(daemon, service, folder).await {
+                Ok(prepared) => prepared.has_ready() && prepared.answers(daemon, name).await,
+                Err(_) => false,
+            },
+            Err(_) => false,
+        };
+        if !answers {
+            daemon.services.set(
+                name,
+                Known {
+                    outside: false,
+                    ..known
+                },
+            );
+        }
+    }
 }
 
 // Starting and stopping.
@@ -679,7 +767,7 @@ pub async fn stop(daemon: &Daemon, name: &str) -> Result<(), Failure> {
             Ok(())
         }
         None if known.outside => {
-            // Probed again: what ran outside may have stopped since.
+            // What ran outside may have stopped since: its next start probes it again.
             daemon.services.set(
                 name,
                 Known {
@@ -738,6 +826,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
     match method {
         "service.list" => {
             let services = load(&daemon)?;
+            probed(&daemon, &services).await;
             let listed: Vec<Value> = services
                 .keys()
                 .map(|name| to_json(&daemon, &services, name))
@@ -748,6 +837,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let Named { name } = serde_json::from_value(params)?;
             let services = load(&daemon)?;
             find(&services, &name)?;
+            probed(&daemon, &services).await;
             Ok(to_json(&daemon, &services, &name))
         }
         "service.add" | "service.edit" => {
@@ -755,7 +845,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let Some(name) = taken.get("name").and_then(Value::as_str) else {
                 return Err(Failure::new("invalid-params", "missing field `name`"));
             };
-            put(&daemon, name, &keys, method == "service.edit")?;
+            put(&daemon, name, &keys, method == "service.edit", None)?;
             let services = load(&daemon)?;
             Ok(to_json(&daemon, &services, name))
         }
@@ -820,14 +910,22 @@ fn tool_call(args: &Value) -> Result<ToolCall, Outcome> {
     let text = |key: &str| taken.get(key).and_then(Value::as_str).map(str::to_owned);
     Ok(ToolCall {
         action: text("action").ok_or_else(|| {
-            Outcome::Refused(format!("refused: services needs action: one of {ACTIONS}"))
+            Outcome::Refused(format!(
+                "refused: services needs action: one of {}",
+                actions()
+            ))
         })?,
         name: text("name"),
         keys,
     })
 }
 
-const ACTIONS: &str = "list, show, start, stop, add, edit and remove";
+const ACTIONS: [&str; 7] = ["list", "show", "start", "stop", "add", "edit", "remove"];
+
+/// The actions, in words.
+fn actions() -> String {
+    format!("{} and {}", ACTIONS[..6].join(", "), ACTIONS[6])
+}
 
 /// Whether a call stops a service: held for the user every time, in every mode.
 pub fn stops(tool: &str, args: &Value) -> bool {
@@ -863,12 +961,18 @@ pub fn reaches(
 
 /// A call checked before the gate is asked: what it changes, in words (nothing for a read or a
 /// start), or the tool's refusal. A child writes nothing of the machine's.
-pub fn says(daemon: &Daemon, root: bool, args: &Value) -> Result<Vec<String>, Outcome> {
+pub fn says(
+    daemon: &Daemon,
+    place: &Place,
+    root: bool,
+    args: &Value,
+) -> Result<Vec<String>, Outcome> {
     let call = tool_call(args)?;
     let action = call.action.as_str();
-    if !["list", "show", "start", "stop", "add", "edit", "remove"].contains(&action) {
+    if !ACTIONS.contains(&action) {
         return Err(Outcome::Refused(format!(
-            "refused: services has no action {action:?}: its actions are {ACTIONS}"
+            "refused: services has no action {action:?}: its actions are {}",
+            actions()
         )));
     }
     if writes("services", args) && !root {
@@ -943,6 +1047,21 @@ pub fn says(daemon: &Daemon, root: bool, args: &Value) -> Result<Vec<String>, Ou
         }
         "stop" => {
             services.get(name).ok_or_else(unknown)?;
+            // Only what Flottille runs can be stopped: the user is not asked to approve a refusal.
+            match now_of(daemon, name) {
+                State::Outside => {
+                    return Err(Outcome::Refused(format!(
+                        "refused: the service {name} runs outside Flottille, which did not start \
+                         it and does not stop it"
+                    )));
+                }
+                state if !state.runs() => {
+                    return Err(Outcome::Refused(format!(
+                        "refused: the service {name} is not running"
+                    )));
+                }
+                _ => {}
+            }
             let needed = needed_by(daemon, name);
             let by = match needed.is_empty() {
                 true => "no project's task needs it".to_owned(),
@@ -954,8 +1073,46 @@ pub fn says(daemon: &Daemon, root: bool, args: &Value) -> Result<Vec<String>, Ou
         }
         _ => {
             services.get(name).ok_or_else(unknown)?;
-            Ok(Vec::new())
+            Ok(said_first(
+                daemon,
+                &services,
+                started_first(daemon, place, "services", args),
+            ))
         }
+    }
+}
+
+/// What a call starts before what it names, in words for the user who approves it.
+pub fn starts_said(daemon: &Daemon, place: &Place, tool: &str, args: &Value) -> Vec<String> {
+    let first = started_first(daemon, place, tool, args);
+    match load(daemon) {
+        Ok(services) => said_first(daemon, &services, first),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn said_first(
+    daemon: &Daemon,
+    services: &BTreeMap<String, Service>,
+    first: Vec<String>,
+) -> Vec<String> {
+    let said: Vec<String> = first
+        .iter()
+        .filter_map(|name| {
+            let service = services.get(name)?;
+            let by = match by_an_agent(daemon, name) {
+                true => ", written by an agent",
+                false => "",
+            };
+            Some(format!("the service {name}{by}: {}", said(service)))
+        })
+        .collect();
+    match said.is_empty() {
+        true => Vec::new(),
+        false => vec![format!(
+            "It starts first what it needs, shared by every project: {}",
+            said.join("; ")
+        )],
     }
 }
 
@@ -989,7 +1146,7 @@ fn said(service: &Service) -> String {
 }
 
 /// The `services` tool, once the gate let it through.
-pub async fn tool(daemon: &Arc<Daemon>, _grant: &Grant, args: Value) -> Outcome {
+pub async fn tool(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcome {
     let call = match tool_call(&args) {
         Ok(call) => call,
         Err(refusal) => return refusal,
@@ -999,6 +1156,9 @@ pub async fn tool(daemon: &Arc<Daemon>, _grant: &Grant, args: Value) -> Outcome 
         Err(failure) => return Outcome::Refused(format!("refused: {}", failure.message)),
     };
     let name = call.name.clone().unwrap_or_default();
+    if matches!(call.action.as_str(), "list" | "show") {
+        probed(daemon, &services).await;
+    }
     match call.action.as_str() {
         "list" => Outcome::Done(list_text(daemon, &services)),
         "show" => match services.get(&name) {
@@ -1023,7 +1183,13 @@ pub async fn tool(daemon: &Arc<Daemon>, _grant: &Grant, args: Value) -> Outcome 
             )),
             Err(failure) => Outcome::Refused(format!("refused: {}", failure.message)),
         },
-        action @ ("add" | "edit") => match put(daemon, &name, &call.keys, action == "edit") {
+        action @ ("add" | "edit") => match put(
+            daemon,
+            &name,
+            &call.keys,
+            action == "edit",
+            Some((&grant.agent, crate::judge::mode(daemon, &grant.agent))),
+        ) {
             Ok(_) => Outcome::Done(format!(
                 "The service {name} is {}: services {{\"action\": \"start\", \"name\": \
                  \"{name}\"}} starts it.",
@@ -1036,7 +1202,8 @@ pub async fn tool(daemon: &Arc<Daemon>, _grant: &Grant, args: Value) -> Outcome 
             Err(failure) => Outcome::Refused(format!("refused: {}", failure.message)),
         },
         other => Outcome::Refused(format!(
-            "refused: services has no action {other:?}: its actions are {ACTIONS}"
+            "refused: services has no action {other:?}: its actions are {}",
+            actions()
         )),
     }
 }

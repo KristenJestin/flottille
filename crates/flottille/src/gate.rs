@@ -1053,16 +1053,19 @@ fn run(call: &Call) -> Verdict {
         }
     }
     if let Some((name, command)) = call.command {
+        // A service runs in its own folder, never the project's.
+        let service = call.tool == "services";
+        let what = if service { "service" } else { "task" };
         if command.ask_before_running {
-            found.judge(format!("the task {name} is marked to ask before it runs"));
+            found.judge(format!("the {what} {name} is marked to ask before it runs"));
         }
         if let Some(shell) = call.words.first().filter(|w| SHELLS.contains(&base(w))) {
             found.judge(format!(
-                "the task {name} runs a shell ({}), whose line the gate does not read",
+                "the {what} {name} runs a shell ({}), whose line the gate does not read",
                 base(shell)
             ));
         }
-        if main {
+        if main && !service {
             found.judge(format!(
                 "the task {name} runs in the project folder (main), the user's own \
                  checkout, not in a workspace"
