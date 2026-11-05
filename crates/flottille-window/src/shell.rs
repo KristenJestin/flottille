@@ -28,7 +28,7 @@ use crate::add_project::AddProject;
 use crate::composer::{Choice, Composer, PlaceChoice};
 use crate::history::{History, Way};
 use crate::link::{self, Connect, Seen, Update};
-use crate::model::{BellItem, Forged, News, Place, Preparation, Snapshot};
+use crate::model::{BellItem, Forged, LinkShown, News, Place, Preparation, Snapshot};
 use crate::open::Opener;
 use crate::page::{MainArea, Page};
 use crate::project::{NewWorkspace, PlaceData, ProjectData, SessionLine};
@@ -663,6 +663,7 @@ impl Shell {
             Update::AppearanceChanged => self.ask_appearance(None),
             Update::Forged(forged) => self.forged(forged, cx),
             Update::News(news) => self.news(news, cx),
+            Update::Link(link) => self.linked(link, cx),
             Update::Items { project, item } => {
                 if let Some(items) = self.project_items_of(&project, cx) {
                     items.update(cx, |items, cx| items.changed(item, cx));
@@ -1633,6 +1634,20 @@ impl Shell {
         self.news.insert(session, unread_words(&forged.said));
         self.forged.push(forged);
         self.ring(cx);
+    }
+
+    /// An agent handed the user a link: a toast offers it with an Open button, on any page (the
+    /// session's conversation keeps a card of it). Nothing opens until the click.
+    fn linked(&mut self, link: LinkShown, cx: &mut Context<Self>) {
+        let shell = cx.entity().downgrade();
+        let target = link.target.clone();
+        flottille_ui::toast(
+            flottille_ui::Toast::success(format!("The agent shares a link: {}", link.name()))
+                .action("Open", move |_, cx| {
+                    shell.update(cx, |shell, _| shell.open_link(&target)).ok();
+                }),
+            cx,
+        );
     }
 
     /// An agent said something, reported or was woken: its session's row says it, unless the

@@ -3927,6 +3927,67 @@ impl Render for Row {
                     .test_support()
                     .into_any_element()
             }
+            // A link the agent handed the user: its title, where it leads and Open, so that a
+            // toast missed is not lost. Nothing opens until the click.
+            Block::Link {
+                title,
+                whence,
+                target,
+            } => {
+                let name = title.clone().unwrap_or_else(|| whence.clone());
+                let said = format!("Link shared by the agent: {name}, {whence}");
+                let (page, target) = (self.page.clone(), target.clone());
+                let words = div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .medium()
+                            .truncate()
+                            .child(SharedString::from(name)),
+                    )
+                    .when(title.is_some(), |d| {
+                        d.child(
+                            div()
+                                .mono(12.)
+                                .text_color(p.faint)
+                                .truncate()
+                                .child(SharedString::from(whence.clone())),
+                        )
+                    });
+                div()
+                    .id(id("link"))
+                    .aria_label(SharedString::from(said))
+                    .child(
+                        Card::new().child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(space::MD)
+                                .px(space::LG)
+                                .py(space::MD)
+                                .child(
+                                    icon(Icon::OpenInEditor)
+                                        .size(px(14.))
+                                        .flex_none()
+                                        .text_color(p.faint),
+                                )
+                                .child(words)
+                                .child(div().flex_none().child(
+                                    Button::secondary(id("link-open"), "Open").on_click(
+                                        move |_, _, cx| {
+                                            page.update(cx, |page, _| page.open_link(&target)).ok();
+                                        },
+                                    ),
+                                )),
+                        ),
+                    )
+                    .test_support()
+                    .into_any_element()
+            }
             // The agent's own end is shown whole: a failure's reason, what was not done and why.
             Block::Notice { kind, text } if !is_delivery(kind) => div()
                 .id(id("notice"))
