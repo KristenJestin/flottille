@@ -1539,7 +1539,7 @@ async fn run_line(
         unsafe {
             libc::kill(-(group as i32), libc::SIGKILL);
         }
-        crate::children::end_session(group);
+        crate::children::end_session(group).await;
     }
     while let Ok(read) = reader.try_read(&mut buffer) {
         if read == 0 {

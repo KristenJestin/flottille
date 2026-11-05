@@ -345,7 +345,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     agents::settle_at_start(&daemon);
     tree::brief_at_start(&daemon);
     crate::subscriptions::resume_at_start(&daemon);
-    runs::settle_at_start(&daemon);
+    runs::settle_at_start(&daemon).await;
     approvals::settle_at_start(&daemon);
     projects::migrate_files(&daemon);
     let picking = daemon.clone();

@@ -163,7 +163,8 @@ impl Drop for Group<'_> {
     fn drop(&mut self) {
         if let Some(pid) = self.pid {
             signal_group(pid, libc::SIGKILL);
-            crate::children::end_session(pid);
+            // A drop cannot wait, and ending a session reads all of `/proc`: on a thread of its own.
+            std::thread::spawn(move || crate::children::end_session_now(pid));
             let _ = self.daemon.read(|store| store.remove_run_process(pid));
         }
     }

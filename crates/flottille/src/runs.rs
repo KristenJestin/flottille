@@ -902,7 +902,7 @@ async fn follow(
     // the run, even in a group of its own, and what is already in the pipe is read without
     // waiting for it.
     signal_group(pid, libc::SIGKILL);
-    crate::children::end_session(pid);
+    crate::children::end_session(pid).await;
     while let Ok(read) = reader.try_read(&mut buffer) {
         if read == 0 {
             break;
@@ -1567,12 +1567,13 @@ fn shown_range(lines: &[String], count: usize, start: Option<usize>) -> (usize, 
 
 /// At daemon start: kills the run process groups a previous daemon left running, each only when
 /// its leader is still the process it started, and marks their runs interrupted.
-pub fn settle_at_start(daemon: &Daemon) {
+pub async fn settle_at_start(daemon: &Daemon) {
+    let mut left = Vec::new();
     let result = daemon.read(|store| {
         for (pid, started) in store.run_processes()? {
             if start_time(pid) == Some(started) {
                 signal_group(pid, libc::SIGKILL);
-                crate::children::end_session(pid);
+                left.push(pid);
                 eprintln!("flottille daemon: killed the run process {pid} that was left running");
             }
             store.remove_run_process(pid)?;
@@ -1581,6 +1582,10 @@ pub fn settle_at_start(daemon: &Daemon) {
     });
     if let Err(error) = result {
         eprintln!("flottille daemon: reading the runs' processes: {error}");
+    }
+    // Outside the store: ending a session reads all of `/proc`, more than once.
+    for pid in left {
+        crate::children::end_session(pid).await;
     }
     let runs = daemon.read(Store::running_runs).unwrap_or_default();
     for run in runs {

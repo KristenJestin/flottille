@@ -53,12 +53,18 @@ pub fn in_own_session(command: &mut tokio::process::Command) -> &mut tokio::proc
     }
 }
 
-/// Kills every process of the session `leader` started (`in_own_session`), whatever its group.
-/// Each is signalled through a pidfd opened before its session is read again, so a process that
-/// took the pid of one that ended meanwhile is never signalled. Again while one is found: a
-/// process may start another as it is killed.
-pub fn end_session(leader: u32) {
-    for _ in 0..10 {
+/// Kills every process of the session `leader` started (`in_own_session`), whatever its group,
+/// off the async workers: `end_session_now` reads all of `/proc`, more than once.
+pub async fn end_session(leader: u32) {
+    let _ = tokio::task::spawn_blocking(move || end_session_now(leader)).await;
+}
+
+/// `end_session`, on the calling thread. Each process is signalled through a pidfd opened before
+/// its session is read again, so a process that took the pid of one that ended meanwhile is
+/// never signalled. Again while one is found, up to `ROUNDS` times: a process may start another
+/// as it is killed.
+pub fn end_session_now(leader: u32) {
+    for _ in 0..ROUNDS {
         let mut found = false;
         for pid in processes() {
             if !in_session(pid, leader) {
@@ -91,6 +97,9 @@ pub fn end_session(leader: u32) {
         }
     }
 }
+
+/// How many times `end_session` reads `/proc` at most.
+const ROUNDS: u32 = 10;
 
 /// Whether the process runs in the session `leader` leads; one that ended runs nothing.
 fn in_session(pid: u32, leader: u32) -> bool {
