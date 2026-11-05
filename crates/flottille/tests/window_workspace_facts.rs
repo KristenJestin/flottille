@@ -216,6 +216,29 @@ fn the_session_rail_lists_the_ticket_above_the_pull_request(cx: &mut TestAppCont
 }
 
 #[gpui_kit::test]
+fn the_workspace_section_does_not_show_prepared(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, _) = lead(&user);
+    with_ticket_and_pull(&user);
+    let cx = open_rail(&user, &lead, cx);
+
+    assert!(
+        present(cx, "rail-fact-Machine"),
+        "the other facts are still there"
+    );
+    for id in [
+        "rail-fact-Prepared",
+        "rail-fact-Prepared-label",
+        "rail-fact-Prepared-value",
+    ] {
+        assert!(
+            !present(cx, id),
+            "the time the workspace took is not drawn: {id}"
+        );
+    }
+}
+
+#[gpui_kit::test]
 fn the_icons_of_the_repository_the_ticket_and_the_pull_request_share_one_x_and_so_do_their_labels(
     cx: &mut TestAppContext,
 ) {
@@ -229,7 +252,6 @@ fn the_icons_of_the_repository_the_ticket_and_the_pull_request_share_one_x_and_s
         "rail-line-ticket-icon",
         "rail-line-pull-api-icon",
         "rail-fact-Machine-icon",
-        "rail-fact-Prepared-icon",
     ];
     let at: Vec<_> = icons.iter().map(|id| rect(cx, id).origin.x).collect();
     assert!(
@@ -242,7 +264,6 @@ fn the_icons_of_the_repository_the_ticket_and_the_pull_request_share_one_x_and_s
         "rail-line-ticket-label",
         "rail-line-pull-api-label",
         "rail-fact-Machine-label",
-        "rail-fact-Prepared-label",
     ];
     let at: Vec<_> = labels.iter().map(|id| rect(cx, id).origin.x).collect();
     assert!(
@@ -265,7 +286,6 @@ fn every_fact_s_value_ends_at_the_same_right_edge_and_truncates_before_its_label
         "rail-ticket",
         "rail-pull-api",
         "rail-fact-Machine-value",
-        "rail-fact-Prepared-value",
     ];
     let right: Vec<_> = values.iter().map(|id| rect(cx, id).right()).collect();
     assert!(
@@ -291,7 +311,7 @@ fn the_values_of_the_ticket_and_the_pull_request_are_drawn_at_the_size_of_the_ot
 
     // The line height follows the text size (`mono(size)` is 1.4 times it): one height, one size.
     let others = rect(cx, "rail-fact-Machine-value").size.height;
-    for id in ["rail-ticket", "rail-pull-api", "rail-fact-Prepared-value"] {
+    for id in ["rail-ticket", "rail-pull-api"] {
         assert_eq!(rect(cx, id).size.height, others, "{id}");
     }
 }

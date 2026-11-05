@@ -79,7 +79,15 @@ agent. They change in two ways, and a session never keeps a list its role no lon
   update`, `docs/releases.md`): no connection survives it. The next process of each agent starts
   on the tools its role has in the new version (the tools and actions added since included), its
   store entry rewritten first (`agent.tools_changed`), and a new process is a new connection,
-  which lists them.
+  which lists them. Its conversation still holds what it was told of the old ones, and a tool
+  can change under the same name (an action, a schema, a description): the list each process
+  is given is kept with the agent (a digest of the tools as listed, and each tool's actions).
+  When a process starts on another list than the last one, its client is told
+  `notifications/tools/list_changed` as for a change below, and an agent that does not list its
+  tools again when told (the table below) is sent a delivery (`tools`) with the prompt that
+  started the process: what changed, by tool (`- forge: added pipelines, run`, a tool `new` or
+  `gone`), so that it does not deny what it can do. An agent made before lists were kept is told
+  nothing at its first process; a change of descriptions or schemas only sends no delivery.
 - **The project gains or loses a forge or a tracker** while sessions run: each running session
   of the project that has not ended is given the new list at once, before the change is
   answered. Its grant serves it, its tools are stored (`agent.tools_changed`), and its client is
@@ -111,7 +119,7 @@ documentation, changelogs and published source, never by running one):
 
 | Agent | Honours `list_changed` | In Flottille |
 |---|---|---|
-| Claude Code (`claude`, checked at 2.1.295) | Yes: in `-p` mode it lists the tools again, its v2 runtime over its listen stream | Takes the new tools: the bridge's `--allowedTools` is the start's, but a tool it lacks asks permission of the bridge, which the daemon answers from the role's list as it is now |
+| Claude Code (`claude`, checked at 2.1.295) | Not in practice: its changelog says it lists them again, but on a real session it did not, and said an action was missing while the daemon accepted it. It gets the `tools` delivery | Takes the new tools: the bridge's `--allowedTools` is the start's, but a tool it lacks asks permission of the bridge, which the daemon answers from the role's list as it is now |
 | Codex (`codex app-server`, checked at 0.162.0) | Not by default: its own issues say it keeps the list it first read; an opt-in feature, `mcp_tool_list_changed`, was proposed | Runs an older list until its next process: the server's `enabled_tools`, set when its thread starts, filter out every tool they do not name |
 | OpenCode (`opencode acp`, checked at 1.19.0) | Yes, since its pull request #5913 (December 2025) | Runs an older list until its next process: its permissions, written when its process starts, deny every tool they do not name |
 
@@ -410,10 +418,11 @@ pending requests.
   restart (so also when it was already told the first run's end), that the user restarted it and
   which run it now is (its own, read with `run_status`); if the stop happened and the new run could
   not start, the delivery says that instead. The new run's end is delivered like any other.
-- **The user sees them** (`docs/design.md` §10): the session's right rail lists the commands of
-  its tree, a project and a session with one running show it in the left sidebar, and the user can
-  read a command's output live and stop it (its whole process group, as above); the rail keeps the
-  last five that ended, and the protocol and the command line can dismiss one
+- **The user sees them** (`docs/design.md` §10): the session's right rail lists the task runs of
+  the agent shown, as the agent that started a run is the one that reads it, a project and a
+  session with one running show it in the left sidebar, and the user can read a run's output live
+  and stop it (its whole process group, as above); the rail keeps the last five that ended, and
+  the protocol and the command line can dismiss one
   (`docs/protocol.md`, "The run methods"; `flottille runs`, `docs/cli.md`).
 - **The user runs a task too**: the Run button of a task on the project page (`task.run`) runs it
   in the project folder, with the project's variables, as a run of no agent: no gate (the user

@@ -717,11 +717,42 @@ impl Bridge {
             count("inputTokens"),
             count("outputTokens"),
         );
+        // What the turn used (`docs/reference/acp.md`, "What a turn used"): what Codex's totals
+        // grew by, a count Codex does not give left out. Its input counts the cached tokens.
+        let grew = |key: &str| {
+            now[key]
+                .as_u64()
+                .map(|n| n.saturating_sub(turn.total[key].as_u64().unwrap_or(0)))
+        };
+        let mut used = json!({});
+        if let Some(model) = self
+            .codex
+            .as_ref()
+            .map(|c| &c.model)
+            .filter(|m| !m.is_empty())
+        {
+            used["model"] = model.as_str().into();
+        }
+        for (key, name) in [
+            ("inputTokens", "inputTokens"),
+            ("cachedInputTokens", "cachedReadTokens"),
+            ("cacheWriteInputTokens", "cachedWriteTokens"),
+            ("outputTokens", "outputTokens"),
+            ("reasoningOutputTokens", "thoughtTokens"),
+        ] {
+            if let Some(count) = grew(key) {
+                used[name] = count.into();
+            }
+        }
+        if let (Some(input), Some(cached)) = (grew("inputTokens"), grew("cachedInputTokens")) {
+            used["inputTokens"] = input.saturating_sub(cached).into();
+        }
         self.answer(
             turn.id,
             json!({"stopReason": stop_reason, "usage": {"inputTokens": input.saturating_sub(cached),
                 "outputTokens": output, "cachedReadTokens": cached,
-                "totalTokens": input + output}}),
+                "totalTokens": input + output},
+                "_meta": {"flottille": {"usage": [used]}}}),
         )
         .await;
     }

@@ -767,11 +767,19 @@ fn runs_list_the_running_first_then_the_last_five_finished_with_how_they_ended(
     let (shell, cx) = open_session(&user, &lead, 1440., cx);
     let page = session_page(&shell, cx);
     until(&shell, cx, "the rail lists the runs", |cx| {
-        has(format!("command-{server}"), cx) && has(format!("command-{}", blips[KEPT_ENDED]), cx)
+        has(format!("command-{server}"), cx) && has("rail-runs-ended", cx)
     });
     settle(cx);
 
     assert_eq!(KEPT_ENDED, 5);
+    assert_eq!(
+        label("rail-runs-ended", cx).as_deref(),
+        Some("5 ended"),
+        "the ended ones are counted, and folded"
+    );
+    assert!(!has(format!("command-{}", blips[KEPT_ENDED]), cx));
+    cx.update(|window, cx| window.click("rail-runs-ended", cx));
+    settle(cx);
     let arranged = page.read_with(cx, |page, cx| {
         let list = page.commands(cx).read(cx);
         let arranged = list.arranged();
