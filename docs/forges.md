@@ -281,7 +281,7 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
 | `bkt pr checks <id> --context C … --json` | `statuses[]`: `state`, `name`, `key` | `pkg/cmd/pr/pr.go:1754-1809` (flags), `:1998` (`statuses`), `:2198` (the states); `pkg/types/commit_status.go:5-11` |
 | `bkt api <path> --context C [--param k=v]` (GET) | the server's own JSON, unchanged | `pkg/cmd/api/api.go:23-48`, `:138-140` |
 | `bkt pr create --context C … --source <branch> --target <base> --title T --description D [--reviewer N]…` | `✓ Created pull request #<id>` | `pkg/cmd/pr/pr.go:597-615`, `:664`, `:696`; `--reviewer` at `:614`, sent as `{"username": N}` on Cloud (`pkg/bbcloud/pullrequests.go:232-237`) and `{"user": {"name": N}}` on Data Center (`pkg/bbdc/pullrequests.go:75-82`) |
-| `bkt pr merge <id> --context C … --strategy S --close-source=false` | the exit code | `pkg/cmd/pr/pr.go:1314-1334`; `pkg/bbcloud/pullrequests.go:351-388` (Cloud takes `merge_commit`, `squash` and `fast_forward` only, `:352-356`, `:363-365`); `pkg/bbdc/pullrequests.go:108-132` (`mergeStrategyId`, given as it is) |
+| `bkt pr merge <id> --context C … --strategy S --close-source=false [--message M]` | the exit code | `pkg/cmd/pr/pr.go:1314-1334` (`--message`, the merge commit's message, `:1332`, given to both servers, `:1372-1376` and Cloud's `MergePullRequest`); `pkg/bbcloud/pullrequests.go:351-388` (Cloud takes `merge_commit`, `squash` and `fast_forward` only, `:352-356`, `:363-365`); `pkg/bbdc/pullrequests.go:108-132` (`mergeStrategyId`, given as it is) |
 | `bkt api /repositories/W/R/pipelines/ --context C --param pagelen=50 --param sort=-created_on` (GET; the sort is a `--param`, not a `?` in the path: `bkt api` is not known to merge one into the other) | `values[]`: `build_number`, `state.result.name`, `target.type`, then `target.ref_name` (a branch's pipeline) or `target.source` and `target.destination` (a pull request's: `pipeline_pullrequest_target`), `target.selector.type`, `target.selector.pattern` | Atlassian's REST documentation (Pipelines, list pipelines). Not `bkt pipeline list`: it decodes `target.ref.name` (`pkg/bbcloud/client.go:140-152`) while the API sends `ref_name`, so every branch it prints is empty (seen live with v0.37.0), and a pull request's pipeline has no `ref` at all |
 | `bkt pipeline list --context C --workspace W --repo R --limit 50 --json`, for the CI durations only ("How long CI takes") | `pipelines[]`: `state.result.name`, `created_on`, `completed_on` (`pkg/bbcloud/client.go:139-152`; the list has no duration field; its `target.ref.name` is empty, which the durations do not need) | `pkg/cmd/pipeline/pipeline.go:177-210`; `pkg/bbcloud/client.go:100-120`, `:145` (newest first: `sort=-created_on`) |
 | `bkt pipeline run --context C --workspace W --repo R --ref <branch> [--selector-type pull-requests --selector-pattern <p>]` | the exit code | `pkg/cmd/pipeline/pipeline.go:81-133` (v0.37.0; the selector flags at `:127-128`), `pkg/bbcloud/client.go:431-482` (`ref_type: branch`, `ref_name`, `selector`) |
@@ -404,7 +404,10 @@ the base the repository started from):
   `rebase-ff-only` on Data Center (rebased onto the base, no merge commit, as GitHub's), and is
   refused on Cloud before anything is asked, since `bkt` takes no rebase strategy there.
   `--close-source=false` because `bkt` closes the source branch by default
-  (`pkg/cmd/pr/pr.go:1334`) and `gh pr merge` does not. When the server refuses the merge, the
+  (`pkg/cmd/pr/pr.go:1334`) and `gh pr merge` does not. A squash `message` is given whole with
+  `--message M` (subject and body in one text, as Bitbucket takes it); left out, the server writes
+  its own. Not yet seen on a real server: that Cloud and Data Center keep it as the squashed
+  commit's message. When the server refuses the merge, the
   strategies the repository allows are read (Cloud: `destination.branch.merge_strategies` of the
   pull request's own page; Data Center: the `enabled` ones of `mergeConfig.strategies[].id` in
   `/rest/api/1.0/projects/{key}/repos/{repo}/settings/pull-requests`, both through `bkt api`,
@@ -728,13 +731,13 @@ What the three tools answer to a write decides what identifies the comment:
 | `gh pr close`, `gh pr reopen` (with a comment) | nothing that names the comment | the text's hash |
 | `bkt pr comment`, `bkt pr decline` (with a comment) | `✓ Commented on pull request #N`, nothing that names the comment | the text's hash |
 | `bkt pr create`, `bkt pr edit` (with a body) | the pull request's number | the item: a `body` |
-| `acli jira workitem comment create` | nothing read (`--json` is not asked) | the text's hash |
+| `acli jira workitem comment create` | nothing read (`--json` is not asked) | the id of the newest comment of its words that no record holds, read from the work item right after the post; the text's hash alone when that read fails |
 | `acli jira workitem create`, `edit` (with a body) | the work item's key | the item: a `body` |
 
 A comment read back is known as an agent's by its record:
 
-- with the id the forge gave it, when the record has one (GitHub): the same words under another
-  id are a person's;
+- with the id the forge gave it, when the record has one (GitHub, Jira): the same words under
+  another id are a person's;
 - else by the hash of its text, and a hash record is **one comment's**: the first comment of those
   words that was not written before the post (the comments are taken oldest first, by the time the
   forge gives: GitHub's `createdAt`, Bitbucket Cloud's `created_on`, Data Center's `createdDate`).
@@ -742,6 +745,10 @@ A comment read back is known as an agent's by its record:
   by more than five minutes (the clocks differ) is not it. Where a read gives no time the first of the
   words is taken: Jira's `created` (`2026-10-01T12:00:00.000+0000`) is not read as a time, so for
   Jira the post claims the first comment of its words.
+
+Only a record that holds a comment's id lets an agent edit or delete that comment (`tickets
+comment_edit`, `comment_delete`, `docs/tickets.md`): words alone never do, a person may write the
+same. An edit replaces the record of the id with the new words; a delete drops it.
 
 The hash is of the text as a read gives it: masked (the secrets of a text are masked on every
 read, the record hashes the masked text too), whitespace one space, only the first 500 characters

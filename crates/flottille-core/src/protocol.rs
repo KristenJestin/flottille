@@ -110,6 +110,15 @@ pub struct ProjectSettings {
     pub branch_prefix: Option<String>,
 }
 
+/// The parameters of `project.set_message_checks`: every check of the project, in order; none
+/// removes them.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MessageChecks {
+    pub name: String,
+    pub checks: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepositorySetting {

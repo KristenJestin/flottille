@@ -153,6 +153,16 @@ pub const CHILD_PLACES: &str = "refused: a child works where you work: workspace
     true, \"workspace\": \"login\"} (or \"new_workspace\": \"login\"), judged; leave them out for a child in your own \
     place";
 
+/// Whether `name`, given as the workspace of a session for the user, is the project folder:
+/// `main`, unless the project holds a workspace of that name, made before it was reserved, which
+/// keeps it (`docs/workspaces.md`, "Main").
+pub fn names_main(daemon: &Daemon, project: &str, name: &str) -> bool {
+    name == flottille_core::workspace::MAIN
+        && daemon
+            .read(|store| store.workspace(project, name))
+            .is_ok_and(|workspace| workspace.is_none())
+}
+
 /// The refusals of a launch that need nothing looked up but the caller's place: checked before
 /// the gate is asked, and again when the launch is performed.
 pub fn launch_refusal(workspace: Option<&str>, args: &Value) -> Result<(), Outcome> {
@@ -257,8 +267,11 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
         true => None,
         false => Some(Slot::take(daemon, &project.name, project.max_children)?),
     };
+    let in_main = matches!(&choice, WorkspaceChoice::Existing(name)
+        if names_main(daemon, &project.name, name));
     let (workspace, preparing) = match choice {
         WorkspaceChoice::Own => (caller.workspace.clone(), false),
+        WorkspaceChoice::Existing(_) if in_main => (None, false),
         WorkspaceChoice::Existing(name) => (Some(name), false),
         WorkspaceChoice::New { name, repositories } => {
             let created = workspaces::call(
@@ -308,7 +321,11 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     } else {
         brief(daemon, &child);
     }
-    let place = workspace.map_or("your own place".to_owned(), |w| format!("workspace {w}"));
+    let place = match (workspace, in_main) {
+        (_, true) => "main, the project folder".to_owned(),
+        (Some(w), _) => format!("workspace {w}"),
+        (None, _) => "your own place".to_owned(),
+    };
     if asked.root {
         return Ok(Outcome::Done(format!(
             "Started a session for the user, {}, in {place}. It is the user's, not your child: \
