@@ -196,3 +196,53 @@ fn the_bell_item_of_a_session_an_agent_started_says_who_started_it(cx: &mut Test
         ["Write the docs · started by begin the docs session"]
     );
 }
+
+#[gpui_kit::test]
+fn the_window_shows_the_brief_without_where_a_question_goes(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, launched) = lead_and_launched(&user);
+    // The daemon's first message holds the paragraph, for the agent.
+    eventually("the session's first message", || {
+        user.call("agent.show", json!({"agent": launched})).is_ok()
+            && flottille_core::store::Store::open(&user.path("state/flottille/flottille.db"))
+                .unwrap()
+                .last_agent_events(&launched, "agent.prompted", 1)
+                .unwrap()
+                .first()
+                .is_some_and(|e| {
+                    e.data["text"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Where a question goes:")
+                })
+    });
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the launched session's row", |cx| {
+        label(cx, session_id(&launched)).is_some()
+    });
+
+    cx.update(|window, cx| window.click(session_id(&launched), cx));
+
+    let started = |cx: &mut VisualTestContext| -> Option<String> {
+        shell.read_with(cx, |s, cx| {
+            let page = s.main().read(cx).session_page()?.clone();
+            page.read(cx)
+                .conversation()
+                .read(cx)
+                .blocks()
+                .iter()
+                .find_map(|block| match block {
+                    flottille_window::conversation::Block::Message { from, text, .. }
+                        if from.starts_with("started by") =>
+                    {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                })
+        })
+    };
+    until(&shell, cx, "the brief in the conversation", |cx| {
+        started(cx).is_some()
+    });
+    assert_eq!(started(cx).unwrap(), "Write the docs");
+}
