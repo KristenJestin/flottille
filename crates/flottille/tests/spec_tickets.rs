@@ -151,22 +151,52 @@ fn show(user: &User, spec: u64) -> Value {
     user.call("spec.show", json!({"spec": spec})).unwrap()
 }
 
-/// The calls of the fake `acli` that write, each as one line of its words.
+/// The calls of the fake `acli` that write, each as one line of its words (`words`).
 fn acli_writes(user: &User) -> Vec<Vec<String>> {
     user.acli_received()
         .iter()
-        .map(|call| {
-            call["args"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|word| word.as_str().unwrap().to_owned())
-                .collect::<Vec<_>>()
-        })
+        .map(words)
         .filter(|args| {
             ["create", "edit"].contains(&args.get(2).map(String::as_str).unwrap_or_default())
         })
         .collect()
+}
+
+/// A call of the fake `acli` as one line of its words. A text Flottille hands in a file
+/// (`--description-file`, `--body-file`, as ADF) stands in its place as the flag without
+/// `-file` and the plain text the fake read from the file, so that a test reads what was sent.
+fn words(call: &Value) -> Vec<String> {
+    let mut files = call["files"].as_array().into_iter().flatten();
+    let mut words = Vec::new();
+    let mut args = call["args"].as_array().unwrap().iter();
+    while let Some(word) = args.next() {
+        let word = word.as_str().unwrap();
+        match word.strip_suffix("-file") {
+            Some(flag) if ["--description", "--body"].contains(&flag) => {
+                args.next();
+                let file = files.next().unwrap();
+                assert!(file["invalid"].is_null(), "{file}");
+                words.push(flag.to_owned());
+                words.push(adf_text(&file["adf"]).trim_end().to_owned());
+            }
+            _ => words.push(word.to_owned()),
+        }
+    }
+    words
+}
+
+/// The plain text of an ADF document: its text pieces, a line break after each block.
+fn adf_text(node: &Value) -> String {
+    let mut text = node["text"].as_str().unwrap_or_default().to_owned();
+    for child in node["content"].as_array().into_iter().flatten() {
+        text.push_str(&adf_text(child));
+    }
+    if ["paragraph", "heading", "codeBlock", "hardBreak"]
+        .contains(&node["type"].as_str().unwrap_or_default())
+    {
+        text.push('\n');
+    }
+    text
 }
 
 /// The words after `flag` in a call.
@@ -525,22 +555,21 @@ fn the_departures_comment_is_offered_at_done_and_posted_only_by_the_user() {
         .filter(|call| call["args"][2] == "comment")
         .collect();
     assert_eq!(posted.len(), 1, "{posted:?}");
-    let args: Vec<String> = posted[0]["args"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|word| word.as_str().unwrap().to_owned())
-        .collect();
+    let args = words(&posted[0]);
     assert_eq!(after(&args, "--key"), "ABC-7");
     let body = after(&args, "--body");
     assert_eq!(body, departures);
     for mark in MARKS {
         assert!(!body.contains(mark), "{mark} in {body}");
     }
+    // Posted through the tickets' own comment path, which records the comment by its id.
+    let recorded = posts(&user);
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
     assert_eq!(
-        posts(&user),
-        [("ABC-7".to_owned(), "comment".to_owned(), None)]
+        (recorded[0].0.as_str(), recorded[0].1.as_str()),
+        ("ABC-7", "comment")
     );
+    assert!(recorded[0].2.is_some(), "{recorded:?}");
     assert!(show(&user, spec)["departures_posted_at"].is_u64());
     let twice = user
         .call("spec.departures", json!({"spec": spec, "post": true}))
