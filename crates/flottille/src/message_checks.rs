@@ -212,10 +212,10 @@ pub async fn pushed(at: &Where<'_>, words: &[String], env: &Env) -> Result<(), S
     Ok(())
 }
 
-/// The commits a push sends, oldest first: those its refs lead to that no ref of the remote
-/// has. Git says which refs the push sends, as it reads the line and the configuration
-/// (`--dry-run`); the remote says which it has (`ls-remote`): its remote-tracking refs are the
-/// agent's to write.
+/// The commits a push sends to branches and tags, oldest first: those its refs lead to that no
+/// ref of the remote has. Git says which refs the push sends, as it reads the line and the
+/// configuration (`--dry-run`); the remote says which it has (`ls-remote`): its remote-tracking
+/// refs are the agent's to write. Notes and other refs are no message of the project's history.
 async fn sent(
     git: &[String],
     rest: &[String],
@@ -227,7 +227,27 @@ async fn sent(
         .iter()
         .position(|word| word == "--" || word == "--end-of-options")
         .unwrap_or(rest.len());
-    read(&rest[..end], &PUSH).map_err(|why| format!("its options cannot be read: {why}"))?;
+    let said =
+        read(&rest[..end], &PUSH).map_err(|why| format!("its options cannot be read: {why}"))?;
+    let submodules = match said.submodules {
+        Some(said) => Some(said),
+        None => setting(git, &["push.recurseSubmodules"], folder, env).await?,
+    };
+    let recursing = match submodules {
+        Some(value) => ["on-demand", "only"].contains(&value.as_str()),
+        // Set to true, it is on-demand for a push that names no other.
+        None => setting(git, &["--type=bool", "submodule.recurse"], folder, env)
+            .await?
+            .is_some_and(|value| value == "true"),
+    };
+    if recursing {
+        return Err(
+            "it would push the commits of submodules too (--recurse-submodules, \
+             push.recurseSubmodules or submodule.recurse), which no check reads: push each \
+             submodule from its own folder"
+                .into(),
+        );
+    }
     let mut dry: Vec<String> = git.to_vec();
     dry.push("push".into());
     dry.extend_from_slice(&rest[..end]);
@@ -242,12 +262,16 @@ async fn sent(
             remotes.last_mut(),
             line.splitn(3, '\t').collect::<Vec<_>>().as_slice(),
         ) && [" ", "+", "*"].contains(flag)
-            && let Some((source, _)) = refs.rsplit_once(':')
+            && let Some((source, destination)) = refs.rsplit_once(':')
+            && ["refs/heads/", "refs/tags/"]
+                .iter()
+                .any(|kind| destination.starts_with(kind))
         {
             sources.push(source);
         }
     }
-    if remotes.is_empty() && !tried.success {
+    // A URL that did not answer has no block, and may answer at the real push.
+    if !tried.success {
         return Err(format!(
             "git could not say what it sends ({})",
             tried.stderr.trim()
@@ -265,7 +289,30 @@ async fn sent(
             input.push('\n');
         }
         input.push_str("--not\n");
-        let had = read_git(git, &["ls-remote", url], folder, env, None).await?;
+        // `insteadOf` would make it read another remote than the one the push goes to.
+        let read = read_git(
+            git,
+            &["ls-remote", "--get-url", "--end-of-options", url],
+            folder,
+            env,
+            None,
+        )
+        .await?;
+        let read = read.trim_end_matches('\n');
+        if read != url {
+            return Err(format!(
+                "the remote's URL is rewritten for reads ({url} is read as {read}), so what it \
+                 has cannot be known: push without the rewrite"
+            ));
+        }
+        let had = read_git(
+            git,
+            &["ls-remote", "--end-of-options", url],
+            folder,
+            env,
+            None,
+        )
+        .await?;
         for listed in had.lines() {
             input.push_str(listed.split('\t').next().unwrap_or_default());
             input.push('\n');
@@ -285,6 +332,32 @@ async fn sent(
         }
     }
     Ok(commits)
+}
+
+/// A key of git's configuration (after the options of `git config --get`), as `git` (`git` and
+/// the line's global options) reads it: nothing when it is not set.
+async fn setting(
+    git: &[String],
+    key: &[&str],
+    folder: &Path,
+    env: &Env,
+) -> Result<Option<String>, String> {
+    let mut words = git.to_vec();
+    words.extend(
+        ["config", "--get"]
+            .into_iter()
+            .chain(key.iter().copied())
+            .map(String::from),
+    );
+    let output = crate::git::run_in(folder, &words, env, None).await?;
+    match (output.success, output.stderr.trim()) {
+        (true, _) => Ok(Some(output.stdout.trim_end_matches('\n').to_owned())),
+        (false, "") => Ok(None),
+        (false, said) => Err(format!(
+            "git config --get {} failed ({said})",
+            key.join(" ")
+        )),
+    }
 }
 
 /// A git command of `git`'s (`git` and the line's global options): its output, or what git
@@ -603,6 +676,8 @@ struct Said {
     edit: bool,
     /// The switches that say whether a commit is made, in their order.
     switches: Vec<&'static str>,
+    /// The last `--recurse-submodules` of a push (empty for `--no-recurse-submodules`).
+    submodules: Option<String>,
 }
 
 enum Part {
@@ -629,6 +704,8 @@ enum Opt {
     Elsewhere(&'static str),
     /// Says whether a commit is made: its name.
     Switch(&'static str),
+    /// Says which submodules a push sends too: whether it takes a value.
+    Submodules(bool),
     Flag,
 }
 
@@ -756,7 +833,10 @@ const PUSH: Options = Options {
         no-dry-run no-porcelain no-force no-force-with-lease no-force-if-includes \
         no-recurse-submodules no-thin no-receive-pack no-exec no-set-upstream no-progress \
         no-prune no-follow-tags no-signed no-atomic no-push-option",
-    matter: &[],
+    matter: &[
+        ("recurse-submodules", Opt::Submodules(true)),
+        ("no-recurse-submodules", Opt::Submodules(false)),
+    ],
     letters: &[('o', Opt::Valued)],
 };
 
@@ -774,7 +854,7 @@ fn read(words: &[String], options: &Options) -> Result<Said, String> {
                 .map_or((long, None), |(n, v)| (n, Some(v)));
             let opt = long_option(options, name)?;
             let value = match (opt, value) {
-                (Opt::Message | Opt::File | Opt::Valued, None) => {
+                (Opt::Message | Opt::File | Opt::Valued | Opt::Submodules(true), None) => {
                     Some(words.next().ok_or("an option lacks its value")?)
                 }
                 _ => value,
@@ -815,6 +895,7 @@ fn take(said: &mut Said, opt: Opt, value: &str) -> Result<(), String> {
         Opt::Edit(on) => said.edit = on,
         Opt::Elsewhere(why) => return Err(why.into()),
         Opt::Switch(name) => said.switches.push(name),
+        Opt::Submodules(_) => said.submodules = Some(value.to_owned()),
         Opt::Valued | Opt::Stuck | Opt::Flag => {}
     }
     Ok(())
