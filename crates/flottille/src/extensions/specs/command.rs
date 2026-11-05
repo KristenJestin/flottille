@@ -301,7 +301,11 @@ fn text(spec: &Value) -> String {
     let write = &spec["ticket_write"];
     let problem = field(write, "problem");
     match write["state"].as_str() {
-        Some("written" | "changed") => text.push_str(&format!("Ticket: {problem}\n")),
+        Some("written") => text.push_str(&format!("Ticket: {problem}\n")),
+        Some("changed") => text.push_str(&format!(
+            "Ticket: {problem} (`flottille spec ticket {} take` or `overwrite`)\n",
+            spec["spec"]
+        )),
         Some("failed") => text.push_str(&format!("Not written to its ticket: {problem}\n")),
         _ => {}
     }

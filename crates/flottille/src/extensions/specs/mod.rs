@@ -1565,9 +1565,11 @@ fn record_write(
                 params![id, ticket, print],
             )?;
         }
+        // Sent back to Draft while it was written: a Draft has no write to say.
         space.tables().execute(
-            "UPDATE ext_specs_specs SET ticket_state = ?2, ticket_problem = ?3 WHERE id = ?1",
-            params![id, word(write.0), write.1],
+            "UPDATE ext_specs_specs SET ticket_state = ?2, ticket_problem = ?3 \
+             WHERE id = ?1 AND status = ?4",
+            params![id, word(write.0), write.1, word(Status::Ready)],
         )?;
         let spec = spec_of(&space, id)?.expect("the spec just written");
         let event = space.append_event(
@@ -1597,7 +1599,7 @@ async fn to_ticket(
             Ok(key) => {
                 let ticket = key.text();
                 let reads = [(ticket.clone(), printed)];
-                let said = format!("{ticket} was created with the spec");
+                let said = format!("written to {ticket}, created with the spec");
                 record_write(
                     daemon,
                     id,
@@ -1651,8 +1653,7 @@ async fn to_ticket(
         if !changed.is_empty() {
             let said = format!(
                 "{} changed on its tracker since Flottille last read it: nothing was written; take \
-                 the change into the spec, or write over it (`flottille spec ticket {id} take` or \
-                 `overwrite`)",
+                 the change into the spec, or write over it",
                 changed.join(", ")
             );
             return record_write(daemon, id, (TicketWrite::Changed, said), None, &[]);
