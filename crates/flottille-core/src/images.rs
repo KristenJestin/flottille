@@ -21,10 +21,8 @@ pub const MAX_SIDE: u32 = 2000;
 /// writes lossless files, which would weigh more), and when it cannot be read: this is a favour
 /// to the byte caps, never a check.
 pub fn scaled_down(mime: &str, bytes: Vec<u8>) -> Vec<u8> {
-    let format = match mime {
-        "image/png" => ImageFormat::Png,
-        "image/jpeg" => ImageFormat::Jpeg,
-        _ => return bytes,
+    let Some(format) = scaled_format(mime) else {
+        return bytes;
     };
     let reader = || ImageReader::with_format(Cursor::new(&bytes), format);
     // The header alone says the size: a picture that fits is never decoded.
@@ -41,6 +39,25 @@ pub fn scaled_down(mime: &str, bytes: Vec<u8>) -> Vec<u8> {
     match encode(&small, format) {
         Some(scaled) => scaled,
         None => bytes,
+    }
+}
+
+/// Whether `scaled_down` would decode and resize this picture. Only its header is read, so the
+/// answer is cheap: a caller that must not wait for the scaling asks first.
+pub fn needs_scaling(mime: &str, bytes: &[u8]) -> bool {
+    let Some(format) = scaled_format(mime) else {
+        return false;
+    };
+    ImageReader::with_format(Cursor::new(bytes), format)
+        .into_dimensions()
+        .is_ok_and(|(width, height)| width.max(height) > MAX_SIDE)
+}
+
+fn scaled_format(mime: &str) -> Option<ImageFormat> {
+    match mime {
+        "image/png" => Some(ImageFormat::Png),
+        "image/jpeg" => Some(ImageFormat::Jpeg),
+        _ => None,
     }
 }
 
@@ -93,6 +110,20 @@ mod tests {
     fn a_picture_that_fits_is_left_byte_for_byte() {
         let png = picture(2000, 1200, ImageFormat::Png);
         assert_eq!(scaled_down("image/png", png.clone()), png);
+    }
+
+    #[test]
+    fn only_a_picture_that_is_scaled_is_said_to_need_it() {
+        assert!(needs_scaling(
+            "image/png",
+            &picture(3000, 1500, ImageFormat::Png)
+        ));
+        assert!(!needs_scaling(
+            "image/png",
+            &picture(2000, 1200, ImageFormat::Png)
+        ));
+        assert!(!needs_scaling("image/gif", b"GIF89a"));
+        assert!(!needs_scaling("image/png", b"not a picture"));
     }
 
     #[test]

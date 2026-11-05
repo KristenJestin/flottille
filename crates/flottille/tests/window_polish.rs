@@ -907,6 +907,7 @@ fn a_big_image_is_scaled_down_when_it_is_attached(cx: &mut TestAppContext) {
     reply.update_in(cx, |reply, _, cx| {
         reply.attach(Image::from_bytes(ImageFormat::Png, png_of(3000, 1500)), cx)
     });
+    cx.run_until_parked();
 
     let (format, bytes) = reply.read_with(cx, |r, _| {
         (r.attachments()[0].format, r.attachments()[0].bytes.clone())
@@ -918,6 +919,66 @@ fn a_big_image_is_scaled_down_when_it_is_attached(cx: &mut TestAppContext) {
         .into_dimensions()
         .unwrap();
     assert_eq!((width, height), (2000, 1000));
+}
+
+#[gpui_kit::test]
+fn a_big_pasted_picture_does_not_hold_the_window(cx: &mut TestAppContext) {
+    let user = user(true);
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", "hello");
+    let (shell, reply, cx) = open_session(&user, &lead, cx);
+
+    reply.update_in(cx, |reply, _, cx| {
+        reply.attach(Image::from_bytes(ImageFormat::Png, png_of(3000, 1500)), cx)
+    });
+
+    // The attach has returned and the scaling has not run: its place is held by a skeleton.
+    assert_eq!(attachments(&reply, cx), 0);
+    assert!(reply.read_with(cx, |r, _| r.is_scaling()));
+    cx.update(|window, cx| window.render_frame(cx));
+    cx.update(|window, _| assert!(window.try_find("attachment-scaling-0").is_some()));
+
+    // Once the scaling is done the thumbnail is there, scaled, and the place is not.
+    cx.run_until_parked();
+    assert_eq!(attachments(&reply, cx), 1);
+    assert!(!reply.read_with(cx, |r, _| r.is_scaling()));
+    let bytes = reply.read_with(cx, |r, _| r.attachments()[0].bytes.clone());
+    let size = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .unwrap()
+        .into_dimensions()
+        .unwrap();
+    assert_eq!(size, (2000, 1000));
+    settle(cx);
+    cx.update(|window, _| {
+        assert!(window.try_find("attachment-0").is_some());
+        assert!(window.try_find("attachment-scaling-0").is_none());
+    });
+    assert_eq!(toasts(&shell, cx), []);
+}
+
+#[gpui_kit::test]
+fn sending_while_a_picture_still_scales_is_refused_in_a_toast(cx: &mut TestAppContext) {
+    let user = user(true);
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", "hello");
+    let (shell, reply, cx) = open_session(&user, &lead, cx);
+
+    reply.update_in(cx, |reply, window, cx| {
+        reply.attach(Image::from_bytes(ImageFormat::Png, png_of(3000, 1500)), cx);
+        reply.send(window, cx);
+    });
+
+    assert!(!reply.read_with(cx, |r, _| r.is_sending()));
+    assert_eq!(
+        toasts(&shell, cx),
+        [(
+            "The message was not sent".to_owned(),
+            "A picture is still being scaled down: send once it is there.".to_owned()
+        )]
+    );
+    cx.run_until_parked();
+    assert_eq!(attachments(&reply, cx), 1);
 }
 
 #[gpui_kit::test]

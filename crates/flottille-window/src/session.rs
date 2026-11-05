@@ -105,6 +105,7 @@ const IMAGE_TOO_BIG: &str = "An image can be 5 MiB at most.";
 const NOT_READ: &str = "That file could not be read.";
 /// What a toast says when the daemon refuses the message, or the interruption.
 pub const NOT_SENT: &str = "The message was not sent";
+const STILL_SCALING: &str = "A picture is still being scaled down: send once it is there.";
 pub const NOT_INTERRUPTED: &str = "The turn was not interrupted";
 /// The biggest file read to be attached: a screenshot of a big screen weighs more than a message
 /// may, and is scaled down before its size is judged.
@@ -5782,6 +5783,11 @@ pub struct Reply {
     images: Option<bool>,
     /// The thumbnails, which unfold as a picture is attached and fold away as it leaves.
     thumbs: Listing<Arc<gpui_kit::Image>>,
+    /// The big pictures being scaled down off the window's thread, each held by a skeleton in
+    /// the strip until its thumbnail is ready.
+    scaling: Vec<u64>,
+    scaling_places: Listing<()>,
+    scaled: u64,
     renders: usize,
     _subscriptions: Vec<Subscription>,
 }
@@ -5859,6 +5865,9 @@ impl Reply {
             sent_images: Vec::new(),
             images: None,
             thumbs: Listing::default(),
+            scaling: Vec::new(),
+            scaling_places: Listing::default(),
+            scaled: 0,
             renders: 0,
             _subscriptions: subscriptions,
         }
@@ -5885,6 +5894,11 @@ impl Reply {
     /// The pictures that go with the next message.
     pub fn attachments(&self) -> &[Arc<gpui_kit::Image>] {
         &self.attachments
+    }
+
+    /// A big picture is still being scaled down.
+    pub fn is_scaling(&self) -> bool {
+        !self.scaling.is_empty()
     }
 
     /// The line above the field while a turn runs: what the root does.
@@ -5919,7 +5933,9 @@ impl Reply {
     }
 
     /// Attaches a picture, or says in a toast why not; the text in the field stays. A big one is
-    /// scaled down first, so that its weight is judged as it will be stored.
+    /// scaled down first, so that its weight is judged as it will be stored: decoding and
+    /// resizing a 4K screenshot takes long enough to freeze the window, so it happens on the
+    /// background executor and the picture is attached once it is done.
     pub fn attach(&mut self, image: gpui_kit::Image, cx: &mut Context<Self>) {
         use gpui_kit::ImageFormat::{Gif, Jpeg, Png, Webp};
         if self.images == Some(false) {
@@ -5928,17 +5944,37 @@ impl Reply {
         if !matches!(image.format, Png | Jpeg | Gif | Webp) {
             return Self::not_attached(IMAGE_KINDS, cx);
         }
-        if self.attachments.len() >= MAX_IMAGES {
+        if self.attachments.len() + self.scaling.len() >= MAX_IMAGES {
             return Self::not_attached(
                 format!("A message carries {MAX_IMAGES} images at most."),
                 cx,
             );
         }
         let mime = image.format.mime_type();
-        let image = gpui_kit::Image::from_bytes(
-            image.format,
-            flottille_core::images::scaled_down(mime, image.bytes),
-        );
+        if !flottille_core::images::needs_scaling(mime, &image.bytes) {
+            return self.keep(image, cx);
+        }
+        let (id, format) = (self.scaled, image.format);
+        self.scaled += 1;
+        self.scaling.push(id);
+        let scaling =
+            cx.background_spawn(
+                async move { flottille_core::images::scaled_down(mime, image.bytes) },
+            );
+        cx.spawn(async move |this, cx| {
+            let bytes = scaling.await;
+            this.update(cx, |this, cx| {
+                this.scaling.retain(|scaling| *scaling != id);
+                this.keep(gpui_kit::Image::from_bytes(format, bytes), cx);
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Keeps a picture that is ready to be sent, if it weighs what a message may carry.
+    fn keep(&mut self, image: gpui_kit::Image, cx: &mut Context<Self>) {
         if image.bytes.len() > MAX_IMAGE_BYTES {
             return Self::not_attached(IMAGE_TOO_BIG, cx);
         }
@@ -6256,7 +6292,14 @@ impl Reply {
     pub fn send(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         let typed = self.field.read(cx).value().to_string();
         let message = typed.trim().to_owned();
-        if self.sending || (message.is_empty() && self.attachments.is_empty()) {
+        if self.sending {
+            return;
+        }
+        // A picture that is not there yet would be left behind: the sender waits for it.
+        if self.is_scaling() {
+            return toast(Toast::failure(NOT_SENT).detail(STILL_SCALING), cx);
+        }
+        if message.is_empty() && self.attachments.is_empty() {
             return;
         }
         self.sending = true;
@@ -6373,6 +6416,16 @@ impl Render for Reply {
                 )
             })
             .collect();
+        self.scaling_places.sync(
+            self.scaling.iter().map(|id| (format!("scaling-{id}"), ())),
+            now,
+            cx.reduce_motion(),
+        );
+        let places: Vec<(String, bool)> = self
+            .scaling_places
+            .rows()
+            .map(|row| (row.key.to_owned(), row.placement.is_gone()))
+            .collect();
         let mut live = 0;
         let thumbs: Vec<AnyElement> = listed
             .into_iter()
@@ -6447,16 +6500,51 @@ impl Render for Reply {
                 .into_any_element()
             })
             .collect();
+        // A skeleton holds the place of a picture being scaled, and folds away as its thumbnail
+        // unfolds.
+        let mut held = 0;
+        let places: Vec<AnyElement> = places
+            .into_iter()
+            .map(|(key, gone)| {
+                let id = match gone {
+                    true => ElementId::Name(format!("attachment-scaling-leaving-{key}").into()),
+                    false => ElementId::Name(format!("attachment-scaling-{held}").into()),
+                };
+                held += usize::from(!gone);
+                let shown = fade(
+                    ElementId::Name(format!("attachment-scaling-shown-{key}").into()),
+                    !gone,
+                    PANEL,
+                    window,
+                    cx,
+                );
+                let slot = div()
+                    .flex_none()
+                    .w(px(68. * shown))
+                    .pr(space::MD)
+                    .pb(space::SM)
+                    .opacity(shown)
+                    .when(shown < 1.0, |d| d.overflow_hidden())
+                    .child(Skeleton::new(id).w(px(56.)).h(px(56.)));
+                enter(
+                    ElementId::Name(format!("attachment-scaling-enter-{key}").into()),
+                    0,
+                    slot,
+                )
+                .into_any_element()
+            })
+            .collect();
         let strip = presence(
             "reply-attachments",
-            !self.attachments.is_empty(),
+            !self.attachments.is_empty() || !self.scaling_places.is_empty(),
             div()
                 .flex()
                 .flex_wrap()
                 .px(space::SM)
                 .pt(space::SM)
                 .pb(space::SM)
-                .children(thumbs),
+                .children(thumbs)
+                .children(places),
         );
         let slash = self.render_slash(cx);
         div()
