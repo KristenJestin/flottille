@@ -39,6 +39,11 @@ measured on a 16-core Linux machine with a 165 Hz screen. Keep them; they cost a
   timer at a few Hz in a separate view to a continuous `with_animation` loop (340 ms of drawing
   per second against 22).
 - Never notify or write a global during prepaint or paint, nor on every frame.
+- **A ticker runs only while its view is drawn.** A page the window keeps but no longer shows
+  keeps its views alive, and a view notified while off screen still draws the window. Measured
+  (#444): fourteen skeletons' pulses left ticking drew a settled session page 140 times a
+  second. A ticker stops at the first tick that finds its view was not drawn since the last one
+  (`Skeleton`'s pulse does).
 - An animation requested in the same view as a list makes the list lose its scroll layer: split
   them.
 - A **text input** (`gpui_kit::component::input`) notifies its state on every caret blink: render
@@ -96,7 +101,10 @@ description:
 - [ ] every list that gains, loses or reorders rows is a `Listing` of `Item`s;
 - [ ] every new page, section or panel enters (staggered), and every overlay rises and fades;
 - [ ] reduced motion jumps (the helpers do it; a `Motion` kept by hand must pass `reduce`);
-- [ ] nothing is redrawn at rest: a scenario ends on `pending_frames == 0`;
+- [ ] nothing is redrawn at rest: a scenario ends on `pending_frames == 0`, and a page the pull
+      request touches is held by a scenario of `crates/flottille/tests/window_at_rest.rs`, which
+      counts the frames drawn over ten seconds of the window's clock once the page settled
+      (`window.layout_stats().frames`, none) and the animation frames asked (none);
 - [ ] the pull request lists each element it animated, and a capture or a scenario shows one.
 
 ## Rules of the window
