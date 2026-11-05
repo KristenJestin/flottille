@@ -127,7 +127,14 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 agent.workspace.as_deref(),
                 &asked.message,
             )?;
-            let images = keep_images(daemon, &agent, &asked.images)?;
+            // Decoding and scaling a big picture takes a good while for a 4K screenshot: it
+            // runs where it holds no thread of the runtime.
+            let images = {
+                let (daemon, agent, uploads) = (daemon.clone(), agent.clone(), asked.images);
+                tokio::task::spawn_blocking(move || keep_images(&daemon, &agent, &uploads))
+                    .await
+                    .map_err(|e| Failure::new("unavailable", format!("images not kept: {e}")))??
+            };
             let delivery = deliveries::deliver_with_images(
                 daemon,
                 &agent.id,
@@ -433,6 +440,8 @@ fn keep_images(
                 MAX_IMAGE_BYTES / 1024 / 1024
             )));
         }
+        // Scaled before it is stored, so that more of them fit under the byte caps of a prompt.
+        let bytes = flottille_core::images::scaled_down(&image.mime, bytes);
         checked.push((extension, bytes));
     }
     let folder = daemon.paths.images(&agent.id);
