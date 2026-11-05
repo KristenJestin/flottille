@@ -171,6 +171,55 @@ fn a_search_prints_jira_s_issue_with_only_the_fields_asked_counts_and_pages() {
 }
 
 #[test]
+fn a_search_prints_only_the_fields_it_was_asked_and_a_view_gives_updated() {
+    let item = json!({"key": "ABC-1", "self": "https://example.atlassian.net/rest/api/3/issue/1",
+        "fields": {"summary": "Log in", "status": {"name": "To Do"},
+            "updated": "2026-11-05T11:23:09.006+0100", "comment": {"comments": [], "total": 0}}});
+    let dir = scripted(json!({"search": [item.clone()], "items": {"ABC-1": item}}));
+    let run = |args: &[&str]| {
+        let output = fake(dir.path()).args(args).output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+
+    let found = run(&[
+        "jira",
+        "workitem",
+        "search",
+        "--jql",
+        "project = ABC",
+        "--json",
+        "--fields",
+        "key,summary",
+    ]);
+    assert_eq!(found[0]["fields"], json!({"summary": "Log in"}));
+    let all = run(&[
+        "jira",
+        "workitem",
+        "search",
+        "--jql",
+        "project = ABC",
+        "--json",
+    ]);
+    assert!(
+        all[0]["fields"]["updated"].is_string(),
+        "no --fields, the default is the script's"
+    );
+
+    let viewed = run(&[
+        "jira",
+        "workitem",
+        "view",
+        "ABC-1",
+        "--json",
+        "--fields",
+        "updated,comment",
+    ]);
+    assert_eq!(viewed["fields"]["updated"], "2026-11-05T11:23:09.006+0100");
+    assert!(viewed["fields"]["summary"].is_null());
+}
+
+#[test]
 fn the_writes_follow_the_script_and_change_nothing() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
