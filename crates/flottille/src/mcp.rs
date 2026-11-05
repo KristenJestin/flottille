@@ -504,7 +504,7 @@ const SERVED: [Definition; 28] = [
         title: "The project's workspaces",
         description: "The project's workspaces. list and show read them. A root's writes, \
             judged: create makes one (worktrees, then setup, judged as a run of each step; to \
-            resume a branch, name it), prepare resumes a failed setup, link_ticket links a \
+            resume a branch, name it; name new ones by the repository's naming convention), prepare resumes a failed setup, link_ticket links a \
             ticket (null unlinks); remove, always held for the user, its request saying what \
             would be lost: yours too once its work is done, your commands in it stopped, and you \
             go on in main. name: yours when left out, but for create. To work on another branch in this workspace, switch with git: the \
@@ -518,7 +518,7 @@ const SERVED: [Definition; 28] = [
                 "action": {"type": "string", "enum": ["list", "show", "create", "prepare", "link_ticket", "remove"]},
                 "name": {"type": "string"},
                 "repositories": {"type": "array", "items": {"type": "string"}, "description": "create: by path."},
-                "branch": {"type": "string", "description": "create: <branch prefix>/<name> when left out; an existing branch is checked out."},
+                "branch": {"type": "string", "description": "create: give it when the repository has a naming convention (its AGENTS.md, CONTRIBUTING, or the branches it already has to read), with the ticket's key when the workspace has a ticket (fix/ABC-12-login). Left out, <branch prefix>/<name> is the fallback (the name alone when the project has no prefix). An existing branch is checked out."},
                 "ticket": {"type": ["string", "null"], "description": "#123 or ABC-123."}
             }, "required": ["action"], "additionalProperties": false})
         },
@@ -2839,6 +2839,35 @@ mod tests {
                 .unwrap_or_else(|| panic!("{tool} has no described parameter {name}"))
                 .to_owned(),
         }
+    }
+
+    #[test]
+    fn the_workspace_create_description_says_to_follow_the_repository_s_naming() {
+        let workspace = definition("workspace").unwrap();
+        let tool = serde_json::to_value(tool_of(workspace, true)).unwrap();
+        let branch = tool["inputSchema"]["properties"]["branch"]["description"]
+            .as_str()
+            .unwrap();
+        for said in [
+            "repository's naming convention",
+            "AGENTS.md",
+            "CONTRIBUTING",
+            "branches it already has",
+            "ticket's key",
+            "fallback",
+        ] {
+            assert!(
+                workspace.description.contains(said) || branch.contains(said),
+                "{said:?} in {} / {branch}",
+                workspace.description
+            );
+        }
+        // The limit every description stays under.
+        assert!(
+            workspace.description.len() < 1000,
+            "{}",
+            workspace.description.len()
+        );
     }
 
     #[test]
