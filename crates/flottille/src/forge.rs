@@ -1121,12 +1121,12 @@ impl ForgeCall {
             }
         }
         if let Some(base) = &self.base
-            && (base.trim().is_empty()
-                || base.starts_with('-')
-                || base.contains(char::is_whitespace))
+            && !branch_name(base)
         {
             return Some(format!(
-                "refused: base: {base:?} is not one branch name, without space, not starting with -"
+                "refused: base: {base:?} is not one branch name: git's rules refuse a space, a \
+                 control character, .., ~ ^ : ? * [ \\ @{{, a leading - or /, a trailing / . or \
+                 .lock, and // ; so does the forge's address, with #"
             ));
         }
         if self.action == "edit" && !self.changes() {
@@ -1154,6 +1154,31 @@ impl ForgeCall {
     }
 }
 
+/// Whether `name` is one branch name by git's rules for a reference (`git check-ref-format`), and
+/// fit to be a path of the forge's API: the base is read there before it is written.
+fn branch_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with(['-', '/'])
+        && !name.ends_with(['/', '.'])
+        && !name.ends_with(".lock")
+        && !["..", "//", "@{"].iter().any(|bad| name.contains(bad))
+        && !name.contains(['~', '^', ':', '?', '*', '[', '\\', '#'])
+        && !name.contains(|c: char| c.is_whitespace() || c.is_control())
+        && name != "@"
+}
+
+/// `why`, the failure of a later step of a write, and what the earlier steps had already changed.
+pub(crate) fn after(why: String, done: &[&str]) -> String {
+    match done {
+        [] => why,
+        done => format!(
+            "{why}; {} had already changed the pull request before it failed: read it with \
+             forge show before going on",
+            done.join(" and ")
+        ),
+    }
+}
+
 /// `names` and then those of `more` that `names` has not, in order.
 fn without_twice(names: &[String], more: &Option<Vec<String>>) -> Vec<String> {
     let mut all = names.to_vec();
@@ -1163,6 +1188,54 @@ fn without_twice(names: &[String], more: &Option<Vec<String>>) -> Vec<String> {
         }
     }
     all
+}
+
+/// Why the branch `branch` of the workspace in the repository `path` must stay whatever is said:
+/// the workspace resumed it (it was the user's before), or another workspace is on it.
+pub(crate) fn keep_because(
+    daemon: &Daemon,
+    project: &str,
+    workspace: &Workspace,
+    path: &str,
+    branch: &str,
+) -> Option<String> {
+    if workspace
+        .repositories
+        .iter()
+        .any(|r| r.path == path && r.resumed)
+    {
+        return Some("it existed before the workspace".to_owned());
+    }
+    daemon
+        .read(|store| store.workspaces(Some(project)))
+        .unwrap_or_default()
+        .into_iter()
+        .find(|w| {
+            w.name != workspace.name
+                && w.branch == branch
+                && w.repositories.iter().any(|r| r.path == path)
+        })
+        .map(|other| format!("the workspace {} is on it", other.name))
+}
+
+/// The workspace a `create` or `merge` writes for and the repository it takes, as `forge_write`
+/// takes them: the one named, else the workspace's only one. For the card, which is read before.
+pub(crate) fn write_target(
+    daemon: &Daemon,
+    place: &Place,
+    workspace: Option<&str>,
+    repository: Option<&str>,
+) -> Option<(Workspace, String)> {
+    let name = workspace_named(daemon, place, workspace, "forge").ok()?;
+    let workspace = daemon
+        .read(|store| store.workspace(&place.project, &name))
+        .ok()??;
+    let path = match (repository, workspace.repositories.as_slice()) {
+        (Some(path), _) => path.to_owned(),
+        (None, [only]) => only.path.clone(),
+        (None, _) => return None,
+    };
+    Some((workspace, path))
 }
 
 /// What a merge does with the pull request's source branch, as far as the call and the project
@@ -2070,15 +2143,17 @@ async fn github_edit(
     if let Some(base) = &asked.base {
         args.extend(["--base", base]);
     }
+    let mut done = Vec::new();
     if args.len() > 5 {
         gh_text(&args).await?;
+        done.push("gh pr edit");
     }
     if let Some(draft) = asked.draft {
         let mut args = vec!["pr", "ready", number, "-R", &repo];
         if draft {
             args.push("--undo");
         }
-        gh_text(&args).await?;
+        gh_text(&args).await.map_err(|why| after(why, &done))?;
     }
     Ok(())
 }
@@ -2487,21 +2562,19 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
         return Outcome::Refused(NO_LABELS.replace("{what}", "opened"));
     }
     // A branch the workspace resumed was the user's before, and another workspace on the same
-    // branch still uses it: a merge never deletes either, whatever it was told.
-    let keep_because = if repository.resumed {
-        Some("it existed before the workspace".to_owned())
-    } else {
-        daemon
-            .read(|store| store.workspaces(Some(&place.project)))
-            .unwrap_or_default()
-            .into_iter()
-            .find(|w| {
-                w.name != workspace.name
-                    && w.branch == branch
-                    && w.repositories.iter().any(|r| r.path == checkout.path)
-            })
-            .map(|other| format!("the workspace {} is on it", other.name))
-    };
+    // branch still uses it: a merge never deletes either, whatever it was told, and a pull
+    // request is not opened to have the forge delete it.
+    let keep_because = keep_because(daemon, &place.project, &workspace, &checkout.path, branch);
+    if asked.action == "create"
+        && asked.delete_branch_on_merge == Some(true)
+        && let Some(why) = &keep_because
+    {
+        return Outcome::Refused(format!(
+            "refused: delete_branch_on_merge: the branch {} is never deleted: {why}; nothing was \
+             opened: open it without delete_branch_on_merge",
+            masked(branch)
+        ));
+    }
     let deletion = Deletion {
         asked: asked.delete_branch,
         setting: project
@@ -2563,7 +2636,7 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                     if asked.delete_branch_on_merge == Some(true) && numbered {
                         // GitHub has no such flag per pull request: Flottille keeps the wish
                         // and applies it when it merges the pull request.
-                        crate::posts::record_delete_branch(daemon, on);
+                        crate::posts::record_delete_branch(daemon, on, branch);
                         told += &format!(
                             ". Flottille will delete the branch {} when it merges #{number}",
                             masked(branch)
@@ -2657,11 +2730,21 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                 args.push("--delete-branch");
             }
             match gh_text(&args).await {
-                Ok(_) => Outcome::Done(format!(
-                    "The pull request #{number} of {branch} was merged by {method} into {base} \
-                     in {slug}{}.",
-                    kept.said(branch)
-                )),
+                Ok(_) => {
+                    // `gh` was told to leave it, but the repository's own setting may not.
+                    let said = match &kept {
+                        Branch::Left(why) if own_deletion(&repo).await => format!(
+                            ", and the repository's own setting deletes head branches: GitHub \
+                             deletes {} although {why}; gh cannot stop it",
+                            masked(branch)
+                        ),
+                        _ => kept.said(branch),
+                    };
+                    Outcome::Done(format!(
+                        "The pull request #{number} of {branch} was merged by {method} into \
+                         {base} in {slug}{said}."
+                    ))
+                }
                 Err(why) => {
                     // Refused by the forge: when the repository forbids the method, say which
                     // ones it allows rather than GitHub's own sentence.

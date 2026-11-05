@@ -20,6 +20,7 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
+use crate::forge::write_target;
 use crate::mcp::{Grant, Outcome, arguments, workspace_named};
 use crate::place::{Place, Resolved};
 use crate::projects::{self, Failure};
@@ -512,14 +513,35 @@ fn forge_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Vec<String> {
             .collect();
         (!list.is_empty()).then(|| list.join(", "))
     };
+    let target = || {
+        let (_, path) = write_target(
+            daemon,
+            &grant.place,
+            args["workspace"].as_str(),
+            args["repository"].as_str(),
+        )?;
+        let project = projects::load_project(daemon, &grant.place.project).ok()?;
+        project.repositories.into_iter().find(|r| r.path == path)
+    };
     let mut says = Vec::new();
     let mut say = |text: Option<String>| says.extend(text);
     match args["action"].as_str() {
         Some("create") => {
             say(names("reviewers").map(|n| format!("Its reviewers, besides the project's: {n}")));
             say(names("labels").map(|n| format!("Its labels: {n}")));
-            say((args["delete_branch_on_merge"] == true)
-                .then(|| "It deletes the branch when the pull request is merged".to_owned()));
+            if args["delete_branch_on_merge"] == true {
+                // GitHub has no such flag per pull request: only a merge by Flottille deletes.
+                let github = matches!(
+                    target().and_then(|repository| repository.forge),
+                    Some(RepositoryForge::Github { .. })
+                );
+                say(Some(match github {
+                    true => "Flottille deletes the branch when it merges the pull request \
+                             (GitHub has no such flag: a merge by anyone else leaves it)"
+                        .to_owned(),
+                    false => "It deletes the branch when the pull request is merged".to_owned(),
+                }));
+            }
         }
         Some("edit") => {
             say(match args["draft"].as_bool() {
@@ -535,36 +557,66 @@ fn forge_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Vec<String> {
                 .as_str()
                 .map(|base| format!("It moves it onto the base {base}")));
         }
-        Some("merge") => {
-            let by_setting = || {
-                let path = args["repository"].as_str();
-                crate::projects::load_project(daemon, &grant.place.project)
-                    .map(|project| match path {
-                        Some(path) => project
-                            .repositories
-                            .iter()
-                            .any(|r| r.path == path && r.delete_branch_on_merge),
-                        None => matches!(&project.repositories[..],
-                            [only] if only.delete_branch_on_merge),
-                    })
-                    .unwrap_or(false)
-            };
-            say(match args["delete_branch"].as_bool() {
-                Some(true) => {
-                    Some("It deletes the source branch on the forge after the merge".to_owned())
-                }
-                Some(false) => None,
-                None if by_setting() => Some(
-                    "It deletes the source branch on the forge after the merge (the project's \
-                     setting Delete the branch on merge)"
-                        .to_owned(),
-                ),
-                None => None,
-            });
-        }
+        Some("merge") => say(merge_says(daemon, grant, args)),
         _ => {}
     }
     says
+}
+
+/// What a `merge` does with the source branch, in words, for the repository `forge` takes: the
+/// one named, else the workspace's only one. The branch kept whatever is said is said as kept.
+fn merge_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Option<String> {
+    let (workspace, path) = write_target(
+        daemon,
+        &grant.place,
+        args["workspace"].as_str(),
+        args["repository"].as_str(),
+    )?;
+    let project = projects::load_project(daemon, &grant.place.project).ok()?;
+    let repository = project.repositories.iter().find(|r| r.path == path)?;
+    let source = match repository.forge {
+        Some(RepositoryForge::Github { .. }) => "github",
+        _ => "bitbucket",
+    };
+    let asked_at_create = || {
+        let on = (grant.place.project.as_str(), source, path.as_str());
+        crate::posts::delete_branch_asked(daemon, on, &workspace.branch)
+    };
+    let (deleted, explicit) = match args["delete_branch"].as_bool() {
+        Some(true) => (
+            "It deletes the source branch on the forge after the merge",
+            true,
+        ),
+        Some(false) => return None,
+        None if repository.delete_branch_on_merge => (
+            "It deletes the source branch on the forge after the merge (the project's setting \
+             Delete the branch on merge)",
+            false,
+        ),
+        None if asked_at_create() => (
+            "It deletes the source branch on the forge after the merge if the pull request \
+             asked for it when it was opened",
+            false,
+        ),
+        None => return None,
+    };
+    let left = crate::forge::keep_because(
+        daemon,
+        &grant.place.project,
+        &workspace,
+        &path,
+        &workspace.branch,
+    );
+    Some(match (left, explicit) {
+        (None, _) => deleted.to_owned(),
+        (Some(why), true) => {
+            format!("It asks to delete the source branch, but the merge leaves it: {why}")
+        }
+        (Some(why), false) => format!(
+            "The merge leaves the source branch, although the project or the pull request would \
+             have it deleted: {why}"
+        ),
+    })
 }
 
 /// Whether the agent is a root, the agent the user talks to.

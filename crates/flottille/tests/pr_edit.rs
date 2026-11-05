@@ -189,9 +189,14 @@ fn passing() -> Value {
 
 /// GitHub's pull request #12 of `app/login`, open and passing, and the script around it.
 fn github_pulls() -> Value {
-    json!({"created": 12, "pulls": {"acme/app": {"app/login": {"number": 12, "title": "Login",
+    github_pulls_in("acme/app")
+}
+
+/// The same, in the repository `slug`.
+fn github_pulls_in(slug: &str) -> Value {
+    json!({"created": 12, "pulls": {slug: {"app/login": {"number": 12, "title": "Login",
         "state": "OPEN", "isDraft": true, "baseRefName": "main", "headRefName": "app/login",
-        "isCrossRepository": false, "url": "https://github.com/acme/app/pull/12",
+        "isCrossRepository": false, "url": format!("https://github.com/{slug}/pull/12"),
         "statusCheckRollup": passing()}}}})
 }
 
@@ -208,6 +213,112 @@ fn cloud_script() -> Value {
             {"id": 12, "state": "OPEN", "participants": []},
             "/repositories/acme/app/refs/branches/release": {"name": "release"}}})
 }
+
+/// A project `app` of the repositories `api` (its table gets `setting`) and `web`, both on GitHub,
+/// and its ready workspace `login`, which takes `api` only, on the branch `app/login`, pushed.
+fn api_and_web(user: &User, setting: &str) {
+    let folder = user.path("work/app");
+    let mut tables = String::new();
+    for repository in ["api", "web"] {
+        let dir = folder.join(repository);
+        user.git_init(&dir);
+        std::fs::write(dir.join("README.md"), format!("{repository}\n")).unwrap();
+        user.git(&dir, &["add", "."]);
+        user.git(&dir, &["commit", "--quiet", "-m", "start"]);
+        let remote = user.path(&format!("remotes/{repository}.git"));
+        user.git(
+            &user.path(""),
+            &["init", "--quiet", "--bare", remote.to_str().unwrap()],
+        );
+        user.git(&dir, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        user.git(&dir, &["push", "--quiet", "origin", "main"]);
+        user.git(
+            &dir,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                &format!("git@github.com:acme/{repository}.git"),
+            ],
+        );
+        let more = if repository == "api" { setting } else { "" };
+        tables += &format!(
+            "\n[[repositories]]\npath = \"{repository}\"\nforge = {{ kind = \"github\", \
+             repository = \"acme/{repository}\" }}\n{more}\n"
+        );
+    }
+    user.write_project_file(
+        "app",
+        &format!("folder = \"{}\"\n{tables}", folder.display()),
+    );
+    let workspace = user
+        .call(
+            "workspace.create",
+            json!({"project": "app", "name": "login", "repositories": ["api"], "offline": true}),
+        )
+        .unwrap();
+    assert_eq!(workspace["state"], "ready", "{workspace}");
+    let worktree = user.path("data/flottille/workspaces/app/login");
+    for dir in [worktree.join("api"), worktree.clone()] {
+        if dir.join(".git").exists() {
+            user.git(
+                &dir,
+                &["update-ref", "refs/remotes/origin/app/login", "HEAD"],
+            );
+        }
+    }
+}
+
+/// A project `app` on `origin` whose workspace `login` resumed the branch `app/login`, which
+/// existed before it (the user's own), its repository's table holding `delete_branch_on_merge`.
+fn resumed(user: &User, origin: &str, forge: &str) {
+    let folder = user.path("work/app");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "app\n").unwrap();
+    user.git(&folder, &["add", "."]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    user.git(&folder, &["branch", "app/login"]);
+    user.git(&folder, &["remote", "add", "origin", origin]);
+    user.write_project_file(
+        "app",
+        &format!(
+            "folder = \"{}\"\n\n[[repositories]]\npath = \".\"\nforge = {forge}\n\
+             delete_branch_on_merge = true\n",
+            folder.display()
+        ),
+    );
+    let made = user
+        .call(
+            "workspace.create",
+            json!({"project": "app", "name": "login", "branch": "app/login", "offline": true}),
+        )
+        .unwrap();
+    assert_eq!(made["state"], "ready", "{made}");
+    user.git(
+        &user.path("data/flottille/workspaces/app/login"),
+        &["update-ref", "refs/remotes/origin/app/login", "HEAD"],
+    );
+}
+
+/// A second workspace `other` recorded on the branch `app/login`: git lets only one worktree
+/// hold a branch, so `login` lets it go for the time `other` is made, and takes it back.
+fn another_workspace_on_the_branch(user: &User) {
+    let login = user.path("data/flottille/workspaces/app/login");
+    let other = user.path("data/flottille/workspaces/app/other");
+    user.git(&login, &["switch", "--quiet", "--detach"]);
+    let made = user
+        .call(
+            "workspace.create",
+            json!({"project": "app", "name": "other", "branch": "app/login", "offline": true}),
+        )
+        .unwrap();
+    assert_eq!(made["state"], "ready", "{made}");
+    user.git(&other, &["switch", "--quiet", "--detach"]);
+    user.git(&login, &["switch", "--quiet", "app/login"]);
+}
+
+const GITHUB: &str = "{ kind = \"github\", repository = \"acme/app\" }";
+const BITBUCKET: &str = "{ kind = \"bitbucket-cloud\", repository = \"acme/app\" }";
 
 // create
 
@@ -282,6 +393,64 @@ fn create_refuses_a_reviewer_or_a_label_that_would_be_an_option() {
         );
     }
     assert!(gh_starting(&user, "pr create").is_empty());
+}
+
+#[test]
+fn create_refuses_delete_branch_on_merge_for_a_branch_it_would_not_delete() {
+    let create = json!({"action": "create", "repository": ".", "title": "Login",
+        "delete_branch_on_merge": true});
+    let refused = |answer: &Answer, why: &str| {
+        assert!(answer.error, "{}", answer.text);
+        assert!(
+            answer.text.contains(&format!(
+                "refused: delete_branch_on_merge: the branch app/login is never deleted: {why}; \
+                 nothing was opened"
+            )),
+            "{}",
+            answer.text
+        );
+    };
+
+    // A branch the workspace resumed, on GitHub and on Bitbucket.
+    let user = User::with_fake_agent().with_fake_gh();
+    resumed(&user, "git@github.com:acme/app.git", GITHUB);
+    user.gh_script(github_pulls());
+    let mcp = agent(&user);
+    refused(
+        &write(&user, &mcp, create.clone()),
+        "it existed before the workspace",
+    );
+    assert!(gh_starting(&user, "pr create").is_empty());
+
+    let user = User::with_fake_agent().with_fake_bkt();
+    resumed(&user, "git@bitbucket.org:acme/app.git", BITBUCKET);
+    user.bkt_script(cloud_script());
+    let mcp = agent(&user);
+    refused(
+        &write(&user, &mcp, create.clone()),
+        "it existed before the workspace",
+    );
+    assert!(bkt_starting(&user, "pr create").is_empty());
+
+    // A branch another workspace is on, on both.
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user, "", "");
+    another_workspace_on_the_branch(&user);
+    user.gh_script(github_pulls());
+    let mcp = agent(&user);
+    refused(
+        &write(&user, &mcp, create.clone()),
+        "the workspace other is on it",
+    );
+    assert!(gh_starting(&user, "pr create").is_empty());
+
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user, "", "");
+    another_workspace_on_the_branch(&user);
+    user.bkt_script(cloud_script());
+    let mcp = agent(&user);
+    refused(&write(&user, &mcp, create), "the workspace other is on it");
+    assert!(bkt_starting(&user, "pr create").is_empty());
 }
 
 #[test]
@@ -519,46 +688,14 @@ fn merge_keeps_the_branch_by_default() {
 
 #[test]
 fn merge_never_deletes_a_branch_the_workspace_resumed_or_another_workspace_is_on() {
+    let merge = json!({"action": "merge", "repository": ".", "delete_branch": true});
+
     // A branch that existed before the workspace was made is the user's.
     let user = User::with_fake_agent().with_fake_gh();
-    let folder = user.path("work/app");
-    user.git_init(&folder);
-    std::fs::write(folder.join("README.md"), "app\n").unwrap();
-    user.git(&folder, &["add", "."]);
-    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
-    user.git(&folder, &["branch", "app/login"]);
-    user.git(
-        &folder,
-        &["remote", "add", "origin", "git@github.com:acme/app.git"],
-    );
-    user.write_project_file(
-        "app",
-        &format!(
-            "folder = \"{}\"\n\n[[repositories]]\npath = \".\"\nforge = {{ kind = \"github\", \
-             repository = \"acme/app\" }}\ndelete_branch_on_merge = true\n",
-            folder.display()
-        ),
-    );
-    let made = user
-        .call(
-            "workspace.create",
-            json!({"project": "app", "name": "login", "branch": "app/login", "offline": true}),
-        )
-        .unwrap();
-    assert_eq!(made["state"], "ready", "{made}");
-    user.git(
-        &user.path("data/flottille/workspaces/app/login"),
-        &["update-ref", "refs/remotes/origin/app/login", "HEAD"],
-    );
+    resumed(&user, "git@github.com:acme/app.git", GITHUB);
     user.gh_script(github_pulls());
     let mcp = agent(&user);
-
-    let answer = write(
-        &user,
-        &mcp,
-        json!({"action": "merge", "repository": ".", "delete_branch": true}),
-    );
-
+    let answer = write(&user, &mcp, merge.clone());
     assert!(!answer.error, "{}", answer.text);
     assert_eq!(
         gh_starting(&user, "pr merge"),
@@ -570,6 +707,205 @@ fn merge_never_deletes_a_branch_the_workspace_resumed_or_another_workspace_is_on
             .contains("its branch app/login was left: it existed before the workspace"),
         "{}",
         answer.text
+    );
+
+    // So is one another workspace is on, whatever the project or the call says.
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user, "delete_branch_on_merge = true", "");
+    another_workspace_on_the_branch(&user);
+    user.gh_script(github_pulls());
+    let mcp = agent(&user);
+    let answer = write(&user, &mcp, merge.clone());
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(
+        gh_starting(&user, "pr merge"),
+        ["pr merge 12 -R github.com/acme/app --squash"]
+    );
+    assert!(
+        answer
+            .text
+            .contains("its branch app/login was left: the workspace other is on it"),
+        "{}",
+        answer.text
+    );
+
+    // Bitbucket says it to `bkt`, which closes the source branch unless told not to.
+    let user = User::with_fake_agent().with_fake_bkt();
+    resumed(&user, "git@bitbucket.org:acme/app.git", BITBUCKET);
+    user.bkt_script(cloud_script());
+    let mcp = agent(&user);
+    let answer = write(&user, &mcp, merge.clone());
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(
+        bkt_starting(&user, "pr merge"),
+        [
+            "pr merge 12 --context cloud --workspace acme --repo app --strategy squash \
+             --close-source=false"
+        ]
+    );
+    assert!(
+        answer
+            .text
+            .contains("its branch app/login was left: it existed before the workspace"),
+        "{}",
+        answer.text
+    );
+
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user, "delete_branch_on_merge = true", "");
+    another_workspace_on_the_branch(&user);
+    user.bkt_script(cloud_script());
+    let mcp = agent(&user);
+    let answer = write(&user, &mcp, merge);
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(
+        bkt_starting(&user, "pr merge"),
+        [
+            "pr merge 12 --context cloud --workspace acme --repo app --strategy squash \
+             --close-source=false"
+        ]
+    );
+    assert!(
+        answer
+            .text
+            .contains("its branch app/login was left: the workspace other is on it"),
+        "{}",
+        answer.text
+    );
+}
+
+#[test]
+fn merge_says_a_github_repository_deletes_the_branch_flottille_left() {
+    let user = User::with_fake_agent().with_fake_gh();
+    resumed(&user, "git@github.com:acme/app.git", GITHUB);
+    let mut script = github_pulls();
+    script["delete_head_branches"] = json!({"acme/app": true});
+    user.gh_script(script);
+    let mcp = agent(&user);
+
+    let answer = write(
+        &user,
+        &mcp,
+        json!({"action": "merge", "repository": ".", "delete_branch": true}),
+    );
+
+    assert!(!answer.error, "{}", answer.text);
+    // Flottille asked `gh` to leave it; it cannot stop the repository's own setting.
+    assert_eq!(
+        gh_starting(&user, "pr merge"),
+        ["pr merge 12 -R github.com/acme/app --squash"]
+    );
+    assert!(
+        answer.text.contains(
+            "the repository's own setting deletes head branches: GitHub deletes app/login"
+        ),
+        "{}",
+        answer.text
+    );
+    assert!(!answer.text.contains("was left"), "{}", answer.text);
+}
+
+#[test]
+fn the_merge_card_names_the_deletion_in_the_workspace_s_only_repository() {
+    // `api` deletes on merge, the workspace takes `api` only: no repository needs naming.
+    let user = User::with_fake_agent().with_fake_gh();
+    api_and_web(&user, "delete_branch_on_merge = true");
+    user.gh_script(github_pulls_in("acme/api"));
+    let mcp = agent(&user);
+
+    let card = says(&user, held(&mcp.call("forge", json!({"action": "merge"}))));
+    assert!(
+        card.iter()
+            .any(|said| said.contains("Delete the branch on merge")),
+        "{card:?}"
+    );
+
+    let answer = write(&user, &mcp, json!({"action": "merge"}));
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(
+        gh_starting(&user, "pr merge"),
+        ["pr merge 12 -R github.com/acme/api --squash --delete-branch"]
+    );
+}
+
+#[test]
+fn the_merge_card_names_the_deletion_a_create_asked_for() {
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user, "", "");
+    user.gh_script(github_pulls());
+    let mcp = agent(&user);
+    let created = write(
+        &user,
+        &mcp,
+        json!({"action": "create", "repository": ".", "title": "Login",
+            "delete_branch_on_merge": true}),
+    );
+    assert!(!created.error, "{}", created.text);
+
+    let card = says(
+        &user,
+        held(&mcp.call("forge", json!({"action": "merge", "repository": "."}))),
+    );
+
+    assert!(
+        card.contains(
+            &"It deletes the source branch on the forge after the merge if the pull request \
+              asked for it when it was opened"
+                .to_owned()
+        ),
+        "{card:?}"
+    );
+}
+
+#[test]
+fn the_cards_do_not_say_more_than_will_happen() {
+    // A merge that leaves a resumed branch does not say it deletes it.
+    let user = User::with_fake_agent().with_fake_gh();
+    resumed(&user, "git@github.com:acme/app.git", GITHUB);
+    user.gh_script(github_pulls());
+    let mcp = agent(&user);
+    let card = says(
+        &user,
+        held(&mcp.call(
+            "forge",
+            json!({"action": "merge", "repository": ".", "delete_branch": true}),
+        )),
+    );
+    assert!(
+        !card
+            .iter()
+            .any(|said| said.starts_with("It deletes the source branch")),
+        "{card:?}"
+    );
+    assert!(
+        card.contains(
+            &"It asks to delete the source branch, but the merge leaves it: it existed before \
+              the workspace"
+                .to_owned()
+        ),
+        "{card:?}"
+    );
+
+    // On GitHub only a merge by Flottille deletes the branch a create asked to delete.
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user, "", "");
+    user.gh_script(github_pulls());
+    let mcp = agent(&user);
+    let card = says(
+        &user,
+        held(&mcp.call(
+            "forge",
+            json!({"action": "create", "repository": ".", "title": "Login",
+                "delete_branch_on_merge": true}),
+        )),
+    );
+    assert!(
+        card.contains(
+            &"Flottille deletes the branch when it merges the pull request (GitHub has no such \
+              flag: a merge by anyone else leaves it)"
+                .to_owned()
+        ),
+        "{card:?}"
     );
 }
 
@@ -789,6 +1125,109 @@ fn the_base_is_changed_and_an_unknown_base_refused() {
 }
 
 #[test]
+fn a_base_that_is_not_a_branch_name_is_refused_before_the_forge_is_asked() {
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user, "", "");
+    user.gh_script(github_pulls());
+    let mcp = agent(&user);
+
+    for base in [
+        "x/../../../../user",
+        "a..b",
+        "a?b",
+        "a#b",
+        "a~1",
+        "a^",
+        "a:b",
+        "a*",
+        "a[b",
+        "a\\b",
+        "a@{1}",
+        "a//b",
+        "/a",
+        "a/",
+        "a.",
+        "a.lock",
+        "a\u{7f}b",
+    ] {
+        // Refused at once, the user is not asked; and the forge is not read for it.
+        let answer = mcp.call(
+            "forge",
+            json!({"action": "edit", "number": 12, "base": base}),
+        );
+        assert!(
+            answer.text.contains("refused: base:") && answer.text.contains("branch name"),
+            "{base:?}: {}",
+            answer.text
+        );
+    }
+    assert!(gh_starting(&user, "api").is_empty());
+    assert!(gh_starting(&user, "pr edit").is_empty());
+}
+
+#[test]
+fn a_later_step_that_fails_says_what_the_earlier_ones_did() {
+    // GitHub: the reviewer was asked, then `gh pr ready` failed.
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user, "", "");
+    let mut script = github_pulls();
+    script["step_fail"] = json!({"acme/app": {"ready": "HTTP 502: Bad Gateway"}});
+    user.gh_script(script);
+    let mcp = agent(&user);
+    let answer = write(
+        &user,
+        &mcp,
+        json!({"action": "edit", "number": 12, "reviewers_add": ["carol"], "draft": false}),
+    );
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains("HTTP 502"), "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("gh pr edit had already changed the pull request"),
+        "{}",
+        answer.text
+    );
+
+    // Bitbucket: the reviewer was asked, then `bkt pr publish` failed.
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user, "", "");
+    let mut script = cloud_script();
+    script["step_fail"] = json!({"acme/app": {"publish": "Error: 502 Bad Gateway"}});
+    user.bkt_script(script);
+    let mcp = agent(&user);
+    let answer = write(
+        &user,
+        &mcp,
+        json!({"action": "edit", "number": 12, "reviewers_add": ["carol"], "draft": false}),
+    );
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains("502"), "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("bkt pr edit had already changed the pull request"),
+        "{}",
+        answer.text
+    );
+
+    // Nothing was done before a failure of the first step: nothing is said of it.
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user, "", "");
+    let mut script = github_pulls();
+    script["step_fail"] = json!({"acme/app": {"edit": "HTTP 502: Bad Gateway"}});
+    user.gh_script(script);
+    let mcp = agent(&user);
+    let answer = write(
+        &user,
+        &mcp,
+        json!({"action": "edit", "number": 12, "reviewers_add": ["carol"], "draft": false}),
+    );
+    assert!(answer.error, "{}", answer.text);
+    assert!(!answer.text.contains("had already"), "{}", answer.text);
+}
+
+#[test]
 fn an_edit_that_changes_nothing_is_refused_and_misplaced_arguments_before_the_gate() {
     let user = User::with_fake_agent().with_fake_gh();
     on_github(&user, "", "");
@@ -833,6 +1272,10 @@ fn an_edit_that_changes_nothing_is_refused_and_misplaced_arguments_before_the_ga
         (
             json!({"action": "edit", "number": 12, "title": "T", "delete_branch": true}),
             "refused: forge edit takes no delete_branch: delete_branch is for close and merge",
+        ),
+        (
+            json!({"action": "merge", "draft": true}),
+            "refused: forge merge takes no draft: draft is for create and edit",
         ),
     ] {
         let answer = mcp.call("forge", args.clone());

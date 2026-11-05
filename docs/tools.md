@@ -513,7 +513,14 @@ pending requests.
   (`bkt pr create --close-source`); GitHub has no such flag per pull request, so Flottille keeps
   the wish for that pull request (the store's `posts`, kind `delete_branch`) and applies it at
   its merge, and the answer reads the repository's own "automatically delete head branches"
-  setting and says it (`the repository's own setting deletes head branches after a merge`).
+  setting and says it (`the repository's own setting deletes head branches after a merge`). A
+  `create` with `delete_branch_on_merge` on a branch the workspace resumed, or one another
+  workspace is on, is refused naming why, before anything is opened (`refused:
+  delete_branch_on_merge: the branch app/login is never deleted: it existed before the workspace;
+  nothing was opened`), on GitHub and on Bitbucket alike: the forge's own close of the source
+  branch would delete the user's branch at a merge Flottille does not make. The card says what
+  the forge does: on GitHub that Flottille deletes the branch when it merges the pull request and
+  that a merge by anyone else leaves it, on Bitbucket that the merge deletes it.
   **`merge`** takes `delete_branch`: the source branch is deleted on the forge once merged
   (GitHub `gh pr merge --delete-branch`, run with `-R` so that no local branch of a checkout is
   touched; Bitbucket `bkt pr merge --close-source=true`, else `=false` as before). Left out, it
@@ -521,7 +528,14 @@ pending requests.
   "Delete the branch on merge" (`docs/projects.md`), else the branch is kept; `delete_branch:
   false` keeps it whatever they say. It never deletes a branch the workspace resumed (it existed
   before, so it was the user's: `its branch app/login was left: it existed before the workspace`)
-  nor one another workspace of the project is on; the answer says the branch was deleted or left. The branch is the one the repository's
+  nor one another workspace of the project is on; the answer says the branch was deleted or left,
+  except on GitHub when the repository's own "automatically delete head branches" is on: `gh`
+  cannot stop that, and the answer says GitHub deletes it (`the repository's own setting deletes
+  head branches: GitHub deletes app/login although it existed before the workspace; gh cannot stop
+  it`). The repository `merge` acts on is, as for `create`, the one named, else the workspace's
+  only one, and its card says the deletion the call, the project's setting or what `create` asked
+  for will do (`if the pull request asked for it when it was opened`), or that the merge leaves the
+  branch, and why. The branch is the one the repository's
   worktree is on now (`docs/workspaces.md`, "The branch"); `create` on a detached HEAD is refused
   (`refused: api is on no branch (detached at 1a2b3c4): switch to a branch first`). `create`
   never pushes: it reads, without fetching, whether the remote-tracking ref of the branch
@@ -533,7 +547,10 @@ pending requests.
   the place; **`edit {number, repository?, title?, body?, draft?, reviewers_add?,
   reviewers_remove?, labels_add?, labels_remove?, base?}`** changes it, at least one field
   (refused at once otherwise, and for a reviewer or a label that would be an option of the command
-  line: empty, starting with `-`, holding a comma, a reviewer holding a space too). GitHub: one
+  line: empty, starting with `-`, holding a comma, a reviewer holding a space too; and for a
+  `base`, anything git's reference rules refuse in a branch name: a space, `..`, `~`, `^`, `:`,
+  `?`, `*`, `[`, `\`, `@{`, `//`, a leading `-` or `/`, a trailing `/`, `.` or `.lock`, and `#`,
+  which would change the address it is read at). GitHub: one
   `gh pr edit --title --body --add-reviewer --remove-reviewer --add-label --remove-label --base`,
   then `gh pr ready` for `draft: false` or `gh pr ready --undo` for `draft: true`; a `base` the
   remote does not have is refused (`gh api repos/<repository>/branches/<base>`) before anything is
@@ -541,7 +558,10 @@ pending requests.
   publish [--undo]` for the draft, labels refused (`refused: Bitbucket has no labels on pull
   requests`), and a `base` on Cloud only, through the API (`bkt api … --method PUT` with the new
   destination, after its branch was checked to exist); Data Center is refused for `base`, `bkt`
-  having no way to move a destination there. A comment is `gh pr comment`, `bkt pr comment
+  having no way to move a destination there. The steps are not one write: when a later one fails
+  (`gh pr ready` after `gh pr edit`, `bkt pr publish` or the destination after `bkt pr edit`),
+  the answer says the failure and which earlier command had already changed the pull request.
+  `draft` is for `create` and `edit` (on `merge` it is refused at once). A comment is `gh pr comment`, `bkt pr comment
   --text`. `edit` of a pull request that is not open is refused once allowed, before
   anything is written (`refused: the pull request #7 of acme/app is merged, not open; nothing was
   written: …`). A `title` on `comment` is refused before anything is asked (`refused: forge

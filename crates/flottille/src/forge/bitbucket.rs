@@ -10,7 +10,7 @@
 use serde_json::{Value, json};
 
 use super::{
-    Branch, Comment, Deletion, Forge, ForgeCall, Gh, MERGE_METHODS, Pull, Seen, blocks,
+    Branch, Comment, Deletion, Forge, ForgeCall, Gh, MERGE_METHODS, Pull, Seen, after, blocks,
     commit_hash, masked, method_refused, run,
 };
 use crate::daemon::Daemon;
@@ -1384,12 +1384,17 @@ pub(super) async fn edit(
     for name in asked.reviewers_remove.iter().flatten() {
         flags.extend(["--remove-reviewer", name.as_str()]);
     }
+    let mut done = Vec::new();
     if !flags.is_empty() {
         text(&command(forge, &context, &["pr", "edit", number], &flags)).await?;
+        done.push("bkt pr edit");
     }
     if let Some(draft) = asked.draft {
         let flags: &[&str] = if draft { &["--undo"] } else { &[] };
-        text(&command(forge, &context, &["pr", "publish", number], flags)).await?;
+        text(&command(forge, &context, &["pr", "publish", number], flags))
+            .await
+            .map_err(|why| after(why, &done))?;
+        done.push("bkt pr publish");
     }
     if let Some(base) = &asked.base {
         // Cloud's pull request page takes a new destination (assumed shape, `docs/forges.md`).
@@ -1405,7 +1410,7 @@ pub(super) async fn edit(
             "--input",
             &input,
         ];
-        text(&args).await?;
+        text(&args).await.map_err(|why| after(why, &done))?;
     }
     Ok(())
 }
@@ -1493,7 +1498,7 @@ pub(super) async fn write(
                 // The pull request's own "close source branch": a merge then says it again,
                 // since `bkt pr merge` sends its own with every merge.
                 if close_source {
-                    crate::posts::record_delete_branch(daemon, on);
+                    crate::posts::record_delete_branch(daemon, on, branch);
                 }
             }
             let url = match pulls(forge, context, "all").await {
