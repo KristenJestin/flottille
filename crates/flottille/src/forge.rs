@@ -2251,9 +2251,17 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
     {
         return Outcome::Refused(refusal);
     }
+    // The checks run in the place of the workspace written for, which an agent of main names.
+    let target;
     let at = crate::message_checks::Where {
         daemon,
-        place,
+        place: match place.workspace.as_deref() == Some(name.as_str()) {
+            true => place,
+            false => {
+                target = Place::of_workspace(&workspace, workspace.folder.clone());
+                &target
+            }
+        },
         repository: &checkout.path,
         folder: &workspace.folder_of(&checkout.path),
     };

@@ -1292,19 +1292,7 @@ pub fn grant_of(daemon: &Daemon, agent: &Agent) -> Result<Grant, String> {
                 .read(|store| store.workspace(&project.name, name))
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("project {} has no workspace named {name}", project.name))?;
-            Place {
-                project: project.name.clone(),
-                workspace: Some(name.clone()),
-                root: agent.folder.clone(),
-                repositories: workspace
-                    .repositories
-                    .iter()
-                    .map(|r| (r.path.clone(), workspace.folder_of(&r.path)))
-                    .collect(),
-                branch: workspace.branch.clone(),
-                variables: workspace.variables.clone(),
-                home: std::env::var_os("HOME").map(Into::into),
-            }
+            Place::of_workspace(&workspace, agent.folder.clone())
         }
         None => Place::main(&project, agent.folder.clone()),
     };

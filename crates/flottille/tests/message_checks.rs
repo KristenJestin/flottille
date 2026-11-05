@@ -856,3 +856,65 @@ fn a_pull_request_title_is_checked_before_it_is_edited() {
     assert_eq!(starting(&calls(user.gh_received()), "pr edit"), 1);
     assert_eq!(seen(&user), "bad title\nfeat: add the login\n");
 }
+
+#[test]
+fn a_forge_check_runs_in_the_place_of_the_workspace_it_writes_for() {
+    let user = User::with_fake_agent().with_fake_gh();
+    prepared(&user, |folder| {
+        user.git(
+            folder,
+            &["remote", "set-url", "origin", "git@github.com:acme/app.git"],
+        )
+    });
+    declare_proposed(&user);
+    pushed(&user);
+    user.gh_script(json!({"created": 12}));
+    // The check says the workspace its place names.
+    let file = user.project_file("app");
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    text.push_str("\n[variables]\nWHERE = \"{workspace}\"\n");
+    std::fs::write(&file, text).unwrap();
+    let says = script(
+        &user,
+        "says-where.sh",
+        "#!/bin/sh\necho \"$WHERE\" >> \"$(dirname \"$0\")/where\"\n",
+    );
+    declare(&user, &[format!("{} {{message}}", says.display())]);
+    let made = user
+        .call(
+            "workspace.create",
+            json!({"project": "app", "name": "signup", "offline": true}),
+        )
+        .unwrap();
+    let signup = PathBuf::from(made["folder"].as_str().unwrap());
+    let branch = user.git_output(&signup, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    user.git(
+        &signup,
+        &[
+            "update-ref",
+            &format!("refs/remotes/origin/{}", branch.trim()),
+            "HEAD",
+        ],
+    );
+    // An agent of main, writing for the workspace.
+    let opened = user.received_requests("session/new").len();
+    user.call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap();
+    let (url, authorization) = server_of(&user, opened);
+    let mcp = Mcp::initialize(&url, &authorization);
+
+    let answer = allowed(
+        &user,
+        mcp.call(
+            "forge",
+            json!({"action": "create", "workspace": "signup", "repository": ".",
+                "title": "feat: add the signup", "body": "x"}),
+        ),
+    );
+
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(
+        std::fs::read_to_string(user.path("checks/where")).unwrap(),
+        "signup\n"
+    );
+}
