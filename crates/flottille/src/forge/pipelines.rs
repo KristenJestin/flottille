@@ -340,16 +340,93 @@ async fn tree_of(checkout: &super::Checkout, branch: &str) -> Option<(String, St
     None
 }
 
-/// A file at a commit, parsed: none when it is not there or is no YAML.
-async fn yaml_at(checkout: &super::Checkout, reference: &str, path: &str) -> Option<Yaml> {
-    let text = git::output(
+/// A file of the CI at a commit, parsed, with what could not be done of it (a note per problem).
+struct Parsed {
+    yaml: Yaml,
+    notes: Vec<String>,
+}
+
+/// Why a file of the CI could not be read: it is not at that commit, git could not give it, or it
+/// is there and the parser refuses it (its message says where).
+enum Unread {
+    Missing,
+    Git(String),
+    Yaml(String),
+}
+
+impl Unread {
+    /// A file of a workflow folder, said after its path.
+    fn said(&self) -> String {
+        match self {
+            Unread::Missing => "is not in the commit".to_owned(),
+            Unread::Git(why) => format!("cannot be read by git: {why}"),
+            Unread::Yaml(why) => format!("cannot be parsed: {why}"),
+        }
+    }
+
+    /// The refusal of a call that needs the file `BITBUCKET_FILE`.
+    fn refusal(&self, branch: &str, slug: &str, how: &str) -> String {
+        match self {
+            Unread::Missing => format!(
+                "refused: {branch} of {slug} has no {BITBUCKET_FILE}: it is not in the commit, \
+                 {how}"
+            ),
+            Unread::Git(why) => format!(
+                "refused: {BITBUCKET_FILE} of {branch} of {slug} cannot be read by git, {how}: \
+                 {why}"
+            ),
+            Unread::Yaml(why) => format!(
+                "refused: {branch} of {slug} has a {BITBUCKET_FILE} that cannot be parsed, {how}: \
+                 {why}; fix the file, or name the pipeline to forge run, which does not need this \
+                 list"
+            ),
+        }
+    }
+}
+
+/// A file at a commit, parsed, merge keys (`<<: *anchor`) applied: why not when it cannot be read.
+async fn yaml_at(
+    checkout: &super::Checkout,
+    reference: &str,
+    path: &str,
+) -> Result<Parsed, Unread> {
+    let shown = git::run(
         &checkout.folder,
         &["show", &format!("{reference}:{path}")],
         Class::Read,
     )
-    .await
-    .ok()?;
-    serde_norway::from_str(&text).ok()
+    .await;
+    let text = match shown {
+        Ok(output) if output.success => output.stdout,
+        Ok(output) => {
+            // `git show` says the same for a missing path and for a path it cannot read: the tree
+            // tells them apart.
+            let listed = git::output(
+                &checkout.folder,
+                &["ls-tree", "--name-only", reference, "--", path],
+                Class::Read,
+            )
+            .await;
+            return Err(match listed {
+                Ok(names) if names.trim().is_empty() => Unread::Missing,
+                _ => Unread::Git(output.stderr.trim().to_owned()),
+            });
+        }
+        Err(why) => return Err(Unread::Git(why)),
+    };
+    let mut yaml: Yaml = serde_norway::from_str(&text).map_err(|e| Unread::Yaml(e.to_string()))?;
+    let mut notes = Vec::new();
+    // `Value` keeps `<<` as a key of its own: the anchors it names are merged in, or the file is
+    // used as written and the note says so.
+    let mut merged = yaml.clone();
+    match merged.apply_merge() {
+        Ok(()) => yaml = merged,
+        Err(why) => notes.push(format!(
+            "{path}: a merge key (<<) could not be applied ({why}): what it merges is missing \
+             from this list"
+        )),
+    }
+    Ok(Parsed { yaml, notes })
 }
 
 /// A YAML scalar as words.
@@ -362,13 +439,14 @@ fn scalar(value: &Yaml) -> Option<String> {
     }
 }
 
-/// The keys of a mapping, as words.
+/// The keys of a mapping, as words; a merge key that could not be applied is no name.
 fn keys(value: &Yaml) -> Vec<String> {
     value
         .as_mapping()
         .into_iter()
         .flat_map(|map| map.keys())
         .filter_map(scalar)
+        .filter(|key| key != "<<")
         .collect()
 }
 
@@ -381,35 +459,49 @@ async fn listed(checkout: &super::Checkout, forge: &Forge, path: &str, branch: &
             checkout.remote
         ));
     };
-    let (file, lines, example) = match forge {
+    let (file, lines, notes, example) = match forge {
         Forge::Bitbucket { .. } => {
-            let Some(yaml) = yaml_at(checkout, &reference, BITBUCKET_FILE).await else {
-                return Outcome::Refused(format!(
-                    "refused: {branch} of {slug} has no {BITBUCKET_FILE} that can be read, {said}"
-                ));
+            let parsed = match yaml_at(checkout, &reference, BITBUCKET_FILE).await {
+                Ok(parsed) => parsed,
+                Err(unread) => {
+                    return Outcome::Refused(super::masked(&unread.refusal(branch, &slug, &said)));
+                }
             };
             (
                 BITBUCKET_FILE.to_owned(),
-                bitbucket_pipelines(&yaml),
+                bitbucket_pipelines(&parsed.yaml),
+                parsed.notes,
                 "\"pipeline\": \"custom: <name>\", \"variables\": [{\"key\": \"K\", \"value\": \
                  \"v\", \"secured\": false}]",
             )
         }
-        Forge::GitHub { .. } => (
-            format!("{WORKFLOWS}/"),
-            github_workflows(checkout, &reference).await,
-            "\"pipeline\": \"<its file>\", \"variables\": [{\"key\": \"input\", \"value\": \"v\"}]",
-        ),
+        Forge::GitHub { .. } => {
+            let (lines, notes) = github_workflows(checkout, &reference).await;
+            (
+                format!("{WORKFLOWS}/"),
+                lines,
+                notes,
+                "\"pipeline\": \"<its file>\", \"variables\": [{\"key\": \"input\", \"value\": \"v\"}]",
+            )
+        }
+    };
+    let unread = match notes.is_empty() {
+        true => String::new(),
+        false => {
+            let notes: String = notes.iter().map(|note| format!("- {note}\n")).collect();
+            format!("Not read:\n{notes}")
+        }
     };
     if lines.is_empty() {
-        return Outcome::Done(format!(
-            "{slug} has nothing that can be run on {branch}: {file} holds none, {said}."
-        ));
+        return Outcome::Done(super::masked(&format!(
+            "{slug} has nothing that can be run on {branch}: {file} holds none that could be \
+             read, {said}.\n{unread}"
+        )));
     }
     let lines: String = lines.iter().map(|line| format!("- {line}\n")).collect();
     Outcome::Done(super::masked(&format!(
-        "What can be run in {slug} on {branch}, from {file} {said}:\n{lines}Run one with forge \
-         {{\"action\": \"run\", \"repository\": {}, {example}}}.",
+        "What can be run in {slug} on {branch}, from {file} {said}:\n{lines}{unread}Run one with \
+         forge {{\"action\": \"run\", \"repository\": {}, {example}}}.",
         Value::from(path)
     )))
 }
@@ -472,9 +564,13 @@ fn bitbucket_variable(variable: &Yaml) -> Option<String> {
 }
 
 /// The workflows of the commit that can be dispatched (`on: workflow_dispatch`), with their
-/// inputs.
-async fn github_workflows(checkout: &super::Checkout, reference: &str) -> Vec<String> {
-    let names = git::output(
+/// inputs; and a note per workflow that could not be read, which never hides the others.
+async fn github_workflows(
+    checkout: &super::Checkout,
+    reference: &str,
+) -> (Vec<String>, Vec<String>) {
+    let mut notes = Vec::new();
+    let names = match git::output(
         &checkout.folder,
         &[
             "ls-tree",
@@ -485,15 +581,27 @@ async fn github_workflows(checkout: &super::Checkout, reference: &str) -> Vec<St
         Class::Read,
     )
     .await
-    .unwrap_or_default();
+    {
+        Ok(names) => names,
+        Err(why) => {
+            notes.push(format!("{WORKFLOWS}/ cannot be listed by git: {why}"));
+            String::new()
+        }
+    };
     let mut lines = Vec::new();
     for path in names
         .lines()
         .filter(|p| p.ends_with(".yml") || p.ends_with(".yaml"))
     {
-        let Some(yaml) = yaml_at(checkout, reference, path).await else {
-            continue;
+        let parsed = match yaml_at(checkout, reference, path).await {
+            Ok(parsed) => parsed,
+            Err(unread) => {
+                notes.push(format!("{path} {}", unread.said()));
+                continue;
+            }
         };
+        notes.extend(parsed.notes);
+        let yaml = parsed.yaml;
         let on = &yaml["on"];
         let dispatched = match on {
             Yaml::String(event) => event == "workflow_dispatch",
@@ -518,7 +626,7 @@ async fn github_workflows(checkout: &super::Checkout, reference: &str) -> Vec<St
             false => lines.push(format!("{name} ({path}), inputs: {}", inputs.join(", "))),
         }
     }
-    lines
+    (lines, notes)
 }
 
 /// An input of a workflow: whether it is required, its type when it is not a text, the values it

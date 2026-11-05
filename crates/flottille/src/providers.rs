@@ -65,6 +65,10 @@ pub struct Provider {
     /// "When the tools change"): told the list changed, it lists them again and may call them.
     /// When it cannot, the tools its process was started with are the only ones it can call.
     pub takes_new_tools: bool,
+    /// Whether its agent lists its tools again when told they changed during a session
+    /// (`docs/tools.md`, "When the tools change"). When it does not, a new build's tools are said
+    /// to it in a delivery.
+    pub lists_tools_again: bool,
     /// Why its agents cannot run on this machine whatever the user does in Flottille, as a
     /// clause after the provider's name; `None` when nothing stops them.
     pub unready: fn() -> Option<String>,

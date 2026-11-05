@@ -369,8 +369,6 @@ pub struct PlaceFacts {
     pub repositories: Vec<(String, RepositoryFacts)>,
     pub branch: Option<String>,
     pub bases: Vec<String>,
-    /// How long its preparation took, once it is ready.
-    pub prepared_ms: Option<u64>,
     /// Each repository's pull request (a workspace).
     pub pulls: Vec<PullRequest>,
     /// Each repository's forge in a line, as the daemon says it.
@@ -947,9 +945,6 @@ impl Link {
             repositories,
             branch: shown["branch"].as_str().map(str::to_owned),
             bases,
-            prepared_ms: shown["ready_at"]
-                .as_u64()
-                .map(|ready| ready.saturating_sub(shown["created_at"].as_u64().unwrap_or(0))),
             pulls: forge.pulls,
             forge_problem: forge.problem,
             forge_pending: known.forge.is_none(),

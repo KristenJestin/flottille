@@ -77,7 +77,11 @@ fn user() -> User {
             {"mcp": {"tool": "run", "arguments": {"task": "fails", "timeout": 1}}},
             {"say": "The slow check is running."}]},
         {"when": "run server", "do": [
-            {"mcp": {"tool": "run", "arguments": {"task": "server"}}}]}
+            {"mcp": {"tool": "run", "arguments": {"task": "server"}}}]},
+        {"when": "launch the builder", "do": [
+            {"mcp": {"tool": "agent_launch",
+                "arguments": {"title": "builder", "brief": "build quietly"}}}]},
+        {"when": "build quietly", "do": [{"say": "Building."}]}
     ]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     user
@@ -251,6 +255,12 @@ fn commands(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Vec<Comma
     page.read_with(cx, |page, cx| page.commands(cx).read(cx).rows().to_vec())
 }
 
+/// Unfolds the `N ended` row of the rail's Runs: the runs that ended are behind it.
+fn unfold_ended(cx: &mut VisualTestContext) {
+    cx.update(|window, cx| window.click("rail-runs-ended", cx));
+    settle(cx);
+}
+
 fn label(cx: &mut VisualTestContext, id: &str) -> Option<String> {
     cx.update(|window, _| {
         window
@@ -348,6 +358,7 @@ fn stop_stops_the_command_and_it_stays_listed_greyed_with_its_end(cx: &mut TestA
             .is_some_and(|row| !row.running())
     });
     settle(cx);
+    unfold_ended(cx);
 
     let rows = commands(&page, cx);
     assert_eq!(rows[0].state, "stopped");
@@ -375,6 +386,7 @@ fn a_command_that_ended_by_itself_shows_its_exit_code(cx: &mut TestAppContext) {
             .is_some_and(|row| !row.running())
     });
     settle(cx);
+    unfold_ended(cx);
 
     assert_eq!(commands(&page, cx)[0].exit_code, Some(3));
     assert_eq!(
@@ -901,10 +913,13 @@ fn the_output_panel_draws_every_line_of_a_long_coloured_output_on_a_line_of_its_
     let run = start(&mcp, "many");
     let (shell, cx) = open_session(&user, &lead, cx);
     let page = session_page(&shell, cx);
-    until(&shell, cx, "the rail lists the run", |cx| {
-        !commands(&page, cx).is_empty()
+    until(&shell, cx, "the run ended and the rail lists it", |cx| {
+        commands(&page, cx)
+            .first()
+            .is_some_and(|row| !row.running())
     });
     settle(cx);
+    unfold_ended(cx);
 
     cx.update(|window, cx| window.click(format!("command-{run}"), cx));
     let panel = page.read_with(cx, |page, _| page.command_panel().clone());
@@ -1555,7 +1570,9 @@ fn bounds_of(cx: &mut VisualTestContext, id: &str) -> Option<gpui_kit::Bounds<gp
 }
 
 #[gpui_kit::test]
-fn the_rail_s_last_line_and_the_address_fold_into_each_other(cx: &mut TestAppContext) {
+fn a_server_that_ends_leaves_the_rail_s_running_runs_for_the_fold_and_shows_its_last_line(
+    cx: &mut TestAppContext,
+) {
     let user = user();
     let (lead, mcp, _) = lead(&user);
     let run = start(&mcp, "web");
@@ -1568,27 +1585,18 @@ fn the_rail_s_last_line_and_the_address_fold_into_each_other(cx: &mut TestAppCon
     settle(cx);
 
     ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
-    // No clock moves while the window takes the end: the fold stands at its first frame.
-    until(&shell, cx, "the row shows its last line", |cx| {
-        label(cx, &last).is_some()
+    until(&shell, cx, "the run is gone from the running ones", |cx| {
+        has(cx, "rail-runs-ended")
     });
-
-    let unfolding = bounds_of(cx, &format!("command-last-presence-{run}"));
-    assert!(
-        unfolding.is_some_and(|b| b.size.height < px(1.)),
-        "the last line unfolds, it does not jump in: {unfolding:?}"
-    );
-    assert!(
-        label(cx, &link).is_some(),
-        "the address is still drawn while it folds away"
-    );
     settle(cx);
-    let unfolded = bounds_of(cx, &format!("command-last-presence-{run}"));
     assert!(
-        unfolded.is_some_and(|b| b.size.height > px(8.)),
-        "{unfolded:?}"
+        !has(cx, &format!("command-{run}")),
+        "it is behind `N ended`, not among the running"
     );
-    assert!(label(cx, &link).is_none(), "and gone once folded");
+
+    unfold_ended(cx);
+    assert!(label(cx, &last).is_some(), "its row shows its last line");
+    assert!(label(cx, &link).is_none(), "and no address: it ended");
 }
 
 /// Opens the drawer of a running `web`: the run, and what drives the window.
@@ -1659,5 +1667,264 @@ fn the_modal_s_address_folds_away_when_the_server_ends(cx: &mut TestAppContext) 
     assert!(
         label(cx, "run-modal-link").is_none(),
         "and gone once folded"
+    );
+}
+
+// The rail's Runs section shows the task runs of the agent shown (#395). The runs are put in the
+// list by hand once the page is open, and the window is not polled again: what the section does
+// with them is what is looked at, not the daemon's timing.
+
+fn has(cx: &mut VisualTestContext, id: &str) -> bool {
+    bounds_of(cx, id).is_some()
+}
+
+/// A run of `agent`, of the task `task` (none: a one-off line), still running or ended.
+fn run_of(run: &str, agent: &str, task: Option<&str>, running: bool, at: u64) -> CommandRow {
+    CommandRow {
+        run: run.to_owned(),
+        agent: agent.to_owned(),
+        name: task.map(str::to_owned),
+        workspace: None,
+        line: task.map_or_else(|| format!("git diff {run}"), |task| format!("./{task}.sh")),
+        state: if running { "running" } else { "exited" }.to_owned(),
+        exit_code: (!running).then_some(0),
+        signal: None,
+        started_at: 1_000 + at,
+        ended_at: (!running).then_some(2_000 + at),
+        last_line: String::new(),
+        tail: Vec::new(),
+        step: false,
+        ready: None,
+        url: None,
+    }
+}
+
+/// The lead's session open, with a child of it: the lead's id, the child's, and the window.
+fn with_a_child<'a>(
+    user: &User,
+    cx: &'a mut TestAppContext,
+) -> (String, String, Entity<Shell>, &'a mut VisualTestContext) {
+    let (lead, ..) = lead_saying(user, "launch the builder");
+    let (shell, cx) = open_session(user, &lead, cx);
+    let page = session_page(&shell, cx);
+    until(&shell, cx, "the builder is in the tree", |cx| {
+        page.read_with(cx, |page, _| page.tree().len() == 2)
+    });
+    let child = page.read_with(cx, |page, _| {
+        page.tree()
+            .iter()
+            .find(|agent| agent.parent.is_some())
+            .map(|agent| agent.id.clone())
+            .unwrap()
+    });
+    // Its row is drawn, and the tree's first run list is in: nothing polls after this.
+    until(&shell, cx, "the builder's row", |cx| {
+        has(cx, &format!("rail-row-{child}"))
+    });
+    (lead, child, shell, cx)
+}
+
+/// Gives the rail's list `rows` and lets everything that moves settle.
+fn list_runs(shell: &Entity<Shell>, rows: Vec<CommandRow>, cx: &mut VisualTestContext) {
+    let page = session_page(shell, cx);
+    let list = page.read_with(cx, |page, cx| page.commands(cx));
+    list.update(cx, |list, cx| list.set(rows, cx));
+    settle(cx);
+}
+
+#[gpui_kit::test]
+fn the_runs_section_lists_task_runs_only(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, _, shell, cx) = with_a_child(&user, cx);
+    list_runs(
+        &shell,
+        vec![
+            run_of("r-task", &lead, Some("server"), true, 1),
+            run_of("r-line", &lead, None, true, 2),
+            run_of("r-old-line", &lead, None, false, 3),
+        ],
+        cx,
+    );
+
+    assert!(has(cx, "command-r-task"), "the task's run is listed");
+    assert!(
+        !has(cx, "command-r-line"),
+        "a one-off line that still runs is not"
+    );
+    assert!(
+        !has(cx, "command-r-old-line") && !has(cx, "rail-runs-ended"),
+        "nor is one that ended, and it does not count under `N ended`"
+    );
+}
+
+#[gpui_kit::test]
+fn no_task_run_folds_the_runs_section_away(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, _, shell, cx) = with_a_child(&user, cx);
+    list_runs(
+        &shell,
+        vec![run_of("r-task", &lead, Some("server"), true, 1)],
+        cx,
+    );
+    assert!(has(cx, "rail-runs"), "a task run: the section is drawn");
+
+    list_runs(&shell, vec![run_of("r-line", &lead, None, true, 2)], cx);
+    assert!(
+        !has(cx, "rail-runs"),
+        "a one-off line alone does not keep the section"
+    );
+
+    list_runs(&shell, vec![], cx);
+    assert!(!has(cx, "rail-runs"));
+}
+
+#[gpui_kit::test]
+fn the_runs_section_shows_only_the_root_s_runs(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, child, shell, cx) = with_a_child(&user, cx);
+    list_runs(
+        &shell,
+        vec![
+            run_of("r-root", &lead, Some("server"), true, 1),
+            run_of("r-child", &child, Some("listener"), true, 2),
+        ],
+        cx,
+    );
+
+    assert!(has(cx, "command-r-root"));
+    assert!(
+        !has(cx, "command-r-child"),
+        "a child's run is read where the child is"
+    );
+}
+
+#[gpui_kit::test]
+fn opening_a_child_shows_its_runs(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, child, shell, cx) = with_a_child(&user, cx);
+    list_runs(
+        &shell,
+        vec![
+            run_of("r-root", &lead, Some("server"), true, 1),
+            run_of("r-child", &child, Some("listener"), true, 2),
+        ],
+        cx,
+    );
+
+    cx.update(|window, cx| window.click(format!("rail-row-{child}"), cx));
+    settle(cx);
+
+    assert!(has(cx, "command-r-child"));
+    assert!(
+        !has(cx, "command-r-root"),
+        "the root's run is no longer listed"
+    );
+}
+
+#[gpui_kit::test]
+fn ended_runs_fold_under_n_ended(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, _, shell, cx) = with_a_child(&user, cx);
+    list_runs(
+        &shell,
+        vec![
+            run_of("r-up", &lead, Some("server"), true, 1),
+            run_of("r-old", &lead, Some("fails"), false, 2),
+            run_of("r-new", &lead, Some("blip"), false, 3),
+        ],
+        cx,
+    );
+
+    assert_eq!(label(cx, "rail-runs-ended").as_deref(), Some("2 ended"));
+    assert!(has(cx, "command-r-up"), "a running one is in sight");
+    assert!(
+        !has(cx, "command-r-old") && !has(cx, "command-r-new"),
+        "the ended ones are folded"
+    );
+
+    cx.update(|window, cx| window.click("rail-runs-ended", cx));
+    settle(cx);
+    let (old, new) = (
+        bounds_of(cx, "command-r-old"),
+        bounds_of(cx, "command-r-new"),
+    );
+    assert!(old.is_some() && new.is_some(), "a click unfolds them");
+    assert!(
+        new.unwrap().origin.y < old.unwrap().origin.y,
+        "the newest first"
+    );
+
+    cx.update(|window, cx| window.click("rail-runs-ended", cx));
+    settle(cx);
+    assert!(!has(cx, "command-r-old"), "and a click folds them again");
+}
+
+#[gpui_kit::test]
+fn a_run_that_ends_slides_into_the_fold(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, _, shell, cx) = with_a_child(&user, cx);
+    list_runs(
+        &shell,
+        vec![
+            run_of("r-up", &lead, Some("server"), true, 1),
+            run_of("r-end", &lead, Some("fails"), true, 2),
+        ],
+        cx,
+    );
+    assert!(has(cx, "command-r-end") && !has(cx, "rail-runs-ended"));
+
+    list_runs(
+        &shell,
+        vec![
+            run_of("r-up", &lead, Some("server"), true, 1),
+            run_of("r-end", &lead, Some("fails"), false, 2),
+        ],
+        cx,
+    );
+    assert_eq!(label(cx, "rail-runs-ended").as_deref(), Some("1 ended"));
+    assert!(
+        !has(cx, "command-r-end") && has(cx, "command-r-up"),
+        "the run that ended left the running ones for the fold"
+    );
+}
+
+#[gpui_kit::test]
+fn a_child_with_running_runs_says_so_in_the_agents_list(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, child, shell, cx) = with_a_child(&user, cx);
+    list_runs(
+        &shell,
+        vec![
+            run_of("r-a", &child, Some("server"), true, 1),
+            run_of("r-b", &child, Some("listener"), true, 2),
+            run_of("r-c", &child, Some("fails"), false, 3),
+            run_of("r-line", &child, None, true, 4),
+            run_of("r-root", &lead, Some("web"), true, 5),
+        ],
+        cx,
+    );
+
+    assert_eq!(
+        label(cx, &format!("rail-runs-count-{child}")).as_deref(),
+        Some("2 runs"),
+        "its task runs still going, counted"
+    );
+    assert!(has(cx, "command-r-root"), "the root's own runs are listed");
+    assert!(!has(cx, "command-r-a"));
+
+    cx.update(|window, cx| window.click(format!("rail-runs-count-{child}"), cx));
+    settle(cx);
+    let page = session_page(&shell, cx);
+    assert_eq!(page.read_with(cx, |page, _| page.shown().to_owned()), child);
+    assert!(has(cx, "command-r-a") && has(cx, "command-r-b"));
+
+    list_runs(
+        &shell,
+        vec![run_of("r-c", &child, Some("fails"), false, 3)],
+        cx,
+    );
+    assert!(
+        !has(cx, &format!("rail-runs-count-{child}")),
+        "nothing running: nothing said"
     );
 }

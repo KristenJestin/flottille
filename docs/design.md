@@ -813,10 +813,16 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   where it says it ended, not its header, and its conversation says it ended, then resumed. Selecting a child shows its
   conversation read-only;
 - the runs of the agents (`docs/tools.md`, "Tasks and runs"): the rail's **Runs** section lists
-  those of the session's tree (it is not called "Commands", which are the project's `/name`
-  instructions), running first, each with its line, who started it (the agent, and the task when
-  it is one), how long, its last output line and Stop, then the last five that ended, greyed, with
-  how they ended; a click opens the run's drawer (the same on the project page): its command, its
+  the **task** runs of the agent shown (the root by default, the child once the user opens it from
+  the Agents list; a run belongs to the agent that started it) (it is not called "Commands", which
+  are the project's `/name` instructions), running first, each with its line, who started it (the
+  agent, and the task), how long, its last output line and Stop, then the last five that ended,
+  greyed, folded under `N ended` (unfolded by a click, as the Agents' `N ended`), with how they
+  ended. A one-off line (`run {"line": …}`) is not listed, running or ended: its card in the
+  conversation is where it is seen, and the section folds away when there is no task run. A child
+  with task runs still going says so on its row in the Agents list (`2 runs`), and a click opens
+  that child with its Runs section; a click on a run opens its drawer (the same on the project
+  page, which lists only the tasks the user ran there): its command, its
   task, where it runs, who started it (a link to the agent in its session), since when or how it
   ended, its output, live and following its end, Copy, Restart (the daemon's `run.restart`: it
   stops the command if it runs and starts the same line again in the same place; the drawer, and
