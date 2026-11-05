@@ -11,7 +11,7 @@ use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use flottille_core::agent::{Agent, AgentState, Choices, GateMode, new_id};
+use flottille_core::agent::{Agent, AgentState, Choices, GateMode, TurnUsage, Used, new_id};
 use flottille_core::approval;
 use flottille_core::paths::ensure_private_dir;
 use flottille_core::project::Project;
@@ -1058,6 +1058,7 @@ async fn process(
         pid,
         speech: Speech::new(Secrets::new(&env, &[])),
         env,
+        started_at: Mutex::new(None),
     });
     let events = recorder.clone();
     let server = acp::Server {
@@ -1285,6 +1286,8 @@ struct Recorder {
     env: BTreeMap<OsString, OsString>,
     /// What the agent is saying, held back until it is settled.
     speech: Speech,
+    /// When the turn under way started.
+    started_at: Mutex<Option<u64>>,
 }
 
 /// Events of the session that say nothing of the conversation: they may come between two pieces
@@ -1429,6 +1432,45 @@ impl Recorder {
         (said_of == model.as_deref())
             .then(|| last.data["size"].as_u64())
             .flatten()
+    }
+
+    /// What the turn used, one row per model, before its end is told: a model the agent did not
+    /// name is the one it had taken.
+    fn record_usage(&self, stop_reason: &str, used: Vec<Used>) {
+        let ended_at = now_ms();
+        let started_at = self.started_at.lock().unwrap().take().unwrap_or(ended_at);
+        let Ok(Some(agent)) = self.daemon.read(|store| store.agent(&self.agent)) else {
+            return;
+        };
+        let session = tree::root_of(&self.daemon, &agent.id);
+        let rows: Vec<TurnUsage> = used
+            .into_iter()
+            .map(|used| TurnUsage {
+                agent: agent.id.clone(),
+                title: agent.title.clone(),
+                session: session.clone(),
+                project: agent.project.clone(),
+                workspace: agent.workspace.clone(),
+                provider: agent.provider.clone(),
+                role: agent.role.clone(),
+                started_at,
+                ended_at,
+                stop_reason: stop_reason.to_owned(),
+                used: Used {
+                    model: used.model.or_else(|| agent.taken.model.clone()),
+                    ..used
+                },
+            })
+            .collect();
+        if let Err(error) = self
+            .daemon
+            .write(|store| Ok((store.record_turn_usage(&rows)?, None)))
+        {
+            eprintln!(
+                "flottille daemon: agent {}: recording its usage: {error}",
+                self.agent
+            );
+        }
     }
 
     /// The text the agent was streaming is over: what was held back is recorded.
@@ -1620,6 +1662,7 @@ impl acp::Events for Recorder {
     }
 
     fn turn_started(&self, text: &str, images: &[String]) {
+        *self.started_at.lock().unwrap() = Some(now_ms());
         let mut data = json!({"text": text});
         if !images.is_empty() {
             data["images"] = json!(images);
@@ -1633,8 +1676,9 @@ impl acp::Events for Recorder {
         );
     }
 
-    fn turn_ended(&self, stop_reason: &str, usage: Value) {
+    fn turn_ended(&self, stop_reason: &str, usage: Value, used: Vec<Used>) {
         self.said();
+        self.record_usage(stop_reason, used);
         let _ = self
             .daemon
             .read(|store| store.deliveries_taken(&self.agent));
