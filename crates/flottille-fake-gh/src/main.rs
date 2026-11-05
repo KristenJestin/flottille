@@ -81,7 +81,8 @@
 //!
 //! `issue list` keeps the issues of `--state` (`open` by default), with a `--label` and an
 //! `--assignee` (`labels[].name`, `assignees[].login`) when given and, for `--search`, those whose
-//! title or body hold its words (a simplification of GitHub's search), newest first, at most
+//! title or body hold its words (a simplification of GitHub's search; an `in:title,body,comments`
+//! qualifier names where they are looked for instead), newest first, at most
 //! `--limit`. `issue create` prints the new issue's URL (numbered `created_issue`, 1 by default);
 //! `issue comment`, `edit`, `close` and `reopen` need an issue the script holds and print its
 //! URL (`issue comment`: the comment's, `…#issuecomment-<commented>`); `issue close --reason` takes `completed` or `not planned` only.
@@ -360,10 +361,30 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 .filter(|issue| updated_since(issue, option("--search")))
                 .filter(|issue| {
                     option("--search").is_none_or(|words| {
-                        let text = format!("{} {}", issue["title"], issue["body"]).to_lowercase();
+                        // `in:` names where the words are looked for; title and body without.
+                        let places = words
+                            .split_whitespace()
+                            .find_map(|word| word.strip_prefix("in:"))
+                            .unwrap_or("title,body");
+                        let mut text = String::new();
+                        for place in places.split(',') {
+                            match place {
+                                "comments" => {
+                                    for comment in
+                                        issue["comments"].as_array().into_iter().flatten()
+                                    {
+                                        text.push_str(&format!(" {}", comment["body"]));
+                                    }
+                                }
+                                place => text.push_str(&format!(" {}", issue[place])),
+                            }
+                        }
+                        let text = text.to_lowercase();
                         words
                             .split_whitespace()
-                            .filter(|word| !word.starts_with("updated:"))
+                            .filter(|word| {
+                                !word.starts_with("updated:") && !word.starts_with("in:")
+                            })
                             .all(|word| text.contains(&word.to_lowercase()))
                     })
                 })
