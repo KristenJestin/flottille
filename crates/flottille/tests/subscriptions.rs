@@ -1059,13 +1059,33 @@ fn a_subscription_to_a_jira_items_comments_is_accepted() {
     assert_eq!(open[0]["events"], json!(["commented"]));
 }
 
+/// Whether any search `acli` was sent asked for `updated`, which a real site refuses.
+fn searched_for_updated(user: &User) -> bool {
+    user.acli_received().iter().any(|call| {
+        let args: Vec<&str> = call["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap())
+            .collect();
+        args.starts_with(&["jira", "workitem", "search"])
+            && value_after(&args, "--fields").is_some_and(|f| f.split(',').any(|f| f == "updated"))
+    })
+}
+
+fn value_after<'a>(args: &[&'a str], flag: &str) -> Option<&'a str> {
+    let at = args.iter().position(|a| *a == flag)?;
+    args.get(at + 1).copied()
+}
+
 #[test]
-fn a_new_jira_comment_wakes_the_subscribed_agent() {
+fn a_new_comment_on_a_followed_jira_item_wakes_its_subscription() {
     let user = user().with_fake_acli();
     fixture(&user);
     let (id, mcp) = jira_agent(&user, &[commented_item("ABC-1", &[], 0)]);
     subscribe_ticket(&mcp, json!({"ticket": "ABC-1", "events": ["commented"]}));
 
+    // A real search prints no `updated`: the window it lists is what says the item changed.
     let comment = jira_comment("Bob", "Can you add a test?");
     jira_script(&user, &[commented_item("ABC-1", &[comment], 5)]);
     a_round(&user);
@@ -1077,6 +1097,28 @@ fn a_new_jira_comment_wakes_the_subscribed_agent() {
         assert!(delivery.contains(part), "{part} in {delivery}");
     }
     assert!(listed(&user, &id).is_empty(), "the delivery ends it");
+    assert!(!searched_for_updated(&user), "a real site refuses it");
+}
+
+#[test]
+fn a_followed_jira_item_the_search_window_does_not_list_is_not_read_again() {
+    let user = user().with_fake_acli();
+    fixture(&user);
+    let (_, mcp) = jira_agent(&user, &[commented_item("ABC-1", &[], 0)]);
+    subscribe_ticket(&mcp, json!({"ticket": "ABC-1", "events": ["commented"]}));
+    let before = comment_reads(&user, "ABC-1");
+
+    // Nothing changed since the last round: Jira lists nothing in its window.
+    user.acli_script(json!({
+        "items": {"ABC-1": commented_item("ABC-1", &[], 0)}, "search": []}));
+    a_round(&user);
+
+    assert_eq!(
+        comment_reads(&user, "ABC-1"),
+        before,
+        "no read for no change"
+    );
+    assert!(delivered(&user).is_empty());
 }
 
 #[test]
