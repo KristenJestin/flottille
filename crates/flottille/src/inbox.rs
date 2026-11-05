@@ -50,6 +50,10 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
             asked.after.unwrap_or(0),
         )
     })?;
+    // A paused following that resumed since says so: the inbox keeps what was sent.
+    let resumed = daemon.read(|store| {
+        store.events_named(&["session.following_resumed"], asked.after.unwrap_or(0))
+    })?;
     let mut entries = Vec::new();
     for event in events {
         let kind = match (event.name.as_str(), &event.data["to"]) {
@@ -66,13 +70,24 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
         let Some(agent) = agent.filter(|agent| agent.parent.is_none()) else {
             continue;
         };
+        let resolved = kind == "paused"
+            && resumed.iter().any(|later| {
+                later.seq > event.seq
+                    && later.data["agent"] == event.data["agent"]
+                    && later.data["follower"] == event.data["follower"]
+            });
         let paused = format!(
             "The session {} and the agent {} that started it have written to each other {} times \
              without you: the agent no longer wakes at the end of this session's turns. Write a \
-             message to either of them to resume it.",
+             message to either of them to resume it.{}",
             agent.id,
             event.data["follower"].as_str().unwrap_or_default(),
-            event.data["exchanges"]
+            event.data["exchanges"],
+            if resolved {
+                " It has resumed since."
+            } else {
+                ""
+            }
         );
         let text = match kind {
             "paused" => json!(paused),
@@ -84,6 +99,9 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
             "seq": event.seq, "at": event.at, "kind": kind, "agent": agent.id,
             "project": agent.project, "workspace": agent.workspace, "text": text,
         }));
+        if resolved {
+            entries.last_mut().unwrap()["resolved"] = json!(true);
+        }
     }
     let limit = asked.limit.unwrap_or(LAST);
     if asked.after.is_some() {

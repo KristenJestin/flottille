@@ -553,9 +553,9 @@ const SERVED: [Definition; 28] = [
         name: "agent_launch",
         title: "Start a session, or launch a child",
         description: "Work that belongs in a workspace is a session for the user: root: true \
-            with workspace (an existing one; main is the project folder) or new_workspace (made \
+            with workspace (existing; main is the project folder) or new_workspace (made \
             for it, repositories picks them), judged; theirs, not your child, the brief its first \
-            message; follow (required): true wakes you at each end of its turns; you write to it, \
+            message; follow (required): true wakes you when each turn ends; you write to it, \
             and it answers you, with session_send. A root only. Without root: a child agent on \
             one precise task, in your own place (workspace and new_workspace are refused), \
             answered at once with its agent_id; it works on its own and you are told when it \
@@ -563,7 +563,7 @@ const SERVED: [Definition; 28] = [
             the task, what to read, the checks, the deliverable. A child launch is refused above \
             the children cap. {\"title\": \"Fix login\", \"brief\": \"...\", \"root\": true, \
             \"workspace\": \"login\", \"follow\": true}; {\"title\": \"Add API\", \"brief\": \
-            \"...\", \"root\": true, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}; {\"title\": \
+            \"...\", \"root\": true, \"follow\": false, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}; {\"title\": \
             \"Write the tests\", \"brief\": \"...\"}",
         read_only: false,
         idempotent: false,

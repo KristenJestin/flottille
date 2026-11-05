@@ -201,7 +201,12 @@ fn a_child_launch_does_not_take_follow() {
     );
 
     assert!(answer.error, "{}", answer.text);
-    assert!(answer.text.contains("follow"), "{}", answer.text);
+    // Not the unknown field it was before following: the refusal says what follow is for.
+    assert!(
+        answer.text.contains("session for the user"),
+        "{}",
+        answer.text
+    );
     assert!(agents(&user).iter().all(|a| a["title"] != "worker"));
 }
 
@@ -279,6 +284,7 @@ fn an_unfollowed_session_wakes_nobody() {
     let (answer, session) = launch(&user, &mcp, "Login", "Fix the login.", Some(false));
 
     assert!(!answer.error, "{}", answer.text);
+    assert!(!answer.text.contains("You follow it"), "{}", answer.text);
     let (session, _) = session.unwrap();
     eventually("the session's turn", || turns(&user, &session) == 1);
     settle();
@@ -307,6 +313,10 @@ fn the_starter_answers_a_followed_session_with_session_send() {
         body.starts_with(&format!("agent {lead} wrote to this session:")),
         "{body}"
     );
+    // The turn the answer started is followed too.
+    eventually("the wake of the answered turn", || {
+        wakes(&user, &lead).len() == 2
+    });
 }
 
 #[test]
@@ -368,7 +378,8 @@ fn the_following_ends_with_the_session() {
         wakes(&user, &lead).len() == 2
     });
     let woken = wakes(&user, &lead).remove(0);
-    assert!(woken.contains("ended"), "{woken}");
+    assert!(woken.contains("Your following of it is over"), "{woken}");
+    assert!(!woken.contains("ended a turn"), "{woken}");
 }
 
 #[test]
@@ -440,7 +451,7 @@ fn a_user_message_resumes_a_paused_following() {
         .unwrap();
 
     eventually("a wake again", || wakes(&user, &lead).len() == paused + 1);
-    // The count starts again: four more exchanges do not pause it.
+    // The count starts again: three more exchanges do not pause it.
     write(&user, &mcp, &session, "six");
     write(&user, &second, &lead, "seven");
     write(&user, &mcp, &session, "eight");
@@ -502,4 +513,212 @@ fn the_descriptions_say_where_a_question_goes() {
         );
         assert!(said.contains("follow-up"), "{name}: {said}");
     }
+}
+
+/// The five exchanges that pause the following of the session by the lead.
+fn pause(user: &User, mcp: &Mcp, session: &str, second: &Mcp, lead: &str) {
+    write(user, mcp, session, "one");
+    write(user, second, lead, "two");
+    write(user, mcp, session, "three");
+    write(user, second, lead, "four");
+    write(user, mcp, session, "five");
+    eventually("the inbox says it", || {
+        inbox(user).iter().any(|e| e["kind"] == "paused")
+    });
+}
+
+/// What a `session_send` of `from` to `to` is answered, the receiver's turns unchanged.
+fn refused_write(user: &User, from: &Mcp, to: &str) -> String {
+    let before = turns(user, to);
+    let sent = from.call("session_send", json!({"session": to, "text": "again"}));
+    assert!(sent.error, "{}", sent.text);
+    settle();
+    assert_eq!(turns(user, to), before, "a refused message started a turn");
+    sent.text
+}
+
+#[test]
+fn a_session_send_between_a_paused_pair_is_refused_naming_why() {
+    let user = User::with_fake_agent();
+    let (lead, mcp, session, second) = followed(&user, "Fix the login.");
+    pause(&user, &mcp, &session, &second, &lead);
+
+    for refused in [
+        refused_write(&user, &mcp, &session),
+        refused_write(&user, &second, &lead),
+    ] {
+        assert!(
+            refused.starts_with(
+                "refused: paused: you two wrote to each other five times without the user; \
+                 wait for their message"
+            ),
+            "{refused}"
+        );
+    }
+
+    user.call("agent.send", json!({"agent": lead, "message": "Go on."}))
+        .unwrap();
+    eventually("the lead's turn", || turns(&user, &lead) >= 2);
+    write(&user, &mcp, &session, "six");
+    write(&user, &second, &lead, "seven");
+}
+
+#[test]
+fn the_last_message_is_of_the_turn_that_ended() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "Fix the login.", "do": [{"say": "Should the logout be covered too?"}]},
+        {"when": "Report it.", "do": [
+            {"mcp": {"tool": "report", "arguments": {"text": "All done."}}}]}
+    ]}));
+    let (lead, _, session, _) = followed(&user, "Fix the login.");
+
+    user.call(
+        "agent.send",
+        json!({"agent": session, "message": "Report it."}),
+    )
+    .unwrap();
+
+    eventually("the second wake", || wakes(&user, &lead).len() == 2);
+    let woken = wakes(&user, &lead).remove(0);
+    assert!(woken.contains("it reported"), "{woken}");
+    assert!(woken.contains("(no message this turn)"), "{woken}");
+    assert!(!woken.contains("Should the logout"), "{woken}");
+}
+
+#[test]
+fn it_asked_the_user_only_in_the_turn_that_asked() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "Ask it.", "do": [
+            {"mcp": {"tool": "ask_user", "arguments": {"question": "Commit now?"}}},
+            {"say": "I asked."}]},
+        {"when": "The brief says", "do": [{"say": "Understood."}]}
+    ]}));
+    let (lead, mcp, session, _) = followed(&user, "Ask it.");
+    assert!(wakes(&user, &lead)[0].contains("asked the user"));
+
+    write(&user, &mcp, &session, "The brief says: no push.");
+
+    eventually("the second wake", || wakes(&user, &lead).len() == 2);
+    let woken = wakes(&user, &lead).remove(0);
+    assert!(woken.contains("turn done"), "{woken}");
+    assert!(!woken.contains("asked the user"), "{woken}");
+}
+
+#[test]
+fn a_turn_that_wrote_to_its_starter_does_not_wake_it_again() {
+    let user = User::with_fake_agent();
+    let (lead, mcp) = lead(&user);
+    user.fake_script(json!({"turns": [
+        {"when": "Fix the login.", "do": [
+            {"mcp": {"tool": "session_send",
+                "arguments": {"session": lead, "text": "Which branch?"}}},
+            {"say": "I asked my starter."}]}
+    ]}));
+
+    let (answer, session) = launch(&user, &mcp, "Login", "Fix the login.", Some(true));
+
+    assert!(!answer.error, "{}", answer.text);
+    let (session, _) = session.unwrap();
+    eventually("the session's turn", || turns(&user, &session) == 1);
+    eventually("its message to the lead", || {
+        delivered(&user, &lead, "session")
+            .iter()
+            .any(|body| body.contains("Which branch?"))
+    });
+    settle();
+    assert!(wakes(&user, &lead).is_empty(), "{:?}", wakes(&user, &lead));
+}
+
+#[test]
+fn a_secret_in_the_last_message_is_masked() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "Fix the login.", "do": [
+            {"say": "The token is ghp_fakefakefakefakefakefakefakefake0001 here."}]}
+    ]}));
+
+    let (lead, _, _, _) = followed(&user, "Fix the login.");
+
+    let woken = wakes(&user, &lead).remove(0);
+    assert!(woken.contains("The token is"), "{woken}");
+    assert!(!woken.contains("ghp_fake"), "{woken}");
+}
+
+#[test]
+fn the_pause_and_the_count_survive_a_restart() {
+    let user = User::with_fake_agent();
+    let (lead, mcp, session, second) = followed(&user, "Fix the login.");
+    pause(&user, &mcp, &session, &second, &lead);
+
+    assert!(user.run(&["daemon", "stop"]).status.success());
+
+    let listed = subscriptions(&user, &lead);
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0]["paused"], true, "{listed:?}");
+    let kept = store(&user).subscriptions().unwrap();
+    assert_eq!(kept[0].seen["exchanges"], 5, "{:?}", kept[0].seen);
+}
+
+#[test]
+fn an_agent_cannot_resume_a_paused_following() {
+    let user = User::with_fake_agent();
+    let (lead, mcp, session, second) = followed(&user, "Fix the login.");
+    pause(&user, &mcp, &session, &second, &lead);
+
+    refused_write(&user, &mcp, &session);
+    refused_write(&user, &second, &lead);
+    for tools in [mcp.tools(), second.tools()] {
+        assert!(
+            tools
+                .iter()
+                .all(|t| !t["name"].as_str().unwrap().contains("resume")),
+            "{tools:?}"
+        );
+    }
+    assert_eq!(subscriptions(&user, &lead)[0]["paused"], true);
+
+    // The user's Resume does what a message of theirs does, and the inbox says it resumed.
+    let id = subscriptions(&user, &lead)[0]["id"].clone();
+    user.call("subscription.resume", json!({"subscription": id}))
+        .unwrap();
+    assert_eq!(subscriptions(&user, &lead)[0]["paused"], false);
+    let entry = inbox(&user)
+        .into_iter()
+        .find(|e| e["kind"] == "paused")
+        .unwrap();
+    assert_eq!(entry["resolved"], true, "{entry}");
+    assert!(
+        entry["text"].as_str().unwrap().contains("resumed since"),
+        "{entry}"
+    );
+    write(&user, &mcp, &session, "six");
+    assert!(
+        user.call("subscription.resume", json!({"subscription": id}))
+            .is_err(),
+        "a following that is not paused is not resumed"
+    );
+}
+
+#[test]
+fn a_following_holds_neither_the_inactivity_sweep_nor_waiting_for() {
+    let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_CLOCK", "1");
+    let (lead, _, _, _) = followed(&user, "Fix the login.");
+
+    let tree = user.call("agent.tree", json!({"agent": lead})).unwrap();
+    let entry = &tree["agents"][0];
+    assert_eq!(entry["agent"]["id"], lead.as_str(), "{tree}");
+    assert!(entry["waiting_on"].is_null(), "{tree}");
+    assert!(
+        entry["doing"].as_str().unwrap().starts_with("idle for"),
+        "{tree}"
+    );
+    user.call("sessions.set", json!({"days": 3})).unwrap();
+    user.call("test.advance", json!({"ms": 10 * 24 * 3_600_000u64}))
+        .unwrap();
+
+    eventually("the lead ended as inactive", || {
+        user.call("agent.show", json!({"agent": lead})).unwrap()["agent"]["state"] == "ended"
+    });
 }

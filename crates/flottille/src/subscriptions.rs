@@ -209,10 +209,22 @@ fn store_seen(daemon: &Daemon, subscription: &Subscription, seen: Value) {
     let _ = daemon.write(|store| Ok((store.subscribe(&kept)?, None)));
 }
 
-/// The two sessions of a following wrote to each other once more (`session_send`, from either):
-/// at the fifth with no message of the user's in either, the following pauses and the user's
-/// inbox says so.
-pub fn exchanged(daemon: &Daemon, starter: &str, session: &Agent) {
+/// What a `session_send` between the two sessions of a paused following is told: nothing reaches
+/// the other until the user writes to one of them.
+pub const PAUSED: &str = "refused: paused: you two wrote to each other five times without the \
+    user; wait for their message";
+
+/// Whether the following of `session` by `starter` is paused: their `session_send` are refused.
+pub fn paused(daemon: &Daemon, starter: &str, session: &str) -> bool {
+    following(daemon, starter, Some(session))
+        .iter()
+        .any(|s| s.seen["paused"] == true)
+}
+
+/// The two sessions of a following wrote to each other once more (`session_send`, from either;
+/// `answered` when the session wrote to its starter, said by when): at the fifth with no message of the user's
+/// in either, the following pauses and the user's inbox says so.
+pub fn exchanged(daemon: &Daemon, starter: &str, session: &Agent, answered: bool) {
     let _counting = COUNTING.lock().unwrap();
     let Some(subscription) = following(daemon, starter, Some(&session.id)).pop() else {
         return;
@@ -220,10 +232,14 @@ pub fn exchanged(daemon: &Daemon, starter: &str, session: &Agent) {
     let count = subscription.seen["exchanges"].as_u64().unwrap_or(0) + 1;
     let paused = subscription.seen["paused"] == true;
     let pausing = !paused && count >= EXCHANGES;
+    let answered = match answered {
+        true => json!(now_ms()),
+        false => subscription.seen["answered"].clone(),
+    };
     store_seen(
         daemon,
         &subscription,
-        json!({"exchanges": count, "paused": paused || pausing}),
+        json!({"exchanges": count, "paused": paused || pausing, "answered": answered}),
     );
     if pausing {
         let _ = daemon.emit(
@@ -241,58 +257,80 @@ pub fn user_wrote(daemon: &Daemon, agent: &str) {
         .into_iter()
         .filter(|s| s.source == SESSION && (s.agent == agent || s.target["session"] == agent))
     {
-        let paused = subscription.seen["paused"] == true;
-        if !paused && subscription.seen["exchanges"].as_u64().unwrap_or(0) == 0 {
-            continue;
-        }
-        store_seen(
-            daemon,
-            &subscription,
-            json!({"exchanges": 0, "paused": false}),
+        reset(daemon, &subscription);
+    }
+}
+
+/// The count of the following starts again and, paused, it resumes: `session.following_resumed`.
+fn reset(daemon: &Daemon, subscription: &Subscription) {
+    let paused = subscription.seen["paused"] == true;
+    if !paused && subscription.seen["exchanges"].as_u64().unwrap_or(0) == 0 {
+        return;
+    }
+    let answered = subscription.seen["answered"].clone();
+    store_seen(
+        daemon,
+        subscription,
+        json!({"exchanges": 0, "paused": false, "answered": answered}),
+    );
+    if paused {
+        let _ = daemon.emit(
+            "session.following_resumed",
+            json!({"agent": subscription.target["session"], "follower": subscription.agent}),
         );
-        if paused {
-            let _ = daemon.emit(
-                "session.following_resumed",
-                json!({"agent": subscription.target["session"], "follower": subscription.agent}),
-            );
-        }
     }
 }
 
 /// A turn of the session ended: the agents that follow it are woken, once each, with why it
-/// ended and its last message, cut and said. A paused following wakes nobody.
+/// ended and the last message of that turn, cut and said. A paused following wakes nobody, nor
+/// one whose session wrote to its starter in the turn: that message woke it already.
 pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent, stop_reason: &str) {
-    let followers = followers(daemon, &session.id);
-    if followers.iter().all(|s| s.seen["paused"] == true) {
-        return;
-    }
-    let seq_of = |name: &str| {
+    let last_of = |name: &str| {
         daemon
             .read(|store| store.last_agent_events(&session.id, name, 1))
             .ok()
-            .and_then(|events| events.first().map(|event| event.seq))
-            .unwrap_or(0)
+            .and_then(|events| events.first().map(|event| (event.seq, event.at)))
+            .unwrap_or((0, 0))
     };
-    let why = if session.waiting_on_answer && session.parent.is_none() {
+    let seq_of = |name: &str| last_of(name).0;
+    let (prompted, prompted_at) = last_of("agent.prompted");
+    let woken: Vec<Subscription> = followers(daemon, &session.id)
+        .into_iter()
+        .filter(|s| s.seen["paused"] != true)
+        .filter(|s| {
+            s.seen["answered"]
+                .as_u64()
+                .is_none_or(|at| at < prompted_at)
+        })
+        .collect();
+    if woken.is_empty() {
+        return;
+    }
+    let why = if seq_of("agent.asked") > prompted {
         "it asked the user a question with ask_user".to_owned()
-    } else if seq_of("agent.reported") > seq_of("agent.prompted") {
+    } else if seq_of("agent.reported") > prompted {
         "it reported".to_owned()
     } else if stop_reason != "end_turn" {
         format!("the turn stopped before its end ({stop_reason})")
     } else {
         "turn done".to_owned()
     };
-    let last = crate::tree::last_messages(daemon, &session.id).pop();
-    for follower in followers.iter().filter(|s| s.seen["paused"] != true) {
+    let last = crate::tree::last_messages_after(daemon, &session.id, prompted)
+        .pop()
+        .unwrap_or_else(|| NO_MESSAGE.to_owned());
+    for follower in &woken {
         wake_follower(
             daemon,
             follower,
             session,
             &format!("ended a turn: {why}."),
-            last.as_deref(),
+            Some(&last),
         );
     }
 }
+
+/// The last message of a turn that said nothing.
+const NO_MESSAGE: &str = "(no message this turn)";
 
 /// The session ended or failed: the agents that follow it are told, and the following ends.
 pub fn followed_ended(daemon: &Arc<Daemon>, session: &Agent, why: &str) {
@@ -580,11 +618,13 @@ fn listed(subscription: &Subscription) -> Value {
     json!({"id": subscription.id, "agent": subscription.agent, "source": subscription.source,
         "named": named(subscription), "target": subscription.target,
         "events": subscription.events, "from": subscription.from,
-        "created_at": subscription.created_at, "expires_at": subscription.expires_at})
+        "created_at": subscription.created_at, "expires_at": subscription.expires_at,
+        "paused": subscription.seen["paused"] == true})
 }
 
-/// `subscription.list` and `subscription.cancel`: what the window shows of what the agents wait
-/// for, and the user's way to end it, the same as the agent's `forge unsubscribe`.
+/// `subscription.list`, `subscription.cancel` and `subscription.resume`: what the window shows of
+/// what the agents wait for, the user's way to end it, the same as the agent's `forge
+/// unsubscribe`, and to resume a paused following, as a message of theirs does.
 pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failure> {
     let params = if params.is_null() { json!({}) } else { params };
     match method {
@@ -622,6 +662,29 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
             };
             end(daemon, &found, "cancelled");
             Ok(json!({"subscription": listed(&found)}))
+        }
+        "subscription.resume" => {
+            let Cancel { subscription } = serde_json::from_value(params)?;
+            let _counting = COUNTING.lock().unwrap();
+            let Some(found) = all(daemon)
+                .into_iter()
+                .find(|s| s.id == subscription && s.source == SESSION)
+            else {
+                return Err(Failure::new(
+                    "not-found",
+                    format!("there is no following {subscription}"),
+                ));
+            };
+            if found.seen["paused"] != true {
+                return Err(Failure::new(
+                    "invalid-params",
+                    format!("the following {subscription} is not paused"),
+                ));
+            }
+            reset(daemon, &found);
+            let mut answer = listed(&found);
+            answer["paused"] = json!(false);
+            Ok(json!({"subscription": answer}))
         }
         method => Err(Failure::new(
             "unknown-method",

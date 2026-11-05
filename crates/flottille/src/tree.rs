@@ -616,6 +616,11 @@ pub const SESSION_WROTE: &str = " wrote to this session:";
 fn session_send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     let asked: SessionSend = arguments("session_send", args)?;
     let (session, started) = session_of(daemon, caller, &asked)?;
+    let starter = if started { &caller.id } else { &session.id };
+    let followed = if started { &session } else { caller };
+    if crate::subscriptions::paused(daemon, starter, &followed.id) {
+        return Err(refused(crate::subscriptions::PAUSED));
+    }
     let id = flottille_core::agent::new_id().map_err(failed)?;
     deliveries::deliver(
         daemon,
@@ -625,9 +630,7 @@ fn session_send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
         &format!("{}{SESSION_WROTE}\n\n{}", named(caller), asked.text),
         approval::URGENT,
     );
-    let starter = if started { &caller.id } else { &session.id };
-    let followed = if started { &session } else { caller };
-    crate::subscriptions::exchanged(daemon, starter, followed);
+    crate::subscriptions::exchanged(daemon, starter, followed, !started);
     Ok(Outcome::Done(format!(
         "Sent to {}: it reaches it on its next tool result, or as a new turn. An answer comes \
          as a [flottille:session] message.",
@@ -847,9 +850,15 @@ fn beside_the_recorder(name: &str) -> bool {
 
 /// The agent's last messages, each whole (its pieces joined) and masked, the oldest first.
 pub fn last_messages(daemon: &Daemon, agent: &str) -> Vec<String> {
-    let events = daemon
+    last_messages_after(daemon, agent, 0)
+}
+
+/// [`last_messages`], of those after the event `after` only.
+pub fn last_messages_after(daemon: &Daemon, agent: &str, after: u64) -> Vec<String> {
+    let mut events = daemon
         .read(|store| store.last_agent_events(agent, "agent.message", 200))
         .unwrap_or_default();
+    events.retain(|event| event.seq > after);
     // Pieces of one message share its id: an event the daemon recorded between them does not
     // split it. Without an id, the pieces of one follow each other: a gap in the numbers starts
     // another message.
