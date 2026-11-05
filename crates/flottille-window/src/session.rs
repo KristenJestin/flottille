@@ -6339,7 +6339,7 @@ impl Reply {
         match entries.get(self.highlighted).or(entries.first()) {
             Some((name, _)) => {
                 let name = name.clone();
-                self.pick(&name, window, cx)
+                self.complete(&name, true, window, cx)
             }
             None => self.send(window, cx),
         }
@@ -6348,12 +6348,20 @@ impl Reply {
     /// Completes the `/` word at the cursor into `/name `, the rest of the message as it was, for
     /// the user to add what the command is about before sending.
     pub fn pick(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.complete(name, false, window, cx);
+    }
+
+    /// `pick`; `entered` when Enter picked it, whose line break the field put after the word.
+    fn complete(&mut self, name: &str, entered: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.slash = None;
         self.dismissed = true;
         self.has_text = true;
         let now = self.field.read(cx).value().to_string();
         let at = self.slash_at.start.min(now.len())..self.slash_at.end.min(now.len());
-        let (before, after) = (&now[..at.start], &now[at.end..]);
+        let (before, mut after) = (&now[..at.start], &now[at.end..]);
+        if entered {
+            after = after.strip_prefix('\n').unwrap_or(after);
+        }
         let space = if after.starts_with(char::is_whitespace) {
             ""
         } else {
