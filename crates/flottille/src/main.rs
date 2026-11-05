@@ -25,6 +25,7 @@ mod forge;
 mod gate;
 mod git;
 mod import_command;
+mod inactive;
 mod inbox;
 mod inbox_command;
 mod items;

@@ -383,6 +383,25 @@ The daemon reads the file at every tool call: a change applies to the next resul
 running session. `tool_results.set` emits `tool_results.changed` with what it answers. The user's
 door alone reaches them: no tool of an agent does.
 
+### The sessions methods
+
+`sessions.show` and `sessions.set` read and keep after how many days without activity the daemon
+ends a root session (`docs/design.md` §5.7): `end_inactive_days` in `sessions.toml` of Flottille's
+configuration folder.
+
+- `sessions.show` answers `{"days"}`: a number of days from 1 to 90, or `"off"` (no file, no key,
+  or the word). `invalid-config` when the file cannot be read, names another key, or holds a value
+  that is neither `"off"` nor a whole number from 1 to 90.
+- `sessions.set {days}` takes a number of days or `"off"`, writes the file
+  (`end_inactive_days = 7`, or `end_inactive_days = "off"`) and answers as `sessions.show`;
+  `invalid-params` for anything else, a number out of the range and a missing `days` included (a
+  client leaves null fields out, so `"off"` is a word). The window sends 7 when the user first
+  turns it on.
+
+The daemon reads the file when a check is due, at its start and about once an hour. `sessions.set`
+emits `sessions.changed` with what it answers. The user's door alone reaches them: no tool of an
+agent does.
+
 ### The workspaces folder methods
 
 `workspaces_folder.show` and `workspaces_folder.set` read and keep where workspaces go

@@ -1358,6 +1358,29 @@ impl Store {
         )?)
     }
 
+    /// The latest sign of activity of these agents, from what is recorded: their events (but
+    /// the two the daemon says on its own, `agent.tools_outdated` and `agent.released`), their
+    /// deliveries made and sent, their runs started and ended, their requests asked and decided,
+    /// and the agents' own `created_at`, `active_at` and `exchanged_at`. `None` for no agent.
+    pub fn last_activity_of(&self, agents: &[String]) -> Result<Option<u64>> {
+        Ok(self.connection.query_row(
+            "WITH tree(id) AS (SELECT value FROM json_each(?1)) \
+             SELECT max(at) FROM ( \
+               SELECT max(created_at, coalesce(active_at, 0), coalesce(exchanged_at, 0)) AS at \
+                 FROM agents WHERE id IN tree \
+               UNION ALL SELECT max(e.at) FROM agent_events a JOIN events e ON e.seq = a.seq \
+                 WHERE a.agent IN tree AND e.name NOT IN ('agent.tools_outdated', 'agent.released') \
+               UNION ALL SELECT max(created_at, coalesce(sent_at, 0)) FROM deliveries \
+                 WHERE agent IN tree \
+               UNION ALL SELECT max(started_at, coalesce(ended_at, 0)) FROM runs \
+                 WHERE agent IN tree \
+               UNION ALL SELECT max(created_at, coalesce(decided_at, 0)) FROM approval_requests \
+                 WHERE agent IN tree)",
+            params![serde_json::to_string(agents)?],
+            |row| row.get(0),
+        )?)
+    }
+
     /// An adapter process started for the agent: its pid and its start time.
     pub fn add_process(&self, pid: u32, started: u64, agent: &str) -> Result<()> {
         self.connection.execute(
@@ -4940,6 +4963,55 @@ mod tests {
             .unwrap();
         assert_eq!(denied.state, RequestState::Denied);
         assert!(store.pending_requests(approval::USER).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_last_activity_of_a_tree_is_its_latest_sign_but_for_what_the_daemon_says_alone() {
+        let mut store = Store::open_in_memory().unwrap();
+        // Created long ago, so that the clock decides what is later.
+        let agent = Agent {
+            created_at: 1_000,
+            updated_at: 1_000,
+            ..an_agent()
+        };
+        assert_eq!(
+            store
+                .last_activity_of(std::slice::from_ref(&agent.id))
+                .unwrap(),
+            None
+        );
+        store
+            .create_agent(&agent, ("agent.created", json!({})))
+            .unwrap();
+        let ids = [agent.id.clone()];
+        let created = store.last_activity_of(&ids).unwrap().unwrap();
+        assert!(created > agent.created_at);
+
+        // The daemon's own words are no activity.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        for name in ["agent.tools_outdated", "agent.released"] {
+            store
+                .append_agent_event(&agent.id, name, json!({}), false)
+                .unwrap();
+        }
+        assert_eq!(store.last_activity_of(&ids).unwrap(), Some(created));
+
+        // A message of the conversation, then a request, is.
+        let message = store
+            .append_agent_event(&agent.id, "agent.message", json!({}), true)
+            .unwrap();
+        assert_eq!(store.last_activity_of(&ids).unwrap(), Some(message.at));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let (asked, _) = store.ask(&a_request(Some("toolu_01"))).unwrap();
+        assert!(asked.created_at > message.at);
+        assert_eq!(
+            store.last_activity_of(&ids).unwrap(),
+            Some(asked.created_at)
+        );
+        assert_eq!(
+            store.last_activity_of(&["somebody-else".into()]).unwrap(),
+            None
+        );
     }
 
     #[test]
