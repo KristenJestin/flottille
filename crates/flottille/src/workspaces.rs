@@ -1070,7 +1070,7 @@ async fn prepare(daemon: Arc<Daemon>, id: i64, mut made: Option<oneshot::Sender<
 }
 
 async fn prepare_steps(
-    daemon: &Daemon,
+    daemon: &Arc<Daemon>,
     id: i64,
     made: &mut Option<oneshot::Sender<()>>,
 ) -> Result<(), Failure> {
@@ -1128,7 +1128,13 @@ async fn prepare_steps(
             .lock()
             .unwrap()
             .insert((id, step.position), live.clone());
-        let outcome = run_step(&workspace, &step, &live).await;
+        let outcome = match services_of(daemon, &workspace, &step).await {
+            Ok(()) => run_step(&workspace, &step, &live).await,
+            Err(why) => Err(StepFailure {
+                doing: step.doing(),
+                output: why,
+            }),
+        };
 
         let (state, failure, name) = match outcome {
             Ok(StepState::Skipped) => (StepState::Skipped, None, "workspace.step_skipped"),
@@ -1175,6 +1181,29 @@ fn kind_name(action: &Action) -> &'static str {
 }
 
 /// Does one step: done, skipped, or its failure.
+/// A step that runs a task first starts the services the task needs, as the project's file says
+/// now (`services.rs`); a task no longer there needs none.
+async fn services_of(
+    daemon: &Arc<Daemon>,
+    workspace: &Workspace,
+    step: &Step,
+) -> Result<(), String> {
+    let Action::Run {
+        task: Some(name), ..
+    } = &step.action
+    else {
+        return Ok(());
+    };
+    let needs = projects::load_project(daemon, &workspace.project)
+        .ok()
+        .and_then(|project| project.tasks.get(name).map(|task| task.needs.to_vec()))
+        .unwrap_or_default();
+    crate::services::start_needed(daemon, &needs)
+        .await
+        .map(|_| ())
+        .map_err(|why| format!("task {name} cannot run: {why}"))
+}
+
 async fn run_step(
     workspace: &Workspace,
     step: &Step,

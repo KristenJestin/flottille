@@ -101,7 +101,7 @@ const REPLACED: &str = "refused: this session has been replaced: a new session o
 
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
 /// the order frozen in the agent.
-const SERVED: [Definition; 28] = [
+const SERVED: [Definition; 29] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -225,6 +225,7 @@ const SERVED: [Definition; 28] = [
                 "check": {"type": "boolean", "description": "Tests, lint."},
                 "read_only": {"type": "boolean", "description": "It changes nothing."},
                 "ask_before_running": {"type": "boolean", "description": "Judged each time it runs."},
+                "needs": {"type": "array", "items": {"type": "string"}, "description": "add, edit: the services of the machine (services lists them) it starts and waits for first."},
                 "ready": {"type": ["object", "null"], "description": "add, edit: when a run of it is ready, one of {\"line\": text its output prints}, {\"url\": an address that answers}, {\"command\": a line that exits 0}; templated ({workspace}, {url}…); null removes it.", "properties": {
                     "line": {"type": "string"}, "url": {"type": "string"}, "command": {"type": "string"}
                 }, "minProperties": 1, "maxProperties": 1, "additionalProperties": false},
@@ -520,6 +521,41 @@ const SERVED: [Definition; 28] = [
                 "repositories": {"type": "array", "items": {"type": "string"}, "description": "create: by path."},
                 "branch": {"type": "string", "description": "create: give it when the repository has a naming convention (its AGENTS.md, CONTRIBUTING, or the branches it already has to read), with the ticket's key when the workspace has a ticket (fix/ABC-12-login). Left out, <branch prefix>/<name> is the fallback (the name alone when the project has no prefix). An existing branch is checked out."},
                 "ticket": {"type": ["string", "null"], "description": "#123 or ABC-123."}
+            }, "required": ["action"], "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "services",
+        title: "The machine's services",
+        description: "The services of the machine: programs every project shares (a database, \
+            an API the apps call), each run once, in its own folder, by Flottille. A task that \
+            needs one starts it before it runs. list: each with its state (stopped, starting, \
+            ready, running, outside: started by someone else, failed and why), folder and \
+            address; show: one, with the end of its output. start: starts it, what it needs \
+            first, judged as a run of its line in its folder: {\"action\": \"start\", \
+            \"name\": \"mongo\"}. stop is always held for the user, whatever the mode: you are \
+            answered at once, the result comes later: {\"action\": \"stop\", \"name\": \
+            \"mongo\"}. A root's add, edit and remove are judged as a task's write: \
+            {\"action\": \"add\", \"name\": \"redis\", \"line\": \"redis-server\", \
+            \"folder\": \"~/tools/redis\"}.",
+        read_only: false,
+        idempotent: false,
+        destructive: true,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["list", "show", "start", "stop", "add", "edit", "remove"]},
+                "name": {"type": "string"},
+                "folder": {"type": ["string", "null"], "description": "add, edit: where it runs, absolute or ~/…; the home when left out or null."},
+                "line": {"type": "string", "description": "add, edit: one command line, never run by a shell."},
+                "needs": {"type": "array", "items": {"type": "string"}, "description": "add, edit: the services started and waited for before it."},
+                "ready": {"type": ["object", "null"], "description": "add, edit: when it is ready, one of {\"line\": text its output prints}, {\"url\": an address that answers}, {\"command\": a line that exits 0}; only {url} is filled; null removes it.", "properties": {
+                    "line": {"type": "string"}, "url": {"type": "string"}, "command": {"type": "string"}
+                }, "minProperties": 1, "maxProperties": 1, "additionalProperties": false},
+                "url": {"description": "add, edit: where it answers: an address or {\"command\": a line that prints it}; null removes it.", "anyOf": [
+                    {"type": "string"}, {"type": "null"},
+                    {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"], "additionalProperties": false}
+                ]},
+                "ask_before_running": {"type": "boolean", "description": "add, edit: judged each time an agent starts it."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -2031,7 +2067,8 @@ async fn played_in(
                             // refuses was refused above.
                             // Its own workspace is removed only with the user's word.
                             _ if mode == GateMode::Full
-                                && !removes_own_workspace(grant, tool, &args) =>
+                                && !removes_own_workspace(grant, tool, &args)
+                                && !crate::services::stops(tool, &args) =>
                             {
                                 verdict = Some("full");
                                 if removes_a_workspace(tool, &args) {
@@ -2252,17 +2289,27 @@ fn classified(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gate:
     // way that run will be.
     let sets =
         crate::actions::family(tool, args).and_then(|_| crate::actions::sets(tasks, tool, args));
-    let (paths, words, command) = match &sets {
-        Some(sets) => (
+    // A service started, or as a write leaves it, is judged as a run of its line in its folder.
+    let service = (tool == "services")
+        .then(|| crate::services::reaches(daemon, &grant.place, args))
+        .flatten();
+    let (paths, words, command) = match (&sets, &service) {
+        (Some(sets), _) => (
             crate::actions::folders(&grant.place, sets),
             flottille_core::command::split_line(&sets.task.line).unwrap_or_default(),
             sets.name.clone(),
         ),
-        None => reached(daemon, &grant.place, tool, args),
+        (None, Some((folder, words, name, _))) => {
+            (vec![folder.clone()], words.clone(), Some(name.clone()))
+        }
+        (None, None) => reached(daemon, &grant.place, tool, args),
     };
     // A line equal to a task's is that task, with its own flags; a write's task is as the write
     // leaves it.
     let command = match (&sets, command.as_deref()) {
+        _ if service.is_some() => service
+            .as_ref()
+            .map(|(_, _, name, task)| (name.as_str(), task)),
         (Some(Sets { task, .. }), Some(name)) => Some((name, task)),
         (_, Some(name)) => tasks
             .get_key_value(name)
@@ -2522,6 +2569,7 @@ async fn performed_once(
 ) -> Outcome {
     match tool {
         "web" => crate::web::web(args).await,
+        "services" => crate::services::tool(daemon, grant, args).await,
         "run" => {
             runs::run(
                 daemon,
@@ -2694,7 +2742,7 @@ mod tests {
     #[test]
     fn a_grant_holds_the_agent_s_served_tools_in_its_own_order() {
         let mut leaf = claude::PROVIDER.tools(false, true, true, true);
-        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 16);
+        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 17);
         leaf.reverse();
         leaf.retain(|tool| !tool.ends_with("__search"));
         leaf.push("fs_read".into());
@@ -2702,7 +2750,7 @@ mod tests {
         assert_eq!(served.first(), Some(&"ask_parent"));
         assert_eq!(served.last(), Some(&"fs_read"));
         assert!(!served.contains(&"search"));
-        assert_eq!(served.len(), 15);
+        assert_eq!(served.len(), 16);
     }
 
     #[test]

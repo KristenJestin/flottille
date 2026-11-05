@@ -65,6 +65,8 @@ struct TasksCall {
     ready: Option<Option<Box<Ready>>>,
     #[serde(default, deserialize_with = "present")]
     url: Option<Option<Box<TaskUrl>>>,
+    /// The services it needs, all of them; left out: unchanged.
+    needs: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -168,6 +170,7 @@ pub fn family(tool: &str, args: &Value) -> Option<&'static str> {
         ("project", "set_rules") => Some("rules"),
         ("workspace", "create" | "prepare") => Some("workspace"),
         ("workspace", "link_ticket") => Some("ticket"),
+        ("services", "add" | "edit" | "remove") => Some("services"),
         _ => None,
     }
 }
@@ -185,6 +188,9 @@ pub fn asked(family: &str) -> String {
              judged as its run"
         }
         "ticket" => "it links a workspace to a ticket, which its agents then read",
+        "services" => {
+            "it adds, changes or removes a service of the machine, which every project shares"
+        }
         _ => "it changes the project's settings",
     }
     .into()
@@ -196,6 +202,7 @@ pub fn line_of<'a>(tool: &str, args: &'a Value) -> Option<&'a str> {
     match (tool, args["action"].as_str()?) {
         ("tasks", "add" | "edit") => args["line"].as_str(),
         ("setup", "add" | "edit") => args["step"]["run"].as_str(),
+        ("services", "add" | "edit") => args["line"].as_str(),
         _ => None,
     }
 }
@@ -226,6 +233,7 @@ pub fn sets(tasks: &BTreeMap<String, Task>, tool: &str, args: &Value) -> Option<
                     read_only: false,
                     ask_before_running: false,
                     added_by: None,
+                    needs: Box::default(),
                     ready: None,
                     url: None,
                 },
@@ -250,6 +258,7 @@ pub fn sets(tasks: &BTreeMap<String, Task>, tool: &str, args: &Value) -> Option<
                         read_only: false,
                         ask_before_running: false,
                         added_by: None,
+                        needs: Box::default(),
                         ready: None,
                         url: None,
                     },
@@ -315,6 +324,9 @@ pub async fn prepared(
     }
     if tool == "forge" {
         return Ok(posted_says(args));
+    }
+    if tool == "services" {
+        return crate::services::says(daemon, is_root(daemon, grant), args);
     }
     if !TOOLS.contains(&tool) {
         return Ok(Vec::new());
@@ -522,6 +534,9 @@ fn task_said(task: &Task) -> String {
     if let Some(url) = &task.url {
         notes.push(url.said());
     }
+    if !task.needs.is_empty() {
+        notes.push(format!("needs the services {}", task.needs.join(", ")));
+    }
     match notes.is_empty() {
         true => format!("`{}`", task.line),
         false => format!("`{}` ({})", task.line, notes.join(", ")),
@@ -570,6 +585,7 @@ fn tasks_says(project: &Project, call: &TasksCall) -> Result<Vec<String>, Outcom
                 read_only: false,
                 ask_before_running: false,
                 added_by: None,
+                needs: Box::default(),
                 ready: None,
                 url: None,
             },
@@ -643,6 +659,9 @@ fn edited(task: &Task, call: &TasksCall) -> Task {
     }
     if let Some(url) = &call.url {
         task.url = url.clone();
+    }
+    if let Some(needs) = &call.needs {
+        task.needs = needs.clone().into();
     }
     task
 }
