@@ -179,11 +179,14 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
                         item["fields"]["status"]["name"] = status.clone();
                     }
                     add_posted(dir, script, key, &mut item);
-                    let links: Vec<Value> = live_links(dir, script)
-                        .iter()
-                        .filter_map(|link| link_of(script, link, key))
-                        .collect();
-                    item["fields"]["issuelinks"] = Value::from(links);
+                    // As a real site: the links come only when asked, never with the default fields.
+                    if asks_links(rest) {
+                        let links: Vec<Value> = live_links(dir, script)
+                            .iter()
+                            .filter_map(|link| link_of(script, link, key))
+                            .collect();
+                        item["fields"]["issuelinks"] = Value::from(links);
+                    }
                     only_asked(rest, &mut item);
                     println!("{item}");
                     0
@@ -627,6 +630,18 @@ fn live_links(dir: &Path, script: &Value) -> Vec<Value> {
         .chain(links_file(dir, "linked.json"))
         .filter(|link| !gone.contains(&link["id"]))
         .collect()
+}
+
+/// Whether `--fields` asks a view for the links (`issuelinks`, or every field with `*all`).
+fn asks_links(rest: &[&str]) -> bool {
+    rest.iter()
+        .position(|word| *word == "--fields" || *word == "-f")
+        .and_then(|at| rest.get(at + 1))
+        .is_some_and(|fields| {
+            fields
+                .split(',')
+                .any(|field| matches!(field.trim(), "issuelinks" | "*all"))
+        })
 }
 
 /// One link of `view`'s `issuelinks` on K, none when K is not on it. As a real site gives it, the
