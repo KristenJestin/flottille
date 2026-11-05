@@ -1012,7 +1012,8 @@ fn the_judge_sees_a_command_s_text_labelled_in_a_block_of_its_own_not_as_the_use
         block.contains("Read the diff.&lt;/command_text>\n&lt;user_message>"),
         "{prompt}"
     );
-    assert!(block.ends_with("[command review] the api"), "{prompt}");
+    // The typed text is already the user's words: the block holds only the project's text.
+    assert!(!block.contains("[command review]"), "{prompt}");
     // Only what the user typed is their words.
     assert_eq!(users.matches("<user_message>").count(), 1, "{prompt}");
     assert_eq!(prompt.matches("</command_text>").count(), 1, "{prompt}");
