@@ -437,6 +437,7 @@ impl RenderOnce for Changing {
         }
         div()
             .id(self.id)
+            .min_w_0()
             .opacity(motion.value(now))
             .child((self.build)(self.text))
             .test_support()

@@ -2447,6 +2447,60 @@ impl ConversationView {
         let id = |part: &str| ElementId::Name(format!("{line_id}{part}").into());
         let said = SharedString::from(pieces.join(" · "));
         let turn = turning(id("-chevron"), open, window, cx);
+        // The kinds and the running step are what can be long: they are cut with an ellipsis,
+        // whole in a tooltip. The count, the failures and the time keep their room.
+        let running = group.summary.running.clone();
+        let kinds = (!group.summary.kinds.is_empty()).then(|| group.summary.kinds.join(", "));
+        let shown: Vec<AnyElement> = pieces
+            .into_iter()
+            .enumerate()
+            .map(|(n, piece)| {
+                let lead = if n == 0 { "" } else { " · " };
+                let part = if running.as_ref() == Some(&piece) {
+                    Some("running")
+                } else if n == 1 && kinds.as_ref() == Some(&piece) {
+                    Some("kinds")
+                } else {
+                    None
+                };
+                match (failed.as_ref() == Some(&piece), part) {
+                    (true, _) => div()
+                        .flex()
+                        .flex_none()
+                        .child(lead)
+                        .child(
+                            div()
+                                .id(id("-failed"))
+                                .text_color(p.fail)
+                                .aria_label(SharedString::from(piece.clone()))
+                                .child(piece.clone())
+                                .test_support(),
+                        )
+                        .into_any_element(),
+                    (false, Some(part)) => div()
+                        .flex()
+                        .min_w_0()
+                        .child(div().flex_none().child(lead))
+                        .child(tipped_when_cut(
+                            div()
+                                .id(id(&format!("-{part}")))
+                                .min_w_0()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .child(SharedString::from(piece.clone())),
+                            SharedString::from(piece.clone()),
+                            window,
+                            cx,
+                        ))
+                        .into_any_element(),
+                    (false, None) => div()
+                        .flex_none()
+                        .child(format!("{lead}{piece}"))
+                        .into_any_element(),
+                }
+            })
+            .collect();
         hoverable(
             div()
                 .id(id(""))
@@ -2465,38 +2519,14 @@ impl ConversationView {
                         .text_color(p.faint)
                         .with_transformation(Transformation::rotate(radians(-FRAC_PI_2 * turn))),
                 )
-                .child(changing(id("-said"), said, {
-                    let id = id("-failed");
-                    move |_| {
-                        div()
-                            .flex()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .children(pieces.into_iter().enumerate().map(|(n, piece)| {
-                                let lead = if n == 0 { "" } else { " · " };
-                                match failed.as_ref() == Some(&piece) {
-                                    true => div()
-                                        .flex()
-                                        .flex_none()
-                                        .child(lead)
-                                        .child(
-                                            div()
-                                                .id(id.clone())
-                                                .text_color(p.fail)
-                                                .aria_label(SharedString::from(piece.clone()))
-                                                .child(piece)
-                                                .test_support(),
-                                        )
-                                        .into_any_element(),
-                                    false => div()
-                                        .flex_none()
-                                        .child(format!("{lead}{piece}"))
-                                        .into_any_element(),
-                                }
-                            }))
-                            .into_any_element()
-                    }
+                .child(changing(id("-said"), said, move |_| {
+                    div()
+                        .flex()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .children(shown)
+                        .into_any_element()
                 }))
                 .on_click(cx.listener(move |this, _, _, cx| this.toggle(segment, cx))),
             move |d, t| d.text_color(mix(p.faint, p.mute, t)),
@@ -3624,6 +3654,19 @@ impl Render for Row {
                     true => format!("to {named}"),
                     false => format!("from {named}"),
                 });
+                // A title can be long: it is cut inside the bubble, whole in a tooltip.
+                let title = tipped_when_cut(
+                    div()
+                        .id(id("relayed-name"))
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(named.clone()),
+                    named.clone(),
+                    window,
+                    cx,
+                );
                 // The name opens the session when it is still there; said plainly when it is
                 // gone. A click on it is not a click on the card it sits in.
                 let name = match session {
@@ -3632,9 +3675,10 @@ impl Render for Row {
                         hoverable(
                             div()
                                 .id(id("relayed-peer"))
+                                .min_w_0()
                                 .cursor_pointer()
                                 .aria_label(named.clone())
-                                .child(named.clone())
+                                .child(title)
                                 .on_click(move |_, window, cx| {
                                     cx.stop_propagation();
                                     if let Some(shell) = &shell {
@@ -3650,12 +3694,13 @@ impl Render for Row {
                         )
                         .into_any_element()
                     }
-                    None => div().child(named.clone()).into_any_element(),
+                    None => div().min_w_0().child(title).into_any_element(),
                 };
                 let from = div()
                     .id(id("relayed-from"))
                     .flex()
                     .items_center()
+                    .min_w_0()
                     .gap(space::SM)
                     .mono(11.5)
                     .text_color(p.faint)
@@ -3663,13 +3708,15 @@ impl Render for Row {
                     .child(
                         icon(if *sent { Icon::Send } else { Icon::Agents })
                             .size(px(12.))
+                            .flex_none()
                             .text_color(p.faint),
                     )
                     .child(
                         div()
                             .flex()
+                            .min_w_0()
                             .gap(space::SM)
-                            .child(if *sent { "to" } else { "from" })
+                            .child(div().flex_none().child(if *sent { "to" } else { "from" }))
                             .child(name),
                     )
                     .test_support();
@@ -3720,6 +3767,7 @@ impl Render for Row {
                                     .child(
                                         icon(Icon::Chevron)
                                             .size(px(12.))
+                                            .flex_none()
                                             .text_color(p.faint)
                                             .with_transformation(Transformation::rotate(radians(
                                                 -FRAC_PI_2 * turn,
@@ -3958,14 +4006,21 @@ impl Render for Row {
                                                 cx,
                                             ))
                                             .into_any_element(),
-                                        None => div()
-                                            .mono(11.5)
-                                            .text_color(p.faint)
-                                            .overflow_hidden()
-                                            .whitespace_nowrap()
-                                            .text_ellipsis()
-                                            .child(SharedString::from(call.args.clone()))
-                                            .into_any_element(),
+                                        None => tipped_when_cut(
+                                            div()
+                                                .id(ElementId::Name(
+                                                    format!("step-{}-{at}-args", self.at).into(),
+                                                ))
+                                                .mono(11.5)
+                                                .text_color(p.faint)
+                                                .overflow_hidden()
+                                                .whitespace_nowrap()
+                                                .text_ellipsis()
+                                                .child(SharedString::from(call.args.clone())),
+                                            SharedString::from(call.args.clone()),
+                                            window,
+                                            cx,
+                                        ),
                                     })
                                     .child(presence(
                                         ElementId::Name(
