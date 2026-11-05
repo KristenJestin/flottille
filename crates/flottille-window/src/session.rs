@@ -58,7 +58,7 @@ use crate::model::Place;
 use crate::open::Opener;
 use crate::providers::Providers;
 use crate::queued::QueuedMessages;
-use crate::runs::{self, CommandList, CommandPanel, rail_label};
+use crate::runs::{self, CommandList, CommandPanel, EndedFold, ended_row, rail_label};
 use crate::session_link::{
     self, ForgeFacts, PlaceFacts, PullRequest, RepositoryFacts, Request, SessionLink,
     SessionUpdate, TicketFacts, TreeAgent, Where,
@@ -4339,13 +4339,6 @@ fn rail_rows(nodes: &[Node], open: &HashSet<String>) -> Vec<RailRow> {
     rows
 }
 
-/// The fold of the children behind one "ended" row.
-struct EndedFold {
-    motion: Motion,
-    /// The children's height, measured while they are drawn.
-    height: Rc<Cell<Pixels>>,
-}
-
 /// A count of tokens as the row says it: `812`, `45k`, `1.2M`.
 fn tokens(count: u64) -> String {
     match count {
@@ -4438,7 +4431,7 @@ impl SessionRail {
                 cx,
             )
         });
-        let commands = cx.new(|_| CommandList::new(page.clone()));
+        let commands = cx.new(|_| CommandList::new(page.clone()).of_agent(root.clone()));
         let subscriptions = cx.new(|_| SubscriptionList::new(page.clone()));
         let waiting = cx.new(|cx| Waiting::new(page.clone(), cx));
         Self {
@@ -4555,12 +4548,8 @@ impl SessionRail {
         let fold = self
             .ended_folds
             .entry(parent.to_owned())
-            .or_insert_with(|| EndedFold {
-                motion: Motion::settled(0.0),
-                height: Rc::new(Cell::new(px(0.))),
-            });
-        fold.motion
-            .animate(if open { 1.0 } else { 0.0 }, PANEL, now, reduce);
+            .or_insert_with(EndedFold::new);
+        fold.animate(open, now, reduce);
         cx.notify();
     }
 
@@ -4628,6 +4617,8 @@ impl SessionRail {
             self.selected = selected;
             cx.notify();
         }
+            self.commands
+                .update(cx, |commands, cx| commands.show_agent(&selected, cx));
     }
 
     /// The place's facts; `None` when the daemon has none (the workspace was removed).
@@ -4967,30 +4958,16 @@ impl Render for SessionRail {
                 .map_or(1, |a| a.depth + 1);
             let indent = space::LG * depth as f32;
             let target = parent.to_owned();
-            let row = div()
-                .id(ElementId::Name(format!("rail-ended-{parent}").into()))
-                .aria_expanded(open)
-                .h(px(28.))
-                .flex()
-                .items_center()
-                .gap(space::SM)
-                .px(space::SM)
-                .rounded(px(7.))
-                .cursor_pointer()
-                .text_size(px(12.))
-                .child(
-                    icon(Icon::Chevron)
-                        .size(px(11.))
-                        .text_color(p.faint)
-                        .with_transformation(Transformation::rotate(radians(
-                            -FRAC_PI_2 * (1.0 - turn),
-                        ))),
-                )
-                .child(SharedString::from(format!("{count} ended")))
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle_ended(&target, cx)));
-            div().pl(indent).child(hoverable(row, move |d, t| {
-                d.bg(p.hover.opacity(t)).text_color(mix(p.faint, p.text, t))
-            }))
+            let said = SharedString::from(format!("{count} ended"));
+            div().pl(indent).child(ended_row(
+                ElementId::Name(format!("rail-ended-{parent}").into()),
+                said.clone(),
+                said,
+                open,
+                turn,
+                p,
+                cx.listener(move |this, _, _, cx| this.toggle_ended(&target, cx)),
+            ))
         };
         let mut rows: Vec<AnyElement> = Vec::new();
         let mut listed = listed.into_iter();
