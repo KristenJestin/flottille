@@ -24,6 +24,7 @@ use gpui_kit::{
 };
 
 use crate::actions::Command;
+use crate::extensions::Registry;
 use crate::providers::{Provider, Providers};
 use crate::rules::RulesEditor;
 use crate::shell::Shell;
@@ -132,6 +133,9 @@ pub struct SettingsPage {
     appearance_unread: Option<String>,
     /// The tab chosen: the index of its section in [`SECTIONS`].
     tab: usize,
+    /// The tab of a part of Flottille the user can turn off, by its name, when it is the one
+    /// chosen instead.
+    own_tab: Option<String>,
     /// The scroll of the section shown, to bring the guidance in view from a link.
     scroll: ScrollHandle,
 }
@@ -186,6 +190,7 @@ impl SettingsPage {
             appearance: None,
             appearance_unread: None,
             tab: 0,
+            own_tab: None,
             scroll: ScrollHandle::new(),
         }
     }
@@ -198,10 +203,31 @@ impl SettingsPage {
     /// Chooses the tab of that section: it shows alone.
     pub fn choose(&mut self, entry: usize, cx: &mut Context<Self>) {
         let entry = entry.min(SECTIONS.len() - 1);
-        if self.tab != entry {
+        if self.tab != entry || self.own_tab.is_some() {
             self.tab = entry;
+            self.own_tab = None;
             cx.notify();
         }
+    }
+
+    /// Chooses the tab of the part of Flottille named `name` (Specs).
+    pub fn choose_own(&mut self, name: &str, cx: &mut Context<Self>) {
+        if self.own_tab.as_deref() != Some(name) {
+            self.own_tab = Some(name.to_owned());
+            cx.notify();
+        }
+    }
+
+    /// The tab of a part of Flottille that is the one chosen, by its name.
+    pub fn own_tab(&self) -> Option<&str> {
+        self.own_tab.as_deref()
+    }
+
+    /// The registry of the shell, while it is there.
+    fn registry(&self, cx: &gpui_kit::App) -> Option<Entity<Registry>> {
+        self.shell
+            .upgrade()
+            .map(|shell| shell.read(cx).extensions().clone())
     }
 
     /// Opened at a section: its tab is the one chosen.
@@ -1103,23 +1129,75 @@ impl Render for SettingsPage {
             vec![("appearance", self.appearance_section(cx).into_any_element())],
             vec![("developer", self.developer_section(cx).into_any_element())],
         ];
-        let chosen = self.tab.min(sections.len() - 1);
-        let shown = sections.swap_remove(chosen);
+        // The tabs of the parts of Flottille the user can turn off come after the Judge's, in
+        // their order; each is drawn from what it declares.
+        let registry = self.registry(cx);
+        let own: Vec<(String, String)> = registry
+            .as_ref()
+            .map(|registry| registry.read(cx).tabs())
+            .unwrap_or_default();
+        let own_shown = self.own_tab.as_ref().and_then(|name| {
+            let drawn = crate::extensions::settings_tab(registry.as_ref()?, name, cx)?;
+            Some((name.clone(), drawn))
+        });
+        let mut order: Vec<Tab> = vec![Tab::Core(0)];
+        order.extend(own.iter().map(|(name, _)| Tab::Own(name.clone())));
+        order.extend((1..SECTIONS.len()).map(Tab::Core));
+        let core = self.tab.min(sections.len() - 1);
+        let (chosen, shown) = match own_shown {
+            Some((name, drawn)) => (
+                order
+                    .iter()
+                    .position(|tab| *tab == Tab::Own(name.clone()))
+                    .unwrap_or(0),
+                vec![(SharedString::from(name), drawn)],
+            ),
+            None => (
+                order
+                    .iter()
+                    .position(|tab| *tab == Tab::Core(core))
+                    .unwrap_or(0),
+                sections
+                    .swap_remove(core)
+                    .into_iter()
+                    .map(|(part, section)| (SharedString::from(part), section))
+                    .collect(),
+            ),
+        };
         let this = cx.entity().downgrade();
-        let tabs = SECTIONS
+        let chooses = order.clone();
+        let tabs = order
             .iter()
             .fold(
                 Tabs::new("settings-tabs", "Sections", chosen),
-                |tabs, (key, label)| match *key {
-                    // The count shows once the daemon listed them, so it does not jump.
-                    "providers" if self.providers.known => {
-                        tabs.counted(*key, *label, count.to_string())
+                |tabs, tab| match tab {
+                    Tab::Own(name) => {
+                        let title = own
+                            .iter()
+                            .find(|(n, _)| n == name)
+                            .map(|(_, title)| title.clone())
+                            .unwrap_or_default();
+                        tabs.tab(SharedString::from(name.clone()), title)
                     }
-                    _ => tabs.tab(*key, *label),
+                    Tab::Core(at) => {
+                        let (key, label) = SECTIONS[*at];
+                        match key {
+                            // The count shows once the daemon listed them, so it does not jump.
+                            "providers" if self.providers.known => {
+                                tabs.counted(key, label, count.to_string())
+                            }
+                            _ => tabs.tab(key, label),
+                        }
+                    }
                 },
             )
-            .on_choose(move |entry, _, cx| {
-                this.update(cx, |this, cx| this.choose(entry, cx)).ok();
+            .on_choose(move |at, _, cx| {
+                let tab = chooses[at].clone();
+                this.update(cx, |this, cx| match tab {
+                    Tab::Core(entry) => this.choose(entry, cx),
+                    Tab::Own(name) => this.choose_own(&name, cx),
+                })
+                .ok();
             });
         let key = |part: &str| ElementId::Name(format!("enter-settings-{part}").into());
         let column = |element: AnyElement| {
@@ -1158,7 +1236,7 @@ impl Render for SettingsPage {
             .pt(space::XL)
             .pb(space::XXXL)
             .children(shown.into_iter().enumerate().map(|(n, (part, section))| {
-                column(enter(key(part), 2 + n, section).into_any_element())
+                column(enter(key(&part), 2 + n, section).into_any_element())
                     .when(n > 0, |d| d.mt(space::XXL))
             }));
         div()
@@ -1169,6 +1247,14 @@ impl Render for SettingsPage {
             .child(top)
             .child(page)
     }
+}
+
+/// A tab of the page: a section of [`SECTIONS`], or the tab of a part of Flottille the user can
+/// turn off, by its name.
+#[derive(Clone, Debug, PartialEq)]
+enum Tab {
+    Core(usize),
+    Own(String),
 }
 
 /// A count of characters with its thousands set apart: `8,000`.

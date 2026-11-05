@@ -1,11 +1,13 @@
 # Extensions
 
-**Status: a proposal, S1 and S2 built.** S1 (#332) built the declaration and the registry,
+**Status: a proposal, S1 to S3 built.** S1 (#332) built the declaration and the registry,
 activation global and per project, `extensions.toml`, `extension.list`/`set`, the data space and
 the scan that the core names no extension, and Specs in the store with its statuses, lock, three
 modes and tickets, from the command line. S2 (#333) built the tools an extension gives and the
 Action trigger, and writing a spec: the `spec` tool, "New spec" and "Write the spec", questions and
-answers, from the command line and the protocol; the rest is a proposal. Written from a discussion with the maintainer
+answers, from the command line and the protocol. S3 (#334) built Specs in the window: the
+renderer of an extension's tab of Settings and of its section of a project's settings, the
+project's Specs tab, "Write the spec" on a ticket's row and a spec's page; the rest is a proposal. Written from a discussion with the maintainer
 (November 2026), and settled with their answers of 2026-11-03 ("Decisions taken"). No question is
 left open but the one in "Open questions".
 
@@ -389,6 +391,15 @@ Settings, in order: Judge, Specs, Compaction, Review, Providers, Rules, Appearan
 The order is a number each declaration gives; a core tab has its own place, and none is moved by
 another's declaration.
 
+As built (S3): the window reads `extension.list` at its start and again on `extension.changed`,
+`spec.*` and a project's change. Its module `crates/flottille-window/src/extensions/` draws an
+extension's tab (after the Judge's, by its order) and its project section (a tab of the project's
+settings after Rules, while it is on globally) from the declaration; a setting is drawn by its
+kind (a language is a select, its first option the value it has when none is set there). Specs'
+project tab is a third tab beside Pull requests and Tickets, its action on a row is the ticket
+row's button, its page opens from a spec's row. Back to draft is one click from Ready, and asks
+in a confirmation from In progress or Review, which only the development (S5) reaches.
+
 Everything in it follows the rules of the window and its motion: the sections of a tab enter one
 after the other, the switch moves over `HOVER`, the settings fold and unfold with the switch, an
 error appears and leaves animated. Each window issue lists what it animates and ticks the
@@ -473,7 +484,7 @@ development on its own at Ready.
 |---|---|---|
 | S1 (built) | the spec in the store, statuses, the lock, the three modes, the link to 0..n tickets, the CLI | the declaration and the registry, activation global and per project, `extensions.toml`, `extension.list`/`set`, the data space, the scan that the core names no extension |
 | S2 (built) | the `spec` tool for a root, "New spec" and "Write the spec", questions and answers, Ready and Draft | tools given by an extension, the Action trigger |
-| S3 | the project's Specs tab, a spec's page, its settings tab | screens: a project tab, a page, an action on a ticket's row, the renderer of an extension's tab and of its project section |
+| S3 (built) | the project's Specs tab, a spec's page, its settings tab | screens: a project tab, a page, an action on a ticket's row, the renderer of an extension's tab and of its project section |
 | S4 | the ticket side of the modes | Core event triggers (a ticket changed) |
 | S5 | launching the development, the statuses read from what Flottille sees | Core event triggers (an agent ended, a pull request opened or merged) |
 | S6 | amendments | nothing new: actions of the tool given by who calls it |

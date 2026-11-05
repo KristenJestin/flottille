@@ -24,6 +24,7 @@ use serde_json::Value;
 
 use crate::actions::Command;
 use crate::commands::perform_later;
+use crate::extensions::specs::{self, SpecsTab, WriteSpec};
 use crate::model::ago;
 use crate::project::repository_label;
 use crate::project_settings::Reveal;
@@ -475,6 +476,12 @@ pub struct ProjectItems {
     marks: HashMap<String, CiMark>,
     detail: Option<Detail>,
     detail_open: bool,
+    /// The Specs tab is the one chosen, while Specs is on in the project.
+    specs_chosen: bool,
+    /// The Specs tab, made the first time it is drawn.
+    specs: Option<Entity<SpecsTab>>,
+    /// "Write the spec" of a ticket.
+    write_spec: Entity<WriteSpec>,
     /// The last read asked (`items.list` or `items.show`), and the `items.list` last applied.
     asked: u64,
     listed_at: u64,
@@ -493,7 +500,11 @@ struct CiMark {
 }
 
 impl ProjectItems {
-    pub fn new(shell: WeakEntity<Shell>, project: String) -> Self {
+    pub fn new(shell: WeakEntity<Shell>, project: String, cx: &mut Context<Self>) -> Self {
+        let write_spec = {
+            let (shell, project) = (shell.clone(), project.clone());
+            cx.new(|_| WriteSpec::new(shell, project))
+        };
         Self {
             shell,
             project,
@@ -506,6 +517,9 @@ impl ProjectItems {
             marks: HashMap::new(),
             detail: None,
             detail_open: false,
+            specs_chosen: false,
+            specs: None,
+            write_spec,
             asked: 0,
             listed_at: 0,
             lists_asked: 0,
@@ -642,6 +656,37 @@ impl ProjectItems {
 
     pub fn choose(&mut self, tab: Kind, cx: &mut Context<Self>) {
         self.tab = tab;
+        self.specs_chosen = false;
+        cx.notify();
+    }
+
+    /// Chooses the Specs tab.
+    pub fn choose_specs(&mut self, cx: &mut Context<Self>) {
+        self.specs_chosen = true;
+        cx.notify();
+    }
+
+    /// Whether the Specs tab is the one shown.
+    pub fn specs_shown(&self, cx: &App) -> bool {
+        self.specs_chosen && self.specs_on(cx)
+    }
+
+    /// Whether Specs is on in the project: its tab and the tickets' action show.
+    fn specs_on(&self, cx: &App) -> bool {
+        self.shell.upgrade().is_some_and(|shell| {
+            shell
+                .read(cx)
+                .extensions()
+                .read(cx)
+                .active(specs::NAME, &self.project)
+        })
+    }
+
+    /// What Specs lists changed: drawn again.
+    pub fn extensions_moved(&mut self, cx: &mut Context<Self>) {
+        if let Some(specs) = &self.specs {
+            specs.update(cx, |_, cx| cx.notify());
+        }
         cx.notify();
     }
 
@@ -845,9 +890,21 @@ impl ProjectItems {
             .test_support();
         let this = cx.weak_entity();
         let clicked = row.clone();
+        let action = (row.kind == "ticket" && self.specs_on(cx)).then(|| {
+            specs::ticket_action(
+                &self.shell,
+                &self.write_spec,
+                &self.project,
+                id.clone(),
+                row.label(),
+                row.title.clone(),
+                cx,
+            )
+        });
         ListRow::new(ElementId::Name(id.into()), row.title.clone())
             .leading(leading)
             .below(below)
+            .when_some(action, |row, action| row.trailing(action))
             .on_click(move |_, _, cx| {
                 this.update(cx, |this, cx| this.open_detail(clicked.clone(), cx))
                     .ok();
@@ -1282,14 +1339,33 @@ impl Render for ProjectItems {
             },
         );
         let this = cx.weak_entity();
-        let tabs = Tabs::new("project-items-tabs", "Lists", tab.index())
+        // Specs' tab, while Specs is on in the project.
+        let specs_on = self.specs_on(cx);
+        let specs_shown = specs_on && self.specs_chosen;
+        let spec_count = specs_on.then(|| {
+            self.shell
+                .upgrade()
+                .map(|shell| {
+                    let registry = shell.read(cx).extensions().clone();
+                    registry.read(cx).specs().of(&self.project).len()
+                })
+                .unwrap_or_default()
+        });
+        let chosen = if specs_shown { 2 } else { tab.index() };
+        let tabs = Tabs::new("project-items-tabs", "Lists", chosen)
             .counted("pulls", "Pull requests", counts[0].to_string())
             .counted("tickets", "Tickets", counts[1].to_string())
+            .when_some(spec_count, |tabs, count| {
+                tabs.counted("specs", "Specs", count.to_string())
+            })
             .on_choose({
                 let this = this.clone();
                 move |at, _, cx| {
-                    let tab = [Kind::Pulls, Kind::Tickets][at];
-                    this.update(cx, |this, cx| this.choose(tab, cx)).ok();
+                    this.update(cx, |this, cx| match at {
+                        2 => this.choose_specs(cx),
+                        at => this.choose([Kind::Pulls, Kind::Tickets][at], cx),
+                    })
+                    .ok();
                 }
             });
         let not_set = {
@@ -1384,8 +1460,19 @@ impl Render for ProjectItems {
             ))
             .child(presence("project-items-list-block", present, card));
         let shown_key = match tab {
+            _ if specs_shown => "specs",
             Kind::Pulls => "pulls",
             Kind::Tickets => "tickets",
+        };
+        let body = match specs_shown {
+            true => {
+                let (shell, project) = (self.shell.clone(), self.project.clone());
+                self.specs
+                    .get_or_insert_with(|| cx.new(|cx| SpecsTab::new(shell, project, window, cx)))
+                    .clone()
+                    .into_any_element()
+            }
+            false => body.into_any_element(),
         };
         let modal = self.detail_modal(cx);
         Section::new("project-items", "Pull requests and tickets")
@@ -1400,6 +1487,7 @@ impl Render for ProjectItems {
                 body,
             ))
             .children(modal)
+            .when(specs_on, |section| section.child(self.write_spec.clone()))
     }
 }
 
