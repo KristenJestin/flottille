@@ -42,8 +42,8 @@ fn root(user: &User) -> (String, Mcp) {
     (id, Mcp::initialize(&url, &authorization))
 }
 
-/// Two sessions of `app`, the first let by the user write to the second: their ids.
-fn pair(user: &User) -> (String, String) {
+/// The project `app` over a throwaway repository.
+fn app(user: &User) {
     let folder = user.path("work/app");
     user.git_init(&folder);
     std::fs::write(folder.join("README.md"), "app\n").unwrap();
@@ -52,18 +52,27 @@ fn pair(user: &User) -> (String, String) {
     user.call("project.add", json!({"folder": folder, "name": "app"}))
         .unwrap();
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
-    let (writer, mcp) = root(user);
-    let (session, _) = root(user);
+}
+
+/// A first message from `mcp`'s session to `session`, held for the user's leave: its request.
+fn first_send(mcp: &Mcp, session: &str) -> u64 {
     let held = mcp.call(
         "session_send",
         json!({"session": session, "text": "Hello."}),
     );
-    let number: u64 = held
-        .text
+    held.text
         .strip_prefix("Waiting for the user's approval, request #")
         .and_then(|rest| rest.split_once('.'))
         .map(|(number, _)| number.parse().unwrap())
-        .unwrap_or_else(|| panic!("not held: {}", held.text));
+        .unwrap_or_else(|| panic!("not held: {}", held.text))
+}
+
+/// Two sessions of `app`, the first let by the user write to the second: their ids.
+fn pair(user: &User) -> (String, String) {
+    app(user);
+    let (writer, mcp) = root(user);
+    let (session, _) = root(user);
+    let number = first_send(&mcp, &session);
     user.call("approval.approve", json!({"number": number}))
         .unwrap();
     let store = Store::open(&user.path("state/flottille/flottille.db")).unwrap();
@@ -201,4 +210,32 @@ fn the_leave_is_listed_on_both_sessions_and_can_be_withdrawn(cx: &mut TestAppCon
         .call("leave.list", json!({"session": session}))
         .unwrap();
     assert_eq!(listed["leaves"], json!([]), "{listed}");
+}
+
+#[gpui_kit::test]
+fn the_leave_card_says_what_allowing_it_gives(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent().with_allowing_judge();
+    app(&user);
+    let (writer, mcp) = root(&user);
+    let (session, _) = root(&user);
+    let number = first_send(&mcp, &session);
+    let (shell, cx) = window(&user, cx);
+    open(&shell, cx, &writer);
+    until(&shell, cx, "the card is shown", |cx| {
+        present(cx, &format!("allow-{number}"))
+    });
+    settle(cx);
+
+    cx.update(|window, cx| window.click(format!("approval-details-{number}"), cx));
+    settle(cx);
+
+    assert_eq!(
+        label(cx, &format!("approval-base-{number}")).as_deref(),
+        Some(flottille_window::session::LEAVE_SAYS)
+    );
+    assert_eq!(
+        flottille_window::session::LEAVE_SAYS,
+        "Flottille always asks you this, in every mode: allowing it lets this session write to \
+         that one until either ends or you withdraw it."
+    );
 }

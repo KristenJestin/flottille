@@ -2684,6 +2684,19 @@ pub struct ApprovalCard {
 }
 
 impl ApprovalCard {
+    /// Why a base card always comes back: a session's first message to another asks a leave,
+    /// which the daemon's reason names.
+    pub fn always_says(&self) -> &'static str {
+        let leave = self
+            .why
+            .as_deref()
+            .is_some_and(|why| why.contains("has not written to that one before"));
+        match leave {
+            true => LEAVE_SAYS,
+            false => BASE_SAYS,
+        }
+    }
+
     /// The one-line record a decided card folds into.
     pub fn record(&self) -> Option<String> {
         let said = match self.decision.as_deref()? {
@@ -4418,6 +4431,12 @@ impl Row {
 /// Why a base card comes back whatever the mode, said on it.
 pub const BASE_SAYS: &str = "Flottille always asks you for this, in Ask and in Auto: it may lose \
                              work or reach what must stay private, so no judge decides it.";
+
+/// Why the first message of a session to another always comes back, said on its card instead of
+/// `BASE_SAYS`: what it asks is a lasting leave, in every mode.
+pub const LEAVE_SAYS: &str = "Flottille always asks you this, in every mode: allowing it lets \
+                              this session write to that one until either ends or you withdraw \
+                              it.";
 
 /// The time a thought took, or has taken so far: it ticks only while the thought runs.
 pub struct ThinkingTimer {
