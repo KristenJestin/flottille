@@ -547,6 +547,36 @@ fn rail_over_three<'a>(
 }
 
 #[gpui_kit::test]
+fn the_window_shows_the_new_name(cx: &mut TestAppContext) {
+    let user = user();
+    trio(&user);
+    let (shell, cx) = rail_over_three(&user, cx);
+    for repository in ["api", "web", "lib"] {
+        let label = label_of(&format!("rail-status-{repository}"), cx).unwrap();
+        assert!(label.starts_with("trio/login · "), "{label}");
+    }
+
+    // An agent renames the branch it never pushed.
+    user.call(
+        "workspace.rename_branch",
+        json!({"project": "trio", "name": "login", "branch": "fix/ABC-12-login"}),
+    )
+    .unwrap();
+    until(&shell, cx, "the rail says the new name", |cx| {
+        label_of("rail-status-api", cx)
+            .is_some_and(|label| label.starts_with("fix/ABC-12-login · "))
+    });
+    // It fades in as a value that changes, then rests.
+    assert!(pending_frames(cx) > 0, "the new name appears at once");
+    settle(cx);
+    assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
+    for repository in ["api", "web", "lib"] {
+        let label = label_of(&format!("rail-status-{repository}"), cx).unwrap();
+        assert!(label.starts_with("fix/ABC-12-login · "), "{label}");
+    }
+}
+
+#[gpui_kit::test]
 fn the_rail_says_once_that_several_repositories_have_no_forge(cx: &mut TestAppContext) {
     let user = user();
     trio(&user);

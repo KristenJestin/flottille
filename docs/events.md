@@ -218,7 +218,8 @@ The workspace was linked to a ticket, or unlinked ([`tickets.md`](tickets.md)).
 ### `workspace.changed`
 
 Every worktree made of the workspace is on one branch other than the recorded one (a `git switch`
-in it), and the record took it ([`workspaces.md`](workspaces.md), "The branch").
+in it, or `workspace.rename_branch`), and the record took it ([`workspaces.md`](workspaces.md),
+"The branch").
 
 | Field | |
 |---|---|
