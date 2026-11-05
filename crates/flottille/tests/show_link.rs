@@ -225,3 +225,99 @@ fn run_refuses_xdg_open_and_points_to_show_link() {
     assert!(user.launches().is_empty(), "{:?}", user.launches());
     assert!(shown(&user, &agent).is_empty());
 }
+
+/// A file of the place with these bytes and this mode.
+fn written(user: &User, name: &str, text: &str, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = user.path("work/app").join(name);
+    std::fs::write(&path, text).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[test]
+fn a_shown_executable_file_is_refused() {
+    let user = user();
+    let (agent, mcp) = session(&user);
+    // No extension a desktop runs: the execute bit alone makes it a program.
+    for mode in [0o755, 0o700, 0o644 | 0o010, 0o644 | 0o001] {
+        written(&user, "notes", "#!/bin/sh\necho hi\n", mode);
+        let why = refused(mcp.call("web", json!({"action": "show_link", "path": "notes"})));
+        assert!(why.contains("executable"), "{mode:o}: {why}");
+    }
+    assert!(shown(&user, &agent).is_empty());
+    assert!(user.launches().is_empty());
+}
+
+#[test]
+fn a_shown_desktop_entry_is_refused() {
+    let user = user();
+    let (agent, mcp) = session(&user);
+    let entry = "[Desktop Entry]\nType=Application\nName=Report\nExec=touch /tmp/pwned\n";
+    for name in ["report.desktop", "Report.DESKTOP"] {
+        written(&user, name, entry, 0o644);
+        let why = refused(mcp.call("web", json!({"action": "show_link", "path": name})));
+        assert!(why.contains("a desktop runs"), "{name}: {why}");
+    }
+    assert!(shown(&user, &agent).is_empty());
+}
+
+#[test]
+fn a_shown_script_by_extension_is_refused() {
+    let user = user();
+    let (agent, mcp) = session(&user);
+    for name in [
+        "build.sh",
+        "run.py",
+        "Tool.AppImage",
+        "app.JAR",
+        "setup.exe",
+        "go.command",
+        "x.bash",
+        "x.zsh",
+        "x.fish",
+        "x.pl",
+        "x.rb",
+        "x.js",
+        "x.run",
+        "x.bin",
+        "x.msi",
+        "x.bat",
+        "x.cmd",
+        "x.ps1",
+        "x.app",
+        "x.deb",
+        "x.rpm",
+        "x.flatpakref",
+    ] {
+        written(&user, name, "data\n", 0o644);
+        let why = refused(mcp.call("web", json!({"action": "show_link", "path": name})));
+        assert!(why.contains("a desktop runs"), "{name}: {why}");
+    }
+    assert!(shown(&user, &agent).is_empty());
+}
+
+#[test]
+fn a_shown_document_still_opens() {
+    let user = user();
+    let (agent, mcp) = session(&user);
+    for name in ["report.html", "notes.md", "plot.png", "Makefile"] {
+        written(&user, name, "data\n", 0o644);
+        done(mcp.call("web", json!({"action": "show_link", "path": name})));
+    }
+    assert_eq!(shown(&user, &agent).len(), 4);
+}
+
+#[test]
+fn a_shown_fifo_is_refused() {
+    let user = user();
+    let (agent, mcp) = session(&user);
+    let fifo = user.path("work/app/pipe");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let why = refused(mcp.call("web", json!({"action": "show_link", "path": "pipe"})));
+    assert!(why.contains("not a file"), "{why}");
+    assert!(shown(&user, &agent).is_empty());
+}

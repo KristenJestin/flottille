@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use flottille_core::secrets;
+use flottille_core::{secrets, shown};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use url::Url;
@@ -109,8 +109,11 @@ fn file(place: &Place, named: &str) -> Result<Link, String> {
             place.root.display()
         )));
     }
-    if !resolved.path.is_file() {
-        return Err(refuse(format!("{} is not a file", resolved.shown)));
+    if let Err(why) = shown::document(&resolved.path) {
+        return Err(refuse(format!(
+            "{}: {why}; show_link shows a document, never a program",
+            resolved.shown
+        )));
     }
     Ok(Link::File {
         real: resolved.path,
