@@ -2177,3 +2177,152 @@ fn a_queued_message_unfolds_into_the_composer_and_folds_away_when_sent(cx: &mut 
     at_rest(cx);
     assert!(!has(queued_id(&delivery), cx));
 }
+
+/// The project's command `ship`.
+fn with_ship(user: &User) {
+    user.call(
+        "command.add",
+        json!({"project": "app", "name": "ship", "description": "Ship it",
+            "instructions": "Push the branch, then open its pull request."}),
+    )
+    .unwrap();
+}
+
+/// The block of the user's message that used commands, and where it is.
+fn commanded(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Option<(usize, Block)> {
+    blocks(page, cx).into_iter().enumerate().find(|(_, block)| {
+        matches!(
+            block,
+            Block::Message {
+                commands: Some(_),
+                ..
+            }
+        )
+    })
+}
+
+/// The heights of `id` on each frame, until every animation ended.
+fn heights_while_it_moves(id: &str, cx: &mut VisualTestContext) -> Vec<f32> {
+    let mut seen = Vec::new();
+    for _ in 0..40 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        seen.extend(cx.update(|window, _| {
+            window
+                .try_find(id.to_owned())
+                .map(|found| f32::from(found.bounds().size.height))
+        }));
+    }
+    seen
+}
+
+#[gpui_kit::test]
+fn a_command_message_shows_what_the_user_typed(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    with_ship(&user);
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": "fix the test, then /ship"}),
+    )
+    .unwrap();
+    until(&shell, cx, "the message shows", |cx| {
+        commanded(&page, cx).is_some()
+    });
+    settle(cx);
+
+    let (at, block) = commanded(&page, cx).unwrap();
+    let Block::Message {
+        text,
+        commands: Some(commanded),
+        ..
+    } = block
+    else {
+        unreachable!()
+    };
+    assert_eq!(text, "fix the test, then /ship", "what the user typed");
+    assert_eq!(commanded.names, ["ship"]);
+    assert!(
+        commanded
+            .received
+            .contains("Push the branch, then open its pull request."),
+        "{}",
+        commanded.received
+    );
+    assert_eq!(
+        flottille_window::session::command_chips(&text, &commanded.names),
+        vec![19..24usize],
+        "the chip is the /ship"
+    );
+    assert!(has(format!("row-{at}-message-text"), cx));
+    assert_eq!(
+        label(format!("row-{at}-received-toggle"), cx).as_deref(),
+        Some(flottille_window::session::RECEIVED)
+    );
+    assert!(
+        !has(format!("row-{at}-received-text"), cx),
+        "what the agent received is folded at first"
+    );
+    // The agent received the commands' text, never the bare `/ship`.
+    assert!(
+        prompts(&user)
+            .iter()
+            .any(|p| p.contains("Push the branch") && p.contains("[command ship]")),
+        "{:?}",
+        prompts(&user)
+    );
+}
+
+#[gpui_kit::test]
+fn what_the_agent_received_unfolds_under_the_message(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    with_ship(&user);
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    user.call("agent.send", json!({"agent": lead, "message": "/ship now"}))
+        .unwrap();
+    until(&shell, cx, "the message shows", |cx| {
+        commanded(&page, cx).is_some()
+    });
+    at_rest(cx);
+    let at = commanded(&page, cx).unwrap().0;
+    let received = format!("row-{at}-received");
+
+    cx.update(|window, cx| window.click(format!("row-{at}-received-toggle"), cx));
+    let unfolding = heights_while_it_moves(&received, cx);
+    assert!(
+        unfolding.len() > 2 && unfolding.windows(2).any(|w| w[0] < w[1]),
+        "it unfolds over frames, never at once: {unfolding:?}"
+    );
+    at_rest(cx);
+    assert!(has(format!("row-{at}-received-text"), cx));
+    let shown = label(format!("row-{at}-received-text"), cx).unwrap_or_default();
+    assert!(shown.contains("Push the branch"), "{shown}");
+    assert!(shown.contains("[command ship] now"), "{shown}");
+
+    cx.update(|window, cx| window.click(format!("row-{at}-received-toggle"), cx));
+    let folding = heights_while_it_moves(&received, cx);
+    assert!(
+        folding.len() > 2 && folding.windows(2).any(|w| w[0] > w[1]),
+        "and folds away over frames: {folding:?}"
+    );
+    at_rest(cx);
+    assert!(!has(format!("row-{at}-received-text"), cx), "folded again");
+}
+
+#[gpui_kit::test]
+fn a_queued_command_message_shows_what_the_user_typed(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    with_ship(&user);
+    let (_shell, page, _, delivery, cx) =
+        with_a_waiting_message(&user, &lead, "work a while", "then /ship it", cx);
+
+    let waiting = page.read_with(cx, |page, cx| page.queued().read(cx).messages().to_vec());
+    assert_eq!(waiting[0].text, "then /ship it");
+    assert_eq!(waiting[0].commands, ["ship"]);
+    assert!(has(format!("queued-{delivery}-text"), cx));
+}

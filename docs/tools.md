@@ -388,6 +388,20 @@ pending requests.
   - no push: `url./dev/null/flottille-refused-push/.pushInsteadOf` set the same way, which
     rewrites every push URL to a path that is no remote, unless the run is itself a `git push`
     (its own line, no wrapper) the user or the judge let through.
+- **A commit's message is checked as the project declares**: with `message_checks` in the
+  project's file (`docs/projects.md`, "Message checks"), each `git commit` the line runs, at any of
+  its layers, has its message (its `-m`, or its `-F` file) given to each check before the run
+  starts, and so has a `git merge` that makes a commit, a `git commit-tree`, and the user's git
+  alias of one of them; a check that fails or cannot run refuses the run: nothing is committed,
+  and the answer names the check, how it ended and the end of its output, masked. A commit
+  whose message cannot be known before it is made (an editor, `-C`, `--amend --no-edit`,
+  `--fixup`, a merge without `-m`, a `git revert` without `--no-commit`) is refused then,
+  saying to give it with `-m` or `-F`, or to commit with `git commit -m`. The commits of
+  `git cherry-pick`, `git am`, `git rebase` and `git pull` are not checked, and what git adds
+  to a message after the checks (`--trailer`, `--signoff`, `--cleanup`) is not in what they
+  read; the `-F` file is read once for the checks and again by git. A call given up stops its
+  checks. The checks are the user's lines, run by the daemon in the run's folder and
+  environment, never a hook of the repository: git still runs none.
 - **A push is the gate's**: `git push` is a call to judge, a forced one base, and only the push
   the gate read and let through goes out. A harmless command (a task, a test run)
   cannot push from a script the gate never read. A push from a workspace is also refused, before
@@ -440,7 +454,7 @@ pending requests.
 
 | Tool | |
 |---|---|
-| `forge {action, workspace?, repository?, number?, state?, branch?, detail?, fresh?, title?, body?, draft?, reviewers?, labels?, delete_branch_on_merge?, delete_branch?, reviewers_add?, reviewers_remove?, labels_add?, labels_remove?, base?, waive?, method?, events?, from?, minutes?, pipeline?, variables?, run?, step?, do?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
+| `forge {action, workspace?, repository?, number?, state?, branch?, detail?, fresh?, title?, body?, draft?, reviewers?, labels?, delete_branch_on_merge?, delete_branch?, reviewers_add?, reviewers_remove?, labels_add?, labels_remove?, base?, waive?, method?, message?, events?, from?, minutes?, pipeline?, variables?, run?, step?, do?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
 
 - **The repositories** are those of the agent's place: its workspace's, or the project's in
   `main`. One the place does not take is refused (`refused: X is not a repository of this
@@ -505,7 +519,11 @@ pending requests.
   workspace's branch (`title`, `body`, `draft`, with the project's reviewers), merges it by
   `method`, `squash` (the default), `merge` or `rebase` (refused when no check ran on it or all were skipped, while its
   checks fail or run or a review asks for changes, unless `waive` gives the
-  user's words, which holds the merge for their approval), or re-runs the failed jobs of its last
+  user's words, which holds the merge for their approval), with `message`, by squash only, the
+  squashed commit's message (its subject on the first line, then its body: `gh pr merge --squash
+  --subject … --body …`, `bkt pr merge --message …`; the forge's own when left out; refused by the
+  gate with another method, `refused: forge merge by merge takes no message: …`, or on another
+  action), or re-runs the failed jobs of its last
   commit's pipelines (`docs/commands.md`, "`forge`"). **`create`** also takes `reviewers`
   (added to the project's, none twice), `labels` (GitHub only: Bitbucket has no labels on pull
   requests, and the call is refused saying so, before anything is opened) and
@@ -542,7 +560,13 @@ pending requests.
   (`refs/remotes/<remote>/<branch>`, which a push leaves, with or without `-u`) exists and holds
   the branch's last commit, and refuses otherwise (`refused: app/login is not on origin yet: push
   the branch first: git push -u origin app/login`, or `… is 2 commit(s) ahead of origin: …`); the
-  agent's `run` of `git push` goes through the gate as any push.
+  agent's `run` of `git push` goes through the gate as any push. The project's message checks
+  (`docs/projects.md`, "Message checks") run on `create`'s title, on the title `edit` gives and
+  on `merge`'s message, in the repository's worktree with the variables of the workspace written
+  for, before anything is asked of the forge: one that fails or cannot run
+  refuses the write (`… refused the pull request's title …; nothing was written to the forge`,
+  `… refused the squash message …; nothing was merged`), naming the check and the end of its
+  output.
 - **`comment {number, repository?, body}`** posts a comment on a pull request of a repository of
   the place; **`edit {number, repository?, title?, body?, draft?, reviewers_add?,
   reviewers_remove?, labels_add?, labels_remove?, base?}`** changes it, at least one field
@@ -592,7 +616,7 @@ pending requests.
 `list`, `show`, `subscribe`, `unsubscribe`, `pipelines`, `runs`, `run_view` and `run_logs` go
 through the gate like every call, which allows them in every mode; `create`, `comment`, `edit`,
 `merge`, `checks`, `close`, `reopen`, `run`, `stop` and `step` are to judge, and a merge that waives the checks base. **What a write asks is on the card**: besides its title and body, its reviewers (`Its reviewers, besides the project's: …`), labels, `It adds the reviewers: …`, `It removes the labels: …`, `It moves it onto the base release`, `It marks it ready for review`, `It makes it a draft`, `It deletes the branch when the pull request is merged`, and for a merge `It deletes the source branch on the forge after the merge` (with `(the project's setting Delete the branch on merge)` when that is why). A write is done only once the repository's remote is checked to lead where its forge is declared. **What a
-write posts is shown whole**: its request says `Its title: …` and `Its body: …` in full (the
+write posts is shown whole**: its request says `Its title: …`, `Its body: …` and `Its message: …` in full (the
 arguments recorded are cut at 500 characters), and the judge is given them whole. A title or a
 body longer than the 8,000 characters the judge is given whole is refused (`refused: the body is
 longer than the 8000 characters the user and the judge are shown whole (…): shorten it`); one

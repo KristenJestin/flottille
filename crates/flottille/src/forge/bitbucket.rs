@@ -1584,12 +1584,11 @@ pub(super) async fn write(
                 Branch::Delete => "--close-source=true",
                 _ => "--close-source=false",
             };
-            let args = command(
-                forge,
-                context,
-                &["pr", "merge", &number],
-                &["--strategy", strategy, close],
-            );
+            let mut flags = vec!["--strategy", strategy, close];
+            if let Some(message) = &asked.message {
+                flags.extend(["--message", message.as_str()]);
+            }
+            let args = command(forge, context, &["pr", "merge", &number], &flags);
             match text(&args).await {
                 Ok(_) => Outcome::Done(format!(
                     "The pull request #{number} of {branch} was merged by {method} into {base} \

@@ -29,6 +29,7 @@ use serde_json::{Value, json};
 
 use crate::actions::Command;
 use crate::commands::{CommandsSection, boxed, menu_of, problem_line};
+use crate::message_checks::MessageChecks;
 use crate::programs::{ProgramChecks, program_block};
 use crate::project::repository_label;
 use crate::repositories::{ProjectRepositories, RepositoryInfo};
@@ -402,6 +403,8 @@ pub struct ProjectSettingsPage {
     narrow: bool,
     /// This project's own rules (`docs/projects.md`, "Rules").
     rules: Entity<RulesEditor>,
+    /// The checks of its agents' messages, under its rules (`docs/projects.md`, "Message checks").
+    message_checks: Entity<MessageChecks>,
     skills: Entity<SkillsSection>,
     commands: Entity<CommandsSection>,
     tasks: Entity<TasksSection>,
@@ -426,6 +429,7 @@ impl ProjectSettingsPage {
             let (shell, project) = (shell.clone(), name.clone());
             cx.new(|_| RulesEditor::new(shell, Some(project)))
         };
+        let message_checks = cx.new(|_| MessageChecks::new(shell.clone(), name.clone()));
         let skills = cx.new(|_| SkillsSection::new(shell.clone(), name.clone()));
         let commands = cx.new(|_| CommandsSection::new(shell.clone(), name.clone()));
         let tasks = cx.new(|_| TasksSection::new(shell.clone(), name.clone()));
@@ -502,6 +506,7 @@ impl ProjectSettingsPage {
             removed: None,
             narrow: false,
             rules,
+            message_checks,
             skills,
             commands,
             tasks,
@@ -515,6 +520,10 @@ impl ProjectSettingsPage {
 
     pub fn rules(&self) -> &Entity<RulesEditor> {
         &self.rules
+    }
+
+    pub fn message_checks(&self) -> &Entity<MessageChecks> {
+        &self.message_checks
     }
 
     pub fn skills(&self) -> &Entity<SkillsSection> {
@@ -751,6 +760,9 @@ impl ProjectSettingsPage {
         self.tasks
             .update(cx, |section, cx| section.set_repositories(paths, cx));
         self.tracker = serde_json::from_value::<ProjectTracker>(settings["tracker"].clone()).ok();
+        let checks = strings(&settings["message_checks"]);
+        self.message_checks
+            .update(cx, |section, cx| section.read(checks, window, cx));
         let kept = settings["branch_prefix"].as_str().map(str::to_owned);
         // What was typed stays unless it was only the former value, or a save just wrote it.
         let untouched =
@@ -2256,7 +2268,14 @@ impl Render for ProjectSettingsPage {
                 .child(self.branch_prefix_section(window, cx))
                 .child(self.setup.clone())
                 .into_any_element(),
-            self.rules.clone().into_any_element(),
+            // What checks the agents' messages belongs with how they are told to work.
+            div()
+                .flex()
+                .flex_col()
+                .gap(space::XXL)
+                .child(self.rules.clone())
+                .child(self.message_checks.clone())
+                .into_any_element(),
         ];
         let chosen = self.tab.min(sections.len() - 1);
         let shown = sections.swap_remove(chosen);

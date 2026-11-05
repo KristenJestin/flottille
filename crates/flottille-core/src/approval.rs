@@ -198,6 +198,14 @@ pub struct Delivery {
     /// The images it carries: names of files in the agent's folder of the data folder.
     #[serde(default)]
     pub images: Vec<String>,
+    /// What the user (or a parent) typed, when it used commands and `body` is what the agent
+    /// received for it; masked as `body` is. `None` for a message sent as it was written.
+    #[serde(default)]
+    pub typed: Option<String>,
+    /// The commands it used, in the order of their first use: what the judge reads, never the
+    /// text.
+    #[serde(default)]
+    pub commands: Vec<String>,
 }
 
 pub const BETWEEN_TURNS: &str = "between-turns";

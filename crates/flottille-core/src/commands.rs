@@ -3,6 +3,9 @@
 //! nothing: what its agent does goes through the gate's classes like any call (`docs/design.md`
 //! §7). Not to be mixed up with `crate::command`, which splits a command line.
 
+use std::collections::BTreeMap;
+use std::ops::Range;
+
 use serde::{Deserialize, Serialize};
 
 /// One command of a project, as its file holds it under `[commands.<name>]`.
@@ -86,30 +89,67 @@ impl Command {
     }
 }
 
-/// The message `/name rest` stands for, when `text` starts with the name of one of `commands`:
-/// its instructions, then the rest of the text after a blank line. `None` for any other text,
-/// which is sent as it is. The instructions of a command are given by `instructions`, which reads
-/// the file of one that points at a file; the reason it cannot is the error.
-pub fn expanded<'a>(
-    text: &str,
-    commands: impl IntoIterator<Item = (&'a String, &'a Command)>,
-    instructions: impl FnOnce(&str, &Command) -> Result<String, String>,
-) -> Result<Option<(String, String)>, String> {
-    let Some(rest) = text.trim_start().strip_prefix('/') else {
-        return Ok(None);
-    };
-    let (name, after) = rest
-        .split_once(char::is_whitespace)
-        .map_or((rest, ""), |(name, after)| (name, after.trim()));
-    let Some((name, command)) = commands.into_iter().find(|(known, _)| *known == name) else {
-        return Ok(None);
-    };
-    let mut message = instructions(name, command)?.trim().to_owned();
-    if !after.is_empty() {
-        message.push_str("\n\n");
-        message.push_str(after);
+/// The commands a message uses, where they stand: each `/name` whose `name` is `known`, at the
+/// start of the text or after whitespace, with whitespace or the end after it, as the byte range
+/// of the whole `/name`, and the name. Anything else after a slash (a path, an address, an
+/// unknown name) is text.
+pub fn used(text: &str, known: impl Fn(&str) -> bool) -> Vec<(Range<usize>, &str)> {
+    let mut found = Vec::new();
+    let mut previous: Option<char> = None;
+    for (at, c) in text.char_indices() {
+        let starts = previous.is_none_or(char::is_whitespace);
+        previous = Some(c);
+        if c != '/' || !starts {
+            continue;
+        }
+        let rest = &text[at + 1..];
+        let name = &rest[..rest.find(char::is_whitespace).unwrap_or(rest.len())];
+        if !name.is_empty() && known(name) {
+            found.push((at..at + 1 + name.len(), name));
+        }
     }
-    Ok(Some((name.clone(), message)))
+    found
+}
+
+/// A message that uses commands, as `expanded` reads it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Expanded {
+    /// Each command it uses, in the order of its first use, once: its name and its instructions.
+    pub commands: Vec<(String, String)>,
+    /// The message as it was typed, each `/name` replaced by `[command name]` at its place.
+    pub marked: String,
+}
+
+/// What `text` stands for when it uses some of `commands` (`used`): the commands, their
+/// instructions read once each by `instructions` (which reads the file of one that points at a
+/// file; the reason it cannot is the error), and the text with each one marked. `None` for a text
+/// that uses none, which is sent as it is.
+pub fn expanded(
+    text: &str,
+    commands: &BTreeMap<String, Command>,
+    mut instructions: impl FnMut(&str, &Command) -> Result<String, String>,
+) -> Result<Option<Expanded>, String> {
+    let found = used(text, |name| commands.contains_key(name));
+    if found.is_empty() {
+        return Ok(None);
+    }
+    let mut given: Vec<(String, String)> = Vec::new();
+    let mut marked = String::new();
+    let mut after = 0;
+    for (range, name) in found {
+        if !given.iter().any(|(known, _)| known == name) {
+            let read = instructions(name, &commands[name])?.trim().to_owned();
+            given.push((name.to_owned(), read));
+        }
+        marked.push_str(&text[after..range.start]);
+        marked.push_str(&format!("[command {name}]"));
+        after = range.end;
+    }
+    marked.push_str(&text[after..]);
+    Ok(Some(Expanded {
+        commands: given,
+        marked,
+    }))
 }
 
 /// The commands Flottille ships, which a project adopts with `flottille command add --template
@@ -233,32 +273,130 @@ mod tests {
         assert!(template("deploy").is_none());
     }
 
+    fn ship_and_deploy() -> BTreeMap<String, Command> {
+        BTreeMap::from([
+            (
+                "ship".to_owned(),
+                Command::new("Ship it", "Push, then open the PR.\n"),
+            ),
+            (
+                "deploy-preview".to_owned(),
+                Command::new("Deploy a preview", "Deploy the branch.\n"),
+            ),
+        ])
+    }
+
+    fn own(_: &str, command: &Command) -> Result<String, String> {
+        Ok(command.instructions.clone())
+    }
+
     #[test]
     fn slash_name_sends_the_instructions_with_the_trailing_text() {
-        let commands = [(
-            "ship".to_owned(),
-            Command::new("Ship it", "Push, then open the PR.\n"),
-        )];
-        let each = || commands.iter().map(|(name, command)| (name, command));
-        let own = |_: &str, command: &Command| Ok(command.instructions.clone());
+        let commands = ship_and_deploy();
         assert_eq!(
-            expanded("/ship only the api, please", each(), own),
-            Ok(Some((
-                "ship".into(),
-                "Push, then open the PR.\n\nonly the api, please".into()
-            )))
+            expanded("/ship only the api, please", &commands, own),
+            Ok(Some(Expanded {
+                commands: vec![("ship".into(), "Push, then open the PR.".into())],
+                marked: "[command ship] only the api, please".into(),
+            }))
         );
         assert_eq!(
-            expanded("  /ship", each(), own),
-            Ok(Some(("ship".into(), "Push, then open the PR.".into())))
+            expanded("  /ship", &commands, own).unwrap().unwrap().marked,
+            "  [command ship]"
         );
-        assert_eq!(expanded("/shipping now", each(), own), Ok(None));
+        assert_eq!(expanded("/shipping now", &commands, own), Ok(None));
         // A command whose file cannot be read sends nothing: the reason is the answer.
         assert_eq!(
-            expanded("/ship", each(), |_, _| Err("it is not there".into())),
+            expanded("/ship", &commands, |_, _| Err("it is not there".into())),
             Err("it is not there".into())
         );
-        assert_eq!(expanded("ship it /ship", each(), own), Ok(None));
-        assert_eq!(expanded("/", each(), own), Ok(None));
+        assert_eq!(expanded("/", &commands, own), Ok(None));
+    }
+
+    #[test]
+    fn a_command_after_text_is_expanded_with_the_text_kept_in_order() {
+        let commands = ship_and_deploy();
+        assert_eq!(
+            expanded("test /deploy-preview then tell me", &commands, own),
+            Ok(Some(Expanded {
+                commands: vec![("deploy-preview".into(), "Deploy the branch.".into())],
+                marked: "test [command deploy-preview] then tell me".into(),
+            }))
+        );
+        assert_eq!(
+            expanded("ship it\n/ship", &commands, own)
+                .unwrap()
+                .unwrap()
+                .marked,
+            "ship it\n[command ship]"
+        );
+    }
+
+    #[test]
+    fn two_commands_keep_the_order_of_their_first_use() {
+        let commands = ship_and_deploy();
+        let read = expanded(
+            "first /ship, no: /ship then /deploy-preview",
+            &commands,
+            own,
+        );
+        // `/ship,` is not a command: a comma follows the name.
+        assert_eq!(
+            read,
+            Ok(Some(Expanded {
+                commands: vec![
+                    ("ship".into(), "Push, then open the PR.".into()),
+                    ("deploy-preview".into(), "Deploy the branch.".into()),
+                ],
+                marked: "first /ship, no: [command ship] then [command deploy-preview]".into(),
+            }))
+        );
+        let read = expanded("/deploy-preview /ship", &commands, own)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            read.commands
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["deploy-preview", "ship"],
+            "in the order of their first use, not the file's"
+        );
+    }
+
+    #[test]
+    fn a_command_used_twice_is_given_once() {
+        let commands = ship_and_deploy();
+        let mut read = 0;
+        let got = expanded("/ship this, then /ship that", &commands, |_, command| {
+            read += 1;
+            Ok(command.instructions.clone())
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(read, 1, "its file is read once");
+        assert_eq!(got.commands.len(), 1);
+        assert_eq!(got.marked, "[command ship] this, then [command ship] that");
+    }
+
+    #[test]
+    fn a_path_or_an_unknown_name_after_a_slash_stays_text() {
+        let commands = ship_and_deploy();
+        for text in [
+            "look at /usr/bin",
+            "https://example.org/ship",
+            "a/ship b",
+            "/deploy now",
+            "/ship/",
+            "(/ship)",
+        ] {
+            assert_eq!(expanded(text, &commands, own), Ok(None), "{text}");
+        }
+        let known = |name: &str| commands.contains_key(name);
+        assert_eq!(
+            used("x /ship\t/deploy-preview\n/nope", known),
+            [(2..7, "ship"), (8..23, "deploy-preview")]
+        );
+        assert_eq!(used("é /ship", known), [(3..8, "ship")]);
     }
 }

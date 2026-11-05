@@ -82,7 +82,10 @@ impl Pending {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Queued {
     pub delivery: String,
+    /// What the user typed.
     pub text: String,
+    /// The commands it used, in the order of their first use; empty for a plain message.
+    pub commands: Vec<String>,
     /// How many pictures go with it.
     pub images: usize,
     /// Their names, which `agent.image` reads back.
@@ -125,6 +128,12 @@ impl TreeAgent {
                 .map(|queued| Queued {
                     delivery: text(&queued["delivery"]).unwrap_or_default(),
                     text: text(&queued["text"]).unwrap_or_default(),
+                    commands: queued["commands"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|name| name.as_str().map(str::to_owned))
+                        .collect(),
                     images: queued["images"].as_u64().unwrap_or(0) as usize,
                     pictures: queued["pictures"]
                         .as_array()

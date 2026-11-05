@@ -357,6 +357,7 @@ const SERVED: [Definition; 28] = [
                 "delete_branch": {"type": "boolean", "description": "close: also delete the pull request's branch, unless a workspace is on it or it comes from a fork. merge: delete its source branch after the merge; the project's setting when left out; never a branch the workspace resumed."},
                 "waive": {"type": "string", "description": "merge: the user's words letting a blocked pull request be merged; held for them."},
                 "method": {"type": "string", "enum": ["squash", "merge", "rebase"], "description": "merge: squash when left out."},
+                "message": {"type": "string", "description": "merge by squash: the squashed commit's message, its subject on the first line; the forge's own when left out."},
                 "events": {"type": "array", "items": {"enum": crate::forge::EVENTS}},
                 "from": {"enum": crate::subscriptions::FROM, "description": "subscribe: whose reviews and comments count: anyone (the default), or people (no bot nor agent)."},
                 "minutes": {"type": "integer", "minimum": 1, "maximum": crate::subscriptions::LONGEST_MINUTES, "description": "subscribe: how long it waits; sized by CI when left out, else 60."},
@@ -1299,19 +1300,7 @@ pub fn grant_of(daemon: &Daemon, agent: &Agent) -> Result<Grant, String> {
                 .read(|store| store.workspace(&project.name, name))
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("project {} has no workspace named {name}", project.name))?;
-            Place {
-                project: project.name.clone(),
-                workspace: Some(name.clone()),
-                root: agent.folder.clone(),
-                repositories: workspace
-                    .repositories
-                    .iter()
-                    .map(|r| (r.path.clone(), workspace.folder_of(&r.path)))
-                    .collect(),
-                branch: workspace.branch.clone(),
-                variables: workspace.variables.clone(),
-                home: std::env::var_os("HOME").map(Into::into),
-            }
+            Place::of_workspace(&workspace, agent.folder.clone())
         }
         None => Place::main(&project, agent.folder.clone()),
     };
