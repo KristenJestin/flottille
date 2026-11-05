@@ -1000,7 +1000,7 @@ agent never drives the user's desktop through a program (`run` has no graphical 
   others), and its extension, compared without case, is none a desktop runs or installs
   (`.desktop`, `.sh`, `.bash`, `.zsh`, `.fish`, `.py`, `.pl`, `.rb`, `.js`, `.AppImage`, `.run`,
   `.bin`, `.jar`, `.exe`, `.msi`, `.bat`, `.cmd`, `.ps1`, `.command`, `.app`, `.deb`, `.rpm`,
-  `.flatpakref`). Each refusal says why (`refused: run.sh: a .sh file is one a desktop runs, and
+  `.flatpakref`, `.flatpak`, `.snap`, `.jnlp`, `.php`, `.lua`, `.vbs`, `.scr`, `.com`, `.lnk`, `.pkg`, `.dmg`). Each refusal says why (`refused: run.sh: a .sh file is one a desktop runs, and
   opening it would run it; show_link shows a document, never a program`). The URL and the path are
   exclusive, and a title is at most 120 characters. The tool's own address check is not `web
   read`'s: a link is for the user's eyes, so `localhost` (a dev server) is allowed.

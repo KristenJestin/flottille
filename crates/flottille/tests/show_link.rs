@@ -288,6 +288,17 @@ fn a_shown_script_by_extension_is_refused() {
         "x.deb",
         "x.rpm",
         "x.flatpakref",
+        "x.flatpak",
+        "x.SNAP",
+        "x.jnlp",
+        "x.php",
+        "x.lua",
+        "x.vbs",
+        "x.scr",
+        "x.com",
+        "x.lnk",
+        "x.pkg",
+        "x.dmg",
     ] {
         written(&user, name, "data\n", 0o644);
         let why = refused(mcp.call("web", json!({"action": "show_link", "path": name})));

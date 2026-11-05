@@ -31,6 +31,17 @@ pub const RUN_EXTENSIONS: &[&str] = &[
     "deb",
     "rpm",
     "flatpakref",
+    "flatpak",
+    "snap",
+    "jnlp",
+    "php",
+    "lua",
+    "vbs",
+    "scr",
+    "com",
+    "lnk",
+    "pkg",
+    "dmg",
 ];
 
 /// Whether `path` may be opened by the system's default handler, or why not. The path is taken as
