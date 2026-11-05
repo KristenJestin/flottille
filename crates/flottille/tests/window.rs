@@ -11373,6 +11373,45 @@ fn the_settings_page_sets_the_default_and_the_project_page_its_own(cx: &mut Test
 }
 
 #[gpui_kit::test]
+fn the_branch_prefix_field_of_the_project_s_settings_accepts_an_empty_prefix(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_project_settings(&shell, "atlas", cx);
+    choose_tab("setup", cx);
+    settle(cx);
+
+    // The slug of the name is what the file gives, shown in the field.
+    assert_eq!(
+        page.read_with(cx, |page, _| page.branch_prefix().map(str::to_owned)),
+        Some("atlas".to_owned())
+    );
+    assert_eq!(
+        page.read_with(cx, |page, cx| page.branch_prefix_typed(cx)),
+        "atlas"
+    );
+    assert!(!page.read_with(cx, |page, cx| page.branch_prefix_savable(cx)));
+
+    // Emptied: Save keeps `branch_prefix = ""`, and the daemon says so.
+    let field = page
+        .read_with(cx, |page, _| page.branch_prefix_field().cloned())
+        .expect("the field is made once the page is drawn");
+    field.update_in(cx, |field, window, cx| field.set_value("", window, cx));
+    settle(cx);
+    assert!(page.read_with(cx, |page, cx| page.branch_prefix_savable(cx)));
+    cx.update(|window, cx| window.click("branch-prefix-save-atlas", cx));
+    until(&shell, cx, "the daemon keeps the empty prefix", |cx| {
+        page.read_with(cx, |page, _| page.branch_prefix() == Some(""))
+    });
+    let text = std::fs::read_to_string(user.project_file("atlas")).unwrap();
+    assert!(text.contains("branch_prefix = \"\"\n"), "{text}");
+    toast_said(&shell, "Branch prefix saved", cx);
+    assert!(!page.read_with(cx, |page, cx| page.branch_prefix_savable(cx)));
+}
+
+#[gpui_kit::test]
 fn a_relative_folder_is_refused_under_its_field_and_nothing_is_written(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");
