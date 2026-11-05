@@ -764,12 +764,13 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   time and a Copy icon button (a toast says it is copied); each step the Auto judge let through
   says "allowed by the judge" (a ticket or a pull request created included), and the folded line
   of its steps says it too; a message the user sent while the root works stays under the
-  conversation, above the composer, drawn as waiting (quieter, "Sent when the agent finishes its
-  step"), until the root reads it between its turns and it is a message like the others (the
-  queued deliveries of `agent.tree`), with three buttons while it waits: Send now (stops the
+  conversation, above the composer, drawn as waiting (quieter, with its pictures as small
+  thumbnails, and one short line, "Queued · after this step", whose tooltip says "Sent when the
+  agent finishes its step"), until the root reads it between its turns and it is a message like
+  the others (the queued deliveries of `agent.tree`), with three buttons while it waits: Send now (stops the
   root's turn and hands it this message next), Edit (takes it back into the composer, text and
   pictures, after what is typed) and Cancel (takes it back); the daemon checks that the root has
-  not read it in one transaction, and says "already read by the agent" in a toast if it has; and a composer that writes to the root, with the session's mode
+  not read it in one transaction, and says "already read by the agent" in a toast if it has; and a composer that writes to the root (it carries 20 pictures at most; a refusal, of a picture or of a message, is a toast and never changes the composer's height; what appears in it unfolds and what leaves folds away), with the session's mode
   (an Ask | Auto | Full control, with a warning icon when Auto has no judge, its highlight in the
   alarm colour on Full, each step Full let through saying "allowed by Full mode") in its bar, whose Stop
   button, in Send's place while a turn runs and Send has nothing to send (the two cross-fade), and

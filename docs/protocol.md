@@ -1039,8 +1039,8 @@ own question waits for the user; `context`, how much of its context the agent us
 report (`agent.usage`), in percent, `null` before one and while the window's size is not known;
 `context_tokens`, the tokens its context holds at that report, `null` before one; `queued`, for the root, the messages the
 user wrote to it that wait for it to read them between its turns, the oldest first, each
-`{"delivery", "text", "images", "at"}` (its text masked as it is stored, how many pictures go with
-it, when it was written), empty for a child.
+`{"delivery", "text", "images", "pictures", "at"}` (its text masked as it is stored, how many pictures go with
+it and their names, which `agent.image` reads back, when it was written), empty for a child.
 
 #### `agent.read`
 

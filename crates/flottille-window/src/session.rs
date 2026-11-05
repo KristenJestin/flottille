@@ -1050,6 +1050,20 @@ impl SessionPage {
                 _ => None,
             })
             .flatten()
+            .collect();
+        // The pictures of a message that waits are the root's, shown while the root is.
+        let queued = self.queued.read(cx);
+        let waiting: Vec<String> = match self.shown == queued.session() {
+            true => queued
+                .messages()
+                .iter()
+                .flat_map(|m| m.pictures.clone())
+                .collect(),
+            false => Vec::new(),
+        };
+        let wanted: Vec<String> = wanted
+            .into_iter()
+            .chain(waiting)
             .filter(|name| !self.asked_pictures.contains(name))
             .collect();
         for name in wanted {
@@ -1071,10 +1085,10 @@ impl SessionPage {
         let Some(format) = gpui_kit::ImageFormat::from_mime_type(&image.mime) else {
             return;
         };
-        self.pictures.insert(
-            name.clone(),
-            Arc::new(gpui_kit::Image::from_bytes(format, image.bytes)),
-        );
+        let picture = Arc::new(gpui_kit::Image::from_bytes(format, image.bytes));
+        self.pictures.insert(name.clone(), picture.clone());
+        self.queued
+            .update(cx, |queued, cx| queued.picture_read(&name, picture, cx));
         let rows = self.conversation.read(cx).rows.clone();
         for row in rows {
             if matches!(&*row.read(cx).block, Block::Message { images, .. } if images.contains(&name))
@@ -1121,6 +1135,7 @@ impl SessionPage {
             let images = root.images;
             let queued = root.queued.clone();
             self.queued.update(cx, |list, cx| list.set(queued, cx));
+            self.fetch_pictures(cx);
             self.reply.update(cx, |reply, cx| {
                 reply.set_images(images);
                 reply.set_running(running, cx)
