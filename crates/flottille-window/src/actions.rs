@@ -197,6 +197,11 @@ pub enum Command {
         project: String,
         settings: Value,
     },
+    /// Writes the project's message checks (`project.set_message_checks`).
+    SaveMessageChecks {
+        project: String,
+        checks: Vec<String>,
+    },
     /// Detects the project's repositories again, against its file.
     CheckProject(String),
     /// Forgets the project, never its folder.
@@ -621,6 +626,11 @@ pub enum Outcome {
         project: String,
         read: Result<Value, String>,
         saved: bool,
+    },
+    /// The project's message checks as saved, or why nothing was.
+    MessageChecks {
+        project: String,
+        saved: Result<Vec<String>, String>,
     },
     /// The project's repositories, read, added to or removed from, or why not.
     Repositories {
@@ -1269,6 +1279,24 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             )),
             project,
             saved: true,
+        },
+        Command::SaveMessageChecks { project, checks } => Outcome::MessageChecks {
+            saved: answer(ask_alone(
+                connect,
+                "project.set_message_checks",
+                json!({"name": project, "checks": checks}),
+                bounds.quick,
+            ))
+            .map(|saved| {
+                saved["message_checks"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            }),
+            project,
         },
         Command::Repositories {
             project,

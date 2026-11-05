@@ -32,6 +32,7 @@ mod items;
 mod judge;
 mod leaves;
 mod mcp;
+mod message_checks;
 mod models;
 mod nofollow;
 mod opencode;

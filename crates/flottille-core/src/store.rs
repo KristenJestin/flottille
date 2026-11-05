@@ -2526,6 +2526,20 @@ impl Store {
         Ok(())
     }
 
+    /// Forgets the comment `comment_id` of an item: it was deleted, or its record is replaced.
+    pub fn drop_comment_posts(
+        &self,
+        (project, source, repository, key): (&str, &str, &str, &str),
+        comment_id: &str,
+    ) -> Result<()> {
+        self.connection.execute(
+            "DELETE FROM posts WHERE project = ?1 AND source = ?2 AND repository = ?3 \
+             AND key = ?4 AND kind = 'comment' AND comment_id = ?5",
+            params![project, source, repository, key, comment_id],
+        )?;
+        Ok(())
+    }
+
     /// What was posted on one item, oldest first.
     pub fn posts(
         &self,
@@ -5197,11 +5211,12 @@ mod tests {
             .unwrap();
         assert_eq!(store.last_activity_of(&ids).unwrap(), Some(message.at));
         std::thread::sleep(std::time::Duration::from_millis(5));
-        let (asked, _) = store.ask(&a_request(Some("toolu_01"))).unwrap();
+        let (asked, event) = store.ask(&a_request(Some("toolu_01"))).unwrap();
         assert!(asked.created_at > message.at);
+        // The request's event reads the clock again, a millisecond later at times.
         assert_eq!(
             store.last_activity_of(&ids).unwrap(),
-            Some(asked.created_at)
+            Some(event.unwrap().at)
         );
         assert_eq!(
             store.last_activity_of(&["somebody-else".into()]).unwrap(),
