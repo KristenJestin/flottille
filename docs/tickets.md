@@ -228,15 +228,20 @@ gate is not asked; nothing else writes a ticket for a spec.
   `acli jira workitem view`). Each one whose description is as Flottille last read or wrote it (a
   hash of its whole text, masked, whitespace and the markup a tracker rewrites left out, as for
   the record of a post) gets the spec as its description, in Markdown: its sections in their
-  order, `C` and `D` numbered. What was written becomes the last read, and the description is
+  order, `C` and `D` numbered. The ticket is read again after the write, and what the tracker holds
+  then becomes the last read (what was sent, when that read fails: a tracker rewrites markup, a
+  link kept as its text), and the description is
   recorded as Flottille's by the ticket's key ([`forges.md`](forges.md), "What Flottille posts is
   recorded"). A ticket Flottille never read (a spec made with `spec new --ticket`) is not known to
-  be as it last read it: the user chooses, as when it changed. A spec with no ticket creates one
-  with its title, in the tracker's only Jira project (with several, the creation fails and says
-  so). A failure says why on the spec, which stays Ready.
+  be as it last read it (it says "Flottille has not read ABC-8 yet"): the user chooses, as when it
+  changed. A spec with no ticket creates one with its title, in the tracker's only Jira project
+  (with several, the creation fails and says so); when the ticket is opened and its key cannot be
+  read, the spec says to link it with `spec link`. Any failure says why on the spec, which stays
+  Ready.
 - **Internal.** The ticket is read, never written. The comment of where the spec departs from it
   is posted at Done only by the user (`spec.departures {post}`), on each ticket, and recorded by
-  the id GitHub gives it, or by its text on Jira, as an agent's comment is.
+  the id GitHub gives it, or by its text on Jira, as an agent's comment is. The post is kept per
+  ticket: one that failed on a ticket is made again only on those it did not reach.
 
 The rounds keep no description, so a description a spec wrote emits no event. A comment the user
 posts for a spec is recorded as an agent's is: it shows `posted by an agent`, and `from: people`
