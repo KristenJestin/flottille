@@ -64,6 +64,12 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - if: steps.cargo.outputs.present == 'true'
         run: cargo test --locked
+      # The margin left on the runner, read even when a step above failed.
+      - name: Disk left
+        if: always()
+        run: df -h /
+        # A failure to print it must not hide the verdict above.
+        continue-on-error: true
 
   # The packages (docs/releases.md): main is stable, dev beta, a feature branch its own alpha.
   # `build` runs the branch's code with a token that can only read; `publish`, once `verify`
