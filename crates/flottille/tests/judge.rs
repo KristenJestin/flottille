@@ -562,6 +562,59 @@ fn the_judge_reads_the_commands_recorded_not_the_text() {
 }
 
 #[test]
+fn the_judge_gets_each_command_s_instructions_whatever_the_workspace_context_holds() {
+    let user = User::with_fake_agent().with_judge(says("ask", "Let the user see it."));
+    let (agent, mcp, _) = session(&user, false);
+    let file = user.project_file("app");
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    text.push_str(&format!(
+        "\n[pull_requests]\ntitle = \"{}\"\n",
+        "a long format ".repeat(300)
+    ));
+    std::fs::write(&file, text).unwrap();
+    for (name, instructions) in [
+        ("review", "Read the diff and say what is wrong."),
+        ("ship", "Push the branch and open the pull request."),
+    ] {
+        user.call(
+            "command.add",
+            json!({"project": "app", "name": name, "description": "A command",
+                "instructions": instructions}),
+        )
+        .unwrap();
+    }
+    user.call(
+        "agent.send",
+        json!({"agent": agent, "message": "/review then /ship"}),
+    )
+    .unwrap();
+
+    held(
+        &user,
+        mcp.call(
+            "fs_write",
+            json!({"path": user.path("elsewhere/a.txt"), "content": "a", "why": "notes"}),
+        ),
+    );
+
+    let prompts = judge_prompts(&user);
+    let users = prompts[0]
+        .split_once("## The user's last messages")
+        .unwrap()
+        .1;
+    for instructions in [
+        "Read the diff and say what is wrong.",
+        "Push the branch and open the pull request.",
+    ] {
+        assert!(users.contains(instructions), "{instructions} cut: {users}");
+    }
+    assert!(
+        !users.contains("a long format"),
+        "the context is not the command's: {users}"
+    );
+}
+
+#[test]
 fn the_judge_runs_with_no_tool_and_no_mcp_server() {
     let user = User::with_fake_agent().with_allowing_judge();
     let (_, mcp, _) = session(&user, false);
