@@ -8,6 +8,7 @@ pub mod claude;
 pub mod commands;
 pub mod composer;
 pub mod conversation;
+pub mod extensions;
 pub mod history;
 pub mod instance;
 pub mod items;

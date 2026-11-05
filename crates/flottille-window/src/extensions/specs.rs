@@ -1,0 +1,1638 @@
+//! Specs in the window (`docs/extensions.md`, "Specs"): the project's Specs tab, "Write the spec"
+//! on a ticket's row, and a spec's page with its questions, each answered in one click. Everything
+//! comes from `spec.list` and `spec.show`, read again when a `spec.*` event says a spec changed;
+//! every gesture is a `spec.*` method of the daemon, its result a toast. Nothing of it shows in a
+//! project where Specs is off.
+
+use std::collections::HashMap;
+
+use flottille_ui::{
+    Button, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Modal, PageHeader,
+    RadioChoices, Section, Toast, changing, color, enter, hoverable, icon, palette, presence,
+    presence_of, space, toast,
+};
+use gpui_kit::base::input::InputState;
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::{
+    AnyElement, App, AppContext as _, Context, ElementId, Entity, Focusable as _,
+    InteractiveElement, IntoElement, ParentElement, Render, SharedString,
+    StatefulInteractiveElement, Styled, TestSupportExt as _, WeakEntity, Window, div, px,
+};
+use serde_json::{Value, json};
+
+use super::{Registry, Then as Asked};
+use crate::actions::Command;
+use crate::commands::perform_later;
+use crate::project_settings::{field_frame, styled_input};
+use crate::shell::{Selection, Shell};
+
+/// Its name, as the daemon declares it.
+pub const NAME: &str = "specs";
+
+/// What to do with the daemon's answer to a `spec.*` request.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Then {
+    /// `spec.list`, the read `asked`.
+    Listed {
+        asked: u64,
+    },
+    /// `spec.show` of `spec` for its page, the read `asked`.
+    Shown {
+        spec: u64,
+        asked: u64,
+    },
+    /// "New spec" from an idea.
+    New,
+    /// "Write the spec" of a ticket.
+    FromTicket {
+        ticket: String,
+    },
+    /// An answer to a question of the spec.
+    Answer {
+        spec: u64,
+        question: u64,
+    },
+    Ready {
+        spec: u64,
+    },
+    Draft {
+        spec: u64,
+    },
+}
+
+impl Then {
+    /// Whether the open spec's page takes the answer.
+    pub fn for_page(&self) -> Option<u64> {
+        match self {
+            Then::Shown { spec, .. }
+            | Then::Answer { spec, .. }
+            | Then::Ready { spec }
+            | Then::Draft { spec } => Some(*spec),
+            Then::Listed { .. } | Then::New | Then::FromTicket { .. } => None,
+        }
+    }
+}
+
+fn ask(shell: &WeakEntity<Shell>, method: &str, params: Value, then: Then, cx: &mut App) {
+    let command = Command::Ask {
+        method: method.to_owned(),
+        params,
+        then: Asked::Specs(then),
+    };
+    perform_later(shell, command, cx);
+}
+
+/// A status in words.
+fn status_said(status: &str) -> &'static str {
+    match status {
+        "draft" => "Draft",
+        "ready" => "Ready",
+        "in_progress" => "In progress",
+        "review" => "Review",
+        "done" => "Done",
+        _ => "Unknown",
+    }
+}
+
+/// `1 open question`, `2 open questions`.
+fn open_said(open: u64) -> String {
+    match open {
+        1 => "1 open question".into(),
+        n => format!("{n} open questions"),
+    }
+}
+
+/// A spec as `spec.list` gives it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Summary {
+    pub spec: u64,
+    pub project: String,
+    pub title: String,
+    pub status: String,
+    /// The tickets it covers, as the project's tracker writes them (`#5`, `ABC-1`).
+    pub tickets: Vec<String>,
+    /// Its open questions.
+    pub questions: u64,
+}
+
+impl Summary {
+    fn of(value: &Value) -> Self {
+        Self {
+            spec: value["spec"].as_u64().unwrap_or_default(),
+            project: value["project"].as_str().unwrap_or_default().to_owned(),
+            title: value["title"].as_str().unwrap_or_default().to_owned(),
+            status: value["status"].as_str().unwrap_or_default().to_owned(),
+            tickets: strings(&value["tickets"]),
+            questions: value["questions"].as_u64().unwrap_or_default(),
+        }
+    }
+
+    /// The labelled values of its row: its status, its tickets, its open questions.
+    fn facts(&self) -> Vec<(&'static str, String)> {
+        let mut facts = vec![("", status_said(&self.status).to_owned())];
+        if !self.tickets.is_empty() {
+            let label = if self.tickets.len() == 1 {
+                "Ticket"
+            } else {
+                "Tickets"
+            };
+            facts.push((label, self.tickets.join(", ")));
+        }
+        if self.questions > 0 {
+            facts.push(("", open_said(self.questions)));
+        }
+        facts
+    }
+}
+
+fn strings(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|text| text.as_str().map(str::to_owned))
+        .collect()
+}
+
+/// What `spec.list` last answered, for every project where Specs is on.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Specs {
+    summaries: Vec<Summary>,
+    known: bool,
+    asked: u64,
+    listed_at: u64,
+}
+
+impl Specs {
+    /// The specs of `project`, the latest first.
+    pub fn of(&self, project: &str) -> Vec<Summary> {
+        let mut found: Vec<Summary> = self
+            .summaries
+            .iter()
+            .filter(|summary| summary.project == project)
+            .cloned()
+            .collect();
+        found.sort_by_key(|summary| std::cmp::Reverse(summary.spec));
+        found
+    }
+
+    /// The spec that covers `ticket` in `project`.
+    pub fn of_ticket(&self, project: &str, ticket: &str) -> Option<u64> {
+        self.summaries
+            .iter()
+            .find(|summary| {
+                summary.project == project && summary.tickets.iter().any(|t| t == ticket)
+            })
+            .map(|summary| summary.spec)
+    }
+
+    pub fn is_known(&self) -> bool {
+        self.known
+    }
+
+    /// Specs was turned off: nothing is listed. Whether something was.
+    pub(super) fn forget(&mut self) -> bool {
+        let had = !self.summaries.is_empty();
+        self.summaries.clear();
+        had
+    }
+}
+
+/// Asks the daemon for the specs.
+pub(super) fn read(registry: &mut Registry, cx: &mut Context<Registry>) {
+    registry.specs.asked += 1;
+    let then = Then::Listed {
+        asked: registry.specs.asked,
+    };
+    ask(&registry.shell, "spec.list", json!({}), then, cx);
+}
+
+/// What the daemon answered to a request of the registry.
+pub(super) fn answered(
+    registry: &mut Registry,
+    then: Then,
+    answer: Result<Value, String>,
+    cx: &mut Context<Registry>,
+) {
+    match then {
+        Then::Listed { asked } => {
+            let specs = &mut registry.specs;
+            if asked < specs.listed_at {
+                return;
+            }
+            specs.listed_at = asked;
+            specs.known = true;
+            // Refused while Specs is off: nothing is listed.
+            let summaries: Vec<Summary> = answer
+                .map(|listed| {
+                    listed["specs"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(Summary::of)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if specs.summaries != summaries {
+                specs.summaries = summaries;
+                cx.notify();
+            }
+        }
+        Then::New | Then::FromTicket { .. } => match answer {
+            Ok(_) => toast(
+                Toast::success("Writing the spec").detail(
+                    "A session reads the code and asks you what only you can decide; its \
+                     questions come to the spec's page.",
+                ),
+                cx,
+            ),
+            Err(why) => toast(Toast::failure("The spec was not started").detail(why), cx),
+        },
+        // The page's own, when it is no longer open.
+        Then::Shown { .. } | Then::Answer { .. } | Then::Ready { .. } | Then::Draft { .. } => {
+            if let Err(why) = answer {
+                toast(Toast::failure("The spec was not changed").detail(why), cx);
+            }
+        }
+    }
+}
+
+/// The registry of the shell, while it is there.
+fn registry_of(shell: &WeakEntity<Shell>, cx: &App) -> Option<Entity<Registry>> {
+    shell
+        .upgrade()
+        .map(|shell| shell.read(cx).extensions().clone())
+}
+
+fn open_spec(
+    shell: &WeakEntity<Shell>,
+    project: &str,
+    spec: u64,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let selection = Selection::Spec {
+        project: project.to_owned(),
+        spec,
+    };
+    shell
+        .update(cx, |shell, cx| shell.open(selection, window, cx))
+        .ok();
+}
+
+/// The labelled values of a row, drawn as the items' are; `said` is what a reader hears.
+fn facts_line(id: String, facts: Vec<(&'static str, String)>, cx: &App) -> impl IntoElement {
+    let p = palette(cx);
+    let said = facts
+        .iter()
+        .map(|(label, value)| match label {
+            &"" => value.clone(),
+            label => format!("{label} {value}"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let status = facts
+        .first()
+        .map(|(_, value)| value.clone())
+        .unwrap_or_default();
+    let rest: Vec<(&'static str, String)> = facts.into_iter().skip(1).collect();
+    div()
+        .id(SharedString::from(id.clone()))
+        .aria_label(SharedString::from(said))
+        .flex()
+        .flex_wrap()
+        .gap_x(space::MD)
+        .text_size(px(12.))
+        // A status that changes fades back in.
+        .child(changing(
+            SharedString::from(format!("{id}-status")),
+            status,
+            move |status| div().text_color(p.mute).child(status).into_any_element(),
+        ))
+        .children(rest.into_iter().map(|(label, value)| {
+            div()
+                .flex()
+                .gap(space::XS)
+                .when(!label.is_empty(), |d| {
+                    d.child(div().text_color(p.faint).child(label))
+                })
+                .child(div().text_color(p.mute).child(SharedString::from(value)))
+        }))
+        .test_support()
+}
+
+/// The project's Specs tab: each spec with its status, its tickets and its open questions, and
+/// "New spec".
+pub struct SpecsTab {
+    shell: WeakEntity<Shell>,
+    project: String,
+    list: Listing<Summary>,
+    /// "New spec" is open.
+    new_open: bool,
+    idea: Entity<InputState>,
+}
+
+impl SpecsTab {
+    pub fn new(
+        shell: WeakEntity<Shell>,
+        project: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let idea =
+            cx.new(|cx| styled_input("Let users sign in with a link sent by mail", window, cx));
+        Self {
+            shell,
+            project,
+            list: Listing::default(),
+            new_open: false,
+            idea,
+        }
+    }
+
+    pub fn open_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_open = true;
+        let focus = self.idea.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+        cx.notify();
+    }
+
+    fn close_new(&mut self, cx: &mut Context<Self>) {
+        self.new_open = false;
+        cx.notify();
+    }
+
+    fn start_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let idea = self.idea.read(cx).value().trim().to_owned();
+        if idea.is_empty() {
+            return;
+        }
+        self.idea
+            .update(cx, |field, cx| field.set_value("", window, cx));
+        self.new_open = false;
+        ask(
+            &self.shell,
+            "spec.new",
+            json!({"project": self.project, "idea": idea}),
+            Then::New,
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn new_modal(&self, cx: &mut Context<Self>) -> Modal {
+        let this = cx.weak_entity();
+        Modal::new("new-spec", "New spec")
+            .sentence(
+                "Say in a sentence what to build: a session reads the code, asks you what only \
+                 you can decide, and writes the spec.",
+            )
+            .open(self.new_open)
+            .on_close({
+                let this = this.clone();
+                move |_, cx| {
+                    this.update(cx, |this, cx| this.close_new(cx)).ok();
+                }
+            })
+            .action(Button::primary("new-spec-start", "Start writing").on_click(
+                move |_, window, cx| {
+                    this.update(cx, |this, cx| this.start_new(window, cx)).ok();
+                },
+            ))
+            .child(Field::new(
+                "new-spec-idea",
+                "What to build",
+                field_frame("new-spec-idea-input", &self.idea, cx),
+            ))
+    }
+}
+
+impl Render for SpecsTab {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let at = cx.background_executor().now();
+        let reduce = cx.reduce_motion();
+        let specs = registry_of(&self.shell, cx)
+            .map(|registry| registry.read(cx).specs().of(&self.project))
+            .unwrap_or_default();
+        self.list.sync(
+            specs
+                .into_iter()
+                .map(|summary| (format!("spec-{}", summary.spec), summary)),
+            at,
+            reduce,
+        );
+        let present = !self.list.is_empty();
+        let rows: Vec<(String, Summary, flottille_ui::Placement)> = self
+            .list
+            .rows()
+            .map(|row| (row.key.to_owned(), row.value.clone(), row.placement))
+            .collect();
+        let card = rows.into_iter().fold(
+            ListCard::new("project-specs-list"),
+            |card, (key, summary, placement)| {
+                let p = palette(cx);
+                let facts = facts_line(format!("{key}-facts"), summary.facts(), cx);
+                let (shell, project, spec) =
+                    (self.shell.clone(), summary.project.clone(), summary.spec);
+                let row = ListRow::new(ElementId::Name(key.clone().into()), summary.title.clone())
+                    .leading(icon(Icon::File).size(px(14.)).text_color(p.faint))
+                    .below(facts)
+                    .on_click(move |_, window, cx| open_spec(&shell, &project, spec, window, cx));
+                card.item(
+                    ElementId::Name(format!("{key}-item").into()),
+                    placement,
+                    row,
+                )
+            },
+        );
+        let this = cx.weak_entity();
+        let new = Button::secondary("specs-new", "New spec")
+            .leading(Icon::Plus)
+            .on_click(move |_, window, cx| {
+                this.update(cx, |this, cx| this.open_new(window, cx)).ok();
+            });
+        let this = cx.weak_entity();
+        let empty = EmptyLine::new(
+            "project-specs-empty",
+            Icon::File,
+            "No spec yet: a spec says what an agent needs to build a task without guessing.",
+        )
+        .action(Button::secondary("specs-new-first", "New spec").on_click(
+            move |_, window, cx| {
+                this.update(cx, |this, cx| this.open_new(window, cx)).ok();
+            },
+        ));
+        let known = registry_of(&self.shell, cx)
+            .is_some_and(|registry| registry.read(cx).specs().is_known());
+        div()
+            .flex()
+            .flex_col()
+            .child(presence(
+                "project-specs-new-block",
+                present,
+                div().pb(space::MD).child(new),
+            ))
+            .child(presence(
+                "project-specs-empty-block",
+                known && !present,
+                empty,
+            ))
+            .child(presence("project-specs-list-block", present, card))
+            .child(self.new_modal(cx))
+    }
+}
+
+/// "Write the spec" of a ticket of the project: the mode to choose, then the session starts.
+pub struct WriteSpec {
+    shell: WeakEntity<Shell>,
+    project: String,
+    /// The ticket being written, as the tracker writes it, and its title.
+    ticket: Option<(String, String)>,
+    open: bool,
+    /// The mode chosen: the ticket is the spec, or the spec is Flottille's alone.
+    ticket_is_spec: bool,
+}
+
+impl WriteSpec {
+    pub fn new(shell: WeakEntity<Shell>, project: String) -> Self {
+        Self {
+            shell,
+            project,
+            ticket: None,
+            open: false,
+            ticket_is_spec: false,
+        }
+    }
+
+    /// The row's action: opens the spec that covers the ticket, or asks how to write one.
+    pub fn act(
+        &mut self,
+        ticket: String,
+        title: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let covering = registry_of(&self.shell, cx)
+            .and_then(|registry| registry.read(cx).specs().of_ticket(&self.project, &ticket));
+        match covering {
+            Some(spec) => open_spec(&self.shell, &self.project, spec, window, cx),
+            None => {
+                self.ticket = Some((ticket, title));
+                self.ticket_is_spec = false;
+                self.open = true;
+                cx.notify();
+            }
+        }
+    }
+
+    fn close(&mut self, cx: &mut Context<Self>) {
+        self.open = false;
+        cx.notify();
+    }
+
+    fn start(&mut self, cx: &mut Context<Self>) {
+        let Some((ticket, _)) = self.ticket.clone() else {
+            return;
+        };
+        self.open = false;
+        let mode = if self.ticket_is_spec {
+            "ticket"
+        } else {
+            "internal"
+        };
+        ask(
+            &self.shell,
+            "spec.from_ticket",
+            json!({"project": self.project, "ticket": ticket, "mode": mode}),
+            Then::FromTicket { ticket },
+            cx,
+        );
+        cx.notify();
+    }
+}
+
+impl Render for WriteSpec {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.weak_entity();
+        let (ticket, title) = self.ticket.clone().unwrap_or_default();
+        let modes = RadioChoices::new("write-spec-mode", "Mode")
+            .choice(
+                "internal",
+                "The spec is Flottille's",
+                "The ticket is read, never written; at the end a draft comment lists where the \
+                 spec departs from it.",
+            )
+            .choice(
+                "ticket",
+                "The ticket is the spec",
+                "Its description is written at each Ready, after reading it again.",
+            )
+            .chosen(usize::from(self.ticket_is_spec))
+            .on_choose({
+                let this = this.clone();
+                move |at, _, cx| {
+                    this.update(cx, |this, cx| {
+                        this.ticket_is_spec = at == 1;
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            });
+        Modal::new("write-spec", format!("Write the spec of {ticket}"))
+            .sentence(format!(
+                "{title}. A session reads the ticket and the code, asks you what only you can \
+                 decide, and writes the spec."
+            ))
+            .open(self.open)
+            .on_close({
+                let this = this.clone();
+                move |_, cx| {
+                    this.update(cx, |this, cx| this.close(cx)).ok();
+                }
+            })
+            .action(
+                Button::primary("write-spec-start", "Write the spec").on_click(move |_, _, cx| {
+                    this.update(cx, |this, cx| this.start(cx)).ok();
+                }),
+            )
+            .child(Field::new(
+                "write-spec-mode-field",
+                "Where the spec lives",
+                modes,
+            ))
+    }
+}
+
+/// The action of a ticket's row: its label, and what it does.
+pub fn ticket_action(
+    shell: &WeakEntity<Shell>,
+    write: &Entity<WriteSpec>,
+    project: &str,
+    id: String,
+    ticket: String,
+    title: String,
+    cx: &App,
+) -> AnyElement {
+    let has = registry_of(shell, cx)
+        .and_then(|registry| registry.read(cx).specs().of_ticket(project, &ticket))
+        .is_some();
+    let label = if has {
+        "Open the spec"
+    } else {
+        "Write the spec"
+    };
+    let write = write.downgrade();
+    let button_id = format!("{id}-spec");
+    // The words change once the ticket has a spec: they fade back in.
+    changing(
+        SharedString::from(format!("{id}-spec-words")),
+        label,
+        move |label| {
+            Button::secondary(SharedString::from(button_id), label)
+                .on_click(move |_, window, cx| {
+                    cx.stop_propagation();
+                    let (ticket, title) = (ticket.clone(), title.clone());
+                    write
+                        .update(cx, |write, cx| write.act(ticket, title, window, cx))
+                        .ok();
+                })
+                .into_any_element()
+        },
+    )
+    .into_any_element()
+}
+
+/// A question the writing session asked.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Question {
+    pub question: u64,
+    pub text: String,
+    pub options: Vec<String>,
+    pub recommended: String,
+    pub reason: String,
+    /// The `D` it became, once answered.
+    pub decision: Option<String>,
+}
+
+/// A decision, `D<n>`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Decision {
+    pub id: String,
+    pub question: String,
+    pub decision: String,
+    pub set_aside: Vec<String>,
+}
+
+/// A spec as `spec.show` gives it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Spec {
+    pub spec: u64,
+    pub project: String,
+    pub title: String,
+    pub status: String,
+    pub tickets: Vec<String>,
+    pub problem: String,
+    pub behaviour: Vec<(String, String)>,
+    pub decisions: Vec<Decision>,
+    pub out_of_scope: Vec<(String, String)>,
+    pub notes: String,
+    pub verification: Vec<(String, String)>,
+    /// Its own open questions, written by the session.
+    pub questions: Vec<String>,
+    pub asked: Vec<Question>,
+    /// The session that writes it.
+    pub writer: Option<String>,
+}
+
+impl Spec {
+    fn of(value: &Value) -> Self {
+        let text = |value: &Value| value.as_str().unwrap_or_default().to_owned();
+        let pairs = |value: &Value| -> Vec<(String, String)> {
+            value
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|item| (text(&item["id"]), text(&item["text"])))
+                .collect()
+        };
+        Self {
+            spec: value["spec"].as_u64().unwrap_or_default(),
+            project: text(&value["project"]),
+            title: text(&value["title"]),
+            status: text(&value["status"]),
+            tickets: strings(&value["tickets"]),
+            problem: text(&value["problem"]),
+            behaviour: pairs(&value["behaviour"]),
+            decisions: value["decisions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|d| Decision {
+                    id: text(&d["id"]),
+                    question: text(&d["question"]),
+                    decision: text(&d["decision"]),
+                    set_aside: strings(&d["set_aside"]),
+                })
+                .collect(),
+            out_of_scope: value["out_of_scope"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|o| {
+                    let why = match (o["reason"].as_str(), o["ticket"].as_str()) {
+                        (Some(reason), _) => reason.to_owned(),
+                        (None, Some(ticket)) => format!("Taken by {ticket}"),
+                        (None, None) => String::new(),
+                    };
+                    (text(&o["text"]), why)
+                })
+                .collect(),
+            notes: text(&value["notes"]),
+            verification: pairs(&value["verification"]),
+            questions: strings(&value["questions"]),
+            asked: value["asked"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|q| Question {
+                    question: q["question"].as_u64().unwrap_or_default(),
+                    text: text(&q["text"]),
+                    options: strings(&q["options"]),
+                    recommended: text(&q["recommended"]),
+                    reason: text(&q["reason"]),
+                    decision: q["decision"].as_str().map(str::to_owned),
+                })
+                .collect(),
+            writer: value["writer"].as_str().map(str::to_owned),
+        }
+    }
+
+    /// Its questions asked and not answered, and its own open ones.
+    pub fn open_questions(&self) -> usize {
+        self.questions.len() + self.asked.iter().filter(|q| q.decision.is_none()).count()
+    }
+
+    /// Why it cannot be made Ready now, while it is a Draft.
+    pub fn not_ready(&self) -> Option<String> {
+        if self.status != "draft" {
+            return None;
+        }
+        match self.open_questions() {
+            0 if self.behaviour.is_empty() => {
+                Some("No expected behaviour yet: the session writes it first.".into())
+            }
+            0 => None,
+            1 => Some("1 question is open: answer it first.".into()),
+            n => Some(format!("{n} questions are open: answer them first.")),
+        }
+    }
+}
+
+/// A spec's page: the spec as it is, its questions answered in one click, Ready and Back to
+/// draft, and the sessions that worked on it.
+pub struct SpecPage {
+    shell: WeakEntity<Shell>,
+    project: String,
+    spec: u64,
+    shown: Option<Result<Spec, String>>,
+    asked: u64,
+    shown_at: u64,
+    /// The open questions as drawn: one answered folds away.
+    questions: Listing<Question>,
+    /// The decisions as drawn: one that comes unfolds.
+    decisions: Listing<Decision>,
+    /// The text answer of each open question.
+    texts: HashMap<u64, Entity<InputState>>,
+    /// The questions whose answer the daemon has not taken yet.
+    answering: Vec<u64>,
+    /// Ready or Back to draft was asked, until the daemon answers.
+    moving: bool,
+    /// The confirmation of Back to draft during a development is open.
+    confirming: bool,
+    narrow: bool,
+}
+
+impl SpecPage {
+    pub fn new(shell: WeakEntity<Shell>, project: String, spec: u64) -> Self {
+        Self {
+            shell,
+            project,
+            spec,
+            shown: None,
+            asked: 0,
+            shown_at: 0,
+            questions: Listing::default(),
+            decisions: Listing::default(),
+            texts: HashMap::new(),
+            answering: Vec::new(),
+            moving: false,
+            confirming: false,
+            narrow: false,
+        }
+    }
+
+    pub fn spec(&self) -> u64 {
+        self.spec
+    }
+
+    pub fn project(&self) -> &str {
+        &self.project
+    }
+
+    /// Whether the daemon answered a read.
+    pub fn is_read(&self) -> bool {
+        matches!(self.shown, Some(Ok(_)))
+    }
+
+    pub fn shown(&self) -> Option<&Spec> {
+        self.shown.as_ref().and_then(|shown| shown.as_ref().ok())
+    }
+
+    /// Whether Ready can be clicked: a Draft with no open question and one expected behaviour.
+    pub fn can_ready(&self) -> bool {
+        !self.moving
+            && self
+                .shown()
+                .is_some_and(|spec| spec.status == "draft" && spec.not_ready().is_none())
+    }
+
+    pub fn set_narrow(&mut self, narrow: bool, cx: &mut Context<Self>) {
+        if self.narrow != narrow {
+            self.narrow = narrow;
+            cx.notify();
+        }
+    }
+
+    /// Asks the daemon for the spec.
+    pub fn read(&mut self, cx: &mut App) {
+        self.asked += 1;
+        let then = Then::Shown {
+            spec: self.spec,
+            asked: self.asked,
+        };
+        ask(
+            &self.shell,
+            "spec.show",
+            json!({"spec": self.spec}),
+            then,
+            cx,
+        );
+    }
+
+    /// What the daemon answered to something the page asked.
+    pub fn answered(&mut self, then: Then, answer: Result<Value, String>, cx: &mut Context<Self>) {
+        match then {
+            Then::Shown { asked, .. } => {
+                if asked < self.shown_at {
+                    return;
+                }
+                self.shown_at = asked;
+                let shown = answer.map(|spec| Spec::of(&spec));
+                if self.shown.as_ref() != Some(&shown) {
+                    self.shown = Some(shown);
+                    cx.notify();
+                }
+            }
+            Then::Answer { question, .. } => {
+                self.answering.retain(|q| *q != question);
+                match answer {
+                    Ok(spec) => {
+                        let spec = Spec::of(&spec);
+                        let became = spec
+                            .asked
+                            .iter()
+                            .find(|q| q.question == question)
+                            .and_then(|q| q.decision.clone())
+                            .unwrap_or_default();
+                        toast(
+                            Toast::success("Answer sent").detail(format!(
+                                "It is now {became}; the session writing the spec is told."
+                            )),
+                            cx,
+                        );
+                        self.shown = Some(Ok(spec));
+                    }
+                    Err(why) => toast(Toast::failure("The answer was not taken").detail(why), cx),
+                }
+                cx.notify();
+            }
+            Then::Ready { .. } | Then::Draft { .. } => {
+                self.moving = false;
+                let ready = matches!(then, Then::Ready { .. });
+                match answer {
+                    Ok(spec) => {
+                        self.shown = Some(Ok(Spec::of(&spec)));
+                        let (title, detail) = match ready {
+                            true => ("Spec ready", "No agent writes it any more."),
+                            false => (
+                                "Spec back to Draft",
+                                "The session writing it is told; it may write it again.",
+                            ),
+                        };
+                        toast(Toast::success(title).detail(detail), cx);
+                    }
+                    Err(why) => {
+                        let title = match ready {
+                            true => "The spec was not made Ready",
+                            false => "The spec was not sent back to Draft",
+                        };
+                        toast(Toast::failure(title).detail(why), cx);
+                    }
+                }
+                cx.notify();
+            }
+            Then::Listed { .. } | Then::New | Then::FromTicket { .. } => {}
+        }
+    }
+
+    /// Answers `question` with its option `option` (from 1), or with a text.
+    pub fn answer(
+        &mut self,
+        question: u64,
+        option: Option<usize>,
+        text: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.answering.contains(&question) {
+            return;
+        }
+        self.answering.push(question);
+        let mut params = json!({"spec": self.spec, "question": question});
+        match (option, text) {
+            (Some(option), _) => params["option"] = json!(option),
+            (None, Some(text)) => params["text"] = json!(text),
+            (None, None) => return,
+        }
+        let then = Then::Answer {
+            spec: self.spec,
+            question,
+        };
+        ask(&self.shell, "spec.answer", params, then, cx);
+        cx.notify();
+    }
+
+    fn answer_text(&mut self, question: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(field) = self.texts.get(&question).cloned() else {
+            return;
+        };
+        let text = field.read(cx).value().trim().to_owned();
+        if text.is_empty() {
+            return;
+        }
+        field.update(cx, |field, cx| field.set_value("", window, cx));
+        self.answer(question, None, Some(text), cx);
+    }
+
+    pub fn ready(&mut self, cx: &mut Context<Self>) {
+        if !self.can_ready() {
+            return;
+        }
+        self.moving = true;
+        let then = Then::Ready { spec: self.spec };
+        ask(
+            &self.shell,
+            "spec.ready",
+            json!({"spec": self.spec}),
+            then,
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// Back to draft: from Ready at once; during a development, after its confirmation.
+    pub fn back_to_draft(&mut self, cx: &mut Context<Self>) {
+        let Some(spec) = self.shown() else { return };
+        if self.moving {
+            return;
+        }
+        match spec.status.as_str() {
+            "ready" => self.send_back(cx),
+            "in_progress" | "review" => {
+                self.confirming = true;
+                cx.notify();
+            }
+            _ => {}
+        }
+    }
+
+    fn send_back(&mut self, cx: &mut Context<Self>) {
+        self.confirming = false;
+        self.moving = true;
+        let then = Then::Draft { spec: self.spec };
+        ask(
+            &self.shell,
+            "spec.draft",
+            json!({"spec": self.spec}),
+            then,
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn question_card(
+        &mut self,
+        question: &Question,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let p = palette(cx);
+        let id = format!("spec-question-{}", question.question);
+        let busy = self.answering.contains(&question.question);
+        let field = self
+            .texts
+            .entry(question.question)
+            .or_insert_with(|| cx.new(|cx| styled_input("Another answer", window, cx)))
+            .clone();
+        let options = question.options.iter().enumerate().map(|(at, option)| {
+            let n = at + 1;
+            let option_id = format!("{id}-option-{n}");
+            let recommended = *option == question.recommended;
+            let this = cx.weak_entity();
+            let q = question.question;
+            hoverable(
+                div()
+                    .id(SharedString::from(option_id.clone()))
+                    .aria_label(SharedString::from(option.clone()))
+                    .px(space::MD)
+                    .py(space::SM)
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(if recommended { p.run } else { p.line })
+                    .flex()
+                    .items_center()
+                    .gap(space::SM)
+                    .cursor_pointer()
+                    .text_size(px(13.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(SharedString::from(option.clone())),
+                    )
+                    .when(recommended, {
+                        let tag = format!("{option_id}-recommended");
+                        move |d| {
+                            d.child(
+                                div()
+                                    .id(SharedString::from(tag))
+                                    .aria_label("Recommended")
+                                    .flex_none()
+                                    .text_size(px(11.5))
+                                    .text_color(p.run)
+                                    .child("Recommended")
+                                    .test_support(),
+                            )
+                        }
+                    })
+                    .on_click(move |_, _, cx| {
+                        if busy {
+                            return;
+                        }
+                        this.update(cx, |this, cx| this.answer(q, Some(n), None, cx))
+                            .ok();
+                    }),
+                move |d, t| d.bg(p.hover.opacity(t)),
+            )
+        });
+        let this = cx.weak_entity();
+        let q = question.question;
+        let own = div()
+            .flex()
+            .items_end()
+            .gap(space::SM)
+            .child(div().flex_1().min_w_0().child(Field::new(
+                SharedString::from(format!("{id}-text")),
+                "Or in your own words",
+                field_frame(SharedString::from(format!("{id}-text-input")), &field, cx),
+            )))
+            .child(
+                Button::secondary(SharedString::from(format!("{id}-answer")), "Answer")
+                    .disabled(busy)
+                    .on_click(move |_, window, cx| {
+                        this.update(cx, |this, cx| this.answer_text(q, window, cx))
+                            .ok();
+                    }),
+            );
+        div()
+            .id(SharedString::from(id.clone()))
+            .aria_label(SharedString::from(question.text.clone()))
+            .p(space::LG)
+            .flex()
+            .flex_col()
+            .gap(space::MD)
+            .rounded(px(12.))
+            .bg(p.card)
+            .border_1()
+            .border_color(p.line)
+            .child(
+                div()
+                    .text_size(px(13.5))
+                    .child(SharedString::from(question.text.clone())),
+            )
+            .child(div().flex().flex_col().gap(space::SM).children(options))
+            .child(
+                div()
+                    .id(SharedString::from(format!("{id}-reason")))
+                    .aria_label(SharedString::from(question.reason.clone()))
+                    .text_size(px(12.5))
+                    .text_color(p.mute)
+                    .child(SharedString::from(format!(
+                        "Recommended because: {}",
+                        question.reason
+                    )))
+                    .test_support(),
+            )
+            .child(own)
+            .test_support()
+            .into_any_element()
+    }
+}
+
+/// A paragraph of the spec, or a faint line saying it is not written yet.
+fn paragraph(id: &str, text: &str, cx: &App) -> AnyElement {
+    let p = palette(cx);
+    let (said, color) = match text.trim() {
+        "" => ("Not written yet.".to_owned(), p.faint),
+        text => (text.to_owned(), p.text),
+    };
+    div()
+        .id(SharedString::from(id.to_owned()))
+        .aria_label(SharedString::from(said.clone()))
+        .text_size(px(13.))
+        .text_color(color)
+        .child(SharedString::from(said))
+        .test_support()
+        .into_any_element()
+}
+
+/// A numbered line: `C1`, then its text.
+fn numbered(id: String, number: &str, text: String, below: Option<String>, cx: &App) -> AnyElement {
+    let p = palette(cx);
+    let said = match &below {
+        Some(below) => format!("{number} {text} {below}"),
+        None => format!("{number} {text}"),
+    };
+    div()
+        .id(SharedString::from(id))
+        .aria_label(SharedString::from(said))
+        .flex()
+        .gap(space::MD)
+        .text_size(px(13.))
+        .child(
+            div()
+                .flex_none()
+                .w(px(32.))
+                .text_color(p.faint)
+                .child(SharedString::from(number.to_owned())),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(space::XS)
+                .child(SharedString::from(text))
+                .children(below.map(|below| {
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(p.mute)
+                        .child(SharedString::from(below))
+                })),
+        )
+        .test_support()
+        .into_any_element()
+}
+
+fn block(children: Vec<AnyElement>) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(space::MD)
+        .children(children)
+        .into_any_element()
+}
+
+impl Render for SpecPage {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let pad = if self.narrow { space::LG } else { space::XXL };
+        let at = cx.background_executor().now();
+        let reduce = cx.reduce_motion();
+        let spec = self.shown().cloned();
+        let open: Vec<Question> = spec
+            .as_ref()
+            .map(|spec| {
+                spec.asked
+                    .iter()
+                    .filter(|q| q.decision.is_none())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.questions.sync(
+            open.into_iter()
+                .map(|q| (format!("spec-question-{}", q.question), q)),
+            at,
+            reduce,
+        );
+        let decisions = spec
+            .as_ref()
+            .map(|spec| spec.decisions.clone())
+            .unwrap_or_default();
+        self.decisions.sync(
+            decisions
+                .into_iter()
+                .map(|d| (format!("spec-decision-{}", d.id), d)),
+            at,
+            reduce,
+        );
+        let title = spec
+            .as_ref()
+            .map_or_else(|| format!("Spec {}", self.spec), |spec| spec.title.clone());
+        let status = spec.as_ref().map_or("", |spec| status_said(&spec.status));
+        let crumb = {
+            let (shell, project) = (self.shell.clone(), self.project.clone());
+            hoverable(
+                div()
+                    .id("spec-crumb")
+                    .aria_label(SharedString::from(format!("{} /", self.project)))
+                    .cursor_pointer()
+                    .child(SharedString::from(format!("{} / Specs /", self.project)))
+                    .on_click(move |_, window, cx| {
+                        let selection = Selection::Project(project.clone());
+                        shell
+                            .update(cx, |shell, cx| shell.open(selection, window, cx))
+                            .ok();
+                    }),
+                move |d, t| d.text_color(color::mix(p.faint, p.text, t)),
+            )
+        };
+        // The status is said once, under the title; a status that changes fades back in.
+        let chip = changing("spec-status-words", status, move |status| {
+            div()
+                .id("spec-status")
+                .aria_label(status.clone())
+                .px(space::SM)
+                .rounded(px(6.))
+                .border_1()
+                .border_color(p.line2)
+                .text_size(px(12.))
+                .text_color(p.mute)
+                .child(status)
+                .test_support()
+                .into_any_element()
+        });
+        let tickets = spec
+            .as_ref()
+            .filter(|spec| !spec.tickets.is_empty())
+            .map(|spec| SharedString::from(format!("Tickets {}", spec.tickets.join(", "))));
+        let header = PageHeader::new("spec-header", title.clone())
+            .crumb(crumb)
+            .below(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(space::MD)
+                    .child(chip)
+                    .children(tickets.map(|tickets| {
+                        div().text_size(px(12.5)).text_color(p.faint).child(tickets)
+                    })),
+            );
+        let why = spec.as_ref().and_then(Spec::not_ready);
+        let draft = spec.as_ref().is_some_and(|spec| spec.status == "draft");
+        let sendable = spec
+            .as_ref()
+            .is_some_and(|spec| matches!(spec.status.as_str(), "ready" | "in_progress" | "review"));
+        let this = cx.weak_entity();
+        let ready = Button::primary("spec-ready", "Ready")
+            .disabled(!self.can_ready())
+            .on_click({
+                let this = this.clone();
+                move |_, _, cx| {
+                    this.update(cx, |this, cx| this.ready(cx)).ok();
+                }
+            });
+        let back = Button::secondary("spec-draft", "Back to draft")
+            .disabled(self.moving)
+            .on_click({
+                let this = this.clone();
+                move |_, _, cx| {
+                    this.update(cx, |this, cx| this.back_to_draft(cx)).ok();
+                }
+            });
+        let gestures = div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(space::SM)
+                    .child(presence("spec-ready-block", draft, ready))
+                    .child(presence("spec-draft-block", sendable, back)),
+            )
+            .child(
+                presence_of(
+                    "spec-ready-why-block",
+                    why.map(SharedString::from),
+                    move |why| {
+                        div()
+                            .id("spec-ready-why")
+                            .aria_label(why.clone())
+                            .text_size(px(12.5))
+                            .text_color(p.mute)
+                            .child(why)
+                            .test_support()
+                            .into_any_element()
+                    },
+                )
+                .gap(space::SM),
+            );
+        // The questions: the open ones, each answered in one click; the spec's own open ones.
+        let listed: Vec<(String, Question, flottille_ui::Placement)> = self
+            .questions
+            .rows()
+            .map(|row| (row.key.to_owned(), row.value.clone(), row.placement))
+            .collect();
+        let mut cards = Vec::new();
+        for (key, question, placement) in listed {
+            let card = self.question_card(&question, window, cx);
+            cards.push(
+                flottille_ui::Item::new(
+                    ElementId::Name(format!("{key}-item").into()),
+                    placement,
+                    card,
+                )
+                .gap(space::MD)
+                .into_any_element(),
+            );
+        }
+        let own_questions: Vec<AnyElement> = spec
+            .as_ref()
+            .map(|spec| {
+                spec.questions
+                    .iter()
+                    .enumerate()
+                    .map(|(at, text)| {
+                        numbered(format!("spec-open-{at}"), "?", text.clone(), None, cx)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let open = spec.as_ref().map_or(0, Spec::open_questions);
+        let questions = Section::new("spec-questions", "Questions")
+            .count(open.to_string())
+            .sentence("What only you can decide. Each answer becomes a decision of the spec.")
+            .child(div().flex().flex_col().children(cards))
+            .child(presence(
+                "spec-own-questions-block",
+                !own_questions.is_empty(),
+                block(own_questions),
+            ));
+        let problem = Section::new("spec-problem", "Problem")
+            .sentence("Why, in a few lines.")
+            .child(paragraph(
+                "spec-problem-text",
+                spec.as_ref().map_or("", |spec| spec.problem.as_str()),
+                cx,
+            ));
+        let behaviour: Vec<AnyElement> = spec
+            .as_ref()
+            .map(|spec| {
+                spec.behaviour
+                    .iter()
+                    .map(|(id, text)| {
+                        numbered(format!("spec-behaviour-{id}"), id, text.clone(), None, cx)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let behaviour_count = behaviour.len();
+        let behaviour = Section::new("spec-behaviour", "Expected behaviour")
+            .count(behaviour_count.to_string())
+            .sentence("Each one sentence that can be checked.")
+            .child(match behaviour.is_empty() {
+                true => paragraph("spec-behaviour-none", "", cx),
+                false => block(behaviour),
+            });
+        let rows: Vec<(String, Decision, flottille_ui::Placement)> = self
+            .decisions
+            .rows()
+            .map(|row| (row.key.to_owned(), row.value.clone(), row.placement))
+            .collect();
+        let decision_count = self.decisions.len();
+        let decisions = Section::new("spec-decisions", "Decisions")
+            .count(decision_count.to_string())
+            .sentence("Each with the question it answered and the options set aside.")
+            .child(presence(
+                "spec-decisions-none-block",
+                spec.as_ref().is_some_and(|spec| spec.decisions.is_empty()),
+                paragraph("spec-decisions-none", "", cx),
+            ))
+            .child(div().flex().flex_col().children(rows.into_iter().map(
+                |(key, decision, placement)| {
+                    let mut below = decision.question.clone();
+                    if !decision.set_aside.is_empty() {
+                        below = format!("{below} Set aside: {}.", decision.set_aside.join("; "));
+                    }
+                    let line = numbered(
+                        key.clone(),
+                        &decision.id,
+                        decision.decision.clone(),
+                        Some(below),
+                        cx,
+                    );
+                    flottille_ui::Item::new(
+                        ElementId::Name(format!("{key}-item").into()),
+                        placement,
+                        line,
+                    )
+                    .gap(space::MD)
+                    .into_any_element()
+                },
+            )));
+        let outside: Vec<AnyElement> = spec
+            .as_ref()
+            .map(|spec| {
+                spec.out_of_scope
+                    .iter()
+                    .enumerate()
+                    .map(|(at, (text, why))| {
+                        let why = (!why.is_empty()).then(|| why.clone());
+                        numbered(format!("spec-outside-{at}"), "", text.clone(), why, cx)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let has_outside = !outside.is_empty();
+        let outside = Section::new("spec-out-of-scope", "Out of scope")
+            .sentence("What the spec leaves out, with its reason or the ticket that takes it.")
+            .child(block(outside));
+        let verification: Vec<AnyElement> = spec
+            .as_ref()
+            .map(|spec| {
+                spec.verification
+                    .iter()
+                    .map(|(id, text)| {
+                        numbered(
+                            format!("spec-verification-{id}"),
+                            id,
+                            text.clone(),
+                            None,
+                            cx,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let found = Section::new("spec-found", "What the agent found")
+            .sentence("Read by you, not validated: its technical notes and how each C is verified.")
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::MD)
+                    .child(paragraph(
+                        "spec-notes",
+                        spec.as_ref().map_or("", |spec| spec.notes.as_str()),
+                        cx,
+                    ))
+                    .children((!verification.is_empty()).then(|| block(verification))),
+            );
+        let writer = spec.as_ref().and_then(|spec| spec.writer.clone());
+        let sessions = {
+            let rows: Vec<ListRow> = writer
+                .iter()
+                .map(|agent| {
+                    let title = self
+                        .shell
+                        .upgrade()
+                        .and_then(|shell| {
+                            shell
+                                .read(cx)
+                                .snapshot()
+                                .session(agent)
+                                .map(|session| session.title.clone())
+                        })
+                        .unwrap_or_else(|| format!("agent {agent}"));
+                    let (shell, agent) = (self.shell.clone(), agent.clone());
+                    ListRow::new(
+                        ElementId::Name(format!("spec-session-{agent}").into()),
+                        title,
+                    )
+                    .leading(icon(Icon::Agents).size(px(14.)).text_color(p.faint))
+                    .line("Writes the spec")
+                    .on_click(move |_, window, cx| {
+                        let selection = Selection::Session(agent.clone());
+                        shell
+                            .update(cx, |shell, cx| shell.open(selection, window, cx))
+                            .ok();
+                    })
+                })
+                .collect();
+            let count = rows.len();
+            Section::new("spec-sessions", "Sessions")
+                .count(count.to_string())
+                .sentence("The sessions that worked on the spec; each opens its conversation.")
+                .child(presence(
+                    "spec-sessions-block",
+                    count > 0,
+                    ListCard::new("spec-sessions-list").rows(rows),
+                ))
+        };
+        let confirm = Confirm::new("spec-draft-confirm", format!("Send {title} back to Draft?"))
+            .sentence(
+                "Its development session is told, and no amendment is taken while it is a Draft.",
+            )
+            .action("Back to draft")
+            .open(self.confirming)
+            .on_confirm({
+                let this = this.clone();
+                move |_, cx| {
+                    this.update(cx, |this, cx| this.send_back(cx)).ok();
+                }
+            })
+            .on_cancel(move |_, cx| {
+                this.update(cx, |this, cx| {
+                    this.confirming = false;
+                    cx.notify();
+                })
+                .ok();
+            });
+        let failed = match &self.shown {
+            Some(Err(why)) => Some(SharedString::from(format!(
+                "The spec cannot be read: {why}"
+            ))),
+            _ => None,
+        };
+        let key = |part: &str| ElementId::Name(format!("enter-spec-{}-{part}", self.spec).into());
+        let read = spec.is_some();
+        let column = div()
+            .max_w(space::COLUMN + pad * 2.)
+            .w_full()
+            .mx_auto()
+            .px(pad)
+            .pt(space::XXL)
+            .pb(space::XXXL)
+            .flex()
+            .flex_col()
+            .gap(space::XXL)
+            .child(enter(
+                key("header"),
+                0,
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::LG)
+                    .child(header)
+                    .child(gestures)
+                    .child(presence_of("spec-failed-block", failed, move |why| {
+                        div()
+                            .id("spec-failed")
+                            .aria_label(why.clone())
+                            .text_size(px(12.5))
+                            .text_color(p.fail)
+                            .child(why)
+                            .test_support()
+                            .into_any_element()
+                    })),
+            ))
+            .child(presence(
+                "spec-questions-block",
+                open > 0 || !self.questions.is_empty(),
+                enter(key("questions"), 1, questions),
+            ))
+            .child(presence(
+                "spec-body-block",
+                read,
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::XXL)
+                    .child(enter(key("problem"), 2, problem))
+                    .child(enter(key("behaviour"), 3, behaviour))
+                    .child(enter(key("decisions"), 4, decisions))
+                    .child(presence(
+                        "spec-out-of-scope-block",
+                        has_outside,
+                        enter(key("out-of-scope"), 5, outside),
+                    ))
+                    .child(enter(key("found"), 6, found))
+                    .child(enter(key("sessions"), 7, sessions)),
+            ));
+        div()
+            .id("spec-page")
+            .size_full()
+            .text_color(p.text)
+            .overflow_y_scroll()
+            .child(column)
+            .child(confirm)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ready_says_why_it_cannot_be_clicked() {
+        let spec = |questions: usize, behaviour: bool| {
+            Spec::of(&json!({
+                "status": "draft",
+                "questions": vec!["?"; questions],
+                "behaviour": if behaviour { json!([{"id": "C1", "text": "x"}]) } else { json!([]) },
+            }))
+        };
+        assert_eq!(
+            spec(1, true).not_ready().as_deref(),
+            Some("1 question is open: answer it first.")
+        );
+        assert_eq!(
+            spec(2, true).not_ready().as_deref(),
+            Some("2 questions are open: answer them first.")
+        );
+        assert!(spec(0, false).not_ready().is_some());
+        assert_eq!(spec(0, true).not_ready(), None);
+    }
+}

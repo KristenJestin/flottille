@@ -129,6 +129,13 @@ pub enum Command {
     DeveloperSet {
         log: bool,
     },
+    /// A request of a part of Flottille the window draws in its places (`extensions`): what to
+    /// do with the answer is said by `then`.
+    Ask {
+        method: String,
+        params: Value,
+        then: crate::extensions::Then,
+    },
     /// The limit above which a tool result is cut (`tool_results.show`).
     ToolResultsRead,
     /// Chooses it (`tool_results.set`): `None` is Off.
@@ -690,6 +697,11 @@ pub enum Outcome {
         written: bool,
         shown: Result<crate::settings::Developer, String>,
     },
+    /// The daemon's answer to an [`Command::Ask`], or why there is none.
+    Asked {
+        then: crate::extensions::Then,
+        answer: Result<Value, String>,
+    },
     /// The limit of tool results as the daemon says it (`None` is Off), after a read (`written`
     /// false) or a choice.
     ToolResults {
@@ -1147,6 +1159,14 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 }
             });
             Outcome::Developer { written, shown }
+        }
+        Command::Ask {
+            method,
+            params,
+            then,
+        } => {
+            let answer = answer(ask_alone(connect, &method, params, bounds.quick));
+            Outcome::Asked { then, answer }
         }
         Command::ToolResultsRead | Command::ToolResultsSet { .. } => {
             let (method, params, written) = match command {

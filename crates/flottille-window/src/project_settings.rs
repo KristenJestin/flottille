@@ -362,6 +362,9 @@ pub struct ProjectSettingsPage {
     revealed: Option<Reveal>,
     /// The tab chosen: the index of its section in [`SECTIONS`]. Kept while the page is open.
     tab: usize,
+    /// The section of a part of Flottille the user can turn off (Specs), by its name, when it is
+    /// the tab chosen instead.
+    own_tab: Option<String>,
     name: String,
     folder: String,
     /// The daemon answered once.
@@ -464,6 +467,7 @@ impl ProjectSettingsPage {
             shell,
             revealed: None,
             tab: 0,
+            own_tab: None,
             name,
             folder: String::new(),
             loaded: false,
@@ -1951,6 +1955,7 @@ impl ProjectSettingsPage {
     /// Opened at a repository or at the tasks: their tab is the one chosen.
     pub fn reveal(&mut self, at: Reveal, cx: &mut Context<Self>) {
         self.tab = at.entry();
+        self.own_tab = None;
         self.revealed = Some(at);
         cx.notify();
     }
@@ -1980,8 +1985,17 @@ impl ProjectSettingsPage {
     /// Chooses the tab of that section: it shows alone.
     pub fn choose(&mut self, entry: usize, cx: &mut Context<Self>) {
         let entry = entry.min(SECTIONS.len() - 1);
-        if self.tab != entry {
+        if self.tab != entry || self.own_tab.is_some() {
             self.tab = entry;
+            self.own_tab = None;
+            cx.notify();
+        }
+    }
+
+    /// Chooses the section of the part of Flottille named `name` (Specs).
+    pub fn choose_own(&mut self, name: &str, cx: &mut Context<Self>) {
+        if self.own_tab.as_deref() != Some(name) {
+            self.own_tab = Some(name.to_owned());
             cx.notify();
         }
     }
@@ -2086,21 +2100,51 @@ impl Render for ProjectSettingsPage {
                 .into_any_element(),
             self.rules.clone().into_any_element(),
         ];
-        let chosen = self.tab.min(sections.len() - 1);
-        let shown = sections.swap_remove(chosen);
+        // After the core's, a section for each part of Flottille the user can turn off that
+        // touches a project, while it is on globally; drawn from what it declares.
+        let registry = self
+            .shell
+            .upgrade()
+            .map(|shell| shell.read(cx).extensions().clone());
+        let own: Vec<(String, String)> = registry
+            .as_ref()
+            .map(|registry| registry.read(cx).project_tabs())
+            .unwrap_or_default();
+        let own_shown = self.own_tab.as_ref().and_then(|name| {
+            let drawn =
+                crate::extensions::project_section(registry.as_ref()?, name, &self.name, cx)?;
+            let at = own.iter().position(|(n, _)| n == name)?;
+            Some((name.clone(), at, drawn))
+        });
+        let core = self.tab.min(sections.len() - 1);
+        let (chosen, shown_key, shown) = match own_shown {
+            Some((name, at, drawn)) => (SECTIONS.len() + at, name, drawn),
+            None => (
+                core,
+                SECTIONS[core].0.to_owned(),
+                sections.swap_remove(core),
+            ),
+        };
         let this = cx.entity().downgrade();
-        let tabs = SECTIONS
+        let names: Vec<String> = own.iter().map(|(name, _)| name.clone()).collect();
+        let tabs = SECTIONS.iter().zip(counts).fold(
+            Tabs::new("project-settings-tabs", "Sections", chosen),
+            |tabs, ((key, label), count)| match count {
+                Some(count) => tabs.counted(*key, *label, count.to_string()),
+                None => tabs.tab(*key, *label),
+            },
+        );
+        let tabs = own
             .iter()
-            .zip(counts)
-            .fold(
-                Tabs::new("project-settings-tabs", "Sections", chosen),
-                |tabs, ((key, label), count)| match count {
-                    Some(count) => tabs.counted(*key, *label, count.to_string()),
-                    None => tabs.tab(*key, *label),
-                },
-            )
+            .fold(tabs, |tabs, (name, title)| {
+                tabs.tab(SharedString::from(name.clone()), title.clone())
+            })
             .on_choose(move |entry, _, cx| {
-                this.update(cx, |this, cx| this.choose(entry, cx)).ok();
+                this.update(cx, |this, cx| match entry.checked_sub(SECTIONS.len()) {
+                    Some(at) => this.choose_own(&names[at], cx),
+                    None => this.choose(entry, cx),
+                })
+                .ok();
             });
         let project = self.name.clone();
         let key = |part: &str| ElementId::Name(format!("enter-settings-{project}-{part}").into());
@@ -2140,9 +2184,7 @@ impl Render for ProjectSettingsPage {
             .px(pad)
             .pt(space::XL)
             .pb(space::XXXL)
-            .child(column(
-                enter(key(SECTIONS[chosen].0), 2, shown).into_any_element(),
-            ));
+            .child(column(enter(key(&shown_key), 2, shown).into_any_element()));
         div()
             .size_full()
             .flex()

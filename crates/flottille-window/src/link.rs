@@ -61,6 +61,9 @@ pub enum Update {
         project: String,
         item: Option<crate::items::ItemKey>,
     },
+    /// A part of Flottille the window draws in its places was switched or changed what it keeps
+    /// (`extension.changed`, `spec.*`), or a project changed: what it shows is read again.
+    Extensions,
     /// What the open session page's link read or saw, with the link's token.
     Session {
         token: u64,
@@ -187,6 +190,9 @@ fn follow(
         if let Some(news) = model::News::of(event) {
             let _ = updates.unbounded_send(Update::News(news));
         }
+        if extensions_of(event) {
+            let _ = updates.unbounded_send(Update::Extensions);
+        }
         if let Some((project, item)) = items_of(event) {
             let _ = updates.unbounded_send(Update::Items { project, item });
         }
@@ -234,6 +240,19 @@ fn items_of(event: &Event) -> Option<(String, Option<crate::items::ItemKey>)> {
         }
         _ => None,
     }
+}
+
+/// Whether an event may change what the window draws in the places of a part of Flottille: one
+/// switched, a spec made or changed, a project's file changed (its own switch is there) or a
+/// project added or removed.
+fn extensions_of(event: &Event) -> bool {
+    let name = event.name.as_str();
+    name == "extension.changed"
+        || name.starts_with("spec.")
+        || matches!(
+            name,
+            "project.changed" | "project.added" | "project.removed"
+        )
 }
 
 /// Whether an event may change what `provider.list` says: a provider enabled or disabled, or a

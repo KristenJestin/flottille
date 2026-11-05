@@ -26,6 +26,8 @@ use gpui_kit::{
 use crate::actions::{Actions, Command, Details, Outcome, Pick};
 use crate::add_project::AddProject;
 use crate::composer::{Choice, Composer, PlaceChoice};
+use crate::extensions::Registry;
+use crate::extensions::specs::SpecPage;
 use crate::history::{History, Way};
 use crate::link::{self, Connect, Seen, Update};
 use crate::model::{BellItem, Forged, News, Place, Preparation, Snapshot};
@@ -83,6 +85,11 @@ pub enum Selection {
     Settings,
     /// A project's own settings.
     ProjectSettings(String),
+    /// A spec's page, in its project.
+    Spec {
+        project: String,
+        spec: u64,
+    },
 }
 
 pub struct Shell {
@@ -158,6 +165,10 @@ pub struct Shell {
     add_project: Entity<AddProject>,
     /// The quick switcher (Ctrl K): sessions, projects and actions found by what is typed.
     switcher: Entity<Switcher>,
+    /// What the window knows of the parts of Flottille it draws in its places (Specs).
+    extensions: Entity<Registry>,
+    /// The open spec's page; made again for another spec.
+    spec_page: Option<Entity<SpecPage>>,
     /// The link's updates, until a task takes them.
     updates: Option<UnboundedReceiver<Update>>,
     _link: Task<()>,
@@ -253,6 +264,15 @@ impl Shell {
             let (this, focus) = (this.clone(), focus.clone());
             cx.new(|cx| Switcher::new(this, focus, window, cx))
         };
+        let extensions = cx.new(|_| Registry::new(this.clone()));
+        let reading = extensions.clone();
+        cx.defer(move |cx| reading.update(cx, |registry, cx| registry.read(cx)));
+        // What they list shows in many places: each is drawn again, and the page open is shown
+        // as it is now (a spec's page goes where Specs is turned off).
+        cx.observe_in(&extensions, window, |this, _, window, cx| {
+            this.extensions_moved(window, cx)
+        })
+        .detach();
         let _clock = cx.spawn(async move |this: WeakEntity<Shell>, cx| {
             loop {
                 cx.background_executor().timer(CLOCK).await;
@@ -302,6 +322,8 @@ impl Shell {
             project_settings: None,
             add_project,
             switcher,
+            extensions,
+            spec_page: None,
             updates: Some(updates),
             _link: Task::ready(()),
             _clock,
@@ -407,6 +429,60 @@ impl Shell {
     /// The quick switcher.
     pub fn switcher(&self) -> &Entity<Switcher> {
         &self.switcher
+    }
+
+    /// What the window knows of the parts of Flottille it draws in its places.
+    pub fn extensions(&self) -> &Entity<Registry> {
+        &self.extensions
+    }
+
+    /// The open spec's page, made the first time and kept while the same spec is open; opened,
+    /// it asks the daemon for the spec.
+    fn spec_page_for(&mut self, page: &Page, cx: &mut Context<Self>) -> Option<Entity<SpecPage>> {
+        let Page::Spec { project, spec } = page else {
+            self.spec_page = None;
+            return None;
+        };
+        if let Some(open) = self.spec_page.clone()
+            && open.read(cx).spec() == *spec
+        {
+            return Some(open);
+        }
+        let this = cx.entity().downgrade();
+        let made = cx.new(|_| SpecPage::new(this, project.clone(), *spec));
+        let reading = made.clone();
+        cx.defer(move |cx| reading.update(cx, |page, cx| page.read(cx)));
+        self.spec_page = Some(made.clone());
+        Some(made)
+    }
+
+    /// What the registry lists changed: the pages that draw it are drawn again, and the page open
+    /// is shown as it is now.
+    fn extensions_moved(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings.update(cx, |_, cx| cx.notify());
+        if let Some(page) = self.project_settings.clone() {
+            page.update(cx, |_, cx| cx.notify());
+        }
+        if let Some(page) = self.main.read(cx).project_page().cloned() {
+            let items = page.read(cx).items().clone();
+            items.update(cx, |items, cx| items.extensions_moved(cx));
+        }
+        if let Some(page) = self.spec_page.clone() {
+            page.update(cx, |_, cx| cx.notify());
+        }
+        if let Some(selection) = self.selected.clone() {
+            let page = self.page_of(&selection, cx);
+            if self.main.read(cx).page() != &page {
+                let forms = self.forms_for(&page, window, cx);
+                let session = self.session_for(&page, window, cx);
+                let settings = self.project_settings_for(&page, window, cx);
+                let spec = self.spec_page_for(&page, cx);
+                self.main.update(cx, |main, cx| {
+                    main.set_spec_page(spec);
+                    main.show(page, forms, session, settings, cx)
+                });
+            }
+        }
     }
 
     /// The window's own focus: what has it when nothing else does.
@@ -661,6 +737,13 @@ impl Shell {
                 }
             }
             Update::AppearanceChanged => self.ask_appearance(None),
+            Update::Extensions => {
+                self.extensions
+                    .update(cx, |registry, cx| registry.changed(cx));
+                if let Some(page) = self.spec_page.clone() {
+                    page.update(cx, |page, cx| page.read(cx));
+                }
+            }
             Update::Forged(forged) => self.forged(forged, cx),
             Update::News(news) => self.news(news, cx),
             Update::Items { project, item } => {
@@ -943,7 +1026,9 @@ impl Shell {
                         None => {
                             self.selected = None;
                             self.project_settings = None;
+                            self.spec_page = None;
                             self.main.update(cx, |main, cx| {
+                                main.set_spec_page(None);
                                 main.show(Page::Empty, None, None, None, cx)
                             });
                         }
@@ -1020,6 +1105,23 @@ impl Shell {
             Outcome::Developer { written, shown } => {
                 self.settings
                     .update(cx, |page, cx| page.developer_answered(shown, written, cx));
+            }
+            Outcome::Asked { then, answer } => {
+                let page = match &then {
+                    crate::extensions::Then::Specs(specs) => specs.for_page(),
+                    _ => None,
+                };
+                match (page, self.spec_page.clone()) {
+                    (Some(spec), Some(open)) if open.read(cx).spec() == spec => {
+                        let crate::extensions::Then::Specs(then) = then else {
+                            unreachable!("a page's answer is a spec's")
+                        };
+                        open.update(cx, |page, cx| page.answered(then, answer, cx));
+                    }
+                    _ => self
+                        .extensions
+                        .update(cx, |registry, cx| registry.answered(then, answer, cx)),
+                }
             }
             Outcome::ToolResults { written, shown } => {
                 self.settings.update(cx, |page, cx| {
@@ -1605,8 +1707,11 @@ impl Shell {
                     let forms = self.forms_for(&page, window, cx);
                     let session = self.session_for(&page, window, cx);
                     let settings = self.project_settings_for(&page, window, cx);
-                    self.main
-                        .update(cx, |main, cx| main.show(page, forms, session, settings, cx));
+                    let spec = self.spec_page_for(&page, cx);
+                    self.main.update(cx, |main, cx| {
+                        main.set_spec_page(spec);
+                        main.show(page, forms, session, settings, cx)
+                    });
                 }
                 self.refresh_project(cx);
             }
@@ -1909,7 +2014,9 @@ impl Shell {
         let forms = self.forms_for(&page, window, cx);
         let session = self.session_for(&page, window, cx);
         let project_settings = self.project_settings_for(&page, window, cx);
+        let spec = self.spec_page_for(&page, cx);
         self.main.update(cx, |main, cx| {
+            main.set_spec_page(spec);
             main.show(page, forms, session, project_settings, cx)
         });
         self.refresh_project(cx);
@@ -1927,6 +2034,21 @@ impl Shell {
                     .is_some_and(|page| page.read(cx).name() == name);
                 if open || self.snapshot.projects.iter().any(|p| &p.name == name) {
                     Page::ProjectSettings { name: name.clone() }
+                } else {
+                    Page::Empty
+                }
+            }
+            // Only where Specs is on: nothing of it shows elsewhere.
+            Selection::Spec { project, spec } => {
+                if self
+                    .extensions
+                    .read(cx)
+                    .active(crate::extensions::specs::NAME, project)
+                {
+                    Page::Spec {
+                        project: project.clone(),
+                        spec: *spec,
+                    }
                 } else {
                     Page::Empty
                 }
@@ -1972,6 +2094,7 @@ impl Shell {
             Some(Selection::Project(name)) => Some(name.clone()),
             Some(Selection::Session(id)) => self.snapshot.session(id).map(|s| s.project.clone()),
             Some(Selection::ProjectSettings(name)) => Some(name.clone()),
+            Some(Selection::Spec { project, .. }) => Some(project.clone()),
             Some(Selection::Settings) | None => None,
         }
         .or_else(|| self.snapshot.projects.first().map(|p| p.name.clone()));
