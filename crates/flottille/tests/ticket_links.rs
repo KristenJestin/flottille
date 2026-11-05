@@ -216,12 +216,23 @@ fn the_link_types_of_the_site_are_listed() {
     jira_script(&user, json!({}));
     let mcp = root_in(&user);
 
+    let mut script: Value =
+        serde_json::from_str(&std::fs::read_to_string(user.path("acli/script.json")).unwrap())
+            .unwrap();
+    script["link_types"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id": "4", "name": "Escalates", "inward": "is escalated by", "outward": "escalates"}));
+    user.acli_script(script);
+
+    // The site names its types only: Jira's own wordings are known for its standard ones.
     let listed = read(&user, &mcp, json!({"action": "link_types"}));
 
     for said in [
-        "blocks (is blocked by)",
+        "blocks (is blocked by) [Blocks]",
         "- relates to [Relates]",
-        "duplicates (is duplicated by)",
+        "duplicates (is duplicated by) [Duplicate]",
+        "- Escalates\n",
     ] {
         assert!(listed.contains(said), "{said} missing: {listed}");
     }
@@ -251,7 +262,7 @@ fn two_jira_items_are_linked_and_unlinked() {
     assert!(made.contains("ABC-2 blocks ABC-1"), "{made}");
     assert!(
         acli_calls(&user).contains(
-            &"jira workitem link create --out ABC-2 --in ABC-1 --type blocks --yes".to_owned()
+            &"jira workitem link create --out ABC-2 --in ABC-1 --type Blocks --yes".to_owned()
         ),
         "{:?}",
         acli_calls(&user)
@@ -276,7 +287,7 @@ fn two_jira_items_are_linked_and_unlinked() {
     );
     let calls = acli_calls(&user);
     assert!(
-        calls.contains(&"jira workitem link list --key ABC-2 --json".to_owned()),
+        calls.contains(&"jira workitem view ABC-2 --json --fields issuelinks".to_owned()),
         "{calls:?}"
     );
     assert!(
@@ -303,7 +314,7 @@ fn the_inward_wording_swaps_the_two_items() {
     assert!(made.contains("ABC-1 is blocked by ABC-2"), "{made}");
     assert!(
         acli_calls(&user).contains(
-            &"jira workitem link create --out ABC-2 --in ABC-1 --type blocks --yes".to_owned()
+            &"jira workitem link create --out ABC-2 --in ABC-1 --type Blocks --yes".to_owned()
         ),
         "{:?}",
         acli_calls(&user)
@@ -343,14 +354,13 @@ fn show_lists_an_item_s_links() {
         json!({"links": [
             {"id": "500", "type": "Blocks", "out": "ABC-2", "in": "ABC-1"},
             {"id": "501", "type": "Relates", "out": "ABC-1", "in": "ABC-3"},
-            {"id": "502", "web": {"title": "Fix the login", "url": "https://github.com/acme/app/pull/9"}, "on": "ABC-1"},
         ]}),
     );
     let mcp = root_in(&user);
 
     let shown = read(&user, &mcp, json!({"action": "show", "ticket": "ABC-1"}));
 
-    assert!(shown.contains("Links (3):"), "{shown}");
+    assert!(shown.contains("Links (2):"), "{shown}");
     assert!(
         shown.contains("- is blocked by ABC-2 (In Progress): Add search"),
         "{shown}"
@@ -359,12 +369,10 @@ fn show_lists_an_item_s_links() {
         shown.contains("- relates to ABC-3 (Done): Shipped"),
         "{shown}"
     );
+    // `link list` names no other item when this one is the outward one: `view` gives both ends.
     assert!(
-        shown.contains("- web link: Fix the login https://github.com/acme/app/pull/9"),
-        "{shown}"
-    );
-    assert!(
-        acli_calls(&user).contains(&"jira workitem link list --key ABC-1 --json".to_owned()),
+        acli_calls(&user)
+            .contains(&"jira workitem view ABC-1 --json --fields issuelinks".to_owned()),
         "{:?}",
         acli_calls(&user)
     );

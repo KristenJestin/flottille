@@ -158,7 +158,16 @@ impl Relation {
     }
 }
 
-/// A link type of a Jira site: its name and its two wordings.
+/// Jira's own wordings of its standard link types: `link type --json` names a site's types only
+/// (seen on a real site), and a type the site renamed or added is known by its name alone.
+const JIRA_WORDINGS: [(&str, &str, &str); 4] = [
+    ("Blocks", "is blocked by", "blocks"),
+    ("Cloners", "is cloned by", "clones"),
+    ("Duplicate", "is duplicated by", "duplicates"),
+    ("Relates", "relates to", "relates to"),
+];
+
+/// A link type of a Jira site: its name and its two wordings (its name for both when unknown).
 #[derive(Clone)]
 struct LinkType {
     name: String,
@@ -183,8 +192,9 @@ impl LinkType {
     }
 }
 
-/// `acli jira workitem link type --json`: an array of types, or Jira's REST object around it
-/// (`issueLinkTypes`). Assumed: the page of the command gives no output.
+/// `acli jira workitem link type --json`: `{"issueLinkTypes": [{"name"}]}`, as a real site answers
+/// (an array is taken too). The wordings, which it does not give, are Jira's own for its standard
+/// types ([`JIRA_WORDINGS`]), or those it gives where it does.
 async fn link_types_of(site: &str) -> Result<Vec<LinkType>, String> {
     jira_site(site, "read").await?;
     let said = acli_run(&["jira", "workitem", "link", "type", "--json"]).await?;
@@ -200,10 +210,17 @@ async fn link_types_of(site: &str) -> Result<Vec<LinkType>, String> {
         .iter()
         .filter_map(|kind| {
             let word = |key: &str| kind[key].as_str().map(masked);
+            let name = word("name")?;
+            let standard = JIRA_WORDINGS.iter().find(|(known, ..)| same(known, &name));
+            let (inward, outward) = match (word("inward"), word("outward"), standard) {
+                (Some(inward), Some(outward), _) => (inward, outward),
+                (_, _, Some((_, inward, outward))) => ((*inward).into(), (*outward).into()),
+                _ => (name.clone(), name.clone()),
+            };
             Some(LinkType {
-                name: word("name")?,
-                inward: word("inward")?,
-                outward: word("outward")?,
+                name,
+                inward,
+                outward,
             })
         })
         .collect())
@@ -299,7 +316,10 @@ pub(super) async fn types(project: &Project) -> Outcome {
                             true => kind.outward.clone(),
                             false => format!("{} ({})", kind.outward, kind.inward),
                         };
-                        format!("- {wordings} [{}]", kind.name)
+                        match wordings == kind.name {
+                            true => format!("- {wordings}"),
+                            false => format!("- {wordings} [{}]", kind.name),
+                        }
                     })
                     .collect();
                 Outcome::Done(format!(
@@ -314,72 +334,67 @@ pub(super) async fn types(project: &Project) -> Outcome {
     }
 }
 
-/// One link of a Jira work item as `acli jira workitem link list --key K --json` says it.
+/// One link of a Jira work item `K` as `view`'s `issuelinks` says it.
 struct Seen {
     id: String,
-    /// What `K` is to the other: `blocks`, `is blocked by`; or `web link`.
+    /// Its type's name, and the end `K` is on.
+    kind: String,
+    end: End,
+    /// What `K` is to the other: `blocks`, `is blocked by`.
     wording: String,
-    /// The other work item's key, or the web link's address.
+    /// The other work item's key, its title and its status.
     other: String,
-    /// Its title, and its status for a work item.
     title: String,
     status: String,
 }
 
 impl Seen {
     fn said(&self) -> String {
-        match self.status.is_empty() {
-            true => format!("{} {} {}", self.wording, self.title, self.other)
-                .replace("  ", " ")
-                .trim()
-                .to_owned(),
-            false => format!(
-                "{} {} ({}): {}",
-                self.wording, self.other, self.status, self.title
-            ),
-        }
+        format!(
+            "{} {} ({}): {}",
+            self.wording, self.other, self.status, self.title
+        )
     }
 }
 
-/// The links of `key`. Assumed, as Jira's REST gives an issue's `issuelinks` (`acli`'s page
-/// gives no output): `{id, type: {name, inward, outward}, inwardIssue | outwardIssue: {key,
-/// fields: {summary, status: {name}}}}`. The field names the wording `key` reads the link with,
-/// as Atlassian's "Issue linking model" page says: with an `outwardIssue`, `key` blocks it; with
-/// an `inwardIssue`, `key` is blocked by it. A web link is `{id, object: {url, title}}`.
-async fn seen_on(key: &str) -> Result<Vec<Seen>, String> {
-    let said = acli_run(&["jira", "workitem", "link", "list", "--key", key, "--json"]).await?;
-    let parsed: Value = serde_json::from_str(&said).map_err(|error| {
-        format!("acli jira workitem link list answered what is not JSON: {error}")
-    })?;
-    let list = parsed
-        .as_array()
-        .or(parsed["issuelinks"].as_array())
-        .or(parsed["links"].as_array())
-        .ok_or("acli jira workitem link list answered no list of links")?;
+/// The links of `key`, from `acli jira workitem view K --json --fields issuelinks`: `link list`
+/// names no other item when `K` is the outward one (seen on a real site). Each is Jira's REST
+/// `{id, type: {name, inward, outward}, inwardIssue, outwardIssue}`, one of the two null, and the
+/// field names the other item's side, as a real site answered for a link made with `--out K`:
+/// on `K` the other is the `inwardIssue` and `K` reads it with the outward wording (`K blocks
+/// it`); with an `outwardIssue`, `K` reads the inward one (`K is blocked by it`).
+async fn seen_on(site: &str, key: &str) -> Result<Vec<Seen>, String> {
+    let item = super::viewed(key, site, "issuelinks").await?;
     let text = |value: &Value| value.as_str().map(masked).unwrap_or_default();
-    Ok(list
-        .iter()
+    Ok(item["fields"]["issuelinks"]
+        .as_array()
+        .into_iter()
+        .flatten()
         .filter_map(|link| {
             let id = link["id"]
                 .as_str()
                 .map(str::to_owned)
                 .or_else(|| link["id"].as_u64().map(|n| n.to_string()))?;
-            if link["object"].is_object() {
-                return Some(Seen {
-                    id,
-                    wording: "web link:".into(),
-                    other: text(&link["object"]["url"]),
-                    title: text(&link["object"]["title"]),
-                    status: String::new(),
-                });
-            }
-            let (issue, wording) = match (link["inwardIssue"].is_object(), &link["type"]) {
-                (true, kind) => (&link["inwardIssue"], &kind["inward"]),
-                (false, kind) => (&link["outwardIssue"], &kind["outward"]),
+            let kind = &link["type"];
+            let (issue, end) = match link["inwardIssue"].is_object() {
+                true => (&link["inwardIssue"], End::Outward),
+                false if link["outwardIssue"].is_object() => (&link["outwardIssue"], End::Inward),
+                false => return None,
+            };
+            let name = text(&kind["name"]);
+            let wording = match end {
+                End::Outward => text(&kind["outward"]),
+                End::Inward => text(&kind["inward"]),
             };
             Some(Seen {
                 id,
-                wording: text(wording),
+                wording: if wording.is_empty() {
+                    name.clone()
+                } else {
+                    wording
+                },
+                kind: name,
+                end,
                 other: text(&issue["key"]),
                 title: text(&issue["fields"]["summary"]),
                 status: text(&issue["fields"]["status"]["name"]),
@@ -391,10 +406,10 @@ async fn seen_on(key: &str) -> Result<Vec<Seen>, String> {
 /// What `tickets show` adds of a Jira work item: its links, one line each. Nothing for a GitHub
 /// issue and for an item with none; a read that failed is said, since the rest is shown.
 pub(super) async fn section(project: &Project, key: &Key) -> String {
-    let (Some(ProjectTracker::Jira { .. }), Key::Jira(key)) = (&project.tracker, key) else {
+    let (Some(ProjectTracker::Jira { site, .. }), Key::Jira(key)) = (&project.tracker, key) else {
         return String::new();
     };
-    match seen_on(key).await {
+    match seen_on(site, key).await {
         Ok(links) if links.is_empty() => String::new(),
         Ok(links) => {
             let lines: Vec<String> = links
@@ -450,14 +465,13 @@ async fn jira_link(site: &str, (ticket, kind, other): (&str, &str, &str), unlink
         })
     );
     if unlink {
-        let links = match seen_on(ticket).await {
+        let links = match seen_on(site, ticket).await {
             Ok(links) => links,
             Err(why) => return Outcome::Failed(why),
         };
-        let Some(there) = links
-            .iter()
-            .find(|link| same(&link.other, other) && same(&link.wording, wording))
-        else {
+        let Some(there) = links.iter().find(|link| {
+            same(&link.other, other) && same(&link.kind, &found.name) && link.end == end
+        }) else {
             let held: Vec<String> = links.iter().map(Seen::said).collect();
             return Outcome::Refused(format!(
                 "refused: {ticket} has no link \"{wording} {other}\"; its links are {}; nothing \
@@ -481,10 +495,18 @@ async fn jira_link(site: &str, (ticket, kind, other): (&str, &str, &str), unlink
         End::Outward => (ticket, other),
         End::Inward => (other, ticket),
     };
-    // `--type` accepts the outward wording, as the page of the command says.
-    let outward = found.outward.as_str();
+    // `--type` takes the type's name, as a real site was seen to.
     match acli_run(&[
-        "jira", "workitem", "link", "create", "--out", out, "--in", inward, "--type", outward,
+        "jira",
+        "workitem",
+        "link",
+        "create",
+        "--out",
+        out,
+        "--in",
+        inward,
+        "--type",
+        &found.name,
         "--yes",
     ])
     .await

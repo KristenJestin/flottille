@@ -71,20 +71,20 @@
 //!   saying so otherwise. These are the work item's transitions as Jira would answer them: the
 //!   fake is the only place they are known, since the real `acli` lists none.
 //!
-//! The links (#365, `docs/tickets.md`, "Links and comments"), in the shape of Jira's REST API,
-//! which `acli`'s pages give no output for (assumed): `acli jira workitem link type --json`
-//! prints the script's `link_types` (`[{"id": "1", "name": "Blocks", "inward": "is blocked by",
-//! "outward": "blocks"}]`, `[]` without). `link create --out A --in B --type T --yes` ends with
-//! 0 for two work items of `items` and a type whose **outward wording** is T (the page says it
-//! accepts those), with 1 saying why otherwise, and keeps the link in `linked.json` numbered from
-//! 10000. `link list --key K --json` prints K's links, those of the script's `links` (`[{"id":
-//! "500", "type": "Blocks", "out": "ABC-2", "in": "ABC-1"}, {"id": "502", "web": {"title": …,
-//! "url": …}, "on": "ABC-1"}]`) and those created, as `{"id", "type": {name, inward, outward},
-//! "inwardIssue" | "outwardIssue": {"key", "fields": {summary, status}}}`: an `outwardIssue` when K
-//! is the outward end (K blocks it), an `inwardIssue` when K is the inward end (K is blocked by
-//! it), as Atlassian's "issue linking model" page says (the field names the label); a web link is
-//! `{"id", "object": {"title", "url"}}`. `link delete --id N --yes` ends with 0 for a link that
-//! is there, 1 otherwise, and keeps the ids deleted in `unlinked.json`.
+//! The links (#365, `docs/tickets.md`, "Links and comments"), in the shapes a real Jira Cloud
+//! site was seen to answer: `acli jira workitem link type --json` prints the names of the
+//! script's `link_types` only (`{"issueLinkTypes": [{"name": "Blocks"}]}`; the script gives each
+//! its `inward` and `outward` wordings too, which `view` shows). `link create --out A --in B
+//! --type T --yes` (A blocks B) ends with 0 for two work items of `items` and a type whose name or
+//! outward wording is T, printing `✓ A Blocks B`, with 1 saying why otherwise, and keeps the link
+//! in `linked.json` numbered from 10000. `view K --json` gives K's links in `fields.issuelinks`,
+//! those of the script's `links` (`[{"id": "500", "type": "Blocks", "out": "ABC-2", "in":
+//! "ABC-1"}]`) and those created, as `{"id", "type": {name, inward, outward}, "inwardIssue",
+//! "outwardIssue"}`, one of the two `null`: on the outward item (`out`) the other is the
+//! `inwardIssue`, on the inward one the `outwardIssue`, each `{"key", "fields": {summary,
+//! status}}`. `link list --key K --json` prints `{"issueLinks": [{"id", "outwardIssueKey",
+//! "typeName"}]}`, the key `null` when K is the outward item. `link delete --id N --yes` ends with
+//! 0 for a link that is there, 1 otherwise, and keeps the ids deleted in `unlinked.json`.
 //!
 //! `comment update --key K --id I (--body | --body-file | --body-adf)` (the first two plain text,
 //! the last a document, refused when it is none) and `comment delete --key K --id I`
@@ -179,6 +179,11 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
                         item["fields"]["status"]["name"] = status.clone();
                     }
                     add_posted(dir, script, key, &mut item);
+                    let links: Vec<Value> = live_links(dir, script)
+                        .iter()
+                        .filter_map(|link| link_of(script, link, key))
+                        .collect();
+                    item["fields"]["issuelinks"] = Value::from(links);
                     only_asked(rest, &mut item);
                     println!("{item}");
                     0
@@ -262,11 +267,12 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
             0
         }
         ["jira", "workitem", "link", "type", rest @ ..] if rest.contains(&"--json") => {
-            let types = match &script["link_types"] {
-                Value::Array(types) => types.clone(),
-                _ => Vec::new(),
-            };
-            println!("{}", Value::from(types));
+            // Names only, as a real site answers: the wordings come with each link of a `view`.
+            let types: Vec<Value> = link_types(script)
+                .iter()
+                .map(|kind| json!({"name": kind["name"]}))
+                .collect();
+            println!("{}", json!({"issueLinkTypes": types}));
             0
         }
         ["jira", "workitem", "link", "create", rest @ ..] if rest.contains(&"--yes") => {
@@ -284,9 +290,9 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
                 }
             }
             let Some(found) = link_types(script).into_iter().find(|t| {
-                t["outward"]
-                    .as_str()
-                    .is_some_and(|outward| outward.eq_ignore_ascii_case(kind))
+                [&t["name"], &t["outward"]]
+                    .iter()
+                    .any(|word| word.as_str().is_some_and(|w| w.eq_ignore_ascii_case(kind)))
             }) else {
                 eprintln!("✗ Error: link type {kind:?} not found");
                 return 1;
@@ -296,23 +302,26 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
             made.push(json!({"id": id, "type": found["name"], "out": out, "in": inward}));
             std::fs::write(dir.join("linked.json"), Value::from(made).to_string())
                 .expect("the links");
-            println!("✓ Link created {id}");
+            println!(
+                "✓ {out} {} {inward}",
+                found["name"].as_str().unwrap_or_default()
+            );
             0
         }
         ["jira", "workitem", "link", "list", rest @ ..] if rest.contains(&"--json") => {
             let Some(key) = value(rest, "--key") else {
                 return not_run(&words);
             };
-            let gone = links_file(dir, "unlinked.json");
-            let all = script["links"]
-                .as_array()
+            // As a real site answers: the outward item's key alone, none when K is that item.
+            let entries: Vec<Value> = live_links(dir, script)
                 .into_iter()
-                .flatten()
-                .cloned()
-                .chain(links_file(dir, "linked.json"))
-                .filter(|link| !gone.contains(&link["id"]));
-            let entries: Vec<Value> = all.filter_map(|link| link_of(script, &link, key)).collect();
-            println!("{}", Value::from(entries));
+                .filter(|link| link["out"] == key || link["in"] == key)
+                .map(|link| {
+                    let outward = (link["out"] != key).then(|| link["out"].clone());
+                    json!({"id": link["id"], "outwardIssueKey": outward, "typeName": link["type"]})
+                })
+                .collect();
+            println!("{}", json!({"issueLinks": entries}));
             0
         }
         ["jira", "workitem", "link", "delete", rest @ ..] if rest.contains(&"--yes") => {
@@ -320,13 +329,7 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
                 return not_run(&words);
             };
             let mut gone = links_file(dir, "unlinked.json");
-            let there = script["links"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .cloned()
-                .chain(links_file(dir, "linked.json"))
-                .any(|link| link["id"] == id && !gone.contains(&link["id"]));
+            let there = live_links(dir, script).iter().any(|link| link["id"] == id);
             if !there {
                 eprintln!("✗ Error: link {id} does not exist");
                 return 1;
@@ -613,13 +616,23 @@ fn links_file(dir: &Path, name: &str) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-/// One link as `link list --key K` prints it, none when K is not on it.
+/// The links there: the script's and those created, less those deleted.
+fn live_links(dir: &Path, script: &Value) -> Vec<Value> {
+    let gone = links_file(dir, "unlinked.json");
+    script["links"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .cloned()
+        .chain(links_file(dir, "linked.json"))
+        .filter(|link| !gone.contains(&link["id"]))
+        .collect()
+}
+
+/// One link of `view`'s `issuelinks` on K, none when K is not on it. As a real site gives it, the
+/// field names the other item's side: on the outward item (the one that blocks) the other is an
+/// `inwardIssue`, on the inward one an `outwardIssue`.
 fn link_of(script: &Value, link: &Value, key: &str) -> Option<Value> {
-    if let Some(web) = link.get("web") {
-        return (link["on"] == key).then(
-            || json!({"id": link["id"], "object": {"title": web["title"], "url": web["url"]}}),
-        );
-    }
     let kind = link_types(script)
         .into_iter()
         .find(|t| t["name"] == link["type"])?;
@@ -629,12 +642,14 @@ fn link_of(script: &Value, link: &Value, key: &str) -> Option<Value> {
             "status": item["fields"]["status"]}})
     };
     let kind = json!({"name": kind["name"], "inward": kind["inward"], "outward": kind["outward"]});
-    // As Jira's REST: the other end's field names the wording K reads it with (`outwardIssue`:
-    // K blocks it; `inwardIssue`: K is blocked by it).
     if link["out"] == key {
-        Some(json!({"id": link["id"], "type": kind, "outwardIssue": issue(&link["in"])}))
+        Some(
+            json!({"id": link["id"], "type": kind, "inwardIssue": issue(&link["in"]),
+            "outwardIssue": null}),
+        )
     } else if link["in"] == key {
-        Some(json!({"id": link["id"], "type": kind, "inwardIssue": issue(&link["out"])}))
+        Some(json!({"id": link["id"], "type": kind, "inwardIssue": null,
+            "outwardIssue": issue(&link["out"])}))
     } else {
         None
     }
