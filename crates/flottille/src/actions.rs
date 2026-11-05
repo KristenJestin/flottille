@@ -308,10 +308,15 @@ pub async fn prepared(
     }
     if tool == "tickets" {
         let project = own(daemon, grant)?;
-        return match crate::tickets::unwritable(&project, args) {
-            Some(why) => Err(Outcome::Refused(why)),
-            None => Ok(posted_says(args)),
-        };
+        if let Some(why) = crate::tickets::unwritable(&project, args) {
+            return Err(Outcome::Refused(why));
+        }
+        // A link kind the site does not have, or a comment no agent posted, is refused before
+        // the user is asked about it.
+        if let Some(why) = crate::tickets::checked_links(daemon, &project, args).await {
+            return Err(Outcome::Refused(why));
+        }
+        return Ok(posted_says(args));
     }
     if tool == "forge" {
         return Ok(posted_says(args));
@@ -472,7 +477,7 @@ pub async fn approved_losses(
 fn posted_says(args: &Value) -> Vec<String> {
     if matches!(
         args["action"].as_str(),
-        Some("list" | "search" | "show" | "types") | None
+        Some("list" | "search" | "show" | "types" | "link_types") | None
     ) {
         return Vec::new();
     }

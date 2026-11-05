@@ -521,7 +521,7 @@ fn a_jira_work_item_is_read_through_acli_and_its_description_comes_as_plain_text
         asked,
         [
             "jira auth status",
-            "jira workitem view ABC-123 --json --fields summary,status,description,comment"
+            "jira workitem view ABC-123 --json --fields summary,status,description,comment,issuelinks"
         ],
         "one read, for the link and the page both"
     );
@@ -906,7 +906,9 @@ fn ticket_read_returns_the_workspace_s_ticket_or_another_of_its_tracker_and_neve
     // Read only: every call either CLI got is one of the reads, and the gate held nothing.
     for call in calls(user.acli_received()) {
         assert!(
-            call == "jira auth status" || call.starts_with("jira workitem view "),
+            call == "jira auth status"
+                || call.starts_with("jira workitem view ")
+                || call.starts_with("jira workitem link list "),
             "{call}"
         );
     }
