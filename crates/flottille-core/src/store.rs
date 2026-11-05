@@ -619,6 +619,11 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX turn_usage_by_time ON turn_usage (started_at);
     CREATE INDEX turn_usage_by_project ON turn_usage (project, started_at);
 ",
+    "
+    -- The tool list an agent's last process was given (`docs/tools.md`, \"When the tools
+    -- change\"): its digest and the actions of each tool, as JSON; NULL before its first process.
+    ALTER TABLE agents ADD COLUMN tools_given TEXT;
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -1260,6 +1265,28 @@ impl Store {
         let event = append_agent_event(&transaction, agent, "agent.tools_changed", data)?;
         transaction.commit()?;
         Ok(event)
+    }
+
+    /// The tool list the agent's last process was given, as `set_agent_tools_given` kept it.
+    pub fn agent_tools_given(&self, agent: &str) -> Result<Option<String>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT tools_given FROM agents WHERE id = ?1",
+                params![agent],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// Keeps the tool list the agent's process is given.
+    pub fn set_agent_tools_given(&mut self, agent: &str, given: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE agents SET tools_given = ?2 WHERE id = ?1",
+            params![agent, given],
+        )?;
+        Ok(())
     }
 
     /// An event of the agent's conversation; `activity` says it is a sign of activity, which

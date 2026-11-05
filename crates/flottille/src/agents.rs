@@ -127,7 +127,14 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 agent.workspace.as_deref(),
                 &asked.message,
             )?;
-            let images = keep_images(daemon, &agent, &asked.images)?;
+            // Decoding and scaling a big picture takes a good while for a 4K screenshot: it
+            // runs where it holds no thread of the runtime.
+            let images = {
+                let (daemon, agent, uploads) = (daemon.clone(), agent.clone(), asked.images);
+                tokio::task::spawn_blocking(move || keep_images(&daemon, &agent, &uploads))
+                    .await
+                    .map_err(|e| Failure::new("unavailable", format!("images not kept: {e}")))??
+            };
             let delivery = deliveries::deliver_with_images(
                 daemon,
                 &agent.id,
@@ -433,6 +440,8 @@ fn keep_images(
                 MAX_IMAGE_BYTES / 1024 / 1024
             )));
         }
+        // Scaled before it is stored, so that more of them fit under the byte caps of a prompt.
+        let bytes = flottille_core::images::scaled_down(&image.mime, bytes);
         checked.push((extension, bytes));
     }
     let folder = daemon.paths.images(&agent.id);
@@ -997,6 +1006,14 @@ async fn process(
     // A token of this process's own, which revokes the last one.
     let grant = mcp::grant_of(daemon, agent)?;
     let token = mcp::mint(daemon, grant, provider)?;
+    // What minting it queued (the tools a new build changed) goes with the prompt that woke the
+    // process: read before it answers, not a turn later.
+    if let Some(woke) = turns.queued.front_mut()
+        && let Some(more) = deliveries::pump(daemon, &agent.id)
+    {
+        woke.text = format!("{}\n\n{}", woke.text, more.text);
+        woke.images.extend(more.images);
+    }
     let mut command = Command::new(&launch.program);
     // The daemon's environment, less what the agent has no business with; what Flottille sets
     // comes after, so that it is not among the removed.

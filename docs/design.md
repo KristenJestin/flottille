@@ -716,7 +716,11 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   workspace (with the preparation's progress and failure output), the composer that starts
   a session (place, agent, model, first message), its pull requests and tickets (`items.md`: two
   tabs, Pull requests and Tickets, each counting what it lists, filtered open, closed or all, the
-  user's own, and a repository for the pull requests; each row its number, title, state, CI mark,
+  user's own, and a repository for the pull requests, and searched by key or title (the quick
+  switcher's matching, what matched in the accent; a line says how many are listed, `128 open`,
+  or `3 of 128 open` under a search); the list is about ten rows tall and scrolls inside its
+  section, the tabs and the filters staying above it, keeps its place when it is read again and
+  goes back to the top when a tab, a filter or the search changes; each row its number, title, state, CI mark,
   author, assignee and when it changed, coming, going and changing live with the `item.*` events
   and going with `items.forgotten`; a project with no forge or no tracker says so with a link to
   its Settings, a source that fails says why; a click opens the item's detail in a dialog: its
@@ -764,12 +768,13 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   time and a Copy icon button (a toast says it is copied); each step the Auto judge let through
   says "allowed by the judge" (a ticket or a pull request created included), and the folded line
   of its steps says it too; a message the user sent while the root works stays under the
-  conversation, above the composer, drawn as waiting (quieter, "Sent when the agent finishes its
-  step"), until the root reads it between its turns and it is a message like the others (the
-  queued deliveries of `agent.tree`), with three buttons while it waits: Send now (stops the
+  conversation, above the composer, drawn as waiting (quieter, with its pictures as small
+  thumbnails, and one short line, "Queued · after this step", whose tooltip says "Sent when the
+  agent finishes its step"), until the root reads it between its turns and it is a message like
+  the others (the queued deliveries of `agent.tree`), with three buttons while it waits: Send now (stops the
   root's turn and hands it this message next), Edit (takes it back into the composer, text and
   pictures, after what is typed) and Cancel (takes it back); the daemon checks that the root has
-  not read it in one transaction, and says "already read by the agent" in a toast if it has; and a composer that writes to the root, with the session's mode
+  not read it in one transaction, and says "already read by the agent" in a toast if it has; and a composer that writes to the root (it carries 20 pictures at most; a refusal, of a picture or of a message, is a toast and never changes the composer's height; what appears in it unfolds and what leaves folds away), with the session's mode
   (an Ask | Auto | Full control, with a warning icon when Auto has no judge, its highlight in the
   alarm colour on Full, each step Full let through saying "allowed by Full mode") in its bar, whose Stop
   button, in Send's place while a turn runs and Send has nothing to send (the two cross-fade), and
@@ -812,10 +817,16 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   where it says it ended, not its header, and its conversation says it ended, then resumed. Selecting a child shows its
   conversation read-only;
 - the runs of the agents (`docs/tools.md`, "Tasks and runs"): the rail's **Runs** section lists
-  those of the session's tree (it is not called "Commands", which are the project's `/name`
-  instructions), running first, each with its line, who started it (the agent, and the task when
-  it is one), how long, its last output line and Stop, then the last five that ended, greyed, with
-  how they ended; a click opens the run's drawer (the same on the project page): its command, its
+  the **task** runs of the agent shown (the root by default, the child once the user opens it from
+  the Agents list; a run belongs to the agent that started it) (it is not called "Commands", which
+  are the project's `/name` instructions), running first, each with its line, who started it (the
+  agent, and the task), how long, its last output line and Stop, then the last five that ended,
+  greyed, folded under `N ended` (unfolded by a click, as the Agents' `N ended`), with how they
+  ended. A one-off line (`run {"line": …}`) is not listed, running or ended: its card in the
+  conversation is where it is seen, and the section folds away when there is no task run. A child
+  with task runs still going says so on its row in the Agents list (`2 runs`), and a click opens
+  that child with its Runs section; a click on a run opens its drawer (the same on the project
+  page, which lists only the tasks the user ran there): its command, its
   task, where it runs, who started it (a link to the agent in its session), since when or how it
   ended, its output, live and following its end, Copy, Restart (the daemon's `run.restart`: it
   stops the command if it runs and starts the same line again in the same place; the drawer, and

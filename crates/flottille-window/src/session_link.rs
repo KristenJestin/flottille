@@ -85,6 +85,8 @@ pub struct Queued {
     pub text: String,
     /// How many pictures go with it.
     pub images: usize,
+    /// Their names, which `agent.image` reads back.
+    pub pictures: Vec<String>,
     pub at: u64,
 }
 
@@ -124,6 +126,12 @@ impl TreeAgent {
                     delivery: text(&queued["delivery"]).unwrap_or_default(),
                     text: text(&queued["text"]).unwrap_or_default(),
                     images: queued["images"].as_u64().unwrap_or(0) as usize,
+                    pictures: queued["pictures"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|name| name.as_str().map(str::to_owned))
+                        .collect(),
                     at: queued["at"].as_u64().unwrap_or(0),
                 })
                 .collect(),
@@ -369,8 +377,6 @@ pub struct PlaceFacts {
     pub repositories: Vec<(String, RepositoryFacts)>,
     pub branch: Option<String>,
     pub bases: Vec<String>,
-    /// How long its preparation took, once it is ready.
-    pub prepared_ms: Option<u64>,
     /// Each repository's pull request (a workspace).
     pub pulls: Vec<PullRequest>,
     /// Each repository's forge in a line, as the daemon says it.
@@ -947,9 +953,6 @@ impl Link {
             repositories,
             branch: shown["branch"].as_str().map(str::to_owned),
             bases,
-            prepared_ms: shown["ready_at"]
-                .as_u64()
-                .map(|ready| ready.saturating_sub(shown["created_at"].as_u64().unwrap_or(0))),
             pulls: forge.pulls,
             forge_problem: forge.problem,
             forge_pending: known.forge.is_none(),

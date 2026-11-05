@@ -730,3 +730,299 @@ fn a_data_center_repository_is_refused_for_pipelines_naming_why() {
         bkt_calls(&user)
     );
 }
+
+/// A realistic `bitbucket-pipelines.yml`, as projects write them: anchors and aliases, merge keys,
+/// `definitions` that are not pipelines, block scalars, comments with colons in them.
+const ANCHORED_PIPELINES: &str = "\
+# Build: test, then ship. Note: the deploy ones are manual.
+image: atlassian/default-image:4
+
+definitions:
+  caches:
+    cargo: ~/.cargo
+  services:
+    postgres:
+      image: postgres:16
+      variables:
+        POSTGRES_DB: app
+  steps:
+    - step: &build
+        name: Build and test
+        caches: [cargo]
+        services: [postgres]
+        script:
+          - cargo build --release
+          - |
+            if [ -n \"$CI\" ]; then
+              echo \"ci: yes\"
+            fi
+          - >
+            cargo test
+            --workspace
+    - step: &deploy
+        name: Deploy
+        deployment: staging
+        trigger: manual
+        script:
+          - ./deploy.sh \"$TARGET\"
+  inputs: &deploy_inputs
+    variables:
+      - name: TARGET
+        default: staging
+        allowed-values: [staging, production]
+        description: Where to deploy
+      - name: TAG
+  shared: &shared
+    deploy-again:
+      - <<: *deploy_inputs
+      - step: *deploy
+
+pipelines:
+  default:
+    - step: *build
+  branches:
+    main:
+      - step:
+          <<: *build
+          name: Build main
+  pull-requests:
+    '**':
+      - step: *build
+  custom:
+    <<: *shared
+    nightly:
+      - step: *build
+    deploy:
+      - <<: *deploy_inputs
+      - step: *deploy
+";
+
+/// The `api` repository's `branch` holds `text` as its `bitbucket-pipelines.yml`, as last fetched
+/// from its remote, the way a branch of the user's Bitbucket does.
+fn api_holds(user: &User, branch: &str, text: &str) {
+    let dir = user.path("work/app/api");
+    std::fs::write(dir.join("bitbucket-pipelines.yml"), text).unwrap();
+    user.git(&dir, &["add", "."]);
+    user.git(&dir, &["commit", "--quiet", "-m", "pipelines"]);
+    user.git(
+        &dir,
+        &[
+            "update-ref",
+            &format!("refs/remotes/origin/{branch}"),
+            "HEAD",
+        ],
+    );
+}
+
+#[test]
+fn a_bitbucket_file_with_anchors_and_merge_keys_lists_its_custom_pipelines() {
+    let (user, _, mcp) = setup();
+    api_holds(&user, "feature/x", ANCHORED_PIPELINES);
+
+    let text = read(
+        &mcp,
+        json!({"action": "pipelines", "repository": "api", "branch": "feature/x"}),
+    );
+
+    for line in [
+        "- default",
+        "- branches: main",
+        "- pull-requests: **",
+        "- custom: nightly",
+        "- custom: deploy-again, variables: ",
+        "- custom: deploy, variables: ",
+    ] {
+        assert!(text.contains(line), "{line:?} in {text}");
+    }
+    assert!(!text.contains("<<"), "a merge key is no pipeline: {text}");
+    assert!(
+        !text.contains("definitions") && !text.contains("deploy_inputs"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_custom_pipeline_from_definitions_lists_its_variables() {
+    let (user, _, mcp) = setup();
+    api_holds(&user, "feature/x", ANCHORED_PIPELINES);
+
+    let text = read(
+        &mcp,
+        json!({"action": "pipelines", "repository": "api", "branch": "feature/x"}),
+    );
+
+    let want = "TARGET (default staging, one of staging, production, Where to deploy), TAG";
+    for name in ["deploy", "deploy-again"] {
+        assert!(
+            text.contains(&format!("- custom: {name}, variables: {want}\n")),
+            "{name} in {text}"
+        );
+    }
+}
+
+#[test]
+fn a_large_realistic_file_is_read_whole() {
+    let (user, _, mcp) = setup();
+    let mut text = ANCHORED_PIPELINES.to_owned();
+    for n in 0..60 {
+        text.push_str(&format!(
+            "    release-{n}:\n      - variables: *deploy_vars\n      - step:\n          <<: *deploy_base\n          name: Release {n}\n          script:\n            - echo \"release: {n}\"\n",
+        ));
+    }
+    let text = text.replace(
+        "      - name: TAG\n",
+        "      - name: TAG\n  vars: &deploy_vars\n    - name: ROUND\n  base: &deploy_base\n    script: [./deploy.sh]\n",
+    );
+    assert!(text.lines().count() > 300, "{}", text.lines().count());
+    api_holds(&user, "feature/x", &text);
+
+    let listed = read(
+        &mcp,
+        json!({"action": "pipelines", "repository": "api", "branch": "feature/x"}),
+    );
+
+    assert!(
+        listed.contains("- custom: release-59, variables: ROUND\n"),
+        "{listed}"
+    );
+    assert!(
+        listed.contains("- custom: deploy, variables: TARGET"),
+        "{listed}"
+    );
+}
+
+#[test]
+fn a_file_that_cannot_be_parsed_says_why_and_where() {
+    let (user, _, mcp) = setup();
+    api_holds(
+        &user,
+        "feature/x",
+        "pipelines:\n  default:\n    - step:\n        name: Deploy: prod\n        script: [a]\n",
+    );
+
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "pipelines", "repository": "api", "branch": "feature/x"}),
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    for part in [
+        "bitbucket-pipelines.yml",
+        "cannot be parsed",
+        "mapping values are not allowed",
+        "line 4 column 21",
+        "origin/feature/x",
+    ] {
+        assert!(answer.text.contains(part), "{part:?} in {}", answer.text);
+    }
+}
+
+#[test]
+fn a_missing_file_says_it_is_missing() {
+    let (user, _, mcp) = setup();
+    let dir = user.path("work/app/api");
+    user.git(&dir, &["rm", "--quiet", "bitbucket-pipelines.yml"]);
+    user.git(&dir, &["commit", "--quiet", "-m", "no pipelines"]);
+    user.git(
+        &dir,
+        &["update-ref", "refs/remotes/origin/feature/x", "HEAD"],
+    );
+
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "pipelines", "repository": "api", "branch": "feature/x"}),
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("has no bitbucket-pipelines.yml")
+            && answer.text.contains("is not in the commit")
+            && answer.text.contains("origin/feature/x"),
+        "{}",
+        answer.text
+    );
+    assert!(
+        !answer.text.contains("cannot be parsed"),
+        "a missing file is not a broken one: {}",
+        answer.text
+    );
+}
+
+#[test]
+fn a_merge_key_that_cannot_be_applied_is_said_and_the_rest_is_listed() {
+    let (user, _, mcp) = setup();
+    api_holds(
+        &user,
+        "feature/x",
+        "definitions:\n  list: &list [a, b]\npipelines:\n  custom:\n    broken:\n      - step:\n          <<: *list\n    fine:\n      - step: {script: [a]}\n",
+    );
+
+    let text = read(
+        &mcp,
+        json!({"action": "pipelines", "repository": "api", "branch": "feature/x"}),
+    );
+
+    assert!(text.contains("- custom: fine"), "{text}");
+    assert!(text.contains("- custom: broken"), "{text}");
+    assert!(
+        text.contains("merge key") && text.contains("mapping"),
+        "the merge that failed is said: {text}"
+    );
+}
+
+#[test]
+fn a_broken_workflow_is_named_and_the_others_are_listed() {
+    let (user, _, mcp) = setup();
+    let dir = user.path("work/app/web");
+    std::fs::write(
+        dir.join(".github/workflows/broken.yml"),
+        "on: workflow_dispatch\njobs:\n  x:\n    name: a: b\n",
+    )
+    .unwrap();
+    user.git(&dir, &["add", "."]);
+    user.git(&dir, &["commit", "--quiet", "-m", "broken"]);
+    user.git(
+        &dir,
+        &["update-ref", "refs/remotes/origin/feature/x", "HEAD"],
+    );
+
+    let text = read(
+        &mcp,
+        json!({"action": "pipelines", "repository": "web", "branch": "feature/x"}),
+    );
+
+    assert!(text.contains("- E2E (.github/workflows/e2e.yml)"), "{text}");
+    assert!(
+        text.contains("- deploy.yml (.github/workflows/deploy.yml)"),
+        "{text}"
+    );
+    assert!(
+        text.contains(".github/workflows/broken.yml")
+            && text.contains("cannot be parsed")
+            && text.contains("line 4"),
+        "the workflow that cannot be read is named: {text}"
+    );
+}
+
+#[test]
+fn a_custom_pipeline_from_an_anchored_file_runs_through_bkt() {
+    let (user, _, mcp) = setup();
+    api_holds(&user, "feature/x", ANCHORED_PIPELINES);
+
+    let answer = write(
+        &user,
+        &mcp,
+        json!({"action": "run", "repository": "api", "branch": "feature/x",
+            "pipeline": "custom: nightly"}),
+    );
+
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(
+        bkt_writes(&user),
+        vec![
+            "pipeline run --context cloud --workspace acme --repo api --ref feature/x \
+             --selector-type custom --selector-pattern nightly"
+                .to_owned()
+        ]
+    );
+}
