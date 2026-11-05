@@ -269,6 +269,7 @@ async fn settings_of(project: &Project) -> Value {
         "folder": project.folder,
         "repositories": repositories,
         "tracker": project.tracker,
+        "message_checks": project.message_checks,
         "obsolete": project.obsolete,
     })
 }
