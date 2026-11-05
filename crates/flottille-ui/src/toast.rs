@@ -8,6 +8,7 @@
 //! A result is never a line appended under a form (a scan of the window's sources refuses it); a
 //! form's own validation stays under its field ([`Field`](crate::Field)).
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::{
@@ -16,11 +17,13 @@ use gpui_kit::{
     WeakEntity, Window, anchored, deferred, div, point, px,
 };
 
+use crate::button::Button;
 use crate::color::mix;
 use crate::icons::{Icon, icon};
 use crate::interact::hoverable;
 use crate::layer;
 use crate::listing::{Item, Listing};
+use crate::space;
 use crate::theme::palette;
 use crate::typography::Type;
 
@@ -39,13 +42,49 @@ pub enum ToastKind {
     Failure,
 }
 
-/// One result: its kind, its line and an optional second line.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One result: its kind, its line, an optional second line and an optional action.
+#[derive(Clone)]
 pub struct Toast {
     kind: ToastKind,
     title: SharedString,
     detail: Option<SharedString>,
+    action: Option<Action>,
 }
+
+type Run = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// A button in a toast (`Open`): its click runs `run` and the toast leaves.
+#[derive(Clone)]
+struct Action {
+    label: SharedString,
+    run: Run,
+}
+
+impl std::fmt::Debug for Toast {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Toast")
+            .field("kind", &self.kind)
+            .field("title", &self.title)
+            .field("detail", &self.detail)
+            .field("action", &self.action.as_ref().map(|a| &a.label))
+            .finish()
+    }
+}
+
+impl PartialEq for Toast {
+    fn eq(&self, other: &Toast) -> bool {
+        self.kind == other.kind
+            && self.title == other.title
+            && self.detail == other.detail
+            && match (&self.action, &other.action) {
+                (Some(a), Some(b)) => a.label == b.label && Rc::ptr_eq(&a.run, &b.run),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+impl Eq for Toast {}
 
 impl Toast {
     /// Something done: "Task test saved".
@@ -54,6 +93,7 @@ impl Toast {
             kind: ToastKind::Success,
             title: title.into(),
             detail: None,
+            action: None,
         }
     }
 
@@ -68,6 +108,19 @@ impl Toast {
     /// The second line: what follows from it, or why it failed.
     pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
         self.detail = Some(detail.into());
+        self
+    }
+
+    /// A button under the lines, `toast-<n>-action`: its click runs `run`, then the toast leaves.
+    pub fn action(
+        mut self,
+        label: impl Into<SharedString>,
+        run: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.action = Some(Action {
+            label: label.into(),
+            run: Rc::new(run),
+        });
         self
     }
 
@@ -217,6 +270,19 @@ impl ToastStack {
                     .line_height(px(19.))
                     .text_color(p.mute)
                     .child(detail)
+            }))
+            .children(toast.action.clone().map(|action| {
+                let this = cx.entity().downgrade();
+                div().mt(space::SM).flex().child(
+                    Button::secondary(
+                        ElementId::Name(format!("toast-{number}-action").into()),
+                        action.label,
+                    )
+                    .on_click(move |_, window, cx| {
+                        (action.run)(window, cx);
+                        this.update(cx, |this, cx| this.dismiss(number, cx)).ok();
+                    }),
+                )
             }));
         let dismiss = div()
             .id(ElementId::Name(format!("toast-{number}-dismiss").into()))
