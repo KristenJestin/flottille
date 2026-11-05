@@ -1337,6 +1337,29 @@ impl Store {
         )?)
     }
 
+    /// The latest sign of activity of these agents, from what is recorded: their events (but
+    /// the two the daemon says on its own, `agent.tools_outdated` and `agent.released`), their
+    /// deliveries made and sent, their runs started and ended, their requests asked and decided,
+    /// and the agents' own `created_at`, `active_at` and `exchanged_at`. `None` for no agent.
+    pub fn last_activity_of(&self, agents: &[String]) -> Result<Option<u64>> {
+        Ok(self.connection.query_row(
+            "WITH tree(id) AS (SELECT value FROM json_each(?1)) \
+             SELECT max(at) FROM ( \
+               SELECT max(created_at, coalesce(active_at, 0), coalesce(exchanged_at, 0)) AS at \
+                 FROM agents WHERE id IN tree \
+               UNION ALL SELECT max(e.at) FROM agent_events a JOIN events e ON e.seq = a.seq \
+                 WHERE a.agent IN tree AND e.name NOT IN ('agent.tools_outdated', 'agent.released') \
+               UNION ALL SELECT max(created_at, coalesce(sent_at, 0)) FROM deliveries \
+                 WHERE agent IN tree \
+               UNION ALL SELECT max(started_at, coalesce(ended_at, 0)) FROM runs \
+                 WHERE agent IN tree \
+               UNION ALL SELECT max(created_at, coalesce(decided_at, 0)) FROM approval_requests \
+                 WHERE agent IN tree)",
+            params![serde_json::to_string(agents)?],
+            |row| row.get(0),
+        )?)
+    }
+
     /// An adapter process started for the agent: its pid and its start time.
     pub fn add_process(&self, pid: u32, started: u64, agent: &str) -> Result<()> {
         self.connection.execute(
