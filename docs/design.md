@@ -599,9 +599,10 @@ started for the user (labelled as that agent's, never the user's), and last the 
 messages to the session, nothing else: the three newest, up to the moment of the call (one sent
 while the agent works, still waiting for its turn, among them), in the order they were sent, each
 numbered, the last named as the newest, so that a small model never takes an older one for it.
-A message that ran a command (`/name`) is told as that: the user ran the command, from its file
-or the project's, and its text as it was sent comes in a block of its own, escaped, since it is
-the project's text, not the user's words.
+A message that used commands (`/name`) is told as that, from the names the daemon recorded with
+it, never read from its text: the user used the commands, each from its file or the project's;
+what they typed comes as their words, and what the agent received in a block of its own, escaped,
+since it is the project's text, not the user's words.
 What the agent wrote comes in blocks of its own, every `<` escaped, so that no text of the agent
 reads as the user's; only the user's messages say what is wanted. It answers one JSON object,
 `{"verdict": "allow" | "ask", "reason": "…"}`. A failure, an answer that is not that object, or
@@ -813,10 +814,11 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   `Writing…`, `Running <tool>…`) is said in the same bar, where the words cross-fade as they change,
   and goes with the turn. A running agent is
   drawn by its icon alone, in the tree and in the rail: no text badge, nothing in the header. In the
-  composer, `/` at the start
-  of a message lists the project's commands, filtered as the user types: picking one puts `/name `
-  in the field, and sending it sends the command's instructions with what follows the name (a
-  `/word` that names none is sent as text); the header says the session's title and its place,
+  composer, a word at the cursor that starts with `/`, anywhere in the message, lists the project's
+  commands, filtered as the user types: picking one completes that word into `/name `, and sending
+  it sends the commands' instructions with the message as it was written (a `/word` that names none
+  is sent as text); the message and the queued message show what the user typed, each command as a
+  chip, what the agent received in a fold; the header says the session's title and its place,
   and no state; a rail with, from its top, the session's tree of agents (each row with the share
   of its context the agent used, a percentage beside a thin bar, on one line; the session's own
   agent says only what it runs on, the others their name over what they run on and do; the composer's bar does not say

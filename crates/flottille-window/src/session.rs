@@ -2692,6 +2692,9 @@ pub struct Row {
     markdown: Vec<Entity<MarkdownPiece>>,
     /// Where a selection begun in its text stays: see [`MarkdownPiece`].
     scope: TextSelectionScopeId,
+    /// What the agent received for a message that used commands, selectable as the message is: the
+    /// text it was made from, and its view.
+    received: Option<(String, MarkdownText)>,
     thinking: Option<(Entity<PulsingLabel>, Entity<ThinkingTimer>)>,
     calls: Vec<(Entity<Status>, Entity<StateIcon>)>,
     sub_agents: Vec<SubAgent>,
@@ -2737,6 +2740,7 @@ impl Row {
                 open: false,
                 markdown: Vec::new(),
                 scope: TextSelectionScopeId::new(),
+                received: None,
                 thinking: None,
                 calls: Vec::new(),
                 sub_agents,
@@ -2840,12 +2844,15 @@ impl Row {
 
     /// Shows `text` as Markdown: each piece that did not change keeps its parse, and one that
     /// grew parses what it gained.
-    fn set_markdown(&mut self, text: &str, muted: bool, cx: &mut Context<Self>) {
+    fn set_markdown(&mut self, text: &str, muted: bool, chips: bool, cx: &mut Context<Self>) {
         let pieces = markdown_pieces(text);
         for (at, piece) in pieces.iter().enumerate() {
             match self.markdown.get(at) {
                 Some(markdown) => {
-                    let state = markdown.read(cx).state.clone();
+                    let state = markdown.update(cx, |markdown, _| {
+                        markdown.chips = chips;
+                        markdown.state.clone()
+                    });
                     state.update(cx, |state, cx| state.set_text(piece, cx));
                 }
                 None => {
@@ -2854,6 +2861,7 @@ impl Row {
                     self.markdown.push(cx.new(|_| MarkdownPiece {
                         state,
                         muted,
+                        chips,
                         scope,
                     }));
                 }
@@ -2892,11 +2900,34 @@ impl Row {
             &block
         {
             let muted = matches!(block, Block::Thought { .. });
-            self.set_markdown(text, muted, cx);
+            self.set_markdown(text, muted, false, cx);
         }
-        // The user's own message is selectable like a reply: the same view, fed what was typed.
-        if let Block::Message { text, .. } | Block::Relayed { text, .. } = &block {
-            self.set_markdown(&as_typed(text), false, cx);
+        // The user's own message is selectable like a reply: the same view, fed what was typed,
+        // each command in it a chip.
+        match &block {
+            Block::Message { text, commands, .. } => {
+                let chips = commands
+                    .as_ref()
+                    .map(|commanded| command_chips(text, &commanded.names))
+                    .unwrap_or_default();
+                self.set_markdown(
+                    &typed_with_chips(text, &chips),
+                    false,
+                    !chips.is_empty(),
+                    cx,
+                );
+                self.received = commands
+                    .as_ref()
+                    .map(|commanded| match self.received.take() {
+                        Some((seen, view)) if seen == commanded.received => (seen, view),
+                        _ => (
+                            commanded.received.clone(),
+                            MarkdownText::quiet(&as_typed(&commanded.received), cx),
+                        ),
+                    });
+            }
+            Block::Relayed { text, .. } => self.set_markdown(&as_typed(text), false, false, cx),
+            _ => {}
         }
         match &block {
             Block::Thought { since, until, .. } => {
@@ -2961,7 +2992,7 @@ impl Row {
         if let Block::Text { text } | Block::Thought { text, .. } = block {
             text.push_str(piece);
             let text = text.clone();
-            self.set_markdown(&text, muted, cx);
+            self.set_markdown(&text, muted, false, cx);
             cx.notify();
         }
     }
@@ -3007,7 +3038,15 @@ fn allowed_said(calls: &[Call]) -> String {
 /// keeps its break and its indentation. An address the renderer links by itself is left as typed:
 /// an escape inside it would be drawn, backslash and all.
 fn as_typed(text: &str) -> String {
+    typed_with_chips(text, &[])
+}
+
+/// [`as_typed`], each of `chips` (byte ranges of `text`, the commands it used) drawn as inline
+/// code, which the message's view styles as the accent's chip: its characters are the command's,
+/// nothing in it is escaped.
+fn typed_with_chips(text: &str, chips: &[std::ops::Range<usize>]) -> String {
     let line = |line: &str| {
+        let base = line.as_ptr() as usize - text.as_ptr() as usize;
         let indent = line.len() - line.trim_start_matches(' ').len();
         let mut out = "\u{a0}".repeat(indent);
         let line = &line[indent..];
@@ -3015,6 +3054,16 @@ fn as_typed(text: &str) -> String {
         let mut previous = None;
         while at < line.len() {
             let ahead = &line[at..];
+            let here = base + indent + at;
+            if let Some(chip) = chips
+                .iter()
+                .find(|chip| chip.start == here && !text[(*chip).clone()].contains('`'))
+            {
+                out.push_str(&format!("`{}`", &text[chip.clone()]));
+                at += chip.len();
+                previous = Some('`');
+                continue;
+            }
             if let Some(length) = address(previous, ahead) {
                 out.push_str(&ahead[..length]);
                 at += length;
@@ -3080,6 +3129,15 @@ pub struct MarkdownText {
 
 impl MarkdownText {
     pub fn new(text: &str, cx: &mut App) -> Self {
+        Self::drawn(text, false, cx)
+    }
+
+    /// In the muted ink, as a thought is.
+    pub fn quiet(text: &str, cx: &mut App) -> Self {
+        Self::drawn(text, true, cx)
+    }
+
+    fn drawn(text: &str, muted: bool, cx: &mut App) -> Self {
         let scope = TextSelectionScopeId::new();
         let pieces = markdown_pieces(text)
             .into_iter()
@@ -3087,7 +3145,8 @@ impl MarkdownText {
                 let state = cx.new(|cx| TextViewState::markdown(piece, cx));
                 cx.new(|_| MarkdownPiece {
                     state,
-                    muted: false,
+                    muted,
+                    chips: false,
                     scope,
                 })
             })
@@ -3131,6 +3190,8 @@ pub struct MarkdownPiece {
     state: Entity<TextViewState>,
     /// A thought's, in the muted ink.
     muted: bool,
+    /// Its inline code is the commands of a message the user typed: the accent's chip.
+    chips: bool,
     scope: TextSelectionScopeId,
 }
 
@@ -3139,13 +3200,23 @@ impl Render for MarkdownPiece {
         let scope = self.scope;
         // The scope is set where the view paints: a piece drawn again alone paints without its
         // row around it.
+        let p = palette(cx);
+        let mut style = markdown_style(&p, self.muted);
+        if self.chips {
+            style = style.with_inline_code(gpui_kit::HighlightStyle {
+                color: Some(p.acc),
+                background_color: Some(p.acc.opacity(0.14)),
+                font_weight: Some(gpui_kit::FontWeight::MEDIUM),
+                ..Default::default()
+            });
+        }
         div()
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 TextSelection::activate_scope(scope, window, cx)
             })
             .child(
                 TextView::new(&self.state)
-                    .style(markdown_style(&palette(cx), self.muted))
+                    .style(style)
                     .image_source(no_image),
             )
             .text_selection_scope(scope)
@@ -3297,6 +3368,71 @@ fn call_state(call: &Call) -> AgentState {
     }
 }
 
+/// Where the commands of a message the user typed stand: each `/name` of `names`.
+pub fn command_chips(text: &str, names: &[String]) -> Vec<std::ops::Range<usize>> {
+    flottille_core::commands::used(text, |name| names.iter().any(|known| known == name))
+        .into_iter()
+        .map(|(range, _)| range)
+        .collect()
+}
+
+/// The line that says the agent received more than was typed.
+pub const RECEIVED: &str = "What the agent received";
+
+impl Row {
+    /// Under a message that used commands: "What the agent received", which unfolds into it.
+    fn render_received(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette(cx);
+        let id = |part: &str| ElementId::Name(format!("row-{}-{part}", self.at).into());
+        let turn = turning(id("received-toggle"), self.open, window, cx);
+        div()
+            .id(id("received-part"))
+            .flex()
+            .flex_col()
+            .px(space::SM)
+            .child(hoverable(
+                div()
+                    .id(id("received-toggle"))
+                    .flex()
+                    .items_center()
+                    .gap(space::SM)
+                    .cursor_pointer()
+                    .text_size(px(12.5))
+                    .aria_label(RECEIVED)
+                    .aria_expanded(self.open)
+                    .child(RECEIVED)
+                    .child(
+                        icon(Icon::Chevron).size(px(12.)).with_transformation(
+                            Transformation::rotate(radians(-FRAC_PI_2 * turn)),
+                        ),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.open = !this.open;
+                        cx.notify();
+                    })),
+                move |d, t| d.text_color(mix(p.faint, p.mute, t)),
+            ))
+            .child(presence(
+                id("received"),
+                self.open,
+                div()
+                    .id(id("received-text"))
+                    .pt(space::SM)
+                    .mono(12.)
+                    .when_some(self.received.as_ref(), |d, (received, _)| {
+                        d.aria_label(SharedString::from(received.clone()))
+                    })
+                    .children(
+                        self.received
+                            .as_ref()
+                            .map(|(_, view)| view.view(id("received-region"))),
+                    )
+                    .test_support(),
+            ))
+            .into_any_element()
+    }
+}
+
 impl Render for Row {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
@@ -3305,7 +3441,12 @@ impl Render for Row {
         // The row's own block, not a copy of it.
         let block = self.block.clone();
         match &*block {
-            Block::Message { text, images, .. } => {
+            Block::Message {
+                text,
+                images,
+                commands,
+                ..
+            } => {
                 let page = self.page.upgrade();
                 let pictures: Vec<Option<Arc<gpui_kit::Image>>> = images
                     .iter()
@@ -3389,6 +3530,7 @@ impl Render for Row {
                                         .test_support(),
                                 )
                             })
+                            .children(commands.as_ref().map(|_| self.render_received(window, cx)))
                             .test_support(),
                     )
                     .test_support();
@@ -5855,9 +5997,10 @@ fn elbow(color: gpui_kit::Hsla) -> gpui_kit::Canvas<()> {
     )
 }
 
-/// The composer of a session: it writes to the root agent, and only to it. `/` at the start of a
-/// message lists the project's commands: picking one puts `/name ` in the field, and the daemon
-/// sends the command's instructions with what follows it.
+/// The composer of a session: it writes to the root agent, and only to it. A word at the cursor
+/// that starts with `/` lists the project's commands: picking one completes it into `/name `, and
+/// the daemon sends the instructions of each command the message uses with it. The field cannot
+/// colour a range, so the commands the message uses show as chips under it.
 pub struct Reply {
     shell: WeakEntity<Shell>,
     /// The root agent: fixed when the composer is made, the only agent it writes to.
@@ -5865,8 +6008,13 @@ pub struct Reply {
     project: String,
     /// The project's commands, as the daemon listed them when `/` was last typed.
     commands: Option<Vec<CommandInfo>>,
-    /// What follows the `/` while the message is that one word: the `/` list is open.
+    /// What follows the `/` of the word at the cursor, while it starts with one: the `/` list is
+    /// open.
     slash: Option<String>,
+    /// Where that word is in the message, its `/` included: what picking a command replaces.
+    slash_at: std::ops::Range<usize>,
+    /// The commands the message uses, as chips under the field.
+    chips: Listing<String>,
     /// The entry of the `/` list the keyboard is on.
     highlighted: usize,
     /// Escape closed the `/` list: it stays closed until the message is no longer a `/` word.
@@ -5939,7 +6087,8 @@ impl Reply {
                         this.has_text = has_text;
                         cx.notify();
                     }
-                    this.typed(&text, cx);
+                    let cursor = field.read(cx).cursor();
+                    this.typed_at(&text, cursor, cx);
                 }
                 InputEvent::PressEnter { shift: false, .. } => this.enter(window, cx),
                 InputEvent::Focus if !this.focused => {
@@ -5955,12 +6104,14 @@ impl Reply {
         )];
         let mode = cx.new(|_| ModeSwitch::new(shell.clone(), session.clone()));
         let options = cx.new(|_| SessionOptions::new(shell.clone(), session.clone()));
-        Self {
+        let reply = Self {
             shell,
             session,
             project,
             commands: None,
             slash: None,
+            slash_at: 0..0,
+            chips: Listing::default(),
             highlighted: 0,
             dismissed: false,
             field,
@@ -5983,7 +6134,10 @@ impl Reply {
             scaled: 0,
             renders: 0,
             _subscriptions: subscriptions,
-        }
+        };
+        // A message put back or pasted shows its chips without a `/` typed first.
+        reply.list_commands(cx);
+        reply
     }
 
     /// The agent it writes to: the session's root.
@@ -6247,29 +6401,45 @@ impl Reply {
         self.slash.is_some() && !self.dismissed
     }
 
-    /// The message changed: a `/` and one word open the list, asking the daemon for the
-    /// commands again (the project's file is the user's to edit). The field says it when the
-    /// user types; a text set from code says it here.
+    /// The message changed, its cursor at its end: a text set from code says it here.
     pub fn typed(&mut self, text: &str, cx: &mut Context<Self>) {
-        let slash = text
-            .strip_prefix('/')
-            .filter(|word| !word.contains(char::is_whitespace))
-            .map(str::to_owned);
+        self.typed_at(text, text.len(), cx);
+    }
+
+    /// The message changed, its cursor at the byte `cursor`: a word there that starts with `/`
+    /// opens the list, asking the daemon for the commands again (the project's file is the user's
+    /// to edit). The field says it when the user types.
+    pub fn typed_at(&mut self, text: &str, cursor: usize, cx: &mut Context<Self>) {
+        let cursor = cursor.min(text.len());
+        let start = text[..cursor].rfind(char::is_whitespace).map_or(0, |at| {
+            at + text[at..].chars().next().map_or(1, char::len_utf8)
+        });
+        let end = text[cursor..]
+            .find(char::is_whitespace)
+            .map_or(text.len(), |at| cursor + at);
+        let slash = text[start..end].strip_prefix('/').map(str::to_owned);
+        self.slash_at = start..end;
         if slash.is_none() {
             self.dismissed = false;
         }
         if slash.is_some() && self.slash.is_none() {
-            let command = Command::Commands {
-                project: self.project.clone(),
-            };
-            // Later: the shell may be the one setting the text, as it hands a reply its answer.
-            crate::commands::perform_later(&self.shell, command, cx);
+            self.list_commands(cx);
         }
         if self.slash != slash {
             self.slash = slash;
             self.highlighted = 0;
             cx.notify();
         }
+    }
+
+    /// Asks the daemon for the project's commands: the `/` list offers them, and the chips know
+    /// them.
+    fn list_commands(&self, cx: &mut Context<Self>) {
+        let command = Command::Commands {
+            project: self.project.clone(),
+        };
+        // Later: the shell may be the one setting the text, as it hands a reply its answer.
+        crate::commands::perform_later(&self.shell, command, cx);
     }
 
     /// The project's commands, as the daemon listed them.
@@ -6306,21 +6476,110 @@ impl Reply {
         match entries.get(self.highlighted).or(entries.first()) {
             Some((name, _)) => {
                 let name = name.clone();
-                self.pick(&name, window, cx)
+                self.complete(&name, true, window, cx)
             }
             None => self.send(window, cx),
         }
     }
 
-    /// Puts `/name ` in the field, for the user to add what the command is about before sending.
+    /// Completes the `/` word at the cursor into `/name `, the rest of the message as it was, for
+    /// the user to add what the command is about before sending.
     pub fn pick(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.complete(name, false, window, cx);
+    }
+
+    /// `pick`; `entered` when Enter picked it, whose line break the field put after the word.
+    fn complete(&mut self, name: &str, entered: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.slash = None;
         self.dismissed = true;
         self.has_text = true;
-        let text = format!("/{name} ");
-        self.field
-            .update(cx, |field, cx| field.set_value(text.as_str(), window, cx));
+        let now = self.field.read(cx).value().to_string();
+        let at = self.slash_at.start.min(now.len())..self.slash_at.end.min(now.len());
+        let (before, mut after) = (&now[..at.start], &now[at.end..]);
+        if entered {
+            after = after.strip_prefix('\n').unwrap_or(after);
+        }
+        let space = if after.starts_with(char::is_whitespace) {
+            ""
+        } else {
+            " "
+        };
+        let text = format!("{before}/{name}{space}{after}");
+        let cursor = before.len() + name.len() + 2;
+        self.field.update(cx, |field, cx| {
+            field.set_value(text.as_str(), window, cx);
+            field.set_selected_range(cursor..cursor, cx);
+        });
         cx.notify();
+    }
+
+    /// The commands the message uses now, in the order of their first use: the chips under the
+    /// field.
+    pub fn commands_used(&self, cx: &App) -> Vec<String> {
+        let Some(commands) = &self.commands else {
+            return Vec::new();
+        };
+        let text = self.field.read(cx).value().to_string();
+        let mut used: Vec<String> = Vec::new();
+        for (_, name) in flottille_core::commands::used(&text, |name| {
+            commands.iter().any(|command| command.name == name)
+        }) {
+            if !used.iter().any(|known| known == name) {
+                used.push(name.to_owned());
+            }
+        }
+        used
+    }
+
+    /// The chips of the commands the message uses, under the field: each one comes and goes as
+    /// the message gains or loses it, the line with the first and the last.
+    fn render_chips(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let used = self.commands_used(cx);
+        let now = cx.background_executor().now();
+        self.chips.sync(
+            used.iter().map(|name| (name.clone(), name.clone())),
+            now,
+            cx.reduce_motion(),
+        );
+        let p = palette(cx);
+        let chips: Vec<AnyElement> = self
+            .chips
+            .rows()
+            .map(|row| {
+                let name = row.value.clone();
+                flottille_ui::Item::new(
+                    ElementId::Name(format!("reply-command-item-{name}").into()),
+                    row.placement,
+                    div()
+                        .id(ElementId::Name(format!("reply-command-{name}").into()))
+                        .flex_none()
+                        .px(space::SM)
+                        .rounded(px(6.))
+                        .bg(p.acc.opacity(0.14))
+                        .text_color(p.acc)
+                        .font_weight(gpui_kit::FontWeight::MEDIUM)
+                        .text_size(px(12.5))
+                        .aria_label(SharedString::from(format!("/{name}")))
+                        .child(format!("/{name}"))
+                        .test_support(),
+                )
+                .into_any_element()
+            })
+            .collect();
+        presence(
+            "reply-commands",
+            !used.is_empty(),
+            div()
+                .id("reply-commands-line")
+                .flex()
+                .flex_wrap()
+                .gap(space::XS)
+                .pt(space::SM)
+                .px(space::XS)
+                .children(chips)
+                .test_support(),
+        )
+        .into_any_element()
     }
 
     /// The `/` list, over the composer: the commands offered.
@@ -6456,6 +6715,10 @@ impl Reply {
         self.field
             .update(cx, |field, cx| field.set_value(joined.clone(), window, cx));
         self.typed(&joined, cx);
+        // Put back by code, not typed: a message that ends with a command is not asking for the
+        // list, and Enter sends it.
+        self.dismissed = self.slash.is_some();
+        self.list_commands(cx);
         for picture in pictures {
             if let Some(format) = gpui_kit::ImageFormat::from_mime_type(&picture.mime) {
                 self.attach(gpui_kit::Image::from_bytes(format, picture.bytes), cx);
@@ -6660,6 +6923,7 @@ impl Render for Reply {
                 .children(places),
         );
         let slash = self.render_slash(cx);
+        let chips = self.render_chips(cx);
         div()
             .id("reply")
             .relative()
@@ -6733,6 +6997,7 @@ impl Render for Reply {
                     }))
                     .test_support(),
             )
+            .child(chips)
             .child(
                 div()
                     .flex()
@@ -6987,6 +7252,19 @@ mod tests {
             "xhttps://a\\.b\\-c",
             "a word that ends in a scheme is no address"
         );
+    }
+
+    #[test]
+    fn a_command_is_inline_code_in_the_text_as_typed_and_the_rest_keeps_its_marks() {
+        let text = "check\n\n- one /open-prs\n- two\n\n```\nlet a = 1;\n``` then /ship";
+        let chips = command_chips(text, &["open-prs".into(), "ship".into()]);
+        assert_eq!(chips.len(), 2);
+
+        assert_eq!(
+            typed_with_chips(text, &chips),
+            "check\n\n\\- one `/open-prs`\\\n\\- two\n\n\\`\\`\\`\\\nlet a = 1;\\\n\\`\\`\\` then `/ship`",
+        );
+        assert_eq!(typed_with_chips(text, &[]), as_typed(text));
     }
 
     fn agent(parent: Option<&str>, state: &str) -> TreeAgent {
