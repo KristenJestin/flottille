@@ -547,6 +547,36 @@ fn rail_over_three<'a>(
 }
 
 #[gpui_kit::test]
+fn the_window_shows_the_new_name(cx: &mut TestAppContext) {
+    let user = user();
+    trio(&user);
+    let (shell, cx) = rail_over_three(&user, cx);
+    for repository in ["api", "web", "lib"] {
+        let label = label_of(&format!("rail-status-{repository}"), cx).unwrap();
+        assert!(label.starts_with("trio/login · "), "{label}");
+    }
+
+    // An agent renames the branch it never pushed.
+    user.call(
+        "workspace.rename_branch",
+        json!({"project": "trio", "name": "login", "branch": "fix/ABC-12-login"}),
+    )
+    .unwrap();
+    until(&shell, cx, "the rail says the new name", |cx| {
+        label_of("rail-status-api", cx)
+            .is_some_and(|label| label.starts_with("fix/ABC-12-login · "))
+    });
+    // It fades in as a value that changes, then rests.
+    assert!(pending_frames(cx) > 0, "the new name appears at once");
+    settle(cx);
+    assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
+    for repository in ["api", "web", "lib"] {
+        let label = label_of(&format!("rail-status-{repository}"), cx).unwrap();
+        assert!(label.starts_with("fix/ABC-12-login · "), "{label}");
+    }
+}
+
+#[gpui_kit::test]
 fn the_rail_says_once_that_several_repositories_have_no_forge(cx: &mut TestAppContext) {
     let user = user();
     trio(&user);
@@ -847,6 +877,48 @@ fn a_base_branch_missing_on_the_remote_is_refused_in_the_dialog(cx: &mut TestApp
     until(&shell, cx, "the dialog closes", |cx| {
         page.read_with(cx, |page, _| page.dialog().is_none())
     });
+}
+
+#[gpui_kit::test]
+fn the_delete_the_branch_on_merge_switch_is_saved_in_the_repository_s_file(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let (shell, cx, page) = open_dialog(&user, "api", cx);
+
+    // Off by default, drawn with its label and what it does.
+    assert!(has("delete-branch-on-merge", cx));
+    page.read_with(cx, |page, _| assert!(!page.deletes_branch_on_merge()));
+    assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
+
+    cx.update(|window, cx| window.click("delete-branch-on-merge", cx));
+    settle(cx);
+    page.read_with(cx, |page, _| assert!(page.deletes_branch_on_merge()));
+    assert_eq!(pending_frames(cx), 0, "the switch moved, then stopped");
+
+    cx.update(|window, cx| window.click("save-settings-modal", cx));
+    until(&shell, cx, "the dialog closes", |cx| {
+        page.read_with(cx, |page, _| page.dialog().is_none())
+    });
+    let file = std::fs::read_to_string(user.project_file("trio")).unwrap();
+    let api = file.split("[[repositories]]").nth(1).unwrap();
+    assert!(api.contains("delete_branch_on_merge = true"), "{file}");
+    // Only the repository it was set on.
+    assert_eq!(file.matches("delete_branch_on_merge").count(), 1, "{file}");
+
+    // Opened again it shows what the file says, and off takes the key away.
+    settle(cx);
+    cx.update(|window, cx| window.click("repository-api", cx));
+    settle(cx);
+    page.read_with(cx, |page, _| assert!(page.deletes_branch_on_merge()));
+    cx.update(|window, cx| window.click("delete-branch-on-merge", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("save-settings-modal", cx));
+    until(&shell, cx, "the dialog closes again", |cx| {
+        page.read_with(cx, |page, _| page.dialog().is_none())
+    });
+    let file = std::fs::read_to_string(user.project_file("trio")).unwrap();
+    assert!(!file.contains("delete_branch_on_merge"), "{file}");
 }
 
 #[gpui_kit::test]

@@ -17,7 +17,9 @@ use std::time::Duration;
 use flottille_core::command::split_line;
 use flottille_core::glob;
 use flottille_core::project::{Project, RepositorySet, SetupStep, StepKind, valid_name};
-use flottille_core::protocol::{WorkspaceCreate, WorkspaceList, WorkspaceName};
+use flottille_core::protocol::{
+    WorkspaceCreate, WorkspaceList, WorkspaceName, WorkspaceRenameBranch,
+};
 use flottille_core::secrets;
 use flottille_core::store::{Store, now_ms};
 use flottille_core::variables::{self, Names};
@@ -99,6 +101,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         "workspace.forge" => crate::forge::call(daemon, params).await,
         "workspace.ticket" => crate::tickets::call(daemon, params).await,
         "workspace.link_ticket" => crate::tickets::link(daemon, params).await,
+        "workspace.rename_branch" => rename_branch(&daemon, serde_json::from_value(params)?).await,
         "workspace.prepare" => resume(daemon, serde_json::from_value(params)?).await,
         "workspace.remove" => remove(daemon, serde_json::from_value(params)?).await,
         method => Err(Failure::new(
@@ -508,6 +511,190 @@ pub fn branches(workspace: &Workspace, heads: &[Head]) -> Vec<String> {
         .iter()
         .map(|head| head.branch_or(&workspace.branch).to_owned())
         .collect()
+}
+
+// Renaming the branch.
+
+/// What renaming a workspace's branch would do: the repositories to do it in, each with its
+/// worktree and the branch it is on now.
+pub struct Renaming {
+    workspace: Workspace,
+    branch: String,
+    repositories: Vec<(String, PathBuf, String)>,
+}
+
+impl Renaming {
+    /// In words, as the judge and the user's card say it.
+    pub fn says(&self) -> String {
+        let paths: Vec<&str> = self.repositories.iter().map(|r| r.0.as_str()).collect();
+        let was = self.repositories.first().map_or("", |r| r.2.as_str());
+        format!(
+            "Rename the branch of the workspace {} from {was} to {} in {}",
+            self.workspace.name,
+            self.branch,
+            paths.join(", ")
+        )
+    }
+}
+
+/// Checks a rename of the branch of `name`, in `repository` or in each of its repositories, to
+/// `branch`, and refuses it, saying why, when it would lose or strand anything: nothing is
+/// renamed unless every repository can be.
+pub async fn renaming(daemon: &Daemon, asked: &WorkspaceRenameBranch) -> Result<Renaming, Failure> {
+    let workspace = find(
+        daemon,
+        &WorkspaceName {
+            project: asked.project.clone(),
+            name: asked.name.clone(),
+        },
+    )?;
+    if daemon.preparing.lock().unwrap().contains(&workspace.id) {
+        return Err(being_prepared(&workspace));
+    }
+    if let Some(path) = &asked.repository
+        && !workspace.repositories.iter().any(|w| &w.path == path)
+    {
+        return Err(Failure::refused(format!(
+            "{path} is not a repository of the workspace {}: its repositories are {}",
+            workspace.name,
+            workspace
+                .repositories
+                .iter()
+                .map(|w| w.path.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    check_branch(&workspace.folder, &asked.branch).await?;
+    let heads = heads(&workspace).await;
+    let read = forge_read(daemon, &workspace).await;
+    let mut repositories = Vec::new();
+    for (worktree, head) in workspace.repositories.iter().zip(&heads) {
+        if asked
+            .repository
+            .as_ref()
+            .is_some_and(|p| *p != worktree.path)
+        {
+            continue;
+        }
+        let path = &worktree.path;
+        let Head::Branch(branch) = head else {
+            return Err(Failure::refused(format!(
+                "{path} is on no branch: switch it to a branch first"
+            )));
+        };
+        if *branch == asked.branch {
+            return Err(Failure::refused(format!(
+                "{path} is on the branch {branch} already"
+            )));
+        }
+        if worktree.resumed {
+            return Err(Failure::refused(format!(
+                "the branch {branch} was the user's before the workspace in {path}, which \
+                 resumed it: only a branch the workspace started is renamed"
+            )));
+        }
+        let folder = workspace.folder_of(path);
+        if let Some(pull) = read
+            .repositories
+            .iter()
+            .find(|r| r.path == *path)
+            .and_then(|r| r.pull.as_ref())
+        {
+            return Err(Failure::refused(format!(
+                "the branch {branch} has the pull request #{} in {path}: renaming it would leave \
+                 the pull request on the old name",
+                pull.number
+            )));
+        }
+        if let Some(remote) = pushed_to(&folder, branch).await {
+            return Err(Failure::refused(format!(
+                "the branch {branch} is on {remote} in {path}: renaming it would leave the \
+                 remote one behind"
+            )));
+        }
+        let main = main_checkout(&workspace.project_folder, path);
+        if let Some(elsewhere) = checked_out_in(&main, &asked.branch).await? {
+            return Err(Failure::refused(format!(
+                "the branch {} is checked out in {elsewhere} for {path}: switch that checkout \
+                 to another branch, or choose another name",
+                asked.branch
+            )));
+        }
+        if commit_of(&main, &format!("refs/heads/{}", asked.branch))
+            .await?
+            .is_some()
+        {
+            return Err(Failure::refused(format!(
+                "the branch {} already exists in {path}: choose another name",
+                asked.branch
+            )));
+        }
+        repositories.push((path.clone(), folder, branch.clone()));
+    }
+    Ok(Renaming {
+        workspace,
+        branch: asked.branch.clone(),
+        repositories,
+    })
+}
+
+/// The remote of the repository at `folder` that has `branch`: its tracking ref as last fetched,
+/// or what it lists now (a remote that cannot be listed is taken for not having it).
+async fn pushed_to(folder: &Path, branch: &str) -> Option<String> {
+    let remotes = git::output(folder, &["remote"], Class::Read).await.ok()?;
+    for remote in remotes.lines() {
+        let tracking = format!("refs/remotes/{remote}/{branch}");
+        let known = ["show-ref", "--verify", "--quiet", &tracking];
+        if git::run(folder, &known, Class::Read)
+            .await
+            .is_ok_and(|shown| shown.success)
+        {
+            return Some(remote.to_owned());
+        }
+        let head = format!("refs/heads/{branch}");
+        let listed = ["ls-remote", "--heads", "--end-of-options", remote, &head];
+        if git::output(folder, &listed, Class::Read)
+            .await
+            .is_ok_and(|listed| !listed.trim().is_empty())
+        {
+            return Some(remote.to_owned());
+        }
+    }
+    None
+}
+
+/// `workspace.rename_branch`: renames the workspace's branch where it can be, then the record
+/// follows the worktrees (`follow`, and its `workspace.changed`).
+async fn rename_branch(daemon: &Daemon, asked: WorkspaceRenameBranch) -> Answer {
+    let renaming = renaming(daemon, &asked).await?;
+    let mut done: Vec<&(String, PathBuf, String)> = Vec::new();
+    for repository in &renaming.repositories {
+        let (_, folder, was) = repository;
+        let rename = ["branch", "-m", "--end-of-options", was, &renaming.branch];
+        if let Err(error) = git::output(folder, &rename, Class::Work).await {
+            // Back to where it was: a rename is all of its repositories or none.
+            for (_, folder, was) in done {
+                let back = ["branch", "-m", "--end-of-options", &renaming.branch, was];
+                let _ = git::output(folder, &back, Class::Work).await;
+            }
+            return Err(Failure::refused(format!(
+                "git could not rename the branch in {}: {error}",
+                repository.0
+            )));
+        }
+        done.push(repository);
+    }
+    let (workspace, _) = follow(daemon, renaming.workspace).await;
+    let mut answer = workspace.to_json();
+    answer["renamed"] = json!(
+        renaming
+            .repositories
+            .iter()
+            .map(|r| &r.0)
+            .collect::<Vec<_>>()
+    );
+    Ok(answer)
 }
 
 // Creation.
@@ -1073,7 +1260,7 @@ async fn prepare(daemon: Arc<Daemon>, id: i64, mut made: Option<oneshot::Sender<
 }
 
 async fn prepare_steps(
-    daemon: &Daemon,
+    daemon: &Arc<Daemon>,
     id: i64,
     made: &mut Option<oneshot::Sender<()>>,
 ) -> Result<(), Failure> {
@@ -1131,7 +1318,13 @@ async fn prepare_steps(
             .lock()
             .unwrap()
             .insert((id, step.position), live.clone());
-        let outcome = run_step(&workspace, &step, &live).await;
+        let outcome = match services_of(daemon, &workspace, &step).await {
+            Ok(()) => run_step(&workspace, &step, &live).await,
+            Err(why) => Err(StepFailure {
+                doing: step.doing(),
+                output: why,
+            }),
+        };
 
         let (state, failure, name) = match outcome {
             Ok(StepState::Skipped) => (StepState::Skipped, None, "workspace.step_skipped"),
@@ -1175,6 +1368,29 @@ fn kind_name(action: &Action) -> &'static str {
         Action::RootEntries { .. } => "root_entries",
         Action::Run { .. } => "run",
     }
+}
+
+/// A step that runs a task first starts the services the task needs, as the project's file says
+/// now (`services.rs`); a task no longer there needs none.
+async fn services_of(
+    daemon: &Arc<Daemon>,
+    workspace: &Workspace,
+    step: &Step,
+) -> Result<(), String> {
+    let Action::Run {
+        task: Some(name), ..
+    } = &step.action
+    else {
+        return Ok(());
+    };
+    let needs = projects::load_project(daemon, &workspace.project)
+        .ok()
+        .and_then(|project| project.tasks.get(name).map(|task| task.needs.to_vec()))
+        .unwrap_or_default();
+    crate::services::start_needed(daemon, &needs, None)
+        .await
+        .map(|_| ())
+        .map_err(|why| format!("task {name} cannot run: {why}"))
 }
 
 /// Does one step: done, skipped, or its failure.
@@ -1512,9 +1728,8 @@ async fn run_line(
                 .map_err(|error| format!("cannot run it: {error}"))?,
         )
         .stderr(writer)
-        .process_group(0)
         .kill_on_drop(true);
-    let spawned = command.spawn();
+    let spawned = crate::children::spawn(crate::children::in_own_session(&mut command));
     // The command holds the pipe's writing end: dropped, only the processes hold it.
     drop(command);
     let mut child = spawned.map_err(|error| format!("cannot run {}: {error}", words[0]))?;
@@ -1536,12 +1751,14 @@ async fn run_line(
         }
     };
     // What it left in the background holds the pipe and would keep the step running: it ends
-    // with the step, and what is already in the pipe is read without waiting for it.
+    // with the step, even in a group of its own, and what is already in the pipe is read
+    // without waiting for it.
     if let Some(group) = group {
-        // SAFETY: kill has no precondition; the group is the step's own (process_group(0)).
+        // SAFETY: kill has no precondition; the group is the step's own (it leads its session).
         unsafe {
             libc::kill(-(group as i32), libc::SIGKILL);
         }
+        crate::children::end_session(group).await;
     }
     while let Ok(read) = reader.try_read(&mut buffer) {
         if read == 0 {

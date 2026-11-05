@@ -47,6 +47,9 @@
 //! drafts included; `closed`, `merged`, `all`) and of `--head` when given, newest first, at most
 //! `--limit`; each with the fields `--json` asks that it has, `headRefName` being its branch.
 //!
+//! `step_fail` (`{"acme/app": {"ready": "HTTP 502: Bad Gateway"}}`) makes `pr comment`, `edit`,
+//! `close`, `reopen` or `ready` of that repository alone fail that way, as a write that ends
+//! half way does.
 //! `view_fail` (`{"acme/app": {"12": "HTTP 502: Bad Gateway"}}`) makes `pr view` and `issue view`
 //! of that number alone fail that way; `list_delay_ms` makes `pr list` wait that long first,
 //! `listing_delay_ms` a `pr list` of every branch alone (a round's, not a branch's `--head`),
@@ -60,6 +63,14 @@
 //! `user_fail` when the script has it. `unlisted` (`{"acme/app": [5]}`) keeps those numbers out
 //! of `pr list` and `issue list`, while `pr view` and `issue view` still answer them: an issue
 //! transferred elsewhere, which GitHub still answers by its old number with its new url.
+//!
+//! The links and comments of an issue (#365, `docs/tickets.md`, "Links and comments"), through
+//! `gh api <path> [--method M] [-F|-f key=value]`: `api repos/<owner>/<name>/issues/<n>` prints
+//! `{"number": n, "id": <the issue's id>}` of an issue the script holds (`id` its own, `1000 + n`
+//! without), not found otherwise; the writes (`…/issues/<n>/sub_issues` POST and
+//! `…/issues/<n>/sub_issue` DELETE with `sub_issue_id`, `…/issues/<n>/dependencies/blocked_by`
+//! POST with `issue_id` and `…/blocked_by/<id>` DELETE, `…/issues/comments/<id>` PATCH with
+//! `body` and DELETE) end with 0 and print `{}`: the test reads them in the record.
 //!
 //! `events` gives, by repository and number, what `gh api repos/<owner>/<name>/issues/<number>/events`
 //! lists (`{"acme/app": {"7": [{"event": "merged", "actor": {"login": "bob"}, "created_at":
@@ -250,6 +261,47 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             }
             0
         }
+        ["api", path, rest @ ..]
+            if path.starts_with("repos/")
+                && (path.contains("/comments/")
+                    || path.contains("/sub_issue")
+                    || path.contains("/dependencies/")) =>
+        {
+            let allowed = ["--method", "-F", "-f"];
+            if rest.first().is_none_or(|flag| !allowed.contains(flag)) {
+                eprintln!("fake gh: api {path} is not a call Flottille makes");
+                return 2;
+            }
+            println!("{{}}");
+            0
+        }
+        ["api", path]
+            if path.starts_with("repos/")
+                && path.contains("/issues/")
+                && path.matches('/').count() == 4 =>
+        {
+            let parts: Vec<&str> = path.split('/').collect();
+            let [_, owner, name, "issues", number] = parts[..] else {
+                eprintln!("fake gh: api {path} is not a call Flottille makes");
+                return 2;
+            };
+            match script["issues"][format!("{owner}/{name}")].get(number) {
+                Some(issue) => {
+                    let id = issue["id"]
+                        .as_u64()
+                        .unwrap_or(1000 + number.parse().unwrap_or(0));
+                    println!(
+                        "{}",
+                        json!({"number": number.parse::<u64>().unwrap_or(0), "id": id})
+                    );
+                    0
+                }
+                None => {
+                    eprintln!("gh: Not Found (HTTP 404)");
+                    1
+                }
+            }
+        }
         ["api", path, ..] if path.starts_with("repos/") && path.contains("/issues/") => {
             // `repos/<owner>/<name>/issues/<number>/events`, the events of an issue or pull
             // request, oldest first.
@@ -277,6 +329,23 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             } else {
                 println!("{events}");
             }
+            0
+        }
+        ["api", path, ..] if path.starts_with("repos/") && path.contains("/branches/") => {
+            // `repos/<owner>/<name>/branches/<branch>`: a branch the script lists, else any when
+            // it lists none.
+            let (repository, branch) = path["repos/".len()..]
+                .split_once("/branches/")
+                .unwrap_or_default();
+            let known = match script["branches"][repository].as_array() {
+                Some(branches) => branches.iter().any(|b| b == branch),
+                None => true,
+            };
+            if !known {
+                eprintln!("gh: Not Found (HTTP 404)");
+                return 1;
+            }
+            println!("{branch}");
             0
         }
         ["api", "user", ..] => {
@@ -438,12 +507,20 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             }
             0
         }
-        ["pr", "comment" | "edit" | "close" | "reopen", number, ..] => {
+        [
+            "pr",
+            "comment" | "edit" | "close" | "reopen" | "ready",
+            number,
+            ..,
+        ] => {
             let Some(repository) = repository else {
                 eprintln!("fake gh: no -R");
                 return 2;
             };
-            if let Some(failure) = script["fail"][repository].as_str() {
+            if let Some(failure) = script["fail"][repository]
+                .as_str()
+                .or(script["step_fail"][repository][words[1]].as_str())
+            {
                 eprintln!("{failure}");
                 return 1;
             }
@@ -474,7 +551,8 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                     .is_none_or(|methods| methods.iter().any(|m| m == method))
             };
             let all = json!({"mergeCommitAllowed": allows("merge"),
-                "rebaseMergeAllowed": allows("rebase"), "squashMergeAllowed": allows("squash")});
+                "rebaseMergeAllowed": allows("rebase"), "squashMergeAllowed": allows("squash"),
+                "deleteBranchOnMerge": script["delete_head_branches"][repository] == true});
             println!("{}", fields_of(&[&all], option("--json"), None)[0]);
             0
         }

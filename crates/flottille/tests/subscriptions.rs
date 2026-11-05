@@ -980,7 +980,9 @@ fn comment_reads(user: &User, key: &str) -> usize {
                 .map(|a| a.as_str().unwrap())
                 .collect();
             args.starts_with(&["jira", "workitem", "view", key])
-                && args.windows(2).any(|w| w == ["--fields", "comment"])
+                && args
+                    .windows(2)
+                    .any(|w| w == ["--fields", "comment,attachment"])
         })
         .count()
 }
@@ -1098,6 +1100,35 @@ fn a_new_comment_on_a_followed_jira_item_wakes_its_subscription() {
     }
     assert!(listed(&user, &id).is_empty(), "the delivery ends it");
     assert!(!searched_for_updated(&user), "a real site refuses it");
+}
+
+#[test]
+fn a_new_comment_with_an_image_says_so_in_its_delivery() {
+    let user = user().with_fake_acli();
+    fixture(&user);
+    let (_, mcp) = jira_agent(&user, &[commented_item("ABC-1", &[], 0)]);
+    subscribe_ticket(&mcp, json!({"ticket": "ABC-1", "events": ["commented"]}));
+
+    let mut comment = jira_comment("Bob", "Claudio proposes this for the mobile version");
+    comment["body"]["content"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({
+        "type": "mediaSingle", "attrs": {"layout": "align-start"},
+        "content": [{"type": "media", "attrs": {"alt": "mobile.bin", "type": "file",
+            "id": "00000000-0000-4000-8000-000000000001"}}]}));
+    let mut item = commented_item("ABC-1", &[comment], 5);
+    item["fields"]["attachment"] = json!([{"id": "10001", "filename": "mobile.bin",
+        "mimeType": "image/png", "size": 1, "created": "2026-01-01T12:00:00.000+0100",
+        "author": {"displayName": "Bob"}}]);
+    jira_script(&user, &[item]);
+    a_round(&user);
+
+    let delivery = the_delivery(&user);
+    assert!(
+        delivery.contains("[image: mobile.bin, not shown: ask the user to paste it if it matters]"),
+        "{delivery}"
+    );
 }
 
 #[test]

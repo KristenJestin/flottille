@@ -382,9 +382,10 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
   ran on this pull request`; later, or in a repository with no pipeline, it is `none ran`. A merge
   is refused either way, there being no check, and says `its checks have not started yet for <short
   sha>` in the first case.
-- **Draft is not modelled.** A pull request is `open`, `merged` (`MERGED`) or `closed`
-  (`DECLINED`, `SUPERSEDED`); `bkt` has no draft flag, so none is shown, and `forge` `create` refuses
-  `draft: true` for Bitbucket.
+- **Draft is not read.** A pull request is `open`, `merged` (`MERGED`) or `closed`
+  (`DECLINED`, `SUPERSEDED`); `bkt pr list` has no draft field, so none is shown. `forge` `edit`
+  does set it (`bkt pr publish [--undo]`, below), and `create` still refuses `draft: true` for
+  Bitbucket (`bkt pr create --draft` exists, not used yet).
 
 ### `forge`'s writes on Bitbucket
 
@@ -434,6 +435,28 @@ the base the repository started from):
   `bkt pr edit <id> [--title T] [--description D]` (`pkg/cmd/pr/pr.go:1654-1669` and `:719-762`,
   which print `✓ Commented on pull request #<id>` and `✓ Updated pull request #<id>`); `bkt pr
   edit` refuses a call with neither, and Flottille refuses it before.
+- `edit` goes further than a title and a description (v0.37.0 help, #360): `--reviewer R` and
+  `--remove-reviewer R` of `bkt pr edit`, `bkt pr publish <id>` (alias `ready`) for `draft:
+  false` and `bkt pr publish <id> --undo` for `draft: true`, and, for `base`, Cloud's API: `bkt api
+  /repositories/<w>/<r>/pullrequests/<id> --method PUT --input
+  '{"destination":{"branch":{"name":"<base>"}}}'` once `/repositories/<w>/<r>/refs/branches/<base>`
+  answered (a 404 is `refused: <repo> has no branch <base> on the forge; nothing was written`).
+  **Assumed, and the maintainer checks them**: that body for the destination (it holds only
+  `destination`: check that the pull request's title and **reviewers are still there after the
+  move**, Atlassian's "update a pull request" being a `PUT` of the whole pull request, and a `PUT`
+  without `title` or `reviewers` having been refused or having dropped them), and that `bkt pr
+  publish` and `bkt pr edit --reviewer` behave on his Cloud and Data Center as their help says.
+  When a later step fails, the answer names the earlier one that had already changed the pull
+  request.
+  Data Center is refused for `base` (the `toRef` and the version it needs are not something `bkt`
+  helps with), and Bitbucket has no labels on pull requests: `labels` on `create` and
+  `labels_add`/`labels_remove` on `edit` are refused naming that, before anything is asked of `bkt`.
+- `create` adds the call's `reviewers` after the project's, and `delete_branch_on_merge` is `bkt pr
+  create --close-source` (refused before anything is opened for a branch the workspace resumed or
+  another workspace is on: the forge's own close of the source branch would delete it). `create` still refuses `draft` on Bitbucket (`bkt pr create --draft`
+  exists, and is not used yet). At `merge`, `--close-source=true` replaces `=false` when the branch
+  is to be deleted (`docs/tools.md`, "The forge"), since `bkt` sends the flag with every merge and
+  its default would override the pull request's own.
 - `close` of a pull request by its number: `bkt pr decline <id> [--comment T] [--delete-source]`
   (v0.37.0, `pkg/cmd/pr/pr.go`, `newDeclineCmd`; alias `close`; it prints `Declined pull request
   #<id>`). `--delete-source` is Data Center's only: on Cloud `bkt` ends with `--delete-source is
@@ -731,13 +754,13 @@ What the three tools answer to a write decides what identifies the comment:
 | `gh pr close`, `gh pr reopen` (with a comment) | nothing that names the comment | the text's hash |
 | `bkt pr comment`, `bkt pr decline` (with a comment) | `✓ Commented on pull request #N`, nothing that names the comment | the text's hash |
 | `bkt pr create`, `bkt pr edit` (with a body) | the pull request's number | the item: a `body` |
-| `acli jira workitem comment create` | nothing read (`--json` is not asked) | the text's hash |
+| `acli jira workitem comment create` | nothing read (`--json` is not asked) | the id of the newest comment of its words that no record holds, read from the work item right after the post; the text's hash alone when that read fails |
 | `acli jira workitem create`, `edit` (with a body) | the work item's key | the item: a `body` |
 
 A comment read back is known as an agent's by its record:
 
-- with the id the forge gave it, when the record has one (GitHub): the same words under another
-  id are a person's;
+- with the id the forge gave it, when the record has one (GitHub, Jira): the same words under
+  another id are a person's;
 - else by the hash of its text, and a hash record is **one comment's**: the first comment of those
   words that was not written before the post (the comments are taken oldest first, by the time the
   forge gives: GitHub's `createdAt`, Bitbucket Cloud's `created_on`, Data Center's `createdDate`).
@@ -745,6 +768,10 @@ A comment read back is known as an agent's by its record:
   by more than five minutes (the clocks differ) is not it. Where a read gives no time the first of the
   words is taken: Jira's `created` (`2026-10-01T12:00:00.000+0000`) is not read as a time, so for
   Jira the post claims the first comment of its words.
+
+Only a record that holds a comment's id lets an agent edit or delete that comment (`tickets
+comment_edit`, `comment_delete`, `docs/tickets.md`): words alone never do, a person may write the
+same. An edit replaces the record of the id with the new words; a delete drops it.
 
 The hash is of the text as a read gives it: masked (the secrets of a text are masked on every
 read, the record hashes the masked text too), whitespace one space, only the first 500 characters

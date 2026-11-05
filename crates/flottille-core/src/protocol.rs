@@ -132,6 +132,9 @@ pub struct RepositorySetting {
     /// out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depends_on: Option<Vec<String>>,
+    /// "Delete the branch on merge"; what the file has when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delete_branch_on_merge: Option<bool>,
 }
 
 /// The parameters of `workspace.create`.
@@ -174,6 +177,19 @@ pub struct WorkspaceTicket {
 pub struct WorkspaceName {
     pub project: String,
     pub name: String,
+}
+
+/// The parameters of `workspace.rename_branch`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceRenameBranch {
+    pub project: String,
+    pub name: String,
+    /// The new name of the branch.
+    pub branch: String,
+    /// Only this repository's; every repository of the workspace when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
 }
 
 /// The parameters of `workspace.forge`.

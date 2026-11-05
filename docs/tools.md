@@ -306,8 +306,9 @@ own while the judge thought), it is refused (`refused: X: the path changed since
 
 | Tool | Arguments | |
 |---|---|---|
-| `tasks` | `action list \| show \| add \| edit \| remove`, `name?`, `line?`, `repository?`, `serve?`, `check?`, `read_only?`, `ask_before_running?`, `ready?`, `url?` | The project's tasks (`docs/projects.md`, "Tasks"). `list` gives one line each: `name: line`, and where it runs, whether it keeps running, is a check, changes nothing, is judged each time it runs, when it is ready and where it answers; `show` gives one. `ready` is `{"line"}`, `{"url"}` or `{"command"}`, `url` an address or `{"command"}`, `null` removing either; a `command` line is judged as a run of it, as the task's own line is. Every agent reads them; a root writes them ("The project"): `add` takes `name` and `line` and the flags, `edit` changes what it is given (`repository: null` puts the task back at the place's top), `remove` removes it, refused while a setup step runs it. A child's write is refused, pointing it to `ask_parent`. |
+| `tasks` | `action list \| show \| add \| edit \| remove`, `name?`, `line?`, `repository?`, `serve?`, `check?`, `read_only?`, `ask_before_running?`, `ready?`, `url?`, `needs?` | The project's tasks (`docs/projects.md`, "Tasks"). `list` gives one line each: `name: line`, and where it runs, whether it keeps running, is a check, changes nothing, is judged each time it runs, when it is ready and where it answers; `show` gives one. `ready` is `{"line"}`, `{"url"}` or `{"command"}`, `url` an address or `{"command"}`, `null` removing either; a `command` line is judged as a run of it, as the task's own line is. Every agent reads them; a root writes them ("The project"): `add` takes `name` and `line` and the flags, `edit` changes what it is given (`repository: null` puts the task back at the place's top), `remove` removes it, refused while a setup step runs it. A child's write is refused, pointing it to `ask_parent`. |
 | `run` | `task` or `line` (exactly one), `repository?`, `timeout? 1..600`, `notify? "ready"`, `why?` | Runs a task (`refused: the project has no task X: list them with tasks {"action": "list"}`) or one line, in the repository's folder (the task's, or the one named) or the place's top. Its description holds a call of each form: `{"task": "test"}`, `{"task": "dev", "notify": "ready"}`, `{"line": "cargo test -p core", "repository": "api", "timeout": 120}`. With `notify: "ready"`, for a task that says when it is ready, the agent is told when it is (below); on a task that does not, or a line, it is refused with a sentence. |
+| `services` | `action list \| show \| start \| stop \| add \| edit \| remove`, `name?`, `folder?`, `line?`, `needs?`, `ready?`, `url?`, `ask_before_running?` | The services of the machine (`docs/projects.md`, "Services"), for every agent. `list` gives one line each: `- <name>: <state> in <folder>`, why it failed, its address, and what it needs that is not running; `show` gives one with its line and the last 20 lines of its output. `list` and `show` run no command: they try again only a service seen outside Flottille whose `ready` is an address. `start` starts it, what it needs first and waited for, and answers with what it started (`Nothing started: the service X runs.` when it runs); it is judged as a run of its line in its folder, which is outside the place, as any line outside the place is; each service it starts first that Flottille does not run (one seen outside Flottille included) is held when marked `ask_before_running`, and one an agent wrote has its lines judged in the caller's mode as runs in its folder (as are the `ready` and `url` commands of a service an agent wrote and starts itself); one Flottille ran when the call was judged and that stopped since refuses it, to be called again. `stop` of a service that does not run, or runs outside Flottille, is refused at once. **`stop` is held for the user every time, in every mode, Full included**: a service is shared by every project. The call is answered at once that it is held, the result comes later as a delivery, and the request names the service and the projects' tasks that need it. A root's `add`, `edit` and `remove` are judged as a write of `tasks` is, the line (and its ready's and address's commands) as a run of it in its folder; `folder`, `ready` and `url` take `null` to remove them; `remove` is refused while a service or a project's task needs it. A child's write is refused, pointing it to `ask_parent`. Its description holds `{"action": "start", "name": "mongo"}`, `{"action": "stop", "name": "mongo"}` and an `add`. |
 | `run_status` | `run`, `action? output \| stop \| notify`, `when? "ready"`, `tail? 1..1000`, `start?` | `action output` (the default): the run's state and lines of its output, the last `tail` (40 by default), or `tail` lines from line `start`. `run` may also be the id of a cut result ("Long results"), read by lines with `start`, never stopped. `action stop`: stops the run and everything in its process group, `SIGTERM`, then `SIGKILL` 5 s later, and answers once it ended; `tail` and `start` are refused with it. `action notify` with `when: "ready"`: the agent is told when a run already started is ready, as `notify` on `run` does; refused for a run of a task that says no ready. |
 
 Until #131 these were `commands_list`, `commands_run` (its `command` now `task`) and
@@ -347,6 +348,19 @@ pending requests.
   that would need single quotes but holds one cannot be one word, and the refusal says to split
   it. A line naming a shell as its program is split like any other; the gate judges the line a
   shell runs with `-c` (below).
+- **The services a task needs** (its `needs`, `docs/projects.md`, "Services") are started before
+  it, those they need first, and waited for until each that says when it is ready is; the answer
+  then starts with `started the services it needs: <names>`. A service that fails, or is not ready
+  within 120 s, refuses the run: `refused: task T cannot run: the service S failed: <why>`. The
+  gate judges the run with them: each that Flottille does not run (one seen running outside it
+  included, started if it no longer answers) is held when marked `ask_before_running`, and the
+  lines of one an agent wrote are judged in the caller's mode as runs in its folder; the user's
+  are not judged again. The request of a held run says the services it starts first. The run
+  starts only those it was judged on: one Flottille ran then and that stopped since refuses it,
+  `refused: task T cannot run: the service S stopped since the call was judged: call again`. A
+  run stopped while they start starts nothing after them. A workspace an agent creates judges
+  the services each of its setup's task steps starts first the same way, and its request says
+  them.
 - **Waiting**: the call waits `timeout` seconds (30 by default) for the end. A task
   that keeps running (`serve`) answers at once, and one already running for the agent is joined.
   A call stopped by its client stops its run.
@@ -396,10 +410,13 @@ pending requests.
   and the answer names the check, how it ended and the end of its output, masked. A commit
   whose message cannot be known before it is made (an editor, `-C`, `--amend --no-edit`,
   `--fixup`, a merge without `-m`, a `git revert` without `--no-commit`) is refused then,
-  saying to give it with `-m` or `-F`, or to commit with `git commit -m`. The commits of
-  `git cherry-pick`, `git am`, `git rebase` and `git pull` are not checked, and what git adds
-  to a message after the checks (`--trailer`, `--signoff`, `--cleanup`) is not in what they
-  read; the `-F` file is read once for the checks and again by git. A call given up stops its
+  saying to give it with `-m` or `-F`, or to commit with `git commit -m`; so is a git command
+  that is neither a command git has, an alias nor a `git-<command>` on the `PATH`, which git
+  could correct into a commit (`help.autocorrect`). A `git push` the user or the judge let
+  through has each commit it sends (those its refs lead to that no ref of the remote has, as
+  the remote lists them) checked before it goes, however the commit was made (a cherry-pick, a
+  rebase, a raw object): a failing one refuses the push, naming its short sha, its subject and
+  what the check said, and nothing is pushed. A call given up stops its
   checks. The checks are the user's lines, run by the daemon in the run's folder and
   environment, never a hook of the repository: git still runs none.
 - **A push is the gate's**: `git push` is a call to judge, a forced one base, and only the push
@@ -407,14 +424,15 @@ pending requests.
   cannot push from a script the gate never read. A push from a workspace is also refused, before
   git runs, when a repository's remote no longer leads where it did when the workspace was made
   (`docs/commands.md`, "Where the remote leads").
-- **A stop ends the run's process group, not every descendant.** `run_status` with `action stop`, a timeout of
-  the call's client and the daemon's stop signal the group the run was spawned in (`SIGTERM`,
-  then `SIGKILL` after 5 s), and what the run left in its group is killed when its own process
-  ends. A process that left the group (`setsid`, a daemon that forks and detaches) escapes all
-  of this and keeps running; Flottille does not stop it. It stays the daemon's descendant,
-  though: the daemon is the subreaper of what it starts, so a process orphaned there is taken in
-  by the daemon rather than by init, waited for when it ends, and refused if it connects to the
-  socket.
+- **A stop ends the run's session, not every descendant.** A run starts in a session of its own
+  (`docs/reference/processes.md`). `run_status` with `action stop`, a timeout of the call's client
+  and the daemon's stop signal the run's process group (`SIGTERM`, then `SIGKILL` after 5 s), and
+  what the run left in its session is killed when its own process ends, even in a process group
+  of its own (what pnpm starts). A process that left the session (`setsid`, a daemon that forks
+  and detaches) escapes all of this and keeps running; Flottille does not stop it. It stays the
+  daemon's descendant, though: the daemon is the subreaper of what it starts, so a process
+  orphaned there is taken in by the daemon rather than by init, waited for when it ends, and
+  refused if it connects to the socket.
 - **The agent is told when a command that outlived its call ends.** A call that answered with the
   command still running (a command that `serve`s, or one past the call's `timeout`) is followed by
   a `command-ended` delivery to the agent that started it when the command ends, urgent like a
@@ -454,7 +472,7 @@ pending requests.
 
 | Tool | |
 |---|---|
-| `forge {action, workspace?, repository?, number?, state?, branch?, detail?, fresh?, title?, body?, draft?, waive?, method?, message?, events?, from?, minutes?, pipeline?, variables?, run?, step?, do?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
+| `forge {action, workspace?, repository?, number?, state?, branch?, detail?, fresh?, title?, body?, draft?, reviewers?, labels?, delete_branch_on_merge?, delete_branch?, reviewers_add?, reviewers_remove?, labels_add?, labels_remove?, base?, waive?, method?, message?, events?, from?, minutes?, pipeline?, variables?, run?, step?, do?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
 
 - **The repositories** are those of the agent's place: its workspace's, or the project's in
   `main`. One the place does not take is refused (`refused: X is not a repository of this
@@ -513,7 +531,8 @@ pending requests.
   said; so does its time, said. Subscribing again to the same pull request replaces the agent's
   subscription. A pull request merged or closed, a repository with no forge or no pull request,
   and `number` are refused. **`unsubscribe {workspace?, repository?}`** cancels the agent's
-  subscriptions to them, every one when it names none.
+  subscriptions to them, every one when it names none; **`unsubscribe {session}`** stops following a
+  session the agent started ("Following a session", under "The tree's tools").
 - **`create`, `merge`, `checks` `{workspace?, repository?, …}`** (`repository` is needed when the
   workspace has several, and the refusal lists them): opens the pull request of a
   workspace's branch (`title`, `body`, `draft`, with the project's reviewers), merges it by
@@ -524,7 +543,36 @@ pending requests.
   --subject … --body …`, `bkt pr merge --message …`; the forge's own when left out; refused by the
   gate with another method, `refused: forge merge by merge takes no message: …`, or on another
   action), or re-runs the failed jobs of its last
-  commit's pipelines (`docs/commands.md`, "`forge`"). The branch is the one the repository's
+  commit's pipelines (`docs/commands.md`, "`forge`"). **`create`** also takes `reviewers`
+  (added to the project's, none twice), `labels` (GitHub only: Bitbucket has no labels on pull
+  requests, and the call is refused saying so, before anything is opened) and
+  `delete_branch_on_merge`. On Bitbucket that one is the pull request's own "close source branch"
+  (`bkt pr create --close-source`); GitHub has no such flag per pull request, so Flottille keeps
+  the wish for that pull request (the store's `posts`, kind `delete_branch`) and applies it at
+  its merge, and the answer reads the repository's own "automatically delete head branches"
+  setting and says it (`the repository's own setting deletes head branches after a merge`). A
+  `create` with `delete_branch_on_merge` on a branch the workspace resumed, or one another
+  workspace is on, is refused naming why, before anything is opened (`refused:
+  delete_branch_on_merge: the branch app/login is never deleted: it existed before the workspace;
+  nothing was opened`), on GitHub and on Bitbucket alike: the forge's own close of the source
+  branch would delete the user's branch at a merge Flottille does not make. The card says what
+  the forge does: on GitHub that Flottille deletes the branch when it merges the pull request and
+  that a merge by anyone else leaves it, on Bitbucket that the merge deletes it.
+  **`merge`** takes `delete_branch`: the source branch is deleted on the forge once merged
+  (GitHub `gh pr merge --delete-branch`, run with `-R` so that no local branch of a checkout is
+  touched; Bitbucket `bkt pr merge --close-source=true`, else `=false` as before). Left out, it
+  follows the pull request's `delete_branch_on_merge`, else the repository's project setting
+  "Delete the branch on merge" (`docs/projects.md`), else the branch is kept; `delete_branch:
+  false` keeps it whatever they say. It never deletes a branch the workspace resumed (it existed
+  before, so it was the user's: `its branch app/login was left: it existed before the workspace`)
+  nor one another workspace of the project is on; the answer says the branch was deleted or left,
+  except on GitHub when the repository's own "automatically delete head branches" is on: `gh`
+  cannot stop that, and the answer says GitHub deletes it (`the repository's own setting deletes
+  head branches: GitHub deletes app/login although it existed before the workspace; gh cannot stop
+  it`). The repository `merge` acts on is, as for `create`, the one named, else the workspace's
+  only one, and its card says the deletion the call, the project's setting or what `create` asked
+  for will do (`if the pull request asked for it when it was opened`), or that the merge leaves the
+  branch, and why. The branch is the one the repository's
   worktree is on now (`docs/workspaces.md`, "The branch"); `create` on a detached HEAD is refused
   (`refused: api is on no branch (detached at 1a2b3c4): switch to a branch first`). `create`
   never pushes: it reads, without fetching, whether the remote-tracking ref of the branch
@@ -539,9 +587,25 @@ pending requests.
   `… refused the squash message …; nothing was merged`), naming the check and the end of its
   output.
 - **`comment {number, repository?, body}`** posts a comment on a pull request of a repository of
-  the place; **`edit {number, repository?, title?, body?}`** changes its title or description, at
-  least one of them (`gh pr comment`, `gh pr edit`; `bkt pr comment --text`, `bkt pr edit --title
-  --description`). `edit` of a pull request that is not open is refused once allowed, before
+  the place; **`edit {number, repository?, title?, body?, draft?, reviewers_add?,
+  reviewers_remove?, labels_add?, labels_remove?, base?}`** changes it, at least one field
+  (refused at once otherwise, and for a reviewer or a label that would be an option of the command
+  line: empty, starting with `-`, holding a comma, a reviewer holding a space too; and for a
+  `base`, anything git's reference rules refuse in a branch name: a space, `..`, `~`, `^`, `:`,
+  `?`, `*`, `[`, `\`, `@{`, `//`, a leading `-` or `/`, a trailing `/`, `.` or `.lock`, and `#`,
+  which would change the address it is read at). GitHub: one
+  `gh pr edit --title --body --add-reviewer --remove-reviewer --add-label --remove-label --base`,
+  then `gh pr ready` for `draft: false` or `gh pr ready --undo` for `draft: true`; a `base` the
+  remote does not have is refused (`gh api repos/<repository>/branches/<base>`) before anything is
+  written. Bitbucket: `bkt pr edit --title --description --reviewer --remove-reviewer`, `bkt pr
+  publish [--undo]` for the draft, labels refused (`refused: Bitbucket has no labels on pull
+  requests`), and a `base` on Cloud only, through the API (`bkt api … --method PUT` with the new
+  destination, after its branch was checked to exist); Data Center is refused for `base`, `bkt`
+  having no way to move a destination there. The steps are not one write: when a later one fails
+  (`gh pr ready` after `gh pr edit`, `bkt pr publish` or the destination after `bkt pr edit`),
+  the answer says the failure and which earlier command had already changed the pull request.
+  `draft` is for `create` and `edit` (on `merge` it is refused at once). A comment is `gh pr comment`, `bkt pr comment
+  --text`. `edit` of a pull request that is not open is refused once allowed, before
   anything is written (`refused: the pull request #7 of acme/app is merged, not open; nothing was
   written: …`). A `title` on `comment` is refused before anything is asked (`refused: forge
   comment takes no title: title is for edit and create`).
@@ -570,7 +634,7 @@ pending requests.
 
 `list`, `show`, `subscribe`, `unsubscribe`, `pipelines`, `runs`, `run_view` and `run_logs` go
 through the gate like every call, which allows them in every mode; `create`, `comment`, `edit`,
-`merge`, `checks`, `close`, `reopen`, `run`, `stop` and `step` are to judge, and a merge that waives the checks base. A write is done only once the repository's remote is checked to lead where its forge is declared. **What a
+`merge`, `checks`, `close`, `reopen`, `run`, `stop` and `step` are to judge, and a merge that waives the checks base. **What a write asks is on the card**: besides its title and body, its reviewers (`Its reviewers, besides the project's: …`), labels, `It adds the reviewers: …`, `It removes the labels: …`, `It moves it onto the base release`, `It marks it ready for review`, `It makes it a draft`, `It deletes the branch when the pull request is merged`, and for a merge `It deletes the source branch on the forge after the merge` (with `(the project's setting Delete the branch on merge)` when that is why). A write is done only once the repository's remote is checked to lead where its forge is declared. **What a
 write posts is shown whole**: its request says `Its title: …`, `Its body: …` and `Its message: …` in full (the
 arguments recorded are cut at 500 characters), and the judge is given them whole. A title or a
 body longer than the 8,000 characters the judge is given whole is refused (`refused: the body is
@@ -605,7 +669,7 @@ It is the agent's own bookkeeping: the gate allows it in every mode, never held.
 
 | Tool | |
 |---|---|
-| `workspace {action: list \| show \| create \| prepare \| link_ticket \| remove, name?, repositories?, ticket?}` | The project's workspaces, as the window manages them (`docs/workspaces.md`). `list` gives each one's state, branch, repositories and ticket; `show {name?}` one whole, each step of its preparation with its state and why a failed one failed. `create {name, repositories?, branch?, ticket?}` makes one as `workspace.create` does: its worktrees, answered once they are made, then its setup in the background; `branch` is `<branch prefix>/<name>` when left out (the name alone when the project's prefix is empty), and an existing branch is checked out (its description: "to resume a branch, name it"). Its description also says to name the branch the way the repository does (its `AGENTS.md`, `CONTRIBUTING`, or the branches it already has), with the ticket's key when the workspace has a ticket, the default being the fallback. `prepare {name?}` resumes a failed preparation (`workspace.prepare`); `link_ticket {name?, ticket}` links its ticket, and unlinks it with `ticket: null` (`workspace.link_ticket`). `name` is the agent's own workspace when left out, but for `create`; in `main` it names one. Every agent has it. Its description says, in one line, that to work on another branch in a workspace an agent switches with git and the workspace follows (`docs/workspaces.md`, "The branch"). A child reads the workspaces; its writes, `remove` included, are refused (`refused: the agent the user talks to manages the project's workspaces; … ask your parent (ask_parent)`). |
+| `workspace {action: list \| show \| create \| prepare \| link_ticket \| rename_branch \| remove, name?, repositories?, branch?, ticket?, repository?}` | The project's workspaces, as the window manages them (`docs/workspaces.md`). `list` gives each one's state, branch, repositories and ticket; `show {name?}` one whole, each step of its preparation with its state and why a failed one failed. `create {name, repositories?, branch?, ticket?}` makes one as `workspace.create` does: its worktrees, answered once they are made, then its setup in the background; `branch` is `<branch prefix>/<name>` when left out (the name alone when the project's prefix is empty), and an existing branch is checked out (its description: "to resume a branch, name it"). Its description also says to name the branch the way the repository does (its `AGENTS.md`, `CONTRIBUTING`, or the branches it already has), with the ticket's key when the workspace has a ticket, the default being the fallback. `prepare {name?}` resumes a failed preparation (`workspace.prepare`); `link_ticket {name?, ticket}` links its ticket, and unlinks it with `ticket: null` (`workspace.link_ticket`). `rename_branch {name?, branch, repository?}` renames the workspace's branch in each of its repositories, or in `repository` alone (`workspace.rename_branch`): only while the branch was never pushed (no remote branch, no pull request) and the workspace did not resume it, to a name git accepts that no repository has and no checkout holds; each refusal says which repository and why (`docs/workspaces.md`, "Renaming the branch"), and comes before the request is held. It is judged as a write: a card in Ask (`Rename the branch of the workspace login from app/login to fix/ABC-12-login in api, web`), the judge in Auto, through in Full. `name` is the agent's own workspace when left out, but for `create`; in `main` it names one. Every agent has it. Its description says, in one line, that to work on another branch in a workspace an agent switches with git and the workspace follows (`docs/workspaces.md`, "The branch"). A child reads the workspaces; its writes, `remove` included, are refused (`refused: the agent the user talks to manages the project's workspaces; … ask your parent (ask_parent)`). |
 | `remove {name}` | Removes a workspace of the project, as `flottille workspace remove` does (`docs/workspaces.md`, "Removal"), **always held for the user**, whatever the mode and the judge: a request whose card says what would be lost, each repository's uncommitted files and commits on no remote (`This would be lost, and the workspace is removed only if your answer says to discard it:`, `api has commits on no remote, on its branch shop/login: 1a2b3c4 Add the login`), or `Nothing would be lost`. Allowed, it is refused, nothing touched, while something would be lost, unless the user's answer said to discard it (`flottille approve <n> --discard`), and while another agent than the caller works in the workspace, of its tree or not, or a command run not the tree's own runs there (`refused: workspace … is not removed, nothing was touched: the agent …, outside this agent's tree, works in it…`, `the agent …, of this agent's tree, works in it`), each named; then deletes, in each repository, the workspace's local branch once its work has landed (no commit of its own, or its pull request merged, as the forge says), never the remote one, and keeps the others, its answer saying each and why (`docs/workspaces.md`, "Removal"). A root removes the workspace it works in too, named or left out, once its work is done, held whatever the mode, Full included: its card also says the commands of its tree running in it, stopped first as `run.stop` stops one (`Stop the commands of this session running in it: pnpm dev:api, pnpm dev:front`), and `This session then goes on in the project's folder (main)`; once it is removed, the session goes on in `main` (its place, its grant and its record, in the write that forgets the workspace), and the answer says so (`The workspace login is removed; you now work in the project's folder (main), …`; `docs/workspaces.md`, "Its own workspace"). Its requests still waiting are then cancelled and answered as not run, and while the removal is carried out its `run`, `agent_launch`, `fs_write` and `fs_edit` are refused (`refused: the workspace login is being removed: …`). A child removes none. Until #141 it was the tool `workspace_remove {workspace?}`, still answered for one release. |
 
 `list` and `show` run at once. `remove` is base (above). `create`, `prepare` and `link_ticket` are to judge, as any
@@ -631,7 +695,7 @@ reasons.
 
 | Tool | |
 |---|---|
-| `tickets {action, ticket?, workspace?, query?, updated_within?, in_comments?, jql?, state?, label?, assignee?, detail?, fresh?, title?, body?, labels?, reason?, remove_labels?, assignees?, remove_assignees?, status?, project?, type?, events?, from?, minutes?}` | The tickets of the project's tracker, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
+| `tickets {action, ticket?, workspace?, query?, updated_within?, in_comments?, jql?, state?, label?, assignee?, detail?, fresh?, title?, body?, labels?, reason?, remove_labels?, assignees?, remove_assignees?, status?, other?, kind?, comment?, sprint?, project?, type?, events?, from?, minutes?}` | The tickets of the project's tracker, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
 
 - **`list {state?, label?, assignee?, updated_within?}`**: every ticket of a state, in one call, a
   line each (`- #12 open: The login fails [bug] (ana)  <link>`): `state` is `open` (the default),
@@ -670,7 +734,7 @@ reasons.
   another ticket of the same tracker by its key (`#123` or `ABC-123`): its reference, tracker,
   state, title, link and description, masked, and how many comments it has with the newest one's
   author (`Comments: 12, … read them with tickets {"action": "show", "detail": "full"}`); `detail
-  full` gives the comments (the newest 30). A ticket read in the last 30 s is given again, saying
+  full` gives the comments (the newest 30). A Jira work item's attachments are listed at the end (the first 30), named and not shown, and an image in a text is a line saying so; the description says the user can paste one into the conversation ([`tickets.md`](tickets.md), "Attachments"). A ticket read in the last 30 s is given again, saying
   how old it is (`fresh: true` and `detail full` read it again; [`tickets.md`](tickets.md), "How
   fast it is read"). A key of the other tracker is refused (`refused:
   ABC-123 is a Jira ticket, and this workspace's tracker is GitHub issues (#123): …`), and nothing
@@ -713,6 +777,17 @@ reasons.
   the title and the body whole, and a long one or one holding a secret is refused or base, as
   for the forge's writes ("The forge"). Locks, a project or a tracker kept read only, are
   planned as their own feature.
+- **Links and comments**: `link_types` (a read, never held) lists the kinds of link the tracker has;
+  `link {ticket, kind, other}` and `unlink {ticket, kind, other}` make and remove a link;
+  `comment_edit {ticket, comment, body}` and `comment_delete {ticket, comment}` change or delete a
+  comment, **only one Flottille recorded as posted by an agent** (`show` with `detail full` gives
+  the id of those, `[comment 10100]`); `sprint {ticket, sprint}` is always refused, saying why. A
+  link reads `ticket kind other`, so the card the user is shown says its direction in words (`ABC-2
+  blocks ABC-1`). `ticket` is required, never the workspace's. On Jira, the kinds are the site's
+  own link types, in the outward or the inward wording; on GitHub, `parent of`, `sub-task of`,
+  `blocks` and `blocked by`, and any other kind is refused, naming why. A kind unknown to the
+  site is refused before anything is asked, naming the ones it has. `show` lists a Jira work
+  item's links ([`tickets.md`](tickets.md), "Links and comments").
 - **`types {project?}`**: the work item types of a Jira project (`acli jira project view --key
   <P> --json`, its `issueTypes`), kept five minutes; `project` is left out when the tracker has
   one. On GitHub it answers that issues have no type. A Jira `create` that `acli` refuses for its
@@ -816,15 +891,15 @@ Two of them take an `action`, as the tools of a family do: `agent_status` (`stat
 
 | Tool | |
 |---|---|
-| `agent_launch {title, brief, provider?, model?, effort?, role?, workspace?, new_workspace?, repositories?, root?}` | Starts a session for the user in a workspace with `root: true` ("Sessions for the user", below), or a child on one task, in the caller's own place, and answers at once with its id. A child never works in another place than its parent's: `workspace` and `new_workspace` are the session's, and a child launch that names another workspace than the caller's own, or a new one, is refused before anything is asked, naming the session form (`refused: a child works where you work: workspace and new_workspace are for a session for the user, … "root": true, "workspace": "login" …`); naming the caller's own workspace is its own place. Its description leads with the session form, for work that belongs in a workspace. `provider` is the caller's when left out, and the child's for life; `model` and `effort` the provider's defaults when left out (`docs/agents.md`, "Providers"): a provider not enabled or not ready, or a model or an effort it is known not to offer, is refused naming those that are (`refused: provider opencode is not enabled (…); the ready providers are claude`). `role` is `worker` (by default) or `lead`; with `root`, `workspace` is an existing workspace's name (`main` for the project folder), `new_workspace` the name of a new one (made at once, with `repositories` as its repositories, the session's first message sent once it is prepared; a workspace that fails fails the session; the launch is judged as `workspace create` is, "The workspace"), neither for the caller's own place; both are plain optional fields, and a mix is refused naming the field to use (`refused: workspace and new_workspace are exclusive: …`, `refused: repositories goes with new_workspace, …`). Its description holds a call of each form. Refused, never queued, above the project's children cap (`refused: N children already run in project P, its cap: do the work yourself, or wait for one of them to end (agent_stop ends one of yours)`). Only a root has this tool: a child, whatever its role, has none of the `agent_*` tools (no depth). **`root: true`** starts a session for the user instead of a child ("Sessions for the user", below). |
+| `agent_launch {title, brief, provider?, model?, effort?, role?, workspace?, new_workspace?, repositories?, root?, follow?}` | Starts a session for the user in a workspace with `root: true` ("Sessions for the user", below), or a child on one task, in the caller's own place, and answers at once with its id. A child never works in another place than its parent's: `workspace` and `new_workspace` are the session's, and a child launch that names another workspace than the caller's own, or a new one, is refused before anything is asked, naming the session form (`refused: a child works where you work: workspace and new_workspace are for a session for the user, … "root": true, "workspace": "login" …`); naming the caller's own workspace is its own place. Its description leads with the session form, for work that belongs in a workspace. `provider` is the caller's when left out, and the child's for life; `model` and `effort` the provider's defaults when left out (`docs/agents.md`, "Providers"): a provider not enabled or not ready, or a model or an effort it is known not to offer, is refused naming those that are (`refused: provider opencode is not enabled (…); the ready providers are claude`). `role` is `worker` (by default) or `lead`; with `root`, `workspace` is an existing workspace's name (`main` for the project folder), `new_workspace` the name of a new one (made at once, with `repositories` as its repositories, the session's first message sent once it is prepared; a workspace that fails fails the session; the launch is judged as `workspace create` is, "The workspace"), neither for the caller's own place; both are plain optional fields, and a mix is refused naming the field to use (`refused: workspace and new_workspace are exclusive: …`, `refused: repositories goes with new_workspace, …`). Its description holds a call of each form. Refused, never queued, above the project's children cap (`refused: N children already run in project P, its cap: do the work yourself, or wait for one of them to end (agent_stop ends one of yours)`). Only a root has this tool: a child, whatever its role, has none of the `agent_*` tools (no depth). **`root: true`** starts a session for the user instead of a child ("Sessions for the user", below), and then **`follow`** (a boolean) is required: a launch without it is refused, naming the field and what each value does; a child launch refuses it. |
 | `session_send {session, text}` (a root) | A message to a session the caller started (`agent_launch` with `root`), or to the agent that started the caller's session ("Sessions for the user", below). |
 | `session_read {session?, last?, since?, until?, cursor?}` (a root) | A page of the conversation of another session of the caller's project, framed as that session's data, with the mode of its tree; without `session`, the caller's own id, role and mode ("Sessions that read each other", below). |
 | `agent_send {agent_id, message, model?, effort?}` | A message to a child, urgent: on its next tool result in a turn, a new turn otherwise. It answers the child's question. With `model` or `effort` it also changes the child's, as `agent.options` does for the user (`docs/agents.md`, "The options"): checked as at `agent_launch` (a model or an effort its provider is known not to offer is refused, naming those it offers, and nothing is sent), then set between its turns, before its next prompt. The provider never changes. |
 | `agent_status {agent_id?, action? status \| conversation, detail? short \| full, after?}` | `action status` (the default): one line per child (or for the one named): what it does (in a turn, `running \`<line>\` for 12 min`, `waiting for approval #3`, `waiting on the provider`, idle, reported, ended or failed with why), the time since its last sign of activity, its context use. For all the children it stops there (`detail short`) and says how to get more; for the one named, or with `detail full`, each also has its last three messages. `action conversation` (with `agent_id`; `after` pages): a page of the child's conversation, oldest first, one line per event that says something (`#<n> sent: …`, `said: …` for a whole reply, its streamed pieces joined and masked, two messages apart, `tool call: …`, a tool served and its outcome, a turn's end, a replacement, a report), each line of 2,000 characters at most (a longer reply goes on, whole, on the next lines), the page under 30,000; it ends with the `after` to pass for the next page. |
 | `agent_stop {agent_id}` | Stops the child and its own children, deepest first; what was queued for them is superseded; their runs are stopped. Their workspaces stay. |
 | `report {text}` | The caller is done. At most 10,000 characters, so that it rides whole on its parent's results; a longer one is refused, asking for fewer words and a file that holds the details. A child's report goes to its parent at once (`child-report`, with its workspace, its branch and the last commit of each repository), and the child ends when its turn does (or two minutes later, if its turn goes on). A root's report is shown to the user (`agent.reported`) and the root stays. |
-| `ask_user {question}` (a root) | A question to the user (`agent.asked`), answered later as a message. |
-| `ask_parent {question}` (a child) | A question to its parent (`child-question`), answered with `agent_send`. Until then the child shows as waiting on its parent. |
+| `ask_user {question}` (a root) | A question to the user (`agent.asked`), answered later as a message. For a decision only the user can take (commit, push, scope, a choice); see "Where a question goes", below. |
+| `ask_parent {question}` (a child) | A question to its parent (`child-question`), answered with `agent_send`. Until then the child shows as waiting on its parent. What a child needs goes here, never in its report. |
 | `approval_answer {request_id, decision, why}` | Answers a request held for the caller: `deny` (the agent that asked is told, with the why) or `forward` (to the caller's parent with its why, or to the user from a root). There is no way to allow: `allow` is refused as a decision the tool does not have, and a request the caller does not hold, or no longer holds, is refused (`refused: request #n is not held by this agent: …`). |
 
 They go through the gate like every call (it allows them). Their texts are masked of the
@@ -869,11 +944,43 @@ from the window: `agent_launch {"title", "brief", "root": true, workspace? | new
 - **It takes the tree's mode**: the mode of the caller's tree, Ask, Auto or Full, never a looser
   one; only the user changes it afterwards, and each tree keeps its own. It counts in no children cap and no depth.
 - The caller is answered at once with the new session's id and name; the `agent_*` tools do not
-  reach it, and the caller is told nothing of it afterwards but what it writes with
-  `session_send`.
+  reach it. **`follow` is required**, and the agent chooses each time (the maintainer's decision:
+  required, not required to be true). `follow: false`: the caller is told nothing of the session
+  afterwards but what it writes with `session_send`. `follow: true`: see "Following a session",
+  below.
 - **It sits under its workspace**, not under the agent that started it: a root of its own,
   `agent.trees` lists it apart, with its `workspace` and `launched_by` (the window's sidebar puts
   it under its place, as any session).
+
+#### Following a session
+
+With `follow: true`, each time the session ends a turn, and when it ends or fails, the agent that
+started it is woken by a delivery, `session-turn-ended`, between turns (`docs/design.md` §5.2). It
+names the session (its title and id), says why the turn ended (`turn done`, `it reported`, `it
+asked the user a question with ask_user`, `the turn stopped before its end (<reason>)`, or, for the
+end of the session, `ended: <why>` or `failed: <why>`) and holds the session's last message, masked
+and cut at 2,000 characters, the cut said (`[cut: N more characters; session_read reads the rest]`).
+Its words are data, not instructions. Nothing reads the text of a message to find a question:
+Flottille recognizes nothing by its text.
+
+The agent may answer with `session_send` (unchanged: judged as a write), relay to the user with its
+own `ask_user`, or do nothing. It is a subscription of the source `session`: `forge show` lists it
+under "Your subscriptions", `subscription.list` and the window's rail show it (`Following <title>`,
+with no end time), and **`forge unsubscribe {session}`** ends it (`session` goes alone; a session
+that is not followed is refused). It also ends when the session ends or fails (the wake says so),
+and when the starting agent ends. It never blocks the inactivity sweep of the starter (`docs/design.md`
+§5.7) and does not draw it as waiting.
+
+#### Where a question goes
+
+Nothing reads a message to find a question, so each agent is told where one goes, in the
+descriptions of `ask_user`, `report`, `session_send` and `ask_parent`, and in the paragraph that
+ends the first message of a session an agent started (`[flottille:launched]`, `Where a question
+goes:`, which the window does not show): a decision only the user can take (commit, push, scope, a
+choice) goes through `ask_user`, which reaches the user's inbox; a question about the brief or its
+context goes to the agent that started the session, with `session_send`; a question left in a
+report or in a last message is a follow-up, not a wait. A child does the same with `ask_parent`
+instead of `ask_user`. The descriptions stay under the 2,048 characters their limit asks.
 
 #### Sessions that talk to each other
 
@@ -890,6 +997,19 @@ you: …`), and so is one that ended or an empty text. Children are written to w
   delivery, `session`, urgent (on its next tool result in a turn, a new turn otherwise), under a
   line naming the sender (`agent 0123456789ab wrote to this session:`): it is an agent's words,
   never the user's. Its answer, a `session_send` the other way, comes back the same way.
+- **No endless back and forth.** When the two agents of a following write to each other five times
+  (`session_send`, from either, each with the turn it causes) with no message of the user's in
+  either session, the following pauses: no more wakes, and a `session_send` between the two is
+  refused at once (`refused: paused: you two wrote to each other five times without the user;
+  wait for their message`); `session.following_paused` is emitted, the user's inbox says that the
+  two sessions talk without them (`kind` `paused`), the window's rail says it under the following
+  with a Resume, and `forge show` says it is paused. A message of the user's to either session, or
+  that Resume (`subscription.resume`), starts the count again and resumes it
+  (`session.following_resumed`); no agent can. A session that is not followed has nothing to
+  pause.
+- **One wake a turn**: a turn of the session that wrote to its starter with `session_send` does not
+  wake it again at its end; the wake of a turn carries that turn's last message only (`(no message
+  this turn)` when it said nothing), and says it asked the user only when it did in that turn.
 - **The judge never takes it for the user's words**: the user's last messages it is given are
   the user's only; the last messages written to the session with `session_send` come in blocks of
   their own, each `written by agent <id> with session_send (an agent's words, not the user's)`.
@@ -1095,8 +1215,12 @@ says who answers a call to judge (`docs/design.md` §7.1).
      `core.gitProxy`, and every key of git's settings that run programs below but `remote.*`,
      `url.*`, `push.*` (any `alias.*`, `include.path`, `includeIf.*`, `credential.*`, drivers,
      filters, `protocol.allow`…); a program named for a remote: `--upload-pack`,
-     `--receive-pack`, `--exec` of `clone`, `fetch`, `pull`, `push`, `send-pack`, `ls-remote`,
-     `archive`, `git clone -u`, `git -c core.sshCommand`;
+     `--receive-pack`, `--exec` of `clone`, `fetch`, `pull`, `push`, `ls-remote`, `archive`,
+     `git clone -u`, `git -c core.sshCommand`;
+   - a push past the wall on pushes (below): `git send-pack`, `git http-push` and git's transport
+     helpers (`git remote-<name>`: `remote-https`, `remote-ext`, `remote-fd`…) connect to the URL
+     they are given, which `pushInsteadOf` does not rewrite: `refused: git send-pack pushes past
+     Flottille's wall; use git push`;
    - a launcher, which starts what it runs outside the daemon's tree of processes, later or on a
      host: `systemd-run`, `tmux`, `screen`, `zellij`, `dtach`, `abduco`, `setsid`, `at`,
      `batch`, `crontab`, `dbus-send`, `gdbus`, `busctl`, `ssh`, `scp`, `sftp`, `loginctl`,
@@ -1258,7 +1382,8 @@ says who answers a call to judge (`docs/design.md` §7.1).
    **Known gaps**, which no command gate closes: a script written with `fs_write` and then run
    (`./script.sh`, `sh script.sh`) is not read, so what it does is out of the gate's reach, but
    for a push, which the environment walls; a git alias in the user's own configuration
-   (`alias.<name> = push`) is run by git itself, and the gate sees only the alias's name.
+   (`alias.<name> = push`) is run by git itself, and the gate sees only the alias's name: the
+   wall stops such a push, but not one through an alias of `send-pack` or `http-push`.
    Running a script the agent wrote is itself a line to judge.
 
 The words of a line that name paths (every word but the program, an option's value after `=`,

@@ -46,6 +46,8 @@ struct Add {
     ready: Option<Option<Box<Ready>>>,
     #[serde(default, deserialize_with = "present_or_empty")]
     url: Option<Option<Box<TaskUrl>>>,
+    #[serde(default)]
+    needs: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -67,6 +69,8 @@ struct Edit {
     ready: Option<Option<Box<Ready>>>,
     #[serde(default, deserialize_with = "present_or_empty")]
     url: Option<Option<Box<TaskUrl>>>,
+    /// The services it needs, all of them; left out: unchanged.
+    needs: Option<Vec<String>>,
 }
 
 /// A field given, `null` and `""` being none.
@@ -115,6 +119,9 @@ impl Edit {
         if let Some(url) = &self.url {
             edited.url = url.clone();
         }
+        if let Some(needs) = &self.needs {
+            edited.needs = needs.clone().into();
+        }
         edited
     }
 }
@@ -147,6 +154,7 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Answer {
                 read_only: asked.read_only,
                 ask_before_running: asked.ask_before_running,
                 added_by: None,
+                needs: asked.needs.into(),
                 ready: asked.ready.flatten(),
                 url: asked.url.flatten(),
             };
@@ -312,6 +320,14 @@ fn write(
             entry.remove("url");
         }
     }
+    if task.needs.is_empty() {
+        entry.remove("needs");
+    } else {
+        entry.insert(
+            "needs",
+            toml_edit::value(task.needs.iter().collect::<toml_edit::Array>()),
+        );
+    }
     Ok(())
 }
 
@@ -334,5 +350,6 @@ pub fn to_json(name: &str, task: &Task) -> Value {
         "ask_before_running": task.ask_before_running,
         "ready": task.ready,
         "url": task.url,
+        "needs": task.needs,
     })
 }

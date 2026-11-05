@@ -730,7 +730,7 @@ async fn run_for(
         .stderr(Stdio::piped())
         .process_group(0)
         .kill_on_drop(true);
-    let child = command.spawn().map_err(|error| match error.kind() {
+    let child = crate::children::spawn(&mut command).map_err(|error| match error.kind() {
         std::io::ErrorKind::NotFound => Gh::Missing,
         _ => Gh::Failed(error.to_string()),
     })?;
@@ -1035,8 +1035,23 @@ pub(crate) struct ForgeCall {
     fresh: bool,
     title: Option<String>,
     body: Option<String>,
-    #[serde(default)]
-    draft: bool,
+    /// create: opened as a draft; edit: `false` marks it ready for review, `true` makes it a
+    /// draft again.
+    draft: Option<bool>,
+    /// create: reviewers besides the project's.
+    reviewers: Option<Vec<String>>,
+    /// create: labels (GitHub).
+    labels: Option<Vec<String>>,
+    /// create: the source branch is deleted when the pull request is merged.
+    delete_branch_on_merge: Option<bool>,
+    /// edit: reviewers asked, reviewers taken off.
+    reviewers_add: Option<Vec<String>>,
+    reviewers_remove: Option<Vec<String>>,
+    /// edit: labels put on, labels taken off (GitHub).
+    labels_add: Option<Vec<String>>,
+    labels_remove: Option<Vec<String>>,
+    /// edit: the branch it goes into.
+    base: Option<String>,
     /// merge: why the user lets a pull request whose checks or review block it be merged; the
     /// gate held the call for them.
     waive: Option<String>,
@@ -1047,15 +1062,17 @@ pub(crate) struct ForgeCall {
     message: Option<String>,
     /// close, reopen: posted on the pull request first.
     comment: Option<String>,
-    /// close: also delete the pull request's branch on the forge.
-    #[serde(default)]
-    delete_branch: bool,
+    /// close, merge: also delete the pull request's branch on the forge. For merge, left out
+    /// follows the pull request's wish and the project's setting.
+    delete_branch: Option<bool>,
     /// subscribe: the events it waits for (`EVENTS`).
     events: Option<Vec<String>>,
     /// subscribe: whose reviews and comments count (`subscriptions::FROM`).
     from: Option<String>,
     /// subscribe: how long it waits at most.
     minutes: Option<u64>,
+    /// unsubscribe: a session the agent follows (`agent_launch` with `follow`), to stop following.
+    session: Option<String>,
     /// run: what to run, as `pipelines` lists it.
     pipeline: Option<String>,
     /// run: the pipeline's variables, the workflow's inputs.
@@ -1072,6 +1089,201 @@ pub(crate) struct ForgeCall {
 impl ForgeCall {
     fn method(&self) -> &str {
         self.method.as_deref().unwrap_or(MERGE_METHODS[0])
+    }
+
+    /// Why the call cannot be done whatever the forge says, before the user is asked: a
+    /// reviewer, a label or a base that would be an option of the command line, an `edit` that
+    /// changes nothing.
+    pub(crate) fn malformed(&self) -> Option<String> {
+        let lists = [
+            ("reviewers", &self.reviewers, false),
+            ("reviewers_add", &self.reviewers_add, false),
+            ("reviewers_remove", &self.reviewers_remove, false),
+            ("labels", &self.labels, true),
+            ("labels_add", &self.labels_add, true),
+            ("labels_remove", &self.labels_remove, true),
+        ];
+        for (key, names, label) in lists {
+            for name in names.iter().flatten() {
+                // Each is one value of a `--reviewer` or `--label`, never an option of its own;
+                // the forge's commands split a value at its commas.
+                let spaced = !label && name.contains(char::is_whitespace);
+                let blank = label && name.trim().is_empty();
+                if name.is_empty()
+                    || blank
+                    || name.starts_with('-')
+                    || name.contains([',', '\n'])
+                    || spaced
+                {
+                    let what = match label {
+                        true => "one label, not starting with -, without comma",
+                        false => {
+                            "one name of the forge, without space nor comma, not starting with -"
+                        }
+                    };
+                    return Some(format!("refused: {key}: {name:?} is not {what}"));
+                }
+            }
+        }
+        if let Some(base) = &self.base
+            && !branch_name(base)
+        {
+            return Some(format!(
+                "refused: base: {base:?} is not one branch name: git's rules refuse a space, a \
+                 control character, .., ~ ^ : ? * [ \\ @{{, a leading - or /, a trailing / . or \
+                 .lock, and // ; so does the forge's address, with #"
+            ));
+        }
+        if self.action == "edit" && !self.changes() {
+            return Some(
+                "refused: forge edit needs at least one of title, body, draft, reviewers_add, \
+                 reviewers_remove, labels_add, labels_remove or base: what changes"
+                    .into(),
+            );
+        }
+        None
+    }
+
+    /// Whether an `edit` changes something.
+    fn changes(&self) -> bool {
+        let said = |text: &Option<String>| text.as_deref().is_some_and(|t| !t.trim().is_empty());
+        let given = |list: &Option<Vec<String>>| list.as_ref().is_some_and(|l| !l.is_empty());
+        said(&self.title)
+            || said(&self.body)
+            || self.draft.is_some()
+            || given(&self.reviewers_add)
+            || given(&self.reviewers_remove)
+            || given(&self.labels_add)
+            || given(&self.labels_remove)
+            || said(&self.base)
+    }
+}
+
+/// Whether `name` is one branch name by git's rules for a reference (`git check-ref-format`), and
+/// fit to be a path of the forge's API: the base is read there before it is written.
+fn branch_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with(['-', '/'])
+        && !name.ends_with(['/', '.'])
+        && !name.ends_with(".lock")
+        && !["..", "//", "@{"].iter().any(|bad| name.contains(bad))
+        && !name.contains(['~', '^', ':', '?', '*', '[', '\\', '#'])
+        && !name.contains(|c: char| c.is_whitespace() || c.is_control())
+        && name != "@"
+}
+
+/// `why`, the failure of a later step of a write, and what the earlier steps had already changed.
+pub(crate) fn after(why: String, done: &[&str]) -> String {
+    match done {
+        [] => why,
+        done => format!(
+            "{why}; {} had already changed the pull request before it failed: read it with \
+             forge show before going on",
+            done.join(" and ")
+        ),
+    }
+}
+
+/// `names` and then those of `more` that `names` has not, in order.
+fn without_twice(names: &[String], more: &Option<Vec<String>>) -> Vec<String> {
+    let mut all = names.to_vec();
+    for name in more.iter().flatten() {
+        if !all.contains(name) {
+            all.push(name.clone());
+        }
+    }
+    all
+}
+
+/// Why the branch `branch` of the workspace in the repository `path` must stay whatever is said:
+/// the workspace resumed it (it was the user's before), or another workspace is on it.
+pub(crate) fn keep_because(
+    daemon: &Daemon,
+    project: &str,
+    workspace: &Workspace,
+    path: &str,
+    branch: &str,
+) -> Option<String> {
+    if workspace
+        .repositories
+        .iter()
+        .any(|r| r.path == path && r.resumed)
+    {
+        return Some("it existed before the workspace".to_owned());
+    }
+    daemon
+        .read(|store| store.workspaces(Some(project)))
+        .unwrap_or_default()
+        .into_iter()
+        .find(|w| {
+            w.name != workspace.name
+                && w.branch == branch
+                && w.repositories.iter().any(|r| r.path == path)
+        })
+        .map(|other| format!("the workspace {} is on it", other.name))
+}
+
+/// The workspace a `create` or `merge` writes for and the repository it takes, as `forge_write`
+/// takes them: the one named, else the workspace's only one. For the card, which is read before.
+pub(crate) fn write_target(
+    daemon: &Daemon,
+    place: &Place,
+    workspace: Option<&str>,
+    repository: Option<&str>,
+) -> Option<(Workspace, String)> {
+    let name = workspace_named(daemon, place, workspace, "forge").ok()?;
+    let workspace = daemon
+        .read(|store| store.workspace(&place.project, &name))
+        .ok()??;
+    let path = match (repository, workspace.repositories.as_slice()) {
+        (Some(path), _) => path.to_owned(),
+        (None, [only]) => only.path.clone(),
+        (None, _) => return None,
+    };
+    Some((workspace, path))
+}
+
+/// What a merge does with the pull request's source branch, as far as the call and the project
+/// say it (`docs/tools.md`, "The forge"): the call's `delete_branch`, else what was kept for that
+/// pull request at its creation, else the repository's project setting; and the reason the branch
+/// must stay whatever they say.
+pub(crate) struct Deletion {
+    pub asked: Option<bool>,
+    pub setting: bool,
+    /// The branch is somebody's else's: the workspace resumed it, or another is on it.
+    pub keep_because: Option<String>,
+}
+
+/// What became of the branch.
+pub(crate) enum Branch {
+    Kept,
+    Delete,
+    Left(String),
+}
+
+impl Deletion {
+    /// Whether the branch of the pull request `number` is to be deleted at its merge.
+    pub fn decide(&self, daemon: &Daemon, on: (&str, &str, &str, &str)) -> Branch {
+        let wanted = self
+            .asked
+            .unwrap_or_else(|| self.setting || crate::posts::delete_branch_kept(daemon, on));
+        match (wanted, &self.keep_because) {
+            (false, _) => Branch::Kept,
+            (true, None) => Branch::Delete,
+            (true, Some(why)) => Branch::Left(why.clone()),
+        }
+    }
+}
+
+impl Branch {
+    /// What the answer of a merge adds about the branch, `branch` being its name.
+    pub fn said(&self, branch: &str) -> String {
+        let branch = masked(branch);
+        match self {
+            Branch::Kept => String::new(),
+            Branch::Delete => format!(", and its branch {branch} was deleted"),
+            Branch::Left(why) => format!(", and its branch {branch} was left: {why}"),
+        }
     }
 }
 
@@ -1164,11 +1376,24 @@ fn subscriptions_text(daemon: &Daemon, agent: &str) -> String {
         .into_iter()
         .filter(|s| s.source == "forge")
         .collect();
-    if mine.is_empty() {
+    let following = crate::subscriptions::following(daemon, agent, None);
+    if mine.is_empty() && following.is_empty() {
         return String::new();
     }
     let now = now_ms();
     let mut text = "\nYour subscriptions:\n".to_owned();
+    for subscription in following {
+        text.push_str(&format!(
+            "- {}{}\n",
+            crate::subscriptions::named(&subscription),
+            if subscription.seen["paused"] == true {
+                " (paused: you two wrote to each other five times without the user; a message of \
+                 theirs to either resumes it)"
+            } else {
+                ""
+            }
+        ));
+    }
     for subscription in mine {
         let from = match subscription.from.as_str() {
             "people" => " (from people)",
@@ -1369,6 +1594,25 @@ fn remember(daemon: &Arc<Daemon>, project: &str, path: &str, forge: &Forge, pull
 /// `forge unsubscribe`: the agent's subscriptions to the workspace and repository it names, every
 /// one when it names none.
 fn forge_unsubscribe(daemon: &Daemon, agent: &str, asked: ForgeCall) -> Outcome {
+    if let Some(session) = &asked.session {
+        if asked.workspace.is_some() || asked.repository.is_some() {
+            return Outcome::Refused(
+                "refused: session goes alone: it names a session you follow, workspace and \
+                 repository a pull request"
+                    .into(),
+            );
+        }
+        let followed = crate::subscriptions::following(daemon, agent, Some(session));
+        if followed.is_empty() {
+            return Outcome::Refused(format!(
+                "refused: you do not follow {session}: forge show lists the sessions you follow"
+            ));
+        }
+        for subscription in &followed {
+            crate::subscriptions::end(daemon, subscription, "cancelled");
+        }
+        return Outcome::Done(format!("You no longer follow {session}."));
+    }
     let named =
         |s: &flottille_core::subscription::Subscription, key: &str, asked: &Option<String>| {
             asked.as_ref().is_none_or(|a| s.target[key] == a.as_str())
@@ -1753,16 +1997,11 @@ async fn forge_note(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
     };
     let body = asked.body.as_deref().filter(|b| !b.trim().is_empty());
     let title = asked.title.as_deref().filter(|t| !t.trim().is_empty());
-    match (action, body, title) {
-        ("comment", None, _) => {
-            return Outcome::Refused("refused: forge comment needs body, the comment".into());
-        }
-        ("edit", None, None) => {
-            return Outcome::Refused(
-                "refused: forge edit needs title, body or both: what changes".into(),
-            );
-        }
-        _ => {}
+    if let Some(why) = asked.malformed() {
+        return Outcome::Refused(why);
+    }
+    if action == "comment" && body.is_none() {
+        return Outcome::Refused("refused: forge comment needs body, the comment".into());
     }
     let checkout = match place_checkouts(daemon, place)
         .and_then(|all| chosen(all, asked.repository.as_deref(), action, true))
@@ -1819,25 +2058,39 @@ async fn forge_note(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
         }
     }
     let number = number.to_string();
+    if action == "edit"
+        && let Err(refusal) = edit_checked(&forge, &asked).await
+    {
+        return refusal;
+    }
     // The id of the comment, where the forge answers one: `gh` prints its link, `bkt` none.
-    let done = match &forge {
-        Forge::Bitbucket { .. } => bitbucket::note(&forge, action, &number, title, body)
+    let done = match (&forge, action) {
+        (Forge::Bitbucket { .. }, "comment") => {
+            bitbucket::note(&forge, action, &number, title, body)
+                .await
+                .map(|()| None)
+        }
+        (Forge::Bitbucket { .. }, _) => bitbucket::edit(&forge, &number, &asked, title, body)
             .await
             .map(|()| None),
-        Forge::GitHub { .. } => {
+        (Forge::GitHub { .. }, "comment") => {
             let repo = forge.gh_repository();
-            let mut args = vec!["pr", action, &number, "-R", &repo];
-            // `gh pr comment` takes no title, and the gate refused one there.
-            if let Some(title) = title.filter(|_| action == "edit") {
-                args.extend(["--title", title]);
-            }
-            if let Some(body) = body {
-                args.extend(["--body", body]);
-            }
+            let args = [
+                "pr",
+                "comment",
+                &number,
+                "-R",
+                &repo,
+                "--body",
+                body.unwrap_or_default(),
+            ];
             gh_text(&args)
                 .await
                 .map(|said| crate::posts::comment_id_in(&said))
         }
+        (Forge::GitHub { .. }, _) => github_edit(&forge, &number, &asked, title, body)
+            .await
+            .map(|()| None),
     };
     let on = (
         place.project.as_str(),
@@ -1861,6 +2114,104 @@ async fn forge_note(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
         }
     }
 }
+
+/// What an `edit` asks that the forge cannot do, refused before anything is written: labels on
+/// Bitbucket, a destination on Data Center, a base the remote has not got.
+async fn edit_checked(forge: &Forge, asked: &ForgeCall) -> Result<(), Outcome> {
+    let given = |list: &Option<Vec<String>>| list.as_ref().is_some_and(|l| !l.is_empty());
+    let slug = forge.slug();
+    if matches!(forge, Forge::Bitbucket { .. }) {
+        if given(&asked.labels_add) || given(&asked.labels_remove) {
+            return Err(Outcome::Refused(NO_LABELS.replace("{what}", "changed")));
+        }
+        if asked.base.is_some() && !bitbucket::cloud(forge) {
+            return Err(Outcome::Refused(format!(
+                "refused: {slug} is on Bitbucket Data Center, where bkt cannot move a pull \
+                 request's destination: nothing was written; open a new pull request into the \
+                 branch"
+            )));
+        }
+    }
+    let Some(base) = asked.base.as_deref() else {
+        return Ok(());
+    };
+    let found = match forge {
+        Forge::GitHub { .. } => {
+            let path = format!("repos/{slug}/branches/{base}");
+            gh_text(&[
+                "api",
+                &path,
+                "--hostname",
+                declared::GITHUB,
+                "--jq",
+                ".name",
+            ])
+            .await
+            .map(|_| ())
+        }
+        Forge::Bitbucket { .. } => bitbucket::branch_exists(forge, base).await,
+    };
+    match found {
+        Ok(()) => Ok(()),
+        Err(why) if why.contains("404") || why.contains("Not Found") => {
+            Err(Outcome::Refused(format!(
+                "refused: {slug} has no branch {} on the forge; nothing was written",
+                masked(base)
+            )))
+        }
+        Err(why) => Err(Outcome::Failed(why)),
+    }
+}
+
+/// `gh pr edit` for what it takes, then `gh pr ready` for the draft.
+async fn github_edit(
+    forge: &Forge,
+    number: &str,
+    asked: &ForgeCall,
+    title: Option<&str>,
+    body: Option<&str>,
+) -> Result<(), String> {
+    let repo = forge.gh_repository();
+    let mut args = vec!["pr", "edit", number, "-R", &repo];
+    if let Some(title) = title {
+        args.extend(["--title", title]);
+    }
+    if let Some(body) = body {
+        args.extend(["--body", body]);
+    }
+    let flags = [
+        ("--add-reviewer", &asked.reviewers_add),
+        ("--remove-reviewer", &asked.reviewers_remove),
+        ("--add-label", &asked.labels_add),
+        ("--remove-label", &asked.labels_remove),
+    ];
+    for (flag, names) in flags {
+        for name in names.iter().flatten() {
+            args.extend([flag, name]);
+        }
+    }
+    if let Some(base) = &asked.base {
+        args.extend(["--base", base]);
+    }
+    let mut done = Vec::new();
+    if args.len() > 5 {
+        gh_text(&args).await?;
+        done.push("gh pr edit");
+    }
+    if let Some(draft) = asked.draft {
+        let mut args = vec!["pr", "ready", number, "-R", &repo];
+        if draft {
+            args.push("--undo");
+        }
+        gh_text(&args).await.map_err(|why| after(why, &done))?;
+    }
+    Ok(())
+}
+
+/// Why labels are refused on Bitbucket; `{what}` is `changed` or `opened`.
+const NO_LABELS: &str = "refused: Bitbucket has no labels on pull requests: nothing was {what}; \
+     labels are GitHub's, and a Bitbucket pull request is told apart by its reviewers and its \
+     title";
 
 /// What `forge close` and `reopen` read of a pull request before they act.
 pub(crate) struct Seen {
@@ -1967,7 +2318,8 @@ async fn forge_close(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
             w.branch == seen.branch && w.repositories.iter().any(|r| r.path == checkout.path)
         });
     let mut left = None;
-    if asked.delete_branch {
+    let delete_branch = asked.delete_branch == Some(true);
+    if delete_branch {
         left = match (&on_it, seen.own) {
             (Some(workspace), _) => Some(format!("the workspace {} is on it", workspace.name)),
             (None, false) => Some("it comes from a fork".to_owned()),
@@ -1981,7 +2333,7 @@ async fn forge_close(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
             );
         }
     }
-    let delete = asked.delete_branch && left.is_none();
+    let delete = delete_branch && left.is_none();
     let done = if bitbucket {
         bitbucket::decline(&forge, &numbered, comment, delete).await
     } else {
@@ -2179,6 +2531,9 @@ async fn on_remote(folder: &Path, remote: &str, branch: &str) -> Result<(), Stri
 /// `forge` `create`, `merge` and `checks`: one write to the forge of one repository of a
 /// workspace, for the workspace's branch only, through the user's own `gh` or `bkt`.
 async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
+    if let Some(why) = asked.malformed() {
+        return Outcome::Refused(why);
+    }
     let name = match workspace_named(daemon, place, asked.workspace.as_deref(), "forge") {
         Ok(name) => name,
         Err(refusal) => return refusal,
@@ -2268,11 +2623,37 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
     if let Err(refusal) = messages_checked(&at, &asked).await {
         return Outcome::Refused(refusal);
     }
-    let reviewers = project.pull_requests.reviewers;
+    let reviewers = without_twice(&project.pull_requests.reviewers, &asked.reviewers);
+    let labels = asked.labels.clone().unwrap_or_default();
+    if matches!(forge, Forge::Bitbucket { .. }) && asked.action == "create" && !labels.is_empty() {
+        return Outcome::Refused(NO_LABELS.replace("{what}", "opened"));
+    }
+    // A branch the workspace resumed was the user's before, and another workspace on the same
+    // branch still uses it: a merge never deletes either, whatever it was told, and a pull
+    // request is not opened to have the forge delete it.
+    let keep_because = keep_because(daemon, &place.project, &workspace, &checkout.path, branch);
+    if asked.action == "create"
+        && asked.delete_branch_on_merge == Some(true)
+        && let Some(why) = &keep_because
+    {
+        return Outcome::Refused(format!(
+            "refused: delete_branch_on_merge: the branch {} is never deleted: {why}; nothing was \
+             opened: open it without delete_branch_on_merge",
+            masked(branch)
+        ));
+    }
+    let deletion = Deletion {
+        asked: asked.delete_branch,
+        setting: project
+            .repositories
+            .iter()
+            .any(|r| r.path == checkout.path && r.delete_branch_on_merge),
+        keep_because,
+    };
     if matches!(forge, Forge::Bitbucket { .. }) {
         let base = &repository.base.branch;
         let on = (daemon, place.project.as_str(), checkout.path.as_str());
-        return bitbucket::write(on, &forge, branch, base, &reviewers, asked).await;
+        return bitbucket::write(on, &forge, (branch, base), &reviewers, &deletion, asked).await;
     }
     if let Err(problem) = signed_in().await {
         return Outcome::Failed(problem);
@@ -2292,29 +2673,47 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                 "pr", "create", "-R", &repo, "--head", branch, "--base", base, "--title", &title,
                 "--body", &body,
             ];
-            if asked.draft {
+            if asked.draft == Some(true) {
                 args.push("--draft");
             }
             for reviewer in &reviewers {
                 args.extend(["--reviewer", reviewer]);
             }
+            for label in &labels {
+                args.extend(["--label", label]);
+            }
             match gh_text(&args).await {
                 Ok(said) => {
                     // `gh` prints the new pull request's link, which ends with its number.
                     let number = said.trim().rsplit('/').next().unwrap_or_default();
-                    if !body.trim().is_empty() && number.parse::<u64>().is_ok() {
-                        let on = (
-                            place.project.as_str(),
-                            forge.kind(),
-                            checkout.path.as_str(),
-                            number,
-                        );
+                    let numbered = number.parse::<u64>().is_ok();
+                    let on = (
+                        place.project.as_str(),
+                        forge.kind(),
+                        checkout.path.as_str(),
+                        number,
+                    );
+                    if !body.trim().is_empty() && numbered {
                         crate::posts::record_body(daemon, on, &body);
                     }
-                    Outcome::Done(format!(
+                    let mut told = format!(
                         "The pull request of {branch} into {base} was opened in {slug}: {}",
                         said.trim()
-                    ))
+                    );
+                    if asked.delete_branch_on_merge == Some(true) && numbered {
+                        // GitHub has no such flag per pull request: Flottille keeps the wish
+                        // and applies it when it merges the pull request.
+                        crate::posts::record_delete_branch(daemon, on, branch);
+                        told += &format!(
+                            ". Flottille will delete the branch {} when it merges #{number}",
+                            masked(branch)
+                        );
+                        if own_deletion(&repo).await {
+                            told += ": the repository's own setting deletes head branches after \
+                                a merge too";
+                        }
+                    }
+                    Outcome::Done(told)
                 }
                 Err(why) => Outcome::Failed(why),
             }
@@ -2384,16 +2783,39 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
             }
             let method = asked.method();
             let flag = format!("--{method}");
+            let on = (
+                place.project.as_str(),
+                forge.kind(),
+                checkout.path.as_str(),
+                number.as_str(),
+            );
+            let kept = deletion.decide(daemon, on);
             let mut args = vec!["pr", "merge", &number, "-R", &repo, &flag];
+            // `-R` names the repository, so that `gh` never touches a local branch of a
+            // checkout, which a workspace may be using.
+            if matches!(kept, Branch::Delete) {
+                args.push("--delete-branch");
+            }
             let message = asked.message.as_deref().map(squash_message);
             if let Some((subject, body)) = &message {
                 args.extend(["--subject", subject, "--body", body]);
             }
             match gh_text(&args).await {
-                Ok(_) => Outcome::Done(format!(
-                    "The pull request #{number} of {branch} was merged by {method} into {base} \
-                     in {slug}."
-                )),
+                Ok(_) => {
+                    // `gh` was told to leave it, but the repository's own setting may not.
+                    let said = match &kept {
+                        Branch::Left(why) if own_deletion(&repo).await => format!(
+                            ", and the repository's own setting deletes head branches: GitHub \
+                             deletes {} although {why}; gh cannot stop it",
+                            masked(branch)
+                        ),
+                        _ => kept.said(branch),
+                    };
+                    Outcome::Done(format!(
+                        "The pull request #{number} of {branch} was merged by {method} into \
+                         {base} in {slug}{said}."
+                    ))
+                }
                 Err(why) => {
                     // Refused by the forge: when the repository forbids the method, say which
                     // ones it allows rather than GitHub's own sentence.
@@ -2466,6 +2888,14 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
         }
         action => Outcome::Refused(format!("refused: forge {action} writes nothing here")),
     }
+}
+
+/// Whether the repository itself deletes the head branch of a pull request once merged
+/// (GitHub's "automatically delete head branches"); false when it cannot be read.
+async fn own_deletion(repo: &str) -> bool {
+    gh_json(&["repo", "view", repo, "--json", "deleteBranchOnMerge"])
+        .await
+        .is_ok_and(|viewed| viewed["deleteBranchOnMerge"] == true)
 }
 
 /// The project's message checks on what a write gives the forge: the title of a pull request

@@ -2,7 +2,8 @@
 //! rules"): always `-C <folder>`, never a prompt, every call bounded in time and in output, and a
 //! call cut at its limit killed with its group and waited for.
 
-use std::ffi::OsStr;
+use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -38,7 +39,47 @@ pub struct Output {
 
 /// Runs `git -C <dir> <args>`. The error is a sentence: git missing, or the call cut.
 pub async fn run<S: AsRef<OsStr>>(dir: &Path, args: &[S], class: Class) -> Result<Output, String> {
-    bounded(command(dir, args), dir, args, class.limit(), OUTPUT_LIMIT).await
+    bounded(
+        command(dir, args),
+        dir,
+        args,
+        class.limit(),
+        OUTPUT_LIMIT,
+        None,
+    )
+    .await
+}
+
+/// Runs `words` (`git`, its global options, its command) in `dir` with the environment `env` and
+/// no other, `input` on its standard input: a git line of an agent's, read before it runs, in
+/// the environment of its run. Unlike `command`, it adds no `-c` of its own: the run's
+/// environment already sets `core.hooksPath`, and the line's global options, approved with the
+/// line, apply to what is read for it as they apply to the line itself.
+pub async fn run_in<S: AsRef<OsStr>>(
+    dir: &Path,
+    words: &[S],
+    env: &BTreeMap<OsString, OsString>,
+    input: Option<Vec<u8>>,
+) -> Result<Output, String> {
+    let mut command = tokio::process::Command::new(&words[0]);
+    command
+        .args(&words[1..])
+        .current_dir(dir)
+        .env_clear()
+        .envs(env)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "never")
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .kill_on_drop(true);
+    let limit = Class::Read.limit();
+    bounded(command, dir, &words[1..], limit, OUTPUT_LIMIT, input).await
 }
 
 fn command<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> tokio::process::Command {
@@ -73,18 +114,30 @@ async fn bounded<S: AsRef<OsStr>>(
     args: &[S],
     time: Duration,
     output: u64,
+    input: Option<Vec<u8>>,
 ) -> Result<Output, String> {
-    let mut child = command.spawn().map_err(|error| match error.kind() {
+    let mut child = crate::children::spawn(&mut command).map_err(|error| match error.kind() {
         std::io::ErrorKind::NotFound => "git is not on the PATH".to_owned(),
         _ => format!("cannot run git: {error}"),
     })?;
     let mut stdout = child.stdout.take().expect("stdout is piped");
     let mut stderr = child.stderr.take().expect("stderr is piped");
+    let stdin = child.stdin.take();
+    // Written beside the reads: git may write before it has read all of it.
+    let write = async move {
+        if let (Some(mut stdin), Some(input)) = (stdin, input) {
+            use tokio::io::AsyncWriteExt;
+            // A git that exits before reading it all is answered by its exit, not by this.
+            let _ = stdin.write_all(&input).await;
+        }
+        Ok::<(), Cut>(())
+    };
     // The first stream past its limit stops the call: git would block on a full pipe.
     let ran = tokio::time::timeout(time, async {
         tokio::try_join!(
             read(&mut stdout, output),
             read(&mut stderr, output),
+            write,
             async { child.wait().await.map_err(Cut::Failed) },
         )
     })
@@ -97,7 +150,7 @@ async fn bounded<S: AsRef<OsStr>>(
     };
     let cut = |what: &str| format!("git {} in {} was stopped: {what}", shown(), dir.display());
     match ran {
-        Ok(Ok((stdout, stderr, status))) => Ok(Output {
+        Ok(Ok((stdout, stderr, (), status))) => Ok(Output {
             success: status.success(),
             stdout,
             stderr,
@@ -197,6 +250,7 @@ mod tests {
             args,
             Duration::from_secs(30),
             1 << 20,
+            None,
         )
         .await
         .unwrap();
@@ -221,6 +275,7 @@ mod tests {
             &args,
             Duration::from_secs(5),
             1024,
+            None,
         )
         .await;
 
@@ -247,6 +302,7 @@ mod tests {
             &args,
             Duration::from_secs(5),
             1024,
+            None,
         )
         .await;
 

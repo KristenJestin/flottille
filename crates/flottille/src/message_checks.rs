@@ -4,6 +4,8 @@
 //! repository's: git runs no hook for an agent (`runs::defend`), and a check is run by the
 //! daemon, without a shell, in the place's run environment, never as a call of the agent.
 
+use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -31,6 +33,8 @@ pub enum Checked {
     Commit,
     Title,
     Squash,
+    /// A commit a push sends.
+    Pushed,
 }
 
 impl Checked {
@@ -39,6 +43,7 @@ impl Checked {
             Checked::Commit => "the commit message",
             Checked::Title => "the pull request's title",
             Checked::Squash => "the squash message",
+            Checked::Pushed => "its message",
         }
     }
 
@@ -47,6 +52,7 @@ impl Checked {
             Checked::Commit => "nothing was committed",
             Checked::Title => "nothing was written to the forge",
             Checked::Squash => "nothing was merged",
+            Checked::Pushed => "nothing was pushed",
         }
     }
 }
@@ -79,8 +85,10 @@ pub async fn commits(at: &Where<'_>, words: &[String]) -> Result<(), String> {
             Checked::Commit.nothing()
         )
     };
+    let env =
+        crate::runs::environment(at.daemon, at.place, at.repository, false).map_err(unknown)?;
     for git in gits {
-        let git = unaliased(git, at.folder).await.map_err(unknown)?;
+        let git = unaliased(git, at.folder, &env).await.map_err(unknown)?;
         if let Some(message) = message_of(&git, at.folder).map_err(unknown)? {
             run_all(at, &checks, Checked::Commit, &message).await?;
         }
@@ -92,8 +100,10 @@ pub async fn commits(at: &Where<'_>, words: &[String]) -> Result<(), String> {
 const ALIASES_MAX: usize = 10;
 
 /// A git command's words with the user's alias of its command expanded, as git expands it: an
-/// alias of `ci` to `commit` makes `git ci -m x` a commit. A builtin command is never an alias.
-async fn unaliased(mut git: Vec<String>, folder: &Path) -> Result<Vec<String>, String> {
+/// alias of `ci` to `commit` makes `git ci -m x` a commit. A command git has, built in or a
+/// `git-<command>` it finds, is never an alias; one that is neither is refused, since git may
+/// run another in its place (`help.autocorrect`), which would commit unread.
+async fn unaliased(mut git: Vec<String>, folder: &Path, env: &Env) -> Result<Vec<String>, String> {
     for _ in 0..ALIASES_MAX {
         let args = &git[1..];
         let (at, globals) = gate::git_globals(args);
@@ -125,14 +135,23 @@ async fn unaliased(mut git: Vec<String>, folder: &Path) -> Result<Vec<String>, S
         let found = crate::git::run(&dir, &asked, crate::git::Class::Read)
             .await
             .map_err(unread)?;
-        if !found.success {
-            return Ok(git);
-        }
-        let builtins = crate::git::output(&dir, &["--list-cmds=builtins"], crate::git::Class::Read)
+        // Where the run looks for a `git-<command>`: the `PATH` of its environment.
+        let listed = ["git", "--list-cmds=builtins,main,others"];
+        let commands = crate::git::run_in(&dir, &listed, env, None)
             .await
             .map_err(unread)?;
-        if builtins.lines().any(|builtin| builtin == command) {
+        if !commands.success {
+            return Err(unread(commands.stderr.trim().to_owned()));
+        }
+        if commands.stdout.lines().any(|known| known == command) {
             return Ok(git);
+        }
+        if !found.success {
+            return Err(format!(
+                "git {command} is neither a git command, an alias nor a git-{command} on the \
+                 PATH, and git may run another command in its place (help.autocorrect): name \
+                 the command git runs"
+            ));
         }
         let alias = found.stdout.trim_end_matches('\n');
         if alias.starts_with('!') {
@@ -150,6 +169,219 @@ async fn unaliased(mut git: Vec<String>, folder: &Path) -> Result<Vec<String>, S
     Err(format!(
         "its aliases lead to more than {ALIASES_MAX} others: commit with git commit -m"
     ))
+}
+
+/// The environment of a run.
+type Env = BTreeMap<OsString, OsString>;
+
+/// Runs the project's checks on each commit the push `words` sends from `folder`, with `env`,
+/// the environment of its run: the refusal of the first that fails, naming it, or of a push
+/// whose commits cannot be known. Nothing when the project declares none.
+pub async fn pushed(at: &Where<'_>, words: &[String], env: &Env) -> Result<(), String> {
+    let checks = declared(at.daemon, at.place, Checked::Pushed)?;
+    if checks.is_empty() {
+        return Ok(());
+    }
+    let unknown = |why: String| {
+        let why = secrets::mask_also(&why, env, &at.place.secret_values());
+        format!(
+            "refused: the project's message checks read each commit a push sends before it \
+             goes, and {why}; {}",
+            Checked::Pushed.nothing()
+        )
+    };
+    let at_push = gate::git_globals(&words[1..]).0 + 1;
+    let git = &words[..at_push];
+    for sha in sent(git, &words[at_push + 1..], at.folder, env)
+        .await
+        .map_err(unknown)?
+    {
+        let object = read_git(git, &["cat-file", "commit", &sha], at.folder, env, None)
+            .await
+            .map_err(unknown)?;
+        let message = object.split_once("\n\n").map_or("", |(_, message)| message);
+        let subject = crate::mcp::masked(message.lines().next().unwrap_or_default(), at.place);
+        let short = &sha[..12.min(sha.len())];
+        run_all(at, &checks, Checked::Pushed, message)
+            .await
+            .map_err(|refusal| {
+                let said = refusal.strip_prefix("refused: ").unwrap_or(&refusal);
+                format!("refused: the push sends the commit {short} ({subject}), and {said}")
+            })?;
+    }
+    Ok(())
+}
+
+/// The commits a push sends to branches and tags, oldest first: those its refs lead to that no
+/// ref of the remote has. Git says which refs the push sends, as it reads the line and the
+/// configuration (`--dry-run`); the remote says which it has (`ls-remote`): its remote-tracking
+/// refs are the agent's to write. Notes and other refs are no message of the project's history.
+async fn sent(
+    git: &[String],
+    rest: &[String],
+    folder: &Path,
+    env: &Env,
+) -> Result<Vec<String>, String> {
+    // Last among its options, so that none of the line's turns them off.
+    let end = rest
+        .iter()
+        .position(|word| word == "--" || word == "--end-of-options")
+        .unwrap_or(rest.len());
+    let said =
+        read(&rest[..end], &PUSH).map_err(|why| format!("its options cannot be read: {why}"))?;
+    let recursing = |value: &str| ["on-demand", "only"].contains(&value);
+    let recursing = match said.submodules {
+        Some(said) => recursing(&said),
+        // Git takes whichever of the two keys it reads last; submodule.recurse true is on-demand.
+        None => {
+            setting(git, &["push.recurseSubmodules"], folder, env)
+                .await?
+                .is_some_and(|value| recursing(&value))
+                || setting(git, &["--type=bool", "submodule.recurse"], folder, env)
+                    .await?
+                    .is_some_and(|value| value == "true")
+        }
+    };
+    if recursing {
+        return Err(
+            "it would push the commits of submodules too (--recurse-submodules, \
+             push.recurseSubmodules or submodule.recurse), which no check reads: push each \
+             submodule from its own folder"
+                .into(),
+        );
+    }
+    let mut dry: Vec<String> = git.to_vec();
+    dry.push("push".into());
+    dry.extend_from_slice(&rest[..end]);
+    dry.extend(["--dry-run", "--porcelain", "--no-quiet"].map(String::from));
+    dry.extend_from_slice(&rest[end..]);
+    let tried = crate::git::run_in(folder, &dry, env, None).await?;
+    let mut remotes: Vec<(&str, Vec<&str>)> = Vec::new();
+    for line in tried.stdout.lines() {
+        if let Some(url) = line.strip_prefix("To ") {
+            remotes.push((url, Vec::new()));
+        } else if let (Some((_, sources)), [flag, refs, _]) = (
+            remotes.last_mut(),
+            line.splitn(3, '\t').collect::<Vec<_>>().as_slice(),
+        ) && [" ", "+", "*"].contains(flag)
+            && let Some((source, destination)) = refs.rsplit_once(':')
+            && ["refs/heads/", "refs/tags/"]
+                .iter()
+                .any(|kind| destination.starts_with(kind))
+        {
+            sources.push(source);
+        }
+    }
+    // A URL that did not answer has no block, and may answer at the real push.
+    if !tried.success {
+        return Err(format!(
+            "git could not say what it sends ({})",
+            tried.stderr.trim()
+        ));
+    }
+    let mut commits: Vec<String> = Vec::new();
+    for (url, sources) in remotes {
+        if sources.is_empty() {
+            continue;
+        }
+        let mut input = String::new();
+        for source in sources {
+            let sha = read_git(git, &["rev-parse", "--verify", source], folder, env, None).await?;
+            input.push_str(sha.trim());
+            input.push('\n');
+        }
+        input.push_str("--not\n");
+        // `insteadOf` would make it read another remote than the one the push goes to.
+        let read = read_git(
+            git,
+            &["ls-remote", "--get-url", "--end-of-options", url],
+            folder,
+            env,
+            None,
+        )
+        .await?;
+        let read = read.trim_end_matches('\n');
+        if read != url {
+            return Err(format!(
+                "the remote's URL is rewritten for reads ({url} is read as {read}), so what it \
+                 has cannot be known: push without the rewrite"
+            ));
+        }
+        let had = read_git(
+            git,
+            &["ls-remote", "--end-of-options", url],
+            folder,
+            env,
+            None,
+        )
+        .await?;
+        for listed in had.lines() {
+            input.push_str(listed.split('\t').next().unwrap_or_default());
+            input.push('\n');
+        }
+        let listed = read_git(
+            git,
+            &["rev-list", "--reverse", "--ignore-missing", "--stdin"],
+            folder,
+            env,
+            Some(input.into_bytes()),
+        )
+        .await?;
+        for sha in listed.lines() {
+            if !commits.iter().any(|seen| seen == sha) {
+                commits.push(sha.to_owned());
+            }
+        }
+    }
+    Ok(commits)
+}
+
+/// A key of git's configuration (after the options of `git config --get`), as `git` (`git` and
+/// the line's global options) reads it: nothing when it is not set.
+async fn setting(
+    git: &[String],
+    key: &[&str],
+    folder: &Path,
+    env: &Env,
+) -> Result<Option<String>, String> {
+    let mut words = git.to_vec();
+    words.extend(
+        ["config", "--get"]
+            .into_iter()
+            .chain(key.iter().copied())
+            .map(String::from),
+    );
+    let output = crate::git::run_in(folder, &words, env, None).await?;
+    match (output.success, output.stderr.trim()) {
+        (true, _) => Ok(Some(output.stdout.trim_end_matches('\n').to_owned())),
+        (false, "") => Ok(None),
+        (false, said) => Err(format!(
+            "git config --get {} failed ({said})",
+            key.join(" ")
+        )),
+    }
+}
+
+/// A git command of `git`'s (`git` and the line's global options): its output, or what git
+/// said when it failed.
+async fn read_git(
+    git: &[String],
+    command: &[&str],
+    folder: &Path,
+    env: &Env,
+    input: Option<Vec<u8>>,
+) -> Result<String, String> {
+    let mut words = git.to_vec();
+    words.extend(command.iter().map(|word| word.to_string()));
+    let output = crate::git::run_in(folder, &words, env, input).await?;
+    match output.success {
+        true => Ok(output.stdout),
+        false => Err(format!(
+            "git {} failed ({})",
+            command[0],
+            output.stderr.trim()
+        )),
+    }
 }
 
 /// Runs the project's checks on `message`: the refusal of the first that fails.
@@ -258,8 +490,7 @@ async fn run_one(at: &Where<'_>, line: &str, file: &Path, checked: Checked) -> R
         .stderr(Stdio::piped())
         .process_group(0)
         .kill_on_drop(true);
-    let child = command
-        .spawn()
+    let child = crate::children::spawn(&mut command)
         .map_err(|e| not_run(format!("cannot run {}: {e}", words[0])))?;
     // Its whole group goes once it ended, was stopped at its limit, or its call was dropped:
     // `kill_on_drop` alone stops only its first process.
@@ -446,6 +677,8 @@ struct Said {
     edit: bool,
     /// The switches that say whether a commit is made, in their order.
     switches: Vec<&'static str>,
+    /// The last `--recurse-submodules` of a push (empty for `--no-recurse-submodules`).
+    submodules: Option<String>,
 }
 
 enum Part {
@@ -472,6 +705,8 @@ enum Opt {
     Elsewhere(&'static str),
     /// Says whether a commit is made: its name.
     Switch(&'static str),
+    /// Says which submodules a push sends too: whether it takes a value.
+    Submodules(bool),
     Flag,
 }
 
@@ -591,6 +826,21 @@ const REVERT: Options = Options {
     ],
 };
 
+const PUSH: Options = Options {
+    longs: "verbose quiet repo= all branches mirror delete tags dry-run porcelain force \
+        force-with-lease force-if-includes recurse-submodules= thin receive-pack= exec= \
+        set-upstream progress prune no-verify follow-tags signed atomic push-option= ipv4 ipv6 \
+        verify no-verbose no-quiet no-repo no-all no-branches no-mirror no-delete no-tags \
+        no-dry-run no-porcelain no-force no-force-with-lease no-force-if-includes \
+        no-recurse-submodules no-thin no-receive-pack no-exec no-set-upstream no-progress \
+        no-prune no-follow-tags no-signed no-atomic no-push-option",
+    matter: &[
+        ("recurse-submodules", Opt::Submodules(true)),
+        ("no-recurse-submodules", Opt::Submodules(false)),
+    ],
+    letters: &[('o', Opt::Valued)],
+};
+
 /// The options of a command's words, read as git reads them, up to `--`.
 fn read(words: &[String], options: &Options) -> Result<Said, String> {
     let mut said = Said::default();
@@ -605,7 +855,7 @@ fn read(words: &[String], options: &Options) -> Result<Said, String> {
                 .map_or((long, None), |(n, v)| (n, Some(v)));
             let opt = long_option(options, name)?;
             let value = match (opt, value) {
-                (Opt::Message | Opt::File | Opt::Valued, None) => {
+                (Opt::Message | Opt::File | Opt::Valued | Opt::Submodules(true), None) => {
                     Some(words.next().ok_or("an option lacks its value")?)
                 }
                 _ => value,
@@ -646,6 +896,7 @@ fn take(said: &mut Said, opt: Opt, value: &str) -> Result<(), String> {
         Opt::Edit(on) => said.edit = on,
         Opt::Elsewhere(why) => return Err(why.into()),
         Opt::Switch(name) => said.switches.push(name),
+        Opt::Submodules(_) => said.submodules = Some(value.to_owned()),
         Opt::Valued | Opt::Stuck | Opt::Flag => {}
     }
     Ok(())

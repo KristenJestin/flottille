@@ -503,6 +503,516 @@ fn a_revert_is_refused_while_checks_are_declared() {
     );
 }
 
+#[test]
+fn a_commit_made_through_gits_autocorrect_is_checked() {
+    let user = User::with_fake_agent();
+    prepared(&user, |_| {});
+    let (passing, refusing) = two_checks(&user);
+    declare(&user, &[passing, refusing]);
+    let mcp = agent(&user);
+    staged(&user, &mcp);
+
+    // `comit` is no command and no alias: git would run `commit` in its place.
+    let answer = line(
+        &user,
+        &mcp,
+        "git -c help.autocorrect=immediate comit -m 'bad change'",
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains("comit"), "{}", answer.text);
+    assert!(
+        answer.text.contains("nothing was committed"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(subjects(&user).lines().count(), 1, "{}", subjects(&user));
+}
+
+// The checks of a push: each commit it sends, however it was made.
+
+/// The workspace's branch.
+fn branch(user: &User) -> String {
+    user.git_output(&worktree(user), &["rev-parse", "--abbrev-ref", "HEAD"])
+        .trim()
+        .to_owned()
+}
+
+/// The commit the remote's `branch` is at: `None` when the remote has no such branch.
+fn remote_head(user: &User, branch: &str) -> Option<String> {
+    let listed = user.git_output(
+        &user.path("remotes/app.git"),
+        &[
+            "for-each-ref",
+            "--format=%(objectname)",
+            &format!("refs/heads/{branch}"),
+        ],
+    );
+    let listed = listed.trim();
+    (!listed.is_empty()).then(|| listed.to_owned())
+}
+
+/// The commit the workspace is at.
+fn head(user: &User) -> String {
+    user.git_output(&worktree(user), &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned()
+}
+
+/// A commit made in the workspace outside of the agent's calls, as another command would make
+/// it: its sha.
+fn committed_outside(user: &User, file: &str, message: &str) -> String {
+    let worktree = worktree(user);
+    std::fs::write(worktree.join(file), format!("{file}\n")).unwrap();
+    user.git(&worktree, &["add", file]);
+    user.git(&worktree, &["commit", "--quiet", "-m", message]);
+    head(user)
+}
+
+/// The short sha of a commit, as a refusal names it.
+fn short(user: &User, sha: &str) -> String {
+    user.git_output(&worktree(user), &["rev-parse", "--short", sha])
+        .trim()
+        .to_owned()
+}
+
+#[test]
+fn a_push_with_a_commit_that_fails_the_check_is_refused_naming_it() {
+    let user = User::with_fake_agent();
+    prepared(&user, |_| {});
+    let (passing, refusing) = two_checks(&user);
+    declare(&user, &[passing, refusing]);
+    let mcp = agent(&user);
+    committed_outside(&user, "good.txt", "fix: a good change");
+    let bad = committed_outside(&user, "bad.txt", "bad change");
+
+    // A new branch: every commit no remote branch has is sent.
+    let answer = line(&user, &mcp, "git push origin HEAD");
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains(&short(&user, &bad)), "{}", answer.text);
+    assert!(answer.text.contains("bad change"), "{}", answer.text);
+    assert!(
+        answer.text.contains("the message says bad"),
+        "{}",
+        answer.text
+    );
+    assert!(
+        answer.text.contains("nothing was pushed"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(remote_head(&user, &branch(&user)), None);
+    assert_eq!(seen(&user), "fix: a good change\nbad change\n");
+}
+
+#[test]
+fn a_push_to_an_existing_branch_checks_only_the_commits_it_sends() {
+    let user = User::with_fake_agent();
+    prepared(&user, |_| {});
+    // Already on the remote before the checks were declared.
+    committed_outside(&user, "old.txt", "bad but old");
+    user.git(&worktree(&user), &["push", "--quiet", "origin", "HEAD"]);
+    let (passing, refusing) = two_checks(&user);
+    declare(&user, &[passing, refusing]);
+    let mcp = agent(&user);
+    committed_outside(&user, "new.txt", "fix: a new change");
+
+    let answer = line(&user, &mcp, "git push origin HEAD");
+
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(remote_head(&user, &branch(&user)), Some(head(&user)));
+    assert_eq!(seen(&user), "fix: a new change\n");
+}
+
+#[test]
+fn a_force_push_checks_the_commits_it_sends() {
+    let user = User::with_fake_agent();
+    prepared(&user, |_| {});
+    let pushed = committed_outside(&user, "a.txt", "fix: a good change");
+    user.git(&worktree(&user), &["push", "--quiet", "origin", "HEAD"]);
+    let (passing, refusing) = two_checks(&user);
+    declare(&user, &[passing, refusing]);
+    let mcp = agent(&user);
+    user.git(
+        &worktree(&user),
+        &["commit", "--quiet", "--amend", "-m", "bad amend"],
+    );
+
+    let answer = line(&user, &mcp, "git push --force origin HEAD");
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains("bad amend"), "{}", answer.text);
+    assert_eq!(remote_head(&user, &branch(&user)), Some(pushed));
+}
+
+#[test]
+fn a_push_of_a_cherry_picked_commit_is_checked() {
+    let user = User::with_fake_agent();
+    prepared(&user, |_| {});
+    let worktree = worktree(&user);
+    let branch = branch(&user);
+    user.git(&worktree, &["checkout", "--quiet", "-b", "other"]);
+    let picked = committed_outside(&user, "other.txt", "bad pick");
+    user.git(&worktree, &["checkout", "--quiet", &branch]);
+    let (passing, refusing) = two_checks(&user);
+    declare(&user, &[passing, refusing]);
+    let mcp = agent(&user);
+
+    // Git takes the message of the commit it picks: no check reads it at commit time.
+    let answer = line(&user, &mcp, &format!("git cherry-pick {picked}"));
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        subjects(&user).starts_with("bad pick"),
+        "{}",
+        subjects(&user)
+    );
+
+    let answer = line(&user, &mcp, "git push origin HEAD");
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains("bad pick"), "{}", answer.text);
+    assert!(
+        answer.text.contains("nothing was pushed"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(remote_head(&user, &branch), None);
+}
+
+#[test]
+fn a_push_of_a_raw_commit_object_is_checked() {
+    let user = User::with_fake_agent();
+    prepared(&user, |_| {});
+    let (passing, refusing) = two_checks(&user);
+    declare(&user, &[passing, refusing]);
+    let mcp = agent(&user);
+    let worktree = worktree(&user);
+    let tree = user.git_output(&worktree, &["rev-parse", "HEAD^{tree}"]);
+    let object = format!(
+        "tree {}\nparent {}\nauthor A <a@example.com> 1 +0000\ncommitter A <a@example.com> 1 \
+         +0000\n\nbad raw commit\n",
+        tree.trim(),
+        head(&user)
+    );
+    let written = mcp.call("fs_write", json!({"path": "object.txt", "content": object}));
+    assert!(!written.error, "{}", written.text);
+    let sha = user.git_output(&worktree, &["hash-object", "-t", "commit", "object.txt"]);
+    let sha = sha.trim();
+
+    // Written as an object, then moved onto the branch: no commit command made it.
+    let answer = line(&user, &mcp, "git hash-object -t commit -w object.txt");
+    assert!(!answer.error, "{}", answer.text);
+    let answer = line(&user, &mcp, &format!("git merge --ff-only {sha}"));
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(head(&user), sha);
+
+    let answer = line(&user, &mcp, "git push origin HEAD");
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains("bad raw commit"), "{}", answer.text);
+    assert_eq!(remote_head(&user, &branch(&user)), None);
+}
+
+#[test]
+fn a_push_whose_commits_pass_goes_through() {
+    let user = User::with_fake_agent();
+    prepared(&user, |_| {});
+    let (passing, refusing) = two_checks(&user);
+    declare(&user, &[passing, refusing]);
+    let mcp = agent(&user);
+    staged(&user, &mcp);
+    let answer = line(&user, &mcp, "git commit -m 'fix: a good change'");
+    assert!(!answer.error, "{}", answer.text);
+
+    let answer = line(&user, &mcp, "git push origin HEAD");
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("exited with code 0"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(remote_head(&user, &branch(&user)), Some(head(&user)));
+    // Once before the commit, once before the push.
+    assert_eq!(seen(&user), "fix: a good change\nfix: a good change\n");
+}
+
+#[test]
+fn a_push_without_declared_checks_is_unchanged() {
+    let user = User::with_fake_agent();
+    prepared(&user, |_| {});
+    let mcp = agent(&user);
+    committed_outside(&user, "bad.txt", "bad change");
+
+    let answer = line(&user, &mcp, "git push origin HEAD");
+
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(remote_head(&user, &branch(&user)), Some(head(&user)));
+    assert_eq!(seen(&user), "");
+}
+
+/// The remote's folder, as its URL.
+fn remote(user: &User) -> String {
+    user.path("remotes/app.git").to_str().unwrap().to_owned()
+}
+
+/// The keys that rewrite the remote for reads to the workspace itself, which has every commit,
+/// and for pushes to the remote.
+fn rewrites(user: &User) -> [String; 2] {
+    [
+        format!("url.{}.insteadOf", worktree(user).display()),
+        format!("url.{}.pushInsteadOf", remote(user)),
+    ]
+}
+
+#[test]
+fn a_push_to_a_remote_rewritten_for_reads_on_the_line_is_refused() {
+    let user = User::with_fake_agent();
+    prepared(&user, |_| {});
+    let (passing, refusing) = two_checks(&user);
+    declare(&user, &[passing, refusing]);
+    let mcp = agent(&user);
+    committed_outside(&user, "bad.txt", "bad change");
+    let [reads, pushes] = rewrites(&user);
+    let remote = remote(&user);
+
+    let answer = line(
+        &user,
+        &mcp,
+        &format!("git -c {reads}={remote} -c {pushes}={remote} push origin HEAD"),
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains("rewritten"), "{}", answer.text);
+    assert_eq!(remote_head(&user, &branch(&user)), None);
+    assert_eq!(seen(&user), "");
+}
+
+#[test]
+fn a_push_to_a_remote_rewritten_for_reads_in_the_repository_is_refused() {
+    let user = User::with_fake_agent();
+    // From before the workspace, so that the remote still leads where it led.
+    prepared(&user, |folder| {
+        for key in rewrites(&user) {
+            user.git(folder, &["config", &key, &remote(&user)]);
+        }
+    });
+    let (passing, refusing) = two_checks(&user);
+    declare(&user, &[passing, refusing]);
+    let mcp = agent(&user);
+    committed_outside(&user, "bad.txt", "bad change");
+
+    let answer = line(&user, &mcp, "git push origin HEAD");
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains("rewritten"), "{}", answer.text);
+    assert_eq!(remote_head(&user, &branch(&user)), None);
+    assert_eq!(seen(&user), "");
+}
+
+#[test]
+fn a_push_with_a_valued_option_without_its_value_is_refused() {
+    // Given `--dry-run` as its value, the option would turn the dry run into the real push.
+    for ending in ["--repo", "-o"] {
+        let user = User::with_fake_agent();
+        prepared(&user, |_| {});
+        let (passing, refusing) = two_checks(&user);
+        declare(&user, &[passing, refusing]);
+        let mcp = agent(&user);
+        committed_outside(&user, "bad.txt", "bad change");
+
+        let answer = line(&user, &mcp, &format!("git push origin HEAD {ending}"));
+
+        assert!(answer.error, "{ending}: {}", answer.text);
+        assert!(
+            answer.text.contains("nothing was pushed"),
+            "{ending}: {}",
+            answer.text
+        );
+        assert_eq!(remote_head(&user, &branch(&user)), None, "{ending}");
+    }
+}
+
+#[test]
+fn a_push_whose_dry_run_fails_for_one_of_its_urls_is_refused() {
+    let user = User::with_fake_agent();
+    let gone = user.path("remotes/gone.git");
+    prepared(&user, |folder| {
+        for url in [remote(&user), gone.to_str().unwrap().to_owned()] {
+            user.git(
+                folder,
+                &["remote", "set-url", "--add", "--push", "origin", &url],
+            );
+        }
+    });
+    let (passing, refusing) = two_checks(&user);
+    declare(&user, &[passing, refusing]);
+    let mcp = agent(&user);
+    // Unread for the URL that did not answer, it may answer at the real push.
+    committed_outside(&user, "good.txt", "fix: a good change");
+
+    let answer = line(&user, &mcp, "git push origin HEAD");
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("nothing was pushed"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(remote_head(&user, &branch(&user)), None);
+}
+
+/// The commit the remote's `name` is at, any ref: `None` when the remote has no such ref.
+fn remote_ref(user: &User, name: &str) -> Option<String> {
+    let listed = user.git_output(
+        &user.path("remotes/app.git"),
+        &["for-each-ref", "--format=%(objectname)", name],
+    );
+    let listed = listed.trim();
+    (!listed.is_empty()).then(|| listed.to_owned())
+}
+
+#[test]
+fn a_push_of_notes_or_another_ref_checks_no_commit() {
+    let user = User::with_fake_agent();
+    prepared(&user, |_| {});
+    let (passing, refusing) = two_checks(&user);
+    declare(&user, &[passing, refusing]);
+    let mcp = agent(&user);
+    let bad = committed_outside(&user, "bad.txt", "bad change");
+    user.git(&worktree(&user), &["notes", "add", "-m", "a note", "HEAD"]);
+
+    // Neither git's own notes commit nor a ref outside branches and tags is the project's history.
+    let answer = line(
+        &user,
+        &mcp,
+        "git push origin refs/notes/commits HEAD:refs/kept/bad",
+    );
+
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(remote_ref(&user, "refs/kept/bad"), Some(bad));
+    assert!(remote_ref(&user, "refs/notes/commits").is_some());
+    assert_eq!(seen(&user), "");
+}
+
+#[test]
+fn a_push_of_a_tag_checks_its_commits() {
+    let user = User::with_fake_agent();
+    prepared(&user, |_| {});
+    let (passing, refusing) = two_checks(&user);
+    declare(&user, &[passing, refusing]);
+    let mcp = agent(&user);
+    committed_outside(&user, "bad.txt", "bad change");
+    user.git(&worktree(&user), &["tag", "-a", "-m", "v1", "v1"]);
+
+    let answer = line(&user, &mcp, "git push origin v1");
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains("bad change"), "{}", answer.text);
+    assert_eq!(remote_ref(&user, "refs/tags/v1"), None);
+}
+
+#[test]
+fn a_push_that_pushes_submodules_is_refused_while_checks_are_declared() {
+    let user = User::with_fake_agent();
+    prepared(&user, |_| {});
+    let (passing, refusing) = two_checks(&user);
+    declare(&user, &[passing, refusing]);
+    let mcp = agent(&user);
+    committed_outside(&user, "good.txt", "fix: a good change");
+    let worktree = worktree(&user);
+
+    // The submodules' own commits would go out, which nothing reads.
+    for (keys, push) in [
+        (
+            &[][..],
+            "git push --recurse-submodules=on-demand origin HEAD",
+        ),
+        (&[], "git push --recurse-submodules only origin HEAD"),
+        (
+            &[],
+            "git -c push.recurseSubmodules=on-demand push origin HEAD",
+        ),
+        (
+            &[("push.recurseSubmodules", "only")],
+            "git push origin HEAD",
+        ),
+        (&[("submodule.recurse", "true")], "git push origin HEAD"),
+        // Git takes whichever of the two it reads last.
+        (
+            &[
+                ("push.recurseSubmodules", "no"),
+                ("submodule.recurse", "true"),
+            ],
+            "git push origin HEAD",
+        ),
+    ] {
+        for (key, value) in keys {
+            user.git(&worktree, &["config", key, value]);
+        }
+
+        let answer = line(&user, &mcp, push);
+
+        assert!(answer.error, "{push} {keys:?}: {}", answer.text);
+        assert!(answer.text.contains("submodule"), "{push}: {}", answer.text);
+        assert_eq!(remote_head(&user, &branch(&user)), None, "{push} {keys:?}");
+        for (key, _) in keys {
+            user.git(&worktree, &["config", "--unset", key]);
+        }
+    }
+
+    // Said on the line, it wins over the configuration, as in git.
+    user.git(
+        &worktree,
+        &["config", "push.recurseSubmodules", "on-demand"],
+    );
+    let answer = line(
+        &user,
+        &mcp,
+        "git push --recurse-submodules=check origin HEAD",
+    );
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(remote_head(&user, &branch(&user)), Some(head(&user)));
+}
+
+#[test]
+fn a_push_past_the_wall_is_refused_naming_git_push() {
+    let user = User::with_fake_agent();
+    prepared(&user, |_| {});
+    let (passing, refusing) = two_checks(&user);
+    declare(&user, &[passing, refusing]);
+    let mcp = agent(&user);
+    committed_outside(&user, "bad.txt", "bad change");
+    let remote = remote(&user);
+    let branch = branch(&user);
+
+    for (command, push) in [
+        (
+            "send-pack",
+            format!("git send-pack {remote} HEAD:refs/heads/{branch}"),
+        ),
+        (
+            "http-push",
+            format!("git http-push http://127.0.0.1:9/app.git HEAD:refs/heads/{branch}"),
+        ),
+        ("remote-ext", format!("git remote-ext origin {remote}")),
+    ] {
+        let answer = mcp.call("run", json!({"line": push, "timeout": 30}));
+
+        assert!(answer.error, "{push}: {}", answer.text);
+        assert!(
+            answer.text.contains(&format!(
+                "refused: git {command} pushes past Flottille's wall; use git push"
+            )),
+            "{push}: {}",
+            answer.text
+        );
+    }
+    assert_eq!(remote_head(&user, &branch), None);
+    assert_eq!(seen(&user), "");
+}
+
 /// Whether the process `pid` still runs: a zombie has ended.
 fn alive(pid: &str) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
