@@ -10,8 +10,8 @@
 //! `judge.reset`), read at each judgement: a change reaches the next one.
 
 use flottille_ui::{
-    Button, Icon, Section, Switch, Toast, hoverable, icon, palette, presence, presence_of, space,
-    toast, turning,
+    Button, Icon, Section, Switch, Toast, follow_theme, hoverable, icon, palette, presence,
+    presence_of, space, toast, turning,
 };
 use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::{
@@ -22,7 +22,7 @@ use gpui_kit::{
 use serde_json::Value;
 
 use crate::actions::Command;
-use crate::commands::{editor_style, perform_later};
+use crate::commands::perform_later;
 use crate::settings::Reveal;
 use crate::shell::Shell;
 
@@ -259,7 +259,7 @@ impl RulesEditor {
                     } else {
                         "how your agents should work"
                     });
-            field.set_editor_style(editor_style(cx));
+            follow_theme(&mut field, cx);
             field
         });
         self._subscriptions
