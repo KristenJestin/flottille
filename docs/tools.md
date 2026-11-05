@@ -405,10 +405,11 @@ pending requests.
   restart (so also when it was already told the first run's end), that the user restarted it and
   which run it now is (its own, read with `run_status`); if the stop happened and the new run could
   not start, the delivery says that instead. The new run's end is delivered like any other.
-- **The user sees them** (`docs/design.md` §10): the session's right rail lists the commands of
-  its tree, a project and a session with one running show it in the left sidebar, and the user can
-  read a command's output live and stop it (its whole process group, as above); the rail keeps the
-  last five that ended, and the protocol and the command line can dismiss one
+- **The user sees them** (`docs/design.md` §10): the session's right rail lists the task runs of
+  the agent shown, as the agent that started a run is the one that reads it, a project and a
+  session with one running show it in the left sidebar, and the user can read a run's output live
+  and stop it (its whole process group, as above); the rail keeps the last five that ended, and
+  the protocol and the command line can dismiss one
   (`docs/protocol.md`, "The run methods"; `flottille runs`, `docs/cli.md`).
 - **The user runs a task too**: the Run button of a task on the project page (`task.run`) runs it
   in the project folder, with the project's variables, as a run of no agent: no gate (the user
