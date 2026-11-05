@@ -1900,6 +1900,7 @@ fn a_message_arriving_appends_without_rebuilding_other_rows(cx: &mut TestAppCont
             from: "you".into(),
             text: "and the changelog".into(),
             images: Vec::new(),
+            commands: None,
         }
     );
     assert_eq!(renders(cx), before, "no row already there is drawn again");
@@ -1946,6 +1947,7 @@ fn replying_delivers_to_the_lead(cx: &mut TestAppContext) {
             from: "you".into(),
             text: "Use the staging database\nand say when done".into(),
             images: Vec::new(),
+            commands: None,
         })
     });
 }
@@ -3447,6 +3449,7 @@ fn a_long_conversation_shows_its_last_page_and_earlier_ones_on_demand(cx: &mut T
             from: "you".into(),
             text: "lead the work".into(),
             images: Vec::new(),
+            commands: None,
         }),
         "the first message is on an earlier page"
     );
@@ -3478,6 +3481,7 @@ fn a_long_conversation_shows_its_last_page_and_earlier_ones_on_demand(cx: &mut T
                 from: "you".into(),
                 text: "lead the work".into(),
                 images: Vec::new(),
+                commands: None,
             }
     });
     settle(cx);
@@ -3721,7 +3725,7 @@ fn opening_settings_shows_the_judge_and_its_guidance_alone(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
-fn settings_has_six_tabs_in_order(cx: &mut TestAppContext) {
+fn settings_has_seven_tabs_in_order(cx: &mut TestAppContext) {
     assert_eq!(
         flottille_window::settings::SECTIONS[..],
         [
@@ -3729,6 +3733,7 @@ fn settings_has_six_tabs_in_order(cx: &mut TestAppContext) {
             ("providers", "Providers"),
             ("rules", "Rules"),
             ("workspaces", "Workspaces"),
+            ("sessions", "Sessions"),
             ("appearance", "Appearance"),
             ("developer", "Developer mode"),
         ]
@@ -3745,7 +3750,7 @@ fn settings_has_six_tabs_in_order(cx: &mut TestAppContext) {
             .iter()
             .map(|key| window.find(format!("settings-tabs-{key}")).bounds().left())
             .collect();
-        assert_eq!(lefts.len(), 6);
+        assert_eq!(lefts.len(), 7);
         assert!(lefts.windows(2).all(|pair| pair[0] < pair[1]), "{lefts:?}");
         assert!(
             window.try_find("settings-tabs-guidance").is_none(),
@@ -5346,6 +5351,7 @@ fn a_user_message_has_no_you_label(cx: &mut TestAppContext) {
             from: "you".into(),
             text: "lead the work".into(),
             images: Vec::new(),
+            commands: None,
         }
     );
     assert_eq!(
@@ -7901,11 +7907,122 @@ fn slash_name_sends_the_instructions_with_the_trailing_text(cx: &mut TestAppCont
         sent.contains("\nThe command close of project atlas"),
         "{sent}"
     );
+    assert!(sent.contains(&format!("{instructions}\n")), "{sent}");
     assert!(
-        sent.ends_with(&format!("{instructions}\n\nkeep the branch")),
-        "the trailing text after the instructions: {sent}"
+        sent.ends_with("\n\n[command close] keep the branch"),
+        "the message as typed, last: {sent}"
     );
     assert!(!sent.contains("/close"), "{sent}");
+}
+
+#[gpui_kit::test]
+fn the_command_list_opens_on_the_word_at_the_cursor(cx: &mut TestAppContext) {
+    let user = user_with_commands();
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    settle(cx);
+    let sent = prompts(&user).len();
+
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("test /op");
+    until(&shell, cx, "the list offers it", |cx| {
+        slash_offered(&shell, cx) == ["open-prs"]
+    });
+    settle(cx);
+    cx.simulate_keystrokes("enter");
+    settle(cx);
+    let reply = reply_open(&shell, cx);
+    let value = |cx: &mut VisualTestContext| {
+        reply.read_with(cx, |r, cx| r.field().read(cx).value().to_string())
+    };
+    assert_eq!(
+        value(cx),
+        "test /open-prs ",
+        "the word at the cursor is completed"
+    );
+    assert_eq!(prompts(&user).len(), sent, "picking sends nothing");
+    // The field cannot colour a range: the command shows as a chip under it.
+    cx.update(|window, _| {
+        assert!(window.try_find("slash-list").is_none());
+        assert!(window.find("reply-command-open-prs").visible());
+    });
+
+    // A word in the middle: the list opens on it, and only it is completed.
+    reply.update_in(cx, |r, window, cx| {
+        r.field().clone().update(cx, |f, cx| {
+            f.set_value("first /cl then the rest", window, cx);
+            f.set_selected_range(9..9, cx);
+        });
+        r.typed_at("first /cl then the rest", 9, cx);
+    });
+    until(&shell, cx, "the list offers close", |cx| {
+        slash_offered(&shell, cx) == ["close"]
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("slash-close", cx));
+    settle(cx);
+    assert_eq!(value(cx), "first /close then the rest");
+    assert_eq!(reply.read_with(cx, |r, cx| r.commands_used(cx)), ["close"]);
+    cx.update(|window, _| {
+        assert!(window.find("reply-command-close").visible());
+        assert!(window.try_find("reply-command-open-prs").is_none());
+    });
+
+    // A word that is not a `/` word at the cursor leaves the list closed.
+    reply.update_in(cx, |r, _, cx| r.typed_at("see /usr/bin here", 2, cx));
+    settle(cx);
+    assert!(slash_offered(&shell, cx).is_empty());
+}
+
+#[gpui_kit::test]
+fn a_message_put_back_in_the_field_shows_its_command_chips_before_a_slash_is_typed(
+    cx: &mut TestAppContext,
+) {
+    let user = user_with_commands();
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    until(&shell, cx, "the composer knows the commands", |cx| {
+        reply_open(&shell, cx).read_with(cx, |r, _| r.knows_commands())
+    });
+    settle(cx);
+
+    let reply = reply_open(&shell, cx);
+    reply.update_in(cx, |r, window, cx| {
+        r.restore("then /close it", Vec::new(), window, cx)
+    });
+    settle(cx);
+
+    assert_eq!(reply.read_with(cx, |r, cx| r.commands_used(cx)), ["close"]);
+    cx.update(|window, _| assert!(window.find("reply-command-close").visible()));
+}
+
+#[gpui_kit::test]
+fn a_message_put_back_ending_with_a_command_opens_no_list_and_enter_sends_it(
+    cx: &mut TestAppContext,
+) {
+    let user = user_with_commands();
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    until(&shell, cx, "the composer knows the commands", |cx| {
+        reply_open(&shell, cx).read_with(cx, |r, _| r.knows_commands())
+    });
+    settle(cx);
+    let sent = prompts(&user).len();
+
+    let reply = reply_open(&shell, cx);
+    reply.update_in(cx, |r, window, cx| {
+        r.restore("fix it, then /close", Vec::new(), window, cx)
+    });
+    settle(cx);
+    assert!(slash_offered(&shell, cx).is_empty(), "no list opens");
+    cx.update(|window, _| assert!(window.try_find("slash-list").is_none()));
+
+    cx.simulate_keystrokes("enter");
+    until(&shell, cx, "the lead was sent the message", |_| {
+        prompts(&user).len() > sent
+    });
+    let text = prompts(&user).pop().unwrap();
+    assert!(text.ends_with("fix it, then [command close]"), "{text}");
 }
 
 #[gpui_kit::test]
@@ -11463,6 +11580,45 @@ fn the_settings_page_sets_the_default_and_the_project_page_its_own(cx: &mut Test
         0,
         "nothing moves at rest"
     );
+}
+
+#[gpui_kit::test]
+fn the_branch_prefix_field_of_the_project_s_settings_accepts_an_empty_prefix(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    let page = open_project_settings(&shell, "atlas", cx);
+    choose_tab("setup", cx);
+    settle(cx);
+
+    // The slug of the name is what the file gives, shown in the field.
+    assert_eq!(
+        page.read_with(cx, |page, _| page.branch_prefix().map(str::to_owned)),
+        Some("atlas".to_owned())
+    );
+    assert_eq!(
+        page.read_with(cx, |page, cx| page.branch_prefix_typed(cx)),
+        "atlas"
+    );
+    assert!(!page.read_with(cx, |page, cx| page.branch_prefix_savable(cx)));
+
+    // Emptied: Save keeps `branch_prefix = ""`, and the daemon says so.
+    let field = page
+        .read_with(cx, |page, _| page.branch_prefix_field().cloned())
+        .expect("the field is made once the page is drawn");
+    field.update_in(cx, |field, window, cx| field.set_value("", window, cx));
+    settle(cx);
+    assert!(page.read_with(cx, |page, cx| page.branch_prefix_savable(cx)));
+    cx.update(|window, cx| window.click("branch-prefix-save-atlas", cx));
+    until(&shell, cx, "the daemon keeps the empty prefix", |cx| {
+        page.read_with(cx, |page, _| page.branch_prefix() == Some(""))
+    });
+    let text = std::fs::read_to_string(user.project_file("atlas")).unwrap();
+    assert!(text.contains("branch_prefix = \"\"\n"), "{text}");
+    toast_said(&shell, "Branch prefix saved", cx);
+    assert!(!page.read_with(cx, |page, cx| page.branch_prefix_savable(cx)));
 }
 
 #[gpui_kit::test]

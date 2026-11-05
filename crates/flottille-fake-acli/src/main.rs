@@ -44,7 +44,12 @@
 //! `--jql` (or `--filter`) or `--json` it ends with 2, as a call Flottille never makes.
 //!
 //! A JQL that names `currentUser()` is answered with the script's `mine_search`, none without:
-//! the work items of the signed-in user.
+//! the work items of the signed-in user. A search whose `--fields` is `key` alone prints `null`
+//! for each work item it finds, as the real one was seen to: `key` is no field of `fields`.
+//! Otherwise each work item is Jira's REST issue as a real site printed it: `key`, `id` and `self`
+//! at the top, the other parts (`changelog`, `names`, …) `null`; its `fields` are the script's
+//! whole, where the real one prints only those asked. With `--count` it prints `✓ Number of work items in the search: N` instead. The
+//! script's `page` is how many a search prints at most without `--paginate`, none by default.
 //!
 //! `acli jira project view --key P --json` prints `{"key": P, "issueTypes": [{"name": …, "subtask":
 //! …}]}` (assumed, as Jira's REST project is: the page of the command gives no output), from the
@@ -232,7 +237,27 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
                     .flat_map(|items| items.values().cloned())
                     .collect(),
             };
+            // A page at most, unless `--paginate` reads them all.
+            if let Some(page) = script["page"].as_u64()
+                && !rest.contains(&"--paginate")
+            {
+                found.truncate(page as usize);
+            }
             found.truncate(limit);
+            if rest.contains(&"--count") {
+                println!("✓ Number of work items in the search: {}", found.len());
+                return 0;
+            }
+            // As the real one does: `key` is no field of `fields`, so asked alone it prints
+            // nothing of each work item but `null`.
+            if value(rest, "--fields") == Some("key") {
+                found = vec![Value::Null; found.len()];
+            }
+            // Its `fields` are the script's whole: the real one prints only those asked, and
+            // `updated` is never among them (refused), which the comments' reads still count on.
+            for item in found.iter_mut().filter(|item| item.is_object()) {
+                enveloped(item);
+            }
             println!("{}", Value::from(found));
             0
         }
@@ -712,6 +737,38 @@ fn add_posted(dir: &Path, script: &Value, key: &str, item: &mut Value) {
             json!({"id": (10100 + at).to_string(), "author": {"displayName": user},
                 "created": "2026-10-01T12:00:00.000+0000", "body": body}),
         );
+    }
+}
+
+/// What the real search prints around a work item, as a real site was seen to: Jira's REST
+/// issue, its parts not asked for `null`.
+fn enveloped(item: &mut Value) {
+    let Some(item) = item.as_object_mut() else {
+        return;
+    };
+    let id = item
+        .get("self")
+        .and_then(Value::as_str)
+        .and_then(|link| link.rsplit('/').next())
+        .unwrap_or("10000")
+        .to_owned();
+    item.entry("id").or_insert(id.into());
+    item.entry("expand").or_insert(
+        "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations".into(),
+    );
+    for part in [
+        "changelog",
+        "editmeta",
+        "fieldsToInclude",
+        "names",
+        "operations",
+        "properties",
+        "renderedFields",
+        "schema",
+        "transitions",
+        "versionedRepresentations",
+    ] {
+        item.entry(part).or_insert(Value::Null);
     }
 }
 

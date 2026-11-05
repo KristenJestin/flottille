@@ -1,6 +1,6 @@
 //! The `command.*` methods (`docs/commands.md`): a project's named instructions, kept in its file
-//! beside its tasks. `/name` at the start of a message to an agent (the user's to a root, a
-//! parent's to its child) sends the command's instructions in its place. A command grants
+//! beside its tasks. `/name` in a message to an agent (the user's to a root, a parent's to its
+//! child) sends the command's instructions with it. A command grants
 //! nothing: what its agent does goes through the gate's classes like any call.
 
 use std::path::Path;
@@ -266,19 +266,40 @@ pub(crate) fn to_json(folder: &Path, name: &str, command: &Command, whole: bool)
     shown
 }
 
-/// The message `text` stands for when it is sent to an agent of `project` in `workspace`:
-/// `/name rest`, where name is one of the project's commands, is the command's instructions with
-/// the rest after them, preceded by what the command is and, in a workspace, by its repositories,
-/// the project's pull requests and the ticket, which the commands Flottille ships read. Any other
-/// text is sent as it is.
+/// A message as it is sent to an agent: what the agent receives, and, when it used commands,
+/// what was typed and the commands' names, in the order of their first use. The two texts are
+/// kept apart: the one the agent receives holds the project's, the typed one is the sender's.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Message {
+    pub text: String,
+    pub typed: Option<String>,
+    pub commands: Vec<String>,
+}
+
+impl Message {
+    /// A message sent as it was written.
+    pub fn plain(text: &str) -> Message {
+        Message {
+            text: text.to_owned(),
+            ..Message::default()
+        }
+    }
+}
+
+/// The message `text` stands for when it is sent to an agent of `project` in `workspace`. Each
+/// `/name` of it that names one of the project's commands (`commands::used`) is one: the agent
+/// receives what the commands are about and, in a workspace, its repositories, the project's pull
+/// requests and the ticket, which the commands Flottille ships read, once; then each command with
+/// its description and its instructions, in the order of its first use, once; then the text as it
+/// was written, each command marked at its place. Any other text is sent as it is.
 pub fn message_for(
     daemon: &Daemon,
     project: &str,
     workspace: Option<&str>,
     text: &str,
-) -> Result<String, Failure> {
+) -> Result<Message, Failure> {
     let Ok(project) = projects::load_project(daemon, project) else {
-        return Ok(text.to_owned());
+        return Ok(Message::plain(text));
     };
     // A command that points at a file reads it now: a file changed is read changed. One that
     // cannot be read sends nothing, rather than the bare `/name` as text.
@@ -299,14 +320,27 @@ pub fn message_for(
         }
     })
     .map_err(Failure::refused)?;
-    let Some((name, instructions)) = expanded else {
-        return Ok(text.to_owned());
+    let Some(expanded) = expanded else {
+        return Ok(Message::plain(text));
     };
-    let mut message = format!(
-        "{}{}\n",
-        header(&name, &project.name),
-        project.commands[&name].description.trim()
-    );
+    let names: Vec<String> = expanded
+        .commands
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
+    let mut message = match names.as_slice() {
+        [name] => format!(
+            "The message below uses the command {name} of project {}: its instructions follow, \
+             then the message as it was written.\n",
+            project.name
+        ),
+        _ => format!(
+            "The message below uses the commands {} of project {}: their instructions follow, in \
+             the order they are used, then the message as it was written.\n",
+            names.join(", "),
+            project.name
+        ),
+    };
     let workspace = workspace.and_then(|workspace| {
         daemon
             .read(|store| store.workspace(&project.name, workspace))
@@ -326,29 +360,22 @@ pub fn message_for(
             ));
         }
     }
-    message.push_str(TEXT_FOLLOWS);
-    message.push_str(&instructions);
-    Ok(message)
-}
-
-/// How a message `message_for` made from a command starts, its description after it.
-fn header(name: &str, project: &str) -> String {
-    format!("The command {name} of project {project}: ")
-}
-
-/// What ends the header of a command's message: its text follows.
-const TEXT_FOLLOWS: &str = "\n---\n\n";
-
-/// The command of `project` a message stands for, when `message_for` made it from one: its name,
-/// the command, and its text as it was sent (the file's text then, which the file may no longer
-/// hold), with what was written after `/name` at its end.
-pub fn ran<'a>(project: &'a Project, message: &'a str) -> Option<(&'a str, &'a Command, &'a str)> {
-    let (name, command) = project
-        .commands
-        .iter()
-        .find(|(name, _)| message.starts_with(&header(name, &project.name)))?;
-    let (_, text) = message.split_once(TEXT_FOLLOWS)?;
-    Some((name, command, text))
+    for (name, instructions) in &expanded.commands {
+        message.push_str(&format!(
+            "\n---\n\nThe command {name} of project {}: {}\n\n{instructions}\n",
+            project.name,
+            project.commands[name].description.trim()
+        ));
+    }
+    message.push_str(&format!(
+        "\n---\n\nThe message, each command marked [command <name>] where it was written:\n\n{}",
+        expanded.marked
+    ));
+    Ok(Message {
+        text: message,
+        typed: Some(text.to_owned()),
+        commands: names,
+    })
 }
 
 /// The workspace's repositories by dependency level, as the project declares them

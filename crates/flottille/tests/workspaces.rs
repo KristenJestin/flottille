@@ -75,6 +75,14 @@ impl Fixture {
         self.user.write_project_file("app", &text);
     }
 
+    /// `configure("")` with `branch_prefix = ""`, which is a key of the file's top.
+    fn configure_without_branch_prefix(&self) {
+        self.configure("");
+        let file = self.user.project_file("app");
+        let text = std::fs::read_to_string(&file).unwrap();
+        std::fs::write(file, format!("branch_prefix = \"\"\n{text}")).unwrap();
+    }
+
     fn root(&self) -> PathBuf {
         self.user.path("work/app-work")
     }
@@ -537,6 +545,46 @@ fn a_workspace_created_with_two_of_three_repositories() {
     assert!(fixture.workspace("login").join("web/.git").exists());
     assert!(!fixture.workspace("login").join("api").exists());
     assert!(!fixture.workspace("login").join("web/DEVELOP.md").exists());
+}
+
+#[test]
+fn an_empty_branch_prefix_makes_the_branch_the_workspace_s_name() {
+    let fixture = Fixture::new(false);
+    fixture.configure_without_branch_prefix();
+
+    let created = fixture.create(json!({"repositories": ["web"]})).unwrap();
+
+    assert_eq!(created["branch"], "login");
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    assert_eq!(
+        fixture.git(
+            &fixture.workspace("login").join("web"),
+            &["branch", "--show-current"]
+        ),
+        "login"
+    );
+}
+
+#[test]
+fn a_project_without_branch_prefix_still_prefixes_with_its_slug() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+
+    let created = fixture.create(json!({"repositories": ["web"]})).unwrap();
+
+    assert_eq!(created["branch"], "app/login");
+}
+
+#[test]
+fn a_named_branch_is_used_as_given() {
+    let fixture = Fixture::new(false);
+    fixture.configure_without_branch_prefix();
+
+    let created = fixture
+        .create(json!({"repositories": ["web"], "branch": "fix/ABC-12-login"}))
+        .unwrap();
+
+    assert_eq!(created["branch"], "fix/ABC-12-login");
 }
 
 #[test]

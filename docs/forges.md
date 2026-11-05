@@ -281,7 +281,7 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
 | `bkt pr checks <id> --context C … --json` | `statuses[]`: `state`, `name`, `key` | `pkg/cmd/pr/pr.go:1754-1809` (flags), `:1998` (`statuses`), `:2198` (the states); `pkg/types/commit_status.go:5-11` |
 | `bkt api <path> --context C [--param k=v]` (GET) | the server's own JSON, unchanged | `pkg/cmd/api/api.go:23-48`, `:138-140` |
 | `bkt pr create --context C … --source <branch> --target <base> --title T --description D [--reviewer N]…` | `✓ Created pull request #<id>` | `pkg/cmd/pr/pr.go:597-615`, `:664`, `:696`; `--reviewer` at `:614`, sent as `{"username": N}` on Cloud (`pkg/bbcloud/pullrequests.go:232-237`) and `{"user": {"name": N}}` on Data Center (`pkg/bbdc/pullrequests.go:75-82`) |
-| `bkt pr merge <id> --context C … --strategy S --close-source=false` | the exit code | `pkg/cmd/pr/pr.go:1314-1334`; `pkg/bbcloud/pullrequests.go:351-388` (Cloud takes `merge_commit`, `squash` and `fast_forward` only, `:352-356`, `:363-365`); `pkg/bbdc/pullrequests.go:108-132` (`mergeStrategyId`, given as it is) |
+| `bkt pr merge <id> --context C … --strategy S --close-source=false [--message M]` | the exit code | `pkg/cmd/pr/pr.go:1314-1334` (`--message`, the merge commit's message, `:1332`, given to both servers, `:1372-1376` and Cloud's `MergePullRequest`); `pkg/bbcloud/pullrequests.go:351-388` (Cloud takes `merge_commit`, `squash` and `fast_forward` only, `:352-356`, `:363-365`); `pkg/bbdc/pullrequests.go:108-132` (`mergeStrategyId`, given as it is) |
 | `bkt api /repositories/W/R/pipelines/ --context C --param pagelen=50 --param sort=-created_on` (GET; the sort is a `--param`, not a `?` in the path: `bkt api` is not known to merge one into the other) | `values[]`: `build_number`, `state.result.name`, `target.type`, then `target.ref_name` (a branch's pipeline) or `target.source` and `target.destination` (a pull request's: `pipeline_pullrequest_target`), `target.selector.type`, `target.selector.pattern` | Atlassian's REST documentation (Pipelines, list pipelines). Not `bkt pipeline list`: it decodes `target.ref.name` (`pkg/bbcloud/client.go:140-152`) while the API sends `ref_name`, so every branch it prints is empty (seen live with v0.37.0), and a pull request's pipeline has no `ref` at all |
 | `bkt pipeline list --context C --workspace W --repo R --limit 50 --json`, for the CI durations only ("How long CI takes") | `pipelines[]`: `state.result.name`, `created_on`, `completed_on` (`pkg/bbcloud/client.go:139-152`; the list has no duration field; its `target.ref.name` is empty, which the durations do not need) | `pkg/cmd/pipeline/pipeline.go:177-210`; `pkg/bbcloud/client.go:100-120`, `:145` (newest first: `sort=-created_on`) |
 | `bkt pipeline run --context C --workspace W --repo R --ref <branch> [--selector-type pull-requests --selector-pattern <p>]` | the exit code | `pkg/cmd/pipeline/pipeline.go:81-133` (v0.37.0; the selector flags at `:127-128`), `pkg/bbcloud/client.go:431-482` (`ref_type: branch`, `ref_name`, `selector`) |
@@ -404,7 +404,10 @@ the base the repository started from):
   `rebase-ff-only` on Data Center (rebased onto the base, no merge commit, as GitHub's), and is
   refused on Cloud before anything is asked, since `bkt` takes no rebase strategy there.
   `--close-source=false` because `bkt` closes the source branch by default
-  (`pkg/cmd/pr/pr.go:1334`) and `gh pr merge` does not. When the server refuses the merge, the
+  (`pkg/cmd/pr/pr.go:1334`) and `gh pr merge` does not. A squash `message` is given whole with
+  `--message M` (subject and body in one text, as Bitbucket takes it); left out, the server writes
+  its own. Not yet seen on a real server: that Cloud and Data Center keep it as the squashed
+  commit's message. When the server refuses the merge, the
   strategies the repository allows are read (Cloud: `destination.branch.merge_strategies` of the
   pull request's own page; Data Center: the `enabled` ones of `mergeConfig.strategies[].id` in
   `/rest/api/1.0/projects/{key}/repos/{repo}/settings/pull-requests`, both through `bkt api`,

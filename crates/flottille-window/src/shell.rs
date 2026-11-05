@@ -643,6 +643,7 @@ impl Shell {
             Update::TextChanged { judge: true, .. } => self.actions.send(Command::JudgeRead),
             Update::DeveloperChanged => self.actions.send(Command::DeveloperRead),
             Update::ToolResultsChanged => self.actions.send(Command::ToolResultsRead),
+            Update::SessionsChanged => self.actions.send(Command::SessionsRead),
             // A default that changed changes the folder every project shows, so the open
             // project's section reads again too.
             Update::WorkspacesFolderChanged { project } => {
@@ -880,6 +881,16 @@ impl Shell {
                     page.update(cx, |page, cx| page.answered(read, saved, window, cx));
                 }
             }
+            Outcome::MessageChecks { project, saved } => {
+                let section = self
+                    .project_settings
+                    .clone()
+                    .filter(|page| page.read(cx).name() == project)
+                    .map(|page| page.read(cx).message_checks().clone());
+                if let Some(section) = section {
+                    section.update(cx, |section, cx| section.answered(saved, window, cx));
+                }
+            }
             Outcome::Repositories {
                 project,
                 read,
@@ -1025,6 +1036,10 @@ impl Shell {
                 self.settings.update(cx, |page, cx| {
                     page.tool_results_answered(shown, written, cx)
                 });
+            }
+            Outcome::Sessions { written, shown } => {
+                self.settings
+                    .update(cx, |page, cx| page.sessions_answered(shown, written, cx));
             }
             // Only the answer to the latest request counts: an older one would take the window
             // back to a choice the user has since changed.
@@ -1900,6 +1915,7 @@ impl Shell {
             self.actions.send(Command::JudgeRead);
             self.actions.send(Command::DeveloperRead);
             self.actions.send(Command::ToolResultsRead);
+            self.actions.send(Command::SessionsRead);
             self.actions
                 .send(Command::WorkspacesFolderRead { project: None });
             self.ask_appearance(None);

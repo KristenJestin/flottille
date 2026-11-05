@@ -476,13 +476,14 @@ fn send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             dropped = format!(" {why}.");
         }
     }
-    deliveries::deliver(
+    deliveries::deliver_message(
         daemon,
         &child.id,
         "parent",
         None,
         &message,
         approval::URGENT,
+        Vec::new(),
     );
     let options = if changed {
         format!(" Its model and effort change between its turns, before its next prompt.{dropped}")
@@ -1706,9 +1707,16 @@ pub fn tree(daemon: &Daemon, agent: &Agent) -> Result<Vec<Value>, Failure> {
                 .into_iter()
                 .filter(|delivery| delivery.kind == "user")
                 .map(|delivery| {
-                    json!({"delivery": delivery.id, "text": delivery.body,
+                    // What the user typed is shown; what the agent will receive unfolds.
+                    let mut queued = json!({"delivery": delivery.id,
+                        "text": delivery.typed.as_deref().unwrap_or(&delivery.body),
                         "images": delivery.images.len(), "pictures": delivery.images,
-                        "at": delivery.created_at})
+                        "at": delivery.created_at});
+                    if delivery.typed.is_some() {
+                        queued["commands"] = json!(delivery.commands);
+                        queued["received"] = delivery.body.into();
+                    }
+                    queued
                 })
                 .collect(),
         };

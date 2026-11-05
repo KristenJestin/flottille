@@ -131,6 +131,15 @@ The user chose the limit above which a tool result is cut (`tool_results.set`,
 |---|---|
 | `limit` | The limit in characters, or `"off"` for no cut. |
 
+### `sessions.changed`
+
+The user chose after how many days an inactive session is ended, or switched that off
+(`sessions.set`, `docs/design.md` §5.7).
+
+| Field | |
+|---|---|
+| `days` | The days, 1 to 90, or `"off"`. |
+
 ### `workspaces_folder.changed`
 
 The user chose where workspaces go (`workspaces_folder.set`, `docs/projects.md`, "Where the
@@ -341,6 +350,7 @@ A turn starts with this message.
 | `agent` | |
 | `text` | The message. |
 | `images` | The names of the images that went with it, when some did (`agent.image` gives each back). An image that did not go is said in `text` instead. |
+| `typed` | When a delivery of the message used commands (`docs/commands.md`): one entry per delivery of `text`, in order, `{"text", "commands"}` for one that used commands (what was typed, masked, and the names of the commands in the order of their first use), `null` for the others. Left out when none did; an event written before it was kept has none. |
 
 #### `agent.user_message`, `agent.message`, `agent.thought`
 
@@ -557,12 +567,14 @@ superseded. A root's failure is for the user to look at: `flottille inbox` lists
 #### `agent.ended`
 
 The agent was stopped (by the user, its parent, or its parent's end), or it was a child that
-reported. Its process and its runs are stopped; what was queued for it is superseded.
+reported, or it was a root left alone for the days the user set (`inactive for 7 days`,
+`docs/design.md` §5.7). Its process and its runs are stopped; what was queued for it is
+superseded.
 
 | Field | |
 |---|---|
 | `agent` | |
-| `reason` | A sentence. |
+| `reason` | A sentence: `stopped by the user`, `its parent stopped`, `it reported`, `inactive for N days`… |
 
 #### `agent.gate_mode_changed`
 

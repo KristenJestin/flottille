@@ -279,9 +279,11 @@ fn slash_name_sends_the_instructions_with_the_trailing_text() {
         "{brief}"
     );
     assert!(
-        brief.ends_with(
-            "\n---\n\nPush the branch, then open its pull request.\n\nand the tests too"
-        ),
+        brief.contains("\n---\n\nThe command ship of project app: Ship the workspace\n\nPush the branch, then open its pull request.\n"),
+        "{brief}"
+    );
+    assert!(
+        brief.ends_with("\n\n[command ship] and the tests too"),
         "{brief}"
     );
     // A session like any other, in the tree, in Auto.
@@ -305,6 +307,49 @@ fn slash_name_sends_the_instructions_with_the_trailing_text() {
                 .is_some_and(|text| text.ends_with("\n/deploy now"))
         })
     });
+}
+
+#[test]
+fn two_commands_share_their_context_once_and_keep_their_order() {
+    let user = User::with_fake_agent();
+    fixture(&user);
+    command(&user, "ship");
+    user.call(
+        "command.add",
+        json!({"project": "app", "name": "deploy", "description": "Deploy a preview",
+            "instructions": "Deploy the branch to the preview host."}),
+    )
+    .unwrap();
+
+    run(&user, "deploy first, then /ship and then /deploy again");
+    let brief = brief_of(&user, "of project app");
+    assert_eq!(
+        brief.matches("It runs in workspace login").count(),
+        1,
+        "{brief}"
+    );
+    assert_eq!(brief.matches("Its repositories").count(), 1, "{brief}");
+    let deploy = brief
+        .find("The command deploy of project app: Deploy a preview\n\nDeploy the branch")
+        .unwrap_or_else(|| panic!("{brief}"));
+    let ship = brief
+        .find("The command ship of project app: Ship the workspace\n\nPush the branch")
+        .unwrap_or_else(|| panic!("{brief}"));
+    assert!(
+        brief.find("It runs in").unwrap() < deploy && deploy < ship,
+        "{brief}"
+    );
+    assert_eq!(
+        brief.matches("Deploy the branch to").count(),
+        1,
+        "given once: {brief}"
+    );
+    assert!(
+        brief.ends_with(
+            "\n\n[command deploy] first, then [command ship] and then [command deploy] again"
+        ),
+        "the message as typed, in order, last: {brief}"
+    );
 }
 
 #[test]

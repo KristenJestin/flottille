@@ -315,6 +315,19 @@ Until #131 these were `commands_list`, `commands_run` (its `command` now `task`)
 is `tasks` with `action list`), and the store renamed them in the agents' fixed lists and their
 pending requests.
 
+- **A line that only prints a part of a file is an `fs_read`.** A `run` of exactly `sed -n <range>p
+  <file>` (`5p`, `5,20p`, `5,$p`), `head [-n N] <file>`, `tail [-n N] <file>` or `cat <file>`, with
+  no `task`, `timeout` or `notify`, is read from the words the splitter below makes of it. When
+  the gate lets the `fs_read` of that file through at once (a path in the place, no sensitive
+  place, no link leading out), the line is not one a rule of the user holds or refuses as a `run`
+  (a program of the project's never list stays held, `cat` or `sed` included), and a page shows
+  the lines whole, it is served, recorded and gated as that `fs_read`, with no process and no
+  judge, in every mode. A page is as long as the result limit allows (`fs_read`'s own page, its
+  line numbers counted, less the line below): `cat` of a file longer than that is a `run`.
+  The answer starts with
+  `read with fs_read {"path": …, "range": {"offset": …, "length": …}}: use it directly`, then the
+  page. Any other line, a file that is not there or has no such lines, a range a page does not
+  show whole is a `run` as below, and a `run` the workspace's removal refuses is refused as such.
 - **No shell, ever.** A line is split as `flottille_core::command` does (the setup's `run` steps
   too): words on whitespace, a quoted part kept whole, a backslash literal. What a shell expands
   inside double quotes too (a newline, a backtick, `$(`, `${`, `$VAR`, `%VAR%`) is refused outside
@@ -375,6 +388,20 @@ pending requests.
   - no push: `url./dev/null/flottille-refused-push/.pushInsteadOf` set the same way, which
     rewrites every push URL to a path that is no remote, unless the run is itself a `git push`
     (its own line, no wrapper) the user or the judge let through.
+- **A commit's message is checked as the project declares**: with `message_checks` in the
+  project's file (`docs/projects.md`, "Message checks"), each `git commit` the line runs, at any of
+  its layers, has its message (its `-m`, or its `-F` file) given to each check before the run
+  starts, and so has a `git merge` that makes a commit, a `git commit-tree`, and the user's git
+  alias of one of them; a check that fails or cannot run refuses the run: nothing is committed,
+  and the answer names the check, how it ended and the end of its output, masked. A commit
+  whose message cannot be known before it is made (an editor, `-C`, `--amend --no-edit`,
+  `--fixup`, a merge without `-m`, a `git revert` without `--no-commit`) is refused then,
+  saying to give it with `-m` or `-F`, or to commit with `git commit -m`. The commits of
+  `git cherry-pick`, `git am`, `git rebase` and `git pull` are not checked, and what git adds
+  to a message after the checks (`--trailer`, `--signoff`, `--cleanup`) is not in what they
+  read; the `-F` file is read once for the checks and again by git. A call given up stops its
+  checks. The checks are the user's lines, run by the daemon in the run's folder and
+  environment, never a hook of the repository: git still runs none.
 - **A push is the gate's**: `git push` is a call to judge, a forced one base, and only the push
   the gate read and let through goes out. A harmless command (a task, a test run)
   cannot push from a script the gate never read. A push from a workspace is also refused, before
@@ -427,7 +454,7 @@ pending requests.
 
 | Tool | |
 |---|---|
-| `forge {action, workspace?, repository?, number?, state?, branch?, detail?, fresh?, title?, body?, draft?, waive?, method?, events?, from?, minutes?, pipeline?, variables?, run?, step?, do?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
+| `forge {action, workspace?, repository?, number?, state?, branch?, detail?, fresh?, title?, body?, draft?, waive?, method?, message?, events?, from?, minutes?, pipeline?, variables?, run?, step?, do?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
 
 - **The repositories** are those of the agent's place: its workspace's, or the project's in
   `main`. One the place does not take is refused (`refused: X is not a repository of this
@@ -492,7 +519,11 @@ pending requests.
   workspace's branch (`title`, `body`, `draft`, with the project's reviewers), merges it by
   `method`, `squash` (the default), `merge` or `rebase` (refused when no check ran on it or all were skipped, while its
   checks fail or run or a review asks for changes, unless `waive` gives the
-  user's words, which holds the merge for their approval), or re-runs the failed jobs of its last
+  user's words, which holds the merge for their approval), with `message`, by squash only, the
+  squashed commit's message (its subject on the first line, then its body: `gh pr merge --squash
+  --subject … --body …`, `bkt pr merge --message …`; the forge's own when left out; refused by the
+  gate with another method, `refused: forge merge by merge takes no message: …`, or on another
+  action), or re-runs the failed jobs of its last
   commit's pipelines (`docs/commands.md`, "`forge`"). The branch is the one the repository's
   worktree is on now (`docs/workspaces.md`, "The branch"); `create` on a detached HEAD is refused
   (`refused: api is on no branch (detached at 1a2b3c4): switch to a branch first`). `create`
@@ -500,7 +531,13 @@ pending requests.
   (`refs/remotes/<remote>/<branch>`, which a push leaves, with or without `-u`) exists and holds
   the branch's last commit, and refuses otherwise (`refused: app/login is not on origin yet: push
   the branch first: git push -u origin app/login`, or `… is 2 commit(s) ahead of origin: …`); the
-  agent's `run` of `git push` goes through the gate as any push.
+  agent's `run` of `git push` goes through the gate as any push. The project's message checks
+  (`docs/projects.md`, "Message checks") run on `create`'s title, on the title `edit` gives and
+  on `merge`'s message, in the repository's worktree with the variables of the workspace written
+  for, before anything is asked of the forge: one that fails or cannot run
+  refuses the write (`… refused the pull request's title …; nothing was written to the forge`,
+  `… refused the squash message …; nothing was merged`), naming the check and the end of its
+  output.
 - **`comment {number, repository?, body}`** posts a comment on a pull request of a repository of
   the place; **`edit {number, repository?, title?, body?}`** changes its title or description, at
   least one of them (`gh pr comment`, `gh pr edit`; `bkt pr comment --text`, `bkt pr edit --title
@@ -534,7 +571,7 @@ pending requests.
 `list`, `show`, `subscribe`, `unsubscribe`, `pipelines`, `runs`, `run_view` and `run_logs` go
 through the gate like every call, which allows them in every mode; `create`, `comment`, `edit`,
 `merge`, `checks`, `close`, `reopen`, `run`, `stop` and `step` are to judge, and a merge that waives the checks base. A write is done only once the repository's remote is checked to lead where its forge is declared. **What a
-write posts is shown whole**: its request says `Its title: …` and `Its body: …` in full (the
+write posts is shown whole**: its request says `Its title: …`, `Its body: …` and `Its message: …` in full (the
 arguments recorded are cut at 500 characters), and the judge is given them whole. A title or a
 body longer than the 8,000 characters the judge is given whole is refused (`refused: the body is
 longer than the 8000 characters the user and the judge are shown whole (…): shorten it`); one
@@ -568,7 +605,7 @@ It is the agent's own bookkeeping: the gate allows it in every mode, never held.
 
 | Tool | |
 |---|---|
-| `workspace {action: list \| show \| create \| prepare \| link_ticket \| remove, name?, repositories?, ticket?}` | The project's workspaces, as the window manages them (`docs/workspaces.md`). `list` gives each one's state, branch, repositories and ticket; `show {name?}` one whole, each step of its preparation with its state and why a failed one failed. `create {name, repositories?, branch?, ticket?}` makes one as `workspace.create` does: its worktrees, answered once they are made, then its setup in the background; `branch` is `<branch prefix>/<name>` when left out, and an existing branch is checked out (its description: "to resume a branch, name it"). `prepare {name?}` resumes a failed preparation (`workspace.prepare`); `link_ticket {name?, ticket}` links its ticket, and unlinks it with `ticket: null` (`workspace.link_ticket`). `name` is the agent's own workspace when left out, but for `create`; in `main` it names one. Every agent has it. Its description says, in one line, that to work on another branch in a workspace an agent switches with git and the workspace follows (`docs/workspaces.md`, "The branch"). A child reads the workspaces; its writes, `remove` included, are refused (`refused: the agent the user talks to manages the project's workspaces; … ask your parent (ask_parent)`). |
+| `workspace {action: list \| show \| create \| prepare \| link_ticket \| remove, name?, repositories?, ticket?}` | The project's workspaces, as the window manages them (`docs/workspaces.md`). `list` gives each one's state, branch, repositories and ticket; `show {name?}` one whole, each step of its preparation with its state and why a failed one failed. `create {name, repositories?, branch?, ticket?}` makes one as `workspace.create` does: its worktrees, answered once they are made, then its setup in the background; `branch` is `<branch prefix>/<name>` when left out (the name alone when the project's prefix is empty), and an existing branch is checked out (its description: "to resume a branch, name it"). Its description also says to name the branch the way the repository does (its `AGENTS.md`, `CONTRIBUTING`, or the branches it already has), with the ticket's key when the workspace has a ticket, the default being the fallback. `prepare {name?}` resumes a failed preparation (`workspace.prepare`); `link_ticket {name?, ticket}` links its ticket, and unlinks it with `ticket: null` (`workspace.link_ticket`). `name` is the agent's own workspace when left out, but for `create`; in `main` it names one. Every agent has it. Its description says, in one line, that to work on another branch in a workspace an agent switches with git and the workspace follows (`docs/workspaces.md`, "The branch"). A child reads the workspaces; its writes, `remove` included, are refused (`refused: the agent the user talks to manages the project's workspaces; … ask your parent (ask_parent)`). |
 | `remove {name}` | Removes a workspace of the project, as `flottille workspace remove` does (`docs/workspaces.md`, "Removal"), **always held for the user**, whatever the mode and the judge: a request whose card says what would be lost, each repository's uncommitted files and commits on no remote (`This would be lost, and the workspace is removed only if your answer says to discard it:`, `api has commits on no remote, on its branch shop/login: 1a2b3c4 Add the login`), or `Nothing would be lost`. Allowed, it is refused, nothing touched, while something would be lost, unless the user's answer said to discard it (`flottille approve <n> --discard`), and while another agent than the caller works in the workspace, of its tree or not, or a command run not the tree's own runs there (`refused: workspace … is not removed, nothing was touched: the agent …, outside this agent's tree, works in it…`, `the agent …, of this agent's tree, works in it`), each named; then deletes, in each repository, the workspace's local branch once its work has landed (no commit of its own, or its pull request merged, as the forge says), never the remote one, and keeps the others, its answer saying each and why (`docs/workspaces.md`, "Removal"). A root removes the workspace it works in too, named or left out, once its work is done, held whatever the mode, Full included: its card also says the commands of its tree running in it, stopped first as `run.stop` stops one (`Stop the commands of this session running in it: pnpm dev:api, pnpm dev:front`), and `This session then goes on in the project's folder (main)`; once it is removed, the session goes on in `main` (its place, its grant and its record, in the write that forgets the workspace), and the answer says so (`The workspace login is removed; you now work in the project's folder (main), …`; `docs/workspaces.md`, "Its own workspace"). Its requests still waiting are then cancelled and answered as not run, and while the removal is carried out its `run`, `agent_launch`, `fs_write` and `fs_edit` are refused (`refused: the workspace login is being removed: …`). A child removes none. Until #141 it was the tool `workspace_remove {workspace?}`, still answered for one release. |
 
 `list` and `show` run at once. `remove` is base (above). `create`, `prepare` and `link_ticket` are to judge, as any

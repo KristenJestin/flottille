@@ -1028,6 +1028,35 @@ fn tickets_list_and_search_answer_from_the_store_with_its_age_and_show_reads_liv
     assert_eq!(item["title"], "Renamed on GitHub", "{item}");
 }
 
+#[test]
+fn tickets_list_says_when_the_last_read_was_cut_at_its_bound() {
+    let user = User::with_fake_agent()
+        .with_fake_gh()
+        .with_env("FLOTTILLE_TEST_CLOCK", "1");
+    fixture(&user);
+    track(&user, github_issues());
+    let many: serde_json::Map<String, Value> = (1..=1000)
+        .map(|n| {
+            // Closed: a first read details none of them.
+            let mut issue = listed_issue(n, "An issue", "2026-10-01T10:00:00Z");
+            issue["state"] = json!("CLOSED");
+            (n.to_string(), issue)
+        })
+        .collect();
+    issues(&user, Value::Object(many));
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
+    let mcp = agent_in(&user, None);
+
+    let listed = mcp.call("tickets", json!({"action": "list"}));
+    assert!(!listed.error, "{}", listed.text);
+    let head = listed.text.lines().next().unwrap_or_default();
+    assert!(
+        head.contains("only the newest 1000 issues are listed"),
+        "{head}"
+    );
+}
+
 // The reads of `tickets show` (`docs/tickets.md`, "How fast it is read"): the sign-in check and
 // the work item are read together, and what was read is kept for 30 s.
 

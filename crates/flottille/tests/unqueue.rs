@@ -156,6 +156,38 @@ fn editing_a_waiting_message_gives_back_its_text_and_its_pictures_and_it_leaves_
 }
 
 #[test]
+fn a_waiting_command_message_is_listed_and_given_back_as_the_user_typed_it() {
+    let user = User::with_fake_agent();
+    let root = busy_root(&user);
+    user.call(
+        "command.add",
+        json!({"project": "app", "name": "ship", "description": "Ship it",
+            "instructions": "Push the branch."}),
+    )
+    .unwrap();
+    let delivery = write(&user, &root, "fix it, then /ship");
+
+    let tree = user.call("agent.tree", json!({"agent": root})).unwrap();
+    let queued = &tree["agents"][0]["queued"][0];
+    assert_eq!(queued["text"], "fix it, then /ship");
+    assert_eq!(queued["commands"], json!(["ship"]));
+    assert!(
+        queued["received"]
+            .as_str()
+            .is_some_and(|text| text.contains("Push the branch.")),
+        "{queued}"
+    );
+
+    let answer = user
+        .call(
+            "agent.unqueue",
+            json!({"agent": root, "delivery": delivery, "images": false}),
+        )
+        .unwrap();
+    assert_eq!(answer["text"], "fix it, then /ship");
+}
+
+#[test]
 fn a_message_the_root_already_took_cannot_be_withdrawn_and_nothing_is_lost() {
     let user = User::with_fake_agent();
     let root = busy_root(&user);

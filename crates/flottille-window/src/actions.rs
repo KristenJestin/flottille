@@ -135,6 +135,12 @@ pub enum Command {
     ToolResultsSet {
         limit: Option<usize>,
     },
+    /// After how many days an inactive session is ended (`sessions.show`).
+    SessionsRead,
+    /// Chooses it (`sessions.set`): `None` is off.
+    SessionsSet {
+        days: Option<u64>,
+    },
     /// The window's appearance (`appearance.show`); `seq` numbers the request (see
     /// `Shell::ask_appearance`).
     AppearanceRead {
@@ -190,6 +196,11 @@ pub enum Command {
     SaveProjectSettings {
         project: String,
         settings: Value,
+    },
+    /// Writes the project's message checks (`project.set_message_checks`).
+    SaveMessageChecks {
+        project: String,
+        checks: Vec<String>,
     },
     /// Detects the project's repositories again, against its file.
     CheckProject(String),
@@ -610,6 +621,11 @@ pub enum Outcome {
         read: Result<Value, String>,
         saved: bool,
     },
+    /// The project's message checks as saved, or why nothing was.
+    MessageChecks {
+        project: String,
+        saved: Result<Vec<String>, String>,
+    },
     /// The project's repositories, read, added to or removed from, or why not.
     Repositories {
         project: String,
@@ -699,6 +715,12 @@ pub enum Outcome {
     ToolResults {
         written: bool,
         shown: Result<Option<usize>, String>,
+    },
+    /// After how many days an inactive session is ended as the daemon says it (`None` is off),
+    /// after a read (`written` false) or a choice.
+    Sessions {
+        written: bool,
+        shown: Result<Option<u64>, String>,
     },
     /// The window's appearance as the daemon keeps it, after a read (`written` false) or a
     /// choice.
@@ -1177,6 +1199,19 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 .map(|shown| shown["limit"].as_u64().map(|limit| limit as usize));
             Outcome::ToolResults { written, shown }
         }
+        Command::SessionsRead | Command::SessionsSet { .. } => {
+            let (method, params, written) = match command {
+                Command::SessionsSet { days } => (
+                    "sessions.set",
+                    json!({"days": days.map_or(json!("off"), |d| json!(d))}),
+                    true,
+                ),
+                _ => ("sessions.show", json!({}), false),
+            };
+            let shown = answer(ask_alone(connect, method, params, bounds.quick))
+                .map(|shown| shown["days"].as_u64());
+            Outcome::Sessions { written, shown }
+        }
         Command::AppearanceRead { seq } | Command::AppearanceSet { seq, .. } => {
             let (method, params, written) = match command {
                 Command::AppearanceSet { appearance, .. } => {
@@ -1233,6 +1268,24 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             )),
             project,
             saved: true,
+        },
+        Command::SaveMessageChecks { project, checks } => Outcome::MessageChecks {
+            saved: answer(ask_alone(
+                connect,
+                "project.set_message_checks",
+                json!({"name": project, "checks": checks}),
+                bounds.quick,
+            ))
+            .map(|saved| {
+                saved["message_checks"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            }),
+            project,
         },
         Command::Repositories {
             project,
