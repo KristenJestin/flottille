@@ -669,15 +669,15 @@ fn tickets(call: &Call) -> Verdict {
         // The link as the ticket named reads it, so that the card says its direction.
         "link" => format!(
             "it links two tickets on the tracker: {} {} {}",
-            words("ticket"),
-            words("kind"),
-            words("other")
+            shown("ticket"),
+            shown("kind"),
+            shown("other")
         ),
         "unlink" => format!(
             "it removes a link between two tickets on the tracker: {} {} {}",
-            words("ticket"),
-            words("kind"),
-            words("other")
+            shown("ticket"),
+            shown("kind"),
+            shown("other")
         ),
         // Which comment, and its new words in full, as the other writes show theirs.
         "comment_edit" => format!(
@@ -746,7 +746,7 @@ fn tickets(call: &Call) -> Verdict {
     if let Err(refused) = texts(
         call.grant,
         call.args,
-        &["title", "body", "status"],
+        &["title", "body", "status", "kind"],
         &mut found,
     ) {
         return refused;
@@ -4274,6 +4274,28 @@ mod tests {
             Some(&fixture.never),
         );
         assert!(!reasons(&masked).contains(token), "{masked:?}");
+    }
+
+    #[test]
+    fn a_link_kind_is_judged_as_a_text() {
+        let fixture = Fixture::main();
+        let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let long = "x".repeat(crate::judge::WHOLE_CHARS + 1);
+
+        let secret = fixture.judge(
+            "tickets",
+            json!({"action": "link", "ticket": "ABC-2", "kind": token, "other": "ABC-1"}),
+            Some(&fixture.never),
+        );
+        let too_long = fixture.judge(
+            "tickets",
+            json!({"action": "link", "ticket": "ABC-2", "kind": long, "other": "ABC-1"}),
+            Some(&fixture.never),
+        );
+
+        assert!(base_class(&secret), "{secret:?}");
+        assert!(!reasons(&secret).contains(token), "{secret:?}");
+        assert!(denied(&too_long), "{too_long:?}");
     }
 
     #[test]
