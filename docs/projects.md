@@ -148,6 +148,7 @@ serve = true                          # keeps running
 check = false                         # tests, lint
 read_only = false                     # changes nothing
 ask_before_running = false            # held for approval each time an agent runs it
+needs = ["mongo"]                     # services of the machine started first ("Services")
 
 [[setup]]                             # the steps that prepare a new workspace, in order
 copy = [".env", ".env.*"]             # globs, copied from the main checkout, never over a file
@@ -305,8 +306,8 @@ the user allows, since it rewrites the instructions of every agent created after
 `[tasks.<name>]` lists the project's command lines its agents run by name with `run`
 (tests, lint, servers), and the user with the Run button of the project page. Each holds `line` (one line, never run by a shell) and, when they apply,
 `repository` (where it runs; the workspace folder when left out), `serve` (it keeps running),
-`check` (tests, lint), `read_only` (it changes nothing) and `ask_before_running` (held for
-approval each time an agent runs it). A setup step runs one with `task = "<name>"`; a task a step
+`check` (tests, lint), `read_only` (it changes nothing), `ask_before_running` (held for
+approval each time an agent runs it) and `needs` (the services of the machine it needs, below). A setup step runs one with `task = "<name>"`; a task a step
 runs cannot be removed. The Tasks section of the project's Settings adds, edits and removes them
 (`task.*`, `docs/protocol.md`), and so does a root agent with `tasks`, each write judged
 (`docs/tools.md`).
@@ -355,6 +356,64 @@ serve = true
 url = "http://{workspace}.api.localhost:8080"
 ready = { line = "listening on" }
 ```
+
+## Services
+
+A project leans on programs that belong to the machine, not to one project or one workspace: a
+database in a container, a cache, an API the apps call, each in a folder of its own outside every
+project. A task runs in the place of the agent that starts it, once per workspace; a **service**
+is a task of the machine, defined once, run once for every project and workspace, its state known
+to the user and the agents.
+
+The services are in `$XDG_CONFIG_HOME/flottille/services.toml` (`~/.config/flottille/services.toml`),
+beside the projects' files: the user's to edit, the daemon the only program that writes it, read
+and refused as a project's file is, naming the file and the key
+(`services.toml: services.auth.needs: unknown service "postgres"`).
+
+```toml
+[services.mongo]
+folder = "~/tools/docker/mongo"       # absolute, or ~/…; the home when left out
+line = "docker compose up"            # one line, never run by a shell
+ready = { command = "docker compose exec -T mongo mongosh --quiet --eval 1" }
+
+[services.auth]
+folder = "~/work/auth-api"
+needs = ["mongo"]                     # started first, and waited for
+line = "npm run start:dev"
+url = "http://localhost:3001"
+ready = { url = "{url}" }
+ask_before_running = false            # held for approval each time an agent starts it
+```
+
+The keys are a task's (`line`, `ready`, `url`, `ask_before_running`, above), with `folder` and
+`needs`, and without `repository`, `serve`, `check` and `read_only`: a service keeps running and
+has no workspace, so its templates fill only `{url}`, in `ready`'s `url` and `line`.
+
+- **One instance on the machine.** The daemon owns a service's run, not a workspace: starting one
+  that runs (starting or ready) does nothing and says it runs, and two tasks that need it at the
+  same moment share one start, each waiting for it to be ready.
+- **Running outside Flottille.** Before it starts one with a `ready` it can try (an address that
+  answers, a command that passes), the daemon tries it once: answered, the service runs outside
+  Flottille (started by hand), nothing is started, and its state says `outside`. A service with no
+  `ready`, or one that waits for a line of its own output, is started.
+- **On demand.** Nothing starts with the daemon. A service runs until the user stops it, or an
+  agent the user allowed; when the daemon stops, its services stop with it, their process groups
+  as a run's are. Stopping a service does not stop what it needs nor what needs it: the state of
+  those that need it says what they need is not running.
+- **Its run** is a run of the daemon's, of no agent and no project (`project` is empty): its
+  output is kept, masked and read as a run's is (`docs/tools.md`, "Tasks and runs"), in the
+  environment of a run with no place's variables, its folder's `.env` files masked. Its state is
+  `stopped`, `starting`, `ready`, `running` (it says no ready), `outside`, or `failed` with the
+  line that says why (the last line of its output, or why it could not start).
+- **Tasks need them.** A task's `needs` names services; running it (an agent's `run`, the user's
+  Run button, a setup step) first starts each it needs that does not run, those they need first,
+  and waits until each with a `ready` is ready, 120 seconds at most: a service that is not ready by
+  then, or fails, refuses the task, naming the service and the line that says why. An unknown name
+  is refused when the project's file is read; a cycle or an unknown name in a service's `needs`
+  when `services.toml` is.
+
+`flottille service` (`docs/cli.md`), the `service.*` methods (`docs/protocol.md`) and the agents'
+`services` tool (`docs/tools.md`) read, write, start and stop them.
 
 ## Skills
 
