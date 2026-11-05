@@ -48,6 +48,10 @@ measured on a 16-core Linux machine with a 165 Hz screen. Keep them; they cost a
   them.
 - A **text input** (`gpui_kit::component::input`) notifies its state on every caret blink: render
   it in its own view, keep its text in a separate entity updated on `Change`.
+  A field's colours (ink, placeholder, selection, caret) are not drawn from the palette by the
+  input: they are set on it. `flottille_ui::follow_theme` sets them from `field_style` and again at
+  each frame of a theme change; a field made with an `InputEditorStyle` of its own keeps the
+  colours of the theme it was made in (a scan refuses it).
 - `uniform_list` calls its row closure for row 0 alone to measure, and only for missing rows
   later: side effects in the closure must ignore `0..1` and not count on being called again.
 - A list that grows while it is looked at (a streaming conversation): keep the rows in an
@@ -181,7 +185,7 @@ The components that hold them:
 | `Menu::new(..).entry(..).danger(id, label, f)` | a "⋯" menu; danger entries come last, after a line |
 | `Confirm::new(id, question)` | `.sentence(s)`, `.action(label)`, `.refused(Option<why>)`, `.open(bool)`, `.on_confirm(f)`, `.on_cancel(f)`; ids `<id>-action`, `<id>-cancel`, `<id>-scrim` |
 | `Modal::new(id, title)` | a form dialog: `.sentence(s)`, `.wide()`, `.action(Button)`, `.on_close(f)`; its body scrolls between the title and the buttons when the window is too small, and `.kept(el)` stays in sight under it (a refusal). `.large()` makes it nearly the whole window (a 32 px margin) for looking at something at length: the title and sentence left in the header, `.action(..)`s and a close button (`<id>-close`) on its right, no Cancel and no footer, and the body takes the height left (its owner scrolls it); `.takes_focus()` so that Escape reaches it. `.search()` makes it a search over the page (the quick switcher): near the top, 640 px, no title drawn (it is its label) and no Cancel, `.above(field)` over the results, `.scroll(&handle)` for the body, `.on_key(f)` for the arrows. While a dialog or a list is open, `keys_held(cx)` says so and the window's shortcuts wait |
-| `toast(Toast::success(t).detail(d), cx)` / `Toast::failure` | rule 3; the shell owns the `ToastStack` |
+| `toast(Toast::success(t).detail(d), cx)` / `Toast::failure` | rule 3; the shell owns the `ToastStack`; `.action(label, f)` adds one secondary button under the lines (`toast-<n>-action`), whose click runs `f` and closes the toast: for something the user may do with what the toast says (Open a link an agent shares), never for a result |
 | `Field::new(id, label, control)` | `.optional()`, `.hint(h)`, `.hint_mono()`, `.error(Option<e>)` |
 | `Switch::new(id, on, label)` | `.hint(h)`, `.on_click(f)`; the whole row toggles |
 | `Segmented::new(id, label, choices, chosen)` | at most three choices, never in a dialog; `.unavailable(i)` shows a choice that cannot be taken here, faded over `HOVER` and with no hover, a line beside it saying why |

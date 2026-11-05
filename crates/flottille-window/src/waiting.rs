@@ -27,7 +27,7 @@ use gpui_kit::{
 
 use crate::actions::Answer;
 use crate::runs::rail_label;
-use crate::session::{ApprovalCard, BASE_SAYS, SessionPage};
+use crate::session::{ApprovalCard, SessionPage};
 
 /// How long a card the user was sent to stays lit.
 const POINTED: Duration = Duration::from_millis(1600);
@@ -283,12 +283,13 @@ impl Waiting {
                     }),
             )
             .when(card.base, |d| {
+                let says = card.always_says();
                 d.child(
                     div()
                         .id(id("approval-base"))
-                        .aria_label(BASE_SAYS)
+                        .aria_label(says)
                         .text_color(p.fail)
-                        .child(BASE_SAYS)
+                        .child(says)
                         .test_support(),
                 )
             })

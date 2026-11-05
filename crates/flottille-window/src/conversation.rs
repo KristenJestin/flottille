@@ -80,6 +80,13 @@ pub enum Block {
         kind: String,
         text: String,
     },
+    /// A link it handed the user (`web show_link`): a card with an Open button, so that a toast
+    /// missed is not lost. `whence` is the address's host, or the file's path in the place.
+    Link {
+        title: Option<String>,
+        whence: String,
+        target: String,
+    },
     /// The edits of a file it changed.
     Diff {
         path: String,
@@ -178,13 +185,15 @@ impl Call {
 }
 
 /// Whether a block stays in sight between the groups: what the agent said, the messages it was
-/// sent, the children it launched (where one that needs the user shows), and why it ended or
-/// came back. Everything else folds into the group between two of them.
+/// sent, a link it shared (a toast missed is not lost), the children it launched (where one that
+/// needs the user shows), and why it ended or came back. Everything else folds into the group between two of them.
 pub fn in_sight(block: &Block) -> bool {
     match block {
-        Block::Text { .. } | Block::Message { .. } | Block::Relayed { .. } | Block::SubAgents => {
-            true
-        }
+        Block::Text { .. }
+        | Block::Message { .. }
+        | Block::Relayed { .. }
+        | Block::SubAgents
+        | Block::Link { .. } => true,
         Block::Notice { kind, .. } => matches!(kind.as_str(), "failed" | "ended" | "resumed"),
         _ => false,
     }
@@ -715,6 +724,18 @@ impl Conversation {
                     }
                     None => Vec::new(),
                 }
+            }
+            "agent.link_shown" => {
+                let Some(shown) = crate::model::LinkShown::of(event) else {
+                    return Vec::new();
+                };
+                let mut changes = self.close(Some(event.at));
+                changes.extend(self.push(Block::Link {
+                    title: shown.title,
+                    whence: shown.whence,
+                    target: shown.target,
+                }));
+                changes
             }
             "agent.reported" => {
                 let mut changes = self.close(Some(event.at));
@@ -1898,6 +1919,49 @@ mod tests {
         assert!(
             matches!(reports[1], Block::Report { from, text } if from == "docs-pass" && text.ends_with("Again."))
         );
+    }
+
+    #[test]
+    fn a_link_the_agent_shared_becomes_a_card_where_it_was_shared() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        c.apply(&event(1, "agent.message", json!({"text": "Done."})));
+        c.apply(&event(
+            2,
+            "agent.link_shown",
+            json!({"agent": "a1", "kind": "url", "target": "https://example.org/t/42",
+                "title": "Ticket 42", "host": "example.org"}),
+        ));
+        c.apply(&event(
+            3,
+            "agent.link_shown",
+            json!({"agent": "a1", "kind": "file", "target": "/work/app/docs/r.html",
+                "title": null, "host": null, "shown": "docs/r.html"}),
+        ));
+        assert_eq!(
+            &c.blocks()[1..],
+            [
+                Block::Link {
+                    title: Some("Ticket 42".into()),
+                    whence: "example.org".into(),
+                    target: "https://example.org/t/42".into(),
+                },
+                Block::Link {
+                    title: None,
+                    whence: "docs/r.html".into(),
+                    target: "/work/app/docs/r.html".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_shared_link_stays_in_sight_between_the_groups() {
+        let link = Block::Link {
+            title: None,
+            whence: "example.org".into(),
+            target: "https://example.org".into(),
+        };
+        assert!(in_sight(&link));
     }
 
     #[test]

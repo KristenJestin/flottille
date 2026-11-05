@@ -4,10 +4,10 @@
 use flottille_ui::color::mix;
 use flottille_ui::motion::HOVER;
 use flottille_ui::{
-    Align, Button, Dropdown, Icon, MenuItem, Type, enter, fade, hoverable, palette, presence_of,
-    space,
+    Align, Button, Dropdown, Icon, MenuItem, Type, enter, fade, follow_theme, hoverable, palette,
+    presence_of, space,
 };
-use gpui_kit::base::input::{InputEditorStyle, InputEvent, RopeExt as _, TextareaState};
+use gpui_kit::base::input::{InputEvent, RopeExt as _, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement, IntoElement,
@@ -183,17 +183,6 @@ pub struct Composer {
 const MIN_ROWS: usize = 3;
 const MAX_ROWS: usize = 8;
 
-fn editor_style(cx: &gpui_kit::App) -> InputEditorStyle {
-    let p = palette(cx);
-    InputEditorStyle {
-        foreground: p.text,
-        muted_foreground: p.faint,
-        selection: p.run.opacity(0.35),
-        caret: p.text,
-        ..Default::default()
-    }
-}
-
 impl Composer {
     /// The composer of one project: its draft and the session it starts belong to it, so that
     /// opening another project's page neither carries the draft there nor loses it.
@@ -208,7 +197,7 @@ impl Composer {
                 .auto_grow(MIN_ROWS, MAX_ROWS)
                 .submit_on_enter(true)
                 .placeholder("Describe a task, a bug to fix, an idea to try…");
-            field.set_editor_style(editor_style(cx));
+            follow_theme(&mut field, cx);
             field
         });
         let subscriptions = vec![cx.subscribe_in(

@@ -710,6 +710,13 @@ fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) 
             },
             None,
         ),
+        method if method.starts_with("leave.") => (
+            match crate::leaves::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+            },
+            None,
+        ),
         method if method.starts_with("inbox.") => (
             match inbox::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),

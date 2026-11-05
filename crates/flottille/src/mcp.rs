@@ -92,6 +92,10 @@ pub struct Definition {
 /// all of them, since the tool list it speaks of differs by agent only in which tools it holds.
 const GUIDE: &str = include_str!("../roles/guide.md");
 
+/// A `session_send` the judge allowed while the user withdrew the leave it was judged under.
+const LEAVE_WITHDRAWN: &str = "refused: the user withdrew your leave to write to that session \
+    while this message was judged; send it again to ask them";
+
 /// What a call of a session that was replaced is answered.
 /// What a call is answered when its process ended while it was on its way.
 const GONE: &str = "refused: this session's process has ended: its token no longer works; stop \
@@ -588,16 +592,20 @@ const SERVED: [Definition; 29] = [
             characters) and its links. search: DuckDuckGo, 10 results. Both are the web's, not \
             the user's. A URL you were shown (user, ticket, pull request, page, result) \
             passes; one you build is judged: it sends out what it holds. No local or private \
-            address.",
+            address. show_link {url or path, title?}: puts a link in front of the user, who \
+            opens it with a click (an http(s) URL, or a file of your place); use it instead of \
+            xdg-open, open or start, which show nothing here.",
         read_only: true,
         idempotent: true,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["read", "search"]},
+                "action": {"type": "string", "enum": ["read", "search", "show_link"]},
                 "url": {"type": "string"},
                 "query": {"type": "string"},
-                "why": {"type": "string"}
+                "why": {"type": "string"},
+                "path": {"type": "string", "description": "show_link: a file inside your place."},
+                "title": {"type": "string", "description": "show_link: a few words naming the link."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -782,12 +790,14 @@ const SERVED: [Definition; 29] = [
     Definition {
         name: "session_send",
         title: "Write to a session",
-        description: "Writes to a session you started (agent_launch with root), or to the agent \
-            that started yours. It does not wait: it reaches it on its next tool result, or as \
-            a new turn, labelled with your name; its answer comes later as [flottille:session]. \
-            Judged, as a write is. Your children are written to with agent_send. A question \
-            about the brief or its context to the agent that started your session goes here; a \
-            decision only the user can take goes through ask_user, and one left in a last \
+        description: "Writes to a session you started (agent_launch with root), to the agent \
+            that started yours, or to any other session of your project (not a child). It does \
+            not wait: it reaches it on its next tool result, or as a new turn, labelled with \
+            your name; its answer comes later as [flottille:session]. Judged, as a write is; \
+            the first message to a session you did not start asks the user's leave, in every \
+            mode, once for that session. Your children are written to with agent_send. A \
+            question about the brief or its context to the agent that started your session goes \
+            here; a decision only the user can take goes through ask_user, and one left in a last \
             message is a follow-up, not a wait.",
         read_only: false,
         idempotent: false,
@@ -2085,9 +2095,11 @@ async fn played_in(
                         match judged {
                             // In Full, what the gate holds passes, base included: what it
                             // refuses was refused above.
-                            // Its own workspace is removed only with the user's word.
+                            // Its own workspace is removed only with the user's word, and so is
+                            // a session written to for the first time.
                             _ if mode == GateMode::Full
                                 && !removes_own_workspace(grant, tool, &args)
+                                && !gate::asks_leave(&ask)
                                 && !crate::services::stops(tool, &args) =>
                             {
                                 verdict = Some("full");
@@ -2103,12 +2115,23 @@ async fn played_in(
                                 }
                             }
                             Some(judged) if judged.verdict == "allow" => {
-                                verdict = Some("judged");
-                                let approved = Some(gate::Class::Judge);
-                                perform(
-                                    daemon, grant, tool, args, cancelled, approved, &first, &reads,
-                                )
-                                .await
+                                // The judge takes seconds: a leave the user withdrew meanwhile,
+                                // or a session ended, stops the message it was judging.
+                                let lost = (tool == "session_send")
+                                    .then(|| crate::tree::needs_leave(daemon, grant, &args));
+                                match lost {
+                                    Some(Err(why)) => Outcome::Refused(why),
+                                    Some(Ok(true)) => Outcome::Refused(LEAVE_WITHDRAWN.into()),
+                                    _ => {
+                                        verdict = Some("judged");
+                                        let approved = Some(gate::Class::Judge);
+                                        perform(
+                                            daemon, grant, tool, args, cancelled, approved, &first,
+                                            &reads,
+                                        )
+                                        .await
+                                    }
+                                }
                             }
                             judged => {
                                 let (outcome, number) = approvals::ask(
@@ -2255,8 +2278,18 @@ fn verdict_of(
     args: &Value,
     first: &[String],
 ) -> gate::Verdict {
+    if tool == "web" && crate::show::is(args) {
+        return crate::show::verdict(&grant.place, args);
+    }
     if tool == "web" {
         return crate::web::classify(daemon, &grant.agent, args);
+    }
+    if tool == "session_send" {
+        match crate::tree::needs_leave(daemon, grant, args) {
+            Err(why) => return gate::Verdict::Deny(why),
+            Ok(true) => return gate::session_leave(grant, args),
+            Ok(false) => {}
+        }
     }
     // A new workspace's launch is classified by its steps below, but its brief is held to the
     // judge's limit like any other launch's.
@@ -2795,6 +2828,7 @@ async fn performed_once(
     first: &[String],
 ) -> Outcome {
     match tool {
+        "web" if crate::show::is(&args) => crate::show::show(daemon, grant, args),
         "web" => crate::web::web(args).await,
         "services" => crate::services::tool(daemon, grant, args, first).await,
         "run" => {

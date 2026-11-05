@@ -28,7 +28,7 @@ const GIT_ENV: [(&str, &str); 6] = [
 
 /// What a test names that would reach the machine outside the test's folders if it ran: faked by
 /// `User::with_fake_launchers`.
-const LAUNCHERS: [&str; 37] = [
+const LAUNCHERS: [&str; 40] = [
     "systemd-run",
     "systemctl",
     "loginctl",
@@ -66,6 +66,9 @@ const LAUNCHERS: [&str; 37] = [
     "bw",
     "uv",
     "ionice",
+    "xdg-open",
+    "open",
+    "start",
 ];
 
 /// The variables and folders the providers take a sign-in from.

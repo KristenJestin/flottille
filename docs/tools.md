@@ -895,7 +895,7 @@ Two of them take an `action`, as the tools of a family do: `agent_status` (`stat
 | Tool | |
 |---|---|
 | `agent_launch {title, brief, provider?, model?, effort?, role?, workspace?, new_workspace?, repositories?, root?, follow?}` | Starts a session for the user in a workspace with `root: true` ("Sessions for the user", below), or a child on one task, in the caller's own place, and answers at once with its id. A child never works in another place than its parent's: `workspace` and `new_workspace` are the session's, and a child launch that names another workspace than the caller's own, or a new one, is refused before anything is asked, naming the session form (`refused: a child works where you work: workspace and new_workspace are for a session for the user, … "root": true, "workspace": "login" …`); naming the caller's own workspace is its own place. Its description leads with the session form, for work that belongs in a workspace. `provider` is the caller's when left out, and the child's for life; `model` and `effort` the provider's defaults when left out (`docs/agents.md`, "Providers"): a provider not enabled or not ready, or a model or an effort it is known not to offer, is refused naming those that are (`refused: provider opencode is not enabled (…); the ready providers are claude`). `role` is `worker` (by default) or `lead`; with `root`, `workspace` is an existing workspace's name (`main` for the project folder), `new_workspace` the name of a new one (made at once, with `repositories` as its repositories, the session's first message sent once it is prepared; a workspace that fails fails the session; the launch is judged as `workspace create` is, "The workspace"), neither for the caller's own place; both are plain optional fields, and a mix is refused naming the field to use (`refused: workspace and new_workspace are exclusive: …`, `refused: repositories goes with new_workspace, …`). Its description holds a call of each form. Refused, never queued, above the project's children cap (`refused: N children already run in project P, its cap: do the work yourself, or wait for one of them to end (agent_stop ends one of yours)`). Only a root has this tool: a child, whatever its role, has none of the `agent_*` tools (no depth). **`root: true`** starts a session for the user instead of a child ("Sessions for the user", below), and then **`follow`** (a boolean) is required: a launch without it is refused, naming the field and what each value does; a child launch refuses it. |
-| `session_send {session, text}` (a root) | A message to a session the caller started (`agent_launch` with `root`), or to the agent that started the caller's session ("Sessions for the user", below). |
+| `session_send {session, text}` (a root) | A message to a session the caller started (`agent_launch` with `root`), to the agent that started the caller's session ("Sessions for the user", below), or to any other session of its project with the user's leave, asked once per pair ("Sessions that talk to each other"). |
 | `session_read {session?, last?, since?, until?, cursor?}` (a root) | A page of the conversation of another session of the caller's project, framed as that session's data, with the mode of its tree; without `session`, the caller's own id, role and mode ("Sessions that read each other", below). |
 | `agent_send {agent_id, message, model?, effort?}` | A message to a child, urgent: on its next tool result in a turn, a new turn otherwise. It answers the child's question. With `model` or `effort` it also changes the child's, as `agent.options` does for the user (`docs/agents.md`, "The options"): checked as at `agent_launch` (a model or an effort its provider is known not to offer is refused, naming those it offers, and nothing is sent), then set between its turns, before its next prompt. The provider never changes. |
 | `agent_status {agent_id?, action? status \| conversation, detail? short \| full, after?}` | `action status` (the default): one line per child (or for the one named): what it does (in a turn, `running \`<line>\` for 12 min`, `waiting for approval #3`, `waiting on the provider`, idle, reported, ended or failed with why), the time since its last sign of activity, its context use. For all the children it stops there (`detail short`) and says how to get more; for the one named, or with `detail full`, each also has its last three messages. `action conversation` (with `agent_id`; `after` pages): a page of the child's conversation, oldest first, one line per event that says something (`#<n> sent: …`, `said: …` for a whole reply, its streamed pieces joined and masked, two messages apart, `tool call: …`, a tool served and its outcome, a turn's end, a replacement, a report), each line of 2,000 characters at most (a longer reply goes on, whole, on the next lines), the page under 30,000; it ends with the `after` to pass for the next page. |
@@ -987,15 +987,33 @@ instead of `ask_user`. The descriptions stay under the 2,048 characters their li
 
 #### Sessions that talk to each other
 
-`session_send {session, text}` (a root's tool) writes to a session the caller started, or to the
-agent that started the caller's session, and to no other agent: any other is refused before
-anything is asked (`refused: <id> is neither a session you started nor the agent that started
-you: …`), and so is one that ended or an empty text. Children are written to with `agent_send`.
+`session_send {session, text}` (a root's tool) writes to another live root of the caller's
+project: a session the caller started, the agent that started the caller's session, or any other
+session of the project with the user's leave. A child is refused before anything is asked (`refused:
+<id> is a child of another session: it is written to by its parent, …`; the caller's own are written
+to with `agent_send`), and so are a session of another project (`refused: <id> is a session of
+another project, <p>, not of <q>: …`), the caller's own session, an id that names no agent, a
+session that ended and an empty text.
 
-- **It is to judge**, as a write is (a card in Ask, the judge in Auto), as an `action` request
-  whose words name the session and give the text whole (`Send to the session "Login" (agent …),
-  which you started: …`). The judge is given the text whole: one longer than its 8,000
-  characters is refused, and one that holds what the masking takes for a secret is base.
+- **The user's leave, once per pair.** Between a session and one it started, or the one that
+  started it, nothing is asked beyond the judging below. To any other session, the first message
+  from A to X is held for the user, in every mode, **Full included**, and never reaches the judge:
+  it is the user's other conversation. Its request is an `action` of class `base` whose words name
+  both sessions and give the text (`Let the session "A" (agent …) write to the session "X" (agent
+  …) (started by you, not by this agent)`, then `Its first message: …`); the call is answered at
+  once that it is held. Allowed, the text is delivered and A writes to X from then on without the
+  user's leave (`leave.granted`, kept only if both sessions still run); refused, nothing is sent
+  and A is told so. While it waits, and while its message is being sent once allowed, another
+  message from A to X is refused, naming the request, so that two first messages ask the user
+  once. The leave is one way (A to X, not X to A) and lasts until either session ends (one
+  resumed asks again) or the user withdraws it, in the window's Write access section of either
+  session or with `leave.withdraw` (`leave.withdrawn`). A message the judge allows after the
+  user withdrew the leave, or after X ended, is refused, saying which, and is not sent.
+- **It is to judge**, as a write is (a card in Ask, the judge in Auto, through in Full), as an
+  `action` request whose words name the session and give the text whole (`Send to the session
+  "Login" (agent …), which you started: …`; `…, which the user let you write to: …` once the leave
+  is given). The judge is given the text whole: one longer than its 8,000 characters is refused,
+  and one that holds what the masking takes for a secret is base.
 - **No call waits**: the caller is answered at once; the text reaches the other session as a
   delivery, `session`, urgent (on its next tool result in a turn, a new turn otherwise), under a
   line naming the sender (`agent 0123456789ab wrote to this session:`): it is an agent's words,
@@ -1070,7 +1088,7 @@ it at once.
 
 | Tool | |
 |---|---|
-| `web {action, url?, query?, why?}` | A page read or a search, through the daemon: the only way an agent reaches the web (`docs/design.md` §4.2). Every agent has it, in `main` as in a workspace. |
+| `web {action, url?, query?, why?, path?, title?}` | A page read or a search, through the daemon: the only way an agent reaches the web (`docs/design.md` §4.2); `show_link`, a link put in front of the user ("Showing a link", below). Every agent has it, in `main` as in a workspace. |
 
 - **`read {url}`**: fetches the page and answers its main content: HTML as Markdown (the `dom_smoothie`
   crate, Readability ported to Rust, its navigation, banners and footers left out), a PDF as its
@@ -1144,6 +1162,42 @@ it at once.
   longer than the 8,000 characters the judge is given whole is refused.
 - **A search** sends its words to the search provider only: it is to judge in Ask (a card),
   and passes in Auto and Full.
+
+### Showing a link
+
+`web {"action": "show_link", "url": "https://…", "title"?}` (or `"path"` instead of `"url"`) puts a
+link in front of the user. It is the way to show a ticket just created, a report, a page: an
+agent never drives the user's desktop through a program (`run` has no graphical session, so
+`xdg-open <url>` ends without error and shows nothing; the gate refuses `xdg-open`, `open` and
+`start` in a line, a task or a step, whatever wraps them, with a sentence that points here).
+
+- **The daemon opens nothing.** It checks the link, says it in `agent.link_shown`
+  (`docs/events.md`) and answers at once (`Shown to the user: <title or host>. They open it with a
+  click; nothing opened by itself.`): no call waits for the user. Only the window opens it, after
+  the user's click on **Open**, with the system's default handler (the code that opens a run's
+  address or a pull request).
+- **What may be shown**: an `http` or `https` URL with a host (no `file:`, `javascript:`, `ftp:`,
+  `mailto:`; at most 2,000 characters; one that holds what the masking takes for a secret is
+  refused), or a file inside the agent's place, its workspace or checkout, where it really leads
+  once `..` and links are followed: a path outside is refused saying so (`refused: … is not inside
+  your place …; nothing was shown`). A shown file is only ever a document, since the system's
+  default handler runs a program it is given and an agent writes files in its place: it is a
+  regular file (no folder, device, fifo or socket), with no execute bit at all (owner, group or
+  others), and its extension, compared without case, is none a desktop runs or installs
+  (`.desktop`, `.sh`, `.bash`, `.zsh`, `.fish`, `.py`, `.pl`, `.rb`, `.js`, `.AppImage`, `.run`,
+  `.bin`, `.jar`, `.exe`, `.msi`, `.bat`, `.cmd`, `.ps1`, `.command`, `.app`, `.deb`, `.rpm`,
+  `.flatpakref`, `.flatpak`, `.snap`, `.jnlp`, `.php`, `.lua`, `.vbs`, `.scr`, `.com`, `.lnk`, `.pkg`, `.dmg`). Each refusal says why (`refused: run.sh: a .sh file is one a desktop runs, and
+  opening it would run it; show_link shows a document, never a program`). The URL and the path are
+  exclusive, and a title is at most 120 characters. The tool's own address check is not `web
+  read`'s: a link is for the user's eyes, so `localhost` (a dev server) is allowed.
+- **The gate lets it through in every mode**, with no card: like a read it changes nothing, and
+  the user decides by clicking. A link that fails the checks above is refused in every mode.
+- **In the window**: a toast `The agent shares a link: <title or host>` with an Open button, and a
+  small card in the agent's conversation (title, host or path, Open), so that a toast missed is
+  not lost. Open checks the file again right before it opens it, by the same rules, since it may
+  have changed between the call and the click: if it no longer passes (made executable, replaced
+  by a link or a folder, removed), nothing opens and a failure toast says why (`Not opened: it is
+  executable, and opening it would run it`). An address opens unchanged.
 
 ## The gate
 
@@ -1235,6 +1289,10 @@ says who answers a call to judge (`docs/design.md` §7.1).
      (the first word after `uv`, `poetry`, `pipenv`, `pdm`, `hatch`, `rye`, `pixi`, `conda`,
      `mamba` `run`; `npm`, `pnpm`, `yarn`, `bundle`, `mise` `exec` or `x`; `bun x`; after `--`
      of `cargo run`). Anywhere else its name is a plain word;
+   - a program that opens a link on the desktop: `xdg-open`, `open`, `start`. A run has no
+     graphical session, so nothing would show; it is refused in the same places as a launcher
+     (a line's program, behind a wrapper, what a runner runs, a task's or a step's line) with a
+     sentence that points to `web` `show_link` ("Showing a link");
    - a container's bind mount: the source of each `-v`, `--volume`, `--mount` (`source=`,
      `src=`) of `docker`, `podman` or `nerdctl` `run` or `create` that names a path is a path the
      line writes, refused as above. A named volume, and a container itself, are not.
