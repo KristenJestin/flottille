@@ -659,7 +659,8 @@ fn an_agent_sends_a_command_to_its_child_with_agent_send() {
         seen.contains("Push the branch.")
     });
     assert!(seen.contains("The command ship of project app"), "{seen}");
-    assert!(seen.contains("Push the branch.\n\nthe login fix"), "{seen}");
+    assert!(seen.contains("Push the branch.\n"), "{seen}");
+    assert!(seen.contains("\n\n[command ship] the login fix"), "{seen}");
 }
 
 #[test]
