@@ -29,6 +29,14 @@ write the file where it stands, its comments kept (`project.add_repository`,
 `project.remove_repository`), and are refused, nothing written, when the file would no longer be
 one the daemon can use.
 
+**The branch prefix** starts the branch of a workspace that is given none: `<branch prefix>/<name>`.
+It defaults to a slug of the project's name, and a file that does not hold the key keeps that. It
+may be empty (`branch_prefix = ""`): the branch is then the workspace's name alone, never
+`/<name>`, for a team whose branches follow the tickets (`fix/ABC-12-…`), which an agent gives
+with `branch` (`docs/workspaces.md`). Only a space is refused (`branch_prefix: must not hold
+spaces`). The project's Settings, Setup tab, "Branch prefix", edits it, an empty field included
+(`project.set_settings`, `branch_prefix`); the workspaces that exist keep their branch.
+
 A click on a repository's row in the project's Settings opens its dialog: its base branches (a list
 in order of preference, moved, removed and added there), the other repositories it depends on (one
 switch each) and its forge. The remote is git's, shown read-only. Saving asks `project.set_settings`,
@@ -114,7 +122,7 @@ rest.
 ```toml
 # The name is the file's name: this is projects/app.toml. A `name` key is allowed if it says the same.
 folder = "/work/app"                  # absolute
-branch_prefix = "app"                 # default: a slug of the name
+branch_prefix = "app"                 # default: a slug of the name; "" for none: the branch is the workspace's name
 workspaces_root = "/work/app-work"    # absolute (`~` and `<project>` allowed); default: the user's, see "Where the workspaces go"
 default_repositories = "all"          # "all", or a list of the repositories a workspace takes
 max_children = 12                     # children running at once, 1 to 12

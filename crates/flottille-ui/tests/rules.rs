@@ -289,6 +289,26 @@ fn a_toast_rises_at_the_bottom_right_and_a_success_leaves_after_its_time(cx: &mu
 }
 
 #[gpui_kit::test]
+fn a_toast_with_a_long_unbroken_word_stays_inside_the_window(cx: &mut TestAppContext) {
+    let (_, cx) = toasts(cx);
+    let path = "/home/user/projects/atlas/apps/front/src/app/pages/(dashboard)/settings/mail-recipient-sheet.html";
+    let hash = "a3f5c9d2e1b04786a3f5c9d2e1b04786a3f5c9d2e1b04786a3f5c9d2e1b04786";
+    cx.update(|_, cx| toast(Toast::success(hash).detail(path), cx));
+    advance(cx, ENTER * 2);
+    let (card, title, detail) = (
+        bounds("toast-1", cx),
+        bounds("toast-1-title", cx),
+        bounds("toast-1-detail", cx),
+    );
+    let viewport = cx.update(|window, _| window.viewport_size());
+    assert!(card.right() <= viewport.width && card.bottom() <= viewport.height);
+    // Each word is broken into lines, none wider than the room beside the icon and the cross.
+    assert!(title.size.height > px(19.5 * 1.5), "{title:?} is one line");
+    assert!(detail.size.height > px(19. * 1.5), "{detail:?} is one line");
+    assert!(title.right() <= card.right() && detail.right() <= card.right());
+}
+
+#[gpui_kit::test]
 fn a_toast_stays_while_it_is_hovered(cx: &mut TestAppContext) {
     let (_, cx) = toasts(cx);
     cx.update(|_, cx| toast(Toast::success("Task test saved"), cx));

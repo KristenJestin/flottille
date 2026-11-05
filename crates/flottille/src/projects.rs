@@ -270,6 +270,7 @@ async fn settings_of(project: &Project) -> Value {
         "repositories": repositories,
         "tracker": project.tracker,
         "message_checks": project.message_checks,
+        "branch_prefix": project.branch_prefix,
         "obsolete": project.obsolete,
     })
 }
@@ -466,6 +467,9 @@ pub async fn set_settings(
                     None => {}
                 }
             }
+        }
+        if let Some(prefix) = &asked.branch_prefix {
+            document.insert("branch_prefix", toml_edit::value(prefix.as_str()));
         }
         match &asked.tracker {
             None => {

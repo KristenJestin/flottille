@@ -1,6 +1,7 @@
 //! A file path on one line: its folder, faint, cut at its start when there is no room
 //! (`…/components/mail-recipient-sheet/`), and its file name, always whole, cut at its end only
-//! when it alone is wider than its frame. The whole path is in a tooltip, and is the label.
+//! when it alone is wider than its frame. The whole path is in a tooltip when it is cut, and is
+//! the label.
 
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -8,7 +9,7 @@ use gpui_kit::{
     StatefulInteractiveElement, Styled, TestSupportExt, Window, div, px,
 };
 
-use crate::button::tipped;
+use crate::cut::tipped_when_cut;
 use crate::theme::palette;
 use crate::typography::Type;
 
@@ -67,5 +68,5 @@ pub fn path_line(
                 .child(SharedString::from(name.to_owned()))
                 .test_support(),
         );
-    tipped(line, whole, LINE, window, cx)
+    tipped_when_cut(line, whole, window, cx)
 }

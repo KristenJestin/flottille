@@ -342,7 +342,8 @@ pub struct Project {
     pub name: String,
     /// Absolute.
     pub folder: PathBuf,
-    /// Starts the branches of the project's workspaces; a slug of the name unless set.
+    /// Starts the branches of the project's workspaces; a slug of the name unless set, and empty
+    /// when the branch is to be the workspace's name alone.
     pub branch_prefix: String,
     /// Where the workspaces are made; absolute: the project's own `workspaces_root` when it has
     /// one, else the user's default (`place`).
@@ -627,6 +628,15 @@ impl Project {
         check(name, file, places).map_err(refuse)
     }
 
+    /// The branch of a workspace named `name` when none is given: the name alone when the
+    /// project has no branch prefix.
+    pub fn default_branch(&self, name: &str) -> String {
+        match self.branch_prefix.as_str() {
+            "" => name.to_owned(),
+            prefix => format!("{prefix}/{name}"),
+        }
+    }
+
     /// The text of the project's file.
     pub fn to_toml(&self) -> crate::Result<String> {
         let refused = |error: &dyn fmt::Display| {
@@ -663,8 +673,8 @@ fn check(name: &str, mut file: File, places: &Places) -> Result<Project, String>
         ));
     }
     let branch_prefix = match file.branch_prefix {
-        Some(prefix) if prefix.is_empty() || prefix.contains(char::is_whitespace) => {
-            return Err("branch_prefix: must not be empty nor hold spaces".into());
+        Some(prefix) if prefix.contains(char::is_whitespace) => {
+            return Err("branch_prefix: must not hold spaces".into());
         }
         Some(prefix) => prefix,
         None => slug(name),
@@ -1409,6 +1419,27 @@ mod tests {
         let project = Project::parse("My_App.2", MINIMAL, Path::new(DATA)).unwrap();
 
         assert_eq!(project.branch_prefix, "my-app-2");
+    }
+
+    #[test]
+    fn an_empty_branch_prefix_is_accepted_and_kept_in_the_file() {
+        let project = parse(&format!("branch_prefix = \"\"\n{MINIMAL}")).unwrap();
+
+        assert_eq!(project.branch_prefix, "");
+        assert_eq!(project.default_branch("login"), "login");
+        assert!(project.to_toml().unwrap().contains("branch_prefix = \"\""));
+    }
+
+    #[test]
+    fn a_branch_prefix_with_a_space_is_still_refused() {
+        let error = parse(&format!("branch_prefix = \"my app\"\n{MINIMAL}")).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("branch_prefix: must not hold spaces"),
+            "{error}"
+        );
     }
 
     #[test]
