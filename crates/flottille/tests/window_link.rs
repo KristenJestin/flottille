@@ -103,7 +103,20 @@ fn until(
         if check(cx) {
             return;
         }
-        assert!(Instant::now() < deadline, "{what} never happened");
+        if Instant::now() >= deadline {
+            let paths: Vec<String> = cx.update(|window, _| {
+                window
+                    .elements()
+                    .into_iter()
+                    .map(|e| format!("{:?} {:?}", e.path().last(), e.label()))
+                    .filter(|e| e.contains("toast"))
+                    .collect()
+            });
+            panic!(
+                "{what} never happened\nlabels: {:?}\ntoasts: {paths:?}",
+                every_label(cx)
+            );
+        }
         std::thread::sleep(Duration::from_millis(25));
     }
 }
