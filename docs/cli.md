@@ -347,7 +347,7 @@ A workspace is one git worktree per repository, on one branch, prepared by the p
 
 Fetches the base of each repository, makes the worktrees, then goes on with the setup in the
 background. `--repositories a,b` takes some repositories only, `--branch <branch>` names the
-branch (`<branch prefix>/<name>` otherwise), `--base <repository>=<branch>` (once per repository)
+branch (`<branch prefix>/<name>` otherwise, the name alone when the prefix is empty), `--base <repository>=<branch>` (once per repository)
 starts a repository from that branch in place of its base rule, `--offline` fetches nothing,
 `--ticket <ticket>`
 links it to a ticket (`#123`, `123` or a Jira key such as `ABC-123`, [`tickets.md`](tickets.md)).
