@@ -317,18 +317,18 @@ const SERVED: [Definition; 28] = [
         name: "forge",
         title: "Pull requests",
         description: "Pull requests and CI of the project's repositories, through the user's \
-            own gh or bkt (no forge sign-in here: never run them). list: by state (open by \
-            default) and branch. show: a workspace's branch's (yours; in main, name \
-            it), or number's, with checks (the log's end of each failed job), review and comment \
-            counts; detail full adds texts. Writes, judged, answered at once, the result maybe \
-            later: create (reviewers, labels, delete_branch_on_merge), merge (method, \
-            squash by default; refused with no check, while checks fail or a review asks for \
-            changes unless waive gives the user's words; delete_branch) and checks \
-            act on a workspace's branch; edit (title, body, draft, reviewers_add/remove, \
-            labels_add/remove, base), comment, close, reopen on number. subscribe/unsubscribe: \
-            a pull request's next events wake you once. CI: pipelines lists what can be run; run \
-            starts one by name (custom: <name>) with its variables; runs, run_view, run_logs \
-            read. {\"action\": \"create\", \"title\": \"fix\"}",
+            own gh or bkt (no forge sign-in here: never run them). list: by state and branch, \
+            as last read. show: a workspace's branch's (yours; in main, name it), or number's, \
+            with checks (the log's end of each failed job), review and comment counts; detail \
+            full: texts. Writes, judged, answered at once, the result maybe later: create \
+            (reviewers, labels, delete_branch_on_merge), merge (squash by default; refused with \
+            no check, while checks fail or a review asks for changes unless waive gives the \
+            user's words) and checks act on a workspace's branch; edit (title, body, draft, \
+            reviewers, labels, base), comment, close (comment first), reopen on number. \
+            subscribe: its next events wake you once; unsubscribe. CI: pipelines lists what can \
+            be run; run starts one by name (custom: <name>) with its variables; runs, run_view, \
+            run_logs read; run, stop, step judged. {\"action\": \"create\", \"repository\": \
+            \"api\", \"title\": \"fix\", \"body\": \"...\"}",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -2912,7 +2912,7 @@ mod tests {
     fn the_texts_cut_to_fit_the_old_cap_are_whole_again() {
         // What #224, #225, #233, #255 and #259 took out of other tools to stay under a number
         // nobody chose (#264): what is still true is said again.
-        let whole: [(&str, Option<&str>, &str); 25] = [
+        let whole: [(&str, Option<&str>, &str); 29] = [
             ("tasks", None, "(tests, lint, servers…)"),
             (
                 "run_status",
@@ -2931,6 +2931,14 @@ mod tests {
             ),
             ("forge", None, "no forge sign-in here: never run them"),
             ("forge", None, "the log's end of each failed job"),
+            ("forge", None, "by state and branch, as last read"),
+            ("forge", None, "close (comment first), reopen on number"),
+            ("forge", None, "run, stop, step judged"),
+            (
+                "forge",
+                None,
+                "{\"action\": \"create\", \"repository\": \"api\", \"title\": \"fix\", \"body\": \"...\"}",
+            ),
             (
                 "forge",
                 None,
