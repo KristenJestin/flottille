@@ -61,7 +61,8 @@
 //! - `turns`: a prompt plays the first turn whose `when` is in its text; a prompt matching none is
 //!   answered `ok`. `stop` is the stop reason (`end_turn` by default). A turn with `"times": n`
 //!   is played n times at most, by every process of the folder together: after that it is skipped,
-//!   and the prompt plays the next turn that matches.
+//!   and the prompt plays the next turn that matches. `answer_usage` is the `usage` its answer
+//!   carries, as OpenCode's does (none by default).
 //!
 //! The steps of a turn, in order:
 //!
@@ -373,7 +374,11 @@ impl Agent {
                     .map(|(_, turn)| turn.clone())
                     .unwrap_or_else(|| json!({"do": [{"say": "ok"}]}));
                 let stop = self.play(&session, &text, &turn, answered, cancelled);
-                Ok(json!({"stopReason": stop}))
+                let mut answer = json!({"stopReason": stop});
+                if let Some(usage) = turn.get("answer_usage") {
+                    answer["usage"] = usage.clone();
+                }
+                Ok(answer)
             }
             method => Err(format!("the fake agent does not know {method}")),
         }
