@@ -1332,7 +1332,9 @@ changes when the judge was not picked.
 `{"after"?, "limit"?}`. What the root agents sent to the user: `{"entries": [...]}`, oldest first.
 An entry is `{"seq", "at", "kind", "agent", "project", "workspace", "text"}`, made from an event of
 a root agent (`docs/events.md`): `report` (`agent.reported`, `text` its report), `question`
-(`agent.asked` to the user, `text` its question) or `failure` (`agent.failed`, `text` its reason).
+(`agent.asked` to the user, `text` its question), `failure` (`agent.failed`, `text` its reason) or
+`paused` (`session.following_paused`: two sessions talk to each other without the user, `text` says
+which and how to resume; `agent` is the followed session).
 A child's own go to its parent and are not here. Without `after`, the last `limit` entries (50 by
 default); with it, the first `limit` entries numbered after it. Nothing is marked read: the inbox
 is a view of the stored events.
