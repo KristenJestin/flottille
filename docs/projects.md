@@ -448,7 +448,8 @@ has no workspace, so its templates fill only `{url}`, in `ready`'s `url` and `li
   same moment share one start, each waiting for it to be ready.
 - **Running outside Flottille.** Before it starts one with a `ready` it can try (an address that
   answers, a command that passes), the daemon tries it once: answered, the service runs outside
-  Flottille (started by hand), nothing is started, and its state says `outside`. A service with no
+  Flottille (started by hand), nothing is started, and its state says `outside`; listing or showing the services tries it
+  again (5 seconds at most), so that one stopped since is shown stopped. A service with no
   `ready`, or one that waits for a line of its own output, is started.
 - **On demand.** Nothing starts with the daemon. A service runs until the user stops it, or an
   agent the user allowed; when the daemon stops, its services stop with it, their process groups
@@ -460,11 +461,27 @@ has no workspace, so its templates fill only `{url}`, in `ready`'s `url` and `li
   `stopped`, `starting`, `ready`, `running` (it says no ready), `outside`, or `failed` with the
   line that says why (the last line of its output, or why it could not start).
 - **Tasks need them.** A task's `needs` names services; running it (an agent's `run`, the user's
-  Run button, a setup step) first starts each it needs that does not run, those they need first,
+  Run button and Run again, a setup step) first starts each it needs that does not run, those they need first,
   and waits until each with a `ready` is ready, 120 seconds at most: a service that is not ready by
   then, or fails, refuses the task, naming the service and the line that says why. An unknown name
   is refused when the project's file is read; a cycle or an unknown name in a service's `needs`
-  when `services.toml` is.
+  when `services.toml` is. A service removed from the file by hand while a task still names it
+  makes that project's file unreadable until the task's `needs` is changed: the daemon refuses
+  such a removal itself (`service.remove`), but not an edit of the file.
+- **Who wrote it, and what an agent's start is judged on.** The daemon keeps, in its store and
+  not in the file, which agent last wrote each service through `services` (and the mode of its
+  tree then); a write of the user (`flottille service`, the window) makes it the user's again,
+  and so is every service written by hand. An agent's `services start` is judged as a run of the
+  service's line in its folder. Every service an agent's call starts first (the needs of a task
+  it runs, of a service it starts) that does not run is held when it is marked
+  `ask_before_running`; one an agent wrote has its lines (`line`, `ready`'s and `url`'s
+  `command`) judged in the caller's mode as a run of them in its folder, as is the `ready` and
+  `url` of a service an agent wrote and starts itself. A service the user wrote is not judged
+  again: the user decided what it runs. The request of a held call says the services it starts
+  first, their lines and folders. What the user starts (the Run button, Run again, `service
+  start`, a setup step) is never judged.
+- **Its folder** is the home when left out: as for any place, the run's output is masked with the
+  `.env` files of its folder, those of the home then.
 
 `flottille service` (`docs/cli.md`), the `service.*` methods (`docs/protocol.md`) and the agents'
 `services` tool (`docs/tools.md`) read, write, start and stop them.
