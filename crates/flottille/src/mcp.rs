@@ -317,18 +317,18 @@ const SERVED: [Definition; 28] = [
         name: "forge",
         title: "Pull requests",
         description: "Pull requests and CI of the project's repositories, through the user's \
-            own gh or bkt (no forge sign-in here: never run them). list: by state (open by \
-            default) and branch, as last read. show: a workspace's branch's (yours; in main, name \
-            it), or number's, with checks (the log's end of each failed job), review and comment \
-            counts; detail full adds texts. Writes, judged, answered at once, the result maybe \
-            later: create, merge (method, squash by default; refused with no check, while checks \
-            fail or a review asks for changes unless waive gives the user's words) and checks \
-            (re-run failed) act on a workspace's branch; comment, edit, close (comment first), \
-            reopen on number. subscribe: a workspace's pull request's next events wake you once, \
-            by a delivery; unsubscribe. CI: pipelines lists what can be run; run starts one by \
-            name (custom: <name>) with its variables; runs, run_view, run_logs read; run, stop, \
-            step judged. {\"action\": \"create\", \"repository\": \"api\", \"title\": \
-            \"fix: ...\", \"body\": \"...\"}",
+            own gh or bkt (no forge sign-in here: never run them). list: by state and branch, \
+            as last read. show: a workspace's branch's (yours; in main, name it), or number's, \
+            with checks (the log's end of each failed job), review and comment counts; detail \
+            full: texts. Writes, judged, answered at once, the result maybe later: create \
+            (reviewers, labels, delete_branch_on_merge), merge (squash by default; refused with \
+            no check, while checks fail or a review asks for changes unless waive gives the \
+            user's words) and checks act on a workspace's branch; edit (title, body, draft, \
+            reviewers, labels, base), comment, close (comment first), reopen on number. \
+            subscribe: its next events wake you once; unsubscribe. CI: pipelines lists what can \
+            be run; run starts one by name (custom: <name>) with its variables; runs, run_view, \
+            run_logs read; run, stop, step judged. {\"action\": \"create\", \"repository\": \
+            \"api\", \"title\": \"fix\", \"body\": \"...\"}",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -344,9 +344,17 @@ const SERVED: [Definition; 28] = [
                 "fresh": {"type": "boolean", "description": "show: read the pull request again; one read in the last 30 s is given again otherwise (detail full always reads)."},
                 "title": {"type": "string", "description": "create, edit: the pull request's title. create needs the branch pushed first (git push -u origin <branch>)."},
                 "body": {"type": "string", "description": "create, edit: description; comment: the comment."},
-                "draft": {"type": "boolean"},
+                "draft": {"type": "boolean", "description": "create: open as a draft. edit: false marks it ready for review, true makes it a draft again."},
+                "reviewers": {"type": "array", "items": {"type": "string"}, "description": "create: reviewers besides the project's."},
+                "labels": {"type": "array", "items": {"type": "string"}, "description": "create: labels (GitHub only)."},
+                "delete_branch_on_merge": {"type": "boolean", "description": "create: delete the source branch when it is merged."},
+                "reviewers_add": {"type": "array", "items": {"type": "string"}, "description": "edit: reviewers to ask."},
+                "reviewers_remove": {"type": "array", "items": {"type": "string"}, "description": "edit: reviewers to take off."},
+                "labels_add": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to put on (GitHub only)."},
+                "labels_remove": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to take off (GitHub only)."},
+                "base": {"type": "string", "description": "edit: the branch it goes into; it must exist on the remote."},
                 "comment": {"type": "string", "description": "close, reopen: posted on the pull request first."},
-                "delete_branch": {"type": "boolean", "description": "close: also delete the pull request's branch, unless a workspace is on it or it comes from a fork."},
+                "delete_branch": {"type": "boolean", "description": "close: also delete the pull request's branch, unless a workspace is on it or it comes from a fork. merge: delete its source branch after the merge; the project's setting when left out; never a branch the workspace resumed."},
                 "waive": {"type": "string", "description": "merge: the user's words letting a blocked pull request be merged; held for them."},
                 "method": {"type": "string", "enum": ["squash", "merge", "rebase"], "description": "merge: squash when left out."},
                 "message": {"type": "string", "description": "merge by squash: the squashed commit's message, its subject on the first line; the forge's own when left out."},
@@ -2914,7 +2922,7 @@ mod tests {
     fn the_texts_cut_to_fit_the_old_cap_are_whole_again() {
         // What #224, #225, #233, #255 and #259 took out of other tools to stay under a number
         // nobody chose (#264): what is still true is said again.
-        let whole: [(&str, Option<&str>, &str); 25] = [
+        let whole: [(&str, Option<&str>, &str); 29] = [
             ("tasks", None, "(tests, lint, servers…)"),
             (
                 "run_status",
@@ -2933,6 +2941,14 @@ mod tests {
             ),
             ("forge", None, "no forge sign-in here: never run them"),
             ("forge", None, "the log's end of each failed job"),
+            ("forge", None, "by state and branch, as last read"),
+            ("forge", None, "close (comment first), reopen on number"),
+            ("forge", None, "run, stop, step judged"),
+            (
+                "forge",
+                None,
+                "{\"action\": \"create\", \"repository\": \"api\", \"title\": \"fix\", \"body\": \"...\"}",
+            ),
             (
                 "forge",
                 None,

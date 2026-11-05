@@ -321,6 +321,48 @@ pub(crate) fn record_body(
     );
 }
 
+/// The wish that the pull request `key` loses its source branch when it is merged, which GitHub
+/// has no flag for (`docs/tools.md`, "The forge"). Not a post of text: the record keeps no text.
+/// It is also kept under the branch's name, which is all a merge's card knows of the pull request
+/// before the forge is asked for its number.
+pub(crate) fn record_delete_branch(
+    daemon: &Daemon,
+    (project, source, repository, key): (&str, &str, &str, &str),
+    branch: &str,
+) {
+    for key in [key, &by_branch(branch)] {
+        record(
+            daemon,
+            post(project, source, repository, key, "delete_branch", None, ""),
+        );
+    }
+}
+
+fn by_branch(branch: &str) -> String {
+    format!("branch:{branch}")
+}
+
+/// Whether that wish was recorded for the pull request `key`.
+pub(crate) fn delete_branch_kept(
+    daemon: &Daemon,
+    (project, source, repository, key): (&str, &str, &str, &str),
+) -> bool {
+    daemon
+        .read(|store| store.posts(project, source, repository, key))
+        .unwrap_or_default()
+        .iter()
+        .any(|post| post.kind == "delete_branch")
+}
+
+/// Whether a pull request of `branch` asked, when it was opened, that the branch be deleted.
+pub(crate) fn delete_branch_asked(
+    daemon: &Daemon,
+    (project, source, repository): (&str, &str, &str),
+    branch: &str,
+) -> bool {
+    delete_branch_kept(daemon, (project, source, repository, &by_branch(branch)))
+}
+
 fn post(
     project: &str,
     source: &str,

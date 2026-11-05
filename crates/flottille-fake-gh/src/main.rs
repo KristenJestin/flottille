@@ -47,6 +47,9 @@
 //! drafts included; `closed`, `merged`, `all`) and of `--head` when given, newest first, at most
 //! `--limit`; each with the fields `--json` asks that it has, `headRefName` being its branch.
 //!
+//! `step_fail` (`{"acme/app": {"ready": "HTTP 502: Bad Gateway"}}`) makes `pr comment`, `edit`,
+//! `close`, `reopen` or `ready` of that repository alone fail that way, as a write that ends
+//! half way does.
 //! `view_fail` (`{"acme/app": {"12": "HTTP 502: Bad Gateway"}}`) makes `pr view` and `issue view`
 //! of that number alone fail that way; `list_delay_ms` makes `pr list` wait that long first,
 //! `listing_delay_ms` a `pr list` of every branch alone (a round's, not a branch's `--head`),
@@ -271,7 +274,11 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             println!("{{}}");
             0
         }
-        ["api", path] if path.starts_with("repos/") && path.matches('/').count() == 4 => {
+        ["api", path]
+            if path.starts_with("repos/")
+                && path.contains("/issues/")
+                && path.matches('/').count() == 4 =>
+        {
             let parts: Vec<&str> = path.split('/').collect();
             let [_, owner, name, "issues", number] = parts[..] else {
                 eprintln!("fake gh: api {path} is not a call Flottille makes");
@@ -321,6 +328,23 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             } else {
                 println!("{events}");
             }
+            0
+        }
+        ["api", path, ..] if path.starts_with("repos/") && path.contains("/branches/") => {
+            // `repos/<owner>/<name>/branches/<branch>`: a branch the script lists, else any when
+            // it lists none.
+            let (repository, branch) = path["repos/".len()..]
+                .split_once("/branches/")
+                .unwrap_or_default();
+            let known = match script["branches"][repository].as_array() {
+                Some(branches) => branches.iter().any(|b| b == branch),
+                None => true,
+            };
+            if !known {
+                eprintln!("gh: Not Found (HTTP 404)");
+                return 1;
+            }
+            println!("{branch}");
             0
         }
         ["api", "user", ..] => {
@@ -462,12 +486,20 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             }
             0
         }
-        ["pr", "comment" | "edit" | "close" | "reopen", number, ..] => {
+        [
+            "pr",
+            "comment" | "edit" | "close" | "reopen" | "ready",
+            number,
+            ..,
+        ] => {
             let Some(repository) = repository else {
                 eprintln!("fake gh: no -R");
                 return 2;
             };
-            if let Some(failure) = script["fail"][repository].as_str() {
+            if let Some(failure) = script["fail"][repository]
+                .as_str()
+                .or(script["step_fail"][repository][words[1]].as_str())
+            {
                 eprintln!("{failure}");
                 return 1;
             }
@@ -498,7 +530,8 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                     .is_none_or(|methods| methods.iter().any(|m| m == method))
             };
             let all = json!({"mergeCommitAllowed": allows("merge"),
-                "rebaseMergeAllowed": allows("rebase"), "squashMergeAllowed": allows("squash")});
+                "rebaseMergeAllowed": allows("rebase"), "squashMergeAllowed": allows("squash"),
+                "deleteBranchOnMerge": script["delete_head_branches"][repository] == true});
             println!("{}", fields_of(&[&all], option("--json"), None)[0]);
             0
         }

@@ -475,3 +475,70 @@ fn an_unlisted_pull_request_is_left_out_of_the_list_but_still_edited() {
     assert_eq!(listed["pull_requests"].as_array().unwrap().len(), 1);
     assert!(edited.status.success());
 }
+
+#[test]
+fn a_draft_is_published_and_a_destination_is_put_through_the_api() {
+    let dir = tempfile::tempdir().unwrap();
+    script(dir.path(), json!({"pulls": {"acme/api": [{"id": 12}]}}));
+    let run = |args: &[&str]| {
+        let mut all = args.to_vec();
+        all.extend(["--context", "cloud", "--workspace", "acme", "--repo", "api"]);
+        fake(dir.path()).args(all).output().unwrap()
+    };
+
+    let published = run(&["pr", "publish", "12", "--undo"]);
+    let reviewers = run(&["pr", "edit", "12", "--reviewer", "alice"]);
+    let moved = fake(dir.path())
+        .args([
+            "api",
+            "/repositories/acme/api/pullrequests/12",
+            "--context",
+            "cloud",
+            "--method",
+            "PUT",
+            "--input",
+            r#"{"destination":{"branch":{"name":"release"}}}"#,
+        ])
+        .output()
+        .unwrap();
+    let nameless = fake(dir.path())
+        .args([
+            "api",
+            "/repositories/acme/api/pullrequests/12",
+            "--context",
+            "cloud",
+            "--method",
+            "PUT",
+            "--input",
+            "{}",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(published.status.success());
+    assert!(reviewers.status.success());
+    assert!(moved.status.success());
+    assert!(!nameless.status.success());
+}
+
+#[test]
+fn step_fail_makes_one_pull_request_write_fail_and_the_others_work() {
+    let dir = tempfile::tempdir().unwrap();
+    script(
+        dir.path(),
+        json!({"pulls": {"acme/api": [{"id": 12, "state": "OPEN"}]},
+            "step_fail": {"acme/api": {"publish": "Error: 502 Bad Gateway"}}}),
+    );
+    let run = |args: &[&str]| {
+        let mut all = args.to_vec();
+        all.extend(["--context", "cloud", "--workspace", "acme", "--repo", "api"]);
+        fake(dir.path()).args(all).output().unwrap()
+    };
+
+    let edited = run(&["pr", "edit", "12", "--reviewer", "carol"]);
+    let published = run(&["pr", "publish", "12"]);
+
+    assert!(edited.status.success());
+    assert!(!published.status.success());
+    assert!(String::from_utf8_lossy(&published.stderr).contains("502"));
+}
