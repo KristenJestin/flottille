@@ -229,16 +229,18 @@ async fn sent(
         .unwrap_or(rest.len());
     let said =
         read(&rest[..end], &PUSH).map_err(|why| format!("its options cannot be read: {why}"))?;
-    let submodules = match said.submodules {
-        Some(said) => Some(said),
-        None => setting(git, &["push.recurseSubmodules"], folder, env).await?,
-    };
-    let recursing = match submodules {
-        Some(value) => ["on-demand", "only"].contains(&value.as_str()),
-        // Set to true, it is on-demand for a push that names no other.
-        None => setting(git, &["--type=bool", "submodule.recurse"], folder, env)
-            .await?
-            .is_some_and(|value| value == "true"),
+    let recursing = |value: &str| ["on-demand", "only"].contains(&value);
+    let recursing = match said.submodules {
+        Some(said) => recursing(&said),
+        // Git takes whichever of the two keys it reads last; submodule.recurse true is on-demand.
+        None => {
+            setting(git, &["push.recurseSubmodules"], folder, env)
+                .await?
+                .is_some_and(|value| recursing(&value))
+                || setting(git, &["--type=bool", "submodule.recurse"], folder, env)
+                    .await?
+                    .is_some_and(|value| value == "true")
+        }
     };
     if recursing {
         return Err(

@@ -924,31 +924,40 @@ fn a_push_that_pushes_submodules_is_refused_while_checks_are_declared() {
     let worktree = worktree(&user);
 
     // The submodules' own commits would go out, which nothing reads.
-    for (key, value, push) in [
+    for (keys, push) in [
         (
-            "",
-            "",
+            &[][..],
             "git push --recurse-submodules=on-demand origin HEAD",
         ),
-        ("", "", "git push --recurse-submodules only origin HEAD"),
+        (&[], "git push --recurse-submodules only origin HEAD"),
         (
-            "",
-            "",
+            &[],
             "git -c push.recurseSubmodules=on-demand push origin HEAD",
         ),
-        ("push.recurseSubmodules", "only", "git push origin HEAD"),
-        ("submodule.recurse", "true", "git push origin HEAD"),
+        (
+            &[("push.recurseSubmodules", "only")],
+            "git push origin HEAD",
+        ),
+        (&[("submodule.recurse", "true")], "git push origin HEAD"),
+        // Git takes whichever of the two it reads last.
+        (
+            &[
+                ("push.recurseSubmodules", "no"),
+                ("submodule.recurse", "true"),
+            ],
+            "git push origin HEAD",
+        ),
     ] {
-        if !key.is_empty() {
+        for (key, value) in keys {
             user.git(&worktree, &["config", key, value]);
         }
 
         let answer = line(&user, &mcp, push);
 
-        assert!(answer.error, "{push} {key}: {}", answer.text);
+        assert!(answer.error, "{push} {keys:?}: {}", answer.text);
         assert!(answer.text.contains("submodule"), "{push}: {}", answer.text);
-        assert_eq!(remote_head(&user, &branch(&user)), None, "{push} {key}");
-        if !key.is_empty() {
+        assert_eq!(remote_head(&user, &branch(&user)), None, "{push} {keys:?}");
+        for (key, _) in keys {
             user.git(&worktree, &["config", "--unset", key]);
         }
     }
