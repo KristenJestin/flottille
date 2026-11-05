@@ -287,6 +287,15 @@ own branches when it has no such remote), or a dependency is on the repository i
 project lacks or closes a cycle (`projects/app.toml: repositories[0].depends_on: cycle web -> api
 -> web; nothing was saved`).
 
+#### `project.set_message_checks`
+
+`{"name", "checks"}`. Writes the project's message checks (`docs/projects.md`, "Message checks"),
+every one in order, in its file where they stand: `message_checks`, removed when `checks` is empty
+(a blank line is left out). Answers `{"name", "message_checks"}`. `refused`, nothing written, when a
+line cannot be split without a shell or does not name `{message}` (`the check `lint x` cannot be
+used: must name {message}, the file that holds the message it checks; nothing was saved`). It is the
+user's alone: no tool of an agent writes the checks, which Flottille runs outside the gate.
+
 #### `project.ticket`
 
 `{"project", "ticket"}`. Reads a ticket of the project's tracker before any workspace has it, for

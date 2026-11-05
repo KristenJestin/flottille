@@ -165,6 +165,8 @@ path = "docs/STYLE.md"                # a path of the project folder; none: a te
 description = "Open the pull requests"
 instructions = "Push the branch, then open one pull request per repository."
 
+message_checks = ["pnpm commitlint --edit {message}"]   # run on an agent's messages (below); none by default
+
 [pull_requests]                       # how its pull requests are opened (docs/commands.md)
 title = "type(TICKET): subject"       # the title's format, told to the agent that writes it
 reviewers = ["alice", "bob"]          # asked to review each pull request Flottille opens
@@ -291,6 +293,42 @@ of its agents, and has its own there as well). An agent reads the rules the agen
 `project {action: "rules"}` and proposes a change with `set_rules {text}`, a base call that only
 the user allows, since it rewrites the instructions of every agent created after it
 (`docs/tools.md`, "The project").
+
+## Message checks
+
+`message_checks` lists command lines the user writes, each with `{message}` standing for a file
+that holds a message, for example `pnpm commitlint --edit {message}`. None by default. They are
+set in the file or in the project's Settings, section Checks (`project.set_message_checks`,
+`docs/protocol.md`); an agent never sets them.
+
+They are the user's configuration, never the repository's. Flottille runs no git hook for an
+agent (`core.hooksPath=/dev/null`, `docs/tools.md`, "Tasks and runs"): a hook is a file the agent
+can write, and would run outside the gate's sight. A repository's own checks on its messages (a
+`commit-msg` hook running a linter) are only words of its rules to an agent; declared here, they
+run.
+
+- **When**: before an agent's `git commit` (a line of `run`, or a task, at any of its layers:
+  `env git commit …`, `sh -c "git commit …"`), each check runs on the commit's message, taken from
+  its `-m` (several are paragraphs, as git joins them) or its `-F` file. Flottille makes no commit
+  of its own for an agent. A commit whose message cannot be known before it is made is refused
+  while checks are declared, saying why and to give it with `-m` or `-F`: an editor writes it
+  (no message, `-e`, `--edit`), git takes it from another commit (`-C`, `-c`, `--amend
+  --no-edit`), or writes it (`--fixup`, `--squash`), or it comes from the standard input (`-F -`).
+  `forge create` checks the pull request's title, and `forge merge` its squash `message`, the same
+  way, before anything is written to the forge (`docs/tools.md`, "The forge").
+- **How**: each line is split without a shell as a run's line is (`{message}` replaced in its
+  words by the file's path), and run by the daemon, not as a call of the agent, in the folder of
+  the repository the commit or the pull request is in, with the environment of a run of the place
+  (no forge token, no push, no hook). The file is written in Flottille's state folder and removed
+  once the checks ran. They run in order; the first that fails stops the others.
+- **A check that fails** refuses the commit (nothing is committed), the pull request (nothing is
+  written to the forge) or the merge (nothing is merged); the agent is told which check failed,
+  how it ended and the end of its output (its last 1,200 characters, ANSI colours removed,
+  masked as a run's output is): `refused: the message check `pnpm commitlint --edit {message}`
+  refused the commit message (it exited with code 1); nothing was committed: change it and try
+  again. Its output: …`.
+- **A check that cannot run** never counts as passed: a program that is not found, or a check
+  that takes longer than 60 s (its process group is then stopped), refuses with that reason.
 
 ## Tasks
 

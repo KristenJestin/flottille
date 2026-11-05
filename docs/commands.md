@@ -152,7 +152,9 @@ act on a pull request by its number, and are in `docs/tools.md`:
 - `merge`: the open pull request of the workspace's branch from the repository itself
   (not from a fork, which can have a branch of the same name) into its base, by `method`:
   `squash` (the default), `merge` or `rebase`, `gh pr merge <n> -R … --squash` (`--merge`,
-  `--rebase`); another method is refused by the gate, and so is a `method` on another action. None
+  `--rebase`); another method is refused by the gate, and so is a `method` on another action. A
+  squash takes `message`, the squashed commit's message (`--subject` its first line, `--body` the
+  rest), refused with another method; left out, the forge writes its own. None
   open is refused. So is one no check ran on (`refused: the pull request #n of … is not merged: no
   check ran on this pull request…`), one whose checks were all skipped or neutral (`… all its
   checks were skipped (build), none passed…`), and one `gh` or `bkt` answers in a shape that
