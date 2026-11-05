@@ -9,7 +9,9 @@ use flottille_core::declared::RepositoryForge;
 use flottille_core::detect;
 use flottille_core::paths::Paths;
 use flottille_core::project::{Project, slug, valid_name};
-use flottille_core::protocol::{ProjectFolder, ProjectName, ProjectRepository, ProjectSettings};
+use flottille_core::protocol::{
+    MessageChecks, ProjectFolder, ProjectName, ProjectRepository, ProjectSettings,
+};
 use flottille_core::registry::Registry;
 use flottille_core::{Error, Result};
 use serde_json::{Value, json};
@@ -267,6 +269,7 @@ async fn settings_of(project: &Project) -> Value {
         "folder": project.folder,
         "repositories": repositories,
         "tracker": project.tracker,
+        "message_checks": project.message_checks,
         "branch_prefix": project.branch_prefix,
         "obsolete": project.obsolete,
     })
@@ -496,6 +499,38 @@ pub async fn set_settings(
         _ => failure,
     })?;
     Ok(settings_of(&saved).await)
+}
+
+/// `project.set_message_checks`: the project's message checks, the user's alone (an agent's
+/// `project` tool never writes them), each line refused with its reason when it cannot be run.
+pub fn set_message_checks(daemon: &Daemon, params: Value) -> std::result::Result<Value, Failure> {
+    let asked: MessageChecks = serde_json::from_value(params)?;
+    let checks: Vec<String> = asked
+        .checks
+        .iter()
+        .map(|line| line.trim().to_owned())
+        .filter(|line| !line.is_empty())
+        .collect();
+    for line in &checks {
+        flottille_core::project::check_message_check(line).map_err(|why| {
+            Failure::refused(format!(
+                "the check `{line}` cannot be used: {why}; nothing was saved"
+            ))
+        })?;
+    }
+    let saved = rewrite(daemon, &asked.name, |_, document| {
+        match checks.is_empty() {
+            true => {
+                document.remove("message_checks");
+            }
+            false => {
+                document["message_checks"] =
+                    toml_edit::value(checks.iter().collect::<toml_edit::Array>());
+            }
+        }
+        Ok(())
+    })?;
+    Ok(json!({"name": saved.name, "message_checks": saved.message_checks}))
 }
 
 /// `project.repositories`: each repository of the project as its checkout stands (found or not,
