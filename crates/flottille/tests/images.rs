@@ -535,8 +535,7 @@ fn a_big_image_is_scaled_down_before_it_is_stored() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|e| e["name"] == "agent.prompted")
-        .last()
+        .rfind(|e| e["name"] == "agent.prompted")
         .cloned()
         .unwrap();
     let names: Vec<&str> = prompted["data"]["images"]
@@ -545,10 +544,16 @@ fn a_big_image_is_scaled_down_before_it_is_stored() {
         .iter()
         .map(|n| n.as_str().unwrap())
         .collect();
-    let stored = |name: &str| std::fs::read(user.path(&format!("data/flottille/images/{id}/{name}"))).unwrap();
+    let stored = |name: &str| {
+        std::fs::read(user.path(&format!("data/flottille/images/{id}/{name}"))).unwrap()
+    };
     let (first, second) = (stored(names[0]), stored(names[1]));
     assert!(names[0].ends_with(".png"), "it stays a PNG: {}", names[0]);
-    assert_eq!(dimensions_of(&first), (2000, 1000), "long side 2000, same proportions");
+    assert_eq!(
+        dimensions_of(&first),
+        (2000, 1000),
+        "long side 2000, same proportions"
+    );
     assert!(first.len() < big.len());
     assert_eq!(second, small, "one that fits is stored as it came");
 }

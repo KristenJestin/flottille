@@ -411,6 +411,8 @@ fn a_pasted_image_is_a_thumbnail_with_a_remove_button_and_goes_as_an_image_block
 
     paste(clipboard_png(), cx);
     assert_eq!(attachments(&reply, cx), 1);
+    // It unfolds into the composer first: its button is there to be clicked once it has.
+    settle(cx);
     cx.update(|window, _| {
         assert!(window.try_find("attachment-0").is_some(), "its thumbnail");
         assert!(
@@ -491,9 +493,7 @@ fn an_image_sent_alone_is_a_message(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn an_image_for_an_agent_that_takes_none_is_refused_in_one_sentence_and_the_text_stays(
-    cx: &mut TestAppContext,
-) {
+fn an_image_for_an_agent_that_takes_none_is_a_toast_and_the_text_stays(cx: &mut TestAppContext) {
     let user = user(false);
     project(&user, "atlas");
     let lead = start(&user, "atlas", "hello");
@@ -509,11 +509,14 @@ fn an_image_for_an_agent_that_takes_none_is_refused_in_one_sentence_and_the_text
     paste(clipboard_png(), cx);
 
     assert_eq!(attachments(&reply, cx), 0, "nothing is attached");
-    let said = cx.update(|window, _| window.find("reply-error").label().map(str::to_owned));
     assert_eq!(
-        said.as_deref(),
-        Some("This agent takes no images, so the picture was not attached.")
+        toasts(&shell, cx),
+        [(
+            "The picture was not attached".to_owned(),
+            "This agent takes no images.".to_owned()
+        )]
     );
+    cx.update(|window, _| assert!(window.try_find("reply-error").is_none(), "no line"));
     assert_eq!(
         reply.read_with(cx, |r, cx| r.field().read(cx).value().to_string()),
         "keep this text"
@@ -525,7 +528,7 @@ fn an_image_dropped_from_a_file_works_like_a_pasted_one(cx: &mut TestAppContext)
     let user = user(true);
     project(&user, "atlas");
     let lead = start(&user, "atlas", "hello");
-    let (_shell, reply, cx) = open_session(&user, &lead, cx);
+    let (shell, reply, cx) = open_session(&user, &lead, cx);
     let file = user.path("shot.png");
     std::fs::write(&file, png()).unwrap();
 
@@ -541,9 +544,9 @@ fn an_image_dropped_from_a_file_works_like_a_pasted_one(cx: &mut TestAppContext)
     frames(cx);
     assert_eq!(attachments(&reply, cx), 1);
     assert!(
-        reply
-            .read_with(cx, |r, _| r.error().map(str::to_owned))
-            .is_some_and(|e| e.contains("png, jpeg, gif and webp"))
+        toasts(&shell, cx)
+            .iter()
+            .any(|(_, why)| why.contains("png, jpeg, gif and webp"))
     );
 }
 
@@ -677,5 +680,286 @@ fn a_pasted_picture_is_drawn_inside_its_bubble_above_the_text(cx: &mut TestAppCo
             image.bottom() <= text.top(),
             "the picture sits above the text: {image:?} over {text:?}"
         );
+    });
+}
+
+// 5. What the composer says, and what moves in it (#396).
+
+/// The titles and second lines of the toasts shown, oldest first.
+fn toasts(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<(String, String)> {
+    shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .map(|toast| {
+                (
+                    toast.title().to_owned(),
+                    toast.second_line().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect()
+    })
+}
+
+/// The height of the whole composer, as drawn now.
+fn composer_height(cx: &mut VisualTestContext) -> f32 {
+    cx.update(|window, _| f32::from(window.find("reply").bounds().size.height))
+}
+
+fn attach_png(reply: &Entity<Reply>, cx: &mut VisualTestContext) {
+    reply.update_in(cx, |reply, _, cx| {
+        reply.attach(Image::from_bytes(ImageFormat::Png, png()), cx)
+    });
+}
+
+#[gpui_kit::test]
+fn a_message_carries_up_to_n_images(cx: &mut TestAppContext) {
+    let user = user(true);
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", "hello");
+    let (shell, reply, cx) = open_session(&user, &lead, cx);
+
+    for _ in 0..20 {
+        attach_png(&reply, cx);
+    }
+    frames(cx);
+    assert_eq!(attachments(&reply, cx), 20, "the cap is taken");
+    assert_eq!(toasts(&shell, cx), []);
+
+    // And it all goes to the daemon in one message.
+    reply.update_in(cx, |reply, window, cx| reply.send(window, cx));
+    until(&shell, cx, "the daemon took the twenty", |cx| {
+        reply.read_with(cx, |r, _| !r.is_sending() && r.attachments().is_empty())
+    });
+    eventually("the agent got twenty images", || {
+        user.received_requests("session/prompt")
+            .get(1)
+            .is_some_and(|p| {
+                p["params"]["prompt"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|b| b["type"] == "image")
+                    .count()
+                    == 20
+            })
+    });
+}
+
+#[gpui_kit::test]
+fn too_many_images_is_a_toast_and_the_composer_keeps_its_height(cx: &mut TestAppContext) {
+    let user = user(true);
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", "hello");
+    let (shell, reply, cx) = open_session(&user, &lead, cx);
+    for _ in 0..20 {
+        attach_png(&reply, cx);
+    }
+    settle(cx);
+    let before = composer_height(cx);
+
+    attach_png(&reply, cx);
+    frames(cx);
+    assert_eq!(
+        composer_height(cx),
+        before,
+        "not a pixel taller on the first frame"
+    );
+    settle(cx);
+
+    assert_eq!(attachments(&reply, cx), 20);
+    assert_eq!(
+        toasts(&shell, cx),
+        [(
+            "The picture was not attached".to_owned(),
+            "A message carries 20 images at most.".to_owned()
+        )]
+    );
+    assert_eq!(composer_height(cx), before, "nor once it has settled");
+    cx.update(|window, _| assert!(window.try_find("reply-error").is_none(), "no line"));
+}
+
+#[gpui_kit::test]
+fn an_image_over_five_mib_is_a_toast_and_the_composer_keeps_its_height(cx: &mut TestAppContext) {
+    let user = user(true);
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", "hello");
+    let (shell, reply, cx) = open_session(&user, &lead, cx);
+    let before = composer_height(cx);
+
+    // Not a picture the window can read, so nothing can make it smaller.
+    let heavy = vec![0u8; 5 * 1024 * 1024 + 1];
+    reply.update_in(cx, |reply, _, cx| {
+        reply.attach(Image::from_bytes(ImageFormat::Png, heavy), cx)
+    });
+    settle(cx);
+
+    assert_eq!(attachments(&reply, cx), 0);
+    assert_eq!(
+        toasts(&shell, cx),
+        [(
+            "The picture was not attached".to_owned(),
+            "An image can be 5 MiB at most.".to_owned()
+        )]
+    );
+    assert_eq!(composer_height(cx), before);
+}
+
+#[gpui_kit::test]
+fn a_file_that_cannot_be_read_is_a_toast_and_the_composer_keeps_its_height(
+    cx: &mut TestAppContext,
+) {
+    let user = user(true);
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", "hello");
+    let (shell, reply, cx) = open_session(&user, &lead, cx);
+    let before = composer_height(cx);
+
+    let gone = user.path("gone.png");
+    reply.update_in(cx, |reply, _, cx| reply.attach_file(&gone, cx));
+    settle(cx);
+
+    assert_eq!(
+        toasts(&shell, cx),
+        [(
+            "The picture was not attached".to_owned(),
+            "That file could not be read.".to_owned()
+        )]
+    );
+    assert_eq!(composer_height(cx), before);
+}
+
+#[gpui_kit::test]
+fn a_refused_send_is_a_toast_and_the_composer_keeps_its_height_and_its_text(
+    cx: &mut TestAppContext,
+) {
+    let user = user(true);
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", "hello");
+    let (shell, reply, cx) = open_session(&user, &lead, cx);
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("keep this text");
+    settle(cx);
+    let before = composer_height(cx);
+
+    cx.update(|window, cx| {
+        reply.update(cx, |r, cx| {
+            r.replied(Some("refused: made-up reason".to_owned()), window, cx)
+        })
+    });
+    settle(cx);
+
+    assert_eq!(
+        toasts(&shell, cx),
+        [(
+            "The message was not sent".to_owned(),
+            "refused: made-up reason".to_owned()
+        )]
+    );
+    assert_eq!(composer_height(cx), before);
+    assert_eq!(
+        reply.read_with(cx, |r, cx| r.field().read(cx).value().to_string()),
+        "keep this text"
+    );
+}
+
+#[gpui_kit::test]
+fn a_refused_interruption_is_a_toast_and_the_composer_keeps_its_height(cx: &mut TestAppContext) {
+    let user = user(true);
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", "hello");
+    let (shell, reply, cx) = open_session(&user, &lead, cx);
+    let before = composer_height(cx);
+
+    reply.update(cx, |r, cx| {
+        r.interrupted(Some("refused: nothing runs".to_owned()), cx)
+    });
+    settle(cx);
+
+    assert_eq!(
+        toasts(&shell, cx),
+        [(
+            "The turn was not interrupted".to_owned(),
+            "refused: nothing runs".to_owned()
+        )]
+    );
+    assert_eq!(composer_height(cx), before);
+}
+
+/// A PNG of `width` x `height` pixels.
+fn png_of(width: u32, height: u32) -> Vec<u8> {
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::RgbImage::from_fn(width, height, |x, y| {
+        image::Rgb([(x / 12) as u8, (y / 12) as u8, ((x + y) / 24) as u8])
+    })
+    .write_to(&mut out, image::ImageFormat::Png)
+    .unwrap();
+    out.into_inner()
+}
+
+#[gpui_kit::test]
+fn a_big_image_is_scaled_down_when_it_is_attached(cx: &mut TestAppContext) {
+    let user = user(true);
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", "hello");
+    let (_shell, reply, cx) = open_session(&user, &lead, cx);
+
+    reply.update_in(cx, |reply, _, cx| {
+        reply.attach(Image::from_bytes(ImageFormat::Png, png_of(3000, 1500)), cx)
+    });
+
+    let (format, bytes) = reply.read_with(cx, |r, _| {
+        (r.attachments()[0].format, r.attachments()[0].bytes.clone())
+    });
+    assert_eq!(format, ImageFormat::Png);
+    let (width, height) = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .unwrap()
+        .into_dimensions()
+        .unwrap();
+    assert_eq!((width, height), (2000, 1000));
+}
+
+#[gpui_kit::test]
+fn an_attached_image_unfolds_and_folds_away(cx: &mut TestAppContext) {
+    let user = user(true);
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", "hello");
+    let (_shell, reply, cx) = open_session(&user, &lead, cx);
+    let bare = composer_height(cx);
+
+    // It unfolds: the composer grows over several frames, not at once.
+    attach_png(&reply, cx);
+    moving(cx);
+    let first = composer_height(cx);
+    settle(cx);
+    let full = composer_height(cx);
+    assert!(
+        full > bare + 40.,
+        "the thumbnail's room: {bare} then {full}"
+    );
+    assert!(
+        first < full,
+        "still unfolding after a frame: {first} of {full}"
+    );
+    cx.update(|window, _| assert!(window.try_find("attachment-0").is_some()));
+
+    // It folds away: still drawn a frame after, gone once it has.
+    cx.update(|window, cx| window.click("attachment-remove-0", cx));
+    moving(cx);
+    let folding = composer_height(cx);
+    assert!(
+        folding > bare && folding <= full,
+        "folding: {bare} < {folding} <= {full}"
+    );
+    assert_eq!(attachments(&reply, cx), 0);
+    settle(cx);
+    assert_eq!(composer_height(cx), bare, "back to the bare composer");
+    cx.update(|window, _| {
+        assert!(
+            window
+                .try_find("reply-attachments")
+                .is_none_or(|a| a.bounds().size.height <= px(1.))
+        )
     });
 }

@@ -22,10 +22,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use flottille_core::images::{MAX_IMAGE_BYTES, MAX_IMAGES};
 use flottille_ui::color::mix;
 use flottille_ui::motion::{HOVER, Motion, PANEL};
 use flottille_ui::{
-    AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Menu, Modal, Palette, Pill,
+    AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Listing, Menu, Modal, Palette, Pill,
     PulsingLabel, Side, Skeleton, StateIcon, Status, Toast, Type, awaiting, changing, enter, fade,
     fold_frame, hoverable, icon, palette, path_line, presence, presence_of, section_label,
     selectable, space, text_region, toast, turning,
@@ -96,13 +97,23 @@ pub const SEND: &str = "Send";
 pub const STOP: &str = "Stop the turn";
 /// The reply field is one line high when empty, and grows with its lines up to this many.
 const REPLY_MAX_ROWS: usize = 10;
-/// What the composer says of a picture it does not attach.
-pub const NO_IMAGES: &str = "This agent takes no images, so the picture was not attached.";
+/// What a toast says of a picture the composer does not attach: its title, and why.
+pub const NOT_ATTACHED: &str = "The picture was not attached";
+pub const NO_IMAGES: &str = "This agent takes no images.";
 const IMAGE_KINDS: &str = "Flottille takes png, jpeg, gif and webp images.";
-const TOO_MANY_IMAGES: &str = "A message carries 4 images at most.";
 const IMAGE_TOO_BIG: &str = "An image can be 5 MiB at most.";
-const MAX_IMAGES: usize = 4;
-const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+const NOT_READ: &str = "That file could not be read.";
+/// What a toast says when the daemon refuses the message, or the interruption.
+pub const NOT_SENT: &str = "The message was not sent";
+pub const NOT_INTERRUPTED: &str = "The turn was not interrupted";
+/// The biggest file read to be attached: a screenshot of a big screen weighs more than a message
+/// may, and is scaled down before its size is judged.
+const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
+
+/// The key of a thumbnail in the composer: the picture itself, which stays alive while it leaves.
+fn thumb_key(image: &Arc<gpui_kit::Image>) -> String {
+    format!("{:x}", Arc::as_ptr(image) as usize)
+}
 
 /// The state an agent of the tree is drawn with, from what the daemon says of it: only a root can
 /// need the user; a child waiting on its parent is waiting, in grey.
@@ -1170,7 +1181,6 @@ impl SessionPage {
             if was_ended.is_some() {
                 // Ended or resumed: what was said before it is over.
                 self.resume_error = None;
-                self.reply.update(cx, |reply, cx| reply.clear_error(cx));
             }
             if !now_ended {
                 self.resuming = false;
@@ -5755,7 +5765,8 @@ pub struct Reply {
     sent_images: Vec<Arc<gpui_kit::Image>>,
     /// Whether the root's agent takes images; `None` until it first started.
     images: Option<bool>,
-    error: Option<SharedString>,
+    /// The thumbnails, which unfold as a picture is attached and fold away as it leaves.
+    thumbs: Listing<Arc<gpui_kit::Image>>,
     renders: usize,
     _subscriptions: Vec<Subscription>,
 }
@@ -5832,7 +5843,7 @@ impl Reply {
             attachments: Vec::new(),
             sent_images: Vec::new(),
             images: None,
-            error: None,
+            thumbs: Listing::default(),
             renders: 0,
             _subscriptions: subscriptions,
         }
@@ -5887,27 +5898,36 @@ impl Reply {
         self.images = images;
     }
 
-    /// Attaches a picture, or says in one sentence why not; the text in the field stays.
+    /// Says in a toast why a picture was not attached: the composer never changes for it.
+    fn not_attached(why: impl Into<SharedString>, cx: &mut Context<Self>) {
+        toast(Toast::failure(NOT_ATTACHED).detail(why), cx);
+    }
+
+    /// Attaches a picture, or says in a toast why not; the text in the field stays. A big one is
+    /// scaled down first, so that its weight is judged as it will be stored.
     pub fn attach(&mut self, image: gpui_kit::Image, cx: &mut Context<Self>) {
         use gpui_kit::ImageFormat::{Gif, Jpeg, Png, Webp};
-        let refused = if self.images == Some(false) {
-            Some(NO_IMAGES)
-        } else if !matches!(image.format, Png | Jpeg | Gif | Webp) {
-            Some(IMAGE_KINDS)
-        } else if image.bytes.len() > MAX_IMAGE_BYTES {
-            Some(IMAGE_TOO_BIG)
-        } else if self.attachments.len() >= MAX_IMAGES {
-            Some(TOO_MANY_IMAGES)
-        } else {
-            None
-        };
-        match refused {
-            Some(why) => self.error = Some(why.into()),
-            None => {
-                self.error = None;
-                self.attachments.push(Arc::new(image));
-            }
+        if self.images == Some(false) {
+            return Self::not_attached(NO_IMAGES, cx);
         }
+        if !matches!(image.format, Png | Jpeg | Gif | Webp) {
+            return Self::not_attached(IMAGE_KINDS, cx);
+        }
+        if self.attachments.len() >= MAX_IMAGES {
+            return Self::not_attached(
+                format!("A message carries {MAX_IMAGES} images at most."),
+                cx,
+            );
+        }
+        let mime = image.format.mime_type();
+        let image = gpui_kit::Image::from_bytes(
+            image.format,
+            flottille_core::images::scaled_down(mime, image.bytes),
+        );
+        if image.bytes.len() > MAX_IMAGE_BYTES {
+            return Self::not_attached(IMAGE_TOO_BIG, cx);
+        }
+        self.attachments.push(Arc::new(image));
         cx.notify();
     }
 
@@ -5924,25 +5944,20 @@ impl Reply {
             Some("jpg" | "jpeg") => Jpeg,
             Some("gif") => Gif,
             Some("webp") => Webp,
-            _ => {
-                self.error = Some(IMAGE_KINDS.into());
-                cx.notify();
-                return;
-            }
+            _ => return Self::not_attached(IMAGE_KINDS, cx),
         };
-        let big = std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_IMAGE_BYTES as u64);
-        match std::fs::read(path) {
-            Ok(_) if big => self.error = Some(IMAGE_TOO_BIG.into()),
-            Ok(bytes) => return self.attach(gpui_kit::Image::from_bytes(format, bytes), cx),
-            Err(_) => self.error = Some("That file could not be read.".into()),
+        if std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_FILE_BYTES) {
+            return Self::not_attached(IMAGE_TOO_BIG, cx);
         }
-        cx.notify();
+        match std::fs::read(path) {
+            Ok(bytes) => self.attach(gpui_kit::Image::from_bytes(format, bytes), cx),
+            Err(_) => Self::not_attached(NOT_READ, cx),
+        }
     }
 
     pub fn detach(&mut self, at: usize, cx: &mut Context<Self>) {
         if at < self.attachments.len() {
             self.attachments.remove(at);
-            self.error = None;
             cx.notify();
         }
     }
@@ -6002,19 +6017,9 @@ impl Reply {
         .detach();
     }
 
-    pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
-    }
-
     /// The root runs a turn.
     pub fn is_running(&self) -> bool {
         self.running
-    }
-
-    fn clear_error(&mut self, cx: &mut Context<Self>) {
-        if self.error.take().is_some() {
-            cx.notify();
-        }
     }
 
     fn set_running(&mut self, running: bool, cx: &mut Context<Self>) {
@@ -6032,7 +6037,6 @@ impl Reply {
             return;
         }
         self.interrupting = true;
-        self.error = None;
         let command = Command::Interrupt {
             session: self.session.clone(),
         };
@@ -6045,7 +6049,9 @@ impl Reply {
     /// What the daemon answered to an interruption.
     pub fn interrupted(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
         self.interrupting = false;
-        self.error = refused.map(Into::into);
+        if let Some(why) = refused {
+            toast(Toast::failure(NOT_INTERRUPTED).detail(why), cx);
+        }
         cx.notify();
     }
 
@@ -6241,7 +6247,6 @@ impl Reply {
         self.sending = true;
         self.sent = Some(typed);
         self.sent_images = self.attachments.clone();
-        self.error = None;
         let images = self
             .attachments
             .iter()
@@ -6302,7 +6307,6 @@ impl Reply {
         let sent = self.sent.take();
         match refused {
             None => {
-                self.error = None;
                 let sent_images = std::mem::take(&mut self.sent_images);
                 self.attachments
                     .retain(|image| !sent_images.iter().any(|sent| Arc::ptr_eq(sent, image)));
@@ -6316,7 +6320,7 @@ impl Reply {
                     self.typed(&rest, cx);
                 }
             }
-            Some(why) => self.error = Some(why.into()),
+            Some(why) => toast(Toast::failure(NOT_SENT).detail(why), cx),
         }
         cx.notify();
     }
@@ -6335,52 +6339,110 @@ impl Render for Reply {
             window,
             cx,
         );
-        let thumbs: Vec<AnyElement> = self
-            .attachments
-            .iter()
-            .enumerate()
-            .map(|(at, image)| {
-                div()
-                    .id(ElementId::Name(format!("attachment-{at}").into()))
+        // A picture unfolds into the strip as it is attached and folds away as it leaves: the
+        // gone ones stay in the listing until they have.
+        let now = cx.background_executor().now();
+        self.thumbs.sync(
+            self.attachments.iter().map(|i| (thumb_key(i), i.clone())),
+            now,
+            cx.reduce_motion(),
+        );
+        let listed: Vec<(String, Arc<gpui_kit::Image>, bool)> = self
+            .thumbs
+            .rows()
+            .map(|row| {
+                (
+                    row.key.to_owned(),
+                    row.value.clone(),
+                    row.placement.is_gone(),
+                )
+            })
+            .collect();
+        let mut live = 0;
+        let thumbs: Vec<AnyElement> = listed
+            .into_iter()
+            .map(|(key, image, gone)| {
+                let at = live;
+                let id = match gone {
+                    true => ElementId::Name(format!("attachment-leaving-{key}").into()),
+                    false => ElementId::Name(format!("attachment-{at}").into()),
+                };
+                live += usize::from(!gone);
+                let shown = fade(
+                    ElementId::Name(format!("attachment-shown-{key}").into()),
+                    !gone,
+                    PANEL,
+                    window,
+                    cx,
+                );
+                let thumb = div()
+                    .id(id)
                     .relative()
                     .flex_none()
                     .size(px(56.))
                     .child(
-                        gpui_kit::img(image.clone())
+                        gpui_kit::img(image)
                             .size_full()
                             .rounded(px(8.))
                             .object_fit(gpui_kit::ObjectFit::Cover),
                     )
-                    .child(hoverable(
-                        div()
-                            .id(ElementId::Name(format!("attachment-remove-{at}").into()))
-                            .absolute()
-                            .top(px(-5.))
-                            .right(px(-5.))
-                            .size(px(18.))
-                            .rounded_full()
-                            .bg(p.card2)
-                            .border_1()
-                            .border_color(p.line2)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .aria_label("Remove the picture")
-                            .on_click(cx.listener(move |this, _, _, cx| this.detach(at, cx))),
-                        // An icon does not inherit the ink: it is drawn here, in the ink this frame.
-                        move |d, t| {
-                            d.bg(mix(p.card2, p.hover, t)).child(
-                                icon(Icon::Close)
-                                    .size(px(12.))
-                                    .text_color(mix(p.mute, p.text, t)),
-                            )
-                        },
-                    ))
-                    .test_support()
-                    .into_any_element()
+                    .when(!gone, |d| {
+                        d.child(hoverable(
+                            div()
+                                .id(ElementId::Name(format!("attachment-remove-{at}").into()))
+                                .absolute()
+                                .top(px(-5.))
+                                .right(px(-5.))
+                                .size(px(18.))
+                                .rounded_full()
+                                .bg(p.card2)
+                                .border_1()
+                                .border_color(p.line2)
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .cursor_pointer()
+                                .aria_label("Remove the picture")
+                                .on_click(cx.listener(move |this, _, _, cx| this.detach(at, cx))),
+                            // An icon does not inherit the ink: it is drawn here, in the ink this frame.
+                            move |d, t| {
+                                d.bg(mix(p.card2, p.hover, t)).child(
+                                    icon(Icon::Close)
+                                        .size(px(12.))
+                                        .text_color(mix(p.mute, p.text, t)),
+                                )
+                            },
+                        ))
+                    })
+                    .test_support();
+                // The slot is as wide as the picture and the gap after it, narrowing as it leaves.
+                let slot = div()
+                    .flex_none()
+                    .w(px(68. * shown))
+                    .pr(space::MD)
+                    .pb(space::SM)
+                    .opacity(shown)
+                    .when(shown < 1.0, |d| d.overflow_hidden())
+                    .child(thumb);
+                enter(
+                    ElementId::Name(format!("attachment-enter-{key}").into()),
+                    0,
+                    slot,
+                )
+                .into_any_element()
             })
             .collect();
+        let strip = presence(
+            "reply-attachments",
+            !self.attachments.is_empty(),
+            div()
+                .flex()
+                .flex_wrap()
+                .px(space::SM)
+                .pt(space::SM)
+                .pb(space::SM)
+                .children(thumbs),
+        );
         let slash = self.render_slash(cx);
         div()
             .id("reply")
@@ -6434,19 +6496,7 @@ impl Render for Reply {
             .shadow_lg()
             .ui_text()
             .text_color(p.text)
-            .when(!thumbs.is_empty(), |d| {
-                d.child(
-                    div()
-                        .id("reply-attachments")
-                        .flex()
-                        .gap(space::MD)
-                        .px(space::SM)
-                        .pt(space::SM)
-                        .pb(space::MD)
-                        .children(thumbs)
-                        .test_support(),
-                )
-            })
+            .child(strip)
             .child(
                 div()
                     .id("reply-field")
@@ -6526,22 +6576,6 @@ impl Render for Reply {
                             .test_support(),
                     ),
             )
-            .child(presence_of(
-                "reply-error-line",
-                self.error.clone(),
-                move |error| {
-                    div()
-                        .id("reply-error")
-                        .aria_label(error.clone())
-                        .px(space::MD)
-                        .pt(space::SM)
-                        .text_size(px(12.5))
-                        .text_color(p.fail)
-                        .child(error)
-                        .test_support()
-                        .into_any_element()
-                },
-            ))
             .test_support()
     }
 }
