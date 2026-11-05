@@ -76,6 +76,29 @@ pub struct Live {
     runs: Mutex<HashMap<String, Arc<Going>>>,
     /// The runs a `run.restart` is working on.
     restarting: Mutex<HashSet<String>>,
+    /// One start at a time of each task that keeps running, by its owner (an agent, or none for
+    /// the user), its project and its name: a second waits while the services it needs start,
+    /// then joins the first.
+    serving: Mutex<HashMap<Serving, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+/// A task that keeps running, by its owner, its project and its name.
+type Serving = (Option<String>, String, String);
+
+impl Live {
+    fn serving(
+        &self,
+        agent: Option<&str>,
+        project: &str,
+        name: &str,
+    ) -> Arc<tokio::sync::Mutex<()>> {
+        let key = (
+            agent.map(str::to_owned),
+            project.to_owned(),
+            name.to_owned(),
+        );
+        self.serving.lock().unwrap().entry(key).or_default().clone()
+    }
 }
 
 /// A run going on.
@@ -107,6 +130,8 @@ struct Going {
     unseen: Mutex<Vec<u8>>,
     /// The agent asked to be told when it is ready (`notify`).
     notify: AtomicBool,
+    /// Told when it is ready, for what waits on it (a service a task needs).
+    readied: Notify,
 }
 
 /// How a run is told ready: its probe, and whether its agent asked to be told.
@@ -192,10 +217,12 @@ struct Request {
     /// When it is ready and where it answers, as its task says.
     ready: Option<Box<Ready>>,
     url: Option<Box<TaskUrl>>,
+    /// The services its task needs.
+    needs: Vec<String>,
 }
 
 fn request(daemon: &Daemon, place: &Place, args: RunArguments) -> Result<Request, Outcome> {
-    let (name, line, repository, serve, ready, url) = match (args.task, args.line) {
+    let (name, line, repository, serve, ready, url, needs) = match (args.task, args.line) {
         (Some(name), None) => {
             let project = match projects::load_project(daemon, &place.project) {
                 Ok(project) => project,
@@ -215,9 +242,10 @@ fn request(daemon: &Daemon, place: &Place, args: RunArguments) -> Result<Request
                 task.serve,
                 task.ready.clone(),
                 task.url.clone(),
+                task.needs.to_vec(),
             )
         }
-        (None, Some(line)) => (None, line, args.repository, false, None, None),
+        (None, Some(line)) => (None, line, args.repository, false, None, None, Vec::new()),
         _ => {
             return Err(Outcome::Refused(
                 "refused: give exactly one of task (one of the project's) and line".into(),
@@ -239,6 +267,7 @@ fn request(daemon: &Daemon, place: &Place, args: RunArguments) -> Result<Request
         folder,
         ready,
         url,
+        needs,
     })
 }
 
@@ -319,13 +348,24 @@ pub fn reaches(
         })
 }
 
+/// The services a call to `run` would start first: those its task needs; none for a call that does
+/// not fit.
+pub fn needs_of(daemon: &Daemon, place: &Place, args: &Value) -> Vec<String> {
+    serde_json::from_value::<RunArguments>(args.clone())
+        .ok()
+        .and_then(|args| request(daemon, place, args).ok())
+        .map_or_else(Vec::new, |request| request.needs)
+}
+
 /// `approved` when the user or the judge let the call through: it may then run outside the place.
+/// `judged`, the services the gate judged it to start first (`services::start_needed`).
 pub async fn run(
     daemon: &Arc<Daemon>,
     agent: &str,
     place: &Place,
     args: Value,
     approved: bool,
+    judged: &[String],
     cancelled: CancellationToken,
 ) -> Outcome {
     let args: RunArguments = match arguments("run", args) {
@@ -358,6 +398,7 @@ pub async fn run(
         folder,
         ready,
         url,
+        needs,
     } = match request(daemon, place, args) {
         Ok(request) => request,
         Err(refusal) => return refusal,
@@ -374,6 +415,14 @@ pub async fn run(
         return Outcome::Refused(refusal);
     }
     // A server already running for the agent is joined, not started twice.
+    let serving = match (serve, name.as_deref()) {
+        (true, Some(task)) => Some(daemon.mcp.runs.serving(Some(agent), &place.project, task)),
+        _ => None,
+    };
+    let _serving = match &serving {
+        Some(lock) => Some(lock.lock().await),
+        None => None,
+    };
     if serve
         && let Some(going) = daemon
             .mcp
@@ -408,6 +457,25 @@ pub async fn run(
             return Outcome::Failed("the call was stopped before it ended".into());
         }
     }
+    let needed = tokio::select! {
+        needed = crate::services::start_needed(daemon, &needs, Some(judged)) => needed,
+        () = cancelled.cancelled() => {
+            return Outcome::Failed("the call was stopped before it ended".into());
+        }
+    };
+    let started = match needed {
+        Ok(started) => started,
+        Err(why) => {
+            return Outcome::Refused(format!(
+                "refused: task {} cannot run: {why}",
+                name.as_deref().unwrap_or_default()
+            ));
+        }
+    };
+    let services_said = match started.is_empty() {
+        true => String::new(),
+        false => format!("started the services it needs: {}\n", started.join(", ")),
+    };
     // Only a push the gate read, and that the user or the judge let through, goes out.
     let lift = approved && gate::is_push(&words);
     let env = match environment(daemon, place, &repository, lift) {
@@ -480,7 +548,8 @@ pub async fn run(
     crate::mcp::started_run(&id);
     if serve {
         detach(daemon, &id);
-        return Outcome::Done(describe(daemon, &id, None, None, true, false));
+        let described = describe(daemon, &id, None, None, true, false);
+        return Outcome::Done(format!("{services_said}{described}"));
     }
     // Held now: once ended, the run is no longer among those going on.
     let going = daemon.mcp.runs.runs.lock().unwrap().get(&id).cloned();
@@ -494,13 +563,15 @@ pub async fn run(
         }
     }
     let by_user = going.is_some_and(|going| going.stopped_by_user.load(Ordering::SeqCst));
-    Outcome::Done(describe(daemon, &id, None, None, true, by_user))
+    let described = describe(daemon, &id, None, None, true, by_user);
+    Outcome::Done(format!("{services_said}{described}"))
 }
 
 /// A task the user runs from the window, in the project folder (`main`): a run of no agent's,
 /// which the gate does not see, since the user asked for it, in the environment an agent's run
-/// gets. It is not waited for: the window follows it in the project's list of commands. A task
-/// that keeps running and already runs for the user is joined, not started twice.
+/// gets. The services it needs are started and waited for first (up to `services::READY_LIMIT`);
+/// the run itself is not waited for: the window follows it in the project's list of commands. A
+/// task that keeps running and already runs for the user is joined, not started twice.
 pub async fn run_for_user(
     daemon: &Arc<Daemon>,
     project: &flottille_core::project::Project,
@@ -510,6 +581,13 @@ pub async fn run_for_user(
         .tasks
         .get(name)
         .ok_or_else(|| format!("project {} has no task named {name}", project.name))?;
+    let serving = task
+        .serve
+        .then(|| daemon.mcp.runs.serving(None, &project.name, name));
+    let _serving = match &serving {
+        Some(lock) => Some(lock.lock().await),
+        None => None,
+    };
     if task.serve
         && let Some(going) = daemon.mcp.runs.runs.lock().unwrap().values().find(|g| {
             g.run.agent.is_none()
@@ -519,6 +597,9 @@ pub async fn run_for_user(
     {
         return Ok(going.run.id.clone());
     }
+    crate::services::start_needed(daemon, &task.needs, None)
+        .await
+        .map_err(|why| format!("task {name} cannot run: {why}"))?;
     let place = Place::main(project, project.folder.clone());
     let words = split_line(&task.line)?;
     let (repository, base) = place.base_for(task.repository.as_deref(), Folder::Task)?;
@@ -582,7 +663,7 @@ fn detach(daemon: &Daemon, id: &str) {
 }
 
 /// Ends when the run has ended.
-fn wait_for_end(daemon: &Daemon, id: &str) -> impl Future<Output = ()> + use<> {
+pub(crate) fn wait_for_end(daemon: &Daemon, id: &str) -> impl Future<Output = ()> + use<> {
     let end = daemon
         .mcp
         .runs
@@ -786,6 +867,7 @@ fn start(
         },
         unseen: Mutex::default(),
         notify: AtomicBool::new(readying.notify),
+        readied: Notify::new(),
     });
     daemon
         .mcp
@@ -875,6 +957,16 @@ fn mark_ready(daemon: &Arc<Daemon>, going: &Going) {
     if let Err(error) = result {
         eprintln!("flottille daemon: run {}: {error}", run.id);
     }
+    // A service's: said before what waits on it goes on, so that what needs it starts after.
+    if run.project.is_empty()
+        && let Some(name) = &run.name
+    {
+        let _ = daemon.emit(
+            "service.ready",
+            json!({"service": name, "run": run.id, "url": run.url}),
+        );
+    }
+    going.readied.notify_waiters();
     if going.notify.load(Ordering::SeqCst)
         && let Some(agent) = &run.agent
     {
@@ -1214,7 +1306,7 @@ pub async fn restart_by_user(
         .iter()
         .find(|(_, folder)| here(folder) == here(&old.folder))
         .map(|(path, _)| path.clone());
-    let (name, line, words, repository, ready, url) = match &old.name {
+    let (name, line, words, repository, ready, url, needs, serve) = match &old.name {
         Some(name) => {
             let args = RunArguments {
                 task: Some(name.clone()),
@@ -1225,7 +1317,16 @@ pub async fn restart_by_user(
                 why: None,
             };
             match request(daemon, &place, args) {
-                Ok(r) => (r.name, r.line, r.words, r.repository, r.ready, r.url),
+                Ok(r) => (
+                    r.name,
+                    r.line,
+                    r.words,
+                    r.repository,
+                    r.ready,
+                    r.url,
+                    r.needs,
+                    r.serve,
+                ),
                 Err(Outcome::Refused(why) | Outcome::Failed(why) | Outcome::Held(why)) => {
                     return Err(why);
                 }
@@ -1248,9 +1349,33 @@ pub async fn restart_by_user(
                 repository.unwrap_or_else(|| ".".into()),
                 None,
                 None,
+                Vec::new(),
+                false,
             )
         }
     };
+    // A server's needs start as a run of it starts them: one at a time for its owner.
+    let serving = match (serve, name.as_deref()) {
+        (true, Some(task)) => Some(daemon.mcp.runs.serving(
+            alive.map(|agent| agent.id.as_str()),
+            &place.project,
+            task,
+        )),
+        _ => None,
+    };
+    let _serving = match &serving {
+        Some(lock) => Some(lock.lock().await),
+        None => None,
+    };
+    // Run again is a run: what the task needs is started first.
+    crate::services::start_needed(daemon, &needs, None)
+        .await
+        .map_err(|why| {
+            format!(
+                "task {} cannot run: {why}",
+                name.as_deref().unwrap_or_default()
+            )
+        })?;
     let env = environment(daemon, &place, &repository, false)?;
     let secret_values = place.secret_values();
     let (url, url_error, probe) = readied(
@@ -1611,6 +1736,204 @@ fn shown_range(lines: &[String], count: usize, start: Option<usize>) -> (usize, 
                 from -= 1;
             }
             (from.min(to.saturating_sub(1)), to)
+        }
+    }
+}
+
+// The services of the machine (`services.rs`): runs of no agent and no project.
+
+/// What a service's run is given, made once for the probe that looks whether it already answers
+/// and for the run itself.
+pub(crate) struct ServiceStart {
+    pub line: String,
+    words: Vec<String>,
+    pub folder: std::path::PathBuf,
+    env: BTreeMap<OsString, OsString>,
+    secrets: Vec<String>,
+    url: Option<String>,
+    url_error: Option<String>,
+    probe: Option<Probe>,
+}
+
+/// The run of a service in `folder`: its line split without a shell, the environment of a run
+/// with no place's variables, the values of the folder's secret files to mask, its address and
+/// its probe, filled with its address alone (a service has no workspace).
+/// The address a service's `ready` probes, found without running anything: none when its `ready`
+/// is not an address, or asks for one only its `url` command gives.
+pub(crate) fn service_address(service: &flottille_core::service::Service) -> Option<String> {
+    let ready = service
+        .ready
+        .as_deref()
+        .filter(|ready| matches!(ready, Ready::Url(_)))?;
+    let names = Names {
+        workspace: String::new(),
+        workspace_path: String::new(),
+        project: String::new(),
+        branch: String::new(),
+        repository: String::new(),
+    };
+    let url = match service.url.as_deref() {
+        None => None,
+        Some(TaskUrl::Address(url)) => Some(variables::fill_also(url, &names, &[]).ok()?),
+        Some(TaskUrl::Command { .. }) => return None,
+    };
+    match ready::probe(ready, &names, url.as_deref()) {
+        Ok(Probe::Url(address)) => Some(address),
+        _ => None,
+    }
+}
+
+pub(crate) async fn service_start(
+    daemon: &Daemon,
+    service: &flottille_core::service::Service,
+    folder: std::path::PathBuf,
+) -> Result<ServiceStart, String> {
+    let words = split_line(&service.line)?;
+    if !folder.is_dir() {
+        return Err(format!("its folder {} is not a folder", folder.display()));
+    }
+    let mut env = variables::environment(std::env::vars_os(), &[]);
+    let empty = daemon.paths.state.join("empty");
+    flottille_core::paths::ensure_private_dir(&empty).map_err(|e| e.to_string())?;
+    defend(&mut env, &empty, false);
+    env.remove(&OsString::from("XDG_RUNTIME_DIR"));
+    let mut secret_values = Vec::new();
+    for entry in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
+        if entry.file_name().to_str().is_some_and(secrets::secret_file)
+            && let Ok(text) = std::fs::read_to_string(entry.path())
+        {
+            secret_values.extend(secrets::file_values(&text));
+        }
+    }
+    let names = Names {
+        workspace: String::new(),
+        workspace_path: String::new(),
+        project: String::new(),
+        branch: String::new(),
+        repository: String::new(),
+    };
+    let (url, url_error, probe) = readied(
+        daemon,
+        service.ready.as_deref(),
+        service.url.as_deref(),
+        &names,
+        &env,
+        &folder,
+        &secret_values,
+    )
+    .await?;
+    Ok(ServiceStart {
+        line: secrets::mask_also(&service.line, &env, &secret_values),
+        words,
+        folder,
+        env,
+        secrets: secret_values,
+        url,
+        url_error,
+        probe,
+    })
+}
+
+impl ServiceStart {
+    /// Whether it says when it is ready, so that what needs it waits.
+    pub fn has_ready(&self) -> bool {
+        self.probe.is_some()
+    }
+
+    /// Its probe, tried once: whether the service already answers, started outside Flottille. A
+    /// line its output prints cannot be looked for before it runs: never.
+    pub async fn answers(&self, daemon: &Daemon, name: &str) -> bool {
+        match &self.probe {
+            Some(Probe::Url(address)) => ready::answers(address).await,
+            Some(Probe::Command(words)) => {
+                ready::command_passes(
+                    daemon,
+                    &format!("service-{name}"),
+                    words,
+                    &self.env,
+                    &self.folder,
+                )
+                .await
+            }
+            Some(Probe::Line(_)) | None => false,
+        }
+    }
+}
+
+/// Starts the service's run: the daemon's, of no agent and no project (`""`), named after the
+/// service. Its id.
+pub(crate) fn start_service(
+    daemon: &Arc<Daemon>,
+    name: &str,
+    start: ServiceStart,
+) -> Result<String, String> {
+    let id = new_id().map_err(|error| error.to_string())?;
+    let run = Run {
+        id: id.clone(),
+        agent: None,
+        name: Some(name.to_owned()),
+        line: start.line,
+        folder: start.folder,
+        state: RunState::Running,
+        exit_code: None,
+        signal: None,
+        started_at: now_ms(),
+        ended_at: None,
+        output: String::new(),
+        dismissed: false,
+        project: String::new(),
+        ready: start.probe.as_ref().map(|_| Readiness::Starting),
+        url: start.url,
+        url_error: start.url_error,
+    };
+    self::start(
+        daemon,
+        run,
+        start.words,
+        start.env,
+        start.secrets,
+        Phase::Waited,
+        Readying {
+            probe: start.probe,
+            notify: false,
+        },
+    )?;
+    Ok(id)
+}
+
+/// Whether the run is going on.
+pub(crate) fn is_going(daemon: &Daemon, id: &str) -> bool {
+    daemon
+        .mcp
+        .runs
+        .runs
+        .lock()
+        .unwrap()
+        .get(id)
+        .is_some_and(|going| going.end.borrow().is_none())
+}
+
+/// Waits until the run is ready, or has ended: whether it is ready. A run that says no ready is
+/// ready as it runs.
+pub(crate) async fn wait_ready(daemon: &Daemon, id: &str) -> bool {
+    let going = daemon.mcp.runs.runs.lock().unwrap().get(id).cloned();
+    let Some(going) = going else { return false };
+    let mut end = going.end.subscribe();
+    loop {
+        let readied = going.readied.notified();
+        tokio::pin!(readied);
+        readied.as_mut().enable();
+        if end.borrow().is_some() {
+            return false;
+        }
+        match *going.readiness.lock().unwrap() {
+            None | Some(Readiness::Ready) => return true,
+            Some(Readiness::Missed) => return false,
+            Some(Readiness::Starting) => {}
+        }
+        tokio::select! {
+            () = &mut readied => {}
+            _ = end.changed() => {}
         }
     }
 }
