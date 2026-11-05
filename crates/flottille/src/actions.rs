@@ -110,10 +110,13 @@ struct WorkspaceCall {
     name: Option<String>,
     repositories: Option<Vec<String>>,
     /// create: the branch, `<branch prefix>/<name>` when left out; an existing one is resumed.
+    /// rename_branch: its new name.
     branch: Option<String>,
     /// link_ticket: `null` unlinks.
     #[serde(default, deserialize_with = "present")]
     ticket: Option<Option<String>>,
+    /// rename_branch: only this repository's branch; every one of the workspace's when left out.
+    repository: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -171,6 +174,7 @@ pub fn family(tool: &str, args: &Value) -> Option<&'static str> {
         ("workspace", "create" | "prepare") => Some("workspace"),
         ("workspace", "link_ticket") => Some("ticket"),
         ("services", "add" | "edit" | "remove") => Some("services"),
+        ("workspace", "rename_branch") => Some("branch"),
         _ => None,
     }
 }
@@ -191,6 +195,7 @@ pub fn asked(family: &str) -> String {
         "services" => {
             "it adds, changes or removes a service of the machine, which every project shares"
         }
+        "branch" => "it renames the branch of a workspace, which its pull requests then follow",
         _ => "it changes the project's settings",
     }
     .into()
@@ -369,6 +374,9 @@ pub async fn prepared(
             if call.action == "remove" {
                 return removal_says(daemon, grant, &call).await;
             }
+            if call.action == "rename_branch" {
+                return rename_says(daemon, grant, &call).await;
+            }
             workspace_says(daemon, grant, &project, &call)
         }
         _ => {
@@ -382,6 +390,33 @@ pub async fn prepared(
             }
         }
     }
+}
+
+/// What renaming a workspace's branch does, in words, or why it cannot be done: checked as the
+/// daemon will check it, so that a refusal never waits for an answer.
+async fn rename_says(
+    daemon: &Daemon,
+    grant: &Grant,
+    call: &WorkspaceCall,
+) -> Result<Vec<String>, Outcome> {
+    let workspace = named_workspace(daemon, grant, call.name.as_deref())?;
+    let Some(branch) = &call.branch else {
+        return Err(Outcome::Refused(
+            "refused: rename_branch needs branch: {\"action\": \"rename_branch\", \"name\": \
+             \"login\", \"branch\": \"fix/ABC-12-login\"}"
+                .into(),
+        ));
+    };
+    let asked = protocol::WorkspaceRenameBranch {
+        project: workspace.project,
+        name: workspace.name,
+        branch: branch.clone(),
+        repository: call.repository.clone(),
+    };
+    let renaming = crate::workspaces::renaming(daemon, &asked)
+        .await
+        .map_err(refusal)?;
+    Ok(vec![renaming.says()])
 }
 
 /// What a removal names and does: the workspace, what removing it would lose and, when it is the
@@ -1374,6 +1409,27 @@ async fn performed(
                         None => format!("Workspace {} is linked to no ticket.", workspace.name),
                     })
                 }
+                "rename_branch" => {
+                    let workspace = named_workspace(daemon, grant, call.name.as_deref())?;
+                    let renamed = answer(
+                        "workspace.rename_branch",
+                        json!({"project": name, "name": workspace.name, "branch": call.branch,
+                            "repository": call.repository}),
+                    )
+                    .await?;
+                    let repositories: Vec<&str> = renamed["renamed"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .collect();
+                    Ok(format!(
+                        "The branch of workspace {} is now {} in {}.",
+                        workspace.name,
+                        call.branch.unwrap_or_default(),
+                        repositories.join(", ")
+                    ))
+                }
                 "remove" => {
                     let removed = crate::workspaces::workspace_remove(
                         daemon,
@@ -1442,7 +1498,8 @@ async fn performed(
 
 // The workspaces.
 
-const WORKSPACE_ACTIONS: &str = "list, show, create, prepare, link_ticket and remove";
+const WORKSPACE_ACTIONS: &str =
+    "list, show, create, prepare, link_ticket, rename_branch and remove";
 
 /// What a child is told of the writes of the `workspace` family but `remove`, which are not its
 /// own.
@@ -1566,7 +1623,17 @@ fn workspace_says(
     call: &WorkspaceCall,
 ) -> Result<Vec<String>, Outcome> {
     let action = call.action.as_str();
-    if !["list", "show", "create", "prepare", "link_ticket", "remove"].contains(&action) {
+    if ![
+        "list",
+        "show",
+        "create",
+        "prepare",
+        "link_ticket",
+        "rename_branch",
+        "remove",
+    ]
+    .contains(&action)
+    {
         return Err(unknown("workspace", action, WORKSPACE_ACTIONS));
     }
     match action {

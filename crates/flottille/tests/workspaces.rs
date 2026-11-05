@@ -2722,6 +2722,275 @@ fn removal_keeps_a_branch_the_workspace_resumed() {
     );
 }
 
+impl Fixture {
+    fn rename_branch(&self, params: Value) -> Result<Value, (String, String)> {
+        let mut asked = json!({"project": "app", "name": "login"});
+        asked
+            .as_object_mut()
+            .unwrap()
+            .extend(params.as_object().unwrap().clone());
+        self.user.call("workspace.rename_branch", asked)
+    }
+
+    /// The branch the worktree of `repository` in the workspace `login` is on.
+    fn branch_of(&self, repository: &str) -> String {
+        self.git(
+            &self.workspace("login").join(repository),
+            &["symbolic-ref", "--short", "HEAD"],
+        )
+    }
+
+    /// Whether `repository`'s own checkout has the local branch `branch`.
+    fn has_local_branch(&self, repository: &str, branch: &str) -> bool {
+        !self
+            .git(&self.folder.join(repository), &["branch", "--list", branch])
+            .is_empty()
+    }
+}
+
+/// A ready workspace `login` over `web` and `api`, on the branch `app/login`.
+fn ready_over_web_and_api(fixture: &Fixture) {
+    fixture.configure("");
+    fixture
+        .create(json!({"repositories": ["web", "api"]}))
+        .unwrap();
+    assert_eq!(fixture.settled("login")["state"], "ready");
+}
+
+#[test]
+fn an_unpushed_branch_is_renamed_in_every_repository() {
+    let fixture = Fixture::new(false);
+    ready_over_web_and_api(&fixture);
+    let watch = fixture.user.watch(&["--after", "0"]);
+
+    let renamed = fixture
+        .rename_branch(json!({"branch": "fix/ABC-12-login"}))
+        .unwrap();
+
+    assert_eq!(renamed["branch"], "fix/ABC-12-login", "{renamed}");
+    for repository in ["web", "api"] {
+        assert_eq!(fixture.branch_of(repository), "fix/ABC-12-login");
+        assert!(
+            !fixture.has_local_branch(repository, "app/login"),
+            "{repository}"
+        );
+        assert!(fixture.has_local_branch(repository, "fix/ABC-12-login"));
+    }
+    // The record follows, and so does what reads it.
+    let shown = fixture.show("login").unwrap();
+    assert_eq!(shown["branch"], "fix/ABC-12-login", "{shown}");
+    let events = watch.until(|event| event["name"] == "workspace.changed");
+    let changed = events.last().unwrap();
+    assert_eq!(changed["data"]["branch"], "fix/ABC-12-login", "{changed}");
+    assert_eq!(changed["data"]["was"], "app/login", "{changed}");
+    assert_eq!(changed["data"]["workspace"], "login", "{changed}");
+}
+
+#[test]
+fn one_repository_is_renamed_when_it_is_named() {
+    let fixture = Fixture::new(false);
+    ready_over_web_and_api(&fixture);
+
+    fixture
+        .rename_branch(json!({"branch": "fix/ABC-12-login", "repository": "web"}))
+        .unwrap();
+
+    assert_eq!(fixture.branch_of("web"), "fix/ABC-12-login");
+    assert_eq!(fixture.branch_of("api"), "app/login");
+    // The repositories are on different branches: the record is left as it is.
+    assert_eq!(fixture.show("login").unwrap()["branch"], "app/login");
+
+    let (code, message) = fixture
+        .rename_branch(json!({"branch": "fix/other", "repository": "lib"}))
+        .unwrap_err();
+    assert_eq!(code, "refused");
+    assert!(
+        message.contains("lib is not a repository of the workspace login"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_pushed_branch_is_refused_naming_why() {
+    let fixture = Fixture::new(false);
+    ready_over_web_and_api(&fixture);
+    let api = fixture.workspace("login").join("api");
+    fixture
+        .user
+        .git(&api, &["push", "--quiet", "origin", "app/login"]);
+
+    let (code, message) = fixture
+        .rename_branch(json!({"branch": "fix/ABC-12-login"}))
+        .unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert_eq!(
+        message,
+        "the branch app/login is on origin in api: renaming it would leave the remote one behind"
+    );
+    // Nothing is renamed, the repository that could be included.
+    assert_eq!(fixture.branch_of("web"), "app/login");
+    assert_eq!(fixture.branch_of("api"), "app/login");
+    assert_eq!(fixture.show("login").unwrap()["branch"], "app/login");
+}
+
+#[test]
+fn a_branch_a_remote_has_but_was_not_fetched_is_refused() {
+    let fixture = Fixture::new(false);
+    ready_over_web_and_api(&fixture);
+    let web = fixture.workspace("login").join("web");
+    fixture
+        .user
+        .git(&web, &["push", "--quiet", "origin", "app/login"]);
+    // Another clone's push is not in this repository's tracking refs.
+    fixture.user.git(
+        &fixture.folder.join("web"),
+        &["update-ref", "-d", "refs/remotes/origin/app/login"],
+    );
+
+    let (_, message) = fixture
+        .rename_branch(json!({"branch": "fix/ABC-12-login"}))
+        .unwrap_err();
+
+    assert!(message.contains("is on origin in web"), "{message}");
+}
+
+#[test]
+fn a_branch_with_a_pull_request_is_refused_naming_it() {
+    let fixture = Fixture::of(User::new().with_fake_gh(), false);
+    ready_over_web_and_api(&fixture);
+    fixture.user.git(
+        &fixture.folder.join("web"),
+        &["remote", "set-url", "origin", "git@github.com:acme/web.git"],
+    );
+    fixture
+        .user
+        .call(
+            "project.set_settings",
+            json!({"name": "app", "repositories": [
+                {"path": "web", "forge": {"kind": "github", "repository": "acme/web"}}
+            ]}),
+        )
+        .unwrap();
+    fixture.user.gh_script(json!({
+        "pulls": {"acme/web": {"app/login": {
+            "number": 12, "title": "Add the login page", "state": "OPEN", "isDraft": false,
+            "headRefOid": "aaaaaaa1", "baseRefName": "main",
+            "url": "https://github.com/acme/web/pull/12",
+            "statusCheckRollup": [], "comments": [], "reviews": []
+        }}}
+    }));
+
+    let (code, message) = fixture
+        .rename_branch(json!({"branch": "fix/ABC-12-login"}))
+        .unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert_eq!(
+        message,
+        "the branch app/login has the pull request #12 in web: renaming it would leave the pull \
+         request on the old name"
+    );
+    assert_eq!(fixture.branch_of("web"), "app/login");
+}
+
+#[test]
+fn a_resumed_branch_is_refused() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    let api = fixture.folder.join("api");
+    fixture
+        .user
+        .git(&api, &["branch", "--quiet", "feature/x", "develop"]);
+    fixture
+        .create(json!({"repositories": ["web", "api"], "branch": "feature/x"}))
+        .unwrap();
+    fixture.settled("login");
+
+    let (code, message) = fixture
+        .rename_branch(json!({"branch": "fix/ABC-12-login"}))
+        .unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert_eq!(
+        message,
+        "the branch feature/x was the user's before the workspace in api, which resumed it: only \
+         a branch the workspace started is renamed"
+    );
+    assert_eq!(fixture.branch_of("web"), "feature/x");
+    assert_eq!(fixture.branch_of("api"), "feature/x");
+    assert!(fixture.has_local_branch("api", "feature/x"));
+}
+
+#[test]
+fn a_name_already_taken_or_invalid_is_refused() {
+    let fixture = Fixture::new(false);
+    ready_over_web_and_api(&fixture);
+    let api = fixture.folder.join("api");
+    fixture
+        .user
+        .git(&api, &["branch", "--quiet", "taken", "develop"]);
+
+    for branch in ["release.lock/1", "login@{1}", "feature/.hidden"] {
+        let (code, message) = fixture
+            .rename_branch(json!({"branch": branch}))
+            .unwrap_err();
+        assert_eq!(code, "refused");
+        assert_eq!(
+            message,
+            format!("{branch} is not a branch name git accepts")
+        );
+    }
+
+    let (code, message) = fixture
+        .rename_branch(json!({"branch": "taken"}))
+        .unwrap_err();
+    assert_eq!(code, "refused");
+    assert_eq!(
+        message,
+        "the branch taken already exists in api: choose another name"
+    );
+
+    // Checked out in the main checkout of a repository: it is said so.
+    fixture.user.git(&api, &["switch", "--quiet", "taken"]);
+    let (_, message) = fixture
+        .rename_branch(json!({"branch": "taken"}))
+        .unwrap_err();
+    assert!(
+        message.contains(&format!(
+            "the branch taken is checked out in {} for api",
+            api.display()
+        )),
+        "{message}"
+    );
+
+    let (_, message) = fixture
+        .rename_branch(json!({"branch": "app/login"}))
+        .unwrap_err();
+    assert_eq!(message, "web is on the branch app/login already");
+    for repository in ["web", "api"] {
+        assert_eq!(fixture.branch_of(repository), "app/login");
+    }
+}
+
+#[test]
+fn a_branch_is_not_renamed_while_the_workspace_is_being_prepared() {
+    let fixture = Fixture::new(false);
+    let slow = fixture.script("slow.sh", "sleep 5\n");
+    fixture.configure(&format!(
+        "[[setup]]\nrun = \"sh {}\"\nrepository = \"web\"\n",
+        slow.display()
+    ));
+    fixture.create(json!({"repositories": ["web"]})).unwrap();
+
+    let (code, message) = fixture
+        .rename_branch(json!({"branch": "fix/ABC-12-login"}))
+        .unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert!(message.contains("is being prepared"), "{message}");
+}
+
 /// A project file that names no folder for its workspaces: it follows the user's default.
 fn following_the_default(fixture: &Fixture) {
     fixture.user.write_project_file(
