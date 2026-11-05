@@ -17,7 +17,7 @@ use flottille_window::Shell;
 use flottille_window::items::{ItemRow, Kind, ProjectItems, Read};
 use flottille_window::shell::Selection;
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
+use gpui_kit::{Entity, Focusable as _, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
 
 /// A time long past: what the incremental reads never ask again.
@@ -1017,4 +1017,279 @@ fn mine_only_is_disabled_with_its_reason_when_who_the_user_is_is_not_known(
     settle(cx);
     let tip = label(cx, "project-items-mine-switch-tooltip");
     assert_eq!(tip, why, "the tooltip says why");
+}
+
+// The list scrolls inside its section (#446).
+
+/// The project's `count` open pull requests of `api`, the most recently changed first (number
+/// `count`), the two last titled for the search.
+fn many_pulls(user: &User, count: u64) {
+    let mut pulls = serde_json::Map::new();
+    for number in 1..=count {
+        let title = match number {
+            1 => "Rework the session cache".to_owned(),
+            2 => "Handle the Café menu".to_owned(),
+            n => format!("Change number {n} of the batch"),
+        };
+        let updated = format!("2020-01-{:02}T00:00:00Z", number.min(28));
+        pulls.insert(
+            format!("feature-{number}"),
+            pull("api", number, &title, "OPEN", &updated),
+        );
+    }
+    user.gh_script(json!({"pulls": {"acme/api": pulls}}));
+    declare(user, &["api"], false);
+    refresh(user);
+}
+
+/// The window tall enough for the section and its list whole: the page itself never scrolls, so
+/// only the list does.
+fn tall(cx: &mut VisualTestContext) {
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    settle(cx);
+}
+
+/// Replaces what the search field holds, as typing would.
+fn search(cx: &mut VisualTestContext, text: &str) {
+    cx.simulate_keystrokes("ctrl-a");
+    match text.is_empty() {
+        true => cx.simulate_keystrokes("backspace"),
+        false => cx.simulate_input(text),
+    }
+    settle(cx);
+}
+
+/// How far the list is scrolled down, in pixels.
+fn scrolled(items: &Entity<ProjectItems>, cx: &mut VisualTestContext) -> f32 {
+    items.read_with(cx, |items, _| -f32::from(items.list_scroll().offset().y))
+}
+
+/// The most the list can scroll.
+fn scrollable(items: &Entity<ProjectItems>, cx: &mut VisualTestContext) -> f32 {
+    items.read_with(cx, |items, _| f32::from(items.list_scroll().max_offset().y))
+}
+
+/// Turns the wheel over the list, as a user would.
+fn wheel(cx: &mut VisualTestContext, down: f32) {
+    reveal(cx, "project-items-list");
+    cx.update(|window, cx| {
+        window.scroll(
+            "project-items-list",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-down))),
+            cx,
+        )
+    });
+    settle(cx);
+}
+
+fn bounds(cx: &mut VisualTestContext, id: &str) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+    let id = id.to_owned();
+    cx.update(|window, _| window.find(id).bounds())
+}
+
+#[gpui_kit::test]
+fn a_long_item_list_scrolls_inside_its_section(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, &["api"]);
+    many_pulls(&user, 40);
+    let (_shell, items, cx) = open_page(&user, cx);
+    tall(cx);
+    assert_eq!(rows(&items, cx).len(), 40);
+
+    let limit = f32::from(flottille_window::items::LIST_HEIGHT);
+    let drawn = height(cx, "project-items-list");
+    assert!(
+        drawn <= limit + 2.,
+        "the list stops at {limit} px, it is {drawn} px"
+    );
+    assert!(
+        scrollable(&items, cx) > limit,
+        "forty rows are longer than the list: {} px to scroll",
+        scrollable(&items, cx)
+    );
+
+    // The wheel moves what the list holds, to its last row.
+    wheel(cx, 400.);
+    assert!(scrolled(&items, cx) > 0., "the wheel scrolled the list");
+    wheel(cx, 100_000.);
+    assert_eq!(scrolled(&items, cx), scrollable(&items, cx));
+    let at_rest = cx.update(|window, cx| window.simulate_next_frame(cx));
+    assert_eq!(at_rest, 0, "nothing moves at rest");
+}
+
+#[gpui_kit::test]
+fn the_section_s_controls_stay_visible_while_the_list_scrolls(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, &["api"]);
+    many_pulls(&user, 40);
+    let (_shell, items, cx) = open_page(&user, cx);
+    tall(cx);
+    let controls = [
+        "project-items-tabs",
+        "project-items-state",
+        "project-items-mine",
+    ];
+    let before: Vec<_> = controls.iter().map(|id| bounds(cx, id)).collect();
+    let first_id = rows(&items, cx)[0].id();
+    let first = bounds(cx, &first_id);
+
+    wheel(cx, 900.);
+
+    assert!(scrolled(&items, cx) > 0.);
+    for (id, before) in controls.iter().zip(before) {
+        assert_eq!(bounds(cx, id), before, "{id} did not move with the list");
+        assert!(visible(cx, id), "{id} stays in sight");
+    }
+    // The page itself did not scroll, and the first row went up inside the list.
+    let after = cx.update(|window, _| window.try_find(first_id.clone()).map(|row| row.bounds()));
+    assert!(
+        after.is_none_or(|now| now.top() < first.top()),
+        "the row moved up"
+    );
+}
+
+#[gpui_kit::test]
+fn a_new_read_keeps_the_scroll_place(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, &["api"]);
+    many_pulls(&user, 40);
+    let (shell, items, cx) = open_page(&user, cx);
+    tall(cx);
+    wheel(cx, 700.);
+    let place = scrolled(&items, cx);
+    assert!(place > 0.);
+
+    // A title changes on the forge, and the daemon says so: the page reads the items again.
+    let mut pulls = serde_json::Map::new();
+    for number in 1..=40u64 {
+        let title = match number {
+            20 => "Change number 20, reworded".to_owned(),
+            n => format!("Change number {n} of the batch"),
+        };
+        let updated = match number {
+            20 => NEW.to_owned(),
+            _ => format!("2020-01-{:02}T00:00:00Z", number.min(28)),
+        };
+        pulls.insert(
+            format!("feature-{number}"),
+            pull("api", number, &title, "OPEN", &updated),
+        );
+    }
+    let asked = items.read_with(cx, |items, _| items.lists_asked());
+    user.gh_script(json!({"pulls": {"acme/api": pulls}}));
+    refresh(&user);
+    until(&shell, cx, "the items are read again", |cx| {
+        items.read_with(cx, |items, _| items.lists_asked()) > asked
+            && rows(&items, cx)
+                .iter()
+                .any(|row| row.title.ends_with("reworded"))
+    });
+    settle(cx);
+
+    assert_eq!(scrolled(&items, cx), place, "the list stayed where it was");
+}
+
+#[gpui_kit::test]
+fn a_filter_change_goes_back_to_the_top(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, &["api"]);
+    many_pulls(&user, 40);
+    let (_shell, items, cx) = open_page(&user, cx);
+    tall(cx);
+
+    // The state filter.
+    wheel(cx, 700.);
+    assert!(scrolled(&items, cx) > 0.);
+    click(cx, "project-items-state-all");
+    settle(cx);
+    assert_eq!(scrolled(&items, cx), 0., "a state went back to the top");
+
+    // Mine only.
+    wheel(cx, 700.);
+    assert!(scrolled(&items, cx) > 0.);
+    click(cx, "project-items-mine");
+    settle(cx);
+    assert_eq!(scrolled(&items, cx), 0., "mine only went back to the top");
+    click(cx, "project-items-mine");
+    settle(cx);
+
+    // The other tab.
+    wheel(cx, 700.);
+    assert!(scrolled(&items, cx) > 0.);
+    click(cx, "project-items-tabs-tickets");
+    settle(cx);
+    assert_eq!(scrolled(&items, cx), 0., "a tab went back to the top");
+    click(cx, "project-items-tabs-pulls");
+    settle(cx);
+
+    // The search.
+    wheel(cx, 700.);
+    assert!(scrolled(&items, cx) > 0.);
+    let field = items
+        .read_with(cx, |items, cx| items.search_field(cx))
+        .unwrap();
+    let focus = cx.update(|_, cx| field.read(cx).focus_handle(cx));
+    cx.update(|window, cx| window.focus(&focus, cx));
+    search(cx, "batch");
+    assert_eq!(scrolled(&items, cx), 0., "a search went back to the top");
+}
+
+#[gpui_kit::test]
+fn the_search_filters_by_key_and_title(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, &["api"]);
+    many_pulls(&user, 40);
+    let (_shell, items, cx) = open_page(&user, cx);
+    tall(cx);
+    assert_eq!(
+        label(cx, "project-items-count").as_deref(),
+        Some("40 open"),
+        "the count says how many are listed"
+    );
+    let field = items
+        .read_with(cx, |items, cx| items.search_field(cx))
+        .expect("the section has its search field");
+    assert_eq!(
+        label(cx, "project-items-search-label").as_deref(),
+        Some("Search"),
+        "a field has its label"
+    );
+    let focus = cx.update(|_, cx| field.read(cx).focus_handle(cx));
+    cx.update(|window, cx| window.focus(&focus, cx));
+
+    // By title, ignoring case and accents.
+    search(cx, "CAFE");
+    assert_eq!(keys(&items, cx), ["2"]);
+    assert_eq!(
+        label(cx, "project-items-count").as_deref(),
+        Some("1 of 40 open")
+    );
+    assert_eq!(
+        label(cx, "project-items-tabs-pulls-count").as_deref(),
+        Some("1")
+    );
+
+    // By key: the number, with its hash or without.
+    search(cx, "#17");
+    settle(cx);
+    assert_eq!(keys(&items, cx), ["17"]);
+    search(cx, "session cache");
+    settle(cx);
+    assert_eq!(keys(&items, cx), ["1"]);
+
+    // Nothing matches: the list says so, and the count with it.
+    search(cx, "zzzz");
+    settle(cx);
+    assert!(keys(&items, cx).is_empty());
+    assert_eq!(
+        label(cx, "project-items-count").as_deref(),
+        Some("0 of 40 open")
+    );
+    assert!(present(cx, "project-items-empty"));
+
+    // Cleared: every row is back.
+    search(cx, "");
+    settle(cx);
+    assert_eq!(keys(&items, cx).len(), 40);
+    assert_eq!(label(cx, "project-items-count").as_deref(), Some("40 open"));
 }
