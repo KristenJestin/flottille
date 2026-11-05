@@ -145,6 +145,8 @@ impl RepositorySetting {
             forge,
             base: self.base.clone(),
             depends_on: self.depends_on.clone(),
+            // An agent does not set it: the project's own setting, for the user (docs/projects.md).
+            delete_branch_on_merge: None,
         }
     }
 }
