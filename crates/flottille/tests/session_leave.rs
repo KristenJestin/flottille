@@ -524,6 +524,70 @@ fn a_leave_withdrawn_while_a_send_is_judged_stops_it() {
 }
 
 #[test]
+fn an_unknown_id_an_ended_session_or_an_empty_text_is_refused_before_anything_is_asked() {
+    let user = user();
+    let (_, mcp) = root(&user, "app");
+    let (x, _) = root(&user, "app");
+    let (ended, _) = root(&user, "app");
+    user.call("agent.stop", json!({"agent": ended})).unwrap();
+    let judged = judge_prompts(&user);
+
+    let unknown = send(&mcp, "000000000000", "Hello.");
+    let to_ended = send(&mcp, &ended, "Hello.");
+    let empty = send(&mcp, &x, "  ");
+
+    for (answer, says) in [
+        (&unknown, ["refused: 000000000000 names no session", ""]),
+        (&to_ended, ["refused: ", " has ended"]),
+        (&empty, ["refused: the text is empty", ""]),
+    ] {
+        assert!(answer.error, "{}", answer.text);
+        assert!(answer.text.starts_with(says[0]), "{}", answer.text);
+        assert!(answer.text.contains(says[1]), "{}", answer.text);
+    }
+    assert!(to_ended.text.contains(&ended), "{}", to_ended.text);
+    assert!(requests(&user).is_empty());
+    assert_eq!(judge_prompts(&user), judged, "the judge was asked");
+    assert!(written_to(&user, &x).is_empty());
+    assert!(written_to(&user, &ended).is_empty());
+}
+
+#[test]
+fn the_writer_resumed_asks_again() {
+    let user = user();
+    let (a, a_mcp) = root(&user, "app");
+    let (x, _) = root(&user, "app");
+    allowed_pair(&user, &a_mcp, &x);
+    drop(a_mcp);
+
+    user.call("agent.stop", json!({"agent": a})).unwrap();
+    let reopened = user.received_requests("session/resume").len()
+        + user.received_requests("session/load").len();
+    user.resume(&a);
+    user.call("agent.send", json!({"agent": a, "message": "again"}))
+        .unwrap();
+    let opened = || {
+        let mut opened = user.received_requests("session/resume");
+        opened.extend(user.received_requests("session/load"));
+        opened
+    };
+    eventually("the session reopened", || opened().len() > reopened);
+    let opened = opened();
+    let server = &opened.last().unwrap()["params"]["mcpServers"][0];
+    let authorization = server["headers"][0]["value"].as_str().unwrap();
+    let mcp = Mcp::initialize(server["url"].as_str().unwrap(), authorization);
+
+    held(&send(&mcp, &x, "Back."));
+
+    assert!(leaves(&user, &x).is_empty());
+    assert!(
+        !written_to(&user, &x)
+            .iter()
+            .any(|body| body.contains("Back."))
+    );
+}
+
+#[test]
 fn a_send_allowed_after_its_session_ended_says_it_ended() {
     let user = user();
     let (a, mcp) = root(&user, "app");
