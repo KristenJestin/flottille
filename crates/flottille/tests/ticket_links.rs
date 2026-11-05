@@ -756,7 +756,8 @@ fn a_comment_it_did_not_write_is_refused() {
         json!({"action": "comment_edit", "ticket": "ABC-1", "comment": "20000", "body": "Mine now"}),
         json!({"action": "comment_delete", "ticket": "ABC-1", "comment": "20000"}),
     ] {
-        let said = allow(&user, held(&mcp.call("tickets", args.clone())));
+        // Refused before the user is asked: nothing is held for a write that cannot be done.
+        let said = refused_at_once(&user, &mcp, args.clone());
         assert!(
             said.contains(
                 "refused: the comment 20000 of ABC-1 was not posted by an agent of Flottille"
@@ -765,12 +766,10 @@ fn a_comment_it_did_not_write_is_refused() {
         );
         assert!(said.contains("nothing was written"), "{said}");
     }
-    let unknown = allow(
+    let unknown = refused_at_once(
         &user,
-        held(&mcp.call(
-            "tickets",
-            json!({"action": "comment_delete", "ticket": "ABC-1", "comment": "99"}),
-        )),
+        &mcp,
+        json!({"action": "comment_delete", "ticket": "ABC-1", "comment": "99"}),
     );
     assert!(unknown.contains("ABC-1 has no comment 99"), "{unknown}");
     assert!(

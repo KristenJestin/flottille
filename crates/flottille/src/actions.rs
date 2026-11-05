@@ -311,8 +311,9 @@ pub async fn prepared(
         if let Some(why) = crate::tickets::unwritable(&project, args) {
             return Err(Outcome::Refused(why));
         }
-        // A link kind the site does not have is refused before the user is asked about it.
-        if let Some(why) = crate::tickets::checked_links(&project, args).await {
+        // A link kind the site does not have, or a comment no agent posted, is refused before
+        // the user is asked about it.
+        if let Some(why) = crate::tickets::checked_links(daemon, &project, args).await {
             return Err(Outcome::Refused(why));
         }
         return Ok(posted_says(args));

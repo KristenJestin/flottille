@@ -252,8 +252,16 @@ fn unknown_kind(site: &str, kind: &str, types: &[LinkType]) -> String {
 }
 
 /// Before the user is asked: a Jira link kind the site has none of is refused, naming the ones
-/// it has.
-pub async fn checked(project: &Project, args: &Value) -> Option<String> {
+/// it has; a comment an agent did not post, or that is not there, is refused too.
+pub async fn checked(daemon: &Daemon, project: &Project, args: &Value) -> Option<String> {
+    if let Some("comment_edit" | "comment_delete") = args["action"].as_str() {
+        let key = super::accepted(project, args["ticket"].as_str()?).ok()?;
+        return match owned(daemon, project, &key, args["comment"].as_str()?).await {
+            Err(Outcome::Refused(why)) => Some(why),
+            // What cannot be read now is said when the comment is written.
+            _ => None,
+        };
+    }
     if !matches!(args["action"].as_str(), Some("link" | "unlink")) {
         return None;
     }
@@ -578,6 +586,47 @@ fn same_comment(have: Option<&str>, named: &str) -> bool {
             .is_some_and(|digits| digits == named)
 }
 
+/// The ticket, and the id of its comment `named`, when an agent of Flottille posted that comment;
+/// else why not.
+async fn owned(
+    daemon: &Daemon,
+    project: &Project,
+    key: &Key,
+    named: &str,
+) -> Result<(super::Ticket, String), Outcome> {
+    let ticket = super::read_known(daemon, project, key)
+        .await
+        .map_err(|problem| {
+            Outcome::Failed(format!(
+                "the ticket {} could not be read: {problem}",
+                key.text()
+            ))
+        })?;
+    let reference = &ticket.reference;
+    let named = named.trim();
+    let Some(found) = ticket
+        .comments
+        .iter()
+        .find(|c| same_comment(c.id.as_deref(), named))
+    else {
+        return Err(Outcome::Refused(format!(
+            "refused: {reference} has no comment {named} among the {} newest it can read; \
+             nothing was written; show with detail full gives the id of a comment an agent \
+             posted",
+            ticket.comments.len()
+        )));
+    };
+    if !found.agent {
+        return Err(Outcome::Refused(format!(
+            "refused: the comment {named} of {reference} was not posted by an agent of \
+             Flottille (its records say it was not): an agent changes only its own comments; \
+             nothing was written"
+        )));
+    }
+    let id = found.id.clone().unwrap_or_default();
+    Ok((ticket, id))
+}
+
 /// `tickets comment_edit` and `comment_delete`: only a comment Flottille recorded as posted by an
 /// agent (`posts`), else refused, whatever its author's name says.
 pub(super) async fn comment(
@@ -591,36 +640,12 @@ pub(super) async fn comment(
     };
     let delete = asked.action == "comment_delete";
     let body = blank(&asked.body);
-    let ticket = match super::read_known(daemon, project, key).await {
-        Ok(ticket) => ticket,
-        Err(problem) => {
-            return Outcome::Failed(format!(
-                "the ticket {} could not be read: {problem}",
-                key.text()
-            ));
-        }
+    // Checked again right before the write: the comments may have changed since the card.
+    let (ticket, id) = match owned(daemon, project, key, named).await {
+        Ok(owned) => owned,
+        Err(outcome) => return outcome,
     };
     let reference = &ticket.reference;
-    let Some(found) = ticket
-        .comments
-        .iter()
-        .find(|c| same_comment(c.id.as_deref(), named))
-    else {
-        return Outcome::Refused(format!(
-            "refused: {reference} has no comment {named} among the {} newest it can read; \
-             nothing was written; show with detail full gives the id of a comment an agent \
-             posted",
-            ticket.comments.len()
-        ));
-    };
-    if !found.agent {
-        return Outcome::Refused(format!(
-            "refused: the comment {named} of {reference} was not posted by an agent of \
-             Flottille (its records say it was not): an agent changes only its own comments; \
-             nothing was written"
-        ));
-    }
-    let id = found.id.clone().unwrap_or_default();
     let (repository, item) = super::events::item_of(project, key).unwrap_or_default();
     let on = (
         project.name.as_str(),

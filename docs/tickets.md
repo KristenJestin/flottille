@@ -340,7 +340,8 @@ ticket itself.
   posted by an agent (`posts`, "What Flottille posts is recorded", `forges.md`), found by the id that
   `show` with `detail full` prints after its author (`[comment 10100]`, GitHub's `issuecomment-501`);
   any other comment, a person's or another tool's, is refused whatever its author's name, and a
-  comment that cannot be found among the newest ones is said. On Jira, `acli jira workitem comment
+  comment that cannot be found among the newest ones is said; both before the user is asked, and
+  checked again right before the write. On Jira, `acli jira workitem comment
   update --key <K> --id <id> --body-adf <file>` (the text as ADF, as for `comment`; `update`'s
   `--body-file` takes plain text only) and `comment
   delete --key <K> --id <id>`; on GitHub, `gh api repos/<owner>/<name>/issues/comments/<id>
