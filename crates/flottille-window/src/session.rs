@@ -6034,7 +6034,7 @@ impl Reply {
         )];
         let mode = cx.new(|_| ModeSwitch::new(shell.clone(), session.clone()));
         let options = cx.new(|_| SessionOptions::new(shell.clone(), session.clone()));
-        Self {
+        let reply = Self {
             shell,
             session,
             project,
@@ -6064,7 +6064,10 @@ impl Reply {
             scaled: 0,
             renders: 0,
             _subscriptions: subscriptions,
-        }
+        };
+        // A message put back or pasted shows its chips without a `/` typed first.
+        reply.list_commands(cx);
+        reply
     }
 
     /// The agent it writes to: the session's root.
@@ -6350,17 +6353,23 @@ impl Reply {
             self.dismissed = false;
         }
         if slash.is_some() && self.slash.is_none() {
-            let command = Command::Commands {
-                project: self.project.clone(),
-            };
-            // Later: the shell may be the one setting the text, as it hands a reply its answer.
-            crate::commands::perform_later(&self.shell, command, cx);
+            self.list_commands(cx);
         }
         if self.slash != slash {
             self.slash = slash;
             self.highlighted = 0;
             cx.notify();
         }
+    }
+
+    /// Asks the daemon for the project's commands: the `/` list offers them, and the chips know
+    /// them.
+    fn list_commands(&self, cx: &mut Context<Self>) {
+        let command = Command::Commands {
+            project: self.project.clone(),
+        };
+        // Later: the shell may be the one setting the text, as it hands a reply its answer.
+        crate::commands::perform_later(&self.shell, command, cx);
     }
 
     /// The project's commands, as the daemon listed them.
@@ -6636,6 +6645,10 @@ impl Reply {
         self.field
             .update(cx, |field, cx| field.set_value(joined.clone(), window, cx));
         self.typed(&joined, cx);
+        // Put back by code, not typed: a message that ends with a command is not asking for the
+        // list, and Enter sends it.
+        self.dismissed = self.slash.is_some();
+        self.list_commands(cx);
         for picture in pictures {
             if let Some(format) = gpui_kit::ImageFormat::from_mime_type(&picture.mime) {
                 self.attach(gpui_kit::Image::from_bytes(format, picture.bytes), cx);

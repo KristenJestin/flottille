@@ -7881,6 +7881,57 @@ fn the_command_list_opens_on_the_word_at_the_cursor(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_message_put_back_in_the_field_shows_its_command_chips_before_a_slash_is_typed(
+    cx: &mut TestAppContext,
+) {
+    let user = user_with_commands();
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    until(&shell, cx, "the composer knows the commands", |cx| {
+        reply_open(&shell, cx).read_with(cx, |r, _| r.knows_commands())
+    });
+    settle(cx);
+
+    let reply = reply_open(&shell, cx);
+    reply.update_in(cx, |r, window, cx| {
+        r.restore("then /close it", Vec::new(), window, cx)
+    });
+    settle(cx);
+
+    assert_eq!(reply.read_with(cx, |r, cx| r.commands_used(cx)), ["close"]);
+    cx.update(|window, _| assert!(window.find("reply-command-close").visible()));
+}
+
+#[gpui_kit::test]
+fn a_message_put_back_ending_with_a_command_opens_no_list_and_enter_sends_it(
+    cx: &mut TestAppContext,
+) {
+    let user = user_with_commands();
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    until(&shell, cx, "the composer knows the commands", |cx| {
+        reply_open(&shell, cx).read_with(cx, |r, _| r.knows_commands())
+    });
+    settle(cx);
+    let sent = prompts(&user).len();
+
+    let reply = reply_open(&shell, cx);
+    reply.update_in(cx, |r, window, cx| {
+        r.restore("fix it, then /close", Vec::new(), window, cx)
+    });
+    settle(cx);
+    assert!(slash_offered(&shell, cx).is_empty(), "no list opens");
+    cx.update(|window, _| assert!(window.try_find("slash-list").is_none()));
+
+    cx.simulate_keystrokes("enter");
+    until(&shell, cx, "the lead was sent the message", |_| {
+        prompts(&user).len() > sent
+    });
+    let text = prompts(&user).pop().unwrap();
+    assert!(text.ends_with("fix it, then [command close]"), "{text}");
+}
+
+#[gpui_kit::test]
 fn in_main_slash_lists_the_commands_too(cx: &mut TestAppContext) {
     let user = user_with_commands();
     let lead = start(&user, "atlas", None, "Read the notes");
