@@ -32,8 +32,15 @@ ignores them, as it does in the main checkout). A workspace that does not take t
 repository has a plain folder there.
 
 The name is 1 to 64 letters, digits, dots, dashes or underscores, starting with a letter or a
-digit. The branch is `<branch prefix>/<name>` unless `--branch` gives one, and the name alone when
-the project's branch prefix is empty (`docs/projects.md`); `git check-ref-format
+digit, and is not `main`: `main` names the project folder where a session for the user is
+started (`agent_launch` with `root`, `"workspace": "main"`, `docs/tools.md`, "Sessions for the
+user"), so creating a workspace under it is refused from the agent's `workspace create`, the
+command line, the window and the protocol alike (`main is reserved: it names the project folder,
+where a session works without a workspace; choose another name for the workspace`). A project
+that holds a workspace named `main`, made before the name was reserved, keeps it, with no
+migration: there `"workspace": "main"` names that workspace, as before, and the card says `the
+workspace main`. The branch is `<branch prefix>/<name>` unless `--branch` gives one, and the name
+alone when the project's branch prefix is empty (`docs/projects.md`); `git check-ref-format
 --branch` must accept it as it is. A repository that names its branches after tickets
 (`fix/ABC-12-login`) is followed by naming the branch: the agent's `workspace create` says to give
 `branch` when the repository has a naming convention (its `AGENTS.md`, `CONTRIBUTING`, or the

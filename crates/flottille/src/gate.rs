@@ -536,6 +536,7 @@ fn untexted(tool: &str, action: &str, args: &Value, keys: &[&str]) -> Result<(),
             let takers = match *key {
                 "title" => "edit and create",
                 "comment" => "close and reopen",
+                "message" => "a merge by squash",
                 _ => "create, comment and edit",
             };
             return Err(Verdict::Deny(format!(
@@ -589,10 +590,11 @@ fn forge(call: &Call) -> Verdict {
         }
     };
     let none: &[&str] = match action {
-        "comment" => &["title", "comment"],
-        "merge" | "checks" | "run" | "stop" | "step" => &["title", "body", "comment"],
-        "close" | "reopen" => &["title", "body"],
-        _ => &["comment"],
+        "comment" => &["title", "comment", "message"],
+        "merge" => &["title", "body", "comment"],
+        "checks" | "run" | "stop" | "step" => &["title", "body", "comment", "message"],
+        "close" | "reopen" => &["title", "body", "message"],
+        _ => &["comment", "message"],
     };
     if let Err(refused) = untexted("forge", action, call.args, none) {
         return refused;
@@ -607,12 +609,18 @@ fn forge(call: &Call) -> Verdict {
             "refused: forge {action} takes no delete_branch: delete_branch is for close"
         ));
     }
+    if by != methods[0] && call.args.get("message").is_some_and(|m| !m.is_null()) {
+        return Verdict::Deny(format!(
+            "refused: forge merge by {by} takes no message: a message is the squashed commit's, \
+             for a merge by squash; leave it out, and the forge writes its own"
+        ));
+    }
     let mut found = Found::default();
     found.judge(said.into());
     if let Err(refused) = texts(
         call.grant,
         call.args,
-        &["title", "body", "comment"],
+        &["title", "body", "comment", "message"],
         &mut found,
     ) {
         return refused;
@@ -643,8 +651,8 @@ fn forge(call: &Call) -> Verdict {
 pub const FORGE_ACTIONS: &str = "list, show, subscribe, unsubscribe, create, comment, edit, merge, checks, close, reopen, \
      pipelines, runs, run_view, run_logs, run, stop and step";
 /// The actions of `tickets`, as a refusal names them.
-pub const TICKET_ACTIONS: &str = "list, search, show, types, subscribe, unsubscribe, create, comment, edit, close, reopen and \
-     status";
+pub const TICKET_ACTIONS: &str = "list, search, show, types, link_types, subscribe, unsubscribe, create, comment, edit, \
+     close, reopen, status, link, unlink, comment_edit, comment_delete and sprint";
 /// What `tickets close` closes for, as `gh issue close --reason` names it.
 pub const CLOSE_REASONS: [&str; 2] = ["completed", "not planned"];
 /// The arguments of `tickets` that belong to `edit` or `close` alone.
@@ -659,19 +667,49 @@ const TICKET_ONLY: [(&str, &str); 4] = [
 /// to the tracker are to judge.
 fn tickets(call: &Call) -> Verdict {
     let action = call.args["action"].as_str().unwrap_or_default();
+    let words = |key: &str| call.args[key].as_str().unwrap_or("?").trim().to_owned();
+    // What the agent wrote, as the card shows it: masked.
+    let shown = |key: &str| crate::mcp::masked(&words(key), &call.grant.place);
     let said = match action {
-        "list" | "search" | "show" | "types" | "subscribe" | "unsubscribe" => {
+        "list" | "search" | "show" | "types" | "link_types" | "subscribe" | "unsubscribe" => {
             return Verdict::Allow;
         }
-        "create" => "it opens a ticket on the tracker",
-        "comment" => "it comments on a ticket on the tracker",
+        // The link as the ticket named reads it, so that the card says its direction.
+        "link" => format!(
+            "it links two tickets on the tracker: {} {} {}",
+            shown("ticket"),
+            shown("kind"),
+            shown("other")
+        ),
+        "unlink" => format!(
+            "it removes a link between two tickets on the tracker: {} {} {}",
+            shown("ticket"),
+            shown("kind"),
+            shown("other")
+        ),
+        // Which comment, and its new words in full, as the other writes show theirs.
+        "comment_edit" => format!(
+            "it changes the comment {} an agent posted on {} on the tracker, its new text: {}",
+            shown("comment"),
+            shown("ticket"),
+            shown("body")
+        ),
+        "comment_delete" => format!(
+            "it deletes the comment {} an agent posted on {} on the tracker",
+            shown("comment"),
+            shown("ticket")
+        ),
+        "sprint" => "it puts a ticket in a sprint on the tracker".into(),
+        "create" => "it opens a ticket on the tracker".into(),
+        "comment" => "it comments on a ticket on the tracker".into(),
         "edit" => {
             "it changes the title, the description, the labels or the assignees of a ticket on \
              the tracker"
+                .into()
         }
-        "close" => "it closes a ticket on the tracker",
-        "reopen" => "it reopens a ticket on the tracker",
-        "status" => "it moves a ticket to another status on the tracker",
+        "close" => "it closes a ticket on the tracker".into(),
+        "reopen" => "it reopens a ticket on the tracker".into(),
+        "status" => "it moves a ticket to another status on the tracker".into(),
         _ => {
             return Verdict::Deny(format!(
                 "refused: tickets has no action {action:?}: its actions are {TICKET_ACTIONS}"
@@ -679,8 +717,10 @@ fn tickets(call: &Call) -> Verdict {
         }
     };
     let none: &[&str] = match action {
-        "comment" => &["title"],
-        "close" | "reopen" | "status" => &["title", "body"],
+        "comment" | "comment_edit" => &["title"],
+        "close" | "reopen" | "status" | "link" | "unlink" | "comment_delete" | "sprint" => {
+            &["title", "body"]
+        }
         _ => &[],
     };
     if let Err(refused) = untexted("tickets", action, call.args, none) {
@@ -710,11 +750,11 @@ fn tickets(call: &Call) -> Verdict {
         ));
     }
     let mut found = Found::default();
-    found.judge(said.into());
+    found.judge(said);
     if let Err(refused) = texts(
         call.grant,
         call.args,
-        &["title", "body", "status"],
+        &["title", "body", "status", "kind"],
         &mut found,
     ) {
         return refused;
@@ -2435,6 +2475,30 @@ pub fn pushes(words: &[String]) -> bool {
     })
 }
 
+/// Each git command a line runs, at any of its layers: its words from `git` on, for the
+/// project's message checks (`crate::message_checks`).
+pub fn gits(words: &[String]) -> Vec<Vec<String>> {
+    let Ok(layers) = lines(words) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for layer in &layers {
+        for (_, suffix) in suffixes(layer) {
+            let args = &suffix[1..];
+            // A wrapper's layer and the layer it runs say the same command.
+            if base(&suffix[0]) == "git"
+                && args.get(git_globals(args).0).is_some()
+                && !found
+                    .iter()
+                    .any(|seen: &Vec<String>| seen.as_slice() == suffix)
+            {
+                found.push(suffix.to_vec());
+            }
+        }
+    }
+    found
+}
+
 /// Whether the line's own program is git pushing, with no wrapper around it: the push the gate
 /// read, which may go out once it passed.
 pub fn is_push(words: &[String]) -> bool {
@@ -2446,7 +2510,7 @@ pub fn is_push(words: &[String]) -> bool {
 
 /// git's global options before its command: where the command is, and each option with its
 /// value.
-fn git_globals(args: &[String]) -> (usize, Vec<(&str, Option<&str>)>) {
+pub(crate) fn git_globals(args: &[String]) -> (usize, Vec<(&str, Option<&str>)>) {
     const VALUED: [&str; 8] = [
         "-C",
         "-c",
@@ -3910,6 +3974,7 @@ mod tests {
                 ("tickets", "list"),
                 ("tickets", "search"),
                 ("tickets", "show"),
+                ("tickets", "link_types"),
                 ("workspace", "list"),
             ] {
                 assert_eq!(
@@ -4087,7 +4152,19 @@ mod tests {
     #[test]
     fn to_judge_ticket_writes_are_judged_and_an_unknown_action_refused() {
         let fixture = Fixture::main();
-        for action in ["create", "comment", "edit", "close", "reopen", "status"] {
+        for action in [
+            "create",
+            "comment",
+            "edit",
+            "close",
+            "reopen",
+            "status",
+            "link",
+            "unlink",
+            "comment_edit",
+            "comment_delete",
+            "sprint",
+        ] {
             let verdict = fixture.judge(
                 "tickets",
                 json!({"action": action, "ticket": "#1"}),
@@ -4190,6 +4267,67 @@ mod tests {
             Some(&fixture.never),
         );
         assert!(base_class(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn the_card_of_a_comment_write_names_the_ticket_the_comment_and_the_new_text() {
+        let fixture = Fixture::main();
+        let body = "Fixed on app/login, rebased on main after the review";
+
+        let edit = fixture.judge(
+            "tickets",
+            json!({"action": "comment_edit", "ticket": "ABC-1", "comment": "10100", "body": body}),
+            Some(&fixture.never),
+        );
+        let delete = fixture.judge(
+            "tickets",
+            json!({"action": "comment_delete", "ticket": "ABC-1", "comment": "10100"}),
+            Some(&fixture.never),
+        );
+
+        assert!(
+            reasons(&edit).contains(&format!(
+                "it changes the comment 10100 an agent posted on ABC-1 on the tracker, its new \
+                 text: {body}"
+            )),
+            "{edit:?}"
+        );
+        assert!(
+            reasons(&delete)
+                .contains("it deletes the comment 10100 an agent posted on ABC-1 on the tracker"),
+            "{delete:?}"
+        );
+        // A secret in the new text is shown masked, as in the other cards.
+        let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let masked = fixture.judge(
+            "tickets",
+            json!({"action": "comment_edit", "ticket": "ABC-1", "comment": "10100",
+                "body": format!("key {token}")}),
+            Some(&fixture.never),
+        );
+        assert!(!reasons(&masked).contains(token), "{masked:?}");
+    }
+
+    #[test]
+    fn a_link_kind_is_judged_as_a_text() {
+        let fixture = Fixture::main();
+        let token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
+        let long = "x".repeat(crate::judge::WHOLE_CHARS + 1);
+
+        let secret = fixture.judge(
+            "tickets",
+            json!({"action": "link", "ticket": "ABC-2", "kind": token, "other": "ABC-1"}),
+            Some(&fixture.never),
+        );
+        let too_long = fixture.judge(
+            "tickets",
+            json!({"action": "link", "ticket": "ABC-2", "kind": long, "other": "ABC-1"}),
+            Some(&fixture.never),
+        );
+
+        assert!(base_class(&secret), "{secret:?}");
+        assert!(!reasons(&secret).contains(token), "{secret:?}");
+        assert!(denied(&too_long), "{too_long:?}");
     }
 
     #[test]
