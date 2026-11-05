@@ -316,7 +316,15 @@ pub async fn prepared(
         };
     }
     if tool == "forge" {
-        return Ok(posted_says(args));
+        // What no forge could do is refused at once: the user is not asked for it.
+        if let Ok(call) = serde_json::from_value::<crate::forge::ForgeCall>(args.clone())
+            && let Some(why) = call.malformed()
+        {
+            return Err(Outcome::Refused(why));
+        }
+        let mut says = posted_says(args);
+        says.extend(forge_says(daemon, grant, args));
+        return Ok(says);
     }
     if !TOOLS.contains(&tool) {
         return Ok(Vec::new());
@@ -489,6 +497,72 @@ fn posted_says(args: &Value) -> Vec<String> {
     // A `null` assignee is how an edit takes the assignee away.
     if args["action"] == "edit" && args["assignee"].is_null() && args.get("assignee").is_some() {
         says.push("It removes the assignee".into());
+    }
+    says
+}
+
+/// What a write of `forge` asks besides its title and body, in words: the reviewers, the labels,
+/// the draft, the base, and what becomes of the source branch.
+fn forge_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Vec<String> {
+    let names = |key: &str| -> Option<String> {
+        let list: Vec<&str> = args[key]
+            .as_array()?
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        (!list.is_empty()).then(|| list.join(", "))
+    };
+    let mut says = Vec::new();
+    let mut say = |text: Option<String>| says.extend(text);
+    match args["action"].as_str() {
+        Some("create") => {
+            say(names("reviewers").map(|n| format!("Its reviewers, besides the project's: {n}")));
+            say(names("labels").map(|n| format!("Its labels: {n}")));
+            say((args["delete_branch_on_merge"] == true)
+                .then(|| "It deletes the branch when the pull request is merged".to_owned()));
+        }
+        Some("edit") => {
+            say(match args["draft"].as_bool() {
+                Some(false) => Some("It marks it ready for review".to_owned()),
+                Some(true) => Some("It makes it a draft".to_owned()),
+                None => None,
+            });
+            say(names("reviewers_add").map(|n| format!("It adds the reviewers: {n}")));
+            say(names("reviewers_remove").map(|n| format!("It removes the reviewers: {n}")));
+            say(names("labels_add").map(|n| format!("It adds the labels: {n}")));
+            say(names("labels_remove").map(|n| format!("It removes the labels: {n}")));
+            say(args["base"]
+                .as_str()
+                .map(|base| format!("It moves it onto the base {base}")));
+        }
+        Some("merge") => {
+            let by_setting = || {
+                let path = args["repository"].as_str();
+                crate::projects::load_project(daemon, &grant.place.project)
+                    .map(|project| match path {
+                        Some(path) => project
+                            .repositories
+                            .iter()
+                            .any(|r| r.path == path && r.delete_branch_on_merge),
+                        None => matches!(&project.repositories[..],
+                            [only] if only.delete_branch_on_merge),
+                    })
+                    .unwrap_or(false)
+            };
+            say(match args["delete_branch"].as_bool() {
+                Some(true) => {
+                    Some("It deletes the source branch on the forge after the merge".to_owned())
+                }
+                Some(false) => None,
+                None if by_setting() => Some(
+                    "It deletes the source branch on the forge after the merge (the project's \
+                     setting Delete the branch on merge)"
+                        .to_owned(),
+                ),
+                None => None,
+            });
+        }
+        _ => {}
     }
     says
 }

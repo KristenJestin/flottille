@@ -431,6 +431,22 @@ the base the repository started from):
   `bkt pr edit <id> [--title T] [--description D]` (`pkg/cmd/pr/pr.go:1654-1669` and `:719-762`,
   which print `✓ Commented on pull request #<id>` and `✓ Updated pull request #<id>`); `bkt pr
   edit` refuses a call with neither, and Flottille refuses it before.
+- `edit` goes further than a title and a description (v0.37.0 help, #360): `--reviewer R` and
+  `--remove-reviewer R` of `bkt pr edit`, `bkt pr publish <id>` (alias `ready`) for `draft:
+  false` and `bkt pr publish <id> --undo` for `draft: true`, and, for `base`, Cloud's API: `bkt api
+  /repositories/<w>/<r>/pullrequests/<id> --method PUT --input
+  '{"destination":{"branch":{"name":"<base>"}}}'` once `/repositories/<w>/<r>/refs/branches/<base>`
+  answered (a 404 is `refused: <repo> has no branch <base> on the forge; nothing was written`).
+  **Assumed, and the maintainer checks them**: that body for the destination, and that `bkt pr
+  publish` and `bkt pr edit --reviewer` behave on his Cloud and Data Center as their help says.
+  Data Center is refused for `base` (the `toRef` and the version it needs are not something `bkt`
+  helps with), and Bitbucket has no labels on pull requests: `labels` on `create` and
+  `labels_add`/`labels_remove` on `edit` are refused naming that, before anything is asked of `bkt`.
+- `create` adds the call's `reviewers` after the project's, and `delete_branch_on_merge` is `bkt pr
+  create --close-source`. `create` still refuses `draft` on Bitbucket (`bkt pr create --draft`
+  exists, and is not used yet). At `merge`, `--close-source=true` replaces `=false` when the branch
+  is to be deleted (`docs/tools.md`, "The forge"), since `bkt` sends the flag with every merge and
+  its default would override the pull request's own.
 - `close` of a pull request by its number: `bkt pr decline <id> [--comment T] [--delete-source]`
   (v0.37.0, `pkg/cmd/pr/pr.go`, `newDeclineCmd`; alias `close`; it prints `Declined pull request
   #<id>`). `--delete-source` is Data Center's only: on Cloud `bkt` ends with `--delete-source is

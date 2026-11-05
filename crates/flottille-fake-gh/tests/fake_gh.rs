@@ -519,3 +519,40 @@ fn the_events_of_a_pull_request_are_answered_from_the_script_and_filtered_for_jq
     assert_eq!(asked("7", true), "merged\tbob\t2026-01-01T10:00:00Z\n");
     assert_eq!(asked("8", true), "");
 }
+
+#[test]
+fn a_pull_request_is_made_ready_and_a_branch_is_found_only_when_the_script_lists_it() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        json!({"pulls": {"acme/api": {"app/x": {"number": 4}}},
+            "branches": {"acme/api": ["main"]}, "delete_head_branches": {"acme/api": true}})
+        .to_string(),
+    )
+    .unwrap();
+    let run = |args: &[&str]| fake(dir.path()).args(args).output().unwrap();
+
+    assert!(
+        run(&["pr", "ready", "4", "-R", "acme/api"])
+            .status
+            .success()
+    );
+    assert!(
+        !run(&["pr", "ready", "5", "-R", "acme/api"])
+            .status
+            .success()
+    );
+    assert!(
+        run(&["api", "repos/acme/api/branches/main"])
+            .status
+            .success()
+    );
+    let unknown = run(&["api", "repos/acme/api/branches/nowhere"]);
+    assert!(!unknown.status.success());
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("404"));
+    let repository = run(&["repo", "view", "acme/api", "--json", "deleteBranchOnMerge"]);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&repository.stdout).unwrap(),
+        json!({"deleteBranchOnMerge": true})
+    );
+}

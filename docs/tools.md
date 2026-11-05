@@ -440,7 +440,7 @@ pending requests.
 
 | Tool | |
 |---|---|
-| `forge {action, workspace?, repository?, number?, state?, branch?, detail?, fresh?, title?, body?, draft?, waive?, method?, events?, from?, minutes?, pipeline?, variables?, run?, step?, do?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
+| `forge {action, workspace?, repository?, number?, state?, branch?, detail?, fresh?, title?, body?, draft?, reviewers?, labels?, delete_branch_on_merge?, delete_branch?, reviewers_add?, reviewers_remove?, labels_add?, labels_remove?, base?, waive?, method?, events?, from?, minutes?, pipeline?, variables?, run?, step?, do?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
 
 - **The repositories** are those of the agent's place: its workspace's, or the project's in
   `main`. One the place does not take is refused (`refused: X is not a repository of this
@@ -506,7 +506,22 @@ pending requests.
   `method`, `squash` (the default), `merge` or `rebase` (refused when no check ran on it or all were skipped, while its
   checks fail or run or a review asks for changes, unless `waive` gives the
   user's words, which holds the merge for their approval), or re-runs the failed jobs of its last
-  commit's pipelines (`docs/commands.md`, "`forge`"). The branch is the one the repository's
+  commit's pipelines (`docs/commands.md`, "`forge`"). **`create`** also takes `reviewers`
+  (added to the project's, none twice), `labels` (GitHub only: Bitbucket has no labels on pull
+  requests, and the call is refused saying so, before anything is opened) and
+  `delete_branch_on_merge`. On Bitbucket that one is the pull request's own "close source branch"
+  (`bkt pr create --close-source`); GitHub has no such flag per pull request, so Flottille keeps
+  the wish for that pull request (the store's `posts`, kind `delete_branch`) and applies it at
+  its merge, and the answer reads the repository's own "automatically delete head branches"
+  setting and says it (`the repository's own setting deletes head branches after a merge`).
+  **`merge`** takes `delete_branch`: the source branch is deleted on the forge once merged
+  (GitHub `gh pr merge --delete-branch`, run with `-R` so that no local branch of a checkout is
+  touched; Bitbucket `bkt pr merge --close-source=true`, else `=false` as before). Left out, it
+  follows the pull request's `delete_branch_on_merge`, else the repository's project setting
+  "Delete the branch on merge" (`docs/projects.md`), else the branch is kept; `delete_branch:
+  false` keeps it whatever they say. It never deletes a branch the workspace resumed (it existed
+  before, so it was the user's: `its branch app/login was left: it existed before the workspace`)
+  nor one another workspace of the project is on; the answer says the branch was deleted or left. The branch is the one the repository's
   worktree is on now (`docs/workspaces.md`, "The branch"); `create` on a detached HEAD is refused
   (`refused: api is on no branch (detached at 1a2b3c4): switch to a branch first`). `create`
   never pushes: it reads, without fetching, whether the remote-tracking ref of the branch
@@ -515,9 +530,19 @@ pending requests.
   the branch first: git push -u origin app/login`, or `… is 2 commit(s) ahead of origin: …`); the
   agent's `run` of `git push` goes through the gate as any push.
 - **`comment {number, repository?, body}`** posts a comment on a pull request of a repository of
-  the place; **`edit {number, repository?, title?, body?}`** changes its title or description, at
-  least one of them (`gh pr comment`, `gh pr edit`; `bkt pr comment --text`, `bkt pr edit --title
-  --description`). `edit` of a pull request that is not open is refused once allowed, before
+  the place; **`edit {number, repository?, title?, body?, draft?, reviewers_add?,
+  reviewers_remove?, labels_add?, labels_remove?, base?}`** changes it, at least one field
+  (refused at once otherwise, and for a reviewer or a label that would be an option of the command
+  line: empty, starting with `-`, holding a comma, a reviewer holding a space too). GitHub: one
+  `gh pr edit --title --body --add-reviewer --remove-reviewer --add-label --remove-label --base`,
+  then `gh pr ready` for `draft: false` or `gh pr ready --undo` for `draft: true`; a `base` the
+  remote does not have is refused (`gh api repos/<repository>/branches/<base>`) before anything is
+  written. Bitbucket: `bkt pr edit --title --description --reviewer --remove-reviewer`, `bkt pr
+  publish [--undo]` for the draft, labels refused (`refused: Bitbucket has no labels on pull
+  requests`), and a `base` on Cloud only, through the API (`bkt api … --method PUT` with the new
+  destination, after its branch was checked to exist); Data Center is refused for `base`, `bkt`
+  having no way to move a destination there. A comment is `gh pr comment`, `bkt pr comment
+  --text`. `edit` of a pull request that is not open is refused once allowed, before
   anything is written (`refused: the pull request #7 of acme/app is merged, not open; nothing was
   written: …`). A `title` on `comment` is refused before anything is asked (`refused: forge
   comment takes no title: title is for edit and create`).
@@ -546,7 +571,7 @@ pending requests.
 
 `list`, `show`, `subscribe`, `unsubscribe`, `pipelines`, `runs`, `run_view` and `run_logs` go
 through the gate like every call, which allows them in every mode; `create`, `comment`, `edit`,
-`merge`, `checks`, `close`, `reopen`, `run`, `stop` and `step` are to judge, and a merge that waives the checks base. A write is done only once the repository's remote is checked to lead where its forge is declared. **What a
+`merge`, `checks`, `close`, `reopen`, `run`, `stop` and `step` are to judge, and a merge that waives the checks base. **What a write asks is on the card**: besides its title and body, its reviewers (`Its reviewers, besides the project's: …`), labels, `It adds the reviewers: …`, `It removes the labels: …`, `It moves it onto the base release`, `It marks it ready for review`, `It makes it a draft`, `It deletes the branch when the pull request is merged`, and for a merge `It deletes the source branch on the forge after the merge` (with `(the project's setting Delete the branch on merge)` when that is why). A write is done only once the repository's remote is checked to lead where its forge is declared. **What a
 write posts is shown whole**: its request says `Its title: …` and `Its body: …` in full (the
 arguments recorded are cut at 500 characters), and the judge is given them whole. A title or a
 body longer than the 8,000 characters the judge is given whole is refused (`refused: the body is
