@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 
 use crate::agent::{Agent, AgentState, Choices, GateMode, TurnUsage, Used};
-use crate::approval::{Decision, Delivery, Forward, Judgement, Kind, Request, RequestState};
+use crate::approval::{Decision, Delivery, Forward, Judgement, Kind, Leave, Request, RequestState};
 use crate::item::{Check, Cursor, Filter, Item, Post};
 use crate::protocol::Event;
 use crate::run::{Readiness, Run, RunState};
@@ -638,6 +638,19 @@ const MIGRATIONS: &[&str] = &[
             AND instr(body, ' of project ') > 13
             AND instr(substr(body, 13, instr(body, ' of project ') - 13), ' ') = 0;
 ",
+    "
+    -- The user's leave for a session to write to another it did not start, one way, given once
+    -- for the pair (`docs/tools.md`, \"Sessions that talk to each other\"): it goes with the end
+    -- of either session.
+    CREATE TABLE session_leaves (
+        writer     TEXT NOT NULL REFERENCES agents (id) ON DELETE CASCADE,
+        session    TEXT NOT NULL REFERENCES agents (id) ON DELETE CASCADE,
+        request    INTEGER NOT NULL,
+        granted_at INTEGER NOT NULL,
+        PRIMARY KEY (writer, session)
+    ) STRICT;
+    CREATE INDEX session_leaves_session ON session_leaves (session);
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -1187,6 +1200,13 @@ impl Store {
                     state.is_final(),
                     now
                 ],
+            )?;
+        }
+        // A leave lasts while both sessions do: one that ends, even to be resumed, takes it.
+        if change.state.is_some_and(AgentState::is_final) {
+            transaction.execute(
+                "DELETE FROM session_leaves WHERE writer = ?1 OR session = ?1",
+                params![id],
             )?;
         }
         if let Some(native_id) = change.native_id {
@@ -2175,6 +2195,95 @@ impl Store {
             .connection
             .execute("DELETE FROM subscriptions WHERE id = ?1", params![id])?
             > 0)
+    }
+
+    /// The user lets `writer` write to `session`, with the request it was asked in, and its
+    /// `leave.granted` event; `None` when it was given already.
+    pub fn grant_leave(
+        &mut self,
+        writer: &str,
+        session: &str,
+        request: u64,
+    ) -> Result<(Option<Leave>, Option<Event>)> {
+        let transaction = self.connection.transaction()?;
+        let leave = Leave {
+            writer: writer.to_owned(),
+            session: session.to_owned(),
+            request,
+            granted_at: now_ms(),
+        };
+        let added = transaction.execute(
+            "INSERT OR IGNORE INTO session_leaves (writer, session, request, granted_at) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![writer, session, request, leave.granted_at],
+        )?;
+        if added == 0 {
+            return Ok((None, None));
+        }
+        let event = append_event(&transaction, "leave.granted", leave.to_json())?;
+        transaction.commit()?;
+        Ok((Some(leave), Some(event)))
+    }
+
+    /// Whether the user let `writer` write to `session`.
+    pub fn has_leave(&self, writer: &str, session: &str) -> Result<bool> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT 1 FROM session_leaves WHERE writer = ?1 AND session = ?2",
+                params![writer, session],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// The leaves that name `agent`, as the writer or as the session written to, oldest first.
+    pub fn leaves_of(&self, agent: &str) -> Result<Vec<Leave>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT writer, session, request, granted_at FROM session_leaves \
+             WHERE writer = ?1 OR session = ?1 ORDER BY granted_at, rowid",
+        )?;
+        let rows = statement.query_map(params![agent], |row| {
+            Ok(Leave {
+                writer: row.get(0)?,
+                session: row.get(1)?,
+                request: row.get(2)?,
+                granted_at: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The user takes the leave back, with its `leave.withdrawn` event; `None` when there was
+    /// none.
+    pub fn withdraw_leave(
+        &mut self,
+        writer: &str,
+        session: &str,
+    ) -> Result<(Option<Leave>, Option<Event>)> {
+        let transaction = self.connection.transaction()?;
+        let leave = transaction
+            .query_row(
+                "DELETE FROM session_leaves WHERE writer = ?1 AND session = ?2 \
+                 RETURNING request, granted_at",
+                params![writer, session],
+                |row| {
+                    Ok(Leave {
+                        writer: writer.to_owned(),
+                        session: session.to_owned(),
+                        request: row.get(0)?,
+                        granted_at: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?;
+        let Some(leave) = leave else {
+            return Ok((None, None));
+        };
+        let event = append_event(&transaction, "leave.withdrawn", leave.to_json())?;
+        transaction.commit()?;
+        Ok((Some(leave), Some(event)))
     }
 
     /// The project's items that `filter` keeps, with their checks, the most recently changed
