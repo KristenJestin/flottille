@@ -78,6 +78,7 @@ pub fn ask(
     if now.is_some_and(|now| now != place) {
         return (Outcome::Refused(format!("refused: {}", left(&place))), None);
     }
+    let leave = gate::asks_leave(&ask);
     let asked = Request {
         number: 0,
         agent: grant.agent.clone(),
@@ -105,7 +106,34 @@ pub fn ask(
         decided_at: None,
         place: Some(place),
     };
-    match daemon.write(|store| store.ask(&asked)) {
+    // Two first messages of a pair at once ask the user once: the second finds the first's
+    // request in the same lock that writes it.
+    let written = daemon.write(|store| {
+        if leave && let Some(number) = asking_leave(store, &asked)? {
+            return Ok((Err(number), None));
+        }
+        let (request, event) = store.ask(&asked)?;
+        Ok((Ok(request), event))
+    });
+    let written = match written {
+        Ok(Err(number)) => {
+            let session = asked.arguments["session"].as_str().unwrap_or_default();
+            let named = match daemon.read(|store| store.agent(session)) {
+                Ok(Some(agent)) => tree::named(&agent),
+                _ => format!("agent {session}"),
+            };
+            return (
+                Outcome::Refused(format!(
+                    "refused: request #{number} already asks the user to let you write to \
+                     {named}; this message was not sent: send it once the user answered"
+                )),
+                None,
+            );
+        }
+        Ok(Ok(request)) => Ok(request),
+        Err(error) => Err(error),
+    };
+    match written {
         Ok(request) if request.held_by == approval::USER => {
             (Outcome::Held(waiting(request.number)), Some(request.number))
         }
@@ -131,6 +159,22 @@ pub fn ask(
             )
         }
     }
+}
+
+/// The pending request that already asks the user's leave for the pair `asked` asks it for,
+/// other than the one its own call key made.
+fn asking_leave(store: &Store, asked: &Request) -> flottille_core::Result<Option<u64>> {
+    Ok(store
+        .pending_requests(approval::USER)?
+        .into_iter()
+        .find(|request| {
+            request.agent == asked.agent
+                && request.tool == asked.tool
+                && request.arguments["session"] == asked.arguments["session"]
+                && request.reasons.iter().any(|reason| reason == gate::LEAVE)
+                && (request.call_key.is_none() || request.call_key != asked.call_key)
+        })
+        .map(|request| request.number))
 }
 
 /// An agent's place as a request keeps it: `main`, or `workspace <name>`.
@@ -376,6 +420,14 @@ async fn performed(
         discarding,
     )
     .await;
+    // The user allowed the first message of a pair: the leave is the pair's from now on.
+    if matches!(outcome, Outcome::Done(_))
+        && tool == "session_send"
+        && request.reasons.iter().any(|reason| reason == gate::LEAVE)
+        && let Some(session) = request.arguments["session"].as_str()
+    {
+        tree::grant_leave(daemon, &request.agent, session, number);
+    }
     let approved = "was approved by the user";
     let (word, body) = match outcome {
         Outcome::Done(text) => (

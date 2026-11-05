@@ -505,26 +505,73 @@ pub struct SessionSend {
     pub text: String,
 }
 
-/// The session a `session_send` writes to, and whether the caller started it (else it started
-/// the caller), or the refusal: only a session the caller started, or the one that started it.
+/// How the caller of `session_send` stands to the session it writes to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Relation {
+    /// The caller started it.
+    Started,
+    /// It started the caller.
+    StartedYou,
+    /// The user let the caller write to it.
+    Leave,
+    /// None of these: the first message asks the user's leave.
+    NoLeave,
+}
+
+/// The session a `session_send` writes to, and how the caller stands to it, or the refusal: a
+/// live root of the caller's project other than its own.
 pub fn session_of(
     daemon: &Daemon,
     caller: &Agent,
     asked: &SessionSend,
-) -> Result<(Agent, bool), Outcome> {
+) -> Result<(Agent, Relation), Outcome> {
     let found = daemon
         .read(|store| store.agent(&asked.session))
         .map_err(failed)?;
-    let (session, started) = match found {
-        Some(agent) if agent.launched_by.as_deref() == Some(caller.id.as_str()) => (agent, true),
-        Some(agent) if caller.launched_by.as_deref() == Some(agent.id.as_str()) => (agent, false),
-        _ => {
+    let id = &asked.session;
+    let session = match found {
+        None => {
             return Err(refused(format!(
-                "refused: {} is neither a session you started nor the agent that started you: \
-                 session_send writes only to those; your children are written to with agent_send",
-                asked.session
+                "refused: {id} names no session: session_send writes to a session of your \
+                 project, named by its agent id"
             )));
         }
+        Some(agent) if agent.id == caller.id => {
+            return Err(refused(format!(
+                "refused: {id} is your own session: session_send writes to another"
+            )));
+        }
+        Some(agent) if agent.parent.as_deref() == Some(caller.id.as_str()) => {
+            return Err(refused(format!(
+                "refused: {id} is one of your children: they are written to with agent_send"
+            )));
+        }
+        Some(agent) if agent.parent.is_some() => {
+            return Err(refused(format!(
+                "refused: {id} is a child of another session: it is written to by its parent, \
+                 never with session_send"
+            )));
+        }
+        Some(agent) if agent.project != caller.project => {
+            return Err(refused(format!(
+                "refused: {id} is a session of another project, {}, not of {}: an agent writes \
+                 only to the sessions of its own project",
+                agent.project, caller.project
+            )));
+        }
+        Some(agent) => agent,
+    };
+    let relation = if session.launched_by.as_deref() == Some(caller.id.as_str()) {
+        Relation::Started
+    } else if caller.launched_by.as_deref() == Some(session.id.as_str()) {
+        Relation::StartedYou
+    } else if daemon
+        .read(|store| store.has_leave(&caller.id, &session.id))
+        .map_err(failed)?
+    {
+        Relation::Leave
+    } else {
+        Relation::NoLeave
     };
     if session.state.is_final() {
         return Err(refused(format!(
@@ -536,14 +583,57 @@ pub fn session_of(
     if asked.text.trim().is_empty() {
         return Err(refused("refused: the text is empty"));
     }
-    Ok((session, started))
+    Ok((session, relation))
+}
+
+/// Whether a `session_send` asks the user's leave: anything but a session the caller started,
+/// the one that started it, or one the user let it write to. A call that names no such session
+/// asks it too, so that nothing passes on a doubt.
+pub fn needs_leave(daemon: &Daemon, grant: &Grant, args: &Value) -> bool {
+    let Ok(asked) = serde_json::from_value::<SessionSend>(args.clone()) else {
+        return true;
+    };
+    let Ok(Some(caller)) = daemon.read(|store| store.agent(&grant.agent)) else {
+        return true;
+    };
+    !matches!(
+        session_of(daemon, &caller, &asked),
+        Ok((
+            _,
+            Relation::Started | Relation::StartedYou | Relation::Leave
+        ))
+    )
+}
+
+/// A session another agent acts on, as the user reads it on a request: its name, and who started
+/// it, which is never the agent asking.
+pub fn other_session(daemon: &Daemon, session: &Agent) -> String {
+    let starter = match &session.launched_by {
+        None => "you".to_owned(),
+        Some(id) => match daemon.read(|store| store.agent(id)) {
+            Ok(Some(agent)) => named(&agent),
+            _ => format!("agent {id}"),
+        },
+    };
+    format!(
+        "the session {} (started by {starter}, not by this agent)",
+        named(session)
+    )
+}
+
+/// The user allowed the first message of `writer` to `session`: the pair writes without asking
+/// the user again, until either session ends or the user takes it back.
+pub fn grant_leave(daemon: &Daemon, writer: &str, session: &str, request: u64) {
+    if let Err(error) = daemon.write(|store| store.grant_leave(writer, session, request)) {
+        eprintln!("flottille daemon: the leave of {writer} to write to {session}: {error}");
+    }
 }
 
 /// What follows the sender's name on the first line of a message `session_send` delivers.
 pub const SESSION_WROTE: &str = " wrote to this session:";
 
-/// `session_send`: a message to a session the caller started, or to the one that started it,
-/// delivered as `session` under a line naming the sender: an agent's words, never the user's.
+/// `session_send`: a message to another session of the caller's project, once the gate let it
+/// through (`Relation`), delivered as `session` under a line naming the sender: an agent's words, never the user's.
 /// The delivery's id names the sender, for the judge (`judge::session_messages`).
 fn session_send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     let asked: SessionSend = arguments("session_send", args)?;

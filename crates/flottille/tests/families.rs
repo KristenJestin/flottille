@@ -4019,11 +4019,9 @@ fn session_send_from_the_starter_reaches_the_session_labelled_and_its_answer_com
 }
 
 #[test]
-fn session_send_to_any_other_session_is_refused() {
+fn session_send_to_a_child_or_to_itself_is_refused() {
     let user = judged_user();
     let (lead, mcp, session, second) = lead_and_session(&user);
-    // A session the user started, which neither of them started.
-    let (other, _) = root_in(&user, None);
     // A child of the lead's.
     let child = mcp.call(
         "agent_launch",
@@ -4039,28 +4037,23 @@ fn session_send_to_any_other_session_is_refused() {
         .to_owned();
     let judged = judge_prompts(&user).len();
 
-    for (from, to) in [
-        (&mcp, &other),
-        (&mcp, &child),
-        (&mcp, &lead),
-        (&second, &other),
-        (&second, &session),
+    for (from, to, said) in [
+        (&mcp, &child, "is one of your children"),
+        (&second, &child, "is a child of another session"),
+        (&mcp, &lead, "is your own session"),
+        (&second, &session, "is your own session"),
     ] {
         let refused = from.call("session_send", json!({"session": to, "text": "Hello."}));
         assert!(refused.error, "{to}: {}", refused.text);
         assert!(
-            refused.text.starts_with(&format!(
-                "refused: {to} is neither a session you started nor the agent that started you"
-            )),
+            refused.text.starts_with(&format!("refused: {to} {said}")),
             "{}",
             refused.text
         );
     }
     assert_eq!(judge_prompts(&user).len(), judged, "the judge was asked");
     assert!(no_request(&user));
-    for agent in [&other, &child] {
-        assert!(delivered(&user, agent, "session").is_empty());
-    }
+    assert!(delivered(&user, &child, "session").is_empty());
 }
 
 #[test]

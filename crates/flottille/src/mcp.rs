@@ -717,10 +717,12 @@ const SERVED: [Definition; 28] = [
     Definition {
         name: "session_send",
         title: "Write to a session",
-        description: "Writes to a session you started (agent_launch with root), or to the agent \
-            that started yours. It does not wait: it reaches it on its next tool result, or as \
-            a new turn, labelled with your name; its answer comes later as [flottille:session]. \
-            Judged, as a write is. Your children are written to with agent_send.",
+        description: "Writes to a session you started (agent_launch with root), to the agent \
+            that started yours, or to any other session of your project (not a child). It does \
+            not wait: it reaches it on its next tool result, or as a new turn, labelled with \
+            your name; its answer comes later as [flottille:session]. Judged, as a write is; \
+            the first message to a session you did not start asks the user's leave, in every \
+            mode, once for that session. Your children are written to with agent_send.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -2029,9 +2031,11 @@ async fn played_in(
                         match judged {
                             // In Full, what the gate holds passes, base included: what it
                             // refuses was refused above.
-                            // Its own workspace is removed only with the user's word.
+                            // Its own workspace is removed only with the user's word, and so is
+                            // a session written to for the first time.
                             _ if mode == GateMode::Full
-                                && !removes_own_workspace(grant, tool, &args) =>
+                                && !removes_own_workspace(grant, tool, &args)
+                                && !gate::asks_leave(&ask) =>
                             {
                                 verdict = Some("full");
                                 if removes_a_workspace(tool, &args) {
@@ -2170,6 +2174,9 @@ fn removes_a_workspace(tool: &str, args: &Value) -> bool {
 pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gate::Verdict {
     if tool == "web" {
         return crate::web::classify(daemon, &grant.agent, args);
+    }
+    if tool == "session_send" && crate::tree::needs_leave(daemon, grant, args) {
+        return gate::session_leave(grant, args);
     }
     // A new workspace's launch is classified by its steps below, but its brief is held to the
     // judge's limit like any other launch's.
