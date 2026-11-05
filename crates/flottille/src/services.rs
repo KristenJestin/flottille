@@ -324,7 +324,19 @@ fn put(
     edit: bool,
     by: Option<&str>,
 ) -> Result<Service, Failure> {
-    let services = rewrite(daemon, |services, document| {
+    // An agent's row is written before the file, so that its lines are never read as the user's,
+    // and put back when the file is not written; the user's is cleared once the file is.
+    let was = match by {
+        Some(_) => {
+            let was = daemon
+                .read(|store| store.service_writer(name))
+                .map_err(|error| Failure::new("unavailable", error.to_string()))?;
+            written_by(daemon, name, by)?;
+            Some(was)
+        }
+        None => None,
+    };
+    let rewritten = rewrite(daemon, |services, document| {
         let was = services.get(name);
         match (edit, was) {
             (false, Some(_)) => {
@@ -339,8 +351,18 @@ fn put(
         }
         let service = keys.applied(was).map_err(Failure::refused)?;
         write(document, name, &service)
-    })?;
-    written_by(daemon, name, by)?;
+    });
+    let services = match (rewritten, was) {
+        (Ok(services), _) => services,
+        (Err(failure), Some(was)) => {
+            let _ = written_by(daemon, name, was.as_deref());
+            return Err(failure);
+        }
+        (Err(failure), None) => return Err(failure),
+    };
+    if by.is_none() {
+        written_by(daemon, name, None)?;
+    }
     let change = if edit { "edited" } else { "added" };
     let _ = daemon.emit(
         "service.changed",
