@@ -818,6 +818,18 @@ mod tests {
     }
 
     #[test]
+    fn an_external_image_with_an_alt_gives_its_address_after_the_name() {
+        let external = json!({"type": "mediaSingle", "content": [
+            {"type": "media", "attrs": {"type": "external", "alt": "the login page",
+                "url": "https://example.com/a.png"}}]});
+
+        assert_eq!(
+            to_markdown(&doc(json!([external]))),
+            format!("[image: the login page (https://example.com/a.png), {NOT_SHOWN}]")
+        );
+    }
+
+    #[test]
     fn a_media_with_no_name_is_still_said() {
         let nameless = json!({"type": "mediaSingle", "content": [
             {"type": "media", "attrs": {"type": "file", "id": "1"}}]});

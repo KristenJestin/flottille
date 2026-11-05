@@ -214,9 +214,9 @@ events.
 ### Attachments
 
 A work item's attachments (`fields.attachment`, read with the item, so cached with it) are listed
-at the end of `tickets show`, one line each: file name, type, size, who added it and when. They are
-named, never shown (the same words as an image in a text): the user can paste one into the
-conversation. `workspace.ticket` gives them as `attachments: [{name, type, bytes, author, at}]`.
+at the end of `tickets show`, one line each: file name, type, size, who added it and when, the first
+30 and then `… and N more`. They are named, never shown (the same words as an image in a text): the user can paste one into the
+conversation. `workspace.ticket` gives them all as `attachments: [{name, type, bytes, author, at}]`.
 Their `content` address is never kept.
 
 ## How fast it is read

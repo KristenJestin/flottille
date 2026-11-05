@@ -45,6 +45,8 @@ const ACLI_TIME: Duration = Duration::from_secs(30);
 pub(crate) const DESCRIPTION_CHARS: usize = 20_000;
 pub(crate) const COMMENT_CHARS: usize = 4_000;
 pub(crate) const COMMENTS: usize = 30;
+/// How many attachments `show` lists by name; the rest are counted.
+const ATTACHMENTS: usize = 30;
 /// What `gh issue view` is asked for.
 const GH_FIELDS: &str = "number,title,state,body,comments,url";
 /// What `acli jira workitem view` is asked for.
@@ -238,7 +240,7 @@ impl Ticket {
                  conversation:\n",
                 self.attachments.len()
             ));
-            for file in &self.attachments {
+            for file in self.attachments.iter().take(ATTACHMENTS) {
                 let mut parts = vec![file.name.clone()];
                 if !file.mime.is_empty() {
                     parts.push(file.mime.clone());
@@ -249,6 +251,14 @@ impl Ticket {
                 }
                 parts.extend(file.at.clone());
                 text.push_str(&format!("- {}\n", parts.join(", ")));
+            }
+            if let Some(more) = self
+                .attachments
+                .len()
+                .checked_sub(ATTACHMENTS)
+                .filter(|n| *n > 0)
+            {
+                text.push_str(&format!("- … and {more} more\n"));
             }
         }
         text
@@ -2984,6 +2994,50 @@ mod tests {
         // Never the address that needs the user's credentials.
         assert!(!text.contains("attachment/content"), "{text}");
         assert!(!ticket.to_json().to_string().contains("attachment/content"));
+    }
+
+    #[test]
+    fn a_work_item_lists_at_most_thirty_attachments_and_counts_the_rest() {
+        let files = (1..=32)
+            .map(|n| attachment(&format!("file-{n}.pdf"), None))
+            .collect::<Vec<_>>();
+        let item = json!({"fields": {"attachment": files}});
+
+        let ticket = work_item("ABC-1", &item, "acme.atlassian.net");
+        let text = ticket.text(false, None, None);
+
+        assert!(text.contains("\nAttachments (32), named"), "{text}");
+        assert!(text.contains("- file-30.pdf, "), "{text}");
+        assert!(!text.contains("file-31.pdf"), "{text}");
+        assert!(text.ends_with("- … and 2 more\n"), "{text}");
+    }
+
+    #[test]
+    fn a_work_item_with_thirty_attachments_lists_them_all() {
+        let files = (1..=30)
+            .map(|n| attachment(&format!("file-{n}.pdf"), None))
+            .collect::<Vec<_>>();
+        let item = json!({"fields": {"attachment": files}});
+
+        let text = work_item("ABC-1", &item, "acme.atlassian.net").text(false, None, None);
+
+        assert!(text.contains("- file-30.pdf, "), "{text}");
+        assert!(!text.contains(" more"), "{text}");
+    }
+
+    #[test]
+    fn the_json_of_an_attachment_is_name_type_bytes_author_at() {
+        let item = json!({"fields": {
+            "attachment": [attachment("spec.pdf", Some("application/pdf"))],
+        }});
+
+        let json = work_item("ABC-1", &item, "acme.atlassian.net").to_json();
+
+        assert_eq!(
+            json["attachments"],
+            json!([{"name": "spec.pdf", "type": "application/pdf", "bytes": 97717,
+                "author": "Ana Example", "at": "2026-01-01T12:00:00.000+0100"}])
+        );
     }
 
     #[test]

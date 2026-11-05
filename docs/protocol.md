@@ -668,6 +668,7 @@ checks. A Bitbucket pull request also has `reviewers`, each `{"name", "state"}` 
   "description": "Users cannot sign in.",
   "comments": [{"author": "alice", "at": "2026-10-01T10:00:00Z", "body": "I can reproduce"}],
   "older_comments": 0,
+  "attachments": [],
   "read_at": 1792843730808,
   "problem": null
 }
@@ -678,7 +679,9 @@ checks. A Bitbucket pull request also has `reviewers`, each `{"name", "state"}` 
 is in, `null` for Jira; `state` is `open` or `closed` for GitHub and Jira's own status name for
 Jira. When the ticket cannot be read (`gh` or `acli` missing, not signed in, no such ticket, a call
 that failed), `problem` says why and with what to do, and the fields of the ticket are absent. All
-the tracker's text is masked. Nothing is kept: every call reads again.
+the tracker's text is masked. `attachments` are the files of a Jira work item, `[{"name", "type",
+"bytes", "author", "at"}]`, named only (Flottille never fetches one), empty for GitHub. Nothing is
+kept: every call reads again.
 
 #### `workspace.link_ticket`
 
