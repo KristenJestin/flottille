@@ -53,6 +53,7 @@ use crate::conversation::{
     Activity, Block, Call, CallState, Change, Conversation, DiffLine, Ending, STARTED_SESSION_KIND,
     Summary, USER, WOKEN_BY_KIND, asks_the_user, in_sight,
 };
+use crate::leaves::LeaveList;
 use crate::link::{Connect, Update};
 use crate::mode::ModeSwitch;
 use crate::model::Place;
@@ -434,6 +435,11 @@ impl SessionPage {
         self.rail.read(cx).subscriptions.clone()
     }
 
+    /// The rail's Leaves section.
+    pub fn leaves(&self, cx: &gpui_kit::App) -> Entity<LeaveList> {
+        self.rail.read(cx).leaves.clone()
+    }
+
     /// The rail's "Waiting for you" section.
     pub fn waiting(&self, cx: &gpui_kit::App) -> Entity<Waiting> {
         self.rail.read(cx).waiting.clone()
@@ -743,6 +749,26 @@ impl SessionPage {
         );
     }
 
+    /// The user withdraws a leave: the daemon takes it back, and the list follows its event.
+    pub fn withdraw_leave(&mut self, writer: &str, session: &str, cx: &mut Context<Self>) {
+        let list = self.leaves(cx);
+        list.update(cx, |list, cx| list.failed(None, cx));
+        self.perform(
+            Command::WithdrawLeave {
+                session: self.opened.id.clone(),
+                writer: writer.to_owned(),
+                leave_session: session.to_owned(),
+            },
+            cx,
+        );
+    }
+
+    /// What the daemon answered to a withdrawal: why, when it refused.
+    pub fn leave_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
+        let list = self.leaves(cx);
+        list.update(cx, |list, cx| list.failed(refused, cx));
+    }
+
     /// What the daemon answered to a cancellation: why, when it refused.
     pub fn subscription_answered(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
         let list = self.subscriptions(cx);
@@ -962,6 +988,10 @@ impl SessionPage {
             }
             SessionUpdate::Subscriptions(rows) => {
                 let list = self.subscriptions(cx);
+                list.update(cx, |list, cx| list.set(rows, cx));
+            }
+            SessionUpdate::Leaves(rows) => {
+                let list = self.leaves(cx);
                 list.update(cx, |list, cx| list.set(rows, cx));
             }
             SessionUpdate::CommandOutput(output) => {
@@ -4587,6 +4617,8 @@ pub struct SessionRail {
     commands: Entity<CommandList>,
     /// What the agents of the session's tree wait for outside Flottille.
     subscriptions: Entity<SubscriptionList>,
+    /// The leaves that let the session write to another, or another to write to it.
+    leaves: Entity<LeaveList>,
     /// The requests that wait for the user, pinned at the rail's bottom.
     waiting: Entity<Waiting>,
     /// The scroll of the sections above what waits.
@@ -4646,11 +4678,13 @@ impl SessionRail {
         });
         let commands = cx.new(|_| CommandList::new(page.clone()).of_agent(root.clone()));
         let subscriptions = cx.new(|_| SubscriptionList::new(page.clone()));
+        let leaves = cx.new(|_| LeaveList::new(page.clone(), root.clone()));
         let waiting = cx.new(|cx| Waiting::new(page.clone(), cx));
         Self {
             page,
             commands,
             subscriptions,
+            leaves,
             waiting,
             scroll: ScrollHandle::new(),
             agents: Vec::new(),
@@ -5789,6 +5823,7 @@ impl Render for SessionRail {
                     .child(agents)
                     .child(workspace)
                     .child(self.subscriptions.clone())
+                    .child(self.leaves.clone())
                     .child(self.commands.clone()),
             )
             .child(

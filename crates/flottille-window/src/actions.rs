@@ -409,6 +409,12 @@ pub enum Command {
         session: String,
         subscription: String,
     },
+    /// Takes back the user's leave for `writer` to write to `leave_session`.
+    WithdrawLeave {
+        session: String,
+        writer: String,
+        leave_session: String,
+    },
     /// The user's answer to a request they hold, given on the page of the session of `session`
     /// (its root agent).
     Answer {
@@ -870,6 +876,11 @@ pub enum Outcome {
     },
     /// A subscription was cancelled as asked, or the daemon refused with why.
     SubscriptionCancelled {
+        session: String,
+        refused: Option<String>,
+    },
+    /// A leave was withdrawn as asked, or the daemon refused with why.
+    LeaveWithdrawn {
         session: String,
         refused: Option<String>,
     },
@@ -1878,6 +1889,22 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 Ok(Err(why)) | Err(why) => Some(why),
             };
             Outcome::SubscriptionCancelled { session, refused }
+        }
+        Command::WithdrawLeave {
+            session,
+            writer,
+            leave_session,
+        } => {
+            let refused = match ask_alone(
+                connect,
+                "leave.withdraw",
+                json!({"writer": writer, "session": leave_session}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::LeaveWithdrawn { session, refused }
         }
         Command::Answer {
             session,

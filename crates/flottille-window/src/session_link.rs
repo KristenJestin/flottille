@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 
 use crate::actions::{Changes, RepositoryStatus};
 use crate::conversation::one_line;
+use crate::leaves::LeaveRow;
 use crate::link::{Conn, Connect, Update, quiet_wait};
 use crate::runs::{CommandOutput, CommandRow};
 use crate::subscriptions::SubscriptionRow;
@@ -465,6 +466,9 @@ pub enum SessionUpdate {
     CommandOutput(Box<CommandOutput>),
     /// What the agents of the session's tree wait for (`subscription.list`).
     Subscriptions(Vec<SubscriptionRow>),
+    /// The leaves that let the root write to another session, or another to write to it
+    /// (`leave.list`).
+    Leaves(Vec<LeaveRow>),
     /// The root's session refused a model or an effort the user changed to, with why.
     OptionsRefused(String),
 }
@@ -621,6 +625,7 @@ struct Stale {
     place: bool,
     commands: bool,
     subscriptions: bool,
+    leaves: bool,
     /// When the first of them was marked.
     since: Option<Instant>,
 }
@@ -696,6 +701,7 @@ impl Link {
         // The runs and the subscriptions never wait for the place, whose forge and tracker are
         // reads of seconds.
         self.read_subscriptions(&mut conn)?;
+        self.read_leaves(&mut conn)?;
         let mut running = self.read_commands(&mut conn)?;
         self.read_place(&mut conn, &mut resume.known)?;
         let mut next_commands = Instant::now() + COMMANDS_EVERY;
@@ -726,6 +732,9 @@ impl Link {
                 if stale.subscriptions {
                     self.read_subscriptions(&mut conn)?;
                 }
+                if stale.leaves {
+                    self.read_leaves(&mut conn)?;
+                }
                 let due = running && Instant::now() >= next_commands;
                 if stale.commands || due {
                     running = self.read_commands(&mut conn)?;
@@ -751,6 +760,14 @@ impl Link {
                 && data["project"] == self.place.project.as_str()
             {
                 stale.mark(false, false, true, false);
+            }
+            // A leave names two sessions, and goes with the end of either, the other one too.
+            let root = self.root.as_str();
+            if (name.starts_with("leave.") && (data["writer"] == root || data["session"] == root))
+                || matches!(name, "agent.ended" | "agent.failed")
+            {
+                stale.leaves = true;
+                stale.since.get_or_insert_with(Instant::now);
             }
             let ours = tree.contains(agent)
                 || (name == "agent.created"
@@ -870,6 +887,19 @@ impl Link {
             .map(SubscriptionRow::of)
             .collect();
         self.send(SessionUpdate::Subscriptions(rows));
+        Ok(())
+    }
+
+    /// The leaves that name the session's root, sent.
+    fn read_leaves(&self, conn: &mut Conn) -> Result<(), String> {
+        let answer = conn.request("leave.list", json!({"session": self.root}))?;
+        let rows = answer["leaves"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(LeaveRow::of)
+            .collect();
+        self.send(SessionUpdate::Leaves(rows));
         Ok(())
     }
 

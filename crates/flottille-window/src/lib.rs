@@ -11,6 +11,7 @@ pub mod conversation;
 pub mod history;
 pub mod instance;
 pub mod items;
+pub mod leaves;
 pub mod link;
 pub mod mode;
 pub mod model;
