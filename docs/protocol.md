@@ -270,12 +270,14 @@ its sign-in check only, never for anything else, and nothing it prints of the ac
 
 #### `project.set_settings`
 
-`{"name", "repositories": [{"path", "forge", "base", "depends_on"}], "tracker"}`. Writes each listed
+`{"name", "repositories": [{"path", "forge", "base", "depends_on"}], "tracker", "branch_prefix"?}`. Writes each listed
 repository's `forge` (removed when `null`; a repository left out is unchanged), its `base` (the base
 branches in order of preference, one at least) and its `depends_on` (the paths of the repositories it
 depends on, `[]` for none) when they are given, and the project's `[tracker]` (removed when `null`
 or left out) in its file, where they stand, what is around them kept, and answers as
-`project.settings`. A `base` or a `depends_on` left out keeps the file's: a client that knows only
+`project.settings` (which also gives the project's `branch_prefix`). `branch_prefix` is written when
+given, `""` included (no prefix: the branch of a workspace is its name), and kept when left out;
+a space in it is refused (`invalid-config`). A `base` or a `depends_on` left out keeps the file's: a client that knows only
 the forge is not affected. A change of base is used by the workspaces created after it; the ones
 already made keep theirs. `refused`, with nothing written, when a path is not one of the project's,
 a forge or the tracker cannot be used (naming its key), a forge is not where its repository's
@@ -382,6 +384,25 @@ Flottille's configuration folder.
 The daemon reads the file at every tool call: a change applies to the next result of every
 running session. `tool_results.set` emits `tool_results.changed` with what it answers. The user's
 door alone reaches them: no tool of an agent does.
+
+### The sessions methods
+
+`sessions.show` and `sessions.set` read and keep after how many days without activity the daemon
+ends a root session (`docs/design.md` §5.7): `end_inactive_days` in `sessions.toml` of Flottille's
+configuration folder.
+
+- `sessions.show` answers `{"days"}`: a number of days from 1 to 90, or `"off"` (no file, no key,
+  or the word). `invalid-config` when the file cannot be read, names another key, or holds a value
+  that is neither `"off"` nor a whole number from 1 to 90.
+- `sessions.set {days}` takes a number of days or `"off"`, writes the file
+  (`end_inactive_days = 7`, or `end_inactive_days = "off"`) and answers as `sessions.show`;
+  `invalid-params` for anything else, a number out of the range and a missing `days` included (a
+  client leaves null fields out, so `"off"` is a word). The window sends 7 when the user first
+  turns it on.
+
+The daemon reads the file when a check is due, at its start and about once an hour. `sessions.set`
+emits `sessions.changed` with what it answers. The user's door alone reaches them: no tool of an
+agent does.
 
 ### The workspaces folder methods
 
@@ -522,7 +543,7 @@ cannot be used.
 `{"project", "name", "repositories"?, "branch"?, "bases"?, "offline"?, "ticket"?}`. Fetches the
 base of each repository, writes the workspace, makes the worktrees and answers the workspace; the
 rest of the setup goes on in the background. `repositories` is the project's default set when left
-out, `branch` is `<branch prefix>/<name>` when left out, and a branch that exists already is checked
+out, `branch` is `<branch prefix>/<name>` when left out (the name alone when the project's prefix is empty), and a branch that exists already is checked
 out rather than started (`docs/workspaces.md`), `bases` (`{"api": "main"}`) gives a repository it takes
 the branch it starts from in place of its base rule, `offline: true` fetches nothing, and `ticket` (`#123`, `123`
 or a Jira key) links the workspace to a ticket (`tickets.md`); the workspace's `ticket` says it, in
@@ -689,7 +710,9 @@ no such project.
 `{"project", "kind"?, "state"?, "repository"?, "mine"?}`: `kind` is `pull` or `ticket`, `state`
 one of an item's states (`open`, `draft`, `merged`, `closed`), `repository` a path of the
 project's (a Jira work item has none), `mine` true for the user's own. Answers `{project, items,
-sources}`, the items most recently changed first, from the store: nothing is read.
+sources}`, the items most recently changed first, from the store: nothing is read. Each source
+has its `mine_unknown`: why its last round could not tell which items are the user's, `null`
+when it could.
 
 #### `items.show`
 

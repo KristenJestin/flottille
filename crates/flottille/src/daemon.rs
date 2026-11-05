@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{ErrorKind, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -173,6 +174,8 @@ pub struct Daemon {
     pub items: items::Items,
     /// The developer mode's log (`docs/developer.md`).
     pub developer: developer::Log,
+    /// When the inactive sessions were last looked for (`inactive::check`); 0 before the first.
+    pub inactive_checked: AtomicU64,
     /// Becomes true when the daemon stops.
     stopping: watch::Sender<bool>,
 }
@@ -346,6 +349,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         kept_tickets: crate::reads::Kept::default(),
         items: items::Items::default(),
         developer: developer::Log::open(paths),
+        inactive_checked: AtomicU64::new(0),
         stopping: watch::Sender::new(false),
     });
     let mut terminate = signal(SignalKind::terminate())?;
@@ -381,6 +385,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     ));
     tokio::spawn(sweep::run(daemon.clone(), daemon.stopping.subscribe()));
     crate::models::check(&daemon);
+    crate::inactive::check(&daemon);
 
     let mut connections = JoinSet::new();
     let reason = loop {
@@ -705,6 +710,13 @@ fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) 
         ),
         method if method.starts_with("appearance.") => (
             match crate::appearance::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+            },
+            None,
+        ),
+        method if method.starts_with("sessions.") => (
+            match crate::inactive::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => Message::error(Some(id), failure.code, failure.message),
             },
