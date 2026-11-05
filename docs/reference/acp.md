@@ -72,6 +72,56 @@ checked against `claude` 2.1.295; `flottille doctor` warns on another version. T
   The crate named `claude-agent-sdk` names an Anthropic repository that does not exist; it is not
   official either.
 
+## What a turn used
+
+The daemon records what each turn used, one row per turn and model, in the store's table
+`turn_usage`: the agent (its id, its title), its session (the root's id), its project and
+workspace by name, the kind of agent (`provider`), its role, the model, the start and the end of
+the turn (milliseconds), its stop reason, the tokens (`input`, `output`, `cache_read`,
+`cache_write`, `reasoning`) and the cost in USD. A count the agent did not give is `NULL`, never
+0. The rows are history: they hold no reference to the agents or the workspaces, and stay when
+those go. Nothing reads them yet.
+
+It comes with the end of the turn, the answer to `session/prompt`, in one of two shapes:
+
+- **`_meta.flottille.usage`**, Flottille's own, which its bridges send: a list with one entry per
+  model the turn used, each with ACP's names for the counts and `usage_update`'s for the cost,
+  a key left out when it is not known:
+
+  ```json
+  {"stopReason": "end_turn", "_meta": {"flottille": {"usage": [
+    {"model": "claude-fable-5", "inputTokens": 100, "outputTokens": 20,
+     "cachedReadTokens": 1000, "cachedWriteTokens": 50, "thoughtTokens": 12,
+     "cost": {"amount": 0.0125, "currency": "USD"}}
+  ]}}}
+  ```
+
+- **ACP's `usage`** on the answer (unstable in v1, the crate's feature
+  `unstable_end_turn_token_usage`): `inputTokens`, `outputTokens`, `thoughtTokens`,
+  `cachedReadTokens`, `cachedWriteTokens`. OpenCode sends it (2.2.5, its optional counts only
+  when they are not 0), with no model and no cost. It is read when `_meta.flottille.usage` is not
+  there.
+
+An answer with neither is one row without counts. A row whose model the agent did not name takes
+the model the agent had taken. A cancelled turn records what its answer says it used.
+
+What each bridge gives:
+
+- **Claude**: the `result` that ends the turn has `usage`, the turn's counts of the main loop alone,
+  and `modelUsage` and `total_cost_usd`, which in this stream-json mode are the session's running
+  totals, across turns: a resumed session continues from the totals its transcript saved (the
+  schema's descriptions in `claude` 2.1.x). The bridge keeps the last totals of each session
+  (beside its history, gone with it) and says what each model's totals grew by since: one entry
+  per model that grew, each with its own cost; the turn's `usage` is not split, as `modelUsage`
+  is already per model. A total that went down was reset (`/clear`): its whole value is the
+  turn's. A session the bridge kept no totals of, and a result without `modelUsage`, give one
+  entry from `usage`, without cost, its model named when the session used only one.
+- **Codex**: what `thread/tokenUsage/updated`'s `total` grew by over the turn (`last` is the last
+  request alone, not the turn), with the turn's model: `inputTokens` without the
+  `cachedInputTokens` it counts, which are `cachedReadTokens`; `reasoningOutputTokens` as
+  `thoughtTokens` (counted in the output too, as Codex does); `cacheWriteInputTokens` when Codex
+  gives it. No cost.
+
 ## Codex
 
 `codex features list` shows `multi_agent` stable and **on by default**, plus `unified_exec`

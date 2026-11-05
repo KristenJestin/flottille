@@ -498,7 +498,12 @@ in `main`, the one the project's checkout is on.
 - **What can be run is read from the branch's own files**, through git, not from the forge: the
   file as `<remote>/<branch>` holds it (as last fetched, what the forge runs), else as the local
   branch holds it, which the answer says (`… is not on origin as last fetched, and the forge runs
-  what is pushed`). YAML is read with `serde_norway`. GitHub runs a workflow by `workflow_dispatch`
+  what is pushed`). YAML is read with `serde_norway`, merge keys (`<<: *anchor`) applied, so a
+  custom pipeline whose variables come from an anchor lists them. A file that cannot be read
+  says which of three it is: not in that commit, git could not give it (git's words), or it is
+  there and the parser refuses it (its message, line and column); a merge key that cannot be
+  applied is said and the rest is listed; a GitHub workflow that cannot be parsed is named under
+  `Not read:` and never hides the others. GitHub runs a workflow by `workflow_dispatch`
   only when the file is also on the default branch: that is GitHub's own refusal, passed on.
 - **A pipeline is named as `pipelines` lists it**: Bitbucket `default`, `custom: <name>` (a bare
   name is a custom one), `branches: <pattern>`, `tags: <pattern>`, `pull-requests: <pattern>`;

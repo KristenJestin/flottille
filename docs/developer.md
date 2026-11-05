@@ -59,6 +59,7 @@ outcome.
 | `result_chars` | The length of the text the agent was given, in characters, before it was cut. |
 | `duration_ms` | How long the call took. |
 | `reads` | For a `forge` or `tickets` call that ran command lines of `gh`, `bkt` or `acli`, or was answered from what an earlier call read: `{"ran", "total_ms", "slowest_ms", "cached"}`, the number of command lines, the sum of their durations, the slowest, and whether the 30 s cache answered; else `null`. Reads that ran together make `duration_ms` near `slowest_ms` and well under `total_ms` ([`forges.md`](forges.md), "How fast `forge show` is read"). |
+| `run` | For `run`, the id of the run it started or joined (the `run` of its `run.*` events); else `null`. |
 
 ### `event`
 
@@ -71,6 +72,12 @@ by `delivery.sent`), an agent's process and session (`agent.created`, `agent.sta
 `agent.provider_limit`), the commands run (`run.started`, `run.ended`), a setup step that failed
 (`workspace.step_failed`), the judge chosen (`provider.judge_changed`), and the daemon's start and
 stop.
+
+A command line an agent ran with `run` is in the log as its `call` line, which says the run's id
+(`run`): its `run.started` is never written, and its `run.ended` only when the call's line does
+not tell its end, that is when it outlived its call, or did not exit with code 0 (it failed, was
+stopped, or was interrupted). A task run (by an agent or by the user), and a command restarted,
+keep both events. The events reach the clients all the same.
 
 | Field | |
 |---|---|

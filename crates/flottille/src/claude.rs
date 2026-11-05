@@ -49,6 +49,9 @@ pub static PROVIDER: Provider = Provider {
     // `--allowedTools` is fixed with its process, but the tools it lacks ask permission of the
     // bridge, which the daemon answers from the role's list as it is now.
     takes_new_tools: true,
+    // Told the list changed, it does not list the tools again: seen on a real session, where it
+    // said an action was missing while the daemon accepted it.
+    lists_tools_again: false,
     unready: providers::ready_here,
     forget_process: forget_bridge,
     forget_session: forget_history,
@@ -147,6 +150,12 @@ pub fn history(paths: &Paths, session: &str) -> Option<PathBuf> {
     is_session_id(session).then(|| histories(paths).join(format!("{session}.jsonl")))
 }
 
+/// The running totals of `modelUsage` the session's last result said, which a turn's usage is
+/// told from (`docs/reference/acp.md`, "What a turn used").
+pub fn totals(paths: &Paths, session: &str) -> Option<PathBuf> {
+    is_session_id(session).then(|| histories(paths).join(format!("{session}.totals.json")))
+}
+
 /// A session id that names a file: letters, digits and dashes only.
 pub fn is_session_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
@@ -154,7 +163,10 @@ pub fn is_session_id(id: &str) -> bool {
 
 /// The session is over (replaced, or its agent ended): its history goes, nothing will load it.
 pub fn forget_history(paths: &Paths, session: &str) {
-    if let Some(path) = history(paths, session) {
+    for path in [history(paths, session), totals(paths, session)]
+        .into_iter()
+        .flatten()
+    {
         let _ = std::fs::remove_file(path);
     }
 }
