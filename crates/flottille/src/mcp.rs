@@ -1111,13 +1111,15 @@ impl Server {
     /// A new token for the agent, revoking the one it had; `takes` says whether its agent can
     /// take tools its role gains while it runs. The grant holds the tools its process was started
     /// with; it serves `stored`, those its agent has now: a change of its project announced
-    /// since its process read them found no token to give them to. The token, and whether its
-    /// session runs an older list, when it does from the start.
+    /// since its process read them found no token to give them to. `newer`: its agent's last
+    /// process was given another list (a new build), which it is told of. The token, and whether
+    /// its session runs an older list, when it does from the start.
     pub fn mint(
         &self,
         grant: Grant,
         takes: bool,
         stored: Vec<&'static str>,
+        newer: bool,
     ) -> std::io::Result<(String, Option<bool>)> {
         let mut bytes = [0u8; 32];
         std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
@@ -1138,6 +1140,9 @@ impl Server {
         };
         let mut grant = Arc::new(grant);
         let outdated = notice.change(&mut grant, stored);
+        if newer {
+            notice.changed += 1;
+        }
         tokens.notices.insert(agent, notice);
         tokens.grants.insert(digest, grant);
         Ok((token, outdated))
@@ -1367,14 +1372,116 @@ pub fn mint(daemon: &Daemon, grant: Grant, provider: &Provider) -> Result<String
         Ok(Some(stored)) => served(provider, &stored.tools),
         _ => grant.tools.clone(),
     };
+    let given = Given::of(&stored);
+    // An agent whose last process was given none (made by a build that kept none) is told
+    // nothing: there is nothing to compare with.
+    let before = daemon
+        .read(|store| store.agent_tools_given(&agent))
+        .ok()
+        .flatten()
+        .and_then(|before| serde_json::from_str::<Given>(&before).ok());
+    let newer = before.as_ref().filter(|b| b.digest != given.digest);
     let (token, outdated) = daemon
         .mcp
-        .mint(grant, provider.takes_new_tools, stored)
+        .mint(grant, provider.takes_new_tools, stored, newer.is_some())
         .map_err(|e| format!("cannot make the agent's token: {e}"))?;
     if let Some(outdated) = outdated {
         say_outdated(daemon, &agent, outdated);
     }
+    // Its conversation still holds what it said of its old tools: an agent that does not list
+    // them again reads what changed with its next turn.
+    if let Some(before) = newer
+        && !provider.lists_tools_again
+        && let Some(changes) = given.since(before)
+    {
+        deliveries::queue(daemon, &agent, "tools", None, &changes);
+    }
+    let kept = serde_json::to_string(&given).expect("a list given is JSON");
+    let kept = daemon.write(|store| {
+        store.set_agent_tools_given(&agent, &kept)?;
+        Ok(((), None))
+    });
+    if let Err(error) = kept {
+        eprintln!("flottille daemon: agent {agent}: its tools given: {error}");
+    }
     Ok(token)
+}
+
+/// The tool list a process is given (`docs/tools.md`, "When the tools change"), kept with its
+/// agent: a digest of the tools as they are listed (names, schemas, descriptions), and the
+/// actions of each.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Given {
+    digest: String,
+    actions: BTreeMap<String, Vec<String>>,
+}
+
+impl Given {
+    fn of(tools: &[&'static str]) -> Given {
+        let definitions: Vec<&Definition> =
+            tools.iter().filter_map(|name| definition(name)).collect();
+        let listed: Vec<Tool> = definitions.iter().map(|d| tool_of(d, true)).collect();
+        let listed = serde_json::to_string(&listed).expect("tools are JSON");
+        let actions = definitions
+            .iter()
+            .map(|definition| {
+                let schema = (definition.schema)();
+                let actions = schema["properties"]["action"]["enum"]
+                    .as_array()
+                    .map(|all| all.iter().filter_map(Value::as_str).map(str::to_owned))
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                (definition.name.to_owned(), actions)
+            })
+            .collect();
+        Given {
+            digest: files::sha256(listed.as_bytes()),
+            actions,
+        }
+    }
+
+    /// What changed since `before`: a line for each tool gained, lost, or whose actions changed;
+    /// `None` when only descriptions or schemas did.
+    fn since(&self, before: &Given) -> Option<String> {
+        let mut lines = Vec::new();
+        for (tool, now) in &self.actions {
+            match before.actions.get(tool) {
+                None => lines.push(format!("- {tool}: new")),
+                Some(had) => {
+                    let missing = |list: &[String], other: &[String]| -> Vec<String> {
+                        list.iter()
+                            .filter(|a| !other.contains(a))
+                            .cloned()
+                            .collect()
+                    };
+                    let (added, removed) = (missing(now, had), missing(had, now));
+                    let mut said = Vec::new();
+                    if !added.is_empty() {
+                        said.push(format!("added {}", added.join(", ")));
+                    }
+                    if !removed.is_empty() {
+                        said.push(format!("removed {}", removed.join(", ")));
+                    }
+                    if !said.is_empty() {
+                        lines.push(format!("- {tool}: {}", said.join("; ")));
+                    }
+                }
+            }
+        }
+        for tool in before.actions.keys() {
+            if !self.actions.contains_key(tool) {
+                lines.push(format!("- {tool}: gone"));
+            }
+        }
+        (!lines.is_empty()).then(|| {
+            format!(
+                "Flottille was updated: your tools changed since you last read them. They are as \
+                 listed now, whatever was said of them before:\n{}",
+                lines.join("\n")
+            )
+        })
+    }
 }
 
 /// The agent's token no longer works: its process is gone (`Server::revoke`).
@@ -2864,7 +2971,9 @@ mod tests {
     /// tools the same, and the token's digest.
     fn minted(takes: bool) -> (Server, String) {
         let server = Server::new(0);
-        let (token, outdated) = server.mint(grant(), takes, STARTED.to_vec()).unwrap();
+        let (token, outdated) = server
+            .mint(grant(), takes, STARTED.to_vec(), false)
+            .unwrap();
         assert_eq!(outdated, None);
         (server, files::sha256(token.as_bytes()))
     }
@@ -2880,7 +2989,7 @@ mod tests {
         // The process read its tools, then its project changed and found no token: the token is
         // made with the tools stored since.
         let server = Server::new(0);
-        let (token, outdated) = server.mint(grant(), false, GAINED.to_vec()).unwrap();
+        let (token, outdated) = server.mint(grant(), false, GAINED.to_vec(), false).unwrap();
         let digest = files::sha256(token.as_bytes());
         assert_eq!(
             outdated,
@@ -2891,7 +3000,7 @@ mod tests {
         assert!(server.outdated("a1"));
 
         let server = Server::new(0);
-        let (token, outdated) = server.mint(grant(), true, GAINED.to_vec()).unwrap();
+        let (token, outdated) = server.mint(grant(), true, GAINED.to_vec(), false).unwrap();
         let digest = files::sha256(token.as_bytes());
         assert_eq!(outdated, None);
         assert_eq!(server.current(&digest).unwrap().tools, GAINED);

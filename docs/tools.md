@@ -79,7 +79,15 @@ agent. They change in two ways, and a session never keeps a list its role no lon
   update`, `docs/releases.md`): no connection survives it. The next process of each agent starts
   on the tools its role has in the new version (the tools and actions added since included), its
   store entry rewritten first (`agent.tools_changed`), and a new process is a new connection,
-  which lists them.
+  which lists them. Its conversation still holds what it was told of the old ones, and a tool
+  can change under the same name (an action, a schema, a description): the list each process
+  is given is kept with the agent (a digest of the tools as listed, and each tool's actions).
+  When a process starts on another list than the last one, its client is told
+  `notifications/tools/list_changed` as for a change below, and an agent that does not list its
+  tools again when told (the table below) is sent a delivery (`tools`) with the prompt that
+  started the process: what changed, by tool (`- forge: added pipelines, run`, a tool `new` or
+  `gone`), so that it does not deny what it can do. An agent made before lists were kept is told
+  nothing at its first process; a change of descriptions or schemas only sends no delivery.
 - **The project gains or loses a forge or a tracker** while sessions run: each running session
   of the project that has not ended is given the new list at once, before the change is
   answered. Its grant serves it, its tools are stored (`agent.tools_changed`), and its client is
