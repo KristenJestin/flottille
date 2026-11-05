@@ -39,8 +39,13 @@ command line, the window and the protocol alike (`main is reserved: it names the
 where a session works without a workspace; choose another name for the workspace`). A project
 that holds a workspace named `main`, made before the name was reserved, keeps it, with no
 migration: there `"workspace": "main"` names that workspace, as before, and the card says `the
-workspace main`. The branch is `<branch prefix>/<name>` unless `--branch` gives one; `git check-ref-format
---branch` must accept it as it is. Creation is refused when the project has a workspace of that
+workspace main`. The branch is `<branch prefix>/<name>` unless `--branch` gives one, and the name
+alone when the project's branch prefix is empty (`docs/projects.md`); `git check-ref-format
+--branch` must accept it as it is. A repository that names its branches after tickets
+(`fix/ABC-12-login`) is followed by naming the branch: the agent's `workspace create` says to give
+`branch` when the repository has a naming convention (its `AGENTS.md`, `CONTRIBUTING`, or the
+branches it already has), with the ticket's key when the workspace has a ticket; the default is
+the fallback. Creation is refused when the project has a workspace of that
 name, when the folder exists, or when the branch is checked out in a checkout of one of the
 repositories, the main one or another worktree (`the branch feature/x is checked out in <folder>
 for web: …`, naming it).
@@ -79,7 +84,7 @@ of all.
 The window's New workspace form offers the same: a row per repository of the project, taken or
 not (the default set taken, at least one stays taken), with the base branch it starts from (its
 rule when the field is left empty, which the field says; `--base`), a branch field (`<branch
-prefix>/<name>` when empty; "To resume a branch, name it."), the offline switch (`--offline`), and the optional ticket, previewed
+prefix>/<name>`, or the name alone without a prefix, when empty; "To resume a branch, name it."), the offline switch (`--offline`), and the optional ticket, previewed
 as it is typed (`docs/tickets.md`). The agent's `workspace create` takes `repositories` the same
 way, each repository on its rule.
 

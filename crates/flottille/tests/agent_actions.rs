@@ -608,7 +608,8 @@ fn in_main_a_known_read_runs_at_once_and_a_write_is_held_then_run_once() {
     let (_, mcp) = root(&user, None);
     let before = file(&user);
 
-    let read = done(mcp.call("run", json!({"line": "cat README.md"})));
+    // Not `cat README.md`, which is answered as an `fs_read` and starts no process.
+    let read = done(mcp.call("run", json!({"line": "git status"})));
     assert!(read.contains("exited with code 0"), "{read}");
     let number = held(mcp.call("run", json!({"line": "touch notes.txt"})));
     let asked = request(&user, number);

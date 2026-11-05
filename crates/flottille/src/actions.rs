@@ -1659,10 +1659,7 @@ fn create_says(
         Some(paths) => format!("with the repositories {}", paths.join(", ")),
         None => "with the project's default repositories".into(),
     };
-    let branch = branch.map_or_else(
-        || format!("{}/{name}", project.branch_prefix),
-        str::to_owned,
-    );
+    let branch = branch.map_or_else(|| project.default_branch(name), str::to_owned);
     let mut says = vec![format!(
         "Create the workspace {name} on the branch {branch}, {taken}"
     )];

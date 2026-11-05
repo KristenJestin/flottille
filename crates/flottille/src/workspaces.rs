@@ -539,7 +539,7 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
     let named = asked.branch.is_some();
     let branch = asked
         .branch
-        .unwrap_or_else(|| format!("{}/{}", project.branch_prefix, asked.name));
+        .unwrap_or_else(|| project.default_branch(&asked.name));
     check_branch(&main_checkout(&project.folder, &taken[0]), &branch).await?;
     let folder = project.workspaces_root.join(&asked.name);
     if daemon

@@ -130,6 +130,9 @@ pub struct Listing {
     pub items: Vec<Fetched>,
     pub note: Option<String>,
     pub details: bool,
+    /// What the developer log says of the read, a line each (`docs/developer.md`): Jira's
+    /// searches, how many each found.
+    pub log: Vec<Value>,
 }
 
 /// A time a source says, as milliseconds: RFC 3339 (with an offset written `+0000` too, as Jira
@@ -194,6 +197,23 @@ pub struct Items {
     swept: Mutex<HashMap<String, u64>>,
     /// The pull requests whose checks could not be read again, said once each.
     unread_checks: Mutex<std::collections::HashSet<String>>,
+    /// Why a source cannot tell which of its items are the user's, by source (`source_key`), as
+    /// its last round found: `items.list` says it of each source.
+    mine_unknown: Mutex<HashMap<String, String>>,
+}
+
+/// A source of a project, as the maps of [`Items`] know it.
+fn source_key(project: &str, kind: &str, target: &str) -> String {
+    format!("{project}\t{kind}\t{target}")
+}
+
+/// Says that `key` cannot tell the user's items, and why, or that it can.
+fn know_mine(daemon: &Daemon, key: String, unknown: Option<String>) {
+    let mut known = daemon.items.mine_unknown.lock().unwrap();
+    match unknown {
+        Some(why) => known.insert(key, why),
+        None => known.remove(&key),
+    };
 }
 
 /// A window connected to the daemon (`events.watch {client: "window"}`): while one is, the rounds
@@ -831,6 +851,11 @@ async fn source_round(daemon: &Arc<Daemon>, project: &Project, source: &Source) 
                     project.name
                 );
             }
+            // Another failure says nothing of who the user is: what was known stays.
+            if problem.starts_with(tickets::MINE_UNKNOWN) {
+                let key = source_key(&project.name, kind, &target);
+                know_mine(daemon, key, Some(problem.clone()));
+            }
             failed(&mut cursor, problem);
         }
     }
@@ -858,8 +883,14 @@ async fn read_round(
     let reader = Reader::open(project, source).await?;
     let since = cursor.cursor.map(|at| at.saturating_sub(OVERLAP_MS));
     let mut listing = reader.list(since, started, stored).await?;
+    for line in std::mem::take(&mut listing.log) {
+        let mut line = line;
+        line["agent"] = Value::Null;
+        line["project"] = json!(project.name);
+        daemon.developer.write("items", line, &[]);
+    }
     let first = cursor.cursor.is_none();
-    let swept_key = format!("{}\t{}\t{}", project.name, source.kind(), source.target());
+    let swept_key = source_key(&project.name, source.kind(), &source.target());
     let sweep = !first
         && daemon
             .items
@@ -878,6 +909,17 @@ async fn read_round(
         Some(found) => me_of(daemon, found).await,
         None => None,
     };
+    let unknown = match (&reader, &me) {
+        (Reader::Pulls(_), None) if !knows_me => {
+            Some("Bitbucket Data Center does not say whom you are signed in as".to_owned())
+        }
+        (_, None) if knows_me => Some(
+            "the forge did not say whom you are signed in as; it is asked again at the next round"
+                .to_owned(),
+        ),
+        _ => None,
+    };
+    know_mine(daemon, swept_key.clone(), unknown);
     let (mut items, mut events) = (Vec::new(), Vec::new());
     let mut listed_keys = Vec::new();
     let followed = followed_work_items(daemon, &project.name);
@@ -1191,12 +1233,14 @@ struct Refreshed {
 
 fn sources_json(daemon: &Daemon, project: &str) -> Result<Value, Failure> {
     let cursors = daemon.read(|store| store.cursors(project))?;
+    let unknown = daemon.items.mine_unknown.lock().unwrap();
     Ok(cursors
         .iter()
         .map(|c| {
+            let mine_unknown = unknown.get(&source_key(project, &c.kind, &c.target));
             json!({"kind": c.kind, "target": c.target, "source": c.source, "cursor": c.cursor,
                 "round_at": c.round_at, "failures": c.failures, "problem": c.problem,
-                "note": c.note})
+                "note": c.note, "mine_unknown": mine_unknown})
         })
         .collect())
 }
