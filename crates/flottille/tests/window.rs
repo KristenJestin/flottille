@@ -1927,8 +1927,9 @@ fn replying_delivers_to_the_lead(cx: &mut TestAppContext) {
         })
     });
     assert_eq!(
-        reply.read_with(cx, |r, _| r.error().map(str::to_owned)),
-        None
+        toasts(&shell, cx),
+        Vec::<String>::new(),
+        "nothing was refused"
     );
     let delivered = user
         .received_requests("session/prompt")
@@ -7010,8 +7011,9 @@ fn stop_during_a_turn_cancels_it_and_the_next_message_is_taken(cx: &mut TestAppC
         })
     });
     assert_eq!(
-        reply.read_with(cx, |r, _| r.error().map(str::to_owned)),
-        None
+        toasts(&shell, cx),
+        Vec::<String>::new(),
+        "nothing was refused"
     );
     eventually("the message is played as a new turn", || {
         user.received_requests("session/prompt")
@@ -7128,8 +7130,9 @@ fn resume_on_an_ended_session_brings_the_composer_back_and_a_message_is_answered
         })
     });
     assert_eq!(
-        reply.read_with(cx, |r, _| r.error().map(str::to_owned)),
-        None
+        toasts(&shell, cx),
+        Vec::<String>::new(),
+        "nothing was refused"
     );
     eventually("the message is answered on the same session", || {
         let shown = user.call("agent.show", json!({"agent": lead})).unwrap();
@@ -7173,52 +7176,12 @@ fn no_resume_when_the_agent_can_neither_resume_nor_load(cx: &mut TestAppContext)
     });
 }
 
-/// The composer's error as it says it.
-fn reply_error(reply: &Entity<Reply>, cx: &mut VisualTestContext) -> Option<String> {
-    reply.read_with(cx, |r, _| r.error().map(str::to_owned))
-}
-
-/// The daemon refusing what the composer sent, as it answers.
-fn refuse_reply(reply: &Entity<Reply>, why: &str, cx: &mut VisualTestContext) {
-    cx.update(|window, cx| reply.update(cx, |r, cx| r.replied(Some(why.to_owned()), window, cx)));
-}
-
 fn the_composer_is_back(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     until(shell, cx, "the composer is back", |cx| {
         cx.update(|window, _| {
             window.try_find("reply-field").is_some() && window.try_find("session-ended").is_none()
         })
     });
-}
-
-#[gpui_kit::test]
-fn the_composer_s_old_error_goes_when_the_session_ends_and_when_it_is_resumed(
-    cx: &mut TestAppContext,
-) {
-    let user = team_user();
-    let (lead, _mcp, _) = lead_in_w(&user);
-    let (shell, cx) = open_session(&user, &lead, 1280., cx);
-    let reply = shell
-        .read_with(cx, |s, _| s.reply_of(&lead).cloned())
-        .unwrap();
-    refuse_reply(&reply, "refused: an old error", cx);
-    assert!(reply_error(&reply, cx).is_some());
-
-    user.call("agent.stop", json!({"agent": lead})).unwrap();
-    let page = session_page(&shell, cx);
-    until(&shell, cx, "the session ended, its process gone", |cx| {
-        page.read_with(cx, |p, _| {
-            p.ended_line().is_some() && p.tree().first().is_some_and(|root| !root.stopping)
-        })
-    });
-    assert_eq!(reply_error(&reply, cx), None, "gone with the end");
-
-    // An answer that came late, while it was ended, is not shown once it is resumed.
-    refuse_reply(&reply, "refused: a late error", cx);
-    settle(cx);
-    cx.update(|window, cx| window.click("session-resume", cx));
-    the_composer_is_back(&shell, cx);
-    assert_eq!(reply_error(&reply, cx), None, "gone with the resume");
 }
 
 #[gpui_kit::test]

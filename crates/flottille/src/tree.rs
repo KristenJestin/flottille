@@ -1493,11 +1493,8 @@ pub fn compacted(daemon: &Arc<Daemon>, id: &str) {
 /// A child reported, and its turn has not ended long after: it is stopped.
 pub fn end_late_reporters(daemon: &Arc<Daemon>) {
     let late = now_ms().saturating_sub(REPORT_GRACE_MS);
-    for agent in daemon.read(Store::agents).unwrap_or_default() {
-        if !agent.state.is_final()
-            && agent.parent.is_some()
-            && agent.reported_at.is_some_and(|at| at < late)
-        {
+    for agent in daemon.read(Store::live_agents).unwrap_or_default() {
+        if agent.parent.is_some() && agent.reported_at.is_some_and(|at| at < late) {
             stop_tree(daemon, &agent.id, "it reported");
         }
     }
@@ -1710,7 +1707,8 @@ pub fn tree(daemon: &Daemon, agent: &Agent) -> Result<Vec<Value>, Failure> {
                 .filter(|delivery| delivery.kind == "user")
                 .map(|delivery| {
                     json!({"delivery": delivery.id, "text": delivery.body,
-                        "images": delivery.images.len(), "at": delivery.created_at})
+                        "images": delivery.images.len(), "pictures": delivery.images,
+                        "at": delivery.created_at})
                 })
                 .collect(),
         };

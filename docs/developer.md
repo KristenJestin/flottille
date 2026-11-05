@@ -58,6 +58,7 @@ outcome.
 | `error` | The text the agent was given for a refused or failed call; else `null`. |
 | `result_chars` | The length of the text the agent was given, in characters, before it was cut. |
 | `duration_ms` | How long the call took. |
+| `reads` | For a `forge` or `tickets` call that ran command lines of `gh`, `bkt` or `acli`, or was answered from what an earlier call read: `{"ran", "total_ms", "slowest_ms", "cached"}`, the number of command lines, the sum of their durations, the slowest, and whether the 30 s cache answered; else `null`. Reads that ran together make `duration_ms` near `slowest_ms` and well under `total_ms` ([`forges.md`](forges.md), "How fast `forge show` is read"). |
 | `run` | For `run`, the id of the run it started or joined (the `run` of its `run.*` events); else `null`. |
 
 ### `event`

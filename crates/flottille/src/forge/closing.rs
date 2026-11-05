@@ -53,13 +53,14 @@ static SAID: AtomicBool = AtomicBool::new(false);
 /// closer is the merger `gh pr view` named, else the actor of the issue's last `merged` or
 /// `closed` event (one `gh api` call, made for these alone). Best effort: when the events cannot
 /// be read, nothing is said of a closing comment and the rest of the pull request is shown as
-/// usual, the daemon's log saying it once.
-pub(super) async fn attach(forge: &Forge, pull: &mut Pull) {
+/// usual, the daemon's log saying it once. None when there is nothing to tell (`pull.closing` is
+/// left as it is); else what to set it to.
+pub(super) async fn of(forge: &Forge, pull: &Pull) -> Option<Option<Comment>> {
     let Forge::GitHub { owner, name } = forge else {
-        return;
+        return None;
     };
     if !matches!(pull.state, "merged" | "closed") {
-        return;
+        return None;
     }
     let ended = match pull.ended.clone() {
         Some(ended) => ended,
@@ -81,19 +82,19 @@ pub(super) async fn attach(forge: &Forge, pull: &mut Pull) {
             match gh_text(&args).await {
                 Ok(lines) => match last_ended(&lines) {
                     Some(ended) => ended,
-                    None => return,
+                    None => return None,
                 },
                 Err(why) => {
                     if !SAID.swap(true, Ordering::Relaxed) {
                         eprintln!("flottille daemon: forge: closing comment not read: {why}");
                     }
-                    return;
+                    return None;
                 }
             }
         }
     };
     let (closer, at) = ended;
-    pull.closing = written_before(&pull.comments, &masked(&closer), at);
+    Some(written_before(&pull.comments, &masked(&closer), at))
 }
 
 #[cfg(test)]

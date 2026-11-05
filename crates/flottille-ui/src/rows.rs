@@ -9,9 +9,9 @@ use std::f32::consts::{FRAC_PI_2, PI};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, ClickEvent, Div, ElementId, Entity, FontWeight, HighlightStyle,
-    InteractiveElement, IntoElement, ParentElement, RenderOnce, SharedString, Stateful,
-    StatefulInteractiveElement, Styled, StyledText, TestSupportExt, Transformation, Window, div,
-    px, radians,
+    InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce, ScrollHandle, SharedString,
+    Stateful, StatefulInteractiveElement, Styled, StyledText, TestSupportExt, Transformation,
+    Window, div, px, radians,
 };
 
 use crate::color::mix;
@@ -663,6 +663,7 @@ impl RenderOnce for ListRow {
 pub struct ListCard {
     id: ElementId,
     rows: Vec<(ListRow, Option<(ElementId, Placement)>)>,
+    scrolling: Option<(ScrollHandle, Pixels)>,
 }
 
 impl ListCard {
@@ -670,7 +671,15 @@ impl ListCard {
         Self {
             id: id.into(),
             rows: Vec::new(),
+            scrolling: None,
         }
+    }
+
+    /// A list longer than `max_height` scrolls inside its card, which keeps its frame; `scroll`
+    /// is the screen's, so that it keeps the place across renders and can take it back to the top.
+    pub fn scrolling(mut self, scroll: &ScrollHandle, max_height: Pixels) -> Self {
+        self.scrolling = Some((scroll.clone(), max_height));
+        self
     }
 
     pub fn row(mut self, row: ListRow) -> Self {
@@ -707,15 +716,26 @@ impl RenderOnce for ListCard {
                 None => content.into_any_element(),
             });
         }
-        div()
-            .id(self.id)
-            .flex()
-            .flex_col()
+        let frame = div()
+            .id(self.id.clone())
             .bg(p.card)
             .border_1()
             .border_color(p.line)
             .rounded(radius::CARD)
-            .children(children)
-            .test_support()
+            .overflow_hidden();
+        match self.scrolling {
+            Some((scroll, max_height)) => frame.child(
+                div()
+                    .id(ElementId::NamedChild(self.id.into(), "scroll".into()))
+                    .flex()
+                    .flex_col()
+                    .max_h(max_height)
+                    .overflow_y_scroll()
+                    .track_scroll(&scroll)
+                    .children(children),
+            ),
+            None => frame.flex().flex_col().children(children),
+        }
+        .test_support()
     }
 }
