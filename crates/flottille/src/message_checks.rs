@@ -258,8 +258,7 @@ async fn run_one(at: &Where<'_>, line: &str, file: &Path, checked: Checked) -> R
         .stderr(Stdio::piped())
         .process_group(0)
         .kill_on_drop(true);
-    let child = command
-        .spawn()
+    let child = crate::children::spawn(&mut command)
         .map_err(|e| not_run(format!("cannot run {}: {e}", words[0])))?;
     // Its whole group goes once it ended, was stopped at its limit, or its call was dropped:
     // `kill_on_drop` alone stops only its first process.

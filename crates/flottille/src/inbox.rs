@@ -41,9 +41,18 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
 fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
     let events = daemon.read(|store| {
         store.events_named(
-            &["agent.reported", "agent.asked", "agent.failed"],
+            &[
+                "agent.reported",
+                "agent.asked",
+                "agent.failed",
+                "session.following_paused",
+            ],
             asked.after.unwrap_or(0),
         )
+    })?;
+    // A paused following that resumed since says so: the inbox keeps what was sent.
+    let resumed = daemon.read(|store| {
+        store.events_named(&["session.following_resumed"], asked.after.unwrap_or(0))
     })?;
     let mut entries = Vec::new();
     for event in events {
@@ -51,6 +60,7 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
             ("agent.reported", _) => "report",
             ("agent.asked", to) if to == "user" => "question",
             ("agent.failed", _) => "failure",
+            ("session.following_paused", _) => "paused",
             _ => continue,
         };
         let Some(id) = event.data["agent"].as_str() else {
@@ -60,15 +70,38 @@ fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
         let Some(agent) = agent.filter(|agent| agent.parent.is_none()) else {
             continue;
         };
+        let resolved = kind == "paused"
+            && resumed.iter().any(|later| {
+                later.seq > event.seq
+                    && later.data["agent"] == event.data["agent"]
+                    && later.data["follower"] == event.data["follower"]
+            });
+        let paused = format!(
+            "The session {} and the agent {} that started it have written to each other {} times \
+             without you: the agent no longer wakes at the end of this session's turns. Write a \
+             message to either of them to resume it.{}",
+            agent.id,
+            event.data["follower"].as_str().unwrap_or_default(),
+            event.data["exchanges"],
+            if resolved {
+                " It has resumed since."
+            } else {
+                ""
+            }
+        );
         let text = match kind {
-            "report" => &event.data["text"],
-            "question" => &event.data["question"],
-            _ => &event.data["reason"],
+            "paused" => json!(paused),
+            "report" => event.data["text"].clone(),
+            "question" => event.data["question"].clone(),
+            _ => event.data["reason"].clone(),
         };
         entries.push(json!({
             "seq": event.seq, "at": event.at, "kind": kind, "agent": agent.id,
             "project": agent.project, "workspace": agent.workspace, "text": text,
         }));
+        if resolved {
+            entries.last_mut().unwrap()["resolved"] = json!(true);
+        }
     }
     let limit = asked.limit.unwrap_or(LAST);
     if asked.after.is_some() {

@@ -74,7 +74,7 @@ async fn bounded<S: AsRef<OsStr>>(
     time: Duration,
     output: u64,
 ) -> Result<Output, String> {
-    let mut child = command.spawn().map_err(|error| match error.kind() {
+    let mut child = crate::children::spawn(&mut command).map_err(|error| match error.kind() {
         std::io::ErrorKind::NotFound => "git is not on the PATH".to_owned(),
         _ => format!("cannot run git: {error}"),
     })?;

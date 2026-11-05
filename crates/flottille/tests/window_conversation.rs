@@ -31,7 +31,7 @@ fn script() -> Value {
         {"when": "work a while", "do": [{"wait": 4000}, {"say": "Done with that."}]},
         {"when": "work until stopped", "do": [{"hold": "release"}, {"say": "Done with that."}]},
         {"when": "start the docs session", "do": [{"mcp": {"tool": "agent_launch",
-            "arguments": {"title": "Docs", "brief": "Write the docs", "root": true,
+            "arguments": {"title": "Docs", "brief": "Write the docs", "follow": false, "root": true,
                 "workspace": "w"}}}]},
         {"when": "start the long session", "do": [{"mcp": {"tool": "agent_launch",
             "arguments": {"title": LONG_TITLE, "brief": "Write the docs", "root": true,
@@ -58,7 +58,7 @@ fn script() -> Value {
                 "rawOutput": "run r9: `sleep 30` is running after 1.0 s\nit keeps going: ask run_status\n(no output)"}},
             call("h2", "fs_list", "completed", json!({"path": "."})),
             {"mcp": {"tool": "agent_launch", "arguments": {"title": "Docs",
-                "brief": "Write the docs", "root": true, "workspace": "w"}}}]},
+                "brief": "Write the docs", "follow": false, "root": true, "workspace": "w"}}}]},
         {"when": "grep a while", "do": [
             call("g1", "fs_list", "completed", json!({"path": "."})),
             call("g2", "run", "in_progress", json!({"line": "git grep -n TODO"})),

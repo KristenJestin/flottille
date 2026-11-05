@@ -15,6 +15,9 @@ pub const USER: &str = "you";
 /// What follows the launcher's name on the first line of a session an agent started for the user
 /// (the daemon's `tree::LAUNCHED`).
 const LAUNCHED: &str = " started this session for the user with this message:";
+/// What opens the paragraph the daemon adds after that message, to say where a question goes
+/// (`tree::WHERE_QUESTIONS_GO`): it is for the agent, the window does not show it.
+const WHERE_QUESTIONS_GO: &str = "\n\nWhere a question goes:";
 /// Who allowed a call the Auto judge let through, as a card says it.
 pub const JUDGE: &str = "the judge";
 /// Who allowed a call Full mode let through, as a card says it.
@@ -1057,6 +1060,9 @@ impl Conversation {
                     Some((first.strip_suffix(LAUNCHED)?, rest.trim_start_matches('\n')))
                 });
                 let (who, text) = said.unwrap_or(("an agent", &body));
+                let text = text
+                    .rsplit_once(WHERE_QUESTIONS_GO)
+                    .map_or(text, |(brief, _)| brief);
                 Block::Message {
                     from: format!("started by {who}"),
                     text: text.to_owned(),

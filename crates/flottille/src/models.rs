@@ -185,17 +185,18 @@ async fn through_a_session(
             command.env_remove(name);
         }
     }
-    let mut child = command
-        .envs(launch.env.iter().map(|(name, value)| (name, value)))
-        .args(&launch.args)
-        .current_dir(&folder)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| format!("cannot start {}: {e}", launch.program.display()))?;
+    let mut child = crate::children::spawn(
+        command
+            .envs(launch.env.iter().map(|(name, value)| (name, value)))
+            .args(&launch.args)
+            .current_dir(&folder)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .kill_on_drop(true),
+    )
+    .map_err(|e| format!("cannot start {}: {e}", launch.program.display()))?;
     let pid = child.id();
     let group = pid.map(Group);
     let stdin = child.stdin.take().ok_or("it has no stdin")?;
