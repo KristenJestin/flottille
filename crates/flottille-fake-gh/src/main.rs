@@ -61,6 +61,14 @@
 //! of `pr list` and `issue list`, while `pr view` and `issue view` still answer them: an issue
 //! transferred elsewhere, which GitHub still answers by its old number with its new url.
 //!
+//! The links and comments of an issue (#365, `docs/tickets.md`, "Links and comments"), through
+//! `gh api <path> [--method M] [-F|-f key=value]`: `api repos/<owner>/<name>/issues/<n>` prints
+//! `{"number": n, "id": <the issue's id>}` of an issue the script holds (`id` its own, `1000 + n`
+//! without), not found otherwise; the writes (`…/issues/<n>/sub_issues` POST and
+//! `…/issues/<n>/sub_issue` DELETE with `sub_issue_id`, `…/issues/<n>/dependencies/blocked_by`
+//! POST with `issue_id` and `…/blocked_by/<id>` DELETE, `…/issues/comments/<id>` PATCH with
+//! `body` and DELETE) end with 0 and print `{}`: the test reads them in the record.
+//!
 //! `events` gives, by repository and number, what `gh api repos/<owner>/<name>/issues/<number>/events`
 //! lists (`{"acme/app": {"7": [{"event": "merged", "actor": {"login": "bob"}, "created_at":
 //! "2026-01-01T10:00:00Z"}]}}`), `[]` without; with a `--jq`, the `merged` and `closed` ones as
@@ -248,6 +256,43 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 return 2;
             }
             0
+        }
+        ["api", path, rest @ ..]
+            if path.starts_with("repos/")
+                && (path.contains("/comments/")
+                    || path.contains("/sub_issue")
+                    || path.contains("/dependencies/")) =>
+        {
+            let allowed = ["--method", "-F", "-f"];
+            if rest.first().is_none_or(|flag| !allowed.contains(flag)) {
+                eprintln!("fake gh: api {path} is not a call Flottille makes");
+                return 2;
+            }
+            println!("{{}}");
+            0
+        }
+        ["api", path] if path.starts_with("repos/") && path.matches('/').count() == 4 => {
+            let parts: Vec<&str> = path.split('/').collect();
+            let [_, owner, name, "issues", number] = parts[..] else {
+                eprintln!("fake gh: api {path} is not a call Flottille makes");
+                return 2;
+            };
+            match script["issues"][format!("{owner}/{name}")].get(number) {
+                Some(issue) => {
+                    let id = issue["id"]
+                        .as_u64()
+                        .unwrap_or(1000 + number.parse().unwrap_or(0));
+                    println!(
+                        "{}",
+                        json!({"number": number.parse::<u64>().unwrap_or(0), "id": id})
+                    );
+                    0
+                }
+                None => {
+                    eprintln!("gh: Not Found (HTTP 404)");
+                    1
+                }
+            }
         }
         ["api", path, ..] if path.starts_with("repos/") && path.contains("/issues/") => {
             // `repos/<owner>/<name>/issues/<number>/events`, the events of an issue or pull

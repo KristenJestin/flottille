@@ -308,10 +308,15 @@ pub async fn prepared(
     }
     if tool == "tickets" {
         let project = own(daemon, grant)?;
-        return match crate::tickets::unwritable(&project, args) {
-            Some(why) => Err(Outcome::Refused(why)),
-            None => Ok(posted_says(args)),
-        };
+        if let Some(why) = crate::tickets::unwritable(&project, args) {
+            return Err(Outcome::Refused(why));
+        }
+        // A link kind the site does not have, or a comment no agent posted, is refused before
+        // the user is asked about it.
+        if let Some(why) = crate::tickets::checked_links(daemon, &project, args).await {
+            return Err(Outcome::Refused(why));
+        }
+        return Ok(posted_says(args));
     }
     if tool == "forge" {
         return Ok(posted_says(args));
@@ -472,7 +477,7 @@ pub async fn approved_losses(
 fn posted_says(args: &Value) -> Vec<String> {
     if matches!(
         args["action"].as_str(),
-        Some("list" | "search" | "show" | "types") | None
+        Some("list" | "search" | "show" | "types" | "link_types") | None
     ) {
         return Vec::new();
     }
@@ -1639,6 +1644,9 @@ fn create_says(
              dashes or underscores, starting with a letter or a digit"
         )));
     }
+    if let Some(why) = flottille_core::workspace::reserved(name) {
+        return Err(Outcome::Refused(format!("refused: {why}")));
+    }
     if let Ok(Some(_)) = daemon.read(|store| store.workspace(&project.name, name)) {
         return Err(Outcome::Refused(format!(
             "refused: project {} already has a workspace named {name}: choose another name",
@@ -1700,12 +1708,14 @@ fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<Strin
             says
         }
         _ if root => {
-            let place = match args["workspace"]
-                .as_str()
-                .or(grant.place.workspace.as_deref())
-            {
-                Some(name) => format!("the workspace {name}"),
-                None => "main, the project folder".to_owned(),
+            let named = args["workspace"].as_str();
+            let main = match named {
+                Some(name) => crate::tree::names_main(daemon, &own(daemon, grant)?.name, name),
+                None => false,
+            };
+            let place = match named.or(grant.place.workspace.as_deref()) {
+                Some(name) if !main => format!("the workspace {name}"),
+                _ => "main, the project folder".to_owned(),
             };
             vec![format!(
                 "Start a session for the user in {place}: \"{title}\", theirs, not a child of \
