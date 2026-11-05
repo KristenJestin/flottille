@@ -127,7 +127,14 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 agent.workspace.as_deref(),
                 &asked.message,
             )?;
-            let images = keep_images(daemon, &agent, &asked.images)?;
+            // Decoding and scaling a big picture takes a good while for a 4K screenshot: it
+            // runs where it holds no thread of the runtime.
+            let images = {
+                let (daemon, agent, uploads) = (daemon.clone(), agent.clone(), asked.images);
+                tokio::task::spawn_blocking(move || keep_images(&daemon, &agent, &uploads))
+                    .await
+                    .map_err(|e| Failure::new("unavailable", format!("images not kept: {e}")))??
+            };
             let delivery = deliveries::deliver_with_images(
                 daemon,
                 &agent.id,
