@@ -280,8 +280,6 @@ pub struct SessionPage {
     resume_error: Option<SharedString>,
     /// A reload of the root's tools was asked and not answered yet.
     reloading: bool,
-    /// The root's tools reload once the turn that runs ends.
-    reload_after_turn: bool,
     renders: usize,
     _status: Subscription,
     _run_drawer: Subscription,
@@ -311,8 +309,9 @@ pub const RELOAD_COMMAND_LINE: &str =
 /// What the page says above the composer while a reload waits for the turn to end.
 pub const RELOADS_AFTER_TURN: &str = "Reloads after this turn";
 
-/// The toast of a reload done at once.
-pub const RELOADED: &str = "Tools reloaded";
+/// The toast of a reload asked between turns: the tools come with the next message, which
+/// starts the next process.
+pub const RELOADED: &str = "Tools reload at its next message";
 
 /// The toast of a reload the daemon refused.
 pub const NOT_RELOADED: &str = "The tools were not reloaded";
@@ -385,7 +384,6 @@ impl SessionPage {
             resuming: false,
             resume_error: None,
             reloading: false,
-            reload_after_turn: false,
             renders: 0,
             _status,
             _run_drawer,
@@ -651,8 +649,8 @@ impl SessionPage {
         cx.notify();
     }
 
-    /// What the daemon answered to a reload: done now, after the turn (said above the composer
-    /// until it ends), or refused.
+    /// What the daemon answered to a reload: asked between turns (a toast), after the turn (the
+    /// tree says it above the composer), or refused.
     pub fn tools_reloaded(
         &mut self,
         after_turn: bool,
@@ -662,23 +660,20 @@ impl SessionPage {
         self.reloading = false;
         match refused {
             Some(why) => toast(Toast::failure(NOT_RELOADED).detail(why), cx),
-            // The turn may have ended before the answer came: the tree says.
-            None if after_turn => self.reload_after_turn = self.root_working(),
+            None if after_turn => {}
             None => toast(
-                Toast::success(RELOADED).detail("Its next message starts it with them."),
+                Toast::success(RELOADED)
+                    .detail("The session is given the new tools at its next message."),
                 cx,
             ),
         }
         cx.notify();
     }
 
-    /// Whether the root's tools reload once its turn ends.
+    /// Whether the root's tools reload once its turn ends, as the daemon says, whoever asked.
     pub fn reloads_after_turn(&self) -> bool {
-        self.reload_after_turn
-    }
-
-    fn root_working(&self) -> bool {
-        self.root().is_some_and(|root| root.state == "working")
+        self.root()
+            .is_some_and(|root| root.tools_reload && root.state == "working")
     }
 
     pub fn set_title(&mut self, title: &str, cx: &mut Context<Self>) {
@@ -1303,13 +1298,10 @@ impl SessionPage {
         let (was_ended, now_ended) = (ended(&self.tree), ended(&tree));
         let root = |tree: &[TreeAgent]| older_tools(tree.iter().find(|a| a.parent.is_none()));
         let older_changed = root(&self.tree) != root(&tree);
+        let was_waiting = self.reloads_after_turn();
         self.tree = tree;
-        if older_changed {
-            cx.notify();
-        }
-        // Its turn ended: the reload it waited for is done.
-        if self.reload_after_turn && !self.root_working() {
-            self.reload_after_turn = false;
+        // The line of a reload that waits for the turn comes and goes with the daemon's word.
+        if older_changed || was_waiting != self.reloads_after_turn() {
             cx.notify();
         }
         if let Some(now_ended) = now_ended.filter(|now| was_ended != Some(*now)) {
@@ -1575,7 +1567,7 @@ impl Render for SessionPage {
             .test_support();
         let root = self.shown == self.opened.id;
         let older = older_tools(self.root().filter(|_| root)).map(SharedString::from);
-        let after_turn = (root && self.reload_after_turn).then_some(RELOADS_AFTER_TURN.into());
+        let after_turn = (root && self.reloads_after_turn()).then_some(RELOADS_AFTER_TURN.into());
         let reloader = cx.entity().downgrade();
         let reloading = self.reloading;
         let dock = div()
@@ -7654,6 +7646,7 @@ mod tests {
             context_tokens: None,
             queued: Vec::new(),
             tools_outdated: false,
+            tools_reload: false,
         }
     }
 

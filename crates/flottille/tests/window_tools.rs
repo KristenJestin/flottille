@@ -15,8 +15,10 @@ use common::mcp::{Mcp, server_of};
 use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::link::Connect;
-use flottille_window::session::{OLDER_TOOLS, RELOAD_TOOLS, RELOADS_AFTER_TURN, SessionPage};
-use flottille_window::tree::session_id;
+use flottille_window::session::{
+    OLDER_TOOLS, RELOAD_TOOLS, RELOADED, RELOADS_AFTER_TURN, SessionPage,
+};
+use flottille_window::tree::{project_id, session_id};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
@@ -383,5 +385,98 @@ fn the_session_menu_offers_reload_tools(cx: &mut TestAppContext) {
     until(&shell, cx, "the process was let go", |_| {
         reloads(&user, &id) == 1
     });
+    // Nothing restarts before its next message: the toast says when the tools come.
+    until(&shell, cx, "the toast says it", |cx| {
+        toasts(&shell, cx)
+            .iter()
+            .any(|(title, _)| title == RELOADED)
+    });
+    let (title, detail) = toasts(&shell, cx)
+        .into_iter()
+        .find(|(title, _)| title == RELOADED)
+        .unwrap();
+    assert_eq!(title, "Tools reload at its next message");
+    assert!(
+        detail.contains("at its next message") && !detail.contains("start"),
+        "{detail}"
+    );
     at_rest(cx);
+}
+
+/// The toasts shown, each its title and its second line.
+fn toasts(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<(String, String)> {
+    shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .map(|toast| {
+                (
+                    toast.title().to_owned(),
+                    toast.second_line().unwrap_or_default().to_owned(),
+                )
+            })
+            .collect()
+    })
+}
+
+fn reloads_after_turn(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> bool {
+    session_page(shell, cx).read_with(cx, |page, _| page.reloads_after_turn())
+}
+
+#[gpui_kit::test]
+fn a_reload_from_the_command_line_during_a_turn_says_it_reloads_after_this_turn(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "work", "do": [{"hold": "release"}, {"say": "Done."}]}
+    ]}));
+    project(&user);
+    let (shell, cx) = window(&user, cx);
+    let id = open_idle_session(&user, &shell, "work", cx);
+    eventually("the turn runs", || shown(&user, &id)["state"] == "working");
+    settle(cx);
+    assert_eq!(label("session-reload-after-turn", cx), None);
+
+    let out = user.run(&["agent", "reload-tools", &id]);
+    assert!(out.status.success(), "{out:?}");
+
+    until(&shell, cx, "the page says it waits", |cx| {
+        reloads_after_turn(&shell, cx)
+    });
+    assert!(step(cx) + step(cx) > 0, "the line unfolds");
+    at_rest(cx);
+    assert_eq!(
+        label("session-reload-after-turn", cx).as_deref(),
+        Some(RELOADS_AFTER_TURN)
+    );
+
+    // Away from the page and back while the turn runs: the daemon still says it.
+    cx.update(|window, cx| window.click(project_id("app"), cx));
+    until(&shell, cx, "the session's page is left", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_none())
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    until(&shell, cx, "the page says it waits again", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+            && reloads_after_turn(&shell, cx)
+    });
+    at_rest(cx);
+    assert_eq!(
+        label("session-reload-after-turn", cx).as_deref(),
+        Some(RELOADS_AFTER_TURN)
+    );
+    assert_eq!(reloads(&user, &id), 0, "the turn is not cut");
+
+    // Reloaded once the turn ended: the line folds away.
+    std::fs::write(user.path("fake/release"), "").unwrap();
+    until(&shell, cx, "the turn ended", |cx| {
+        !reloads_after_turn(&shell, cx)
+    });
+    step(cx);
+    assert!(step(cx) > 0, "the line folds away");
+    at_rest(cx);
+    assert_eq!(label("session-reload-after-turn", cx), None);
+    eventually("the process was let go", || reloads(&user, &id) == 1);
 }
