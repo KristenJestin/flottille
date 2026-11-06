@@ -1018,9 +1018,10 @@ Each method answers `not-found` when the agent does not exist.
 
 #### `agent.start`
 
-`{"project", "workspace"?, "provider"?, "model"?, "effort"?, "mode"?, "role"?, "message"}`. Creates
-a root agent in the project folder or the workspace, and gives it its first message: `{"agent",
-"after"}`. `role` is `lead` (the default) or `worker`. `provider` is the project's, else the first
+`{"project", "workspace"?, "provider"?, "model"?, "effort"?, "mode"?, "role"?, "message", "images"?}`.
+Creates a root agent in the project folder or the workspace, and gives it its first message:
+`{"agent", "after"}`. `images` is as in `agent.send`, and goes with the first message; they are
+judged before the agent exists, so that one refused starts none. `role` is `lead` (the default) or `worker`. `provider` is the project's, else the first
 one enabled, when left out; `model` the project's when the provider is the project's, else the
 provider's default; `model` and `effort` are values of the session's options, as the provider
 lists them (`provider.list`). `not-found` when the project or the workspace does not exist;

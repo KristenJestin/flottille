@@ -109,7 +109,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
     let daemon = &daemon;
     match method {
         // `agent.run` is the name it had before the pilot door; both stay.
-        "agent.start" | "agent.run" => start(daemon, serde_json::from_value(params)?),
+        "agent.start" | "agent.run" => start(daemon, serde_json::from_value(params)?).await,
         "agent.send" => {
             let asked: AgentSend = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
@@ -399,7 +399,6 @@ fn keep_images(
     agent: &Agent,
     images: &[ImageUpload],
 ) -> Result<Vec<String>, Failure> {
-    use base64::Engine as _;
     if images.is_empty() {
         return Ok(Vec::new());
     }
@@ -409,6 +408,14 @@ fn keep_images(
             agent.id
         )));
     }
+    store_images(daemon, &agent.id, check_images(images)?)
+}
+
+/// The images of a message, judged and scaled: with the extension of their file.
+type Checked = Vec<(&'static str, Vec<u8>)>;
+
+fn check_images(images: &[ImageUpload]) -> Result<Checked, Failure> {
+    use base64::Engine as _;
     if images.len() > MAX_IMAGES {
         return Err(Failure::refused(format!(
             "a message carries {MAX_IMAGES} images at most"
@@ -443,9 +450,17 @@ fn keep_images(
         }
         // Scaled before it is stored, so that more of them fit under the byte caps of a prompt.
         let bytes = flottille_core::images::scaled_down(&image.mime, bytes);
-        checked.push((extension, bytes));
+        checked.push((*extension, bytes));
     }
-    let folder = daemon.paths.images(&agent.id);
+    Ok(checked)
+}
+
+/// Writes images judged by [`check_images`] to the agent's folder: the names of the files.
+fn store_images(daemon: &Daemon, agent: &str, checked: Checked) -> Result<Vec<String>, Failure> {
+    if checked.is_empty() {
+        return Ok(Vec::new());
+    }
+    let folder = daemon.paths.images(agent);
     ensure_private_dir(&folder).map_err(|e| Failure::new("unavailable", e.to_string()))?;
     // Without a stamp two messages could share their names: none is better than a collision.
     let stamp = new_id().map_err(|e| Failure::new("unavailable", format!("no stamp: {e}")))?;
@@ -453,7 +468,7 @@ fn keep_images(
     for (at, (extension, bytes)) in checked.into_iter().enumerate() {
         let name = format!("{stamp}-{at}.{extension}");
         if let Err(error) = std::fs::write(folder.join(&name), bytes) {
-            deliveries::discard_images(&daemon.paths, &agent.id, &names);
+            deliveries::discard_images(&daemon.paths, agent, &names);
             return Err(Failure::new(
                 "unavailable",
                 format!("an image cannot be stored: {error}"),
@@ -471,9 +486,17 @@ fn refuse_empty(message: &str) -> Result<(), Failure> {
     Ok(())
 }
 
-fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
+async fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
     let project = projects::load_project(daemon, &asked.project)?;
     refuse_empty(&asked.message)?;
+    // The pictures are judged before the agent exists, so that a refusal leaves nothing behind;
+    // like a later message's, off the runtime's threads.
+    let checked = {
+        let uploads = asked.images;
+        tokio::task::spawn_blocking(move || check_images(&uploads))
+            .await
+            .map_err(|e| Failure::new("unavailable", format!("images not kept: {e}")))??
+    };
     // An agent's own permission modes decide which of its calls run unasked: in bare mode every
     // call goes through Flottille's gate, which no mode may loosen.
     if let Some(mode) = &asked.mode {
@@ -514,17 +537,24 @@ fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
             launched_by: None,
         },
     )?;
+    let images = store_images(daemon, &agent.id, checked).inspect_err(|_| {
+        tree::stop_tree(daemon, &agent.id, "its pictures could not be stored");
+    })?;
     // The root's brief is its first message: a replacement supersedes it by its id, as any
-    // brief, and delivers the brief again.
-    deliveries::deliver_message(
+    // brief, and delivers the brief again (its text: the pictures are said once).
+    if deliveries::deliver_message(
         daemon,
         &agent.id,
         "user",
         Some(format!("brief-{}-0", agent.id)),
         &message,
         approval::BETWEEN_TURNS,
-        Vec::new(),
-    );
+        images.clone(),
+    )
+    .is_none()
+    {
+        deliveries::discard_images(&daemon.paths, &agent.id, &images);
+    }
     Ok(json!({"agent": agent.to_json(), "after": after}))
 }
 

@@ -191,6 +191,62 @@ fn an_image_that_is_not_one_the_daemon_takes_is_refused() {
 }
 
 #[test]
+fn an_image_sent_with_a_start_goes_with_the_first_prompt() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"images": true}));
+    project(&user);
+
+    let started = user
+        .call(
+            "agent.start",
+            json!({"project": "app", "message": "what is this?", "images": [image("image/png", PNG)]}),
+        )
+        .unwrap();
+    let id = started["agent"]["id"].as_str().unwrap().to_owned();
+    eventually("the first turn ends", || {
+        show(&user, &id)["agent"]["state"] == "idle"
+    });
+
+    let prompt = &user.received_requests("session/prompt")[0]["params"]["prompt"];
+    assert!(
+        prompt[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("what is this?"),
+        "{prompt}"
+    );
+    assert_eq!(prompt[1]["type"], "image");
+    assert_eq!(prompt[1]["data"], base64_of(PNG));
+    assert_eq!(prompt.as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn a_start_with_an_image_the_daemon_refuses_starts_no_agent() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"images": true}));
+    project(&user);
+    let start = |images: Value| {
+        user.call(
+            "agent.start",
+            json!({"project": "app", "message": "x", "images": images}),
+        )
+        .unwrap_err()
+    };
+
+    let kind = start(json!([image("application/pdf", PNG)]));
+    assert!(kind.1.contains("application/pdf"), "{}", kind.1);
+    let many = start(json!(vec![image("image/png", PNG); 21]));
+    assert!(many.1.contains("20 images at most"), "{}", many.1);
+    let agents = user.call("agent.list", json!({})).unwrap();
+    assert_eq!(
+        agents["agents"].as_array().map(Vec::len),
+        Some(0),
+        "{agents}"
+    );
+    assert!(user.received_requests("session/prompt").is_empty());
+}
+
+#[test]
 fn an_image_alone_is_a_message() {
     let user = User::with_fake_agent();
     user.fake_script(json!({"images": true}));
