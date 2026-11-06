@@ -8,6 +8,7 @@ pub mod attachments;
 pub mod claude;
 pub mod commands;
 pub mod composer;
+pub mod conventions;
 pub mod conversation;
 pub mod history;
 pub mod instance;

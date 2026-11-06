@@ -11760,6 +11760,90 @@ fn the_branch_prefix_field_of_the_project_s_settings_accepts_an_empty_prefix(
 }
 
 #[gpui_kit::test]
+fn the_branch_format_and_the_pull_request_template_are_saved_from_the_project_s_settings(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    // Tall enough for the Setup tab's sections, the branch format among them, to be clicked.
+    cx.simulate_resize(size(px(1280.), px(1600.)));
+    let page = open_project_settings(&shell, "atlas", cx);
+    choose_tab("setup", cx);
+    settle(cx);
+    let format = page.read_with(cx, |page, _| page.convention("branch_format").clone());
+    assert_eq!(
+        format.read_with(cx, |s, _| s.saved().map(str::to_owned)),
+        Some(String::new())
+    );
+    assert!(!format.read_with(cx, |s, cx| s.savable(cx)));
+
+    // A pattern that is no regular expression: refused under its field, nothing written.
+    format.update_in(cx, |s, window, cx| s.type_text("^(feat", window, cx));
+    settle(cx);
+    assert!(format.read_with(cx, |s, cx| s.savable(cx)));
+    cx.update(|window, cx| window.click("branch-format-save-atlas", cx));
+    until(&shell, cx, "the pattern is refused", |cx| {
+        format.read_with(cx, |s, _| s.problem().is_some())
+    });
+    let problem = format.read_with(cx, |s, _| s.problem().unwrap().to_owned());
+    assert!(problem.contains("unclosed group"), "{problem}");
+    settle(cx);
+    assert_eq!(
+        text_of("branch-format-field-atlas-error", cx),
+        Some(problem.clone())
+    );
+    let text = std::fs::read_to_string(user.project_file("atlas")).unwrap();
+    assert!(!text.contains("branch_format"), "{text}");
+
+    // Typing again takes the refusal away; a pattern is saved, and the daemon says so.
+    let pattern = "^(feat|fix)/[A-Z]+-[0-9]+-[a-z0-9-]+$";
+    cx.update(|window, cx| window.click("branch-format-input-atlas", cx));
+    cx.simulate_input("|fix)/[A-Z]+-[0-9]+-[a-z0-9-]+$");
+    settle(cx);
+    assert_eq!(
+        format.read_with(cx, |s, cx| s.typed(cx)),
+        Some(pattern.to_owned())
+    );
+    assert_eq!(
+        format.read_with(cx, |s, _| s.problem().map(str::to_owned)),
+        None
+    );
+    cx.update(|window, cx| window.click("branch-format-save-atlas", cx));
+    until(&shell, cx, "the daemon keeps the pattern", |cx| {
+        format.read_with(cx, |s, _| s.saved() == Some(pattern))
+    });
+    toast_said(&shell, "Branch format saved", cx);
+    let text = std::fs::read_to_string(user.project_file("atlas")).unwrap();
+    assert!(text.contains("branch_format = "), "{text}");
+    assert!(!format.read_with(cx, |s, cx| s.savable(cx)));
+
+    // The template, beside the message checks.
+    choose_tab("rules", cx);
+    let template = page.read_with(cx, |page, _| {
+        page.convention("pull_request_template").clone()
+    });
+    let written = "## Why\n\n## How to verify\n";
+    template.update_in(cx, |s, window, cx| s.type_text(written, window, cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("pull-request-template-save-atlas", cx));
+    until(&shell, cx, "the daemon keeps the template", |cx| {
+        template.read_with(cx, |s, _| s.saved() == Some(written))
+    });
+    toast_said(&shell, "Pull request template saved", cx);
+    let shown = user
+        .call("project.settings", json!({"name": "atlas"}))
+        .unwrap();
+    assert_eq!(shown["pull_request_template"], written);
+    settle(cx);
+    assert_eq!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)),
+        0,
+        "nothing moves at rest"
+    );
+}
+
+#[gpui_kit::test]
 fn a_relative_folder_is_refused_under_its_field_and_nothing_is_written(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");

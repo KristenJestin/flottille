@@ -29,6 +29,7 @@ use serde_json::{Value, json};
 
 use crate::actions::Command;
 use crate::commands::{CommandsSection, boxed, menu_of, problem_line};
+use crate::conventions::{Convention, Kind};
 use crate::message_checks::MessageChecks;
 use crate::programs::{ProgramChecks, program_block};
 use crate::project::repository_label;
@@ -398,6 +399,10 @@ pub struct ProjectSettingsPage {
     rules: Entity<RulesEditor>,
     /// The checks of its agents' messages, under its rules (`docs/projects.md`, "Message checks").
     message_checks: Entity<MessageChecks>,
+    /// The regular expression its branches match, beside the branch prefix.
+    branch_format: Entity<Convention>,
+    /// The description of a pull request opened without one, beside the message checks.
+    pull_request_template: Entity<Convention>,
     skills: Entity<SkillsSection>,
     commands: Entity<CommandsSection>,
     tasks: Entity<TasksSection>,
@@ -423,6 +428,11 @@ impl ProjectSettingsPage {
             cx.new(|_| RulesEditor::new(shell, Some(project)))
         };
         let message_checks = cx.new(|_| MessageChecks::new(shell.clone(), name.clone()));
+        let convention = |kind, cx: &mut Context<Self>| {
+            cx.new(|_| Convention::new(shell.clone(), name.clone(), kind))
+        };
+        let branch_format = convention(Kind::BranchFormat, cx);
+        let pull_request_template = convention(Kind::PullRequestTemplate, cx);
         let skills = cx.new(|_| SkillsSection::new(shell.clone(), name.clone()));
         let commands = cx.new(|_| CommandsSection::new(shell.clone(), name.clone()));
         let tasks = cx.new(|_| TasksSection::new(shell.clone(), name.clone()));
@@ -500,6 +510,8 @@ impl ProjectSettingsPage {
             narrow: false,
             rules,
             message_checks,
+            branch_format,
+            pull_request_template,
             skills,
             commands,
             tasks,
@@ -517,6 +529,15 @@ impl ProjectSettingsPage {
 
     pub fn message_checks(&self) -> &Entity<MessageChecks> {
         &self.message_checks
+    }
+
+    /// The section of the convention whose key is `key`: the branch format, or the pull request
+    /// template.
+    pub fn convention(&self, key: &str) -> &Entity<Convention> {
+        match key == Kind::BranchFormat.key() {
+            true => &self.branch_format,
+            false => &self.pull_request_template,
+        }
     }
 
     pub fn skills(&self) -> &Entity<SkillsSection> {
@@ -753,6 +774,12 @@ impl ProjectSettingsPage {
         self.tasks
             .update(cx, |section, cx| section.set_repositories(paths, cx));
         self.tracker = serde_json::from_value::<ProjectTracker>(settings["tracker"].clone()).ok();
+        for kind in [Kind::BranchFormat, Kind::PullRequestTemplate] {
+            let value = settings[kind.key()].as_str().unwrap_or_default().to_owned();
+            self.convention(kind.key())
+                .clone()
+                .update(cx, |section, cx| section.read(value, window, cx));
+        }
         let checks = strings(&settings["message_checks"]);
         self.message_checks
             .update(cx, |section, cx| section.read(checks, window, cx));
@@ -2259,6 +2286,7 @@ impl Render for ProjectSettingsPage {
                 .gap(space::XXL)
                 .child(self.workspaces.clone())
                 .child(self.branch_prefix_section(window, cx))
+                .child(self.branch_format.clone())
                 .child(self.setup.clone())
                 .into_any_element(),
             // What checks the agents' messages belongs with how they are told to work.
@@ -2268,6 +2296,7 @@ impl Render for ProjectSettingsPage {
                 .gap(space::XXL)
                 .child(self.rules.clone())
                 .child(self.message_checks.clone())
+                .child(self.pull_request_template.clone())
                 .into_any_element(),
         ];
         let chosen = self.tab.min(sections.len() - 1);

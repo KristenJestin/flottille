@@ -199,6 +199,13 @@ pub enum Command {
         project: String,
         settings: Value,
     },
+    /// Writes one of the project's conventions, `key` of `project.set_conventions`, empty for
+    /// none.
+    SaveConvention {
+        project: String,
+        key: &'static str,
+        value: String,
+    },
     /// Writes the project's message checks (`project.set_message_checks`).
     SaveMessageChecks {
         project: String,
@@ -633,6 +640,12 @@ pub enum Outcome {
         project: String,
         read: Result<Value, String>,
         saved: bool,
+    },
+    /// One of the project's conventions as saved, empty for none, or why nothing was.
+    Convention {
+        project: String,
+        key: &'static str,
+        saved: Result<String, String>,
     },
     /// The project's message checks as saved, or why nothing was.
     MessageChecks {
@@ -1288,6 +1301,21 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             )),
             project,
             saved: true,
+        },
+        Command::SaveConvention {
+            project,
+            key,
+            value,
+        } => Outcome::Convention {
+            saved: answer(ask_alone(
+                connect,
+                "project.set_conventions",
+                json!({"name": project, key: value}),
+                bounds.quick,
+            ))
+            .map(|saved| saved[key].as_str().unwrap_or_default().to_owned()),
+            project,
+            key,
         },
         Command::SaveMessageChecks { project, checks } => Outcome::MessageChecks {
             saved: answer(ask_alone(
