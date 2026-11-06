@@ -1004,6 +1004,15 @@ fn an_attached_image_unfolds_and_folds_away(cx: &mut TestAppContext) {
         "still unfolding after a frame: {first} of {full}"
     );
     cx.update(|window, _| assert!(window.try_find("attachment-0").is_some()));
+    // The id the final check looks for is the strip's: it is drawn, with room, while it is there.
+    cx.update(|window, _| {
+        assert!(
+            window
+                .try_find("attachments")
+                .is_some_and(|a| a.bounds().size.height > px(1.)),
+            "the strip is drawn under the id the fold check looks for"
+        )
+    });
 
     // It folds away: still drawn a frame after, gone once it has.
     cx.update(|window, cx| window.click("attachment-remove-0", cx));
@@ -1019,7 +1028,7 @@ fn an_attached_image_unfolds_and_folds_away(cx: &mut TestAppContext) {
     cx.update(|window, _| {
         assert!(
             window
-                .try_find("reply-attachments")
+                .try_find("attachments")
                 .is_none_or(|a| a.bounds().size.height <= px(1.))
         )
     });

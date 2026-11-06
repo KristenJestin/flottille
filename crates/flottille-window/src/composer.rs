@@ -1,11 +1,13 @@
 //! The composer that starts a session, in two layers: an outer shell, the field with its own
 //! border and focus ring, and the pickers below it (the place, the agent and model, send). The field is its own view: typing redraws it, never the page.
 
+use std::sync::Arc;
+
 use flottille_ui::color::mix;
 use flottille_ui::motion::HOVER;
 use flottille_ui::{
-    Align, Button, Dropdown, Icon, MenuItem, Type, enter, fade, follow_theme, hoverable, palette,
-    presence_of, space,
+    Align, Button, Dropdown, Icon, MenuItem, Toast, Type, enter, fade, follow_theme, hoverable,
+    palette, presence_of, space, toast,
 };
 use gpui_kit::base::input::{InputEvent, RopeExt as _, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -16,9 +18,13 @@ use gpui_kit::{
 };
 
 use crate::actions::{Command, Pick, Target};
+use crate::attachments::{Attachments, STILL_SCALING};
 use crate::providers::{Provider, Providers};
 use crate::settings::Reveal;
 use crate::shell::Shell;
+
+/// What a toast says when the daemon starts no session, or the composer waits for a picture.
+const NOT_STARTED: &str = "The session was not started";
 
 /// A place the composer can start a session in.
 #[derive(Clone, Debug, PartialEq)]
@@ -154,6 +160,8 @@ pub struct Composer {
     field: Entity<TextareaState>,
     has_text: bool,
     focused: bool,
+    /// The pictures that go with the first message.
+    attached: Attachments,
     places: Vec<PlaceChoice>,
     choice: Choice,
     /// A workspace made from the picker, which becomes the place once the daemon lists it.
@@ -220,6 +228,7 @@ impl Composer {
             field,
             has_text: false,
             focused: false,
+            attached: Attachments::default(),
             places: Vec::new(),
             choice: Choice::Main,
             wanted: None,
@@ -401,6 +410,37 @@ impl Composer {
         &self.field
     }
 
+    /// Whether the chosen provider's agents take images; `None` until one started.
+    pub fn takes_images(&self) -> Option<bool> {
+        self.provider().and_then(|provider| provider.images)
+    }
+
+    /// The pictures that go with the first message.
+    pub fn attachments(&self) -> &[Arc<gpui_kit::Image>] {
+        self.attached.pictures()
+    }
+
+    /// The pictures, told first whether the chosen provider's agents take any, so that one that
+    /// takes none is said in a toast, as a session's composer says it.
+    fn attached_of(&mut self) -> &mut Attachments {
+        self.attached.set_takes(self.takes_images());
+        &mut self.attached
+    }
+
+    /// Attaches a picture, or says in a toast why not; the text in the field stays.
+    pub fn attach(&mut self, image: gpui_kit::Image, cx: &mut Context<Self>) {
+        self.attached_of().attach(image, cx, Self::attached_of);
+    }
+
+    /// Attaches the picture a file holds (a file dropped on the composer, or picked).
+    pub fn attach_file(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        self.attached_of().attach_file(path, cx, Self::attached_of);
+    }
+
+    pub fn detach(&mut self, at: usize, cx: &mut Context<Self>) {
+        self.attached.detach(at, cx);
+    }
+
     pub fn set_places(&mut self, places: Vec<PlaceChoice>, cx: &mut Context<Self>) {
         if self.places != places {
             if let Choice::Workspace(name) = &self.choice
@@ -504,12 +544,17 @@ impl Composer {
             && (self.provider().is_some_and(Provider::offered) || !self.providers.known)
             && self.model_refused().is_none()
             && self.sending.is_none()
-            && self.has_text
+            // Pictures alone are a first message, as they are a later one.
+            && (self.has_text || !self.attached.is_empty())
     }
 
     /// Starts a session with what the field holds, where the picker says.
     pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let _ = window;
+        // A picture that is not there yet would be left behind: the sender waits for it.
+        if self.attached.is_scaling() {
+            return toast(Toast::failure(NOT_STARTED).detail(STILL_SCALING), cx);
+        }
         if !self.can_send() {
             return;
         }
@@ -523,6 +568,7 @@ impl Composer {
             target: target.clone(),
             pick: self.pick.clone(),
             message,
+            images: self.attached.sending(),
         };
         self.sending = Some(target);
         self.sent = Some(self.pick.clone());
@@ -542,6 +588,7 @@ impl Composer {
         self.field
             .update(cx, |field, cx| field.set_value("", window, cx));
         self.has_text = false;
+        self.attached.clear();
         cx.notify();
         used
     }
@@ -587,6 +634,7 @@ impl Composer {
                     }))
                     .items(self.place_items(cx)),
             )
+            .child(Attachments::button(cx, Self::attached_of))
             .child(div().flex_1())
             .children(self.render_agent_pickers(cx))
             .child(
@@ -990,6 +1038,9 @@ impl Render for Composer {
         self.renders += 1;
         let p = palette(cx);
         let focus = fade("composer-focus", self.focused, HOVER, window, cx);
+        let strip = self
+            .attached
+            .strip(window, cx, |this, at, cx| this.detach(at, cx));
         let body = div()
             .id("composer-field")
             .px(space::LG)
@@ -1003,93 +1054,95 @@ impl Render for Composer {
                 window.focus(&focus, cx);
             }))
             .test_support();
-        div()
-            .id("composer")
-            .relative()
-            .w_full()
-            .p(space::SM)
-            .rounded(px(16.))
-            .bg(p.shell)
-            .border_1()
-            .border_color(p.line)
-            .shadow_lg()
-            .ui_text()
-            .text_color(p.text)
-            .test_support()
-            .child(
+        Attachments::taken_by(
+            div().id("composer").relative().w_full(),
+            cx,
+            Self::attached_of,
+        )
+        .p(space::SM)
+        .rounded(px(16.))
+        .bg(p.shell)
+        .border_1()
+        .border_color(p.line)
+        .shadow_lg()
+        .ui_text()
+        .text_color(p.text)
+        .test_support()
+        .child(strip)
+        .child(
+            div()
+                .rounded(px(11.))
+                .bg(p.field)
+                .border_1()
+                .border_color(mix(p.field_line, p.focus_line, focus))
+                .when(focus > 0.0, |d| {
+                    d.shadow(vec![gpui_kit::BoxShadow {
+                        color: p.focus_ring.opacity(focus),
+                        offset: gpui_kit::point(px(0.), px(0.)),
+                        blur_radius: px(0.),
+                        spread_radius: px(3.),
+                        inset: false,
+                    }])
+                })
+                .overflow_hidden()
+                .child(body),
+        )
+        .child(self.render_pickers(cx).into_any_element())
+        .children(self.render_not_ready(cx))
+        .child(presence_of(
+            "composer-model-refused-line",
+            self.model_refused().map(SharedString::from),
+            move |why| {
                 div()
-                    .rounded(px(11.))
-                    .bg(p.field)
-                    .border_1()
-                    .border_color(mix(p.field_line, p.focus_line, focus))
-                    .when(focus > 0.0, |d| {
-                        d.shadow(vec![gpui_kit::BoxShadow {
-                            color: p.focus_ring.opacity(focus),
-                            offset: gpui_kit::point(px(0.), px(0.)),
-                            blur_radius: px(0.),
-                            spread_radius: px(3.),
-                            inset: false,
-                        }])
-                    })
-                    .overflow_hidden()
-                    .child(body),
+                    .id("composer-model-refused")
+                    .px(space::MD)
+                    .pt(space::SM)
+                    .pb(space::XS)
+                    .text_size(px(12.5))
+                    .text_color(p.faint)
+                    .child(why)
+                    .into_any_element()
+            },
+        ))
+        .when_some(self.blocked.clone(), |d, why| {
+            d.child(
+                div()
+                    .id("composer-blocked")
+                    .px(space::MD)
+                    .pt(space::SM)
+                    .pb(space::XS)
+                    .text_size(px(12.5))
+                    .text_color(p.faint)
+                    .child(SharedString::from(why)),
             )
-            .child(self.render_pickers(cx).into_any_element())
-            .children(self.render_not_ready(cx))
-            .child(presence_of(
-                "composer-model-refused-line",
-                self.model_refused().map(SharedString::from),
-                move |why| {
-                    div()
-                        .id("composer-model-refused")
-                        .px(space::MD)
-                        .pt(space::SM)
-                        .pb(space::XS)
-                        .text_size(px(12.5))
-                        .text_color(p.faint)
-                        .child(why)
-                        .into_any_element()
-                },
+        })
+        .child(presence_of(
+            "composer-error-line",
+            self.error.clone(),
+            move |error| {
+                div()
+                    .id("composer-error")
+                    .px(space::MD)
+                    .pt(space::SM)
+                    .pb(space::XS)
+                    .text_size(px(12.5))
+                    .text_color(p.fail)
+                    .child(error)
+                    .into_any_element()
+            },
+        ))
+        .when(self.sending.is_some(), |d| {
+            d.child(enter(
+                "composer-starting",
+                0,
+                div()
+                    .px(space::MD)
+                    .pt(space::SM)
+                    .pb(space::XS)
+                    .mono(11.5)
+                    .text_color(p.faint)
+                    .child("Starting…"),
             ))
-            .when_some(self.blocked.clone(), |d, why| {
-                d.child(
-                    div()
-                        .id("composer-blocked")
-                        .px(space::MD)
-                        .pt(space::SM)
-                        .pb(space::XS)
-                        .text_size(px(12.5))
-                        .text_color(p.faint)
-                        .child(SharedString::from(why)),
-                )
-            })
-            .child(presence_of(
-                "composer-error-line",
-                self.error.clone(),
-                move |error| {
-                    div()
-                        .id("composer-error")
-                        .px(space::MD)
-                        .pt(space::SM)
-                        .pb(space::XS)
-                        .text_size(px(12.5))
-                        .text_color(p.fail)
-                        .child(error)
-                        .into_any_element()
-                },
-            ))
-            .when(self.sending.is_some(), |d| {
-                d.child(enter(
-                    "composer-starting",
-                    0,
-                    div()
-                        .px(space::MD)
-                        .pt(space::SM)
-                        .pb(space::XS)
-                        .mono(11.5)
-                        .text_color(p.faint)
-                        .child("Starting…"),
-                ))
-            })
+        })
     }
 }

@@ -834,6 +834,10 @@ async fn source_round(daemon: &Arc<Daemon>, project: &Project, source: &Source) 
         .filter(|item| kind == "ticket" || item.repository == target)
         .collect::<Vec<_>>();
     let outcome = read_round(daemon, project, source, &cursor, &stored, started).await;
+    // The runs agents follow in the repository, read with its pull requests, whatever they gave.
+    if let Source::Pulls(checkout) = source {
+        forge::followed::round(daemon, &project.name, checkout).await;
+    }
     match outcome {
         // The project went meanwhile: nothing of it is written back.
         Ok(None) => return,

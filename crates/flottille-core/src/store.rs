@@ -2199,6 +2199,15 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Writes what the source of a subscription last saw of its target; whether it was still
+    /// there: one ended meanwhile is not written back.
+    pub fn set_seen(&self, id: &str, seen: &serde_json::Value) -> Result<bool> {
+        Ok(self.connection.execute(
+            "UPDATE subscriptions SET seen = ?2 WHERE id = ?1",
+            params![id, serde_json::to_string(seen)?],
+        )? > 0)
+    }
+
     /// Removes a subscription; whether it was there.
     pub fn unsubscribe(&self, id: &str) -> Result<bool> {
         Ok(self

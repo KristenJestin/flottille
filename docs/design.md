@@ -363,7 +363,10 @@ review) subscribes to it instead of reading again and again. Four parts, each it
   (`agent_launch` with `root` and `follow: true`): it is not one shot and has no time, and ends
   when the agent unsubscribes (`forge unsubscribe` with `session`), when the session ends or
   fails, or when the agent ends. It wakes the agent at each end of a turn of the session, never
-  more than once for a turn.
+  more than once for a turn. A run the agent started (`forge` `run`) is followed the same way
+  unless it says `follow: false`: the rounds of the items read it, and it wakes the agent once
+  when it waits on a manual step and when it ends, which ends the following (`docs/forges.md`,
+  "Following a run").
 - **Delivering** is the existing path (§5.2): a `subscription` delivery, masked, its forge texts
   framed as data and not instructions, wakes the agent as a child's report does.
 
@@ -777,7 +780,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   sessions, each workspace's card saying where each of its repositories stands (branch, commits
   ahead, files not committed, setup steps played), creating and removing a
   workspace (with the preparation's progress and failure output), the composer that starts
-  a session (place, agent, model, first message), its pull requests and tickets (`items.md`: two
+  a session (place, agent, model, first message, and pictures taken as a session's composer does,
+  which go with the first message), its pull requests and tickets (`items.md`: two
   tabs, Pull requests and Tickets, each counting what it lists, filtered open, closed or all, the
   user's own, and a repository for the pull requests, and searched by key or title (the quick
   switcher's matching, what matched in the accent; a line says how many are listed, `128 open`,

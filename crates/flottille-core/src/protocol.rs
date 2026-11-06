@@ -236,6 +236,9 @@ pub struct AgentRun {
     pub role: Option<String>,
     /// Its first message.
     pub message: String,
+    /// Pasted or dropped images, sent with the first message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageUpload>,
 }
 
 /// The parameters of `agent.send`.
