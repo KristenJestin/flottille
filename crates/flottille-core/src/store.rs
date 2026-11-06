@@ -3422,6 +3422,7 @@ mod tests {
                     note: None,
                 },
                 resumed: false,
+                resumed_branch: None,
             }],
             steps: vec![
                 Step {

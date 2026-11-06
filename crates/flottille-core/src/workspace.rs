@@ -57,6 +57,11 @@ pub struct Worktree {
     /// checks it out instead of starting it from the base (`docs/workspaces.md`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub resumed: bool,
+    /// The name of the branch it resumed, as it was then: the workspace's branch follows a `git
+    /// switch`, this never does. None for a branch it started, and for a workspace made before it
+    /// was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resumed_branch: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

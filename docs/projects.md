@@ -42,12 +42,18 @@ spaces`). The project's Settings, Setup tab, "Branch prefix", edits it, an empty
 says `^` and `$`). With one, a workspace refuses to start a branch that does not match it, the
 default `<branch prefix>/<name>` as a branch named (`docs/workspaces.md`), a workspace's
 `rename_branch` refuses one, and an agent's `git push` that would make a branch outside it on a
-remote is refused before anything goes; each refusal names the pattern (`the branch feature/x does
+remote is refused before anything goes (git's own dry run says which branches it makes, read once
+with the message checks'); each refusal names the pattern (`the branch feature/x does
 not match the project's branch format ^(feat|fix)/…$: give a branch that does`). A branch a
 workspace **resumed** was named before the format and is never refused for its name, nor is a push
-to a branch the remote has already. An agent's `workspace create` and `agent_launch` refuse a
+to a branch the remote has already. The name resumed is the one recorded when the workspace was made
+(each repository's `resumed_branch`), never the branch it is on now: a branch an agent makes later
+with `git switch -c` in that workspace is held to the format at its push. A branch an agent makes in
+the main checkout before `workspace create` names it counts as resumed, as any branch that exists. An agent's `workspace create` and `agent_launch` refuse a
 branch outside the format before the user is asked, unless a repository has it already (its own
-or as last fetched): the creation then decides, once it knows which repositories resume it. A
+or as last fetched): the creation then decides, once it knows which repositories resume it. The
+creation refuses a branch named outside the format that no repository has, nor its remote (listed,
+not fetched), before it fetches any base. A
 pattern that is not a regular expression is refused when the file is read and when it is saved,
 with the reason. The project's Settings, Setup tab, "Branch format", under the branch prefix,
 edits it (`project.set_conventions`, `docs/protocol.md`); empty turns it off. Agents read it with

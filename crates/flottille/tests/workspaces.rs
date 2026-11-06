@@ -3421,3 +3421,42 @@ fn a_resumed_branch_is_never_refused_for_its_name() {
         .unwrap();
     assert_eq!(created["branch"], "old/remote-only");
 }
+
+#[test]
+fn a_named_branch_outside_the_format_that_exists_nowhere_is_refused_before_any_fetch() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    fixture.with_branch_format();
+    let web = fixture.folder.join("web");
+    let tracking = || fixture.git(&web, &["rev-parse", "refs/remotes/origin/develop"]);
+    let before = tracking();
+    // develop moves on the remote: a fetch would bring it into the tracking ref.
+    let other = fixture.user.path("other-web");
+    fixture.user.git(
+        &fixture.user.path(""),
+        &[
+            "clone",
+            "--quiet",
+            "--branch",
+            "develop",
+            fixture.remote("web").to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(other.join("MOVED.md"), "moved\n").unwrap();
+    fixture.user.git(&other, &["add", "."]);
+    fixture
+        .user
+        .git(&other, &["commit", "--quiet", "-m", "moved"]);
+    fixture
+        .user
+        .git(&other, &["push", "--quiet", "origin", "develop"]);
+
+    let (code, message) = fixture
+        .create(json!({"repositories": ["web"], "branch": "feature/login"}))
+        .unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert!(message.contains(FORMAT), "{message}");
+    assert_eq!(tracking(), before, "fetched before the refusal");
+}
