@@ -664,6 +664,16 @@ with `events_since`.
 | `question` | Masked. |
 | `to` | `user` or `parent`. |
 
+#### `agent.answered`
+
+The agent took a message of the user (a root) or of its parent (a child) while a question of its
+waited: every question it asked before is answered. A root's open questions (`agent.tree`,
+`questions`) are those asked after its last `agent.answered`.
+
+| Field | |
+|---|---|
+| `agent` | |
+
 #### `agent.stuck`
 
 The sweep found the agent stuck in a turn (`docs/agents.md`, "The sweep"): its session is

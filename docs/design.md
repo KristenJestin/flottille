@@ -231,7 +231,10 @@ Flottille's own tools:
 - `report {text}`: the caller is done; its report goes to its parent at once and the session ends
   (see 5.3). A root agent's report goes to the user.
 - `ask_user {question}` (a root only): a question to the user, answered later as a delivery
-  (never blocks).
+  (never blocks). It is open at once, whatever the agent does next: in the inbox, as "needs you"
+  on its session's row, as a card at its place in the conversation with the field that answers it
+  (the call's own line says `asked you: <its first line>`), and in what `session_read` gives,
+  until the agent takes a message of the user.
 - `ask_parent {question}` (a child only, in place of `ask_user`): a question to its parent,
   delivered as `child-question`; the parent answers with `agent_send`.
 - `approval_answer {request_id, decision: forward | deny, why}`: answer a request held for the
@@ -303,7 +306,7 @@ An agent that starts a session for the user chooses, with `follow`, whether it h
 `follow: true` it is woken, between turns, by `session-turn-ended` at each end of a turn of that
 session (and when the session ends), a delivery that names the session, says why the turn ended
 (turn done, a report, a question with `ask_user`, a failure) and holds its last message, masked and
-cut. It is a following, a subscription that has no end of its own (§5.6, `docs/tools.md`, "Sessions
+cut, after the questions to the user that turn asked and that still wait, whole. It is a following, a subscription that has no end of its own (§5.6, `docs/tools.md`, "Sessions
 for the user"). Two sessions that write to each other five times without the user pause it.
 
 ### 5.3 What the parent is told
