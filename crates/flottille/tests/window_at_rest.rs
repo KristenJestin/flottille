@@ -273,3 +273,54 @@ fn the_window_draws_no_frame_at_rest_on_a_session_with_a_leave(cx: &mut TestAppC
         "(frames drawn, frames asked)"
     );
 }
+
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_session_with_a_folded_sub_agents_card(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "launch a worker", "do": [{"mcp": {"tool": "agent_launch",
+            "arguments": {"title": "write the docs", "brief": "REPORT and write the docs"}}}]},
+        {"when": "REPORT", "do": [{"mcp": {"tool": "report", "arguments": {"text": "done"}}}]}
+    ]}));
+    let id = idle_session(&user);
+    user.call(
+        "agent.send",
+        json!({"agent": id, "message": "launch a worker"}),
+    )
+    .unwrap();
+    eventually("the worker reported and the lead is idle again", || {
+        let agents = user.call("agent.list", json!({})).unwrap()["agents"].clone();
+        let agents = agents.as_array().unwrap();
+        agents.len() == 2
+            && agents
+                .iter()
+                .all(|a| a["state"] == "idle" || a["state"] == "ended")
+    });
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&id)).is_some())
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    until(&shell, cx, "the sub-agents card is there", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).session_page().is_some_and(|page| {
+                page.read(cx)
+                    .conversation()
+                    .read(cx)
+                    .rows()
+                    .iter()
+                    .any(|row| !row.read(cx).sub_agents().is_empty())
+            })
+        })
+    });
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
