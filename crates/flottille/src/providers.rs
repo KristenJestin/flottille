@@ -590,6 +590,17 @@ pub(crate) fn last_models(daemon: &Daemon, check: &Check) -> Option<(Vec<Value>,
     Some((models.as_array().cloned().unwrap_or_default(), current))
 }
 
+/// Whether a provider's agents take images in a prompt, as the last of its agents that started
+/// said; `None` before one did.
+pub fn takes_images(daemon: &Daemon, provider: &str) -> Option<bool> {
+    let agents = daemon.read(|store| store.agents()).ok()?;
+    agents
+        .iter()
+        .rev()
+        .filter(|agent| agent.provider == provider)
+        .find_map(|agent| agent.images)
+}
+
 /// The models a provider's agents offered, when they were read from the version of the provider
 /// there is now: only these refuse a model or an effort.
 fn known_models(daemon: &Daemon, check: &Check) -> Option<Vec<Value>> {
@@ -1393,6 +1404,7 @@ fn list(daemon: &Daemon, project: Option<&Project>) -> Result<Value, Failure> {
             let last = last_models(daemon, check);
             entry["models_outdated"] = json!(last.as_ref().is_some_and(|(_, current)| !current));
             entry["models"] = json!(last.map(|(models, _)| models));
+            entry["images"] = json!(takes_images(daemon, check.provider.name));
             entry
         })
         .collect();

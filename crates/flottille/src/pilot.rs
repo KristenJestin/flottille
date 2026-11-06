@@ -552,6 +552,7 @@ fn agent_start(paths: &Paths, args: Value) -> Done {
         mode: None,
         role,
         message,
+        images: Vec::new(),
     };
     let started = ask(paths, "agent.start", &asked)?;
     let agent = &started["agent"];

@@ -138,6 +138,8 @@ pub struct Shell {
     /// Each session's composer, made when its page first opens: a draft and a send belong to
     /// their session.
     replies: HashMap<String, Entity<Reply>>,
+    /// Each composer's changes, which the session's row says as a pencil while it is left.
+    _drafts: Vec<Subscription>,
     /// The providers as the daemon last listed them, and the number of that read.
     providers: Providers,
     providers_read: u64,
@@ -292,6 +294,7 @@ impl Shell {
             session_page: None,
             _chose: None,
             replies: HashMap::new(),
+            _drafts: Vec::new(),
             providers: Providers::default(),
             providers_read: 0,
             last_pick: None,
@@ -442,6 +445,20 @@ impl Shell {
         (self.follow.opener)(std::path::Path::new(url));
     }
 
+    /// Tells a session's row whether its composer holds a draft; the row says it as a pencil
+    /// while the session is not the open one.
+    fn say_draft(&self, session: &str, cx: &mut Context<Self>) {
+        let held = self
+            .replies
+            .get(session)
+            .is_some_and(|reply| reply.read(cx).holds_draft());
+        if let Some(row) = self.sessions.get(session)
+            && row.read(cx).draft() != held
+        {
+            row.update(cx, |row, cx| row.set_draft(held, cx));
+        }
+    }
+
     /// The composer of a session whose page was opened.
     pub fn reply_of(&self, session: &str) -> Option<&Entity<Reply>> {
         self.replies.get(session)
@@ -495,15 +512,20 @@ impl Shell {
             started_by,
         };
         let this = cx.entity().downgrade();
-        let reply = self
-            .replies
-            .entry(id.clone())
-            .or_insert_with(|| {
-                let (this, id) = (this.clone(), id.clone());
-                let project = opened.project.clone();
-                cx.new(|cx| Reply::new(this, id, project, window, cx))
-            })
-            .clone();
+        let reply = match self.replies.get(id) {
+            Some(reply) => reply.clone(),
+            None => {
+                let (shell, project) = (this.clone(), opened.project.clone());
+                let session = id.clone();
+                let reply = cx.new(|cx| Reply::new(shell, session, project, window, cx));
+                self._drafts.push(cx.observe(&reply, |shell, reply, cx| {
+                    let session = reply.read(cx).session().to_owned();
+                    shell.say_draft(&session, cx);
+                }));
+                self.replies.insert(id.clone(), reply.clone());
+                reply
+            }
+        };
         if self.providers.known {
             let mode = reply.read(cx).mode.clone();
             let chosen = self.providers.judge.is_some();
@@ -1540,6 +1562,13 @@ impl Shell {
             }
             if row.read(cx).commands() != session.commands {
                 row.update(cx, |row, cx| row.set_commands(session.commands, cx));
+            }
+            let held = self
+                .replies
+                .get(&session.id)
+                .is_some_and(|reply| reply.read(cx).holds_draft());
+            if row.read(cx).draft() != held {
+                row.update(cx, |row, cx| row.set_draft(held, cx));
             }
             // Ended, it sits among other projects' sessions: its row says whose it is.
             let scope = session.ended.then_some(session.project.as_str());
