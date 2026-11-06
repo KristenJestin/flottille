@@ -527,3 +527,67 @@ fn the_window_draws_no_frame_at_rest_on_a_session_with_a_folded_sub_agents_card(
         "(frames drawn, frames asked)"
     );
 }
+
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_session_with_a_card_of_links_and_a_thumbnail(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "show the results", "do": [
+            {"mcp": {"tool": "web", "arguments": {"action": "show_link", "path": "shot.png"}}},
+            {"mcp": {"tool": "web", "arguments": {"action": "show_link", "path": "other.png"}}},
+            {"mcp": {"tool": "web", "arguments": {"action": "show_link",
+                "url": "https://example.org/t/42", "title": "Ticket 42"}}}]}
+    ]}));
+    let id = idle_session(&user);
+    // A picture of 1 pixel by 1.
+    let picture = [
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+        0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0x64,
+        0x60, 0xf8, 0x5f, 0x0f, 0x00, 0x02, 0x87, 0x01, 0x80, 0xeb, 0x47, 0xba, 0x92, 0x00, 0x00,
+        0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+    std::fs::write(user.path("work/app/shot.png"), picture).unwrap();
+    std::fs::write(user.path("work/app/other.png"), picture).unwrap();
+    user.call(
+        "agent.send",
+        json!({"agent": id, "message": "show the results"}),
+    )
+    .unwrap();
+    eventually("the lead showed its links and is idle again", || {
+        let shown = user.call("agent.show", json!({"agent": id})).unwrap();
+        shown["agent"]["state"] == "idle"
+            && shown["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|event| event["name"] == "agent.link_shown")
+                .count()
+                == 3
+    });
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&id)).is_some())
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    until(
+        &shell,
+        cx,
+        "the card of links and its pictures are there",
+        |cx| {
+            cx.update(|window, _| {
+                (0..12).any(|at| window.try_find(format!("row-{at}-link-0-thumb")).is_some())
+            })
+        },
+    );
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}

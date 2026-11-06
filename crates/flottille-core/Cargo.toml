@@ -7,8 +7,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-# Already built for the window (and GPUI): PNG and JPEG, to scale a picture down before it is kept.
-image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
+# Already built for the window (and GPUI): PNG and JPEG, to scale a picture down before it is kept;
+# GIF and WebP, to read the size of a picture and make its thumbnail.
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 libc = "0.2.191"
 # Already built for the window (GPUI): the project's branch format is a regular expression.
 regex = "1.13.1"
