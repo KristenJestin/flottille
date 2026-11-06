@@ -3409,7 +3409,9 @@ fn an_answered_request_keeps_its_record_when_the_page_is_opened_again(cx: &mut T
 }
 
 #[gpui_kit::test]
-fn a_long_conversation_shows_its_last_page_and_earlier_ones_on_demand(cx: &mut TestAppContext) {
+fn a_long_conversation_shows_its_last_page_and_earlier_ones_as_the_user_scrolls_up(
+    cx: &mut TestAppContext,
+) {
     let user = team_user();
     let pieces: Vec<serde_json::Value> =
         (0..1100).map(|n| json!({"say": format!("{n} ")})).collect();
@@ -3477,7 +3479,7 @@ fn a_long_conversation_shows_its_last_page_and_earlier_ones_on_demand(cx: &mut T
         cx.update(|window, _| window.try_find("row-0-sub-agents").is_some()),
         "drawn, not folded under a group"
     );
-    cx.update(|window, cx| window.click("show-earlier", cx));
+    // The scroll to the start asked for the earlier page by itself.
     until(&shell, cx, "the earlier page", |cx| {
         blocks(&page, cx)[0]
             == Block::Message {

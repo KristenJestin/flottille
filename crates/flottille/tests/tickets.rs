@@ -521,7 +521,7 @@ fn a_jira_work_item_is_read_through_acli_and_its_description_comes_as_plain_text
         asked,
         [
             "jira auth status",
-            "jira workitem view ABC-123 --json --fields summary,status,description,comment,issuelinks,attachment"
+            "jira workitem view ABC-123 --json --fields summary,status,description,comment,issuelinks,attachment,assignee,parent,*navigable"
         ],
         "one read, for the link and the page both"
     );

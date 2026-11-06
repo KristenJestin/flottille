@@ -41,7 +41,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Bounds, Context, Div, ElementId, Entity, EventEmitter,
     Focusable as _, FollowMode, ImageCacheError, ImageSource, InteractiveElement, IntoElement,
-    ListAlignment, ListState, MouseButton, ParentElement, PathBuilder, Pixels, Render,
+    ListAlignment, ListOffset, ListState, MouseButton, ParentElement, PathBuilder, Pixels, Render,
     ScrollHandle, SharedString, SharedUri, Stateful, StatefulInteractiveElement, Styled,
     StyledImage as _, Subscription, Task, TestSupportExt as _, Transformation, WeakEntity, Window,
     canvas, div, list, point, px, radians,
@@ -991,11 +991,22 @@ impl SessionPage {
         self.run_drawer.update(cx, |drawer, cx| drawer.open(cx));
     }
 
-    /// Reads one more page of the shown agent's conversation, before those shown.
+    /// Reads one more page of the shown agent's conversation, before those shown: the button's
+    /// and the scroll's. One page is asked at a time, and one that failed is asked again.
     pub fn show_earlier(&mut self, cx: &mut Context<Self>) {
-        self.pages += 1;
+        let Some(again) = self.conversation.update(cx, |view, cx| view.asking(cx)) else {
+            return;
+        };
+        if !again {
+            self.pages += 1;
+        }
         self.relink();
         cx.notify();
+    }
+
+    /// How many pages of the shown conversation are asked for.
+    pub fn pages(&self) -> usize {
+        self.pages
     }
 
     /// The user chose an agent's conversation: the root's, with the composer, or a sub-agent's,
@@ -1111,6 +1122,13 @@ impl SessionPage {
                 self.sync_command_cards(cx);
                 self.note_activity(cx);
                 self.fetch_pictures(cx);
+            }
+            SessionUpdate::HistoryFailed(why) => {
+                // The first read is the skeleton's; only a page asked for is told.
+                if self.pages > 1 {
+                    self.conversation
+                        .update(cx, |view, cx| view.load_failed(why, cx));
+                }
             }
             // One row added or drawn again: nothing else is looked at.
             SessionUpdate::Live(event) => {
@@ -1912,6 +1930,15 @@ pub struct ConversationView {
     specials: Vec<usize>,
     /// Older events than those read remain.
     earlier: bool,
+    /// Whether a page of them is asked for, and why one failed.
+    load: Load,
+    /// The list's first item still stands while the line it held folds away, once nothing
+    /// earlier remains.
+    head_leaving: bool,
+    /// Takes the head out of the list, and the spinner with it, once the line has folded.
+    head_sweep: Option<Task<()>>,
+    /// The spinner of the loading line: made when a page is asked for, as it turns by itself.
+    spinner: Option<Entity<StateIcon>>,
     /// How many times a row was looked at or changed, for the cost of an update.
     touched: usize,
     /// How many rows of a group were walked to say its line or what stays out of its fold: only
@@ -1939,6 +1966,35 @@ pub struct ConversationView {
     /// drawn until it says which is that one, which then becomes it in place.
     held: HashSet<usize>,
     renders: usize,
+}
+
+/// Where the page of earlier events stands.
+#[derive(Clone, Debug, PartialEq)]
+enum Load {
+    Idle,
+    Asked,
+    /// It did not come, with why.
+    Failed(String),
+}
+
+/// What the user was reading when a page of earlier events arrived: the block at the top of the
+/// list, found again by the number of its event, and how far in it the top was.
+struct Anchor {
+    seq: u64,
+    /// The sub-agents' card, which stands first until the event that launched them is read.
+    card: bool,
+    kind: Reading,
+    /// How far into its item the top of the list was.
+    offset: Pixels,
+}
+
+/// Which item of a block was at the top.
+#[derive(Clone, Copy)]
+enum Reading {
+    /// A group's line.
+    Line,
+    /// A row, or one of the pieces of a long reply.
+    Piece(usize),
 }
 
 /// A message being sent, as an item of the list: it enters as any message, and folds away when
@@ -2017,6 +2073,10 @@ impl ConversationView {
             rows: Vec::new(),
             specials: Vec::new(),
             earlier: false,
+            load: Load::Idle,
+            head_leaving: false,
+            head_sweep: None,
+            spinner: None,
             touched: 0,
             walked: 0,
             list,
@@ -2180,9 +2240,15 @@ impl ConversationView {
         }
     }
 
+    /// How many items come before the segments: the line that asks for earlier events, which
+    /// stays while it folds away.
+    fn head(&self) -> usize {
+        usize::from(self.earlier || self.head_leaving)
+    }
+
     /// The list's first item of a segment.
     fn item_of(&self, segment: usize) -> usize {
-        usize::from(self.earlier)
+        self.head()
             + self.segments[..segment.min(self.segments.len())]
                 .iter()
                 .map(|s| self.items_of(s))
@@ -2207,7 +2273,7 @@ impl ConversationView {
 
     /// The segment of the list's item `ix`, and which of its items it is.
     fn segment_at(&self, ix: usize) -> Option<(usize, usize)> {
-        let mut ix = ix.checked_sub(usize::from(self.earlier))?;
+        let mut ix = ix.checked_sub(self.head())?;
         for (at, segment) in self.segments.iter().enumerate() {
             let items = self.items_of(segment);
             if ix < items {
@@ -2499,6 +2565,133 @@ impl ConversationView {
         self.earlier
     }
 
+    /// The user scrolled the list: a page of earlier events is asked when what is left above
+    /// is about a window's worth. Only a scroll of the user's gets here, never the list
+    /// opening on its end nor the jump back to it.
+    pub(crate) fn scrolled(&mut self, cx: &mut Context<Self>) {
+        if !self.earlier || self.load != Load::Idle || !self.near_top() {
+            return;
+        }
+        let page = self.page.clone();
+        // The list is still borrowed while it tells: the page is asked once the scroll is done.
+        cx.defer(move |cx| {
+            page.update(cx, |page, cx| page.show_earlier(cx)).ok();
+        });
+    }
+
+    /// Whether the items above the list's top are no more than those in sight. The list measures
+    /// only what it draws, so heights above would count what was never seen as nothing.
+    fn near_top(&self) -> bool {
+        let top = self.list.logical_scroll_top();
+        let area = self.list.viewport_bounds();
+        let in_sight = (top.item_ix..)
+            .take_while(|&ix| {
+                self.list
+                    .bounds_for_item(ix)
+                    .is_some_and(|bounds| bounds.top() < area.bottom())
+            })
+            .count();
+        top.item_ix <= in_sight.max(1)
+    }
+
+    /// A page of earlier events is asked: whether it is a page asked again after it failed, or
+    /// `None` when there is none to ask or one is on its way already.
+    pub(crate) fn asking(&mut self, cx: &mut Context<Self>) -> Option<bool> {
+        if !self.earlier {
+            return None;
+        }
+        let again = match self.load {
+            Load::Asked => return None,
+            Load::Failed(_) => true,
+            Load::Idle => false,
+        };
+        self.load = Load::Asked;
+        self.head_sweep = None;
+        if self.spinner.is_none() {
+            let status = cx.new(|_| Status::new(AgentState::Running));
+            self.spinner = Some(cx.new(|cx| StateIcon::new(status, cx)));
+        }
+        cx.notify();
+        Some(again)
+    }
+
+    /// The page asked for did not come, with why.
+    pub(crate) fn load_failed(&mut self, why: String, cx: &mut Context<Self>) {
+        if self.load == Load::Idle || self.load == Load::Failed(why.clone()) {
+            return;
+        }
+        self.load = Load::Failed(why);
+        self.sweep_head(cx);
+        cx.notify();
+    }
+
+    /// Lets the loading line fold away before the head and the spinner go.
+    fn sweep_head(&mut self, cx: &mut Context<Self>) {
+        self.head_sweep = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PANEL + FRAME).await;
+            this.update(cx, |this, cx| this.head_swept(cx)).ok();
+        }));
+    }
+
+    fn head_swept(&mut self, cx: &mut Context<Self>) {
+        if self.head_leaving {
+            self.head_leaving = false;
+            self.list.splice(0..1, 0);
+        }
+        if self.load != Load::Asked {
+            self.spinner = None;
+        }
+        cx.notify();
+    }
+
+    /// What is at the top of the list, to put it back there once the rows are made again.
+    fn anchor(&self) -> Option<Anchor> {
+        let top = self.list.logical_scroll_top();
+        let (segment, piece, offset) = match self.segment_at(top.item_ix) {
+            Some((segment, piece)) => (segment, piece, top.offset_in_item),
+            // On the head, the first block is what is read, at its top.
+            None if top.item_ix < self.head() && !self.segments.is_empty() => (0, 0, px(0.)),
+            None => return None,
+        };
+        let (at, kind) = match &self.segments[segment] {
+            Segment::Row(at) => (*at, Reading::Piece(piece)),
+            Segment::Group(group) if piece == 0 => (group.rows.start, Reading::Line),
+            Segment::Group(group) => (group.items.get(piece - 1)?.at, Reading::Piece(0)),
+        };
+        Some(Anchor {
+            seq: self.model.seq_of(at),
+            card: matches!(self.model.blocks()[at], Block::SubAgents),
+            kind,
+            offset,
+        })
+    }
+
+    /// Scrolls the list to what the user was reading, wherever it is now: older rows came in
+    /// above it.
+    fn restore(&self, anchor: &Anchor) {
+        let found = match anchor.card {
+            true => {
+                (0..self.rows.len()).find(|&at| matches!(self.model.blocks()[at], Block::SubAgents))
+            }
+            false => (0..self.rows.len())
+                .rev()
+                .find(|&at| self.model.seq_of(at) <= anchor.seq),
+        };
+        let Some(at) = found else {
+            return;
+        };
+        let segment = self.segment_of[at];
+        let item_ix = match (&self.segments[segment], anchor.kind) {
+            (Segment::Group(_), Reading::Line) => self.item_of(segment),
+            (Segment::Row(_), Reading::Piece(piece)) => self.item(at) + piece.min(self.more[at]),
+            _ => self.item(at),
+        };
+        self.list.scroll_to(ListOffset {
+            item_ix,
+            offset_in_item: anchor.offset,
+        });
+    }
+
     /// The groups the conversation folds, each the rows it holds.
     pub fn groups(&self) -> Vec<Range<usize>> {
         self.segments
@@ -2589,6 +2782,9 @@ impl ConversationView {
     /// Makes the rows again from what a link read: the events are folded first, then each
     /// block gets its row.
     fn rebuild(&mut self, read: Read, page: &SessionPage, cx: &mut Context<Self>) {
+        // A page of earlier events keeps the user where they were reading.
+        let anchor = (!read.follow).then(|| self.anchor()).flatten();
+        let had_head = self.head() == 1;
         self.model = self.model.restarted();
         self.model.place_approvals(read.placed);
         for event in read.events {
@@ -2598,6 +2794,11 @@ impl ConversationView {
             self.model.prepend_sub_agents();
         }
         self.earlier = read.earlier;
+        self.load = Load::Idle;
+        self.head_leaving = had_head && !self.earlier;
+        if had_head {
+            self.sweep_head(cx);
+        }
         self.rows.clear();
         self.specials.clear();
         self.more.clear();
@@ -2684,7 +2885,12 @@ impl ConversationView {
                 self.watch(cx);
             }
             // Earlier pages read: the rows shown before stay where they were, below them.
-            false => self.list.reset(items),
+            false => {
+                self.list.reset(items);
+                if let Some(anchor) = anchor {
+                    self.restore(&anchor);
+                }
+            }
         }
         cx.notify();
     }
@@ -2842,8 +3048,15 @@ impl ConversationView {
         if self.in_place.contains_key(&at) {
             return self.rows[at].clone().into_any_element();
         }
+        // Named by its event, not its index: a page of earlier events shifts the indices, and
+        // what is read must not enter again.
+        let seq = self.model.seq_of(at);
+        let same = (0..at)
+            .rev()
+            .take_while(|&before| self.model.seq_of(before) == seq)
+            .count();
         enter(
-            ElementId::Name(format!("enter-row-{}-{at}", self.id).into()),
+            ElementId::Name(format!("enter-row-{}-{seq}-{same}", self.id).into()),
             0,
             self.rows[at].clone(),
         )
@@ -2955,6 +3168,57 @@ impl ConversationView {
         .into_any_element()
     }
 
+    /// The first item while earlier events remain: "Show earlier", the fallback and the keys'
+    /// way, or while a page comes, a quiet line saying so, and why a page did not come. Each
+    /// unfolds and folds away.
+    fn render_head(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette(cx);
+        let (loading, failed) = match &self.load {
+            Load::Idle => (false, None),
+            Load::Asked => (true, None),
+            Load::Failed(why) => (false, Some(why.clone())),
+        };
+        let page = self.page.clone();
+        let button = Button::quiet("show-earlier", "Show earlier").on_click(move |_, _, cx| {
+            page.update(cx, |page, cx| page.show_earlier(cx)).ok();
+        });
+        let line = div()
+            .id("earlier-loading-line")
+            .flex()
+            .items_center()
+            .gap(space::SM)
+            .py(space::XS)
+            .text_color(p.faint)
+            .aria_label("Loading earlier…")
+            .children(self.spinner.clone())
+            .child("Loading earlier…")
+            .test_support();
+        let reason = failed
+            .filter(|_| self.earlier)
+            .map(|why| SharedString::from(format!("Earlier events did not load: {why}")));
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .child(presence(
+                "show-earlier-fold",
+                self.earlier && !loading,
+                button,
+            ))
+            .child(presence_of("show-earlier-failed", reason, move |why| {
+                div()
+                    .id("show-earlier-reason")
+                    .pt(space::XS)
+                    .text_color(p.fail)
+                    .aria_label(why.clone())
+                    .child(why)
+                    .test_support()
+                    .into_any_element()
+            }))
+            .child(presence("earlier-loading", self.earlier && loading, line))
+            .into_any_element()
+    }
+
     /// The list's item `ix`: "Show earlier", a row, a piece of a row's long reply, a group's
     /// line or one of its rows, in the conversation's column.
     fn render_item(
@@ -2980,13 +3244,9 @@ impl ConversationView {
         let gap = if last { px(20.) } else { row_gap() };
         // A list's item is not stretched to its width: the column is centred in a full one.
         let centred = |column: Div| div().w_full().child(column).into_any_element();
-        if self.earlier && ix == 0 {
-            let page = self.page.clone();
-            return centred(column(gap).flex().justify_center().child(
-                Button::quiet("show-earlier", "Show earlier").on_click(move |_, _, cx| {
-                    page.update(cx, |page, cx| page.show_earlier(cx)).ok();
-                }),
-            ));
+        if self.head() == 1 && ix == 0 {
+            let head = self.render_head(cx);
+            return centred(column(gap).child(head));
         }
         match self.segments.get(segment) {
             Some(Segment::Group(_)) if piece == 0 => {

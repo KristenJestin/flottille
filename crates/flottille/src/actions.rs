@@ -334,7 +334,30 @@ pub async fn prepared(
         if let Some(why) = crate::tickets::checked_links(daemon, &project, args).await {
             return Err(Outcome::Refused(why));
         }
-        return Ok(posted_says(args));
+        let mut says = posted_says(args);
+        // The labels, which the user reads whole; the sprint as the site names it.
+        for (key, said) in [
+            ("labels", "It adds the labels"),
+            ("remove_labels", "It removes the labels"),
+        ] {
+            let names: Vec<&str> = args[key]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .collect();
+            if !names.is_empty() {
+                says.push(format!("{said} {}", names.join(", ")));
+            }
+        }
+        says.extend(
+            crate::tickets::sprint_says(&project, args)
+                .await
+                .map_err(Outcome::Refused)?,
+        );
+        return Ok(says);
     }
     if tool == "forge" {
         // What no forge could do is refused at once: the user is not asked for it.
@@ -544,7 +567,7 @@ pub async fn approved_losses(
 fn posted_says(args: &Value) -> Vec<String> {
     if matches!(
         args["action"].as_str(),
-        Some("list" | "search" | "show" | "types" | "link_types") | None
+        Some("list" | "search" | "show" | "types" | "link_types" | "sprints") | None
     ) {
         return Vec::new();
     }
@@ -552,11 +575,20 @@ fn posted_says(args: &Value) -> Vec<String> {
         ("title", "Its title"),
         ("body", "Its body"),
         ("message", "Its message"),
-        ("assignee", "Its assignee"),
     ]
     .into_iter()
     .filter_map(|(key, said)| Some(format!("{said}: {}", args[key].as_str()?)))
     .collect();
+    // Whom a ticket goes to, where it goes, in words: `me` is the user reading the card.
+    if let Some(who) = args["assignee"].as_str() {
+        says.push(match who.trim() {
+            "me" | "@me" => "It assigns it to you".into(),
+            who => format!("It assigns it to {who}"),
+        });
+    }
+    if let Some(parent) = args["parent"].as_str() {
+        says.push(format!("It puts it under {}", parent.trim().to_uppercase()));
+    }
     // A `null` assignee is how an edit takes the assignee away.
     if args["action"] == "edit" && args["assignee"].is_null() && args.get("assignee").is_some() {
         says.push("It removes the assignee".into());

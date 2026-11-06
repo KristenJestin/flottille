@@ -724,7 +724,7 @@ reasons.
 
 | Tool | |
 |---|---|
-| `tickets {action, ticket?, workspace?, query?, updated_within?, in_comments?, jql?, state?, label?, assignee?, detail?, fresh?, title?, body?, labels?, reason?, remove_labels?, assignees?, remove_assignees?, status?, other?, kind?, comment?, sprint?, project?, type?, events?, from?, minutes?}` | The tickets of the project's tracker, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
+| `tickets {action, ticket?, workspace?, query?, updated_within?, in_comments?, jql?, state?, label?, assignee?, detail?, fresh?, title?, body?, labels?, reason?, remove_labels?, assignees?, remove_assignees?, status?, other?, kind?, comment?, sprint?, parent?, board?, project?, type?, events?, from?, minutes?}` | The tickets of the project's tracker, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
 
 - **`list {state?, label?, assignee?, updated_within?}`**: every ticket of a state, in one call, a
   line each (`- #12 open: The login fails [bug] (ana)  <link>`): `state` is `open` (the default),
@@ -792,12 +792,13 @@ reasons.
   `--remove-assignee`), `close` (`reason` is `completed` or `not planned`, `--reason`; left out,
   GitHub's own default), `reopen`, and a `status` below. On Jira, once `acli` is checked to be signed in to the
   tracker's site (as for a read), `acli jira workitem create --project <P> --summary <title>
-  [--description <body>] [--assignee <who>] [--type <type>] [--label a,b] --json` in `project
-  {project?, type?}`,
+  [--description <body>] [--assignee <who>] [--type <type>] [--label a,b] [--parent <key>] --json`
+  in `project {project?, type?, parent?, sprint?}` (in a sprint, from a JSON definition: below),
   one of the tracker's projects (it may be left out when the tracker has one), the type the
   project's default when none is given; `acli jira workitem comment create --key <K> --body
   <body>`; `acli jira workitem edit --key <K> [--summary] [--description] [--assignee <who> |
-  --remove-assignee] --yes`; and `close`,
+  --remove-assignee] [--labels a,b] [--remove-labels c] --yes` (`--labels` adds; an edit `acli`
+  ends with 0 while printing `✗ Failure: …` is said as not done); and `close`,
   `reopen` and `status` as `acli jira workitem transition --key <K> --status <name> --yes`: one
   status is attempted, which Jira's transitions accept or refuse, and the work item's status is
   read back to say what happened; a `reopen` of a work item that is not closed says it is already
@@ -805,8 +806,9 @@ reasons.
   tracker does not take,
   a `status` with no name, a `reason` that is neither value, and, for an argument of another action
   (`reason` is for close, `remove_labels`, `assignees` and `remove_assignees` for edit, `assignee`
-  for create and edit) or of the other tracker (on Jira, a label on edit, `assignees` or a reason;
-  on GitHub, `assignee`: GitHub's is `assignees`), is refused before anything is asked. A
+  for create and edit, `parent` and `sprint` for create) or of the other tracker (on Jira,
+  `assignees` or a reason; on GitHub, `assignee`, `parent` or `sprint`: GitHub's is `assignees`),
+  is refused before anything is asked. A
   `title` on `comment`, `close`, `reopen` or `status` is refused before anything is asked
   (`refused: tickets comment takes no title: title is for edit and create`). The request shows
   the title and the body whole, and a long one or one holding a secret is refused or base, as
@@ -816,7 +818,7 @@ reasons.
   `link {ticket, kind, other}` and `unlink {ticket, kind, other}` make and remove a link;
   `comment_edit {ticket, comment, body}` and `comment_delete {ticket, comment}` change or delete a
   comment, **only one Flottille recorded as posted by an agent** (`show` with `detail full` gives
-  the id of those, `[comment 10100]`); `sprint {ticket, sprint}` is always refused, saying why. A
+  the id of those, `[comment 10100]`). A
   link reads `ticket kind other`, so the card the user is shown says its direction in words (`ABC-2
   blocks ABC-1`). `ticket` is required, never the workspace's. On Jira, the kinds are the site's
   own link types, in the outward or the inward wording; on GitHub, `parent of`, `sub-task of`,
@@ -828,11 +830,32 @@ reasons.
   one. On GitHub it answers that issues have no type. A Jira `create` that `acli` refuses for its
   `type` answers with the project's types, nothing written, so that a type is never guessed
   twice ([`tickets.md`](tickets.md), "Types and assignment").
-- **`assignee` on Jira**: `create` and `edit` take `"@me"` (the user `acli` is signed in as,
-  which `acli` resolves itself), an email or an account id, as `acli` takes them; `edit` with
-  `assignee: null` removes it. Nothing is assigned unless the agent asks (a tracker may assign a
-  new work item by default). On GitHub, `assignees` (edit), `"@me"` accepted. The request names
-  the assignee (`Its assignee: @me`, `It removes the assignee`).
+- **`assignee` on Jira**: `create` and `edit` take `"me"` (the user the agent works for: `acli`'s
+  `@me`, the user it is signed in as, which `acli` resolves itself; `"@me"` is taken too), an email
+  or an account id, as `acli` takes them; anything else, a display name above all, is refused
+  before anything is asked (`assignee is me, an email or an account id; a display name cannot be
+  looked up with acli`); `edit` with `assignee: null` removes it. A creation `acli` refuses with
+  its assignee says it (`acli refused the creation assigned to "…": …; nothing was created`) and
+  is never tried again without it. Nothing is assigned unless the agent asks (a tracker may assign
+  a new work item by default). On GitHub, `assignees` (edit), `"me"` sent as `@me`. The request
+  says it in words (`It assigns it to you`, `It removes the assignee`).
+- **Parents and sprints on Jira**: `create` takes `parent` (a key of the tracker, the epic or the
+  sub-task's parent: `--parent`) and `sprint` (an open sprint, by its name or its id, with a
+  `type`); `sprints {project?, board?}` (a read, never held) lists the active and future sprints
+  of the project's boards (`acli jira board search --project <P> --json`, then `acli jira board
+  list-sprints --id <N> --state active,future --json`). A creation in a sprint is written as a
+  JSON definition (`acli jira workitem create --from-json <file> --json`, the site's Sprint field
+  in its `additionalAttributes`), its assignee set right after with `edit`. The sprint and the
+  Sprint field are found before the user is asked: an unknown or ambiguous sprint, or a site whose
+  Sprint field is not known, is refused then, and the card names the sprint and its board as the
+  site does. A creation that loses its assignee, or that `acli` answers without its key, says
+  what may not be set. A label holding a comma is refused, a blank one left out; `board` is
+  `sprints`' alone. The parent and the
+  sprint of an existing work item are refused, saying why: `acli`'s `edit` sets neither. The
+  request says them (`It puts it in sprint "Sprint 42" (board "ABC board")`, `It puts it under
+  ABC-10`, `It adds the labels bug, p1`), and `show`
+  says a work item's assignee, parent and sprint ([`tickets.md`](tickets.md), "Parents and
+  sprints").
 - **`status` on GitHub**: sets the Status of the issue on the GitHub Projects (v2) board it is on,
   like Todo, In Progress or Done. The option is found by its name, in any case, among those of the
   board's Status field. The daemon reads the issue's boards (`gh issue view <n> -R … --json
