@@ -343,7 +343,7 @@ review) subscribes to it instead of reading again and again. Four parts, each it
   subscribed is no event. The sources are the daemon's rounds of the items ([`items.md`](items.md),
   "What reads this stream"), which compare each read with what the store holds and say it as
   `item.*` events: a subscription to a pull request filters those of its pull request, as
-  `checks` (all ended), `review`, `comment`, `merged` and `closed` (`docs/forges.md`,
+  `checks` (all ended), `review`, `approved`, `comment`, `merged` and `closed` (`docs/forges.md`,
   "Subscriptions"), one to a ticket those of its ticket, as `commented`, `status`, `assigned` and
   `closed` (`docs/tickets.md`). No subscription reads anything of its own; it hears as often as
   the rounds come. The **timer** of a wake is a source too: its target is the agent's reason, its

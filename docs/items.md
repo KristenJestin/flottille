@@ -173,7 +173,7 @@ what was left, its cursor not having moved.
 Each round compares what it read with what is stored and emits, in the same transaction as it
 stores it (`docs/events.md`): `item.opened`, `item.changed` (with what changed: `state`, `title`,
 `assignees`, `labels`, `status`, and by name alone its `description`, its `discussion` and its
-`checks`), `item.commented`, `item.reviewed`, `item.checks`, `item.merged`, `item.closed`. **A
+`checks`), `item.commented`, `item.reviewed`, `item.approved`, `item.checks`, `item.merged`, `item.closed`. **A
 source's first round stores without emitting.** A source forgotten says `items.forgotten`, once.
 
 ## What reads this stream
@@ -185,7 +185,9 @@ again on its own (#257):
   `subscribe`) or to a ticket (`tickets` `subscribe`) is a filter on the `item.*` events of its
   item, offered once they are stored; it holds no read of its own. A pull request's `item.checks`
   is its `checks`, `item.reviewed` its `review` (each new review, or, on Bitbucket, each new
-  verdict, `verdicts`), `item.commented` its `comment`, `item.merged` and `item.closed` its
+  verdict, `verdicts`), `item.approved` its `approved` (the pull request's decision became approved, judged against the
+  decision the item held before the round), `item.commented` its `comment`, `item.merged` and
+  `item.closed` its
   `merged` and `closed`. A ticket's `item.commented` is its `commented`, an `item.changed` of its
   `status` or of its `state` (a reopening) its `status`, one of its `assignees` its `assigned`,
   `item.closed` its `closed`. The failed jobs' logs a `checks` delivery summarises are read then (three at most), after

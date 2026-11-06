@@ -1056,6 +1056,31 @@ fn mark(checks: &[Check]) -> &'static str {
     }
 }
 
+/// Who approved a pull request: Bitbucket's reviewers whose verdict is an approval, GitHub's
+/// authors whose last review that counts (not a comment) is one.
+fn approvers(new: &Fetched) -> Vec<String> {
+    if let Some(reviewers) = new.item.details["reviewers"].as_array() {
+        return reviewers
+            .iter()
+            .filter(|r| r["state"] == "approved")
+            .filter_map(|r| r["name"].as_str().map(str::to_owned))
+            .collect();
+    }
+    let mut last: Vec<(&str, &str)> = Vec::new();
+    for review in &new.reviews {
+        let state = review.state.as_deref().unwrap_or_default();
+        if matches!(state, "commented" | "pending" | "") {
+            continue;
+        }
+        last.retain(|(author, _)| *author != review.author);
+        last.push((&review.author, state));
+    }
+    last.into_iter()
+        .filter(|(_, state)| *state == "approved")
+        .map(|(author, _)| author.to_owned())
+        .collect()
+}
+
 /// What happened to an item between what was stored and what a round read: its events, each with
 /// the item's identity.
 fn events_of(old: Option<&Item>, new: &Fetched) -> Vec<(&'static str, Value)> {
@@ -1151,6 +1176,22 @@ fn events_of(old: Option<&Item>, new: &Fetched) -> Vec<(&'static str, Value)> {
                 .collect();
         }
         events.push(("item.reviewed", data));
+        // The review as a whole became approved, from any other state (the decision of the
+        // forge, or on Bitbucket every reviewer's approval with no change asked): once, never on
+        // a round that reads it approved again. A decision never read is unknown, not another
+        // state; the end of the pull request is its own event.
+        if item.kind == "pull"
+            && !matches!(item.state.as_str(), "merged" | "closed")
+            && item.details["review"] == "approved"
+            && old
+                .details
+                .get("review")
+                .is_some_and(|was| was != "approved")
+        {
+            let mut data = with(base(), "review", json!("approved"));
+            data["by"] = json!(approvers(new));
+            events.push(("item.approved", data));
+        }
     }
     // The checks ended: none runs now, and one was running, or the pull request's head moved.
     let running = |checks: &[Check]| checks.iter().any(|c| c.state == "pending");
@@ -1492,7 +1533,11 @@ mod tests {
             detailed: true,
         };
         let events = events_of(Some(&old), &new);
-        assert_eq!(names(&events), ["item.commented", "item.reviewed"]);
+        // The decision went from none to approved: that is an approval too.
+        assert_eq!(
+            names(&events),
+            ["item.commented", "item.reviewed", "item.approved"]
+        );
         let authors: Vec<&str> = events[0].1["comments"]
             .as_array()
             .unwrap()
@@ -1502,6 +1547,86 @@ mod tests {
         assert_eq!(authors, ["bob", "carol"]);
         assert_eq!(events[1].1["review"], "approved");
         assert_eq!(events[1].1["reviews"][0]["author"], "dave");
+    }
+
+    #[test]
+    fn a_decision_that_becomes_approved_is_item_approved_once_saying_who_approved() {
+        let said = |author: &str, state: &str| Said {
+            author: author.into(),
+            bot: false,
+            by_agent: false,
+            id: None,
+            at: None,
+            state: Some(state.into()),
+            excerpt: String::new(),
+            body: String::new(),
+        };
+        let mut old = stored("open");
+        old.details["review"] = json!("review required");
+        let mut new = old.clone();
+        new.details["review"] = json!("approved");
+        new.details["reviews"] = json!(3);
+        let new = Fetched {
+            item: new,
+            comments: Vec::new(),
+            // Bob approved then asked for changes then approved again; Carol only commented
+            // after approving; Dave's request for changes is the last word of Dave.
+            reviews: vec![
+                said("bob", "approved"),
+                said("dave", "changes requested"),
+                said("bob", "changes requested"),
+                said("bob", "approved"),
+                said("carol", "approved"),
+                said("carol", "commented"),
+            ],
+            created_at: None,
+            detailed: true,
+        };
+        let events = events_of(Some(&old), &new);
+        assert_eq!(names(&events), ["item.reviewed", "item.approved"]);
+        assert_eq!(events[1].1["review"], "approved");
+        assert_eq!(events[1].1["by"], json!(["bob", "carol"]));
+        // The next round reads it approved again: nothing.
+        assert!(events_of(Some(&new.item), &new).is_empty());
+        // Back from approved and approved again is a new one.
+        let mut back = new.item.clone();
+        back.details["review"] = json!("changes requested");
+        assert_eq!(
+            names(&events_of(Some(&new.item), &fetched(back.clone()))),
+            ["item.reviewed"]
+        );
+        assert_eq!(
+            names(&events_of(Some(&back), &new)),
+            ["item.reviewed", "item.approved"]
+        );
+    }
+
+    #[test]
+    fn a_decision_never_read_before_or_of_a_pull_that_ended_is_not_item_approved() {
+        let mut unknown = stored("open");
+        unknown.details.as_object_mut().unwrap().remove("review");
+        let mut approved = stored("open");
+        approved.details["review"] = json!("approved");
+        assert!(
+            !names(&events_of(Some(&unknown), &fetched(approved.clone())))
+                .contains(&"item.approved".to_owned())
+        );
+        // Merged with the same round: its end is the event.
+        let mut waiting = stored("open");
+        waiting.details["review"] = json!("review required");
+        let mut merged = approved.clone();
+        merged.state = "merged".into();
+        let events = events_of(Some(&waiting), &fetched(merged));
+        assert!(
+            !names(&events).contains(&"item.approved".to_owned()),
+            "{events:?}"
+        );
+        // A Bitbucket pull request says who approved by its reviewers.
+        let mut bitbucket = approved;
+        bitbucket.details["reviewers"] = json!([
+            {"name": "Alice", "state": "approved"}, {"name": "Bob", "state": "approved"}]);
+        let events = events_of(Some(&waiting), &fetched(bitbucket));
+        assert_eq!(events.last().unwrap().1["by"], json!(["Alice", "Bob"]));
     }
 
     #[test]

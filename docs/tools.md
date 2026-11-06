@@ -522,7 +522,7 @@ pending requests.
   request #12 of api, workspace login: checks, review, until it is merged or closed`, or `for 52
   min more` with a deadline).
 - **`subscribe {workspace?, repository?, events, from?, minutes?}`**: each of `events`
-  (`checks`, `review`, `comment`, `merged`, `closed`) of the pull request of a workspace's branch
+  (`checks`, `review`, `approved`, `comment`, `merged`, `closed`) of the pull request of a workspace's branch
   wakes the agent, as a `subscription` delivery (`docs/design.md` §5.6), until the pull request is
   merged or closed: the agent subscribes once (the answer says `it wakes you at each of these
   events until it is merged or closed; no need to subscribe again`). The events of one round are
@@ -544,7 +544,9 @@ pending requests.
   `default` pipeline that ends first no longer hides a long custom one. `checks` delivers how many passed and failed, with
   for each failed job (three at most, the others counted) its name, its duration and the line
   that says why it failed, the end of its log being in `show` ([`forges.md`](forges.md), "A wake about failed checks is a summary"); `review` and `comment` their author, their
-  state and an excerpt (200 characters, on one line). The events are those of the daemon's rounds
+  state and an excerpt (200 characters, on one line); `approved` who approved and the checks as they
+  stand, in one line (`checks: 12 passed`, `checks still running`, `checks: 2 failed`), so that the
+  agent knows whether it may merge without another read. The events are those of the daemon's rounds
   of the items, which the subscription filters, reading nothing of its own: it hears as often as
   the rounds come, every minute while a window is connected, every five otherwise, and costs
   nothing to keep. A merged or closed pull request ends any subscription, said; so does its

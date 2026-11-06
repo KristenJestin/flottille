@@ -33,6 +33,12 @@ fn fixture(user: &User) {
 
 /// The same, the project holding the repositories `others` beside `api`.
 fn fixture_with(user: &User, others: &[&str]) {
+    let github = json!({"kind": "github", "repository": "acme/api"});
+    fixture_on(user, others, "git@github.com:acme/api.git", github);
+}
+
+/// The same, `api` on the forge `forge` declares, its `origin` being `url`.
+fn fixture_on(user: &User, others: &[&str], url: &str, forge: Value) {
     let folder = user.path("work/app");
     for other in others {
         let dir = folder.join(other);
@@ -69,14 +75,11 @@ fn fixture_with(user: &User, others: &[&str]) {
         )
         .unwrap();
     assert_eq!(workspace["state"], "ready", "{workspace}");
-    user.git(
-        &dir,
-        &["remote", "set-url", "origin", "git@github.com:acme/api.git"],
-    );
+    user.git(&dir, &["remote", "set-url", "origin", url]);
     user.call(
         "project.set_settings",
         json!({"name": "app", "repositories": std::iter::once(
-            json!({"path": "api", "forge": {"kind": "github", "repository": "acme/api"}})
+            json!({"path": "api", "forge": forge})
         ).chain(others.iter().map(|other| json!({"path": other}))).collect::<Vec<_>>()}),
     )
     .unwrap();
@@ -2165,4 +2168,377 @@ fn subscribing_to_a_closed_ticket_is_refused() {
         answer.text
     );
     assert!(listed(&user, &id).is_empty());
+}
+
+// The `approved` event: the pull request's review decision becomes approved (#513).
+
+/// `pull` with its review decision and the reviews that lead to it, as `gh pr view --json` says
+/// them.
+fn decided(mut pull: Value, decision: &str, reviews: &[(&str, &str)]) -> Value {
+    pull["reviewDecision"] = decision.into();
+    pull["reviews"] = reviews
+        .iter()
+        .map(|(author, state)| json!({"author": {"login": author}, "state": state, "body": ""}))
+        .collect();
+    pull
+}
+
+/// `pull` whose two checks passed.
+fn passing(mut pull: Value) -> Value {
+    pull["statusCheckRollup"][1] = check("test", "COMPLETED", "SUCCESS", 456);
+    pull
+}
+
+/// The deliveries to the agent, once there are `count` of them.
+fn deliveries(user: &User, count: usize) -> Vec<String> {
+    eventually("the deliveries", || delivered(user).len() >= count);
+    // What else came with them would show.
+    std::thread::sleep(Duration::from_millis(300));
+    let all = delivered(user);
+    assert_eq!(all.len(), count, "{all:?}");
+    all
+}
+
+#[test]
+fn the_last_approval_on_github_wakes_an_approved_subscription() {
+    let user = user();
+    fixture(&user);
+    script(&user, decided(passing(pull()), "REVIEW_REQUIRED", &[]));
+    let (_, mcp) = agent(&user);
+
+    subscribe(&mcp, json!({"events": ["approved"]}));
+    // One approval of two: GitHub's decision is still to be taken.
+    script(
+        &user,
+        decided(
+            passing(pull()),
+            "REVIEW_REQUIRED",
+            &[("bob", "APPROVED"), ("carol", "COMMENTED")],
+        ),
+    );
+    a_round(&user);
+    assert!(delivered(&user).is_empty(), "{:?}", delivered(&user));
+
+    script(
+        &user,
+        decided(
+            passing(pull()),
+            "APPROVED",
+            &[("bob", "APPROVED"), ("carol", "APPROVED")],
+        ),
+    );
+    a_round(&user);
+    let delivery = the_delivery(&user);
+    for part in ["pull request #12", "approved", "bob", "carol"] {
+        assert!(delivery.contains(part), "{part} in {delivery}");
+    }
+}
+
+#[test]
+fn an_already_approved_pull_request_is_no_event() {
+    let user = user();
+    fixture(&user);
+    script(
+        &user,
+        decided(passing(pull()), "APPROVED", &[("bob", "APPROVED")]),
+    );
+    let (_, mcp) = agent(&user);
+
+    subscribe(&mcp, json!({"events": ["approved"]}));
+    a_round(&user);
+    // A round that reads it approved again, with more said: still no event.
+    let mut commented = decided(passing(pull()), "APPROVED", &[("bob", "APPROVED")]);
+    commented["comments"] = json!([{"author": {"login": "alice"}, "body": "Nice"}]);
+    script(&user, commented);
+    a_round(&user);
+    // Another approval of a pull request that is approved already.
+    script(
+        &user,
+        decided(
+            passing(pull()),
+            "APPROVED",
+            &[("bob", "APPROVED"), ("carol", "APPROVED")],
+        ),
+    );
+    a_round(&user);
+    assert!(delivered(&user).is_empty(), "{:?}", delivered(&user));
+}
+
+#[test]
+fn approved_after_changes_requested_is_a_new_event() {
+    let user = user();
+    fixture(&user);
+    script(&user, decided(passing(pull()), "REVIEW_REQUIRED", &[]));
+    let (_, mcp) = agent(&user);
+
+    subscribe(&mcp, json!({"events": ["approved"]}));
+    script(
+        &user,
+        decided(passing(pull()), "APPROVED", &[("bob", "APPROVED")]),
+    );
+    a_round(&user);
+    assert!(deliveries(&user, 1)[0].contains("bob"));
+
+    // A reviewer asks for changes: the decision goes back, and says nothing.
+    script(
+        &user,
+        decided(
+            passing(pull()),
+            "CHANGES_REQUESTED",
+            &[("bob", "APPROVED"), ("carol", "CHANGES_REQUESTED")],
+        ),
+    );
+    a_round(&user);
+    deliveries(&user, 1);
+
+    // She approves it: approved again, a new event.
+    script(
+        &user,
+        decided(
+            passing(pull()),
+            "APPROVED",
+            &[("bob", "APPROVED"), ("carol", "APPROVED")],
+        ),
+    );
+    a_round(&user);
+    let all = deliveries(&user, 2);
+    assert!(all[1].contains("carol"), "{}", all[1]);
+}
+
+#[test]
+fn the_approved_delivery_says_the_checks() {
+    let user = user();
+    fixture(&user);
+    script(&user, decided(pull(), "REVIEW_REQUIRED", &[]));
+    let (_, mcp) = agent(&user);
+    subscribe(&mcp, json!({"events": ["approved"]}));
+
+    let approve = |pull: Value| {
+        script(
+            &user,
+            decided(
+                pull.clone(),
+                "CHANGES_REQUESTED",
+                &[("bob", "CHANGES_REQUESTED")],
+            ),
+        );
+        a_round(&user);
+        script(&user, decided(pull, "APPROVED", &[("bob", "APPROVED")]));
+        a_round(&user);
+    };
+    // The test job still runs.
+    script(&user, decided(pull(), "APPROVED", &[("bob", "APPROVED")]));
+    a_round(&user);
+    assert!(
+        deliveries(&user, 1)[0].contains("checks still running"),
+        "{:?}",
+        delivered(&user)
+    );
+    // It failed.
+    approve(ended(pull()));
+    let all = deliveries(&user, 2);
+    assert!(all[1].contains("checks: 1 failed"), "{}", all[1]);
+    // It passed.
+    approve(passing(pull()));
+    let all = deliveries(&user, 3);
+    assert!(all[2].contains("checks: 2 passed"), "{}", all[2]);
+}
+
+/// How a Bitbucket pull request is read: Cloud and Data Center say it in their own shapes.
+#[derive(Clone, Copy, Debug)]
+enum Bitbucket {
+    Cloud,
+    DataCenter,
+}
+
+impl Bitbucket {
+    const ALL: [Bitbucket; 2] = [Bitbucket::Cloud, Bitbucket::DataCenter];
+
+    /// A user whose forge is the fake `bkt`, with the clock tests move.
+    fn user(self) -> User {
+        let user = User::with_fake_agent()
+            .with_fake_bkt()
+            .with_env("FLOTTILLE_TEST_CLOCK", "1");
+        let (url, forge) = match self {
+            Bitbucket::Cloud => (
+                "git@bitbucket.org:acme/api.git",
+                json!({"kind": "bitbucket-cloud", "repository": "acme/api"}),
+            ),
+            Bitbucket::DataCenter => (
+                "ssh://git@bitbucket.example.com:7999/APP/api.git",
+                json!({"kind": "bitbucket-data-center", "host": "bitbucket.example.com",
+                    "repository": "APP/api"}),
+            ),
+        };
+        fixture_on(&user, &[], url, forge);
+        user
+    }
+
+    /// The fake `bkt` holding the pull request #12 of `app/login`, its reviewers and their
+    /// verdicts (`approved`, `changes requested`, `pending`) and its one check `state`. Each
+    /// script is a change of the pull request, which Bitbucket says by a newer time.
+    fn script(self, user: &User, reviewers: &[(&str, &str)], state: &str) {
+        static CHANGES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = CHANGES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let at = format!("2999-01-01T{:02}:{:02}:00+00:00", n / 60 % 24, n % 60);
+        let checks = json!([{"state": state, "name": "build"}]);
+        user.bkt_script(match self {
+            Bitbucket::Cloud => {
+                let pull = json!({"id": 12, "title": "Add the login page", "state": "OPEN",
+                    "author": {"display_name": "Alice"},
+                    "source": {"branch": {"name": "app/login"}, "commit": {"hash": "abcdef1"},
+                        "repository": {"full_name": "acme/api"}},
+                    "destination": {"branch": {"name": "main"},
+                        "repository": {"full_name": "acme/api"}},
+                    "links": {"html": {"href": "https://bitbucket.org/acme/api/pull-requests/12"}},
+                    "comment_count": 0, "updated_on": at,
+                    "created_on": "2020-01-01T00:00:00+00:00"});
+                let participants: Vec<Value> = reviewers
+                    .iter()
+                    .map(|(name, verdict)| {
+                        let state = match *verdict {
+                            "approved" => json!("approved"),
+                            "changes requested" => json!("changes_requested"),
+                            _ => Value::Null,
+                        };
+                        json!({"role": "REVIEWER", "approved": *verdict == "approved",
+                            "state": state, "user": {"display_name": name}})
+                    })
+                    .collect();
+                json!({"contexts": [{"name": "cloud", "host": "bitbucket.org", "active": true}],
+                    "pulls": {"acme/api": [pull]},
+                    "api": {
+                        "/repositories/acme/api/pullrequests": {"values": [pull]},
+                        "/repositories/acme/api/pullrequests/12": {"participants": participants},
+                        "/repositories/acme/api/pullrequests/12/comments": {"values": []},
+                        "/repositories/acme/api/pullrequests/12/diffstat": {"values": []}
+                    },
+                    "checks": {"acme/api": {"12": checks}}})
+            }
+            Bitbucket::DataCenter => {
+                let repository = json!({"slug": "api", "project": {"key": "APP"}});
+                let participants: Vec<Value> = reviewers
+                    .iter()
+                    .map(|(name, verdict)| {
+                        let status = match *verdict {
+                            "approved" => "APPROVED",
+                            "changes requested" => "NEEDS_WORK",
+                            _ => "UNAPPROVED",
+                        };
+                        json!({"role": "REVIEWER", "approved": *verdict == "approved",
+                            "status": status, "user": {"name": name.to_lowercase(),
+                                "displayName": name}})
+                    })
+                    .collect();
+                let pull = json!({"id": 12, "title": "Add the login page", "state": "OPEN",
+                    "version": n, "createdDate": 1_600_000_000_000u64,
+                    "updatedDate": 1_600_000_000_000u64 + n,
+                    "author": {"user": {"name": "alice", "displayName": "Alice"}},
+                    "fromRef": {"displayId": "app/login", "latestCommit": "abcdef1",
+                        "repository": repository},
+                    "toRef": {"displayId": "main", "latestCommit": "abcdef2",
+                        "repository": repository},
+                    "participants": participants,
+                    "links": {"self": [{"href":
+                        "https://bitbucket.example.com/projects/APP/repos/api/pull-requests/12"}]}});
+                let base = "/rest/api/1.0/projects/APP/repos/api/pull-requests";
+                json!({"contexts": [{"name": "work", "host": "bitbucket.example.com:7990",
+                        "active": true}],
+                    "pulls": {"APP/api": [pull]},
+                    "api": {
+                        base: {"values": [pull]},
+                        format!("{base}/12/activities"): {"values": []},
+                        format!("{base}/12/merge"): {"conflicted": false}
+                    },
+                    "checks": {"APP/api": {"12": checks}}})
+            }
+        });
+    }
+}
+
+#[test]
+fn one_approval_of_two_bitbucket_reviewers_is_no_approved_event() {
+    for shape in Bitbucket::ALL {
+        let user = shape.user();
+        shape.script(
+            &user,
+            &[("Alice", "pending"), ("Bob", "pending")],
+            "SUCCESSFUL",
+        );
+        let (_, mcp) = agent(&user);
+
+        subscribe(&mcp, json!({"events": ["approved"]}));
+        shape.script(
+            &user,
+            &[("Alice", "approved"), ("Bob", "pending")],
+            "SUCCESSFUL",
+        );
+        a_round(&user);
+        assert!(
+            delivered(&user).is_empty(),
+            "{shape:?}: {:?}",
+            delivered(&user)
+        );
+        // One approves, the other asks for changes: not approved either.
+        shape.script(
+            &user,
+            &[("Alice", "approved"), ("Bob", "changes requested")],
+            "SUCCESSFUL",
+        );
+        a_round(&user);
+        assert!(
+            delivered(&user).is_empty(),
+            "{shape:?}: {:?}",
+            delivered(&user)
+        );
+    }
+}
+
+#[test]
+fn the_second_bitbucket_approval_wakes_an_approved_subscription() {
+    for shape in Bitbucket::ALL {
+        let user = shape.user();
+        shape.script(
+            &user,
+            &[("Alice", "approved"), ("Bob", "pending")],
+            "SUCCESSFUL",
+        );
+        let (_, mcp) = agent(&user);
+
+        subscribe(&mcp, json!({"events": ["approved"]}));
+        shape.script(
+            &user,
+            &[("Alice", "approved"), ("Bob", "approved")],
+            "SUCCESSFUL",
+        );
+        a_round(&user);
+        let delivery = the_delivery(&user);
+        for part in [
+            "pull request #12",
+            "approved",
+            "Alice",
+            "Bob",
+            "checks: 1 passed",
+        ] {
+            assert!(delivery.contains(part), "{shape:?}: {part} in {delivery}");
+        }
+    }
+}
+
+#[test]
+fn a_bitbucket_pull_request_with_no_reviewer_is_never_approved() {
+    for shape in Bitbucket::ALL {
+        let user = shape.user();
+        shape.script(&user, &[], "INPROGRESS");
+        let (_, mcp) = agent(&user);
+
+        subscribe(&mcp, json!({"events": ["approved"]}));
+        shape.script(&user, &[], "SUCCESSFUL");
+        a_round(&user);
+        assert!(
+            delivered(&user).is_empty(),
+            "{shape:?}: {:?}",
+            delivered(&user)
+        );
+    }
 }
