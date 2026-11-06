@@ -542,3 +542,56 @@ fn step_fail_makes_one_pull_request_write_fail_and_the_others_work() {
     assert!(!published.status.success());
     assert!(String::from_utf8_lossy(&published.stderr).contains("502"));
 }
+
+#[test]
+fn a_run_is_started_by_its_uuid_and_read_by_it_or_by_its_number_with_its_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = json!({"uuid": "{43}", "build_number": 43,
+        "state": {"name": "COMPLETED", "result": {"name": "FAILED"}},
+        "created_on": "2026-11-01T11:00:00Z", "completed_on": "2026-11-01T11:04:05Z"});
+    script(
+        dir.path(),
+        json!({"triggered": 43, "pipelines": {"acme/api": [run]},
+            "steps": {"acme/api": {"43": [{"uuid": "{s}", "name": "e2e"}]}}}),
+    );
+    let repository = ["--context", "cloud", "--workspace", "acme", "--repo", "api"];
+
+    let triggered = fake(dir.path())
+        .args(["pipeline", "run", "--ref", "a"])
+        .args(repository)
+        .output()
+        .unwrap();
+    let by_uuid = fake(dir.path())
+        .args([
+            "api",
+            "/repositories/acme/api/pipelines/{43}",
+            "--context",
+            "cloud",
+        ])
+        .output()
+        .unwrap();
+    let unknown = fake(dir.path())
+        .args([
+            "api",
+            "/repositories/acme/api/pipelines/{44}",
+            "--context",
+            "cloud",
+        ])
+        .status()
+        .unwrap();
+    let viewed = fake(dir.path())
+        .args(["pipeline", "view", "43", "--json"])
+        .args(repository)
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        String::from_utf8_lossy(&triggered.stdout).trim(),
+        "✓ Triggered pipeline {43} on acme/api (PENDING)"
+    );
+    assert_eq!(json_of(by_uuid), run);
+    assert!(!unknown.success());
+    let viewed = json_of(viewed);
+    assert_eq!(viewed["pipeline"], run);
+    assert_eq!(viewed["steps"][0]["name"], "e2e");
+}
