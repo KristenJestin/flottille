@@ -367,6 +367,62 @@ fn create_adds_reviewers_and_labels() {
     );
 }
 
+/// The project's pull request template (#466), a Markdown text of several lines.
+const TEMPLATE: &str = "## Why\n\n## How to verify\n";
+
+#[test]
+fn forge_create_without_a_body_uses_the_template() {
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(
+        &user,
+        "",
+        "[pull_requests]\ntemplate = \"\"\"\n## Why\n\n## How to verify\n\"\"\"\n",
+    );
+    user.gh_script(github_pulls());
+    let mcp = agent(&user);
+    let create = json!({"action": "create", "repository": ".", "title": "Add the login page"});
+
+    // The user reads the body the forge will show: the template.
+    let card = says(&user, held(&mcp.call("forge", create.clone())));
+    assert!(
+        card.contains(&format!("Its body, the project's template: {TEMPLATE}")),
+        "{card:?}"
+    );
+
+    let answer = write(&user, &mcp, create);
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(
+        gh_starting(&user, "pr create"),
+        [format!(
+            "pr create -R github.com/acme/app --head app/login --base main --title Add the login \
+             page --body {TEMPLATE}"
+        )]
+    );
+}
+
+#[test]
+fn forge_create_with_a_body_keeps_it() {
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user, "", "[pull_requests]\ntemplate = \"## Why\\n\"\n");
+    user.gh_script(github_pulls());
+    let mcp = agent(&user);
+
+    let answer = write(
+        &user,
+        &mcp,
+        json!({"action": "create", "repository": ".", "title": "Add the login page",
+            "body": "## Why\nThe login page was missing."}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(
+        gh_starting(&user, "pr create"),
+        [
+            "pr create -R github.com/acme/app --head app/login --base main --title Add the login \
+          page --body ## Why\nThe login page was missing."
+        ]
+    );
+}
+
 #[test]
 fn create_refuses_a_reviewer_or_a_label_that_would_be_an_option() {
     let user = User::with_fake_agent().with_fake_gh();

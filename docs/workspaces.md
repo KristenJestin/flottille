@@ -45,7 +45,11 @@ alone when the project's branch prefix is empty (`docs/projects.md`); `git check
 (`fix/ABC-12-login`) is followed by naming the branch: the agent's `workspace create` says to give
 `branch` when the repository has a naming convention (its `AGENTS.md`, `CONTRIBUTING`, or the
 branches it already has), with the ticket's key when the workspace has a ticket; the default is
-the fallback. Creation is refused when the project has a workspace of that
+the fallback. A session started in a new workspace (`agent_launch` with `new_workspace`) names it
+the same way, with `branch` (and `base`, as `--base` does): its card says the branch, and that is
+the branch made. When the project has a branch format (`docs/projects.md`), a branch the workspace
+starts must match it, named or the default, or creation is refused naming the pattern; a branch
+every repository resumes is taken as it is. Creation is refused when the project has a workspace of that
 name, when the folder exists, or when the branch is checked out in a checkout of one of the
 repositories, the main one or another worktree (`the branch feature/x is checked out in <folder>
 for web: …`, naming it).
@@ -85,6 +89,7 @@ and the record follows as for a `git switch` (`workspace.changed`); the window's
 name, fading in. It is all or none, refused before anything is renamed when:
 
 - the workspace is being prepared;
+- the new name does not match the project's branch format (`docs/projects.md`), naming it;
 - the new name is not one `git check-ref-format --branch` accepts, is the branch a worktree is on
   already, exists in a repository, or is checked out in a checkout of one (the main one or
   another worktree);

@@ -486,6 +486,16 @@ pub async fn run(
     // were made, through a command the checks at commit time read or not.
     if lift {
         tokio::select! {
+            checked = crate::message_checks::branch_format(&at, &words, &env) => {
+                if let Err(refusal) = checked {
+                    return Outcome::Refused(refusal);
+                }
+            }
+            () = cancelled.cancelled() => {
+                return Outcome::Failed("the call was stopped before it ended".into());
+            }
+        }
+        tokio::select! {
             checked = crate::message_checks::pushed(&at, &words, &env) => {
                 if let Err(refusal) = checked {
                     return Outcome::Refused(refusal);

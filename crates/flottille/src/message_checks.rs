@@ -212,6 +212,113 @@ pub async fn pushed(at: &Where<'_>, words: &[String], env: &Env) -> Result<(), S
     Ok(())
 }
 
+/// A ref a push sends, as git's dry run says it: its flag (`*` a new one), its source and its
+/// destination.
+type Pushed = (String, String, String);
+
+/// What the push would do, as git says it without doing it (`--dry-run --porcelain`): for each URL
+/// it goes to, each ref with its flag (`*` a new one), its source and its destination.
+async fn dry_run(
+    git: &[String],
+    rest: &[String],
+    end: usize,
+    folder: &Path,
+    env: &Env,
+) -> Result<Vec<(String, Vec<Pushed>)>, String> {
+    let mut dry: Vec<String> = git.to_vec();
+    dry.push("push".into());
+    dry.extend_from_slice(&rest[..end]);
+    dry.extend(["--dry-run", "--porcelain", "--no-quiet"].map(String::from));
+    dry.extend_from_slice(&rest[end..]);
+    let tried = crate::git::run_in(folder, &dry, env, None).await?;
+    let mut remotes: Vec<(String, Vec<Pushed>)> = Vec::new();
+    for line in tried.stdout.lines() {
+        if let Some(url) = line.strip_prefix("To ") {
+            remotes.push((url.to_owned(), Vec::new()));
+        } else if let (Some((_, refs)), [flag, pushed, _]) = (
+            remotes.last_mut(),
+            line.splitn(3, '\t').collect::<Vec<_>>().as_slice(),
+        ) && let Some((source, destination)) = pushed.rsplit_once(':')
+        {
+            refs.push((
+                (*flag).to_owned(),
+                source.to_owned(),
+                destination.to_owned(),
+            ));
+        }
+    }
+    // A URL that did not answer has no block, and may answer at the real push.
+    if !tried.success {
+        return Err(format!(
+            "git could not say what it sends ({})",
+            tried.stderr.trim()
+        ));
+    }
+    Ok(remotes)
+}
+
+/// Refuses a push that makes a branch outside the project's branch format on a remote, naming the
+/// pattern (`docs/projects.md`, "Branch format"): a branch the remote has already, or that the
+/// workspace resumed, was named before, and goes. Nothing without a format.
+pub async fn branch_format(at: &Where<'_>, words: &[String], env: &Env) -> Result<(), String> {
+    let nothing = "nothing was pushed";
+    let project = crate::projects::load_project(at.daemon, &at.place.project).map_err(|failure| {
+        format!(
+            "refused: the project's file cannot be read, so its branch format cannot be checked \
+             ({}); {nothing}",
+            failure.message
+        )
+    })?;
+    if project.branch_format.is_none() {
+        return Ok(());
+    }
+    let resumed = at.place.workspace.as_deref().is_some_and(|name| {
+        at.daemon
+            .read(|store| store.workspace(&at.place.project, name))
+            .ok()
+            .flatten()
+            .is_some_and(|workspace| {
+                workspace
+                    .repositories
+                    .iter()
+                    .any(|w| w.path == at.repository && w.resumed)
+            })
+    });
+    let at_push = gate::git_globals(&words[1..]).0 + 1;
+    let git = &words[..at_push];
+    let rest = &words[at_push + 1..];
+    let end = rest
+        .iter()
+        .position(|word| word == "--" || word == "--end-of-options")
+        .unwrap_or(rest.len());
+    let tried = dry_run(git, rest, end, at.folder, env)
+        .await
+        .map_err(|why| {
+            let why = secrets::mask_also(&why, env, &at.place.secret_values());
+            format!(
+                "refused: the project's branch format reads each branch a push makes before it \
+             goes, and {why}; {nothing}"
+            )
+        })?;
+    for (_, refs) in &tried {
+        for (flag, _, destination) in refs {
+            let Some(branch) = destination.strip_prefix("refs/heads/") else {
+                continue;
+            };
+            if flag != "*" || (resumed && branch == at.place.branch) {
+                continue;
+            }
+            if let Some(why) = project.branch_refusal(branch) {
+                return Err(format!(
+                    "refused: {why}: push to a branch that does (git push origin \
+                     HEAD:<branch>), or rename it (workspace rename_branch); {nothing}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The commits a push sends to branches and tags, oldest first: those its refs lead to that no
 /// ref of the remote has. Git says which refs the push sends, as it reads the line and the
 /// configuration (`--dry-run`); the remote says which it has (`ls-remote`): its remote-tracking
@@ -250,37 +357,20 @@ async fn sent(
                 .into(),
         );
     }
-    let mut dry: Vec<String> = git.to_vec();
-    dry.push("push".into());
-    dry.extend_from_slice(&rest[..end]);
-    dry.extend(["--dry-run", "--porcelain", "--no-quiet"].map(String::from));
-    dry.extend_from_slice(&rest[end..]);
-    let tried = crate::git::run_in(folder, &dry, env, None).await?;
-    let mut remotes: Vec<(&str, Vec<&str>)> = Vec::new();
-    for line in tried.stdout.lines() {
-        if let Some(url) = line.strip_prefix("To ") {
-            remotes.push((url, Vec::new()));
-        } else if let (Some((_, sources)), [flag, refs, _]) = (
-            remotes.last_mut(),
-            line.splitn(3, '\t').collect::<Vec<_>>().as_slice(),
-        ) && [" ", "+", "*"].contains(flag)
-            && let Some((source, destination)) = refs.rsplit_once(':')
-            && ["refs/heads/", "refs/tags/"]
-                .iter()
-                .any(|kind| destination.starts_with(kind))
-        {
-            sources.push(source);
-        }
-    }
-    // A URL that did not answer has no block, and may answer at the real push.
-    if !tried.success {
-        return Err(format!(
-            "git could not say what it sends ({})",
-            tried.stderr.trim()
-        ));
-    }
+    let tried = dry_run(git, rest, end, folder, env).await?;
     let mut commits: Vec<String> = Vec::new();
-    for (url, sources) in remotes {
+    for (url, refs) in tried {
+        let sources: Vec<&str> = refs
+            .iter()
+            .filter(|(flag, _, destination)| {
+                [" ", "+", "*"].contains(&flag.as_str())
+                    && ["refs/heads/", "refs/tags/"]
+                        .iter()
+                        .any(|kind| destination.starts_with(kind))
+            })
+            .map(|(_, source, _)| source.as_str())
+            .collect();
+        let url = url.as_str();
         if sources.is_empty() {
             continue;
         }

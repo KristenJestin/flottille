@@ -1428,3 +1428,37 @@ fn a_forge_check_runs_in_the_place_of_the_workspace_it_writes_for() {
         "signup\n"
     );
 }
+
+// The project's branch format at the push (#466): a branch outside it is not sent.
+
+#[test]
+fn a_push_of_a_branch_outside_the_format_is_refused() {
+    let user = User::with_fake_agent();
+    prepared(&user, |_| {});
+    let format = "^(feat|fix)/[A-Z]+-[0-9]+-[a-z0-9-]+$";
+    // Set once the workspace is made on app/login, which the format does not take.
+    user.call(
+        "project.set_conventions",
+        json!({"name": "app", "branch_format": format}),
+    )
+    .unwrap();
+    let mcp = agent(&user);
+    committed_outside(&user, "good.txt", "fix: a good change");
+
+    let answer = line(&user, &mcp, "git push origin HEAD");
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains(format), "{}", answer.text);
+    assert!(answer.text.contains("app/login"), "{}", answer.text);
+    assert!(
+        answer.text.contains("nothing was pushed"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(remote_head(&user, "app/login"), None);
+
+    // To a branch within the format, it goes.
+    let answer = line(&user, &mcp, "git push origin HEAD:fix/ABC-12-login");
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(remote_head(&user, "fix/ABC-12-login"), Some(head(&user)));
+}

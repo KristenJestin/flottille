@@ -566,6 +566,10 @@ pub async fn renaming(daemon: &Daemon, asked: &WorkspaceRenameBranch) -> Result<
         )));
     }
     check_branch(&workspace.folder, &asked.branch).await?;
+    let project = projects::load_project(daemon, &workspace.project)?;
+    if let Some(why) = project.branch_refusal(&asked.branch) {
+        return Err(Failure::refused(format!("{why}: choose one that does")));
+    }
     let heads = heads(&workspace).await;
     let read = forge_read(daemon, &workspace).await;
     let mut repositories = Vec::new();
@@ -728,6 +732,15 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
         .branch
         .unwrap_or_else(|| project.default_branch(&asked.name));
     check_branch(&main_checkout(&project.folder, &taken[0]), &branch).await?;
+    // The default name is never resumed: outside the format, it is refused before any fetch.
+    let outside_format = || {
+        project
+            .branch_refusal(&branch)
+            .map(|why| Failure::refused(format!("{why}: give a branch that does")))
+    };
+    if !named && let Some(refusal) = outside_format() {
+        return Err(refusal);
+    }
     let folder = project.workspaces_root.join(&asked.name);
     if daemon
         .read(|store| store.workspace(&project.name, &asked.name))?
@@ -786,6 +799,12 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
             resumed,
         });
     }
+    // A branch resumed everywhere was named before the format: it is taken as it is.
+    if repositories.iter().any(|worktree| !worktree.resumed)
+        && let Some(refusal) = outside_format()
+    {
+        return Err(refusal);
+    }
 
     let workspace = Workspace {
         id: 0,
@@ -836,6 +855,30 @@ pub fn notes(made: &Value) -> String {
 }
 
 /// The repositories a new workspace takes: the root one first, then in dependency order.
+/// Whether one of the repositories a workspace would take has `branch`, its own or its remote's
+/// as last fetched: a branch it may resume, which the creation decides, so the card of a branch
+/// outside the project's format does not refuse it beforehand.
+pub async fn may_resume(project: &Project, asked: Option<&[String]>, branch: &str) -> bool {
+    let Ok(taken) = taken_repositories(project, asked) else {
+        return false;
+    };
+    for path in &taken {
+        let Some(repository) = project.repositories.iter().find(|r| &r.path == path) else {
+            continue;
+        };
+        let main = main_checkout(&project.folder, path);
+        for reference in [
+            format!("refs/heads/{branch}"),
+            format!("refs/remotes/{}/{branch}", repository.remote),
+        ] {
+            if matches!(commit_of(&main, &reference).await, Ok(Some(_))) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn taken_repositories(project: &Project, asked: Option<&[String]>) -> Result<Vec<String>, Failure> {
     let wanted: Vec<String> = match (asked, &project.default_repositories) {
         (Some(paths), _) => paths.to_vec(),

@@ -119,6 +119,18 @@ pub struct MessageChecks {
     pub checks: Vec<String>,
 }
 
+/// The parameters of `project.set_conventions`: the project's branch format and pull request
+/// template, each kept when left out and removed when empty.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Conventions {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request_template: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepositorySetting {

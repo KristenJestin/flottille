@@ -119,6 +119,11 @@ struct Launch {
     workspace: Option<String>,
     new_workspace: Option<String>,
     repositories: Option<Vec<String>>,
+    /// With `new_workspace`: its branch, `<branch prefix>/<name>` when left out; an existing one
+    /// is resumed, as `workspace create` does.
+    branch: Option<String>,
+    /// With `new_workspace`: the base branch of a repository, by path, in place of its rule.
+    base: Option<BTreeMap<String, String>>,
     /// A session for the user rather than a child (`docs/tools.md`, "The tree's tools").
     #[serde(default)]
     root: bool,
@@ -142,6 +147,8 @@ enum WorkspaceChoice {
     New {
         name: String,
         repositories: Option<Vec<String>>,
+        branch: Option<String>,
+        base: Option<BTreeMap<String, String>>,
     },
 }
 
@@ -197,6 +204,19 @@ impl Launch {
     }
 
     fn workspace_choice(&self) -> Result<WorkspaceChoice, Outcome> {
+        if self.new_workspace.is_none()
+            && let Some(field) = [
+                ("branch", self.branch.is_some()),
+                ("base", self.base.is_some()),
+            ]
+            .iter()
+            .find_map(|(field, given)| given.then_some(field))
+        {
+            return Err(refused(format!(
+                "refused: {field} goes with new_workspace, the name of the workspace to make on \
+                 it: add it, or drop {field}"
+            )));
+        }
         match (&self.workspace, &self.new_workspace, &self.repositories) {
             (Some(_), Some(_), _) => Err(refused(
                 "refused: workspace and new_workspace are exclusive: workspace names an existing \
@@ -215,6 +235,8 @@ impl Launch {
             (None, Some(name), repositories) => Ok(WorkspaceChoice::New {
                 name: name.clone(),
                 repositories: repositories.clone(),
+                branch: self.branch.clone(),
+                base: self.base.clone(),
             }),
             (None, None, None) => Ok(WorkspaceChoice::Own),
         }
@@ -273,12 +295,18 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
         WorkspaceChoice::Own => (caller.workspace.clone(), false),
         WorkspaceChoice::Existing(_) if in_main => (None, false),
         WorkspaceChoice::Existing(name) => (Some(name), false),
-        WorkspaceChoice::New { name, repositories } => {
+        WorkspaceChoice::New {
+            name,
+            repositories,
+            branch,
+            base,
+        } => {
             let created = workspaces::call(
                 daemon.clone(),
                 "workspace.create",
                 json!({"project": project.name, "name": name,
-                    "repositories": repositories}),
+                    "repositories": repositories, "branch": branch,
+                    "bases": base.unwrap_or_default()}),
             )
             .await
             .map_err(|f| {
