@@ -56,9 +56,10 @@ fn checks_line(item: &Item) -> String {
     let count = |state: &str| item.checks.iter().filter(|c| c.state == state).count();
     match (count("failing"), count("pending"), item.checks.len()) {
         (0, 0, 0) => "no checks".to_owned(),
-        (0, 0, _) => match count("skipped") {
-            0 => format!("checks: {} passed", count("passing")),
-            skipped => format!("checks: {} passed, {skipped} skipped", count("passing")),
+        (0, 0, _) => match (count("passing"), count("skipped")) {
+            (passed, 0) => format!("checks: {passed} passed"),
+            (0, skipped) => format!("checks: {skipped} skipped"),
+            (passed, skipped) => format!("checks: {passed} passed, {skipped} skipped"),
         },
         (0, _, _) => "checks still running".to_owned(),
         (failed, _, _) => format!("checks: {failed} failed"),
@@ -465,6 +466,7 @@ mod tests {
             (vec!["passing", "pending"], "checks still running"),
             (vec!["failing", "failing", "passing"], "checks: 2 failed"),
             (vec!["passing", "skipped"], "checks: 1 passed, 1 skipped"),
+            (vec!["skipped", "skipped"], "checks: 2 skipped"),
             (vec![], "no checks"),
         ] {
             let item = item(&checks);

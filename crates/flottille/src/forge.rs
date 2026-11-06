@@ -1575,6 +1575,15 @@ async fn forge_subscribe(
     if let Some(runs) = runs {
         text.push_str(&format!("\n{}", runs.line()));
     }
+    // GitHub says no decision when the base branch requires no review: `approved` waits for one.
+    if pull.review.is_none()
+        && matches!(repository.forge, Some(Forge::GitHub { .. }))
+        && subscription.events.iter().any(|e| e == "approved")
+    {
+        text.push_str(
+            "\nThis repository asks for no review, so approved will not come; subscribe to review.",
+        );
+    }
     text.push_str(&checks_when_subscribed(daemon, agent, &path, pull));
     Outcome::Done(text)
 }

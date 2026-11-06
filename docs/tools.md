@@ -549,7 +549,9 @@ pending requests.
   agent knows whether it may merge without another read. The events are those of the daemon's rounds
   of the items, which the subscription filters, reading nothing of its own: it hears as often as
   the rounds come, every minute while a window is connected, every five otherwise, and costs
-  nothing to keep. A merged or closed pull request ends any subscription, said; so does its
+  nothing to keep. On GitHub, `approved` asked for a pull request whose base branch requires no review (it has
+  no review decision) adds one line to the answer: `This repository asks for no review, so
+  approved will not come; subscribe to review.` A merged or closed pull request ends any subscription, said; so does its
   deadline, said, its agent's end, and `unsubscribe` or the user's Cancel. Subscribing again to the same pull request replaces the agent's
   subscription: its events, `from` and deadline. A pull request merged or closed, a repository with no forge or no pull request,
   and `number` are refused. **`unsubscribe {workspace?, repository?}`** cancels the agent's

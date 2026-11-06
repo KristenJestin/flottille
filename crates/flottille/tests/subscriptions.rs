@@ -2344,6 +2344,29 @@ fn the_approved_delivery_says_the_checks() {
     assert!(all[2].contains("checks: 2 passed"), "{}", all[2]);
 }
 
+#[test]
+fn subscribing_to_approved_on_github_with_no_required_review_says_it_will_not_come() {
+    const LINE: &str =
+        "This repository asks for no review, so approved will not come; subscribe to review.";
+    let user = user();
+    fixture(&user);
+    // GitHub says no decision at all when the base branch requires no review.
+    script(&user, passing(pull()));
+    let (_, mcp) = agent(&user);
+
+    let said = subscribe(&mcp, json!({"events": ["approved"]}));
+    assert!(said.contains(LINE), "{said}");
+    // Only `approved` waits for a decision: `review` and the others are not told.
+    let said = subscribe(&mcp, json!({"events": ["review", "checks"]}));
+    assert!(!said.contains(LINE), "{said}");
+
+    // A repository that requires a review has a decision, even before anyone reviewed.
+    script(&user, decided(passing(pull()), "REVIEW_REQUIRED", &[]));
+    a_round(&user);
+    let said = subscribe(&mcp, json!({"events": ["approved"]}));
+    assert!(!said.contains(LINE), "{said}");
+}
+
 /// How a Bitbucket pull request is read: Cloud and Data Center say it in their own shapes.
 #[derive(Clone, Copy, Debug)]
 enum Bitbucket {

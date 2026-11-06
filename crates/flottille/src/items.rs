@@ -1602,6 +1602,19 @@ mod tests {
     }
 
     #[test]
+    fn a_decision_that_goes_from_none_to_approved_is_item_approved() {
+        // GitHub says no decision (`null`) until a review is required or given.
+        let old = stored("open");
+        assert!(old.details["review"].is_null());
+        let mut new = old.clone();
+        new.details["review"] = json!("approved");
+        let events = events_of(Some(&old), &fetched(new.clone()));
+        assert_eq!(names(&events), ["item.reviewed", "item.approved"]);
+        // And none read again as none is nothing.
+        assert!(events_of(Some(&old), &fetched(old.clone())).is_empty());
+    }
+
+    #[test]
     fn a_decision_never_read_before_or_of_a_pull_that_ended_is_not_item_approved() {
         let mut unknown = stored("open");
         unknown.details.as_object_mut().unwrap().remove("review");
