@@ -37,8 +37,13 @@ fn base64_of(bytes: &[u8]) -> String {
 
 /// A user whose fake agent takes images, with the project `atlas` over a throwaway repository.
 fn user() -> User {
+    user_taking(true)
+}
+
+/// The same, whose fake agent takes images or not (`images`).
+fn user_taking(images: bool) -> User {
     let user = User::with_fake_agent();
-    user.fake_script(json!({"images": true, "turns": [
+    user.fake_script(json!({"images": images, "turns": [
         {"when": "work briefly", "do": [{"wait": 1500}, {"say": "done"}]}
     ]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
@@ -290,5 +295,69 @@ fn an_image_removed_before_sending_is_not_sent(cx: &mut TestAppContext) {
     let images = first_prompt_images(&user);
     assert_eq!(images.len(), 1, "only the picture left is sent");
     assert_eq!(images[0]["data"], base64_of(&png_of(9, 9)));
+    settle(cx);
+}
+
+#[gpui_kit::test]
+fn a_picture_alone_starts_a_session(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, composer, cx) = open_atlas(&user, cx);
+
+    composer.update_in(cx, |composer, _, cx| {
+        composer.attach(Image::from_bytes(ImageFormat::Png, png_of(8, 8)), cx)
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("send", cx));
+
+    let images = first_prompt_images(&user);
+    assert_eq!(images.len(), 1, "the first prompt carries the picture");
+    until(&shell, cx, "the composer let the picture go", |cx| {
+        attached(&composer, cx).is_empty() && !composer.read_with(cx, |c, _| c.is_sending())
+    });
+    settle(cx);
+}
+
+#[gpui_kit::test]
+fn a_picture_for_a_provider_that_takes_none_is_a_toast_on_the_project_page(
+    cx: &mut TestAppContext,
+) {
+    let user = user_taking(false);
+    // A session of that provider has started: it said it takes no images.
+    let started = user
+        .call(
+            "agent.start",
+            json!({"project": "atlas", "message": "hello"}),
+        )
+        .unwrap();
+    let first = started["agent"]["id"].as_str().unwrap().to_owned();
+    eventually("the first turn ends", || {
+        user.call("agent.show", json!({"agent": first})).unwrap()["agent"]["state"] == "idle"
+    });
+    let (shell, composer, cx) = open_atlas(&user, cx);
+    until(
+        &shell,
+        cx,
+        "the composer knows the provider takes none",
+        |cx| composer.read_with(cx, |c, _| c.takes_images()) == Some(false),
+    );
+    let file = user.path("shot.png");
+    std::fs::write(&file, png_of(8, 8)).unwrap();
+
+    type_task("keep this text", cx);
+    composer.update_in(cx, |composer, _, cx| composer.attach_file(&file, cx));
+    frames(cx);
+
+    assert!(attached(&composer, cx).is_empty(), "nothing is attached");
+    assert_eq!(
+        toasts(&shell, cx),
+        [(
+            "The picture was not attached".to_owned(),
+            "This agent takes no images.".to_owned()
+        )]
+    );
+    assert_eq!(
+        composer.read_with(cx, |c, cx| c.field().read(cx).value().to_string()),
+        "keep this text"
+    );
     settle(cx);
 }

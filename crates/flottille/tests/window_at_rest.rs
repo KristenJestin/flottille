@@ -173,6 +173,8 @@ fn the_window_draws_no_frame_at_rest_on_the_project_page_with_a_picture_attached
     cx: &mut TestAppContext,
 ) {
     let user = User::with_fake_agent();
+    // Its agent takes images, so that the composer attaches the picture.
+    user.fake_script(json!({"images": true}));
     idle_session(&user);
     let (shell, cx) = window(&user, cx);
     until(&shell, cx, "the project is known", |cx| {

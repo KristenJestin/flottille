@@ -410,23 +410,31 @@ impl Composer {
         &self.field
     }
 
+    /// Whether the chosen provider's agents take images; `None` until one started.
+    pub fn takes_images(&self) -> Option<bool> {
+        self.provider().and_then(|provider| provider.images)
+    }
+
     /// The pictures that go with the first message.
     pub fn attachments(&self) -> &[Arc<gpui_kit::Image>] {
         self.attached.pictures()
     }
 
+    /// The pictures, told first whether the chosen provider's agents take any, so that one that
+    /// takes none is said in a toast, as a session's composer says it.
     fn attached_of(&mut self) -> &mut Attachments {
+        self.attached.set_takes(self.takes_images());
         &mut self.attached
     }
 
     /// Attaches a picture, or says in a toast why not; the text in the field stays.
     pub fn attach(&mut self, image: gpui_kit::Image, cx: &mut Context<Self>) {
-        self.attached.attach(image, cx, Self::attached_of);
+        self.attached_of().attach(image, cx, Self::attached_of);
     }
 
     /// Attaches the picture a file holds (a file dropped on the composer, or picked).
     pub fn attach_file(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
-        self.attached.attach_file(path, cx, Self::attached_of);
+        self.attached_of().attach_file(path, cx, Self::attached_of);
     }
 
     pub fn detach(&mut self, at: usize, cx: &mut Context<Self>) {
@@ -536,7 +544,8 @@ impl Composer {
             && (self.provider().is_some_and(Provider::offered) || !self.providers.known)
             && self.model_refused().is_none()
             && self.sending.is_none()
-            && self.has_text
+            // Pictures alone are a first message, as they are a later one.
+            && (self.has_text || !self.attached.is_empty())
     }
 
     /// Starts a session with what the field holds, where the picker says.
