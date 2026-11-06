@@ -77,10 +77,14 @@ impl ToEnd {
         cx.notify();
     }
 
-    /// The user scrolled: whether the end is out of sight now.
+    /// The user scrolled: whether the end is out of sight now, and the conversation may want a
+    /// page of earlier events.
     fn scrolled(&mut self, cx: &mut Context<Self>) {
         self.going = None;
         self.steps = None;
+        if let Some(owner) = &self.owner {
+            owner.update(cx, |view, cx| view.scrolled(cx)).ok();
+        }
         let offset = -self.list.scroll_px_offset_for_scrollbar().y;
         let end = self.list.max_offset_for_scrollbar().y;
         let away = !self.list.is_following_tail() && offset < end - px(1.);

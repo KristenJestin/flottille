@@ -63,6 +63,9 @@ pub enum Exit {
     Died(ExitStatus),
     /// Its session is to be replaced, for this reason.
     Replace(String),
+    /// The user reloads its tools: let go between turns, to be started again on its session with
+    /// the tools its role has now.
+    Reload,
 }
 
 /// What the session loop tells the agent's owner as it goes.
@@ -99,6 +102,8 @@ pub trait Events: Send + Sync + 'static {
     );
     /// The next prompt, taken from what was delivered, when there is one.
     fn pump(&self) -> Option<Prompt>;
+    /// The user asked to reload the agent's tools since this process was given them.
+    fn reloading(&self) -> bool;
     /// An image a prompt carries, as its MIME type and its bytes in base64.
     fn image(&self, name: &str) -> Option<(&'static str, String)>;
     /// `typed`: the prompt's `Prompt::typed`.
@@ -384,6 +389,11 @@ async fn drive(
 
     let mut turn: Option<Turn> = None;
     loop {
+        // A reload never cuts a turn: the process goes once it ended, before the next prompt,
+        // which the next process plays.
+        if turn.is_none() && events.reloading() {
+            return Ok(Exit::Reload);
+        }
         // Between turns only: what was chosen during one is set once it ended, before the next
         // prompt goes. A change the agent could not answer is tried again only then.
         if turn.is_none()

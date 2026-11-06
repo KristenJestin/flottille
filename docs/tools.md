@@ -109,10 +109,21 @@ older list** until it lists them or its tools come back to that list, through la
 too; one whose agent cannot take new tools runs one while its list is not the one its process
 started with. Then `agent.show` and
 `agent.tree` say `tools_outdated: true`, `flottille agent show` says that the session runs an
-older list of tools than its role has now and that a restart (stop, then resume) gives the new
-one, the window says so above the composer, and `agent.tools_outdated` says when that starts and
-when it ends, its process's end included (`docs/events.md`). The next process of the agent
-starts on the new list.
+older list of tools than its role has now and that reloading them gives the new one, the window
+says so above the composer with a **Reload tools** button, and `agent.tools_outdated` says when
+that starts and when it ends, its process's end included (`docs/events.md`). The next process of
+the agent starts on the new list.
+
+**Reloading a session's tools** (`agent.reload_tools`, `flottille agent reload-tools`, and in the
+window the outdated line's button, the root's menu and `/reload-tools` in the composer) lets its
+root's process go, as an idle release does (`agent.released`, reason `reload`); the next message
+starts the next one on the same session, with the tools its role has now. A turn that runs is
+never cut: the process goes once it ended, and the window says `Reloads after this turn` until
+then, whoever asked (the agent's `tools_reload`, `agent.tools_reload`). Between turns nothing
+restarts until the next message: the window and the command line say the tools are given then. It relies on the new process, not on `list_changed`, so it works the same for every agent:
+the new process's first prompt carries the `tools` delivery, what changed by tool as above, or
+`Your tools were reloaded: nothing changed.`, so that the agent knows its list is current. Its
+children keep their processes and lists. A session that ended or failed does not offer it.
 
 What the agents Flottille runs do with the notice (checked in November 2026, from their
 documentation, changelogs and published source, never by running one):
@@ -508,20 +519,24 @@ pending requests.
   closed with (not an older one of its closer), when the forge has it ([`forges.md`](forges.md),
   "The closing comment").
   `show` ends with the agent's subscriptions, when it has some (`Your subscriptions:` then `- pull
-  request #12 of api, workspace login: checks, review, for 52 min more`).
-- **`subscribe {workspace?, repository?, events, from?, minutes?}`**: the next of `events`
+  request #12 of api, workspace login: checks, review, until it is merged or closed`, or `for 52
+  min more` with a deadline).
+- **`subscribe {workspace?, repository?, events, from?, minutes?}`**: each of `events`
   (`checks`, `review`, `comment`, `merged`, `closed`) of the pull request of a workspace's branch
-  wakes the agent once, as a `subscription` delivery (`docs/design.md` §5.6). The call answers at
+  wakes the agent, as a `subscription` delivery (`docs/design.md` §5.6), until the pull request is
+  merged or closed: the agent subscribes once (the answer says `it wakes you at each of these
+  events until it is merged or closed; no need to subscribe again`). The events of one round are
+  one delivery, and the deliveries of a round one wake; those that come while the agent is in a
+  turn are pumped together, in order, at its end. The call answers at
   once; what is so already (checks that already ended) is no event, `show` reads it; when the
   rounds have not read the repository's pull requests once yet, the answer says what happens
   before their first is not seen. `from` is
   `anyone` (the default) or `people`: no bot, nor a comment known as posted by an agent
-  ([`forges.md`](forges.md), "What Flottille posts is recorded"). `minutes` is how
-  long it waits, 60 by default, 6000 (100 hours) at most. Without `minutes` the wait is sized by the
-  repository's CI instead, and the answer says the duration taken and why: twice the average of
-  its recent runs, from 15 minutes to the longest, 60 when there is no run to measure by
-  ([`forges.md`](forges.md), "How long CI takes"); the answer carries the line `show` gives about
-  the runs, with `minutes` too. It also says the pull request's checks running as it subscribed
+  ([`forges.md`](forges.md), "What Flottille posts is recorded"). `minutes`, optional,
+  is a deadline the agent asked for, with no cap: past it, the agent is woken once (`Nothing came in
+  30 min: …` when nothing did) and the subscription ends; without it there is none. The answer
+  carries the line `show` gives about how long the repository's CI runs take, as information
+  ([`forges.md`](forges.md), "How long CI takes"). It also says the pull request's checks running as it subscribed
   (`Its checks running as you subscribed: test.`, or that none was), that `checks` is the end of
   those and that a run started on its branch outside them is followed by `run`, not by the
   subscription, and each run the agent already follows on that branch (`You already follow the
@@ -531,10 +546,10 @@ pending requests.
   that says why it failed, the end of its log being in `show` ([`forges.md`](forges.md), "A wake about failed checks is a summary"); `review` and `comment` their author, their
   state and an excerpt (200 characters, on one line). The events are those of the daemon's rounds
   of the items, which the subscription filters, reading nothing of its own: it hears as often as
-  the rounds come, every minute while a window is connected, every five otherwise. A merged or
-  closed pull request ends any subscription,
-  said; so does its time, said. Subscribing again to the same pull request replaces the agent's
-  subscription. A pull request merged or closed, a repository with no forge or no pull request,
+  the rounds come, every minute while a window is connected, every five otherwise, and costs
+  nothing to keep. A merged or closed pull request ends any subscription, said; so does its
+  deadline, said, its agent's end, and `unsubscribe` or the user's Cancel. Subscribing again to the same pull request replaces the agent's
+  subscription: its events, `from` and deadline. A pull request merged or closed, a repository with no forge or no pull request,
   and `number` are refused. **`unsubscribe {workspace?, repository?}`** cancels the agent's
   subscriptions to them (the runs it follows there with them), every one when it names none;
   **`unsubscribe {run, repository?}`** stops following a run it started (`repository` needed
@@ -660,8 +675,7 @@ action's, and the store renamed them in the agents' fixed lists and their pendin
 
 ## Waking later
 
-**`wake {minutes, why}`** asks Flottille to wake the agent once, `minutes` from now (1 to 6000, 100 hours, the
-subscriptions' longest), by a `subscription` delivery that starts `Woken by the timer: <why>` and
+**`wake {minutes, why}`** asks Flottille to wake the agent once, `minutes` from now (1 to 6000, 100 hours), by a `subscription` delivery that starts `Woken by the timer: <why>` and
 says when it was asked (`You asked for it at 2026-11-01T10:22:00Z, 20 min later.`). It is a
 subscription whose source is a timer (`docs/design.md` §5.6), stored, listed and cancelled as the
 others are. The answer comes at once (`Set: a delivery wakes you in 20 min with your why. End your
@@ -710,7 +724,7 @@ reasons.
 
 | Tool | |
 |---|---|
-| `tickets {action, ticket?, workspace?, query?, updated_within?, in_comments?, jql?, state?, label?, assignee?, detail?, fresh?, title?, body?, labels?, reason?, remove_labels?, assignees?, remove_assignees?, status?, other?, kind?, comment?, sprint?, project?, type?, events?, from?, minutes?}` | The tickets of the project's tracker, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
+| `tickets {action, ticket?, workspace?, query?, updated_within?, in_comments?, jql?, state?, label?, assignee?, detail?, fresh?, title?, body?, labels?, reason?, remove_labels?, assignees?, remove_assignees?, status?, other?, kind?, comment?, sprint?, parent?, board?, project?, type?, events?, from?, minutes?}` | The tickets of the project's tracker, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
 
 - **`list {state?, label?, assignee?, updated_within?}`**: every ticket of a state, in one call, a
   line each (`- #12 open: The login fails [bug] (ana)  <link>`): `state` is `open` (the default),
@@ -760,10 +774,13 @@ reasons.
   is linked to no ticket: …`). An unreadable ticket (`gh` or `acli` missing or signed out, no such
   ticket) is an error saying why and what to do. What it read is stored over what the daemon's
   rounds keep of the ticket.
-- **`subscribe {ticket?, workspace?, events, from?, minutes?}`**: the next of `events`
-  (`commented`, `status`, `assigned`, `closed`) of the ticket wakes the agent once, as a
-  `subscription` delivery, the same shape as `forge` `subscribe` (60 minutes by default, 6000 at
-  most, `from: people` without bots nor what an agent posted); a Jira work item's comments are
+- **`subscribe {ticket?, workspace?, events, from?, minutes?}`**: each of `events`
+  (`commented`, `status`, `assigned`, `closed`) of the ticket wakes the agent, as a
+  `subscription` delivery, until the ticket is closed (on Jira, moved to a status of the category
+  done; a ticket already closed is refused, as a merged pull request is), the same shape as
+  `forge` `subscribe` (no deadline unless `minutes` gives one, `from:
+  people` without bots nor what an agent posted; `show` ends with the agent's subscriptions to
+  tickets, `- ticket #5 of api: commented, until the ticket is closed`); a Jira work item's comments are
   read by the rounds while a subscription to them follows it. **`unsubscribe {ticket?}`** cancels the agent's
   subscriptions to the ticket, every one when it names none ([`tickets.md`](tickets.md),
   "Subscribing to a ticket"). Both are allowed in every mode, never held.
@@ -775,12 +792,13 @@ reasons.
   `--remove-assignee`), `close` (`reason` is `completed` or `not planned`, `--reason`; left out,
   GitHub's own default), `reopen`, and a `status` below. On Jira, once `acli` is checked to be signed in to the
   tracker's site (as for a read), `acli jira workitem create --project <P> --summary <title>
-  [--description <body>] [--assignee <who>] [--type <type>] [--label a,b] --json` in `project
-  {project?, type?}`,
+  [--description <body>] [--assignee <who>] [--type <type>] [--label a,b] [--parent <key>] --json`
+  in `project {project?, type?, parent?, sprint?}` (in a sprint, from a JSON definition: below),
   one of the tracker's projects (it may be left out when the tracker has one), the type the
   project's default when none is given; `acli jira workitem comment create --key <K> --body
   <body>`; `acli jira workitem edit --key <K> [--summary] [--description] [--assignee <who> |
-  --remove-assignee] --yes`; and `close`,
+  --remove-assignee] [--labels a,b] [--remove-labels c] --yes` (`--labels` adds; an edit `acli`
+  ends with 0 while printing `✗ Failure: …` is said as not done); and `close`,
   `reopen` and `status` as `acli jira workitem transition --key <K> --status <name> --yes`: one
   status is attempted, which Jira's transitions accept or refuse, and the work item's status is
   read back to say what happened; a `reopen` of a work item that is not closed says it is already
@@ -788,8 +806,9 @@ reasons.
   tracker does not take,
   a `status` with no name, a `reason` that is neither value, and, for an argument of another action
   (`reason` is for close, `remove_labels`, `assignees` and `remove_assignees` for edit, `assignee`
-  for create and edit) or of the other tracker (on Jira, a label on edit, `assignees` or a reason;
-  on GitHub, `assignee`: GitHub's is `assignees`), is refused before anything is asked. A
+  for create and edit, `parent` and `sprint` for create) or of the other tracker (on Jira,
+  `assignees` or a reason; on GitHub, `assignee`, `parent` or `sprint`: GitHub's is `assignees`),
+  is refused before anything is asked. A
   `title` on `comment`, `close`, `reopen` or `status` is refused before anything is asked
   (`refused: tickets comment takes no title: title is for edit and create`). The request shows
   the title and the body whole, and a long one or one holding a secret is refused or base, as
@@ -799,7 +818,7 @@ reasons.
   `link {ticket, kind, other}` and `unlink {ticket, kind, other}` make and remove a link;
   `comment_edit {ticket, comment, body}` and `comment_delete {ticket, comment}` change or delete a
   comment, **only one Flottille recorded as posted by an agent** (`show` with `detail full` gives
-  the id of those, `[comment 10100]`); `sprint {ticket, sprint}` is always refused, saying why. A
+  the id of those, `[comment 10100]`). A
   link reads `ticket kind other`, so the card the user is shown says its direction in words (`ABC-2
   blocks ABC-1`). `ticket` is required, never the workspace's. On Jira, the kinds are the site's
   own link types, in the outward or the inward wording; on GitHub, `parent of`, `sub-task of`,
@@ -811,11 +830,32 @@ reasons.
   one. On GitHub it answers that issues have no type. A Jira `create` that `acli` refuses for its
   `type` answers with the project's types, nothing written, so that a type is never guessed
   twice ([`tickets.md`](tickets.md), "Types and assignment").
-- **`assignee` on Jira**: `create` and `edit` take `"@me"` (the user `acli` is signed in as,
-  which `acli` resolves itself), an email or an account id, as `acli` takes them; `edit` with
-  `assignee: null` removes it. Nothing is assigned unless the agent asks (a tracker may assign a
-  new work item by default). On GitHub, `assignees` (edit), `"@me"` accepted. The request names
-  the assignee (`Its assignee: @me`, `It removes the assignee`).
+- **`assignee` on Jira**: `create` and `edit` take `"me"` (the user the agent works for: `acli`'s
+  `@me`, the user it is signed in as, which `acli` resolves itself; `"@me"` is taken too), an email
+  or an account id, as `acli` takes them; anything else, a display name above all, is refused
+  before anything is asked (`assignee is me, an email or an account id; a display name cannot be
+  looked up with acli`); `edit` with `assignee: null` removes it. A creation `acli` refuses with
+  its assignee says it (`acli refused the creation assigned to "…": …; nothing was created`) and
+  is never tried again without it. Nothing is assigned unless the agent asks (a tracker may assign
+  a new work item by default). On GitHub, `assignees` (edit), `"me"` sent as `@me`. The request
+  says it in words (`It assigns it to you`, `It removes the assignee`).
+- **Parents and sprints on Jira**: `create` takes `parent` (a key of the tracker, the epic or the
+  sub-task's parent: `--parent`) and `sprint` (an open sprint, by its name or its id, with a
+  `type`); `sprints {project?, board?}` (a read, never held) lists the active and future sprints
+  of the project's boards (`acli jira board search --project <P> --json`, then `acli jira board
+  list-sprints --id <N> --state active,future --json`). A creation in a sprint is written as a
+  JSON definition (`acli jira workitem create --from-json <file> --json`, the site's Sprint field
+  in its `additionalAttributes`), its assignee set right after with `edit`. The sprint and the
+  Sprint field are found before the user is asked: an unknown or ambiguous sprint, or a site whose
+  Sprint field is not known, is refused then, and the card names the sprint and its board as the
+  site does. A creation that loses its assignee, or that `acli` answers without its key, says
+  what may not be set. A label holding a comma is refused, a blank one left out; `board` is
+  `sprints`' alone. The parent and the
+  sprint of an existing work item are refused, saying why: `acli`'s `edit` sets neither. The
+  request says them (`It puts it in sprint "Sprint 42" (board "ABC board")`, `It puts it under
+  ABC-10`, `It adds the labels bug, p1`), and `show`
+  says a work item's assignee, parent and sprint ([`tickets.md`](tickets.md), "Parents and
+  sprints").
 - **`status` on GitHub**: sets the Status of the issue on the GitHub Projects (v2) board it is on,
   like Todo, In Progress or Done. The option is found by its name, in any case, among those of the
   board's Status field. The daemon reads the issue's boards (`gh issue view <n> -R … --json

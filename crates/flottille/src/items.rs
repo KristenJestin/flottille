@@ -442,7 +442,9 @@ fn lock_of(daemon: &Daemon, project: &str) -> Arc<tokio::sync::Mutex<u64>> {
 }
 
 /// A round of each of `sources`, one after the other: one that fails stops none of the others.
+/// The agents its events are delivered to are rung once, at its end: one wake for the round.
 async fn round(daemon: &Arc<Daemon>, project: &Project, sources: &[Source]) {
+    let _held = crate::subscriptions::Round::hold(daemon, &project.name);
     for source in sources {
         source_round(daemon, project, source).await;
     }
@@ -615,7 +617,7 @@ fn flush(
     daemon
         .write_all(|store| Ok(((), store.put_items(&items, events.clone())?)))
         .map_err(|error| format!("the items could not be stored: {error}"))?;
-    crate::subscriptions::items(daemon, &items, &events);
+    crate::subscriptions::items(daemon, project, &items, &events);
     Ok(true)
 }
 
