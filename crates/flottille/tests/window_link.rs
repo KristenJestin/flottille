@@ -35,12 +35,16 @@ fn user() -> User {
             link("https://example.org/1", "One"),
             link("https://example.org/2", "Two"),
             link("https://example.org/3", "Three")]},
+        {"when": "LAUNCH A WORKER", "do": [{"mcp": {"tool": "agent_launch",
+            "arguments": {"title": "Worker", "brief": "WORKER SHOWS ONE"}}}]},
+        {"when": "WORKER SHOWS ONE", "do": [link("https://example.org/w", "Worker's")]},
+        {"when": "STAY QUIET", "do": []},
         {"when": "SHOW SPLIT", "do": [
             link("https://example.org/1", "One"),
             {"say": "That was the first."},
             link("https://example.org/2", "Two")]},
         {"when": "SHOW PICTURES", "do": [
-            file("shot.png"), file("fake.png"), file("big.png"), file("gone.png"),
+            file("shot.png"), file("fake.png"), file("big.png"), file("gone.png"), file("huge.png"),
             link("https://example.org/shot.png", "Remote")]}
     ]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
@@ -236,6 +240,15 @@ const PNG: [u8; 70] = [
     0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0x64, 0x60, 0xf8, 0x5f,
     0x0f, 0x00, 0x02, 0x87, 0x01, 0x80, 0xeb, 0x47, 0xba, 0x92, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
     0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+];
+
+/// A picture of 11000 by 11000 pixels, as far as its header says: a few bytes that would take
+/// half a gigabyte decoded, and nothing a decoder could read.
+const HUGE_PNG: [u8; 58] = [
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x2a, 0xf8, 0x00, 0x00, 0x2a, 0xf8, 0x08, 0x06, 0x00, 0x00, 0x00, 0xce, 0x2f, 0x9a,
+    0x8a, 0x00, 0x00, 0x00, 0x01, 0x49, 0x44, 0x41, 0x54, 0x00, 0x28, 0x38, 0x7d, 0xe8, 0x00, 0x00,
+    0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
 ];
 
 /// The row of the card of links, once there is one.
@@ -556,6 +569,7 @@ fn a_shown_picture_is_a_thumbnail_that_opens_it(cx: &mut TestAppContext) {
     std::fs::write(user.path("work/app/shot.png"), PNG).unwrap();
     std::fs::write(user.path("work/app/fake.png"), "<p>not a picture</p>").unwrap();
     std::fs::write(user.path("work/app/gone.png"), PNG).unwrap();
+    std::fs::write(user.path("work/app/huge.png"), HUGE_PNG).unwrap();
     std::fs::File::create(user.path("work/app/big.png"))
         .unwrap()
         .set_len(21 * 1024 * 1024)
@@ -566,8 +580,8 @@ fn a_shown_picture_is_a_thumbnail_that_opens_it(cx: &mut TestAppContext) {
     let page = session_page(&shell, cx);
 
     tell(&user, &agent, "SHOW PICTURES");
-    until(&shell, cx, "the card has its five links", |cx| {
-        card_at(&page, cx).is_some_and(|at| lines(&page, at, cx) == 5)
+    until(&shell, cx, "the card has its six links", |cx| {
+        card_at(&page, cx).is_some_and(|at| lines(&page, at, cx) == 6)
     });
     let at = card_at(&page, cx).unwrap();
     until(&shell, cx, "the picture is read", |cx| {
@@ -576,8 +590,8 @@ fn a_shown_picture_is_a_thumbnail_that_opens_it(cx: &mut TestAppContext) {
     settle(cx);
 
     // An address gets no thumbnail: the window fetches nothing from the network.
-    assert!(!has(format!("row-{at}-link-4-thumb"), cx));
-    assert!(has(format!("row-{at}-link-4-open"), cx));
+    assert!(!has(format!("row-{at}-link-5-thumb"), cx));
+    assert!(has(format!("row-{at}-link-5-open"), cx));
 
     // The click on the thumbnail goes where Open goes.
     cx.update(|window, cx| window.click(format!("row-{at}-link-0-thumb"), cx));
@@ -613,6 +627,7 @@ fn a_picture_that_cannot_be_read_keeps_its_plain_line(cx: &mut TestAppContext) {
     std::fs::write(user.path("work/app/shot.png"), PNG).unwrap();
     std::fs::write(user.path("work/app/fake.png"), "<p>not a picture</p>").unwrap();
     std::fs::write(user.path("work/app/gone.png"), PNG).unwrap();
+    std::fs::write(user.path("work/app/huge.png"), HUGE_PNG).unwrap();
     std::fs::File::create(user.path("work/app/big.png"))
         .unwrap()
         .set_len(21 * 1024 * 1024)
@@ -627,7 +642,7 @@ fn a_picture_that_cannot_be_read_keeps_its_plain_line(cx: &mut TestAppContext) {
             .iter()
             .filter(|event| event["name"] == "agent.link_shown")
             .count()
-            == 5
+            == 6
     });
     std::fs::remove_file(user.path("work/app/gone.png")).unwrap();
     let (shell, cx) = window(&user, cx);
@@ -643,7 +658,7 @@ fn a_picture_that_cannot_be_read_keeps_its_plain_line(cx: &mut TestAppContext) {
     settle(cx);
 
     // The one that is a picture has its thumbnail; the others keep their line and their Open.
-    for n in 1..5 {
+    for n in 1..6 {
         assert!(!has(format!("row-{at}-link-{n}-thumb"), cx), "link {n}");
         assert!(has(format!("row-{at}-link-{n}-open"), cx), "link {n}");
     }
@@ -688,5 +703,85 @@ fn the_group_is_the_same_after_the_page_is_left_and_shown_again(cx: &mut TestApp
     assert_eq!(
         label(format!("row-{first}-link-0"), cx).as_deref(),
         Some("Link shared by the agent: One, example.org")
+    );
+}
+
+#[gpui_kit::test]
+fn a_link_of_a_sub_agent_toasts_while_only_the_root_s_conversation_is_shown(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let (agent, _mcp) = lead(&user);
+    let (shell, cx) = window(&user, cx);
+    open_session(&shell, &agent, cx);
+
+    tell(&user, &agent, "LAUNCH A WORKER");
+    // The worker's conversation is not the one on screen: the toast says it.
+    until(&shell, cx, "the toast of the worker's link", |cx| {
+        toast_said(cx) == ["The agent shares a link: Worker's".to_owned()]
+    });
+}
+
+#[gpui_kit::test]
+fn a_new_group_of_links_gets_a_toast_of_its_own(cx: &mut TestAppContext) {
+    let user = user();
+    let (agent, _mcp) = lead(&user);
+    let (shell, cx) = window(&user, cx);
+    following(&shell, &agent, cx);
+
+    tell(&user, &agent, "SHOW SPLIT");
+    // The agent's words in between end the row: the second link is not the first one's toast
+    // overwritten, it has its own.
+    until(&shell, cx, "both toasts are on screen", |cx| {
+        let said = toast_said(cx);
+        said.contains(&"The agent shares a link: One".to_owned())
+            && said.contains(&"The agent shares a link: Two".to_owned())
+    });
+    assert!(has("toast-2", cx));
+}
+
+#[gpui_kit::test]
+fn the_user_s_own_message_ends_the_row_of_links_too(cx: &mut TestAppContext) {
+    let user = user();
+    let (agent, mcp) = lead(&user);
+    let (shell, cx) = window(&user, cx);
+    following(&shell, &agent, cx);
+
+    show(
+        &mcp,
+        json!({"action": "show_link", "url": "https://example.org/a", "title": "A"}),
+    );
+    until(&shell, cx, "the first toast", |cx| {
+        toast_said(cx) == ["The agent shares a link: A".to_owned()]
+    });
+    tell(&user, &agent, "STAY QUIET");
+    eventually("the message is recorded", || {
+        user.call("agent.show", json!({"agent": agent})).unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| {
+                event["name"] == "agent.prompted"
+                    && event["data"]["text"]
+                        .as_str()
+                        .is_some_and(|t| t.contains("STAY QUIET"))
+            })
+    });
+    // Let the window take the event before the next link comes.
+    until(&shell, cx, "the window took it", |cx| {
+        settle(cx);
+        true
+    });
+    show(
+        &mcp,
+        json!({"action": "show_link", "url": "https://example.org/b", "title": "B"}),
+    );
+    until(&shell, cx, "the second toast", |cx| {
+        toast_said(cx).contains(&"The agent shares a link: B".to_owned())
+    });
+    assert!(
+        toast_said(cx).contains(&"The agent shares a link: A".to_owned()),
+        "{:?}",
+        toast_said(cx)
     );
 }

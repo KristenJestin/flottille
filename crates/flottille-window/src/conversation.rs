@@ -191,13 +191,22 @@ pub struct Call {
     pub cut: Option<u64>,
     /// It is a `web` `show_link`: the card of links is what the user sees of it.
     pub shows: bool,
+    /// Its arguments are known: an agent may send them in an update after the call is first said.
+    pub asked: bool,
 }
 
 impl Call {
-    /// Whether the call is left out of the steps: a link shown has its card, but one that was
-    /// refused or failed is a step, since no card says it.
+    /// Whether the call is left out of the steps: a link shown has its card. A `web` call whose
+    /// arguments are not known yet is left out too while it runs, so that one that turns out to
+    /// show a link never was a row to take away; one that turns out to read appears. A call that
+    /// failed or was interrupted is a step, since no card says it.
     pub fn hidden(&self) -> bool {
-        self.shows && self.state != CallState::Failed
+        match self.state {
+            CallState::Failed | CallState::Interrupted => false,
+            state => {
+                self.shows || (self.name == "web" && !self.asked && state == CallState::Running)
+            }
+        }
     }
 
     /// How long it took, once it ended.
@@ -210,18 +219,6 @@ impl Call {
 /// card of links says.
 pub fn is_hidden(block: &Block) -> bool {
     matches!(block, Block::Steps { calls } if !calls.is_empty() && calls.iter().all(Call::hidden))
-}
-
-/// Whether a block is text of the agent's own, or a message: a link shown after it starts a card.
-fn breaks_links(block: &Block) -> bool {
-    matches!(
-        block,
-        Block::Text { .. }
-            | Block::Message { .. }
-            | Block::Relayed { .. }
-            | Block::Report { .. }
-            | Block::Notice { .. }
-    )
 }
 
 /// Whether a block stays in sight between the groups: what the agent said, the messages it was
@@ -656,6 +653,7 @@ impl Conversation {
                     args: args_of(&name, &data["raw_input"]),
                     path: path_of(&name, &data["raw_input"]),
                     shows: shows_link(&name, &data["raw_input"]),
+                    asked: input_known(&data["raw_input"]),
                     name,
                     state: call_state(data["status"].as_str()),
                     since: event.at,
@@ -800,12 +798,12 @@ impl Conversation {
                     target: shown.target,
                 };
                 let mut changes = self.close(Some(event.at));
-                // Links shown in a row are one card: the last one is still the agent's latest
-                // word when nothing of its own came after it.
+                // Links shown in a row are one card: only thoughts, and the calls that show them,
+                // may sit between two; any other call, and any text, starts a new one.
                 let card = self
                     .blocks
                     .iter()
-                    .rposition(|block| matches!(block, Block::Links { .. }) || breaks_links(block))
+                    .rposition(|block| !matches!(block, Block::Thought { .. }) && !is_hidden(block))
                     .filter(|&at| matches!(self.blocks[at], Block::Links { .. }));
                 match card {
                     Some(at) => {
@@ -939,6 +937,7 @@ impl Conversation {
             call.args = args_of(&call.name, &data["raw_input"]);
             call.path = path_of(&call.name, &data["raw_input"]);
             call.shows = shows_link(&call.name, &data["raw_input"]);
+            call.asked |= input_known(&data["raw_input"]);
             if call.name == "fs_edit" {
                 self.edits
                     .insert(call.id.clone(), data["raw_input"].clone());
@@ -1521,6 +1520,11 @@ fn args_of(tool: &str, input: &Value) -> String {
         ("web", Some(asked)) => cut_args(asked.to_owned()),
         _ => shown_args(input),
     }
+}
+
+/// Whether a call's arguments came: an empty object is what an agent sends before them.
+fn input_known(input: &Value) -> bool {
+    !input.is_null() && input.as_object().is_none_or(|object| !object.is_empty())
 }
 
 /// Whether a call is `web` `show_link`.
@@ -2165,7 +2169,10 @@ mod tests {
         let Block::Steps { calls } = &c.blocks()[0] else {
             panic!("no steps");
         };
-        assert!(!calls[1].hidden(), "an unknown web call is a step");
+        assert!(
+            calls[1].hidden(),
+            "a web call whose arguments are not known waits to be drawn"
+        );
         c.apply(&event(
             3,
             "agent.tool_call",
@@ -2189,6 +2196,121 @@ mod tests {
         assert!(
             !calls[1].hidden(),
             "a link refused is a step: no card says it"
+        );
+    }
+
+    #[test]
+    fn an_interrupted_show_link_stays_a_visible_step() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        c.apply(&event(
+            1,
+            "agent.tool_call",
+            json!({"id": "w", "title": "mcp__flottille__web", "status": "in_progress",
+                "raw_input": {"action": "show_link", "url": "https://example.org"}}),
+        ));
+        let Block::Steps { calls } = &c.blocks()[0] else {
+            panic!("no steps");
+        };
+        assert!(calls[0].hidden(), "running, its card to come");
+        c.apply(&event(2, "agent.turn_ended", json!({})));
+        let Block::Steps { calls } = &c.blocks()[0] else {
+            panic!("no steps");
+        };
+        assert_eq!(calls[0].state, CallState::Interrupted);
+        assert!(!calls[0].hidden(), "no card will say it: it is a step");
+    }
+
+    /// Whether the first call of the first block is drawn, after each event.
+    fn drawn_after(events: &[Event]) -> Vec<bool> {
+        let mut c = Conversation::new("the conversation".into(), None);
+        events
+            .iter()
+            .map(|event| {
+                c.apply(event);
+                match c.blocks().first() {
+                    Some(Block::Steps { calls }) => !calls[0].hidden(),
+                    _ => false,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_web_call_is_not_drawn_until_its_arguments_say_what_it_is() {
+        let first = |seq| {
+            event(
+                seq,
+                "agent.tool_call",
+                json!({"id": "w", "title": "mcp__flottille__web", "status": "in_progress",
+                    "raw_input": {}}),
+            )
+        };
+        let late = |seq, input: Value, status: &str| {
+            event(
+                seq,
+                "agent.tool_call",
+                json!({"id": "w", "update": true, "status": status, "raw_input": input}),
+            )
+        };
+        // A link: never drawn, so no row vanishes without folding when the arguments come.
+        let shown = drawn_after(&[
+            first(1),
+            late(
+                2,
+                json!({"action": "show_link", "url": "https://example.org"}),
+                "in_progress",
+            ),
+            late(3, Value::Null, "completed"),
+        ]);
+        assert_eq!(shown, [false, false, false]);
+        // A page read: it appears once it is known (an appearance folds in; a row never leaves).
+        let read = drawn_after(&[
+            first(1),
+            late(
+                2,
+                json!({"action": "read", "url": "https://example.org"}),
+                "in_progress",
+            ),
+            late(3, Value::Null, "completed"),
+        ]);
+        assert_eq!(read, [false, true, true]);
+        // Whatever the order, a drawn call is never taken away.
+        for events in [
+            vec![first(1), late(2, Value::Null, "completed")],
+            vec![
+                first(1),
+                late(
+                    2,
+                    json!({"action": "show_link", "path": "a.html"}),
+                    "failed",
+                ),
+            ],
+        ] {
+            let drawn = drawn_after(&events);
+            assert!(
+                drawn.windows(2).all(|pair| !(pair[0] && !pair[1])),
+                "{drawn:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn links_with_another_call_between_them_are_two_cards() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        c.apply(&shown(1, "https://example.org/1", None));
+        c.apply(&event(
+            2,
+            "agent.tool_call",
+            json!({"id": "r", "title": "fs_read", "status": "completed",
+                "raw_input": {"path": "a.txt"}}),
+        ));
+        c.apply(&shown(3, "https://example.org/2", None));
+        assert_eq!(
+            c.blocks()
+                .iter()
+                .filter(|block| matches!(block, Block::Links { .. }))
+                .count(),
+            2
         );
     }
 

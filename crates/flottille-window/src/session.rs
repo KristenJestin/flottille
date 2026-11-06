@@ -8282,6 +8282,7 @@ mod tests {
             allowed_by: by.map(str::to_owned),
             cut: None,
             shows: false,
+            asked: true,
         }
     }
 

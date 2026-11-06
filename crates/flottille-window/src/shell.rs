@@ -87,6 +87,22 @@ pub enum Selection {
     Services,
 }
 
+/// The links an agent shares in a row: the toast that says them is named by the agent and the
+/// row's number, so that the next row is a toast of its own.
+#[derive(Default)]
+struct Sharing {
+    row: u64,
+    links: Vec<LinkShown>,
+}
+
+impl Sharing {
+    /// The row ends: the next link starts another, and another toast.
+    fn end(&mut self) {
+        self.row += 1;
+        self.links.clear();
+    }
+}
+
 pub struct Shell {
     seen: Arc<Seen>,
     snapshot: Snapshot,
@@ -125,7 +141,7 @@ pub struct Shell {
     news: HashMap<String, String>,
     /// The links each agent shared in a row, while the toast that says them is on screen: the
     /// toast counts them, and the agent's next words start a new row.
-    sharing: HashMap<String, Vec<LinkShown>>,
+    sharing: HashMap<String, Sharing>,
     /// Each project's composer and new workspace form, made when its page first opens: a draft,
     /// a send and a name asked belong to their project.
     forms: HashMap<String, Forms>,
@@ -705,6 +721,7 @@ impl Shell {
             Update::Forged(forged) => self.forged(forged, cx),
             Update::News(news) => self.news(news, cx),
             Update::Link(link) => self.linked(link, cx),
+            Update::Prompted(agent) => self.spoke(&agent),
             Update::Items { project, item } => {
                 if let Some(items) = self.project_items_of(&project, cx) {
                     items.update(cx, |items, cx| items.changed(item, cx));
@@ -1758,18 +1775,26 @@ impl Shell {
     /// counts them while it is on screen. Nothing opens until the click.
     fn linked(&mut self, link: LinkShown, cx: &mut Context<Self>) {
         let session = self.snapshot.root_of(&link.agent);
-        if self.selected == Some(Selection::Session(session.clone())) {
-            self.sharing.remove(&link.agent);
+        // On screen is the conversation of the agent itself: a sub-agent's link, while the
+        // root's conversation is shown, is not in sight.
+        let on_screen = self.selected == Some(Selection::Session(session.clone()))
+            && self
+                .session_page
+                .as_ref()
+                .is_some_and(|page| page.read(cx).shown() == link.agent);
+        let sharing = self.sharing.entry(link.agent.clone()).or_default();
+        if on_screen {
+            sharing.end();
             return;
         }
-        let key = format!("links-{}", link.agent);
-        let row = self.sharing.entry(link.agent.clone()).or_default();
-        if !flottille_ui::toast::shown(&key, cx) {
-            row.clear();
+        let mut key = format!("links-{}-{}", link.agent, sharing.row);
+        if !sharing.links.is_empty() && !flottille_ui::toast::shown(&key, cx) {
+            sharing.end();
+            key = format!("links-{}-{}", link.agent, sharing.row);
         }
-        row.push(link);
+        sharing.links.push(link);
         let shell = cx.entity().downgrade();
-        let toast = match row.as_slice() {
+        let toast = match sharing.links.as_slice() {
             [only] => {
                 let target = only.target.clone();
                 flottille_ui::Toast::success(format!("The agent shares a link: {}", only.name()))
@@ -1795,11 +1820,17 @@ impl Shell {
         flottille_ui::toast(toast.keyed(key), cx);
     }
 
+    /// What the agent said or what the user told it ends the row of links it was sharing.
+    fn spoke(&mut self, agent: &str) {
+        if let Some(sharing) = self.sharing.get_mut(agent) {
+            sharing.end();
+        }
+    }
+
     /// An agent said something, reported or was woken: its session's row says it, unless the
     /// session is the one open, where it is in sight.
     fn news(&mut self, news: News, cx: &mut Context<Self>) {
-        // What the agent says ends the row of links it was sharing.
-        self.sharing.remove(&news.agent);
+        self.spoke(&news.agent);
         let session = self.snapshot.root_of(&news.agent);
         if self.selected == Some(Selection::Session(session.clone())) {
             return;

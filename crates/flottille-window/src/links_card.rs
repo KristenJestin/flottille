@@ -12,7 +12,7 @@ use std::sync::Arc;
 use flottille_ui::Type as _;
 use flottille_ui::color::mix;
 use flottille_ui::{
-    Button, Card, Icon, Item, Listing, enter, hoverable, icon, palette, presence, space,
+    Button, Card, Icon, Item, Listing, enter, icon, palette, presence, pressable, space,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -31,6 +31,8 @@ pub type Open = Rc<dyn Fn(&str, &mut App)>;
 
 /// The thumbnail's frame: a bounded size, whatever the picture's.
 const THUMB: (f32, f32) = (64., 44.);
+/// ... made of twice the pixels, for a screen that has them.
+const THUMB_PIXELS: (u32, u32) = (128, 88);
 
 /// What is known of the picture on a line.
 enum Picture {
@@ -46,13 +48,20 @@ pub struct LinksCard {
     pictures: HashMap<String, Picture>,
 }
 
-/// Whether the extension names a picture a thumbnail is drawn for.
-fn names_a_picture(target: &str) -> bool {
-    Path::new(target)
+/// The type of the picture a file's extension names, a thumbnail being drawn for these only.
+fn picture_type(target: &str) -> Option<&'static str> {
+    match Path::new(target)
         .extension()
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase)
-        .is_some_and(|e| matches!(e.as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp"))
+        .as_deref()
+    {
+        Some("png") => Some("image/png"),
+        Some("jpg" | "jpeg") => Some("image/jpeg"),
+        Some("gif") => Some("image/gif"),
+        Some("webp") => Some("image/webp"),
+        _ => None,
+    }
 }
 
 /// Whether the target is a file of the place: an address gets no thumbnail.
@@ -60,14 +69,27 @@ fn is_file(target: &str) -> bool {
     !(target.starts_with("http://") || target.starts_with("https://"))
 }
 
-/// The picture a file holds, read the way an attachment is, after the checks Open makes.
+/// The most of a file that is read, as for an attachment.
+const MAX_READ: u64 = 20 * 1024 * 1024;
+
+/// The thumbnail of the picture a file holds: the file is opened once, without following a link,
+/// checked as Open checks it on the file opened, and read up to [`MAX_READ`]; its size is read
+/// from its header before it is decoded, and only a small copy of it is kept (see
+/// `flottille_core::images::thumbnail`).
 fn read(path: PathBuf) -> Option<Arc<gpui_kit::Image>> {
-    flottille_core::shown::document(&path).ok()?;
-    let image = crate::attachments::read_picture(&path).ok()?;
-    if !flottille_core::images::is_picture(image.format.mime_type(), &image.bytes) {
+    use std::io::Read as _;
+    let mime = picture_type(path.to_str()?)?;
+    let file = flottille_core::shown::open_document(&path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MAX_READ + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > MAX_READ {
         return None;
     }
-    Some(Arc::new(image))
+    let small = flottille_core::images::thumbnail(mime, &bytes, THUMB_PIXELS).ok()?;
+    Some(Arc::new(gpui_kit::Image::from_bytes(
+        gpui_kit::ImageFormat::Png,
+        small,
+    )))
 }
 
 impl LinksCard {
@@ -75,7 +97,7 @@ impl LinksCard {
     pub fn show<T: 'static>(&mut self, links: &[ShownLink], cx: &mut Context<T>, of: Of<T>) {
         for link in links {
             if !is_file(&link.target)
-                || !names_a_picture(&link.target)
+                || picture_type(&link.target).is_none()
                 || self.pictures.contains_key(&link.target)
             {
                 continue;
@@ -162,7 +184,7 @@ impl LinksCard {
                 let thumb = {
                     let (target, opens) = (target.clone(), open.clone());
                     // The click goes where Open goes, through the same checks.
-                    let frame = hoverable(
+                    let frame = pressable(
                         div()
                             .id(card(&format!("link-{n}-thumb")))
                             .flex_none()
@@ -181,7 +203,10 @@ impl LinksCard {
                                 )
                             })
                             .on_click(move |_, _, cx| opens(&target, cx)),
-                        move |d, t| d.border_color(mix(p.line2, p.acc, t)),
+                        move |d, hover, press| {
+                            d.border_color(mix(p.line2, p.acc, hover))
+                                .opacity(1.0 - 0.2 * press)
+                        },
                     );
                     // It unfolds and fades in once the picture is read; a line that has none
                     // takes no room.
@@ -249,24 +274,49 @@ impl LinksCard {
 mod tests {
     use super::*;
 
+    /// A folder of its own in the temporary folder, removed with it.
+    struct Folder(PathBuf);
+
+    impl Folder {
+        fn new(name: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("flottille-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&path).unwrap();
+            Folder(path)
+        }
+    }
+
+    impl Drop for Folder {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
     #[test]
     fn only_a_file_with_a_picture_extension_gets_a_thumbnail() {
-        assert!(names_a_picture("/work/app/shot.PNG"));
-        assert!(names_a_picture("/work/app/shot.jpeg"));
-        assert!(!names_a_picture("/work/app/report.html"));
-        assert!(!names_a_picture("/work/app/shot.png.sh"));
+        assert_eq!(picture_type("/work/app/shot.PNG"), Some("image/png"));
+        assert_eq!(picture_type("/work/app/shot.jpeg"), Some("image/jpeg"));
+        assert_eq!(picture_type("/work/app/report.html"), None);
+        assert_eq!(picture_type("/work/app/shot.png.sh"), None);
         assert!(is_file("/work/app/shot.png"));
         assert!(!is_file("https://example.org/shot.png"));
     }
 
     #[test]
     fn a_file_that_is_no_picture_is_not_read_as_one() {
-        let folder = std::env::temp_dir().join(format!("flottille-links-{}", std::process::id()));
-        std::fs::create_dir_all(&folder).unwrap();
-        let fake = folder.join("fake.png");
+        let folder = Folder::new("links-fake");
+        let fake = folder.0.join("fake.png");
         std::fs::write(&fake, "<p>not a picture</p>").unwrap();
         assert!(read(fake).is_none());
-        assert!(read(folder.join("missing.png")).is_none());
-        std::fs::remove_dir_all(&folder).ok();
+        assert!(read(folder.0.join("missing.png")).is_none());
+    }
+
+    #[test]
+    fn a_file_swapped_for_a_link_to_a_device_is_not_read() {
+        let folder = Folder::new("links-swap");
+        let shot = folder.0.join("shot.png");
+        std::os::unix::fs::symlink("/dev/zero", &shot).unwrap();
+        // Returns at once: nothing follows the link, so nothing reads without end.
+        assert!(read(shot).is_none());
     }
 }
