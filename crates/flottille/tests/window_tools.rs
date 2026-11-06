@@ -15,7 +15,7 @@ use common::mcp::{Mcp, server_of};
 use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::link::Connect;
-use flottille_window::session::{OLDER_TOOLS, SessionPage};
+use flottille_window::session::{OLDER_TOOLS, RELOAD_TOOLS, RELOADS_AFTER_TURN, SessionPage};
 use flottille_window::tree::session_id;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
@@ -206,4 +206,182 @@ fn a_session_on_an_older_list_of_tools_says_so_above_its_composer_until_it_lists
     );
     at_rest(cx);
     assert_eq!(label("session-older-tools", cx), None);
+}
+
+/// A root whose first turn ended, its session's page open in the window: its id.
+fn open_idle_session(
+    user: &User,
+    shell: &Entity<Shell>,
+    message: &str,
+    cx: &mut VisualTestContext,
+) -> String {
+    let answer = user
+        .call("agent.run", json!({"project": "app", "message": message}))
+        .unwrap();
+    let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+    until(shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&id)).is_some())
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    until(shell, cx, "the session's page shows its tree", |cx| {
+        session_page(shell, cx).read_with(cx, |page, _| !page.tree().is_empty())
+    });
+    id
+}
+
+/// The events of the agent named `name`, from the store.
+fn named(user: &User, agent: &str, name: &str) -> Vec<serde_json::Value> {
+    user.call("agent.show", json!({"agent": agent})).unwrap()["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["name"] == name)
+        .cloned()
+        .collect()
+}
+
+fn reloads(user: &User, agent: &str) -> usize {
+    named(user, agent, "agent.released")
+        .iter()
+        .filter(|e| e["data"]["reason"] == "reload")
+        .count()
+}
+
+#[gpui_kit::test]
+fn the_outdated_note_offers_reload_tools(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (shell, cx) = window(&user, cx);
+    let id = open_idle_session(&user, &shell, "lead the work", cx);
+    eventually("the first turn ends", || {
+        shown(&user, &id)["state"] == "idle"
+    });
+    let (url, authorization) = server_of(&user, 0);
+    // rmcp's client, in place of the agent's own: it does nothing with a notice.
+    let mcp = Mcp::initialize(&url, &authorization);
+    mcp.names();
+    user.call(
+        "project.set_settings",
+        json!({"name": "app",
+            "repositories": [{"path": ".", "forge": {"kind": "github", "repository": "acme/app"}}],
+            "tracker": {"kind": "github", "repository": "."}}),
+    )
+    .unwrap();
+    mcp.call("fs_list", json!({"path": "."}));
+    mcp.call("fs_list", json!({"path": "."}));
+    until(&shell, cx, "the page knows", |cx| outdated(&shell, cx));
+    at_rest(cx);
+    assert_eq!(
+        label("session-older-tools", cx).as_deref(),
+        Some(OLDER_TOOLS)
+    );
+    assert_eq!(
+        label("session-reload-tools", cx).as_deref(),
+        Some(RELOAD_TOOLS),
+        "the note offers the action"
+    );
+
+    cx.update(|window, cx| window.click("session-reload-tools", cx));
+
+    until(&shell, cx, "the process was let go", |_| {
+        reloads(&user, &id) == 1
+    });
+    // Its token revoked, it no longer runs an older list: the note folds away, drawn while it
+    // does.
+    until(&shell, cx, "the page knows it is current", |cx| {
+        !outdated(&shell, cx)
+    });
+    step(cx);
+    assert!(step(cx) > 0, "the note folds away");
+    assert_eq!(
+        label("session-older-tools", cx).as_deref(),
+        Some(OLDER_TOOLS),
+        "drawn while it folds"
+    );
+    at_rest(cx);
+    assert_eq!(label("session-older-tools", cx), None);
+    assert_eq!(label("session-reload-tools", cx), None);
+}
+
+#[gpui_kit::test]
+fn slash_reload_tools_during_a_turn_says_it_reloads_after_this_turn(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "work", "do": [{"hold": "release"}, {"say": "Done."}]}
+    ]}));
+    project(&user);
+    let (shell, cx) = window(&user, cx);
+    let id = open_idle_session(&user, &shell, "work", cx);
+    eventually("the turn runs", || shown(&user, &id)["state"] == "working");
+    until(&shell, cx, "the page knows it works", |cx| {
+        session_page(&shell, cx).read_with(cx, |page, _| {
+            page.tree().iter().any(|a| a.state == "working")
+        })
+    });
+    settle(cx);
+
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("/reload");
+    until(&shell, cx, "the list offers it", |cx| {
+        cx.update(|window, _| window.try_find("slash-reload-tools").is_some())
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("slash-reload-tools", cx));
+
+    until(&shell, cx, "the page says it waits", |cx| {
+        session_page(&shell, cx).read_with(cx, |page, _| page.reloads_after_turn())
+    });
+    let page = session_page(&shell, cx);
+    let reply = page.read_with(cx, |page, _| page.reply().cloned()).unwrap();
+    assert_eq!(
+        reply.read_with(cx, |r, cx| r.field().read(cx).value().to_string()),
+        "",
+        "the command is done, not sent"
+    );
+    assert!(step(cx) + step(cx) > 0, "the line unfolds");
+    at_rest(cx);
+    assert_eq!(
+        label("session-reload-after-turn", cx).as_deref(),
+        Some(RELOADS_AFTER_TURN)
+    );
+    assert_eq!(reloads(&user, &id), 0, "the turn is not cut");
+
+    std::fs::write(user.path("fake/release"), "").unwrap();
+    until(&shell, cx, "the turn ended", |cx| {
+        !session_page(&shell, cx).read_with(cx, |page, _| page.reloads_after_turn())
+    });
+    eventually("the process was let go", || reloads(&user, &id) == 1);
+    step(cx);
+    assert!(step(cx) > 0, "the line folds away");
+    at_rest(cx);
+    assert_eq!(label("session-reload-after-turn", cx), None);
+    let ended = named(&user, &id, "agent.turn_ended");
+    assert_eq!(ended[0]["data"]["stop_reason"], "end_turn");
+}
+
+#[gpui_kit::test]
+fn the_session_menu_offers_reload_tools(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (shell, cx) = window(&user, cx);
+    let id = open_idle_session(&user, &shell, "lead the work", cx);
+    eventually("the first turn ends", || {
+        shown(&user, &id)["state"] == "idle"
+    });
+    until(&shell, cx, "the page knows it is idle", |cx| {
+        session_page(&shell, cx)
+            .read_with(cx, |page, _| page.tree().iter().any(|a| a.state == "idle"))
+    });
+    settle(cx);
+
+    cx.update(|window, cx| window.click("rail-agent-menu", cx));
+    settle(cx);
+    cx.update(|window, _| assert!(window.find("rail-agent-reload-tools").visible()));
+    cx.update(|window, cx| window.click("rail-agent-reload-tools", cx));
+
+    until(&shell, cx, "the process was let go", |_| {
+        reloads(&user, &id) == 1
+    });
+    at_rest(cx);
 }

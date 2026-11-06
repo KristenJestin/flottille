@@ -278,6 +278,10 @@ pub struct SessionPage {
     resuming: bool,
     /// What the daemon said when it refused to resume the session.
     resume_error: Option<SharedString>,
+    /// A reload of the root's tools was asked and not answered yet.
+    reloading: bool,
+    /// The root's tools reload once the turn that runs ends.
+    reload_after_turn: bool,
     renders: usize,
     _status: Subscription,
     _run_drawer: Subscription,
@@ -291,7 +295,27 @@ impl EventEmitter<Chose> for SessionPage {}
 /// What the page says above the composer of a session that runs an older list of tools than its
 /// role has (`docs/tools.md`, "When the tools change").
 pub const OLDER_TOOLS: &str = "This session runs an older list of tools than its role has now: \
-    end it, then resume it, for the new one.";
+    reload them for the new one.";
+
+/// The action that restarts the root's process on its conversation with the tools its role has
+/// now: the outdated line's button, the root's menu and `/reload-tools`.
+pub const RELOAD_TOOLS: &str = "Reload tools";
+
+/// The name of the composer's own command that reloads the tools.
+pub const RELOAD_COMMAND: &str = "reload-tools";
+
+/// What `/reload-tools` says in the composer's list.
+pub const RELOAD_COMMAND_LINE: &str =
+    "Restart the agent on its conversation with the tools its role has now";
+
+/// What the page says above the composer while a reload waits for the turn to end.
+pub const RELOADS_AFTER_TURN: &str = "Reloads after this turn";
+
+/// The toast of a reload done at once.
+pub const RELOADED: &str = "Tools reloaded";
+
+/// The toast of a reload the daemon refused.
+pub const NOT_RELOADED: &str = "The tools were not reloaded";
 
 /// The line of an older list of tools, for the session's root: only while it has not ended.
 pub fn older_tools(root: Option<&TreeAgent>) -> Option<&'static str> {
@@ -360,6 +384,8 @@ impl SessionPage {
             end_error: None,
             resuming: false,
             resume_error: None,
+            reloading: false,
+            reload_after_turn: false,
             renders: 0,
             _status,
             _run_drawer,
@@ -611,6 +637,48 @@ impl SessionPage {
 
     pub fn resume_error(&self) -> Option<&str> {
         self.resume_error.as_deref()
+    }
+
+    /// Reloads the root's tools: its process restarts on its conversation, once the turn that
+    /// runs ended. Nothing happens for a session that ended, nor while one is asked.
+    pub fn reload_tools(&mut self, cx: &mut Context<Self>) {
+        if !self.endable() || self.reloading {
+            return;
+        }
+        self.reloading = true;
+        let session = self.opened.id.clone();
+        self.perform(Command::ReloadTools { session }, cx);
+        cx.notify();
+    }
+
+    /// What the daemon answered to a reload: done now, after the turn (said above the composer
+    /// until it ends), or refused.
+    pub fn tools_reloaded(
+        &mut self,
+        after_turn: bool,
+        refused: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.reloading = false;
+        match refused {
+            Some(why) => toast(Toast::failure(NOT_RELOADED).detail(why), cx),
+            // The turn may have ended before the answer came: the tree says.
+            None if after_turn => self.reload_after_turn = self.root_working(),
+            None => toast(
+                Toast::success(RELOADED).detail("Its next message starts it with them."),
+                cx,
+            ),
+        }
+        cx.notify();
+    }
+
+    /// Whether the root's tools reload once its turn ends.
+    pub fn reloads_after_turn(&self) -> bool {
+        self.reload_after_turn
+    }
+
+    fn root_working(&self) -> bool {
+        self.root().is_some_and(|root| root.state == "working")
     }
 
     pub fn set_title(&mut self, title: &str, cx: &mut Context<Self>) {
@@ -1239,6 +1307,11 @@ impl SessionPage {
         if older_changed {
             cx.notify();
         }
+        // Its turn ended: the reload it waited for is done.
+        if self.reload_after_turn && !self.root_working() {
+            self.reload_after_turn = false;
+            cx.notify();
+        }
         if let Some(now_ended) = now_ended.filter(|now| was_ended != Some(*now)) {
             if was_ended.is_some() {
                 // Ended or resumed: what was said before it is over.
@@ -1502,6 +1575,9 @@ impl Render for SessionPage {
             .test_support();
         let root = self.shown == self.opened.id;
         let older = older_tools(self.root().filter(|_| root)).map(SharedString::from);
+        let after_turn = (root && self.reload_after_turn).then_some(RELOADS_AFTER_TURN.into());
+        let reloader = cx.entity().downgrade();
+        let reloading = self.reloading;
         let dock = div()
             .flex_none()
             .w_full()
@@ -1516,7 +1592,38 @@ impl Render for SessionPage {
                 older,
                 move |said| {
                     div()
-                        .id("session-older-tools")
+                        .flex()
+                        .items_center()
+                        .gap(space::MD)
+                        .pb(space::SM)
+                        .child(
+                            div()
+                                .id("session-older-tools")
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(12.5))
+                                .text_color(p.faint)
+                                .aria_label(said.clone())
+                                .child(said)
+                                .test_support(),
+                        )
+                        .child(
+                            Button::secondary("session-reload-tools", RELOAD_TOOLS)
+                                .disabled(reloading)
+                                .on_click(move |_, _, cx| {
+                                    reloader.update(cx, |page, cx| page.reload_tools(cx)).ok();
+                                }),
+                        )
+                        .into_any_element()
+                },
+            ))
+            // While a reload waits for the turn to end; it folds away once it ended.
+            .child(presence_of(
+                "session-reload-after-turn-line",
+                after_turn,
+                move |said| {
+                    div()
+                        .id("session-reload-after-turn")
                         .pb(space::SM)
                         .text_size(px(12.5))
                         .text_color(p.faint)
@@ -4828,15 +4935,25 @@ impl SessionRail {
     ) -> Self {
         let editor = page.clone();
         let ender = page.clone();
+        let reloader = page.clone();
         let agent_menu = cx.new(|cx| {
-            Menu::new("rail-agent-menu", "Session actions", cx).entry(
-                "rail-agent-end",
-                "End session…",
-                Some(Icon::Stop),
-                move |_, cx| {
-                    ender.update(cx, |page, cx| page.ask_end(cx)).ok();
-                },
-            )
+            Menu::new("rail-agent-menu", "Session actions", cx)
+                .entry(
+                    "rail-agent-reload-tools",
+                    RELOAD_TOOLS,
+                    Some(Icon::Restart),
+                    move |_, cx| {
+                        reloader.update(cx, |page, cx| page.reload_tools(cx)).ok();
+                    },
+                )
+                .entry(
+                    "rail-agent-end",
+                    "End session…",
+                    Some(Icon::Stop),
+                    move |_, cx| {
+                        ender.update(cx, |page, cx| page.ask_end(cx)).ok();
+                    },
+                )
         });
         let rail = cx.entity().downgrade();
         let unlinks = rail.clone();
@@ -6597,7 +6714,8 @@ impl Reply {
     }
 
     /// The commands the `/` list offers now, each with its description: those whose name holds
-    /// what follows the `/`. None while the list is closed.
+    /// what follows the `/`, the project's, then the composer's own (`/reload-tools`), which
+    /// takes the place of a project's command of its name. None while the list is closed.
     pub fn slash_entries(&self) -> Vec<(String, String)> {
         let (Some(typed), Some(commands), false) = (&self.slash, &self.commands, self.dismissed)
         else {
@@ -6606,8 +6724,13 @@ impl Reply {
         let typed = typed.to_lowercase();
         commands
             .iter()
-            .filter(|p| p.name.to_lowercase().contains(&typed))
+            .filter(|p| p.name != RELOAD_COMMAND && p.name.to_lowercase().contains(&typed))
             .map(|p| (p.name.clone(), p.description.clone()))
+            .chain(
+                RELOAD_COMMAND
+                    .contains(&typed)
+                    .then(|| (RELOAD_COMMAND.to_owned(), RELOAD_COMMAND_LINE.to_owned())),
+            )
             .collect()
     }
 
@@ -6708,6 +6831,7 @@ impl Reply {
     }
 
     /// `pick`; `entered` when Enter picked it, whose line break the field put after the word.
+    /// `/reload-tools` is done at once, its word taken out of the message.
     fn complete(&mut self, name: &str, entered: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.slash = None;
         self.dismissed = true;
@@ -6717,6 +6841,22 @@ impl Reply {
         let (before, mut after) = (&now[..at.start], &now[at.end..]);
         if entered {
             after = after.strip_prefix('\n').unwrap_or(after);
+        }
+        if name == RELOAD_COMMAND {
+            let text = format!("{before}{}", after.trim_start());
+            self.has_text = !text.trim().is_empty();
+            self.field.update(cx, |field, cx| {
+                field.set_value(text.as_str(), window, cx);
+                field.set_selected_range(before.len()..before.len(), cx);
+            });
+            let command = Command::ReloadTools {
+                session: self.session.clone(),
+            };
+            self.shell
+                .update(cx, |shell, _| shell.perform(command))
+                .ok();
+            cx.notify();
+            return;
         }
         let space = if after.starts_with(char::is_whitespace) {
             ""
@@ -6809,7 +6949,6 @@ impl Reply {
         // A word that names no command is a message like any other: nothing to show, unless the
         // project has no command at all.
         let none = self.slash_open()
-            && entries.is_empty()
             && self.slash.as_deref() == Some("")
             && self.commands.as_ref().is_some_and(|c| c.is_empty());
         let open = !entries.is_empty() || none;
@@ -6872,7 +7011,7 @@ impl Reply {
             .gap(space::XS)
             .child(presence("slash-label", listed, section_label("Commands", cx)).gap(space::XS))
             .children(rows)
-            .child(presence("slash-note", !listed, note).gap(space::XS))
+            .child(presence("slash-note", none, note).gap(space::XS))
             .test_support();
         div()
             .absolute()
