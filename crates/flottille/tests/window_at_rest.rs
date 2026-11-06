@@ -273,3 +273,73 @@ fn the_window_draws_no_frame_at_rest_on_a_session_with_a_leave(cx: &mut TestAppC
         "(frames drawn, frames asked)"
     );
 }
+
+#[gpui_kit::test]
+fn the_services_page_is_still_at_rest(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    idle_session(&user);
+    // The fake server, from the test's own folder: one ready, one that failed, one stopped.
+    std::fs::create_dir_all(user.path("bin")).unwrap();
+    let server = user.path("bin/fake-server");
+    std::os::unix::fs::symlink(common::fake_server(), &server).unwrap();
+    let folder = user.path("home/tools");
+    std::fs::create_dir_all(&folder).unwrap();
+    let service = |name: &str, args: &str, ready: &str| {
+        format!(
+            "[services.{name}]\nfolder = \"{}\"\nline = \"{} {args}\"\n{ready}",
+            folder.display(),
+            server.display()
+        )
+    };
+    std::fs::write(
+        user.path("config/flottille/services.toml"),
+        [
+            service(
+                "mongo",
+                "--listen 0",
+                "ready = { line = \"listening on\" }\n",
+            ),
+            service("relay", "--print port-in-use --exit 3", ""),
+            service("redis", "--listen 0", ""),
+        ]
+        .concat(),
+    )
+    .unwrap();
+    user.call("service.start", json!({"name": "mongo"}))
+        .unwrap();
+    user.call("service.start", json!({"name": "relay"}))
+        .unwrap();
+    eventually("mongo is ready and relay failed", || {
+        let listed = user.call("service.list", json!({})).unwrap();
+        let state = |name: &str| {
+            listed["services"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["name"] == name)
+                .unwrap()["state"]
+                .clone()
+        };
+        state("mongo") == "ready" && state("relay") == "failed"
+    });
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    cx.update(|window, cx| window.click("services", cx));
+    until(&shell, cx, "the services are listed", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .services_page()
+                .is_some_and(|page| page.read(cx).services().is_some_and(|l| l.len() == 3))
+        })
+    });
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}

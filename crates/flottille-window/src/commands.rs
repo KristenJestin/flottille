@@ -66,7 +66,11 @@ pub(crate) fn line_field(
 }
 
 /// A field in the modals: a box around an input.
-pub(crate) fn boxed(id: &'static str, field: impl IntoElement, cx: &App) -> impl IntoElement {
+pub(crate) fn boxed(
+    id: impl Into<ElementId>,
+    field: impl IntoElement,
+    cx: &App,
+) -> impl IntoElement {
     let p = palette(cx);
     div()
         .id(id)
