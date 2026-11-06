@@ -363,7 +363,7 @@ const SERVED: [Definition; 29] = [
                 "waive": {"type": "string", "description": "merge: the user's words letting a blocked pull request be merged; held for them."},
                 "method": {"type": "string", "enum": ["squash", "merge", "rebase"], "description": "merge: squash when left out."},
                 "message": {"type": "string", "description": "merge by squash: the squashed commit's message, its subject on the first line; the forge's own when left out."},
-                "events": {"type": "array", "items": {"enum": crate::forge::EVENTS}},
+                "events": {"type": "array", "items": {"enum": crate::forge::EVENTS}, "description": "subscribe: what wakes you. approved: the review as a whole turns approved (once each time, saying who and the checks), where review wakes you at each reviewer."},
                 "from": {"enum": crate::subscriptions::FROM, "description": "subscribe: whose reviews and comments count: anyone (the default), or people (no bot nor agent)."},
                 "minutes": {"type": "integer", "minimum": 1, "description": "subscribe: a deadline: past it with nothing come, you are woken once and it ends. Left out: none; each event wakes you, no need to subscribe again."},
                 "session": {"type": "string", "description": "unsubscribe: a session you follow, by its agent id, to stop following it."},
@@ -3288,7 +3288,7 @@ mod tests {
     fn the_texts_cut_to_fit_the_old_cap_are_whole_again() {
         // What #224, #225, #233, #255 and #259 took out of other tools to stay under a number
         // nobody chose (#264): what is still true is said again.
-        let whole: [(&str, Option<&str>, &str); 29] = [
+        let whole: [(&str, Option<&str>, &str); 30] = [
             ("tasks", None, "(tests, lint, servers…)"),
             (
                 "run_status",
@@ -3331,6 +3331,11 @@ mod tests {
                 "all of the place's when left out",
             ),
             ("forge", Some("body"), "comment: the comment."),
+            (
+                "forge",
+                Some("events"),
+                "approved: the review as a whole turns approved (once each time, saying who and the checks), where review wakes you at each reviewer",
+            ),
             (
                 "forge",
                 Some("waive"),

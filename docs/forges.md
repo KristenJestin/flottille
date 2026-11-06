@@ -723,6 +723,24 @@ it, after the checks.
 - `review` (`item.reviewed`): a review that was not there (GitHub: its state, not `pending`;
   Bitbucket: a reviewer's new verdict), with its author, state and an excerpt (200 characters, on
   one line);
+- `approved` (`item.approved`): the pull request's review decision **becomes** approved, from any
+  other state, once: GitHub's `reviewDecision` turns `APPROVED`; Bitbucket (Cloud: `approved` on
+  each reviewer participant; Data Center: `APPROVED` on each reviewer) every reviewer has approved
+  and none asks for changes, a pull request with no reviewer never. Where `review` wakes the agent
+  at each reviewer's verdict, this wakes it once the review as a whole is approved, so it need not
+  read the pull request to know. The delivery says who approved and the checks in one line
+  (`checks: 12 passed`, `checks still running`, `checks: 2 failed`, `checks: 2 skipped`, `no checks`), as the round
+  stored them. It is judged against the decision the item held before the round, not read again
+  from the forge: a decision already approved when the agent subscribes (`show` says it), or read
+  approved again by a later round, is no event; one that goes back (a new commit dismisses it, a
+  reviewer asks for changes) and is approved again is a new one. **On GitHub a repository whose
+  base branch requires no review has no decision** (`reviewDecision` stays empty, stored as
+  `null`), so `approved` never comes there, whatever the reviews; `subscribe` says so when it is
+  asked for such a pull request (`This repository asks for no review, so approved will not come;
+  subscribe to review.`), and `review` is the event to wait for. The decision going from none to
+  approved, if a review is required later, is an `approved` like any other. It is not told for a pull request
+  that is merged or closed by the same round, which has its own event, and `from` does not filter
+  it: it is the review as a whole, not one person's;
 - `comment` (`item.commented`): a comment that was not there, with its author and an excerpt, the
   newest five of a round at most;
 - `merged`, `closed` (`item.merged`, `item.closed`): the pull request's state became that; either

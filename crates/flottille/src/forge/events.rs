@@ -17,7 +17,9 @@ use crate::session_read::form;
 use crate::subscriptions::{self, By, Event};
 
 /// The events a pull request has, as a subscription names them.
-pub const EVENTS: [&str; 5] = ["checks", "review", "comment", "merged", "closed"];
+pub const EVENTS: [&str; 6] = [
+    "checks", "review", "approved", "comment", "merged", "closed",
+];
 
 /// Who wrote a comment or a review an `item.*` event says (`items::Said`).
 fn by(said: &Value) -> Option<By> {
@@ -46,6 +48,22 @@ fn checks_ended(item: &Item) -> String {
     }
     text.push('.');
     text
+}
+
+/// The checks of `item` in one line, as an `approved` delivery says them: a failure first, then
+/// a check that still runs.
+fn checks_line(item: &Item) -> String {
+    let count = |state: &str| item.checks.iter().filter(|c| c.state == state).count();
+    match (count("failing"), count("pending"), item.checks.len()) {
+        (0, 0, 0) => "no checks".to_owned(),
+        (0, 0, _) => match (count("passing"), count("skipped")) {
+            (passed, 0) => format!("checks: {passed} passed"),
+            (0, skipped) => format!("checks: {skipped} skipped"),
+            (passed, skipped) => format!("checks: {passed} passed, {skipped} skipped"),
+        },
+        (0, _, _) => "checks still running".to_owned(),
+        (failed, _, _) => format!("checks: {failed} failed"),
+    }
 }
 
 /// What the events of one pull request say, as its subscriptions name them, and the one that
@@ -96,6 +114,22 @@ fn events_of(
                         ),
                     });
                 }
+            }
+            "item.approved" => {
+                let by: Vec<&str> = said(data, "by").filter_map(Value::as_str).collect();
+                let by = match by.is_empty() {
+                    true => String::new(),
+                    false => format!(" by {}", by.join(", ")),
+                };
+                let checks = item
+                    .map(|item| format!("; {}", checks_line(item)))
+                    .unwrap_or_default();
+                found.push(Event {
+                    kind: "approved",
+                    // The review as a whole, not one person's: `from` leaves it alone.
+                    by: None,
+                    text: format!("The {named} is approved{by}{checks}"),
+                });
             }
             "item.commented" => {
                 for comment in said(data, "comments") {
@@ -396,6 +430,54 @@ mod tests {
         );
         assert!(found[1].by.as_ref().is_some_and(|by| by.marked));
         assert_eq!(ends.map(|e| e.kind), Some("merged"));
+    }
+
+    #[test]
+    fn an_approval_says_who_approved_and_the_checks_in_one_line() {
+        let check = |state: &str| flottille_core::item::Check {
+            name: "test".into(),
+            state: state.into(),
+            started_at: None,
+            ended_at: None,
+            link: None,
+        };
+        let item = |states: &[&str]| Item {
+            project: "app".into(),
+            kind: "pull".into(),
+            source: "github".into(),
+            repository: "api".into(),
+            key: "12".into(),
+            title: String::new(),
+            state: "open".into(),
+            author: None,
+            assignees: Vec::new(),
+            labels: Vec::new(),
+            url: None,
+            updated_at: None,
+            seen_at: 1,
+            mine: false,
+            details: json!({}),
+            checks: states.iter().map(|s| check(s)).collect(),
+        };
+        let events = [event("item.approved", json!({"by": ["bob", "carol"]}))];
+        let events: Vec<&(&'static str, Value)> = events.iter().collect();
+        for (checks, said) in [
+            (vec!["passing"; 12], "checks: 12 passed"),
+            (vec!["passing", "pending"], "checks still running"),
+            (vec!["failing", "failing", "passing"], "checks: 2 failed"),
+            (vec!["passing", "skipped"], "checks: 1 passed, 1 skipped"),
+            (vec!["skipped", "skipped"], "checks: 2 skipped"),
+            (vec![], "no checks"),
+        ] {
+            let item = item(&checks);
+            let (found, ends) = events_of("pull request #12 of api", Some(&item), &events);
+            assert_eq!(
+                found[0].text,
+                format!("The pull request #12 of api is approved by bob, carol; {said}")
+            );
+            assert_eq!(found[0].kind, "approved");
+            assert!(found[0].by.is_none() && ends.is_none());
+        }
     }
 
     #[test]

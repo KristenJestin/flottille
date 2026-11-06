@@ -258,7 +258,7 @@ fn a_subscription_shows_in_the_rail_with_its_pull_request_its_events_and_when_it
     let user = user();
     script(&user, pull());
     let (lead, mcp) = lead(&user);
-    subscribe(&mcp, json!(["checks", "review"]));
+    subscribe(&mcp, json!(["checks", "review", "approved"]));
     let (shell, cx) = open_session(&user, &lead, cx);
     let page = session_page(&shell, cx);
 
@@ -276,7 +276,7 @@ fn a_subscription_shows_in_the_rail_with_its_pull_request_its_events_and_when_it
     );
     assert_eq!(
         label(cx, &format!("subscription-events-{id}")).unwrap(),
-        "checks, review"
+        "checks, review, approved"
     );
     let times = label(cx, &format!("subscription-times-{id}")).unwrap();
     assert!(

@@ -268,6 +268,19 @@ than stored.
 | `review`, `reviewers` (`item.reviewed`) | The decision now; Bitbucket's reviewers and their verdicts. |
 | `verdicts` (`item.reviewed`, Bitbucket) | The reviewers whose verdict is new, `{name, state}`, none `pending`: what a subscription to `review` is told. |
 
+#### `item.approved`
+
+A pull request's review decision became approved, from any other state (`item.reviewed` comes
+with it): GitHub's `reviewDecision` turned `APPROVED`; on Bitbucket every reviewer approved and
+none asks for changes (a pull request with no reviewer never). Judged against the decision stored
+before the round: one read approved again, or a decision never read before, is no event, nor is a
+pull request merged or closed by the same round.
+
+| Field | |
+|---|---|
+| `review` | `approved`. |
+| `by` | Who approved: Bitbucket's reviewers who approved; GitHub's authors whose last review that counts (not a comment) is an approval. |
+
 #### `item.checks`
 
 A pull request's checks ended: none runs now, and one was running, or its head commit moved.
