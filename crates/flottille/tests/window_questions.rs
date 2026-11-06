@@ -15,7 +15,7 @@ use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::conversation::Block;
 use flottille_window::link::Connect;
-use flottille_window::session::{ANSWER_WAITS, SessionPage};
+use flottille_window::session::{ANSWER_WAITS, ANSWERS_ALL, SessionPage};
 use flottille_window::tree::session_id;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
@@ -347,7 +347,7 @@ fn answering_the_card_delivers_the_answer_and_folds_it(cx: &mut TestAppContext) 
     });
     answer.update(cx, |answer, cx| answer.send(cx));
     until(&shell, cx, "the answer went", |cx| {
-        answer.read_with(cx, |a, _| a.is_sent())
+        answer.read_with(cx, |a, cx| a.is_sent(cx))
     });
     settle(cx);
     assert_eq!(
@@ -423,6 +423,122 @@ fn the_steps_line_of_ask_user_says_the_question(cx: &mut TestAppContext) {
     assert_eq!(
         call.args,
         "asked you: **POC charts**: blocked by the minimum of 3 points?"
+    );
+    release(&user);
+}
+
+/// The card's field of the question of row `at`.
+fn answer_of(
+    page: &Entity<SessionPage>,
+    at: usize,
+    cx: &mut VisualTestContext,
+) -> Entity<flottille_window::session::AnswerBox> {
+    page.read_with(cx, |page, cx| {
+        page.conversation().read(cx).rows()[at]
+            .read(cx)
+            .answer()
+            .cloned()
+    })
+    .expect("the card's field")
+}
+
+fn answer(
+    page: &Entity<SessionPage>,
+    at: usize,
+    text: &str,
+    cx: &mut VisualTestContext,
+) -> Entity<flottille_window::session::AnswerBox> {
+    let answer = answer_of(page, at, cx);
+    let field = answer.read_with(cx, |a, _| a.field().clone());
+    field.update_in(cx, |field, window, cx| field.set_value(text, window, cx));
+    answer.update(cx, |answer, cx| answer.send(cx));
+    answer
+}
+
+#[gpui_kit::test]
+fn answering_one_of_two_questions_answers_both_and_says_so(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "full", "ask twice");
+    let (shell, page, cx) = open_session(&user, &id, cx);
+    until(&shell, cx, "both cards", |cx| {
+        let open = questions(&page, cx);
+        open.len() == 2 && open.iter().all(|(at, _)| card_shows(*at, cx))
+    });
+    settle(cx);
+    let (first, second) = (questions(&page, cx)[0].0, questions(&page, cx)[1].0);
+    for at in [first, second] {
+        assert_eq!(
+            label(format!("row-{at}-answer-all"), cx).as_deref(),
+            Some(ANSWERS_ALL),
+            "each card says where its answer goes"
+        );
+    }
+
+    answer(&page, first, "Keep it, and blue.", cx);
+    release(&user);
+    until(&shell, cx, "both cards fold away", |cx| {
+        settle(cx);
+        !has(format!("row-{first}-question-text"), cx)
+            && !has(format!("row-{second}-question-text"), cx)
+    });
+    let prompt = user
+        .received_requests("session/prompt")
+        .iter()
+        .map(|r| r["params"]["prompt"].to_string())
+        .find(|p| p.contains("Keep it, and blue."))
+        .expect("the answer reached the agent");
+    assert!(
+        prompt.contains("POC charts"),
+        "it quotes the first: {prompt}"
+    );
+    assert!(prompt.contains(SECOND), "it quotes the second: {prompt}");
+}
+
+#[gpui_kit::test]
+fn an_answer_sent_stays_sent_when_the_page_is_opened_again(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "full", "draw the charts");
+    let other = user
+        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (shell, page, cx) = open_session(&user, &id, cx);
+    until(&shell, cx, "the card", |cx| {
+        questions(&page, cx)
+            .first()
+            .is_some_and(|(at, _)| card_shows(*at, cx))
+    });
+    let at = questions(&page, cx)[0].0;
+    let sent = answer(&page, at, "Drop it.", cx);
+    until(&shell, cx, "the answer went", |cx| {
+        sent.read_with(cx, |a, cx| a.is_sent(cx))
+    });
+
+    // Another session, then this one again: a new page, whose card still knows.
+    cx.update(|window, cx| window.click(session_id(&other), cx));
+    until(&shell, cx, "the other page", |cx| {
+        session_page(&shell, cx).read_with(cx, |p, _| p.id() == other)
+    });
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    until(&shell, cx, "this page again, its card", |cx| {
+        let page = session_page(&shell, cx);
+        page.read_with(cx, |p, _| p.id() == id)
+            && questions(&page, cx)
+                .first()
+                .is_some_and(|(at, _)| has(format!("row-{at}-question-text"), cx))
+    });
+    settle(cx);
+    let page = session_page(&shell, cx);
+    let at = questions(&page, cx)[0].0;
+    assert_eq!(
+        label(format!("row-{at}-answer-waits"), cx).as_deref(),
+        Some(ANSWER_WAITS)
+    );
+    assert!(
+        !has(format!("row-{at}-answer-frame"), cx),
+        "no field to answer again"
     );
     release(&user);
 }

@@ -1261,16 +1261,25 @@ impl SessionPage {
             .find(|a| a.parent.is_none())
             .map(|root| root.questions.clone())
             .unwrap_or_default();
-        let message = match open.iter().find(|q| q.seq == seq) {
-            Some(question) if open.len() > 1 => {
-                let first = question.text.lines().next().unwrap_or_default();
-                format!("> {first}\n\n{answer}")
+        // A message of the user answers every question open: it quotes each when several wait.
+        let message = match open.len() > 1 {
+            true => {
+                let quoted: Vec<String> = open
+                    .iter()
+                    .map(|q| format!("> {}", q.text.lines().next().unwrap_or_default()))
+                    .collect();
+                format!("{}\n\n{answer}", quoted.join("\n>\n"))
             }
-            _ => answer,
+            false => answer,
         };
+        let mut seqs: Vec<u64> = open.iter().map(|q| q.seq).collect();
+        if !seqs.contains(&seq) {
+            seqs.push(seq);
+        }
         let command = Command::AnswerQuestion {
             session: self.opened.id.clone(),
             seq,
+            seqs,
             message,
         };
         self.shell
@@ -1296,6 +1305,14 @@ impl SessionPage {
         if let Some(answer) = answer {
             answer.update(cx, |answer, cx| answer.answered(refused, window, cx));
         }
+    }
+
+    /// How many questions of the root wait for the user's answer.
+    fn open_questions(&self) -> usize {
+        self.tree
+            .iter()
+            .find(|a| a.parent.is_none())
+            .map_or(0, |root| root.questions.len())
     }
 
     /// Whether the question of `seq` waits for the user's answer, as the daemon says it.
@@ -1346,6 +1363,10 @@ impl SessionPage {
                 let row = view.rows[at].clone();
                 view.touched += 1;
                 if let Block::Question { seq, .. } = *row.read(cx).block {
+                    if let Some(answer) = row.read(cx).answer.clone() {
+                        let open = self.open_questions();
+                        answer.update(cx, |answer, cx| answer.set_open(open, cx));
+                    }
                     let asking = self.asking(seq);
                     if row.read(cx).asking != asking {
                         row.update(cx, |row, cx| row.set_asking(asking, cx));
@@ -4654,7 +4675,15 @@ impl Row {
             Some(answer) => answer.clone(),
             None => {
                 let page = self.page.clone();
-                let answer = cx.new(|cx| AnswerBox::new(self.at, seq, page, window, cx));
+                let (session, open) = page
+                    .upgrade()
+                    .map(|page| {
+                        let page = page.read(cx);
+                        (page.id().to_owned(), page.open_questions())
+                    })
+                    .unwrap_or_default();
+                let answer =
+                    cx.new(|cx| AnswerBox::new(self.at, seq, session, open, page, window, cx));
                 self.answer = Some(answer.clone());
                 answer
             }
@@ -4683,20 +4712,40 @@ impl Row {
     }
 }
 
-/// What a question's card says once its answer was sent while the agent works: it reads it
-/// between its turns, and the card folds away then.
-pub const ANSWER_WAITS: &str = "Your answer is sent: the agent reads it at the end of its turn.";
+/// What a question's card says once its answer was sent while the agent works: a message of the
+/// user waits for the end of the agent's turn (or "Send now" under the conversation), and the
+/// card folds away once the agent took it.
+pub const ANSWER_WAITS: &str =
+    "Your answer is sent: it waits under the conversation until the agent's turn ends.";
+
+/// What each card says while several questions wait: a message of the user answers them all.
+pub const ANSWERS_ALL: &str =
+    "Several questions wait: your answer goes to all of them, and quotes each.";
+
+/// The questions whose answer the user sent, by session: the window keeps them, so that a page
+/// opened again, or a history read again, does not ask for an answer twice.
+#[derive(Default)]
+struct SentAnswers(HashSet<(String, u64)>);
+
+impl gpui_kit::Global for SentAnswers {}
+
+/// The answer to the questions `seqs` of `session` was taken by the daemon.
+pub fn answers_sent(session: &str, seqs: &[u64], cx: &mut App) {
+    let sent = &mut cx.default_global::<SentAnswers>().0;
+    sent.extend(seqs.iter().map(|&seq| (session.to_owned(), seq)));
+}
 
 /// The field that answers a question, in its own view: its caret blinks without drawing the row.
 pub struct AnswerBox {
     at: usize,
     seq: u64,
+    session: String,
+    /// How many questions of the session wait: its answer goes to all of them.
+    open: usize,
     page: WeakEntity<SessionPage>,
     field: Entity<InputState>,
     has_text: bool,
     sending: bool,
-    /// The answer went: the field gives way to a line saying it waits for the agent.
-    sent: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -4704,6 +4753,8 @@ impl AnswerBox {
     fn new(
         at: usize,
         seq: u64,
+        session: String,
+        open: usize,
         page: WeakEntity<SessionPage>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -4713,7 +4764,7 @@ impl AnswerBox {
             follow_theme(&mut field, cx);
             field
         });
-        let subscriptions = vec![cx.subscribe_in(
+        let mut subscriptions = vec![cx.subscribe_in(
             &field,
             window,
             |this: &mut Self, field, event, _, cx| match event {
@@ -4725,15 +4776,25 @@ impl AnswerBox {
                 _ => {}
             },
         )];
+        subscriptions.push(cx.observe_global::<SentAnswers>(|_, cx| cx.notify()));
         AnswerBox {
             at,
             seq,
+            session,
+            open,
             page,
             field,
             has_text: false,
             sending: false,
-            sent: false,
             _subscriptions: subscriptions,
+        }
+    }
+
+    /// How many questions of the session wait now.
+    fn set_open(&mut self, open: usize, cx: &mut Context<Self>) {
+        if self.open != open {
+            self.open = open;
+            cx.notify();
         }
     }
 
@@ -4741,8 +4802,10 @@ impl AnswerBox {
         &self.field
     }
 
-    pub fn is_sent(&self) -> bool {
-        self.sent
+    /// Whether the answer to its question went: the field gives way to a line saying it waits.
+    pub fn is_sent(&self, cx: &App) -> bool {
+        cx.try_global::<SentAnswers>()
+            .is_some_and(|sent| sent.0.contains(&(self.session.clone(), self.seq)))
     }
 
     /// Sends what the field holds to the root, as a message.
@@ -4763,7 +4826,6 @@ impl AnswerBox {
         self.sending = false;
         match refused {
             None => {
-                self.sent = true;
                 self.has_text = false;
                 self.field
                     .update(cx, |field, cx| field.set_value("", window, cx));
@@ -4804,6 +4866,14 @@ impl Render for AnswerBox {
                 .child(div().flex_1().min_w_0().child(frame))
                 .child(send),
         );
+        let all = div()
+            .id(id("answer-all"))
+            .pb(space::SM)
+            .text_size(px(12.5))
+            .text_color(p.mute)
+            .aria_label(ANSWERS_ALL)
+            .child(ANSWERS_ALL)
+            .test_support();
         let waits = div()
             .id(id("answer-waits"))
             .text_size(px(12.5))
@@ -4811,9 +4881,11 @@ impl Render for AnswerBox {
             .aria_label(ANSWER_WAITS)
             .child(ANSWER_WAITS)
             .test_support();
+        let sent = self.is_sent(cx);
         div()
-            .child(presence(id("answer-open"), !self.sent, field))
-            .child(presence(id("answer-sent"), self.sent, waits))
+            .child(presence(id("answer-several"), self.open > 1 && !sent, all))
+            .child(presence(id("answer-open"), !sent, field))
+            .child(presence(id("answer-sent"), sent, waits))
     }
 }
 
