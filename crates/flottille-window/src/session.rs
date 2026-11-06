@@ -101,6 +101,16 @@ pub const STOP: &str = "Stop the turn";
 const REPLY_MAX_ROWS: usize = 10;
 /// What a toast says when the daemon refuses the message, or the interruption.
 pub const NOT_SENT: &str = "The message was not sent";
+/// What a message says under it from the moment it is sent until the daemon records it.
+pub const SENDING: &str = "Sending…";
+/// What a message the daemon refused says before its reason.
+pub const NOT_SENT_LINE: &str = "Not sent";
+/// The button of a refused message that sends it again.
+pub const RETRY: &str = "Retry";
+/// Why a message the daemon took is not sent after all: the agent failed, or ended, first.
+pub const AGENT_FAILED: &str = "the agent failed before it read it";
+pub const AGENT_ENDED: &str = "the session ended before the agent read it";
+pub const NEVER_READ: &str = "the agent ended before it read it";
 pub const NOT_INTERRUPTED: &str = "The turn was not interrupted";
 /// The state an agent of the tree is drawn with, from what the daemon says of it: only a root can
 /// need the user; a child waiting on its parent is waiting, in grey.
@@ -266,6 +276,7 @@ pub struct SessionPage {
     renders: usize,
     _status: Subscription,
     _run_drawer: Subscription,
+    _reply: Subscription,
 }
 
 /// Emitted when the user chooses the conversation of an agent of the session.
@@ -314,6 +325,8 @@ impl SessionPage {
             }
         });
         let needs_you = status.read(cx).state() == AgentState::NeedsYou;
+        // A message sent, answered or recorded shows in the conversation, or under it.
+        let _reply = cx.observe(&reply, |this, _, cx| this.sync_pending(cx));
         let mut page = Self {
             shell: shell.clone(),
             follow,
@@ -348,10 +361,100 @@ impl SessionPage {
             renders: 0,
             _status,
             _run_drawer,
+            _reply,
             opened,
         };
         page.relink();
+        page.sync_pending(cx);
         page
+    }
+
+    /// Shows the messages being sent where they are to be: in the conversation, or under it
+    /// with the waiting ones when a turn ran as they were sent. One the daemon put in the queue
+    /// is the waiting one now, in its place.
+    fn sync_pending(&mut self, cx: &mut Context<Self>) {
+        let queued: Vec<String> = self
+            .queued
+            .read(cx)
+            .messages()
+            .iter()
+            .map(|m| m.delivery.clone())
+            .collect();
+        let waiting: Vec<(u64, String, bool)> = self
+            .reply
+            .read(cx)
+            .pending()
+            .iter()
+            .filter(|p| p.refused.is_none())
+            .filter_map(|p| {
+                let delivery = &p.accepted.as_ref()?.delivery;
+                queued
+                    .contains(delivery)
+                    .then(|| (p.key, delivery.clone(), p.queued))
+            })
+            .collect();
+        for (key, delivery, here) in waiting {
+            if here {
+                self.queued
+                    .update(cx, |queued, cx| queued.alias(delivery, key, cx));
+            }
+            self.reply.update(cx, |reply, cx| reply.resolve(key, cx));
+        }
+        // What was sent is recorded after the last event the root's conversation shows now.
+        if self.shown == self.opened.id {
+            let last = self.conversation.read(cx).model.last_seq();
+            self.reply.update(cx, |reply, _| reply.stamp(last));
+        }
+        let all = self.reply.read(cx).pending().to_vec();
+        let (conversation, this) = (self.conversation.clone(), &*self);
+        conversation.update(cx, |view, cx| view.sync_pending(&all, this, cx));
+        let waiting: Vec<Pending> = self
+            .reply
+            .read(cx)
+            .pending()
+            .iter()
+            .filter(|p| p.queued)
+            .cloned()
+            .collect();
+        self.queued
+            .update(cx, |queued, cx| queued.set_pending(waiting, cx));
+    }
+
+    /// What the root's events say of the messages being sent: one taken back leaves, one that
+    /// will never be read (its agent ended) stays, refused with why.
+    fn sending_left(&mut self, event: &flottille_core::protocol::Event, cx: &mut Context<Self>) {
+        let data = &event.data;
+        let reason = data["reason"].as_str().unwrap_or_default();
+        let ids = || -> Vec<String> {
+            data["deliveries"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|id| id.as_str().map(str::to_owned))
+                .collect()
+        };
+        let reply = self.reply.clone();
+        match event.name.as_str() {
+            "agent.failed" => {
+                let why = format!("{AGENT_FAILED}: {reason}");
+                reply.update(cx, |reply, cx| reply.root_ended(&why, cx));
+            }
+            "agent.ended" => {
+                let why = format!("{AGENT_ENDED}: {reason}");
+                reply.update(cx, |reply, cx| reply.root_ended(&why, cx));
+            }
+            "delivery.withdrawn" => reply.update(cx, |reply, cx| {
+                for id in ids() {
+                    reply.delivery_left(&id, None, cx);
+                }
+            }),
+            "delivery.superseded" => reply.update(cx, |reply, cx| {
+                for id in ids() {
+                    reply.delivery_left(&id, Some(NEVER_READ.to_owned()), cx);
+                }
+            }),
+            _ => {}
+        }
     }
 
     pub fn id(&self) -> &str {
@@ -863,6 +966,7 @@ impl SessionPage {
         self.conversation = cx.new(|cx| ConversationView::new(page, &shown, name, parent, cx));
         self.rail
             .update(cx, |rail, cx| rail.set_selected(agent.to_owned(), cx));
+        self.sync_pending(cx);
         self.relink();
         self.refresh_conversation(cx);
         cx.notify();
@@ -948,6 +1052,9 @@ impl SessionPage {
             // One row added or drawn again: nothing else is looked at.
             SessionUpdate::Live(event) => {
                 self.note_decision(&event);
+                if self.shown == self.opened.id {
+                    self.sending_left(&event, cx);
+                }
                 let (conversation, this) = (self.conversation.clone(), &*self);
                 conversation.update(cx, |view, cx| {
                     let changes = view.model.apply(&event);
@@ -1167,6 +1274,7 @@ impl SessionPage {
             let images = root.images;
             let queued = root.queued.clone();
             self.queued.update(cx, |list, cx| list.set(queued, cx));
+            self.sync_pending(cx);
             self.fetch_pictures(cx);
             self.reply.update(cx, |reply, cx| {
                 reply.set_images(images);
@@ -1723,7 +1831,24 @@ pub struct ConversationView {
     to_end: Entity<ToEnd>,
     /// Takes the rows that folded away out of the list once their fold has ended.
     sweep: Option<Task<()>>,
+    /// The messages the user sent and the daemon has not recorded yet, after the rows: one item
+    /// of the list each.
+    pending: Vec<SentRow>,
+    /// The rows that were a message being sent: they are drawn in its place, never entering.
+    in_place: HashMap<usize, u64>,
+    /// The user's messages recorded while one sent from here waits for the daemon's answer: not
+    /// drawn until it says which is that one, which then becomes it in place.
+    held: HashSet<usize>,
     renders: usize,
+}
+
+/// A message being sent, as an item of the list: it enters as any message, and folds away when
+/// it is taken back.
+struct SentRow {
+    key: u64,
+    row: Entity<Row>,
+    motion: Motion,
+    height: Rc<Cell<Pixels>>,
 }
 
 /// A stretch of the conversation: a row in sight, or a group of the agent's work.
@@ -1801,10 +1926,138 @@ impl ConversationView {
             segment_of: Vec::new(),
             to_end,
             sweep: None,
+            pending: Vec::new(),
+            in_place: HashMap::new(),
+            held: HashSet::new(),
             renders: 0,
         };
         this.watch(cx);
         this
+    }
+
+    /// The list's first item after the rows: the first message being sent.
+    fn pending_item(&self) -> usize {
+        self.item_of(self.segments.len())
+    }
+
+    /// Follows the messages being sent: the ones drawn in the conversation (not `queued`) enter
+    /// at the end, fold away when gone, say a refusal on their own. One whose record is here
+    /// already is that record: in its place when the record was held for it.
+    fn sync_pending(&mut self, all: &[Pending], page: &SessionPage, cx: &mut Context<Self>) {
+        let root = self.id == page.id();
+        let mut recorded = Vec::new();
+        for pending in all.iter().filter(|_| root) {
+            let Some(accepted) = pending
+                .accepted
+                .as_ref()
+                .filter(|_| pending.refused.is_none())
+            else {
+                continue;
+            };
+            let at = (0..self.rows.len())
+                .rev()
+                .find(|&at| self.model.delivery_of(at) == Some(accepted.delivery.as_str()));
+            if let Some(at) = at {
+                recorded.push((pending.key, at));
+            }
+        }
+        for &(key, at) in &recorded {
+            page.reply.update(cx, |reply, cx| reply.resolve(key, cx));
+            let Some(n) = self.pending.iter().position(|shown| shown.key == key) else {
+                continue;
+            };
+            let ix = self.pending_item() + n;
+            self.list.splice(ix..ix + 1, 0);
+            let shown = self.pending.remove(n);
+            if self.held.remove(&at) {
+                let block = self.model.blocks()[at].clone();
+                let when = self.model.at(at);
+                shown
+                    .row
+                    .update(cx, |row, cx| row.recorded(at, block, when, cx));
+                self.rows[at] = shown.row;
+                self.in_place.insert(at, key);
+                let item = self.item(at);
+                self.list.remeasure_items(item..item + 1);
+                self.fit(at, cx);
+            }
+        }
+        let sent: Vec<&Pending> = all
+            .iter()
+            .filter(|p| root && !p.queued && !recorded.iter().any(|(key, _)| *key == p.key))
+            .collect();
+        // Nothing sent from here waits for its answer: the records held are someone else's.
+        if !sent.iter().any(|p| p.in_flight()) {
+            for at in std::mem::take(&mut self.held) {
+                let item = self.item(at);
+                self.list.remeasure_items(item..item + 1);
+            }
+        }
+        let now = cx.background_executor().now();
+        let reduce = cx.reduce_motion();
+        let mut leaving = false;
+        for shown in &mut self.pending {
+            match sent.iter().find(|p| p.key == shown.key) {
+                Some(pending) => {
+                    let refused = pending.refused.clone();
+                    shown.row.update(cx, |row, cx| row.set_refused(refused, cx));
+                }
+                None if shown.motion.target() == 1.0 => {
+                    shown.motion.animate(0.0, PANEL, now, reduce);
+                    leaving = true;
+                }
+                None => {}
+            }
+        }
+        for pending in sent {
+            if self.pending.iter().any(|shown| shown.key == pending.key) {
+                continue;
+            }
+            let row = Row::sending(pending, root, page, self.page.clone(), cx);
+            let ix = self.pending_item() + self.pending.len();
+            self.list.splice(ix..ix, 1);
+            self.pending.push(SentRow {
+                key: pending.key,
+                row,
+                motion: Motion::settled(1.0),
+                height: Rc::default(),
+            });
+        }
+        if leaving {
+            self.sweep = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(PANEL + FRAME).await;
+                this.update(cx, |this, cx| this.swept(cx)).ok();
+            }));
+        }
+        cx.notify();
+    }
+
+    /// The message being sent that the block at `at`, just added, records: the one the daemon
+    /// took as its delivery.
+    fn sent_as(&self, at: usize, page: &SessionPage, cx: &gpui_kit::App) -> Option<u64> {
+        let delivery = self.model.delivery_of(at)?;
+        if self.id != page.id() {
+            return None;
+        }
+        page.reply
+            .read(cx)
+            .pending()
+            .iter()
+            .find(|p| p.is(delivery))
+            .map(|p| p.key)
+    }
+
+    /// Whether the user's message at `at` waits to be drawn: one sent from here waits for the
+    /// daemon's answer, and it may be its record.
+    fn holds(&self, at: usize, page: &SessionPage, cx: &gpui_kit::App) -> bool {
+        let user = matches!(&self.model.blocks()[at], Block::Message { from, .. } if from == USER);
+        user && self.id == page.id()
+            && page
+                .reply
+                .read(cx)
+                .pending()
+                .iter()
+                .any(|p| !p.queued && p.in_flight())
     }
 
     fn list() -> ListState {
@@ -2077,6 +2330,19 @@ impl ConversationView {
                 !gone
             });
         }
+        let first = self.pending_item();
+        let mut n = 0;
+        let list = &self.list;
+        self.pending.retain(|shown| {
+            let leaving = shown.motion.target() == 0.0;
+            let gone = leaving && !shown.motion.is_running(now);
+            again |= leaving && !gone;
+            match gone {
+                true => list.splice(first + n..first + n + 1, 0),
+                false => n += 1,
+            }
+            !gone
+        });
         self.sweep = again.then(|| {
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(FRAME).await;
@@ -2239,6 +2505,45 @@ impl ConversationView {
         self.segments.clear();
         self.segment_of.clear();
         self.sweep = None;
+        self.in_place.clear();
+        self.held.clear();
+        // A message being sent that the history holds is recorded: it leaves. The user's
+        // messages recorded since one was sent that waits for its answer wait with it.
+        if self.id == page.id() {
+            let pending = page.reply.read(cx).pending().to_vec();
+            let recorded: Vec<u64> = pending
+                .iter()
+                .filter(|p| {
+                    (0..self.model.blocks().len())
+                        .any(|at| self.model.delivery_of(at).is_some_and(|d| p.is(d)))
+                })
+                .map(|p| p.key)
+                .collect();
+            for key in &recorded {
+                page.reply.update(cx, |reply, cx| reply.resolve(*key, cx));
+            }
+            self.pending.retain(|shown| !recorded.contains(&shown.key));
+            let since = pending
+                .iter()
+                .filter(|p| !p.queued && p.in_flight())
+                .filter_map(|p| p.since)
+                .min();
+            if let Some(since) = since {
+                let known = |at: usize| {
+                    self.model
+                        .delivery_of(at)
+                        .is_some_and(|d| pending.iter().any(|p| p.is(d)))
+                };
+                self.held = (0..self.model.blocks().len())
+                    .filter(|&at| {
+                        matches!(&self.model.blocks()[at], Block::Message { from, .. } if from == USER)
+                            && self.model.seq_of(at) > since
+                            && !known(at)
+                    })
+                    .collect();
+            }
+        }
+        self.pending.retain(|shown| shown.motion.target() == 1.0);
         for at in 0..self.model.blocks().len() {
             self.add_row(at, page, cx);
             self.more[at] = self.rows[at].read(cx).more_pieces().len();
@@ -2271,7 +2576,7 @@ impl ConversationView {
             }
             self.mark_asks(segment, cx);
         }
-        let items = self.item_of(self.segments.len());
+        let items = self.item_of(self.segments.len()) + self.pending.len();
         match read.follow {
             true => {
                 self.list = Self::list();
@@ -2318,7 +2623,32 @@ impl ConversationView {
             match change {
                 Change::Added => {
                     let at = self.rows.len();
-                    self.add_row(at, page, cx);
+                    let sent = self.sent_as(at, page, cx);
+                    if let Some(key) = sent {
+                        page.reply.update(cx, |reply, cx| reply.resolve(key, cx));
+                    }
+                    let shown = sent.and_then(|key| self.pending.iter().position(|s| s.key == key));
+                    match shown {
+                        // The message being sent becomes the daemon's, in its place.
+                        Some(n) => {
+                            let ix = self.pending_item() + n;
+                            self.list.splice(ix..ix + 1, 0);
+                            let SentRow { key, row, .. } = self.pending.remove(n);
+                            let block = self.model.blocks()[at].clone();
+                            let when = self.model.at(at);
+                            row.update(cx, |row, cx| row.recorded(at, block, when, cx));
+                            self.rows.push(row);
+                            self.more.push(0);
+                            self.touched += 1;
+                            self.in_place.insert(at, key);
+                        }
+                        None => {
+                            self.add_row(at, page, cx);
+                            if sent.is_none() && self.holds(at, page, cx) {
+                                self.held.insert(at);
+                            }
+                        }
+                    }
                     let item = self.item_of(self.segments.len());
                     if self.place(at) {
                         self.list.splice(item..item, 1);
@@ -2410,6 +2740,9 @@ impl ConversationView {
 
     /// A row of the conversation as the list draws it, entering when it first shows.
     fn row_element(&self, at: usize) -> AnyElement {
+        if self.in_place.contains_key(&at) {
+            return self.rows[at].clone().into_any_element();
+        }
         enter(
             ElementId::Name(format!("enter-row-{}-{at}", self.id).into()),
             0,
@@ -2533,7 +2866,7 @@ impl ConversationView {
     ) -> AnyElement {
         let narrow = window.viewport_size().width < px(crate::shell::NARROW);
         let (segment, piece) = self.segment_at(ix).unwrap_or((usize::MAX, 0));
-        let last = ix + 1 == self.item_of(self.segments.len());
+        let last = ix + 1 == self.pending_item() + self.pending.len();
         let column = |below: Pixels| {
             div()
                 .max_w(px(780.))
@@ -2581,6 +2914,7 @@ impl ConversationView {
                 // The gap under it folds with it.
                 centred(column(gap * t).child(row))
             }
+            Some(Segment::Row(at)) if self.held.contains(at) => div().into_any_element(),
             Some(Segment::Row(at)) => {
                 let (at, more) = (*at, self.more[*at]);
                 let row = &self.rows[at];
@@ -2610,7 +2944,40 @@ impl ConversationView {
                 }
                 centred(column(below).children(shown))
             }
-            None => div().into_any_element(),
+            None => {
+                let Some(shown) = ix
+                    .checked_sub(self.pending_item())
+                    .and_then(|n| self.pending.get(n))
+                else {
+                    return div().into_any_element();
+                };
+                let now = cx.background_executor().now();
+                let running = shown.motion.is_running(now);
+                let open = shown.motion.target() == 1.0;
+                if !open && !running {
+                    return div().into_any_element();
+                }
+                if running {
+                    window.request_animation_frame();
+                }
+                let t = shown.motion.value(now);
+                let key = shown.key;
+                let row = enter(
+                    ElementId::Name(format!("enter-pending-{}-{key}", self.id).into()),
+                    0,
+                    shown.row.clone(),
+                );
+                let row = fold_frame(
+                    pending_part(key, "item"),
+                    open,
+                    running,
+                    t,
+                    &shown.height,
+                    row,
+                );
+                // The gap under it folds with it.
+                centred(column(gap * t).child(row))
+            }
         }
     }
 }
@@ -2650,7 +3017,7 @@ impl Render for ConversationView {
         let p = palette(cx);
         let narrow = window.viewport_size().width < px(crate::shell::NARROW);
         let id = SharedString::from(format!("conversation-{}", self.id));
-        if self.rows.is_empty() && !self.earlier {
+        if self.rows.is_empty() && !self.earlier && self.pending.is_empty() {
             return div()
                 .id(id)
                 .size_full()
@@ -2789,8 +3156,32 @@ pub struct Row {
     /// Its steps show only the question asked to the user: they stay out of a folded group
     /// for it alone.
     asks_only: bool,
+    /// It is a message the user sent from the composer: being sent, refused, or recorded since.
+    sent: Option<Sent>,
     renders: usize,
 }
+
+/// A message of the user shown from the moment it was sent. Its fades are kept here rather than
+/// by `fade` and `presence`: once the daemon records it the row moves to another item of the
+/// list and is drawn under other ids, and the state of an element would start over.
+struct Sent {
+    key: u64,
+    /// The pictures as they were sent: they need no reading back.
+    images: Vec<Arc<gpui_kit::Image>>,
+    /// Why the daemon refused it, the last time it did: said while the reason folds away.
+    refused: Option<String>,
+    /// 1 once recorded: the ink of a message sent.
+    ink: Motion,
+    /// 1 while it is being sent: the `Sending…` line.
+    sending: Motion,
+    sending_height: Rc<Cell<Pixels>>,
+    /// 1 while refused: its reason, Retry and Edit.
+    failed: Motion,
+    failed_height: Rc<Cell<Pixels>>,
+}
+
+/// How much of its ink a message keeps while it is being sent.
+const QUIET: f32 = 0.6;
 
 impl Row {
     #[allow(clippy::too_many_arguments)]
@@ -2834,11 +3225,173 @@ impl Row {
                 icons: HashMap::new(),
                 pills: HashMap::new(),
                 asks_only: false,
+                sent: None,
                 renders: 0,
             };
             row.set_block(block, cx);
             row
         })
+    }
+
+    /// The row of a message being sent: the bubble the daemon's record of it will be, quieter.
+    fn sending(
+        pending: &Pending,
+        root: bool,
+        page: &SessionPage,
+        weak: WeakEntity<SessionPage>,
+        cx: &mut gpui_kit::App,
+    ) -> Entity<Row> {
+        let block = Block::Message {
+            from: USER.into(),
+            text: pending.text.clone(),
+            images: (0..pending.images.len())
+                .map(|n| format!("pending-{}-{n}", pending.key))
+                .collect(),
+            commands: None,
+        };
+        let row = Row::view(0, block, None, String::new(), root, page, weak, cx);
+        row.update(cx, |row, _| {
+            row.sent = Some(Sent {
+                key: pending.key,
+                images: pending.images.clone(),
+                refused: pending.refused.clone(),
+                ink: Motion::settled(0.0),
+                sending: Motion::settled(if pending.refused.is_some() { 0.0 } else { 1.0 }),
+                sending_height: Rc::default(),
+                failed: Motion::settled(if pending.refused.is_some() { 1.0 } else { 0.0 }),
+                failed_height: Rc::default(),
+            });
+        });
+        row
+    }
+
+    /// The message being sent was refused (`Some`), or is sent again (`None`).
+    fn set_refused(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
+        let (now, reduce) = (cx.background_executor().now(), cx.reduce_motion());
+        let Some(sent) = self.sent.as_mut() else {
+            return;
+        };
+        let failed = refused.is_some();
+        if sent.failed.target() == f32::from(u8::from(failed)) && sent.refused == refused {
+            return;
+        }
+        if refused.is_some() {
+            sent.refused = refused;
+        }
+        sent.failed
+            .animate(if failed { 1.0 } else { 0.0 }, PANEL, now, reduce);
+        sent.sending
+            .animate(if failed { 0.0 } else { 1.0 }, PANEL, now, reduce);
+        cx.notify();
+    }
+
+    /// The message being sent is recorded: the row is the daemon's, at `at`, in its place, and its
+    /// ink and its line move to the sent state.
+    fn recorded(&mut self, at: usize, block: Block, when: Option<u64>, cx: &mut Context<Self>) {
+        let (now, reduce) = (cx.background_executor().now(), cx.reduce_motion());
+        self.at = at;
+        self.when = when;
+        if let Some(sent) = self.sent.as_mut() {
+            sent.ink.animate(1.0, PANEL, now, reduce);
+            sent.sending.animate(0.0, PANEL, now, reduce);
+            sent.failed.animate(0.0, PANEL, now, reduce);
+        }
+        self.set_block(block, cx);
+        cx.notify();
+    }
+
+    /// The lines under a message the user sent while they show: `Sending…`, or why it was
+    /// refused with Retry and Edit; each unfolds and folds away.
+    fn sent_lines(&self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let Some(sent) = &self.sent else {
+            return Vec::new();
+        };
+        let now = cx.background_executor().now();
+        let p = palette(cx);
+        let key = sent.key;
+        let mut lines = Vec::new();
+        let mut fold = |motion: &Motion, height: &Rc<Cell<Pixels>>, part: &str, line: Div| {
+            let (t, running) = (motion.value(now), motion.is_running(now));
+            if running {
+                window.request_animation_frame();
+            }
+            if t > 0.0 || running {
+                let frame = fold_frame(
+                    pending_part(key, part),
+                    motion.target() == 1.0,
+                    running,
+                    t,
+                    height,
+                    line,
+                );
+                lines.push(frame.into_any_element());
+            }
+        };
+        let sending = div().pt(space::XS).flex().justify_end().child(
+            div()
+                .id(pending_part(key, "sending"))
+                .flex()
+                .items_center()
+                .gap(space::XS)
+                .text_size(px(11.5))
+                .text_color(p.faint)
+                .aria_label(SENDING)
+                .child(icon(Icon::Clock).size(px(11.)).text_color(p.faint))
+                .child(SENDING)
+                .test_support(),
+        );
+        fold(&sent.sending, &sent.sending_height, "sending-line", sending);
+        let why = sent.refused.clone().unwrap_or_default();
+        let said = SharedString::from(format!("{NOT_SENT_LINE} · {why}"));
+        let page = self.page.clone();
+        let on = move |act: fn(&mut Reply, u64, &mut Window, &mut Context<Reply>)| {
+            let page = page.clone();
+            move |_: &gpui_kit::ClickEvent, window: &mut Window, cx: &mut gpui_kit::App| {
+                let Some(reply) = page.upgrade().map(|page| page.read(cx).reply.clone()) else {
+                    return;
+                };
+                reply.update(cx, |reply, cx| act(reply, key, window, cx));
+            }
+        };
+        let failed = div()
+            .pt(space::XS)
+            .flex()
+            .flex_col()
+            .items_end()
+            .gap(space::XS)
+            .child(
+                div()
+                    .id(pending_part(key, "failed"))
+                    .max_w(px(540.))
+                    .flex()
+                    .items_center()
+                    .gap(space::XS)
+                    .text_size(px(11.5))
+                    .text_color(p.fail)
+                    .aria_label(said.clone())
+                    .child(icon(Icon::Warning).size(px(11.)).text_color(p.fail))
+                    .child(said)
+                    .test_support(),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(space::XS)
+                    .child(
+                        Button::quiet(pending_part(key, "retry"), RETRY)
+                            .leading(Icon::Restart)
+                            .on_click(on(|reply, key, _, cx| reply.retry(key, cx))),
+                    )
+                    .child(
+                        Button::quiet(pending_part(key, "edit"), crate::queued::EDIT)
+                            .leading(Icon::Edit)
+                            .on_click(on(|reply, key, window, cx| {
+                                reply.edit_pending(key, window, cx)
+                            })),
+                    ),
+            );
+        fold(&sent.failed, &sent.failed_height, "failed-line", failed);
+        lines
     }
 
     pub fn block(&self) -> &Block {
@@ -3581,7 +4134,16 @@ impl Render for Row {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
         let p = palette(cx);
-        let id = |part: &str| ElementId::Name(format!("row-{}-{part}", self.at).into());
+        // A message being sent is named by its key until the daemon records it.
+        let pending = self
+            .sent
+            .as_ref()
+            .filter(|sent| sent.ink.target() == 0.0)
+            .map(|sent| sent.key);
+        let id = |part: &str| match pending {
+            Some(key) => pending_part(key, part),
+            None => ElementId::Name(format!("row-{}-{part}", self.at).into()),
+        };
         // The row's own block, not a copy of it.
         let block = self.block.clone();
         match &*block {
@@ -3592,11 +4154,24 @@ impl Render for Row {
                 ..
             } => {
                 let page = self.page.upgrade();
-                let pictures: Vec<Option<Arc<gpui_kit::Image>>> = images
-                    .iter()
-                    .map(|name| page.as_ref()?.read(cx).pictures.get(name).cloned())
-                    .collect();
+                let pictures: Vec<Option<Arc<gpui_kit::Image>>> = match &self.sent {
+                    Some(sent) if !sent.images.is_empty() => {
+                        sent.images.iter().cloned().map(Some).collect()
+                    }
+                    _ => images
+                        .iter()
+                        .map(|name| page.as_ref()?.read(cx).pictures.get(name).cloned())
+                        .collect(),
+                };
                 let worded = !text.trim().is_empty();
+                let now = cx.background_executor().now();
+                let ink = self.sent.as_ref().map_or(1.0, |sent| {
+                    if sent.ink.is_running(now) {
+                        window.request_animation_frame();
+                    }
+                    sent.ink.value(now)
+                });
+                let quiet = QUIET + (1.0 - QUIET) * ink;
                 // The pictures sit inside the bubble, above its text.
                 let thumbs = (!pictures.is_empty()).then(|| {
                     div()
@@ -3604,6 +4179,7 @@ impl Render for Row {
                         .flex()
                         .flex_wrap()
                         .gap(space::SM)
+                        .when(quiet < 1.0, |d| d.opacity(quiet))
                         .children(pictures.into_iter().enumerate().map(|(n, picture)| {
                             let thumb = div()
                                 .id(id(&format!("image-{n}")))
@@ -3628,6 +4204,7 @@ impl Render for Row {
                         }))
                         .test_support()
                 });
+                let lines = self.sent_lines(window, cx);
                 let message = div()
                     .id(id("message"))
                     .flex()
@@ -3646,6 +4223,7 @@ impl Render for Row {
                             .rounded_bl(px(14.))
                             .rounded_br(px(4.))
                             .p(space::SM)
+                            .aria_label(SharedString::from(text.clone()))
                             .when_some(self.label(), |d, from| {
                                 d.child(
                                     div()
@@ -3666,6 +4244,7 @@ impl Render for Row {
                                         .id(id("message-text"))
                                         .px(space::SM)
                                         .py(space::XS)
+                                        .when(quiet < 1.0, |d| d.opacity(quiet))
                                         .child(markdown_view(
                                             id("message-region"),
                                             &self.markdown,
@@ -3677,16 +4256,13 @@ impl Render for Row {
                             .children(commands.as_ref().map(|_| self.render_received(window, cx)))
                             .test_support(),
                     )
+                    .children(lines)
                     .test_support();
-                said(
-                    format!("row-{}", self.at),
-                    message,
-                    true,
-                    self.when,
-                    text.clone(),
-                    p,
-                )
-                .into_any_element()
+                let said_id = match pending {
+                    Some(key) => format!("pending-{key}"),
+                    None => format!("row-{}", self.at),
+                };
+                said(said_id, message, true, self.when, text.clone(), p).into_any_element()
             }
             // Another session's words, or what this one sent it: the agent's side, marked with
             // who it is from or to, never drawn as the user's.
@@ -6309,6 +6885,50 @@ fn elbow(color: gpui_kit::Hsla) -> gpui_kit::Canvas<()> {
     )
 }
 
+/// What the daemon said when it took a message: its delivery, and the last event before it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Accepted {
+    pub delivery: String,
+    pub after: u64,
+}
+
+/// A message sent from the composer and not recorded yet: shown from the moment it is sent, in
+/// the conversation, or under it where a message waits when a turn ran as it was sent.
+#[derive(Clone, Debug)]
+pub struct Pending {
+    pub key: u64,
+    pub text: String,
+    pub images: Vec<Arc<gpui_kit::Image>>,
+    /// Why the daemon refused it: it stays, with Retry and Edit.
+    pub refused: Option<String>,
+    pub accepted: Option<Accepted>,
+    /// A turn ran as it was sent: it is to wait under the conversation.
+    pub queued: bool,
+    /// The last event of the conversation shown as it was sent: its record comes after.
+    pub since: Option<u64>,
+}
+
+impl Pending {
+    /// Sent, and the daemon has not answered yet.
+    pub fn in_flight(&self) -> bool {
+        self.accepted.is_none() && self.refused.is_none()
+    }
+
+    /// Taken by the daemon as `delivery`, and not refused since.
+    fn is(&self, delivery: &str) -> bool {
+        self.refused.is_none()
+            && self
+                .accepted
+                .as_ref()
+                .is_some_and(|a| a.delivery == delivery)
+    }
+}
+
+/// The id of a part of a message being sent: `pending-<key>-<part>`.
+pub fn pending_part(key: u64, part: &str) -> ElementId {
+    ElementId::Name(format!("pending-{key}-{part}").into())
+}
+
 /// The composer of a session: it writes to the root agent, and only to it. A word at the cursor
 /// that starts with `/` lists the project's commands: picking one completes it into `/name `, and
 /// the daemon sends the instructions of each command the message uses with it. The field cannot
@@ -6346,8 +6966,14 @@ pub struct Reply {
     running: bool,
     /// An interruption was asked and not answered yet.
     interrupting: bool,
-    /// The field's text as it was sent, while it is: what is typed after it is kept.
-    sent: Option<String>,
+    /// The messages sent and not recorded yet, the oldest first: each shows from the moment it
+    /// is sent, and one the daemon refused stays until it is sent again or taken back.
+    pending: Vec<Pending>,
+    /// The key the next message sent takes.
+    next_pending: u64,
+    /// Deliveries that left the queue (withdrawn: `None`) or will never be read (`Some`, why)
+    /// before the daemon's answer named them: the answer finds them here.
+    left: HashMap<String, Option<String>>,
     /// What the root does while its turn runs, for the line above the field.
     activity: Option<Activity>,
     /// The pictures that go with the next message.
@@ -6420,7 +7046,9 @@ impl Reply {
             sending: false,
             running: false,
             interrupting: false,
-            sent: None,
+            pending: Vec::new(),
+            next_pending: 0,
+            left: HashMap::new(),
             activity: None,
             attached: Attachments::default(),
             renders: 0,
@@ -6447,6 +7075,11 @@ impl Reply {
 
     pub fn is_sending(&self) -> bool {
         self.sending
+    }
+
+    /// The messages sent and not recorded yet, the oldest first.
+    pub fn pending(&self) -> &[Pending] {
+        &self.pending
     }
 
     /// The pictures that go with the next message.
@@ -6838,8 +7471,9 @@ impl Reply {
             .into_any_element()
     }
 
-    /// Sends what the field holds to the root agent.
-    pub fn send(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+    /// Sends what the field holds to the root agent: it leaves the composer at once and shows as
+    /// a message being sent until the daemon records it.
+    pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let typed = self.field.read(cx).value().to_string();
         let message = typed.trim().to_owned();
         if self.sending {
@@ -6852,18 +7486,92 @@ impl Reply {
         if message.is_empty() && self.attached.is_empty() {
             return;
         }
+        let key = self.next_pending;
+        self.next_pending += 1;
+        self.pending.push(Pending {
+            key,
+            text: message,
+            images: self.attached.take(cx),
+            refused: None,
+            accepted: None,
+            queued: self.running,
+            since: None,
+        });
+        self.has_text = false;
+        self.field
+            .update(cx, |field, cx| field.set_value("", window, cx));
+        self.typed("", cx);
+        self.ask(key, cx);
+    }
+
+    /// Asks the daemon to take the message `key`.
+    fn ask(&mut self, key: u64, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending.iter().find(|p| p.key == key) else {
+            return;
+        };
         self.sending = true;
-        self.sent = Some(typed);
-        let images = self.attached.sending();
         let command = Command::Reply {
             session: self.session.clone(),
-            message,
-            images,
+            key,
+            message: pending.text.clone(),
+            images: pending
+                .images
+                .iter()
+                .map(|image| Picture {
+                    mime: image.format.mime_type().to_owned(),
+                    bytes: image.bytes.clone(),
+                })
+                .collect(),
         };
         self.shell
             .update(cx, |shell, _| shell.perform(command))
             .ok();
         cx.notify();
+    }
+
+    /// Sends again a message the daemon refused: it shows as being sent again, in its place.
+    pub fn retry(&mut self, key: u64, cx: &mut Context<Self>) {
+        if self.sending {
+            return;
+        }
+        let Some(pending) = self.pending.iter_mut().find(|p| p.key == key) else {
+            return;
+        };
+        if pending.refused.take().is_none() {
+            return;
+        }
+        pending.accepted = None;
+        pending.since = None;
+        pending.queued = self.running;
+        self.ask(key, cx);
+    }
+
+    /// Puts a message the daemon refused back in the composer: it leaves the conversation.
+    pub fn edit_pending(&mut self, key: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(at) = self
+            .pending
+            .iter()
+            .position(|p| p.key == key && p.refused.is_some())
+        else {
+            return;
+        };
+        let pending = self.pending.remove(at);
+        let pictures = pending
+            .images
+            .iter()
+            .map(|image| Picture {
+                mime: image.format.mime_type().to_owned(),
+                bytes: image.bytes.clone(),
+            })
+            .collect();
+        self.restore(&pending.text, pictures, window, cx);
+    }
+
+    /// The message `key` is recorded: it is shown as the daemon has it now.
+    pub fn resolve(&mut self, key: u64, cx: &mut Context<Self>) -> Option<Pending> {
+        let at = self.pending.iter().position(|p| p.key == key)?;
+        cx.notify();
+        Some(self.pending.remove(at))
     }
 
     /// A waiting message taken back to be changed: its text goes at the end of what the field
@@ -6895,32 +7603,72 @@ impl Reply {
         cx.notify();
     }
 
-    /// What the daemon answered: what was sent leaves the field, and what was typed after it
-    /// stays; or the field keeps the message and says why.
-    pub fn replied(
-        &mut self,
-        refused: Option<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// What the daemon answered for the message `key`: it waits to be recorded, or it stays
+    /// where it is, refused, with why.
+    pub fn replied(&mut self, key: u64, answer: Result<Accepted, String>, cx: &mut Context<Self>) {
         self.sending = false;
-        let sent = self.sent.take();
-        match refused {
-            None => {
-                self.attached.sent();
-                let now = self.field.read(cx).value().to_string();
-                // A sent text changed meanwhile is left as it is: nothing typed is lost.
-                if let Some(rest) = sent.as_deref().and_then(|sent| now.strip_prefix(sent)) {
-                    let rest = rest.trim_start().to_owned();
-                    self.has_text = !rest.trim().is_empty();
-                    self.field
-                        .update(cx, |field, cx| field.set_value(rest.clone(), window, cx));
-                    self.typed(&rest, cx);
+        // An answer to a message answered already (said refused by the agent's end) is late.
+        let Some(at) = self
+            .pending
+            .iter()
+            .position(|p| p.key == key && p.in_flight())
+        else {
+            return cx.notify();
+        };
+        match answer {
+            Ok(accepted) => {
+                let left = self.left.remove(&accepted.delivery);
+                self.pending[at].accepted = Some(accepted);
+                match left {
+                    Some(Some(why)) => self.pending[at].refused = Some(why),
+                    Some(None) => {
+                        self.pending.remove(at);
+                    }
+                    None => {}
                 }
             }
-            Some(why) => toast(Toast::failure(NOT_SENT).detail(why), cx),
+            Err(why) => self.pending[at].refused = Some(why),
         }
         cx.notify();
+    }
+
+    /// A delivery left the queue: taken back (`why` is `None`), or never to be read, and why.
+    /// The message it is leaves, or stays refused; one not answered yet finds it on its answer.
+    pub fn delivery_left(&mut self, delivery: &str, why: Option<String>, cx: &mut Context<Self>) {
+        let Some(at) = self.pending.iter().position(|p| p.is(delivery)) else {
+            if self.pending.iter().any(Pending::in_flight) {
+                self.left.insert(delivery.to_owned(), why);
+            }
+            return;
+        };
+        match why {
+            Some(why) => self.pending[at].refused = Some(why),
+            None => {
+                self.pending.remove(at);
+            }
+        }
+        cx.notify();
+    }
+
+    /// The root ended or failed: what it took and has not read yet will never be, and says why.
+    pub fn root_ended(&mut self, why: &str, cx: &mut Context<Self>) {
+        let mut changed = false;
+        for pending in &mut self.pending {
+            if pending.accepted.is_some() && pending.refused.is_none() {
+                pending.refused = Some(why.to_owned());
+                changed = true;
+            }
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// Stamps the messages just sent with the last event of the conversation shown.
+    fn stamp(&mut self, last: u64) {
+        for pending in &mut self.pending {
+            pending.since.get_or_insert(last);
+        }
     }
 }
 

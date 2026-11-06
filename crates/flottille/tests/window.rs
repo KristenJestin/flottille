@@ -3625,9 +3625,10 @@ fn text_typed_while_a_reply_sends_is_kept(cx: &mut TestAppContext) {
         reply.read_with(cx, |r, _| !r.is_sending())
     });
 
+    // The field emptied as the message was sent: what was typed after it is all it holds.
     assert_eq!(
         reply.read_with(cx, |r, cx| r.field().read(cx).value().to_string()),
-        "and then"
+        " and then"
     );
     let prompts = user.received_requests("session/prompt");
     assert!(prompts.iter().any(|p| p.to_string().contains("first")));

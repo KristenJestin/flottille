@@ -359,6 +359,8 @@ pub enum Command {
     /// A message to a session's root agent: the only agent the window writes to.
     Reply {
         session: String,
+        /// The message being sent, as the composer keeps it until the daemon answers.
+        key: u64,
         message: String,
         /// Pasted or dropped pictures that go with it, as the clipboard gave them.
         images: Vec<Picture>,
@@ -843,7 +845,8 @@ pub enum Outcome {
     /// A message to the session's root was taken, or refused with why.
     Replied {
         session: String,
-        refused: Option<String>,
+        key: u64,
+        answer: Result<crate::session::Accepted, String>,
     },
     /// A waiting message was taken back, with its text and pictures, or the daemon refused with
     /// why ("already read by the agent").
@@ -1781,24 +1784,29 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
         }
         Command::Reply {
             session,
+            key,
             message,
             images,
-        } => match ask_alone(
-            connect,
-            "agent.send",
-            json!({"agent": session, "message": message,
-                "images": images.iter().map(Picture::to_json).collect::<Vec<_>>()}),
-            bounds.quick,
-        ) {
-            Ok(Ok(_)) => Outcome::Replied {
+        } => {
+            let answer = match ask_alone(
+                connect,
+                "agent.send",
+                json!({"agent": session, "message": message,
+                    "images": images.iter().map(Picture::to_json).collect::<Vec<_>>()}),
+                bounds.quick,
+            ) {
+                Ok(Ok(taken)) => Ok(crate::session::Accepted {
+                    delivery: taken["delivery"].as_str().unwrap_or_default().to_owned(),
+                    after: taken["after"].as_u64().unwrap_or_default(),
+                }),
+                Ok(Err(why)) | Err(why) => Err(why),
+            };
+            Outcome::Replied {
                 session,
-                refused: None,
-            },
-            Ok(Err(why)) | Err(why) => Outcome::Replied {
-                session,
-                refused: Some(why),
-            },
-        },
+                key,
+                answer,
+            }
+        }
         Command::Unqueue {
             session,
             delivery,

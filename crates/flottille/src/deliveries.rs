@@ -364,6 +364,8 @@ pub struct Prompt {
     /// For each delivery taken, in order, what was typed and the commands it used (`null` for one
     /// sent as written); `null` when none used a command. The window shows the typed text.
     pub typed: Value,
+    /// The ids of the deliveries taken, in order: the window knows a message it sent by its own.
+    pub deliveries: Vec<String>,
 }
 
 /// The agent's queued deliveries as one prompt, taken: those that start a session first, then the
@@ -415,6 +417,7 @@ pub fn pump(daemon: &Daemon, agent: &str) -> Option<Prompt> {
         Value::Null
     };
     Some(Prompt {
+        deliveries: taken.iter().map(|d| d.id.clone()).collect(),
         images: taken.iter().flat_map(|d| d.images.clone()).collect(),
         typed,
         text: taken
