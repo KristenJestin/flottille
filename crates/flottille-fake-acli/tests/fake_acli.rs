@@ -562,12 +562,12 @@ fn an_assignee_the_site_does_not_know_is_refused_as_the_real_one_does() {
             .contains("User not found for email: bob@example.org")
     );
     assert_eq!(name.status.code(), Some(1));
-    assert!(
-        String::from_utf8_lossy(&name.stderr).contains("invalid format for assignee email")
-    );
+    assert!(String::from_utf8_lossy(&name.stderr).contains("invalid format for assignee email"));
     // The real `edit` is a bulk command: it ends with 0 and says its failure on its output.
     assert!(edited.status.success());
-    assert!(String::from_utf8_lossy(&edited.stdout).starts_with("✗ Failure: ABC-1 can't be edited"));
+    assert!(
+        String::from_utf8_lossy(&edited.stdout).starts_with("✗ Failure: ABC-1 can't be edited")
+    );
 }
 
 #[test]
@@ -587,7 +587,8 @@ fn a_creation_from_json_is_recorded_and_needs_its_type() {
     let made = create(json!({"projectKey": "ABC", "summary": "S", "type": "Task",
         "additionalAttributes": {"customfield_10020": 42}}));
     let untyped = create(json!({"projectKey": "ABC", "summary": "S"}));
-    let me = create(json!({"projectKey": "ABC", "summary": "S", "type": "Task", "assignee": "@me"}));
+    let me =
+        create(json!({"projectKey": "ABC", "summary": "S", "type": "Task", "assignee": "@me"}));
 
     assert_eq!(
         serde_json::from_slice::<Value>(&made.stdout).unwrap()["key"],

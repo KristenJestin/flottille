@@ -630,7 +630,10 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
             let Some(project) = value(rest, "--project") else {
                 return not_run(&words);
             };
-            let boards = script["boards"][project].as_array().cloned().unwrap_or_default();
+            let boards = script["boards"][project]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
             // As a real site printed it: Jira's agile REST page.
             println!(
                 "{}",
@@ -1082,10 +1085,11 @@ fn value<'a>(args: &[&'a str], flag: &str) -> Option<&'a str> {
     args.get(at + 1).copied()
 }
 
-/// A write to the work item of `--key`: done when the script holds it.
+/// A write to the work item of `--key`: done when the script holds it, or it is the one a
+/// creation answers (`created`).
 fn known(script: &Value, args: &[&str]) -> i32 {
     match value(args, "--key") {
-        Some(key) if script["items"].get(key).is_some() => {
+        Some(key) if script["items"].get(key).is_some() || script["created"] == key => {
             println!("✓ Work item {key} updated");
             0
         }
