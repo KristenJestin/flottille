@@ -554,7 +554,7 @@ Its process was let go; the next message starts it again.
 | Field | |
 |---|---|
 | `agent` | |
-| `reason` | `idle` (no turn for the idle release time), `restart` (the daemon that ran it is gone) or `stopped` (an ended root whose session is kept: it can be resumed now, `agent.resume`). |
+| `reason` | `idle` (no turn for the idle release time), `restart` (the daemon that ran it is gone), `reload` (the user reloaded its tools, `agent.reload_tools`) or `stopped` (an ended root whose session is kept: it can be resumed now, `agent.resume`). |
 
 #### `agent.died`
 

@@ -109,10 +109,20 @@ older list** until it lists them or its tools come back to that list, through la
 too; one whose agent cannot take new tools runs one while its list is not the one its process
 started with. Then `agent.show` and
 `agent.tree` say `tools_outdated: true`, `flottille agent show` says that the session runs an
-older list of tools than its role has now and that a restart (stop, then resume) gives the new
-one, the window says so above the composer, and `agent.tools_outdated` says when that starts and
-when it ends, its process's end included (`docs/events.md`). The next process of the agent
-starts on the new list.
+older list of tools than its role has now and that reloading them gives the new one, the window
+says so above the composer with a **Reload tools** button, and `agent.tools_outdated` says when
+that starts and when it ends, its process's end included (`docs/events.md`). The next process of
+the agent starts on the new list.
+
+**Reloading a session's tools** (`agent.reload_tools`, `flottille agent reload-tools`, and in the
+window the outdated line's button, the root's menu and `/reload-tools` in the composer) lets its
+root's process go, as an idle release does (`agent.released`, reason `reload`); the next message
+starts the next one on the same session, with the tools its role has now. A turn that runs is
+never cut: the process goes once it ended, and the window says `Reloads after this turn` until
+then. It relies on the new process, not on `list_changed`, so it works the same for every agent:
+the new process's first prompt carries the `tools` delivery, what changed by tool as above, or
+`Your tools were reloaded: nothing changed.`, so that the agent knows its list is current. Its
+children keep their processes and lists. A session that ended or failed does not offer it.
 
 What the agents Flottille runs do with the notice (checked in November 2026, from their
 documentation, changelogs and published source, never by running one):

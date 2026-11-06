@@ -1116,6 +1116,18 @@ whose session was forgotten (7 days after it ended), one whose workspace or proj
 `resumable` says, in short (`agent.tree`); and one whose last process is still stopping
 (`stopping`), with a sentence to try again in a moment.
 
+#### `agent.reload_tools`
+
+`{"agent"}`. Reloads a root's tools (`docs/tools.md`, "When the tools change"): `{"agent",
+"after_turn"}`. Its process is let go between turns, as after an idle release
+(`agent.released`, reason `reload`), and the next message starts the next one, which resumes or
+loads its session with the tools its role has now. A turn that runs is never cut: the process goes
+once it ended (`after_turn` true), the prompts waiting going to the next process. The next
+process's prompt carries a `tools` delivery: what changed since the last list the agent was given,
+by tool, else `Your tools were reloaded: nothing changed.`, whatever its agent does with
+`list_changed`. Its children keep their processes. `refused` for a child (the sentence names its
+root) and an agent in a final state.
+
 #### `agent.mode`
 
 `{"agent", "mode"}`, `mode` `ask`, `auto` or `full`. Puts the agent's tree in that mode
