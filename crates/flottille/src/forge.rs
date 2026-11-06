@@ -41,6 +41,7 @@ mod events;
 pub(crate) mod followed;
 mod logs;
 mod pipelines;
+mod yaml;
 
 pub(crate) use events::offer;
 pub use events::{EVENTS, target_named};

@@ -12,7 +12,7 @@ use serde_norway::Value as Yaml;
 use super::followed::{self, Started};
 use super::{
     Forge, ForgeCall, NO_FORGE, bitbucket, chosen, ci, declared_forge, events, gh_json, gh_text,
-    logs, place_checkouts, signed_in,
+    logs, place_checkouts, signed_in, yaml,
 };
 use crate::daemon::Daemon;
 use crate::git::{self, Class};
@@ -392,7 +392,8 @@ impl Unread {
     }
 }
 
-/// A file at a commit, parsed, merge keys (`<<: *anchor`) applied: why not when it cannot be read.
+/// A file at a commit, parsed, a repeated key read as the forge reads it (the last one kept, said
+/// in the notes), merge keys (`<<: *anchor`) applied: why not when it cannot be read.
 async fn yaml_at(
     checkout: &super::Checkout,
     reference: &str,
@@ -422,8 +423,8 @@ async fn yaml_at(
         }
         Err(why) => return Err(Unread::Git(why)),
     };
-    let mut yaml: Yaml = serde_norway::from_str(&text).map_err(|e| Unread::Yaml(e.to_string()))?;
-    let mut notes = Vec::new();
+    let (mut yaml, mut notes) =
+        yaml::parse(&text, path).map_err(|e| Unread::Yaml(e.to_string()))?;
     // `Value` keeps `<<` as a key of its own: the anchors it names are merged in, or the file is
     // used as written and the note says so.
     let mut merged = yaml.clone();
@@ -438,7 +439,7 @@ async fn yaml_at(
 }
 
 /// A YAML scalar as words.
-fn scalar(value: &Yaml) -> Option<String> {
+pub(super) fn scalar(value: &Yaml) -> Option<String> {
     match value {
         Yaml::String(text) => Some(text.clone()),
         Yaml::Number(number) => Some(number.to_string()),

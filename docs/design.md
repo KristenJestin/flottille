@@ -780,7 +780,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   sessions, each workspace's card saying where each of its repositories stands (branch, commits
   ahead, files not committed, setup steps played), creating and removing a
   workspace (with the preparation's progress and failure output), the composer that starts
-  a session (place, agent, model, first message), its pull requests and tickets (`items.md`: two
+  a session (place, agent, model, first message, and pictures taken as a session's composer does,
+  which go with the first message), its pull requests and tickets (`items.md`: two
   tabs, Pull requests and Tickets, each counting what it lists, filtered open, closed or all, the
   user's own, and a repository for the pull requests, and searched by key or title (the quick
   switcher's matching, what matched in the accent; a line says how many are listed, `128 open`,
