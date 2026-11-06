@@ -1339,7 +1339,9 @@ source's own (`forge`: `project`, `workspace`, `repository`, `number`; `tickets`
 `repository`, the tracker's, empty for Jira, and `key`, `5` or `ABC-1`; `timer`: `why`,
 `expires_at` being when it wakes; `session`: `session` and `title`, the session followed, with no
 end of its own), `from` is `anyone` or `people`, the times are in milliseconds since the Unix
-epoch. `paused` is true for a following paused because its two sessions wrote to each other
+epoch. A subscription with no deadline (one to a pull request or a ticket the agent gave no
+`minutes`, a following) has `expires_at` 9223372036854775807 (`i64::MAX`): it lasts until its
+target ends. `paused` is true for a following paused because its two sessions wrote to each other
 without the user (`docs/tools.md`, "Sessions that talk to each other"), false otherwise.
 
 #### `subscription.cancel`

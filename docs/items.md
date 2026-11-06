@@ -189,16 +189,18 @@ again on its own (#257):
   `merged` and `closed`. A ticket's `item.commented` is its `commented`, an `item.changed` of its
   `status` or of its `state` (a reopening) its `status`, one of its `assignees` its `assigned`,
   `item.closed` its `closed`. The failed jobs' logs a `checks` delivery summarises are read then (three at most), after
-  the round, which does not wait for them; that delivery ends the subscription, so an event that
-  comes while they are read (a comment) is not delivered before it, nor after.
+  the round, which does not wait for them; an event that comes for the subscription while they
+  are read (a comment) is kept and delivered with the checks, after them. Each read that holds
+  events is one delivery, and the subscription goes on until its item ends (`item.merged`,
+  `item.closed`); the deliveries of a round ring each agent once, at the round's end.
 - **A run an agent follows** (`forge` `run`, [`forges.md`](forges.md), "Following a run") is read
   by the round of its repository's pull requests, after them and whatever they gave: one request
   a run, none when no run is followed there. It is no item and stores nothing but what its
   following last said (a wait, a read that failed).
 - **What changed with no event of its own is no event of a subscription**: an `item.changed` that
   names only a `description`, a `discussion` or `checks` delivers nothing, and `items.forgotten`
-  neither delivers nor ends a subscription to an item of that source: it ends at its time, as one
-  to which nothing came, or hears its item again from the rounds after the first of the source
+  neither delivers nor ends a subscription to an item of that source: it ends at its deadline, when
+  the agent gave one, or hears its item again from the rounds after the first of the source
   declared again.
 - **Their latency is the rhythm** above: a minute while a window is connected, five otherwise. A
   subscription that needs to hear sooner has no faster rhythm of its own (a follow-up, if one

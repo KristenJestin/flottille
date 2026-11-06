@@ -672,9 +672,11 @@ log, or why there is none:
 
 ## How long CI takes
 
-An agent that subscribes to its pull request picks a duration blind. So `forge` `show` of a pull
-request (the workspace's branch's or one by its number) and the answer of `forge` `subscribe` carry
-one line about the repository's recent CI runs, when there are finished ones to measure:
+An agent that waits on its pull request's checks is told how long they usually take, as
+information: a subscription needs no duration, it lasts until the pull request is merged or closed
+("Subscriptions" below). So `forge` `show` of a pull request (the workspace's branch's or one by
+its number) and the answer of `forge` `subscribe` carry one line about the repository's recent CI
+runs, when there are finished ones to measure:
 
 ```
 Recent CI runs of acme/app took 4 min on average (3 to 6 min, last 5).
@@ -697,18 +699,8 @@ Recent CI runs of acme/app took 4 min on average (3 to 6 min, last 5).
   of the items (which a subscription hears) nor the watch of a client. **A read that fails** (`gh` or `bkt` failing, an answer in a
   shape not expected) is not an error: `show` and `subscribe` answer without the line.
 
-**`forge` `subscribe` without `minutes`** is sized by those runs: twice their average, rounded up
-to the minute, from 15 minutes (`SHORTEST_MINUTES` in `forge/ci.rs`) to the longest allowed
-(`subscriptions::LONGEST_MINUTES`); with no run to measure by it stays
-`subscriptions::DEFAULT_MINUTES`, 60. The answer says which duration was taken and why:
-
-```
-Duration: 25 min, twice the average of the recent CI runs.
-Duration: 15 min, the shortest: twice the average of the recent CI runs is 4 min.
-Duration: 60 min, the default: no recent CI run to measure it by.
-```
-
-With `minutes`, the agent's choice is kept and the answer carries the line about the runs alone.
+Nothing is sized by those runs: `forge` `subscribe` without `minutes` has no deadline, and with
+`minutes` the agent's deadline is kept; the answer carries the line either way.
 
 ## Subscriptions
 
@@ -716,7 +708,12 @@ The pull requests the daemon keeps up to date are a source of events of the subs
 (`docs/design.md` §5.6). Each round of the items compares what it read of a pull request with
 what the store holds of it and says what changed as `item.*` events ([`items.md`](items.md),
 "Events"); a subscription to that pull request is offered them once they are stored, as the
-events it names:
+events it names, and wakes the agent at each read that holds some, until the pull request is
+merged or closed: the agent subscribes once, and is never asked to subscribe again. The events of
+one round are one delivery, the deliveries of a round ring the agent once, and those that come
+while it is in a turn are pumped together, in order, at its end. When the logs of failed jobs are
+read for a `checks` delivery, what comes for the subscription meanwhile is kept and delivered with
+it, after the checks.
 
 - `checks` (`item.checks`): none runs now, and one was running or the head commit changed; the
   delivery is a summary, not the logs: how many passed, failed and were skipped, then for each
@@ -729,7 +726,8 @@ events it names:
 - `comment` (`item.commented`): a comment that was not there, with its author and an excerpt, the
   newest five of a round at most;
 - `merged`, `closed` (`item.merged`, `item.closed`): the pull request's state became that; either
-  ends every subscription to it.
+  ends every subscription to it, said (`The pull request #12 of api was merged: your subscription
+  to checks is over.`).
 
 `forge subscribe` reads the pull request once and stores it before the subscription opens: what
 is already so is no event. A round that fails changes nothing. A subscription hears as often as

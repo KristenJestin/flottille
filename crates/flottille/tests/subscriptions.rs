@@ -1,6 +1,6 @@
 //! The scenarios of the subscriptions (`docs/design.md` §5.6, `docs/tools.md`, "The forge"): an
-//! agent subscribes once to the next event of its workspace's pull request, and the first one that
-//! matches wakes it as a delivery. The events are those of the daemon's rounds of the items
+//! agent subscribes once to the events of its workspace's pull request, and each read that holds
+//! some wakes it as a delivery, until the pull request is merged or closed. The events are those of the daemon's rounds of the items
 //! (`docs/items.md`), which each test starts itself (`items.refresh`); a subscription reads
 //! nothing of its own. Read through the fake `gh` (`crates/flottille-fake-gh`), the clock moved
 //! by the test; no test ever calls GitHub.
@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use common::User;
 use common::mcp::{Mcp, server_of};
+use flottille_core::store::Store;
 use serde_json::{Value, json};
 
 /// What Flottille ends every comment and body it posts for an agent with (`docs/forges.md`).
@@ -232,15 +233,6 @@ fn an_agent_subscribed_to_checks_is_delivered_their_end_once_with_a_failed_job_s
     ] {
         assert!(delivery.contains(part), "{part} in {delivery}");
     }
-
-    // Over once delivered: the next end is not.
-    let mut again = pull();
-    again["headRefOid"] = "bbbbbbb2".into();
-    script(&user, again.clone());
-    a_round(&user);
-    script(&user, ended(again));
-    a_round(&user);
-    assert_eq!(delivered(&user).len(), 1);
 }
 
 #[test]
@@ -489,47 +481,6 @@ fn a_merged_pull_request_ends_a_subscription_that_waited_for_checks_and_says_so(
 }
 
 #[test]
-fn the_maximum_time_ends_it_and_says_so() {
-    let user = user();
-    fixture(&user);
-    script(&user, pull());
-    let (_, mcp) = agent(&user);
-
-    subscribe(&mcp, json!({"events": ["checks"]}));
-    user.call("test.advance", json!({"ms": 61 * 60_000}))
-        .unwrap();
-    let delivery = the_delivery(&user);
-    assert!(delivery.contains("ended after 60 min"), "{delivery}");
-    assert!(delivery.contains("checks"), "{delivery}");
-}
-
-#[test]
-fn a_subscription_asked_for_100_hours_is_accepted() {
-    let user = user();
-    fixture(&user);
-    script(&user, pull());
-    let (_, mcp) = agent(&user);
-
-    let answer = subscribe(&mcp, json!({"events": ["checks"], "minutes": 6000}));
-    assert!(answer.contains("within 6000 min"), "{answer}");
-}
-
-#[test]
-fn a_subscription_asked_for_more_than_100_hours_is_refused_and_says_6000_is_the_most() {
-    let user = user();
-    fixture(&user);
-    script(&user, pull());
-    let (_, mcp) = agent(&user);
-
-    let answer = mcp.call(
-        "forge",
-        json!({"action": "subscribe", "events": ["checks"], "minutes": 6001}),
-    );
-    assert!(answer.error, "{}", answer.text);
-    assert!(answer.text.contains("from 1 to 6000"), "{}", answer.text);
-}
-
-#[test]
 fn a_forge_subscription_is_delivered_from_the_fetcher_s_checks_event_with_no_watch_of_its_own() {
     let user = user();
     fixture(&user);
@@ -552,12 +503,13 @@ fn a_forge_subscription_is_delivered_from_the_fetcher_s_checks_event_with_no_wat
         delivery.contains("checks ended: 1 passed, 1 failed"),
         "{delivery}"
     );
-    let events = watch.until(|e| e["name"] == "subscription.ended");
+    let events =
+        watch.until(|e| e["name"] == "delivery.queued" && e["data"]["kind"] == "subscription");
     let checks = events.iter().position(|e| e["name"] == "item.checks");
-    let ended = events
+    let queued = events
         .iter()
-        .position(|e| e["name"] == "subscription.ended");
-    assert!(checks.is_some() && checks < ended, "{events:?}");
+        .position(|e| e["name"] == "delivery.queued" && e["data"]["kind"] == "subscription");
+    assert!(checks.is_some() && checks < queued, "{events:?}");
 }
 
 #[test]
@@ -735,7 +687,7 @@ fn a_subscription_cancelled_while_its_logs_are_read_wakes_nobody_and_ends_once()
 }
 
 #[test]
-fn a_delivery_ends_the_subscription_with_an_event_saying_it_was_delivered() {
+fn a_delivery_leaves_the_subscription_open_and_the_end_of_its_target_ends_it_delivered() {
     let user = user();
     fixture(&user);
     script(&user, pull());
@@ -746,7 +698,12 @@ fn a_delivery_ends_the_subscription_with_an_event_saying_it_was_delivered() {
     script(&user, ended(pull()));
     a_round(&user);
     the_delivery(&user);
+    assert_eq!(listed(&user, &id).len(), 1);
 
+    let mut closed = ended(pull());
+    closed["state"] = "CLOSED".into();
+    script(&user, closed);
+    a_round(&user);
     let ended = watch.until(|e| e["name"] == "subscription.ended");
     let ended = ended.last().unwrap();
     assert_eq!(ended["data"]["why"], "delivered", "{ended}");
@@ -1098,7 +1055,7 @@ fn a_new_comment_on_a_followed_jira_item_wakes_its_subscription() {
     ] {
         assert!(delivery.contains(part), "{part} in {delivery}");
     }
-    assert!(listed(&user, &id).is_empty(), "the delivery ends it");
+    assert_eq!(listed(&user, &id).len(), 1, "it goes on");
     assert!(!searched_for_updated(&user), "a real site refuses it");
 }
 
@@ -1254,8 +1211,9 @@ fn the_live_read_of_a_jira_item_has_its_status_category() {
     user.acli_script(json!({
         "items": {"ABC-1": work_item_in("ABC-1", "Done", "done")}, "search": []}));
 
-    let said = subscribe_ticket(&mcp, json!({"ticket": "ABC-1", "events": ["status"]}));
-    assert!(!said.contains("Flottille's rounds have not"), "{said}");
+    // A closed ticket cannot be subscribed to (nothing would end it): `show` reads it live.
+    let shown = mcp.call("tickets", json!({"action": "show", "ticket": "ABC-1"}));
+    assert!(!shown.error, "{}", shown.text);
 
     // Stored by that read, closed because its status is in the done category.
     let stored = user
@@ -1270,17 +1228,23 @@ fn the_live_read_of_a_jira_item_has_its_status_category() {
     assert_eq!(stored[0]["details"]["category"], "done");
 
     // So its reopening, the next round finds, is a change from there.
+    let watch = user.watch(&["--after", "0"]);
     let mut reopened = work_item_in("ABC-1", "In Progress", "indeterminate");
     reopened["fields"]["updated"] = "2026-10-02T10:05:00.000+0000".into();
     jira_script(&user, &[reopened]);
     a_round(&user);
-    let delivery = the_delivery(&user);
-    for part in [
-        "Its state changed from closed to open.",
-        "Its status changed from Done to In Progress.",
-    ] {
-        assert!(delivery.contains(part), "{part} in {delivery}");
-    }
+    let events = watch.until(|e| e["name"] == "item.changed" && e["data"]["key"] == "ABC-1");
+    let changes = &events.last().unwrap()["data"]["changes"];
+    assert_eq!(
+        changes["state"],
+        json!({"from": "closed", "to": "open"}),
+        "{changes}"
+    );
+    assert_eq!(
+        changes["status"],
+        json!({"from": "Done", "to": "In Progress"}),
+        "{changes}"
+    );
 }
 
 #[test]
@@ -1301,7 +1265,7 @@ fn a_ticket_subscription_s_expiry_and_cancel_are_those_of_a_forge_subscription()
     let ended = watch.until(|e| e["name"] == "subscription.ended");
     assert_eq!(ended.last().unwrap()["data"]["why"], "expired", "{ended:?}");
     let delivery = the_delivery(&user);
-    assert!(delivery.contains("ended after 5 min"), "{delivery}");
+    assert!(delivery.contains("Nothing came in 5 min"), "{delivery}");
     assert!(delivery.contains("ticket #5 of api"), "{delivery}");
 
     subscribe_ticket(&mcp, json!({"ticket": "#5", "events": ["commented"]}));
@@ -1594,17 +1558,17 @@ fn ended_checks_whose_logs_are_read_are_delivered_before_a_later_comment() {
             .iter()
             .any(|call| call["args"].to_string().contains("--log-failed"))
     });
-    // A comment comes while the log is read: the checks ended first, and are delivered.
+    // A comment comes while the log is read: the checks ended first, and are delivered with it
+    // after them, as one.
     let mut commented = ended(pull());
     commented["comments"] = json!([{"author": {"login": "alice"}, "body": "Why a new form?"}]);
     user.gh_script(slowly(commented));
     a_round(&user);
 
     let delivery = the_delivery(&user);
-    assert!(
-        delivery.contains("checks ended: 1 passed, 1 failed"),
-        "{delivery}"
-    );
+    let checks = delivery.find("checks ended: 1 passed, 1 failed");
+    let comment = delivery.find("A comment by alice: Why a new form?");
+    assert!(checks.is_some() && checks < comment, "{delivery}");
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(delivered(&user).len(), 1, "{:?}", delivered(&user));
 }
@@ -1821,4 +1785,384 @@ fn past_the_cap_the_failed_jobs_are_counted() {
         .filter(|call| call["args"].to_string().contains("--log-failed"))
         .count();
     assert_eq!(read, 3);
+}
+
+#[test]
+fn a_pull_request_subscription_wakes_at_each_checks_end_until_merged() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull());
+    let (id, mcp) = agent(&user);
+    subscribe(&mcp, json!({"events": ["checks"]}));
+
+    script(&user, ended(pull()));
+    a_round(&user);
+    eventually("the first end", || delivered(&user).len() == 1);
+    let first = delivered(&user).remove(0);
+    assert!(first.contains("checks ended"), "{first}");
+    assert!(first.contains("Your subscription goes on"), "{first}");
+
+    // A new commit: its checks run, then end, and wake it again with no new subscription.
+    let mut again = pull();
+    again["headRefOid"] = "bbbbbbb2".into();
+    script(&user, again.clone());
+    a_round(&user);
+    script(&user, ended(again.clone()));
+    a_round(&user);
+    eventually("the second end", || delivered(&user).len() == 2);
+    assert_eq!(listed(&user, &id).len(), 1, "it goes on");
+
+    let mut merged = ended(again);
+    merged["state"] = "MERGED".into();
+    script(&user, merged);
+    a_round(&user);
+    eventually("the merge", || delivered(&user).len() == 3);
+    let last = delivered(&user).pop().unwrap();
+    assert!(
+        last.contains("was merged: your subscription to checks is over"),
+        "{last}"
+    );
+    assert!(listed(&user, &id).is_empty());
+}
+
+#[test]
+fn a_ticket_subscription_wakes_at_each_comment_until_the_ticket_is_closed() {
+    let user = user();
+    fixture(&user);
+    track(&user, json!({"kind": "github", "repository": "api"}));
+    script_issue(&user, issue(json!([])));
+    let (id, mcp) = agent(&user);
+    subscribe_ticket(&mcp, json!({"ticket": "#5", "events": ["commented"]}));
+
+    let alice = json!({"author": {"login": "alice"}, "body": "I can reproduce"});
+    let bob = json!({"author": {"login": "bob"}, "body": "Me too"});
+    script_issue(&user, issue(json!([alice])));
+    a_round(&user);
+    eventually("the first comment", || delivered(&user).len() == 1);
+    script_issue(&user, issue(json!([alice, bob])));
+    a_round(&user);
+    eventually("the second comment", || delivered(&user).len() == 2);
+    let second = delivered(&user).pop().unwrap();
+    assert!(second.contains("A comment by bob: Me too"), "{second}");
+    assert!(!second.contains("alice"), "{second}");
+    assert_eq!(listed(&user, &id).len(), 1, "it goes on");
+
+    let mut closed = issue(json!([alice, bob]));
+    closed["state"] = "CLOSED".into();
+    script_issue(&user, closed);
+    a_round(&user);
+    eventually("the close", || delivered(&user).len() == 3);
+    let last = delivered(&user).pop().unwrap();
+    assert!(
+        last.contains("was closed: your subscription to commented is over"),
+        "{last}"
+    );
+    assert!(listed(&user, &id).is_empty());
+}
+
+#[test]
+fn a_jira_item_moved_to_a_done_status_ends_its_subscription() {
+    let user = user().with_fake_acli();
+    fixture(&user);
+    track(
+        &user,
+        json!({"kind": "jira", "site": "example.atlassian.net", "projects": ["ABC"]}),
+    );
+    script(&user, pull());
+    user.acli_script(json!({"items": {"ABC-1": work_item("To Do")}}));
+    let (id, mcp) = agent(&user);
+    subscribe_ticket(&mcp, json!({"ticket": "ABC-1", "events": ["status"]}));
+
+    user.acli_script(json!({"items": {"ABC-1": work_item("In Progress")}}));
+    a_round(&user);
+    eventually("the first status", || delivered(&user).len() == 1);
+    assert_eq!(listed(&user, &id).len(), 1, "it goes on");
+
+    // Done is Jira's status category, whatever the status is called.
+    user.acli_script(json!({"items": {"ABC-1": work_item_in("ABC-1", "Shipped", "done")}}));
+    a_round(&user);
+    eventually("the end", || delivered(&user).len() == 2);
+    let last = delivered(&user).pop().unwrap();
+    assert!(last.contains("Shipped"), "{last}");
+    assert!(
+        last.contains("was closed: your subscription to status is over"),
+        "{last}"
+    );
+    assert!(listed(&user, &id).is_empty());
+}
+
+#[test]
+fn events_of_one_round_are_one_wake() {
+    let user = user();
+    fixture(&user);
+    track(&user, json!({"kind": "github", "repository": "api"}));
+    script_issue(&user, issue(json!([])));
+    let (_, mcp) = agent(&user);
+    subscribe(&mcp, json!({"events": ["comment", "review"]}));
+    subscribe_ticket(&mcp, json!({"ticket": "#5", "events": ["commented"]}));
+
+    // One round finds a comment and a review on the pull request, and a comment on the ticket.
+    let mut pull = pull();
+    pull["comments"] = json!([{"author": {"login": "alice"}, "body": "Why a new form?"}]);
+    pull["reviews"] = json!([{"author": {"login": "bob"}, "state": "CHANGES_REQUESTED",
+        "body": "Rename the form"}]);
+    user.gh_script(json!({
+        "pulls": {"acme/api": {"app/login": changed(pull)}},
+        "issues": {"acme/api": {"5": issue(json!([{"author": {"login": "carol"}, "body": "Seen"}]))}}
+    }));
+    a_round(&user);
+
+    let delivery = the_delivery(&user);
+    for part in [
+        "A comment by alice: Why a new form?",
+        "review by bob, changes requested: Rename the form",
+        "A comment by carol: Seen",
+    ] {
+        assert!(delivery.contains(part), "{part} in {delivery}");
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(delivered(&user).len(), 1, "{:?}", delivered(&user));
+}
+
+#[test]
+fn events_during_a_turn_are_delivered_together_after_it() {
+    let user = user();
+    user.fake_script(json!({
+        "turns": [{"when": "slow", "do": [{"hold": "release"}, {"say": "done"}]}]
+    }));
+    fixture(&user);
+    script(&user, pull());
+    let (id, mcp) = agent(&user);
+    subscribe(&mcp, json!({"events": ["comment"]}));
+    user.call("agent.send", json!({"agent": id, "message": "slow"}))
+        .unwrap();
+    eventually("the slow turn", || state(&user, &id) == "working");
+
+    // Two rounds, each with a comment, while the agent works.
+    let alice = json!({"author": {"login": "alice"}, "body": "First"});
+    let bob = json!({"author": {"login": "bob"}, "body": "Second"});
+    let mut commented = pull();
+    commented["comments"] = json!([alice]);
+    script(&user, commented.clone());
+    a_round(&user);
+    commented["comments"] = json!([alice, bob]);
+    script(&user, commented);
+    a_round(&user);
+    assert!(delivered(&user).is_empty(), "{:?}", delivered(&user));
+
+    std::fs::write(user.path("fake/release"), "").unwrap();
+    let delivery = the_delivery(&user);
+    let (first, second) = (
+        delivery.find("A comment by alice: First"),
+        delivery.find("A comment by bob: Second"),
+    );
+    assert!(first.is_some() && first < second, "{delivery}");
+}
+
+#[test]
+fn a_subscription_without_minutes_has_no_deadline() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull());
+    let (id, mcp) = agent(&user);
+    subscribe(&mcp, json!({"events": ["checks"]}));
+    let row = listed(&user, &id).remove(0);
+    assert!(
+        row["expires_at"].as_u64().unwrap() >= i64::MAX as u64,
+        "{row}"
+    );
+
+    // A week passes: the subscription is still there, and still says nothing.
+    user.call("test.advance", json!({"ms": 7 * 24 * 3_600_000_u64}))
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(listed(&user, &id).len(), 1);
+    assert!(delivered(&user).is_empty(), "{:?}", delivered(&user));
+    let shown = mcp.call("forge", json!({"action": "show"}));
+    assert!(
+        shown.text.contains(
+            "- pull request #12 of api, workspace login: checks, until it is merged or closed"
+        ),
+        "{}",
+        shown.text
+    );
+
+    script(&user, ended(pull()));
+    a_round(&user);
+    assert!(the_delivery(&user).contains("checks ended"));
+
+    // A deadline as long as the agent wants: there is no cap any more.
+    let long = subscribe(&mcp, json!({"events": ["checks"], "minutes": 60_000}));
+    assert!(
+        long.contains("or for 60000 min, the deadline you gave"),
+        "{long}"
+    );
+    let zero = mcp.call(
+        "forge",
+        json!({"action": "subscribe", "events": ["checks"], "minutes": 0}),
+    );
+    assert!(zero.error, "{}", zero.text);
+}
+
+#[test]
+fn a_deadline_wakes_once_with_nothing_came_and_ends() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull());
+    let (id, mcp) = agent(&user);
+    subscribe(&mcp, json!({"events": ["checks"], "minutes": 5}));
+    let shown = mcp.call("forge", json!({"action": "show"}));
+    assert!(
+        shown.text.contains("checks, for 5 min more"),
+        "{}",
+        shown.text
+    );
+
+    user.call("test.advance", json!({"ms": 6 * 60_000}))
+        .unwrap();
+    let delivery = the_delivery(&user);
+    assert!(delivery.contains("Nothing came in 5 min"), "{delivery}");
+    assert!(delivery.contains("checks"), "{delivery}");
+    assert!(listed(&user, &id).is_empty());
+
+    user.call("test.advance", json!({"ms": 60 * 60_000}))
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(delivered(&user).len(), 1, "{:?}", delivered(&user));
+}
+
+#[test]
+fn a_subscription_ends_with_its_agent() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull());
+    let (id, mcp) = agent(&user);
+    subscribe(&mcp, json!({"events": ["checks"]}));
+    let watch = user.watch(&["--after", "0"]);
+
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+
+    let seen = watch.until(|e| e["name"] == "subscription.ended");
+    assert_eq!(
+        seen.last().unwrap()["data"]["why"],
+        "agent-ended",
+        "{seen:?}"
+    );
+    assert!(listed(&user, &id).is_empty());
+    script(&user, ended(pull()));
+    a_round(&user);
+    assert!(delivered(&user).is_empty(), "{:?}", delivered(&user));
+}
+
+#[test]
+fn a_subscription_stored_with_a_deadline_keeps_it() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull());
+    let (id, mcp) = agent(&user);
+    subscribe(&mcp, json!({"events": ["checks"]}));
+
+    // What a subscription stored before it lasted until its target ended looks like: the hour it
+    // was given by default.
+    let store = Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let mut old = store.subscriptions().unwrap().remove(0);
+    old.expires_at = old.created_at + 60 * 60_000;
+    let mut store = store;
+    store.subscribe(&old).unwrap();
+    drop(store);
+    let row = listed(&user, &id).remove(0);
+    assert_eq!(
+        row["expires_at"].as_u64().unwrap() - row["created_at"].as_u64().unwrap(),
+        60 * 60_000,
+        "{row}"
+    );
+
+    user.call("test.advance", json!({"ms": 61 * 60_000}))
+        .unwrap();
+    let delivery = the_delivery(&user);
+    assert!(delivery.contains("Nothing came in 60 min"), "{delivery}");
+    // The hour was the old default, not the agent's choice: it is not said to be.
+    assert!(!delivery.contains("you gave"), "{delivery}");
+    assert!(listed(&user, &id).is_empty());
+}
+
+#[test]
+fn the_subscribe_answers_say_no_need_to_subscribe_again() {
+    let user = user();
+    fixture(&user);
+    track(&user, json!({"kind": "github", "repository": "api"}));
+    script_issue(&user, issue(json!([])));
+    let (_, mcp) = agent(&user);
+
+    let pull = subscribe(&mcp, json!({"events": ["checks", "review"]}));
+    assert!(
+        pull.contains(
+            "it wakes you at each of these events until it is merged or closed; no need to \
+             subscribe again"
+        ),
+        "{pull}"
+    );
+    let ticket = subscribe_ticket(&mcp, json!({"ticket": "#5", "events": ["commented"]}));
+    assert!(
+        ticket.contains(
+            "it wakes you at each of these events until the ticket is closed; no need to \
+             subscribe again"
+        ),
+        "{ticket}"
+    );
+    let shown = mcp.call("tickets", json!({"action": "show", "ticket": "#5"}));
+    assert!(
+        shown.text.contains(
+            "Your subscriptions:\n- ticket #5 of api: commented, until the ticket is closed"
+        ),
+        "{}",
+        shown.text
+    );
+}
+
+#[test]
+fn subscribing_to_a_closed_ticket_is_refused() {
+    // A GitHub issue closed: no `item.closed` would ever come to end it.
+    let user = user();
+    fixture(&user);
+    track(&user, json!({"kind": "github", "repository": "api"}));
+    let mut closed = issue(json!([]));
+    closed["state"] = "CLOSED".into();
+    script_issue(&user, closed);
+    let (id, mcp) = agent(&user);
+
+    let answer = mcp.call(
+        "tickets",
+        json!({"action": "subscribe", "ticket": "#5", "events": ["commented"]}),
+    );
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("the ticket #5 is already closed"),
+        "{}",
+        answer.text
+    );
+    assert!(listed(&user, &id).is_empty());
+
+    // A Jira work item in a status of the category done, whatever it is called.
+    let user = self::user().with_fake_acli();
+    fixture(&user);
+    track(
+        &user,
+        json!({"kind": "jira", "site": "example.atlassian.net", "projects": ["ABC"]}),
+    );
+    script(&user, pull());
+    user.acli_script(json!({"items": {"ABC-1": work_item_in("ABC-1", "Shipped", "done")}}));
+    let (id, mcp) = agent(&user);
+
+    let answer = mcp.call(
+        "tickets",
+        json!({"action": "subscribe", "ticket": "ABC-1", "events": ["commented"]}),
+    );
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("the ticket ABC-1 is already closed"),
+        "{}",
+        answer.text
+    );
+    assert!(listed(&user, &id).is_empty());
 }

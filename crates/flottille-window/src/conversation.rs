@@ -1161,6 +1161,24 @@ pub fn woken_by(body: &str) -> String {
         (!digits.is_empty()).then(|| format!("#{digits}"))
     };
     let pull = number(body).unwrap_or_else(|| "the pull request".into());
+    // A deadline the agent gave: `Nothing came in 5 min: your subscription to checks of …`.
+    let deadline = |rest: &str| {
+        let minutes = rest.split(" min").next().unwrap_or_default().to_owned();
+        let events = rest
+            .split_once("your subscription to ")
+            .and_then(|(_, rest)| rest.split(" of ").next())
+            .unwrap_or_default()
+            .to_owned();
+        (minutes, events)
+    };
+    if let Some(rest) = body.strip_prefix("Nothing came in ") {
+        let (minutes, events) = deadline(rest);
+        return format!("nothing came for the {events} of {pull} after {minutes} min");
+    }
+    if let Some(rest) = body.strip_prefix("Its deadline, ") {
+        let (minutes, events) = deadline(rest);
+        return format!("the deadline for the {events} of {pull} passed after {minutes} min");
+    }
     if let Some(rest) = body.strip_prefix("Your subscription to ") {
         let events = rest.split(" of pull request").next().unwrap_or_default();
         let minutes = rest
@@ -1631,6 +1649,18 @@ mod tests {
                 "Your subscription to checks of pull request #3 of app, workspace w ended after 60 min with nothing of what you waited for: subscribe again."
             ),
             "nothing came for the checks of #3 after 60 min"
+        );
+        assert_eq!(
+            woken_by(
+                "Nothing came in 5 min: your subscription to checks, review of pull request #3 of app, workspace w reached its deadline and ended. Subscribe again if you still wait for them."
+            ),
+            "nothing came for the checks, review of #3 after 5 min"
+        );
+        assert_eq!(
+            woken_by(
+                "Its deadline, 30 min, passed: your subscription to comment of pull request #3 of app, workspace w ended. Subscribe again if you still wait for them."
+            ),
+            "the deadline for the comment of #3 passed after 30 min"
         );
         assert_eq!(
             woken_by(

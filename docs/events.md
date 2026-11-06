@@ -850,5 +850,5 @@ A subscription is over, once.
 | Field | |
 |---|---|
 | `agent`, `subscription` | |
-| `why` | `delivered` (an event it waited for, or the end of its target, or a wake's time, or the end of a followed run, was delivered), `expired` (its time was up, said to the agent), `cancelled` (the agent's `unsubscribe`, the user's `subscription.cancel`, or a new subscription to the same target), `agent-ended` (its agent ended), `session-ended` (the session it followed ended or failed, said to the agent), `unavailable` (until #257, when a subscription held a watch of its own: the daemon could not watch its target again after a restart). Only the first two wake the agent. |
+| `why` | `delivered` (the end of its target, with what it waited for of that read, or a wake's time, or the end of a followed run, was delivered; an event that leaves the target open is delivered and ends nothing), `expired` (the deadline the agent gave passed, said to the agent), `cancelled` (the agent's `unsubscribe`, the user's `subscription.cancel`, or a new subscription to the same target), `agent-ended` (its agent ended), `session-ended` (the session it followed ended or failed, said to the agent), `unavailable` (until #257, when a subscription held a watch of its own: the daemon could not watch its target again after a restart). Only the first two wake the agent. |
 

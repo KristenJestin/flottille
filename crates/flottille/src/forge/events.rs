@@ -3,7 +3,7 @@
 //! to the subscriptions to it, as the events they name. A subscription reads nothing of its own:
 //! a state already stored when it subscribed is no event, since the rounds emit only changes.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use flottille_core::item::Item;
@@ -215,20 +215,24 @@ fn forge_of(daemon: &Daemon, project: &str, repository: &str) -> Option<Forge> {
     Some(Forge::from(declared))
 }
 
-/// The subscriptions told their checks ended, while the logs of the failed jobs are read: that
-/// delivery ends them, so what comes after for them is for nobody.
-static READING: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+/// What a read found for a subscription: its events, and the one that ends it.
+type Found = (Vec<Event>, Option<Event>);
+
+/// The subscriptions told their checks ended, while the logs of the failed jobs are read, with
+/// what came for them meanwhile: delivered with the checks, after them.
+static READING: Mutex<BTreeMap<String, Vec<Found>>> = Mutex::new(BTreeMap::new());
 
 /// Offers what the items stored to a subscription to a pull request, when some of the events are
-/// of its pull request. The logs of the failed jobs are read only when it is told the checks
-/// ended, after the round, which does not wait for them; the events after those are not offered
-/// to it meanwhile, so that it is delivered the first.
+/// of its pull request; whether a delivery was queued, for the caller to ring the agent. The logs
+/// of the failed jobs are read only when it is told the checks ended, after the round, which does
+/// not wait for them: that delivery rings the agent itself, and the events that come for it
+/// meanwhile are kept and delivered with it, after the checks.
 pub(crate) fn offer(
     daemon: &Arc<Daemon>,
     subscription: &Subscription,
     items: &[Item],
     events: &[(&'static str, Value)],
-) {
+) -> bool {
     let target = &subscription.target;
     let project = target["project"].as_str().unwrap_or_default();
     let repository = target["repository"].as_str().unwrap_or_default();
@@ -248,26 +252,32 @@ pub(crate) fn offer(
             )
         })
         .collect();
-    if mine.is_empty() || READING.lock().unwrap().contains(&subscription.id) {
-        return;
+    if mine.is_empty() {
+        return false;
     }
     let item = items
         .iter()
         .find(|i| of(&i.project, &i.kind, &i.repository, &i.key));
     let named = pull_named(project, repository, key.parse().unwrap_or_default());
     let (found, ends) = events_of(&named, item, &mine);
+    if let Some(kept) = READING.lock().unwrap().get_mut(&subscription.id) {
+        kept.push((found, ends));
+        return false;
+    }
     let named = target_named(target);
     let (jobs, more) = item.map(jobs_of).unwrap_or_default();
     let told_checks = subscription.events.iter().any(|e| e == "checks")
         && found.iter().any(|e| e.kind == "checks");
     let forge = forge_of(daemon, project, repository);
     let (Some(forge), true, false) = (forge, told_checks, jobs.is_empty()) else {
-        subscriptions::offer(daemon, subscription, &named, &found, ends.as_ref());
-        return;
+        return subscriptions::offer(daemon, subscription, &named, &found, ends.as_ref(), false);
     };
     let (jobs, took): (Vec<Job>, Vec<Option<u64>>) = jobs.into_iter().unzip();
     let (daemon, subscription) = (daemon.clone(), subscription.clone());
-    READING.lock().unwrap().insert(subscription.id.clone());
+    READING
+        .lock()
+        .unwrap()
+        .insert(subscription.id.clone(), Vec::new());
     tokio::spawn(async move {
         let mut pull = Pull {
             number: 0,
@@ -292,7 +302,7 @@ pub(crate) fn offer(
         };
         logs::attach(&forge, &mut pull.jobs).await;
         let jobs: Vec<(Job, Option<u64>)> = pull.jobs.into_iter().zip(took).collect();
-        let found: Vec<Event> = found
+        let mut found: Vec<Event> = found
             .into_iter()
             .map(|mut event| {
                 if event.kind == "checks" {
@@ -301,9 +311,18 @@ pub(crate) fn offer(
                 event
             })
             .collect();
-        subscriptions::offer(&daemon, &subscription, &named, &found, ends.as_ref());
-        READING.lock().unwrap().remove(&subscription.id);
+        let mut ends = ends;
+        // Held until the delivery is queued: what a round finds meanwhile waits for it, and comes
+        // after it, never between the entry's removal and the delivery.
+        let mut reading = READING.lock().unwrap();
+        for (later, ended) in reading.remove(&subscription.id).unwrap_or_default() {
+            found.extend(later);
+            ends = ends.or(ended);
+        }
+        subscriptions::offer(&daemon, &subscription, &named, &found, ends.as_ref(), true);
+        drop(reading);
     });
+    false
 }
 
 /// A repository that is the project's folder is named by the project, as the window does.

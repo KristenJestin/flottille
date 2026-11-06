@@ -519,20 +519,24 @@ pending requests.
   closed with (not an older one of its closer), when the forge has it ([`forges.md`](forges.md),
   "The closing comment").
   `show` ends with the agent's subscriptions, when it has some (`Your subscriptions:` then `- pull
-  request #12 of api, workspace login: checks, review, for 52 min more`).
-- **`subscribe {workspace?, repository?, events, from?, minutes?}`**: the next of `events`
+  request #12 of api, workspace login: checks, review, until it is merged or closed`, or `for 52
+  min more` with a deadline).
+- **`subscribe {workspace?, repository?, events, from?, minutes?}`**: each of `events`
   (`checks`, `review`, `comment`, `merged`, `closed`) of the pull request of a workspace's branch
-  wakes the agent once, as a `subscription` delivery (`docs/design.md` §5.6). The call answers at
+  wakes the agent, as a `subscription` delivery (`docs/design.md` §5.6), until the pull request is
+  merged or closed: the agent subscribes once (the answer says `it wakes you at each of these
+  events until it is merged or closed; no need to subscribe again`). The events of one round are
+  one delivery, and the deliveries of a round one wake; those that come while the agent is in a
+  turn are pumped together, in order, at its end. The call answers at
   once; what is so already (checks that already ended) is no event, `show` reads it; when the
   rounds have not read the repository's pull requests once yet, the answer says what happens
   before their first is not seen. `from` is
   `anyone` (the default) or `people`: no bot, nor a comment known as posted by an agent
-  ([`forges.md`](forges.md), "What Flottille posts is recorded"). `minutes` is how
-  long it waits, 60 by default, 6000 (100 hours) at most. Without `minutes` the wait is sized by the
-  repository's CI instead, and the answer says the duration taken and why: twice the average of
-  its recent runs, from 15 minutes to the longest, 60 when there is no run to measure by
-  ([`forges.md`](forges.md), "How long CI takes"); the answer carries the line `show` gives about
-  the runs, with `minutes` too. It also says the pull request's checks running as it subscribed
+  ([`forges.md`](forges.md), "What Flottille posts is recorded"). `minutes`, optional,
+  is a deadline the agent asked for, with no cap: past it, the agent is woken once (`Nothing came in
+  30 min: …` when nothing did) and the subscription ends; without it there is none. The answer
+  carries the line `show` gives about how long the repository's CI runs take, as information
+  ([`forges.md`](forges.md), "How long CI takes"). It also says the pull request's checks running as it subscribed
   (`Its checks running as you subscribed: test.`, or that none was), that `checks` is the end of
   those and that a run started on its branch outside them is followed by `run`, not by the
   subscription, and each run the agent already follows on that branch (`You already follow the
@@ -542,10 +546,10 @@ pending requests.
   that says why it failed, the end of its log being in `show` ([`forges.md`](forges.md), "A wake about failed checks is a summary"); `review` and `comment` their author, their
   state and an excerpt (200 characters, on one line). The events are those of the daemon's rounds
   of the items, which the subscription filters, reading nothing of its own: it hears as often as
-  the rounds come, every minute while a window is connected, every five otherwise. A merged or
-  closed pull request ends any subscription,
-  said; so does its time, said. Subscribing again to the same pull request replaces the agent's
-  subscription. A pull request merged or closed, a repository with no forge or no pull request,
+  the rounds come, every minute while a window is connected, every five otherwise, and costs
+  nothing to keep. A merged or closed pull request ends any subscription, said; so does its
+  deadline, said, its agent's end, and `unsubscribe` or the user's Cancel. Subscribing again to the same pull request replaces the agent's
+  subscription: its events, `from` and deadline. A pull request merged or closed, a repository with no forge or no pull request,
   and `number` are refused. **`unsubscribe {workspace?, repository?}`** cancels the agent's
   subscriptions to them (the runs it follows there with them), every one when it names none;
   **`unsubscribe {run, repository?}`** stops following a run it started (`repository` needed
@@ -671,8 +675,7 @@ action's, and the store renamed them in the agents' fixed lists and their pendin
 
 ## Waking later
 
-**`wake {minutes, why}`** asks Flottille to wake the agent once, `minutes` from now (1 to 6000, 100 hours, the
-subscriptions' longest), by a `subscription` delivery that starts `Woken by the timer: <why>` and
+**`wake {minutes, why}`** asks Flottille to wake the agent once, `minutes` from now (1 to 6000, 100 hours), by a `subscription` delivery that starts `Woken by the timer: <why>` and
 says when it was asked (`You asked for it at 2026-11-01T10:22:00Z, 20 min later.`). It is a
 subscription whose source is a timer (`docs/design.md` §5.6), stored, listed and cancelled as the
 others are. The answer comes at once (`Set: a delivery wakes you in 20 min with your why. End your
@@ -771,10 +774,13 @@ reasons.
   is linked to no ticket: …`). An unreadable ticket (`gh` or `acli` missing or signed out, no such
   ticket) is an error saying why and what to do. What it read is stored over what the daemon's
   rounds keep of the ticket.
-- **`subscribe {ticket?, workspace?, events, from?, minutes?}`**: the next of `events`
-  (`commented`, `status`, `assigned`, `closed`) of the ticket wakes the agent once, as a
-  `subscription` delivery, the same shape as `forge` `subscribe` (60 minutes by default, 6000 at
-  most, `from: people` without bots nor what an agent posted); a Jira work item's comments are
+- **`subscribe {ticket?, workspace?, events, from?, minutes?}`**: each of `events`
+  (`commented`, `status`, `assigned`, `closed`) of the ticket wakes the agent, as a
+  `subscription` delivery, until the ticket is closed (on Jira, moved to a status of the category
+  done; a ticket already closed is refused, as a merged pull request is), the same shape as
+  `forge` `subscribe` (no deadline unless `minutes` gives one, `from:
+  people` without bots nor what an agent posted; `show` ends with the agent's subscriptions to
+  tickets, `- ticket #5 of api: commented, until the ticket is closed`); a Jira work item's comments are
   read by the rounds while a subscription to them follows it. **`unsubscribe {ticket?}`** cancels the agent's
   subscriptions to the ticket, every one when it names none ([`tickets.md`](tickets.md),
   "Subscribing to a ticket"). Both are allowed in every mode, never held.
