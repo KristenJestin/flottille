@@ -344,6 +344,38 @@ fn starting_a_service_starts_what_it_needs_first() {
 }
 
 #[test]
+fn a_service_says_the_projects_tasks_that_need_it() {
+    let user = User::with_fake_agent();
+    services_file(
+        &user,
+        &format!(
+            "{}{}{}",
+            listening(&user, "mongo", 0, &[]),
+            listening(&user, "auth", 0, &["mongo"]),
+            listening(&user, "redis", 0, &[])
+        ),
+    );
+    project(&user, &["auth"]);
+
+    let listed = user.call("service.list", json!({})).unwrap();
+    let needed = |name: &str| {
+        listed["services"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == name)
+            .unwrap()["needed_by"]
+            .clone()
+    };
+
+    let app = json!([{"project": "app", "tasks": ["api"]}]);
+    assert_eq!(needed("auth"), app);
+    // Through what auth needs, the task needs mongo too.
+    assert_eq!(needed("mongo"), app);
+    assert_eq!(needed("redis"), json!([]));
+}
+
+#[test]
 fn a_task_s_needs_are_followed_through_its_services_needs() {
     let user = User::with_fake_agent();
     services_file(

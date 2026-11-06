@@ -262,7 +262,7 @@ fn two_jira_items_are_linked_and_unlinked() {
     assert!(made.contains("ABC-2 blocks ABC-1"), "{made}");
     assert!(
         acli_calls(&user).contains(
-            &"jira workitem link create --out ABC-2 --in ABC-1 --type Blocks --yes".to_owned()
+            &"jira workitem link create --out ABC-1 --in ABC-2 --type Blocks --yes".to_owned()
         ),
         "{:?}",
         acli_calls(&user)
@@ -314,7 +314,7 @@ fn the_inward_wording_swaps_the_two_items() {
     assert!(made.contains("ABC-1 is blocked by ABC-2"), "{made}");
     assert!(
         acli_calls(&user).contains(
-            &"jira workitem link create --out ABC-2 --in ABC-1 --type Blocks --yes".to_owned()
+            &"jira workitem link create --out ABC-1 --in ABC-2 --type Blocks --yes".to_owned()
         ),
         "{:?}",
         acli_calls(&user)
@@ -352,7 +352,7 @@ fn show_lists_an_item_s_links() {
     jira_script(
         &user,
         json!({"links": [
-            {"id": "500", "type": "Blocks", "out": "ABC-2", "in": "ABC-1"},
+            {"id": "500", "type": "Blocks", "out": "ABC-1", "in": "ABC-2"},
             {"id": "501", "type": "Relates", "out": "ABC-1", "in": "ABC-3"},
         ]}),
     );
@@ -373,11 +373,80 @@ fn show_lists_an_item_s_links() {
     // asked with the ticket's own fields so that one read serves both.
     assert!(
         acli_calls(&user).contains(
-            &"jira workitem view ABC-1 --json --fields summary,status,description,comment,issuelinks,attachment"
+            &"jira workitem view ABC-1 --json --fields summary,status,description,comment,issuelinks,attachment,assignee,parent,*navigable"
                 .to_owned()
         ),
         "{:?}",
         acli_calls(&user)
+    );
+}
+
+#[test]
+fn a_work_item_blocked_by_one_and_blocking_another_says_both_rightly() {
+    let user = user();
+    on_jira(&user);
+    // As acli makes them, `--out X --in Y` being `Y blocks X` on a real site: ABC-1 blocks ABC-2,
+    // which blocks ABC-3.
+    jira_script(
+        &user,
+        json!({"links": [
+            {"id": "500", "type": "Blocks", "out": "ABC-2", "in": "ABC-1"},
+            {"id": "501", "type": "Blocks", "out": "ABC-3", "in": "ABC-2"},
+        ]}),
+    );
+    let mcp = root_in(&user);
+
+    let shown = read(&user, &mcp, json!({"action": "show", "ticket": "ABC-2"}));
+
+    assert!(
+        shown.contains("- is blocked by ABC-1 (To Do): The login fails"),
+        "{shown}"
+    );
+    assert!(shown.contains("- blocks ABC-3 (Done): Shipped"), "{shown}");
+    let first = read(&user, &mcp, json!({"action": "show", "ticket": "ABC-1"}));
+    assert!(
+        first.contains("- blocks ABC-2 (In Progress): Add search"),
+        "{first}"
+    );
+    let last = read(&user, &mcp, json!({"action": "show", "ticket": "ABC-3"}));
+    assert!(
+        last.contains("- is blocked by ABC-2 (In Progress): Add search"),
+        "{last}"
+    );
+}
+
+#[test]
+fn linking_with_is_blocked_by_puts_the_other_item_on_the_blocking_end() {
+    let user = user();
+    on_jira(&user);
+    jira_script(&user, json!({}));
+    let mcp = root_in(&user);
+
+    let made = written(
+        &user,
+        &mcp,
+        json!({"action": "link", "ticket": "ABC-2", "kind": "is blocked by", "other": "ABC-1"}),
+    );
+
+    assert!(made.contains("ABC-2 is blocked by ABC-1"), "{made}");
+    assert!(made.contains("ABC-1 blocks ABC-2"), "{made}");
+    // On a real site `--out A --in B --type Blocks` made B block A, whatever acli printed.
+    assert!(
+        acli_calls(&user).contains(
+            &"jira workitem link create --out ABC-2 --in ABC-1 --type Blocks --yes".to_owned()
+        ),
+        "{:?}",
+        acli_calls(&user)
+    );
+    let blocked = read(&user, &mcp, json!({"action": "show", "ticket": "ABC-2"}));
+    assert!(
+        blocked.contains("- is blocked by ABC-1 (To Do): The login fails"),
+        "{blocked}"
+    );
+    let blocking = read(&user, &mcp, json!({"action": "show", "ticket": "ABC-1"}));
+    assert!(
+        blocking.contains("- blocks ABC-2 (In Progress): Add search"),
+        "{blocking}"
     );
 }
 
@@ -626,25 +695,6 @@ fn a_jira_parent_is_refused_naming_what_acli_lacks() {
     assert!(said.contains("parent"), "{said}");
     assert!(said.contains("workitem edit"), "{said}");
     assert!(said.contains("nothing was written"), "{said}");
-}
-
-#[test]
-fn a_sprint_is_refused_naming_what_acli_lacks() {
-    let user = user();
-    on_jira(&user);
-    jira_script(&user, json!({}));
-    let mcp = root_in(&user);
-
-    let said = refused_at_once(
-        &user,
-        &mcp,
-        json!({"action": "sprint", "ticket": "ABC-1", "sprint": "Sprint 4"}),
-    );
-
-    assert!(said.contains("acli"), "{said}");
-    assert!(said.contains("sprint"), "{said}");
-    assert!(said.contains("nothing was written"), "{said}");
-    assert!(acli_calls(&user).is_empty(), "{:?}", acli_calls(&user));
 }
 
 /// A work item whose comments are `comments` (Jira's shape).

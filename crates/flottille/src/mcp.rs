@@ -329,7 +329,7 @@ const SERVED: [Definition; 29] = [
             (squash by default; refused with no check, while checks fail or a review asks for changes unless waive gives the \
             user's words) and checks act on a workspace's branch; edit (title, body, draft, \
             reviewers, labels, base), comment, close (comment first), reopen on number. \
-            subscribe: its next events wake you once; unsubscribe. CI: pipelines lists what can \
+            subscribe: events wake you until merged or closed; unsubscribe. CI: pipelines lists what can \
             be run; run starts one by name (custom: <name>) with its variables and follows it unless \
             follow: false; runs, run_view, \
             run_logs read; run, stop, step judged. {\"action\": \"create\", \"repository\": \
@@ -363,9 +363,9 @@ const SERVED: [Definition; 29] = [
                 "waive": {"type": "string", "description": "merge: the user's words letting a blocked pull request be merged; held for them."},
                 "method": {"type": "string", "enum": ["squash", "merge", "rebase"], "description": "merge: squash when left out."},
                 "message": {"type": "string", "description": "merge by squash: the squashed commit's message, its subject on the first line; the forge's own when left out."},
-                "events": {"type": "array", "items": {"enum": crate::forge::EVENTS}},
+                "events": {"type": "array", "items": {"enum": crate::forge::EVENTS}, "description": "subscribe: what wakes you. approved: the review as a whole turns approved (once each time, saying who and the checks), where review wakes you at each reviewer."},
                 "from": {"enum": crate::subscriptions::FROM, "description": "subscribe: whose reviews and comments count: anyone (the default), or people (no bot nor agent)."},
-                "minutes": {"type": "integer", "minimum": 1, "maximum": crate::subscriptions::LONGEST_MINUTES, "description": "subscribe: how long it waits; sized by CI when left out, else 60."},
+                "minutes": {"type": "integer", "minimum": 1, "description": "subscribe: a deadline: past it with nothing come, you are woken once and it ends. Left out: none; each event wakes you, no need to subscribe again."},
                 "session": {"type": "string", "description": "unsubscribe: a session you follow, by its agent id, to stop following it."},
                 "pipeline": {"type": "string", "description": "run: as pipelines lists it (Bitbucket default, custom: <name>, branches: <pattern>; GitHub a workflow's file)."},
                 "variables": {"type": "array", "description": "run: Bitbucket variables, GitHub inputs.", "items": {"type": "object", "properties": {
@@ -390,15 +390,15 @@ const SERVED: [Definition; 29] = [
             types: a Jira project's work item types (a guess is refused); link_types: link kinds. \
             Writes, judged, answered at once, the result maybe later: create, comment, edit, close, \
             reopen, status, link and unlink (ticket kind other: ABC-2 blocks ABC-1), comment_edit and \
-            comment_delete (yours only). Assign only when asked: assignee \"@me\" is the user (Jira \
-            create, edit; null on edit removes; GitHub edit: assignees). subscribe: a ticket's next \
-            events wake you once (people only; minutes: default 60); unsubscribe.",
+            comment_delete (yours only). Assign only when asked (assignee \"me\": the user; \
+            GitHub: assignees). Jira create: parent, sprint (sprints lists them). \
+            subscribe: a ticket's events wake you until it is closed; unsubscribe.",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "search", "show", "types", "link_types", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "sprint"]},
+                "action": {"type": "string", "enum": ["list", "search", "show", "types", "link_types", "sprints", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete"]},
                 "ticket": {"type": "string", "description": "#123 or ABC-123; the workspace's when left out."},
                 "workspace": {"type": "string"},
                 "query": {"type": "string", "description": "search: words."},
@@ -407,26 +407,28 @@ const SERVED: [Definition; 29] = [
                 "jql": {"type": "string", "description": "search on Jira: a JQL query, answered only within the tracker's projects (what it may refer to is not checked); ORDER BY allowed. Not for list."},
                 "state": {"type": "string", "enum": ["open", "closed", "all"]},
                 "label": {"type": "string"},
-                "assignee": {"type": ["string", "null"], "description": "list, search: only those assigned to them. create, edit on Jira: whom to assign, \"@me\" (the user signed in to acli), an email or an account id; edit: null removes the assignee."},
+                "assignee": {"type": ["string", "null"], "description": "list, search: only those assigned to them. create, edit on Jira: whom to assign: \"me\" is the user you work for (\"assign it to me\", \"to the user\"), else an email or an account id, not a display name; edit: null removes the assignee."},
                 "detail": {"type": "string", "enum": ["short", "full"]},
                 "fresh": {"type": "boolean", "description": "show: read the ticket again; one read in the last 30 s is given again otherwise (detail full always reads)."},
                 "title": {"type": "string"},
                 "body": {"type": "string", "description": "create, edit: description; comment, comment_edit: the comment. Markdown, converted for Jira."},
-                "labels": {"type": "array", "items": {"type": "string"}, "description": "create, edit: labels to add (GitHub)."},
+                "labels": {"type": "array", "items": {"type": "string"}, "description": "create, edit: labels to add."},
                 "reason": {"enum": ["completed", "not planned"], "description": "close: completed or not planned (GitHub)."},
-                "remove_labels": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to remove (GitHub)."},
-                "assignees": {"type": "array", "items": {"type": "string"}, "description": "edit: logins to add (GitHub), \"@me\" for the user."},
+                "remove_labels": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to remove."},
+                "assignees": {"type": "array", "items": {"type": "string"}, "description": "edit: logins to add (GitHub), \"me\" for the user."},
                 "remove_assignees": {"type": "array", "items": {"type": "string"}, "description": "edit: logins to remove (GitHub)."},
                 "status": {"type": "string", "description": "status: its name."},
                 "other": {"type": "string", "description": "link, unlink: the other ticket. The link reads ticket, kind, other: ABC-2 blocks ABC-1 is ticket ABC-2, kind blocks, other ABC-1."},
                 "kind": {"type": "string", "description": "link, unlink: a kind link_types lists (blocks, is blocked by, relates to; GitHub: parent of, sub-task of)."},
                 "comment": {"type": "string", "description": "comment_edit, comment_delete: the id show (detail full) gives a comment an agent posted; no one else's."},
-                "sprint": {"type": "string", "description": "sprint: refused, acli cannot do it."},
-                "project": {"type": "string", "description": "create, types on Jira: the tracker's project; status: the board."},
+                "sprint": {"type": "string", "description": "create on Jira (with type): an open sprint, by the name or id sprints gives. An existing item's sprint cannot be changed (acli)."},
+                "parent": {"type": "string", "description": "create on Jira: the work item it goes under (an epic, or a sub-task's parent). An existing item's parent cannot be changed (acli)."},
+                "board": {"type": "string", "description": "sprints: one board of the project, by name or id; all of them otherwise."},
+                "project": {"type": "string", "description": "create, types, sprints on Jira: the tracker's project; status: the board."},
                 "type": {"type": "string", "description": "create on Jira: work item type, one of those types lists."},
                 "events": {"type": "array", "items": {"enum": crate::tickets::EVENTS}},
-                "from": {"enum": crate::subscriptions::FROM},
-                "minutes": {"type": "integer", "minimum": 1, "maximum": crate::subscriptions::LONGEST_MINUTES}
+                "from": {"enum": crate::subscriptions::FROM, "description": "subscribe: whose comments count: anyone (the default), or people (no bot nor agent)."},
+                "minutes": {"type": "integer", "minimum": 1, "description": "subscribe: a deadline: past it with nothing come, you are woken once and it ends. Left out: none; each event wakes you until the ticket is closed (Jira: a done status), no need to subscribe again."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -1461,12 +1463,23 @@ pub fn mint(daemon: &Daemon, grant: Grant, provider: &Provider) -> Result<String
         say_outdated(daemon, &agent, outdated);
     }
     // Its conversation still holds what it said of its old tools: an agent that does not list
-    // them again reads what changed with its next turn.
-    if let Some(before) = newer
-        && !provider.lists_tools_again
-        && let Some(changes) = given.since(before)
-    {
-        deliveries::queue(daemon, &agent, "tools", None, &changes);
+    // them again reads what changed with its next turn. One whose tools the user reloaded reads
+    // it whatever its agent does, and that nothing changed when nothing did.
+    let changes = newer.and_then(|before| given.since(before));
+    if crate::agents::take_reload(daemon, &agent) {
+        let said = match changes {
+            Some(changes) => format!("{RELOADED_CHANGED}\n{changes}"),
+            None => RELOADED_UNCHANGED.to_owned(),
+        };
+        deliveries::queue(daemon, &agent, "tools", None, &said);
+    } else if let Some(changes) = changes.filter(|_| !provider.lists_tools_again) {
+        deliveries::queue(
+            daemon,
+            &agent,
+            "tools",
+            None,
+            &format!("{UPDATED}\n{changes}"),
+        );
     }
     let kept = serde_json::to_string(&given).expect("a list given is JSON");
     let kept = daemon.write(|store| {
@@ -1478,6 +1491,15 @@ pub fn mint(daemon: &Daemon, grant: Grant, provider: &Provider) -> Result<String
     }
     Ok(token)
 }
+
+/// What an agent whose tools changed since its last process is told, before what changed.
+const UPDATED: &str = "Flottille was updated: your tools changed since you last read them. They \
+                       are as listed now, whatever was said of them before:";
+/// The same, for an agent whose tools the user reloaded.
+const RELOADED_CHANGED: &str = "Your tools were reloaded: they changed since you last read them. \
+                                They are as listed now, whatever was said of them before:";
+/// What an agent whose tools the user reloaded is told when they are as they were.
+const RELOADED_UNCHANGED: &str = "Your tools were reloaded: nothing changed.";
 
 /// The tool list a process is given (`docs/tools.md`, "When the tools change"), kept with its
 /// agent: a digest of the tools as they are listed (names, schemas, descriptions), and the
@@ -1546,13 +1568,7 @@ impl Given {
                 lines.push(format!("- {tool}: gone"));
             }
         }
-        (!lines.is_empty()).then(|| {
-            format!(
-                "Flottille was updated: your tools changed since you last read them. They are as \
-                 listed now, whatever was said of them before:\n{}",
-                lines.join("\n")
-            )
-        })
+        (!lines.is_empty()).then(|| lines.join("\n"))
     }
 }
 
@@ -2994,6 +3010,36 @@ mod tests {
     }
 
     #[test]
+    fn the_tickets_tool_says_me_is_the_user_and_names_parent_sprint_and_sprints() {
+        let tickets = SERVED.iter().find(|d| d.name == "tickets").unwrap();
+        let schema = (tickets.schema)();
+        let assignee = schema["properties"]["assignee"]["description"]
+            .as_str()
+            .unwrap();
+
+        assert!(
+            assignee.contains("\"me\" is the user you work for"),
+            "{assignee}"
+        );
+        assert!(assignee.contains("not a display name"), "{assignee}");
+        for word in ["sprints", "parent", "sprint"] {
+            assert!(tickets.description.contains(word), "{word}");
+        }
+        assert!(
+            !schema["properties"]["action"]["enum"]
+                .as_array()
+                .unwrap()
+                .contains(&Value::from("sprint"))
+        );
+        assert!(
+            schema["properties"]["action"]["enum"]
+                .as_array()
+                .unwrap()
+                .contains(&Value::from("sprints"))
+        );
+    }
+
+    #[test]
     fn every_tool_is_described_for_a_new_colleague() {
         for definition in &SERVED {
             let tool = serde_json::to_value(tool_of(definition, true)).unwrap();
@@ -3242,7 +3288,7 @@ mod tests {
     fn the_texts_cut_to_fit_the_old_cap_are_whole_again() {
         // What #224, #225, #233, #255 and #259 took out of other tools to stay under a number
         // nobody chose (#264): what is still true is said again.
-        let whole: [(&str, Option<&str>, &str); 29] = [
+        let whole: [(&str, Option<&str>, &str); 30] = [
             ("tasks", None, "(tests, lint, servers…)"),
             (
                 "run_status",
@@ -3285,6 +3331,11 @@ mod tests {
                 "all of the place's when left out",
             ),
             ("forge", Some("body"), "comment: the comment."),
+            (
+                "forge",
+                Some("events"),
+                "approved: the review as a whole turns approved (once each time, saying who and the checks), where review wakes you at each reviewer",
+            ),
             (
                 "forge",
                 Some("waive"),

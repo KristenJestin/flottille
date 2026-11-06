@@ -32,16 +32,24 @@ use gpui_kit::{
 use serde_json::Value;
 
 use crate::conversation::{CommandCard, Ending};
+use crate::services::ServicesPage;
 use crate::session::{SessionPage, THE_CONVERSATION, seconds};
 use crate::shell::now_ms;
 use crate::tasks::ProjectTasks;
 
-/// Where a list of commands and its panel are: a session's rail, or a project page, which lists
-/// the tasks the user ran there.
+/// Where a list of commands and its panel are: a session's rail, a project page, which lists
+/// the tasks the user ran there, or the services page, which shows a service's run.
 #[derive(Clone)]
 pub enum Owner {
     Session(WeakEntity<SessionPage>),
     Project(WeakEntity<ProjectTasks>),
+    Services(WeakEntity<ServicesPage>),
+}
+
+impl From<WeakEntity<ServicesPage>> for Owner {
+    fn from(page: WeakEntity<ServicesPage>) -> Self {
+        Owner::Services(page)
+    }
 }
 
 impl From<WeakEntity<SessionPage>> for Owner {
@@ -70,6 +78,11 @@ impl Owner {
                     tasks.read(cx).open_link(url, cx);
                 }
             }
+            Owner::Services(page) => {
+                if let Some(page) = page.upgrade() {
+                    page.read(cx).open_link(url, cx);
+                }
+            }
         }
     }
 
@@ -79,6 +92,7 @@ impl Owner {
             Owner::Project(tasks) => tasks
                 .update(cx, |tasks, cx| tasks.open_command(run, cx))
                 .ok(),
+            Owner::Services(page) => page.update(cx, |page, cx| page.open_run(run, cx)).ok(),
         };
     }
 
@@ -86,6 +100,7 @@ impl Owner {
         match self {
             Owner::Session(page) => page.update(cx, |page, cx| page.close_command(cx)).ok(),
             Owner::Project(tasks) => tasks.update(cx, |tasks, cx| tasks.close_command(cx)).ok(),
+            Owner::Services(page) => page.update(cx, |page, cx| page.close_output(cx)).ok(),
         };
     }
 
@@ -95,6 +110,7 @@ impl Owner {
             Owner::Project(tasks) => tasks
                 .update(cx, |tasks, cx| tasks.stop_command(run, cx))
                 .ok(),
+            Owner::Services(page) => page.update(cx, |page, cx| page.stop_run(run, cx)).ok(),
         };
     }
 
@@ -106,6 +122,7 @@ impl Owner {
             Owner::Project(tasks) => tasks
                 .update(cx, |tasks, cx| tasks.restart_command(run, cx))
                 .ok(),
+            Owner::Services(page) => page.update(cx, |page, cx| page.start_run(run, cx)).ok(),
         };
     }
 
@@ -147,6 +164,8 @@ pub struct CommandRow {
     pub ready: Option<String>,
     /// Where it answers, as its task says.
     pub url: Option<String>,
+    /// A service's run: the daemon's, of no agent and no project; `name` is the service's.
+    pub service: bool,
 }
 
 /// What the drawer follows: a command, or a step of a workspace's setup.
@@ -193,6 +212,7 @@ impl CommandRow {
             step: false,
             ready: value["ready"].as_str().map(str::to_owned),
             url: value["url"].as_str().map(str::to_owned),
+            service: value["project"] == "" && value["agent"] == "",
         }
     }
 
@@ -226,6 +246,7 @@ impl CommandRow {
             step: true,
             ready: None,
             url: None,
+            service: false,
         }
     }
 
@@ -1673,15 +1694,16 @@ impl Render for CommandPanel {
             _ => said,
         };
         let time = seconds(row.elapsed_ms(now));
+        let kind = if row.service { "Service" } else { "Task" };
         let sub = match (&row.name, running) {
             _ if row.step && running => format!("Setup step · running for {time}"),
             _ if row.step => format!("Setup step · {said} after {time}"),
             (Some(task), true) => match row.readiness() {
-                Some(ready) => format!("Task {task} · {ready} · {time}"),
-                None => format!("Task {task} · running for {time}"),
+                Some(ready) => format!("{kind} {task} · {ready} · {time}"),
+                None => format!("{kind} {task} · running for {time}"),
             },
             (None, true) => format!("Running for {time}"),
-            (Some(task), false) => format!("Task {task} · {said} after {time}"),
+            (Some(task), false) => format!("{kind} {task} · {said} after {time}"),
             (None, false) => format!("{} after {time}", capitalized(&said)),
         };
         let page = self.page.clone();
@@ -2028,6 +2050,7 @@ mod tests {
             step: false,
             ready: None,
             url: None,
+            service: false,
         }
     }
 

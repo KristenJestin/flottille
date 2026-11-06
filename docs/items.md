@@ -173,7 +173,7 @@ what was left, its cursor not having moved.
 Each round compares what it read with what is stored and emits, in the same transaction as it
 stores it (`docs/events.md`): `item.opened`, `item.changed` (with what changed: `state`, `title`,
 `assignees`, `labels`, `status`, and by name alone its `description`, its `discussion` and its
-`checks`), `item.commented`, `item.reviewed`, `item.checks`, `item.merged`, `item.closed`. **A
+`checks`), `item.commented`, `item.reviewed`, `item.approved`, `item.checks`, `item.merged`, `item.closed`. **A
 source's first round stores without emitting.** A source forgotten says `items.forgotten`, once.
 
 ## What reads this stream
@@ -185,20 +185,24 @@ again on its own (#257):
   `subscribe`) or to a ticket (`tickets` `subscribe`) is a filter on the `item.*` events of its
   item, offered once they are stored; it holds no read of its own. A pull request's `item.checks`
   is its `checks`, `item.reviewed` its `review` (each new review, or, on Bitbucket, each new
-  verdict, `verdicts`), `item.commented` its `comment`, `item.merged` and `item.closed` its
+  verdict, `verdicts`), `item.approved` its `approved` (the pull request's decision became approved, judged against the
+  decision the item held before the round), `item.commented` its `comment`, `item.merged` and
+  `item.closed` its
   `merged` and `closed`. A ticket's `item.commented` is its `commented`, an `item.changed` of its
   `status` or of its `state` (a reopening) its `status`, one of its `assignees` its `assigned`,
   `item.closed` its `closed`. The failed jobs' logs a `checks` delivery summarises are read then (three at most), after
-  the round, which does not wait for them; that delivery ends the subscription, so an event that
-  comes while they are read (a comment) is not delivered before it, nor after.
+  the round, which does not wait for them; an event that comes for the subscription while they
+  are read (a comment) is kept and delivered with the checks, after them. Each read that holds
+  events is one delivery, and the subscription goes on until its item ends (`item.merged`,
+  `item.closed`); the deliveries of a round ring each agent once, at the round's end.
 - **A run an agent follows** (`forge` `run`, [`forges.md`](forges.md), "Following a run") is read
   by the round of its repository's pull requests, after them and whatever they gave: one request
   a run, none when no run is followed there. It is no item and stores nothing but what its
   following last said (a wait, a read that failed).
 - **What changed with no event of its own is no event of a subscription**: an `item.changed` that
   names only a `description`, a `discussion` or `checks` delivers nothing, and `items.forgotten`
-  neither delivers nor ends a subscription to an item of that source: it ends at its time, as one
-  to which nothing came, or hears its item again from the rounds after the first of the source
+  neither delivers nor ends a subscription to an item of that source: it ends at its deadline, when
+  the agent gave one, or hears its item again from the rounds after the first of the source
   declared again.
 - **Their latency is the rhythm** above: a minute while a window is connected, five otherwise. A
   subscription that needs to hear sooner has no faster rhythm of its own (a follow-up, if one

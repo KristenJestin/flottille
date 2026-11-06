@@ -1776,6 +1776,8 @@ pub fn summary(daemon: &Daemon, agent: &Agent) -> Value {
         "images": agent.images,
         // Its session runs an older list of tools than its role has: a restart gives the new one.
         "tools_outdated": daemon.mcp.outdated(&agent.id),
+        // A reload of its tools waits for its next process (`agent.reload_tools`).
+        "tools_reload": agents::reloading(daemon, &agent.id),
     })
 }
 

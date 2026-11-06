@@ -258,7 +258,7 @@ fn a_subscription_shows_in_the_rail_with_its_pull_request_its_events_and_when_it
     let user = user();
     script(&user, pull());
     let (lead, mcp) = lead(&user);
-    subscribe(&mcp, json!(["checks", "review"]));
+    subscribe(&mcp, json!(["checks", "review", "approved"]));
     let (shell, cx) = open_session(&user, &lead, cx);
     let page = session_page(&shell, cx);
 
@@ -276,7 +276,7 @@ fn a_subscription_shows_in_the_rail_with_its_pull_request_its_events_and_when_it
     );
     assert_eq!(
         label(cx, &format!("subscription-events-{id}")).unwrap(),
-        "checks, review"
+        "checks, review, approved"
     );
     let times = label(cx, &format!("subscription-times-{id}")).unwrap();
     assert!(
@@ -348,18 +348,29 @@ fn cancel_ends_the_subscription_through_the_daemon_and_the_row_folds_away(cx: &m
 }
 
 #[gpui_kit::test]
-fn a_subscription_that_delivers_leaves_the_rail_and_the_delivery_says_what_woke_the_agent(
+fn a_subscription_that_delivers_stays_in_the_rail_until_its_pull_request_is_merged(
     cx: &mut TestAppContext,
 ) {
     let user = user();
     script(&user, pull());
     let (lead, mcp) = lead(&user);
-    subscribe(&mcp, json!(["checks"]));
+    // No deadline: it lasts until the pull request is merged or closed.
+    let answer: Answer = mcp.call(
+        "forge",
+        json!({"action": "subscribe", "events": ["checks"]}),
+    );
+    assert!(!answer.error, "{}", answer.text);
     let (shell, cx) = open_session(&user, &lead, cx);
     let page = session_page(&shell, cx);
     until(&shell, cx, "the rail lists the subscription", |cx| {
         !rows(&page, cx).is_empty()
     });
+    let id = rows(&page, cx)[0].id.clone();
+    let times = label(cx, &format!("subscription-times-{id}")).unwrap();
+    assert!(
+        times.starts_with("since") && times.ends_with(" · until merged or closed"),
+        "{times}"
+    );
 
     script(&user, ended());
     a_round(&user);
@@ -367,9 +378,6 @@ fn a_subscription_that_delivers_leaves_the_rail_and_the_delivery_says_what_woke_
         blocks(&page, cx)
             .iter()
             .any(|b| matches!(b, Block::Notice { kind, .. } if kind == "woken by"))
-    });
-    until(&shell, cx, "the subscription left the rail", |cx| {
-        rows(&page, cx).is_empty()
     });
     settle(cx);
 
@@ -390,6 +398,15 @@ fn a_subscription_that_delivers_leaves_the_rail_and_the_delivery_says_what_woke_
         woken[0].contains("test login::form ... FAILED"),
         "{woken:?}"
     );
+    assert_eq!(rows(&page, cx).len(), 1, "it goes on");
+
+    let mut merged = ended();
+    merged["state"] = "MERGED".into();
+    script(&user, merged);
+    a_round(&user);
+    until(&shell, cx, "the subscription left the rail", |cx| {
+        rows(&page, cx).is_empty()
+    });
 }
 
 /// Unfolds the group that holds the row `at`, when it is folded: its rows are drawn.

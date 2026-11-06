@@ -1,6 +1,6 @@
 //! The scenarios of the CI durations (`docs/forges.md`, "How long CI takes"): `forge show` and
-//! `forge subscribe` tell an agent how long the repository's recent CI runs took, and a
-//! subscription asked for with no `minutes` is sized by it. Read through the fake `gh` and the
+//! `forge subscribe` tell an agent how long the repository's recent CI runs took, as information:
+//! a subscription with no `minutes` has no deadline, whatever CI takes. Read through the fake `gh` and the
 //! fake `bkt`; no test ever calls GitHub nor Bitbucket.
 
 mod common;
@@ -137,22 +137,6 @@ fn subscribe(mcp: &Mcp, args: Value) -> String {
     let answer = mcp.call("forge", args);
     assert!(!answer.error, "{}", answer.text);
     answer.text
-}
-
-/// The longest a subscription can wait, as `forge subscribe` says it when it refuses more.
-fn longest(mcp: &Mcp) -> u64 {
-    let refused = mcp.call(
-        "forge",
-        json!({"action": "subscribe", "events": ["checks"], "minutes": 100_000_000}),
-    );
-    assert!(refused.error, "{}", refused.text);
-    refused
-        .text
-        .split("minutes is from 1 to ")
-        .nth(1)
-        .and_then(|rest| rest.split(',').next())
-        .and_then(|n| n.parse().ok())
-        .unwrap_or_else(|| panic!("no longest in {}", refused.text))
 }
 
 #[test]
@@ -299,7 +283,10 @@ fn a_failure_to_read_the_runs_never_fails_forge_show_nor_forge_subscribe() {
     assert!(!shown.text.contains(LINE), "{}", shown.text);
     assert!(subscribed.contains("Subscribed"), "{subscribed}");
     assert!(!subscribed.contains(LINE), "{subscribed}");
-    assert!(subscribed.contains("within 60 min"), "{subscribed}");
+    assert!(
+        subscribed.contains("no need to subscribe again"),
+        "{subscribed}"
+    );
 }
 
 #[test]
@@ -322,81 +309,22 @@ fn a_failure_to_read_the_pipelines_never_fails_forge_show() {
 }
 
 #[test]
-fn forge_subscribe_with_no_minutes_takes_twice_the_average_rounded_up_to_the_minute() {
+fn forge_subscribe_with_no_minutes_says_the_runs_and_sizes_no_wait_by_them() {
     let user = User::with_fake_agent().with_fake_gh();
     github(&user);
-    // 12 min 10 s each: twice that is 24 min 20 s.
+    // 12 min 10 s each.
     runs(&user, each(5, 730));
     let mcp = agent(&user);
 
     let said = subscribe(&mcp, json!({}));
 
-    assert!(said.contains("within 25 min"), "{said}");
     assert!(
         said.contains("Recent CI runs of acme/api took 12 min on average (12 to 12 min, last 5)."),
         "{said}"
     );
-    assert!(
-        said.contains("Duration: 25 min, twice the average of the recent CI runs."),
-        "{said}"
-    );
-}
-
-#[test]
-fn forge_subscribe_with_no_minutes_waits_at_least_15_minutes_when_the_runs_are_short() {
-    let user = User::with_fake_agent().with_fake_gh();
-    github(&user);
-    runs(&user, each(5, 120));
-    let mcp = agent(&user);
-
-    let said = subscribe(&mcp, json!({}));
-
-    assert!(said.contains("within 15 min"), "{said}");
-    assert!(
-        said.contains(
-            "Duration: 15 min, the shortest: twice the average of the recent CI runs is 4 min."
-        ),
-        "{said}"
-    );
-}
-
-#[test]
-fn forge_subscribe_with_no_minutes_waits_at_most_the_longest_when_the_runs_are_long() {
-    let user = User::with_fake_agent().with_fake_gh();
-    github(&user);
-    // 60 hours each: twice that is past any longest.
-    runs(&user, each(5, 60 * 3600));
-    let mcp = agent(&user);
-    let longest = longest(&mcp);
-
-    let said = subscribe(&mcp, json!({}));
-
-    assert!(said.contains(&format!("within {longest} min")), "{said}");
-    assert!(
-        said.contains(&format!(
-            "Duration: {longest} min, the longest: twice the average of the recent CI runs is {} \
-             min.",
-            2 * 60 * 60
-        )),
-        "{said}"
-    );
-}
-
-#[test]
-fn forge_subscribe_with_no_minutes_and_no_history_takes_60_minutes() {
-    let user = User::with_fake_agent().with_fake_gh();
-    github(&user);
-    runs(&user, vec![]);
-    let mcp = agent(&user);
-
-    let said = subscribe(&mcp, json!({}));
-
-    assert!(said.contains("within 60 min"), "{said}");
-    assert!(
-        said.contains("Duration: 60 min, the default: no recent CI run to measure it by."),
-        "{said}"
-    );
-    assert!(!said.contains(LINE), "{said}");
+    assert!(said.contains("until it is merged or closed"), "{said}");
+    assert!(!said.contains("Duration:"), "{said}");
+    assert!(!said.contains(" min, the deadline"), "{said}");
 }
 
 #[test]
@@ -408,7 +336,10 @@ fn forge_subscribe_with_minutes_keeps_the_agent_s_choice_and_still_says_the_runs
 
     let said = subscribe(&mcp, json!({"minutes": 30}));
 
-    assert!(said.contains("within 30 min"), "{said}");
+    assert!(
+        said.contains("or for 30 min, the deadline you gave"),
+        "{said}"
+    );
     assert!(!said.contains("Duration:"), "{said}");
     assert!(said.contains("took 12 min on average"), "{said}");
 }

@@ -837,8 +837,8 @@ the agent follows (`session-turn-ended`, `docs/tools.md`, "Sessions for the user
 parent's message (`parent`), what happens to a child (`child-report`,
 `child-question`, `child-asks`, `child-failed`, `child-stuck`, `child-idle`, `child-replaced`,
 `children-status`), an approval's answer (`approval`), a reminder (`reminder`), a session's
-restart (`resume`), what a new build changed in its tools (`tools`, `docs/tools.md`, "When the
-tools change"). It is stored before it is sent, under an id that makes it idempotent, and it
+restart (`resume`), what a new build or a reload changed in its tools, or that a reload changed
+nothing (`tools`, `docs/tools.md`, "When the tools change"). It is stored before it is sent, under an id that makes it idempotent, and it
 is the only thing that wakes an agent.
 
 - **As the agent reads it**: `[flottille:<kind>]` on a line, then the body. Bodies are data: a

@@ -67,6 +67,8 @@ pub struct TreeAgent {
     /// Its running session runs an older list of tools than its role has: a restart gives the
     /// new one.
     pub tools_outdated: bool,
+    /// A reload of its tools waits for its next process (`agent.reload_tools`).
+    pub tools_reload: bool,
 }
 
 /// A change of model and effort waiting for the end of the turn.
@@ -150,6 +152,7 @@ impl TreeAgent {
                 })
                 .collect(),
             tools_outdated: agent["tools_outdated"] == true,
+            tools_reload: agent["tools_reload"] == true,
         }
     }
 }
@@ -445,6 +448,8 @@ pub enum SessionUpdate {
         events: Vec<Event>,
         earlier: bool,
     },
+    /// The history could not be read, with why: the link goes on trying.
+    HistoryFailed(String),
     /// An event of the shown agent, as it comes.
     Live(Event),
     /// The requests an agent of the session asked that reached the user, pending or decided,
@@ -542,6 +547,8 @@ const TREE_EVENTS: &[&str] = &[
     "agent.usage",
     // The line that says the session runs an older list of tools.
     "agent.tools_outdated",
+    // The line that says the tools reload after this turn.
+    "agent.tools_reload",
     "delivery.queued",
     // A waiting message taken back leaves the queue under the conversation.
     "delivery.withdrawn",
@@ -669,16 +676,22 @@ impl Link {
         let mut resume = Resume::default();
         while !self.stopped() {
             let began = Instant::now();
-            if let Ok(stream) = (self.connect)()
-                && let Ok(clone) = stream.try_clone()
-            {
-                *self.stream.lock().unwrap() = Some(clone);
-                if self.stopped() {
-                    return;
+            let broke = match (self.connect)().and_then(|s| Ok((s.try_clone()?, s))) {
+                Ok((clone, stream)) => {
+                    *self.stream.lock().unwrap() = Some(clone);
+                    if self.stopped() {
+                        return;
+                    }
+                    match self.follow(stream, &mut resume) {
+                        Ok(()) => return,
+                        Err(why) => why,
+                    }
                 }
-                if self.follow(stream, &mut resume).is_ok() {
-                    return;
-                }
+                Err(why) => why.to_string(),
+            };
+            // A page of earlier events asked for says why it does not come.
+            if !resume.read {
+                self.send(SessionUpdate::HistoryFailed(broke));
             }
             if began.elapsed() >= HEALTHY {
                 retry = FIRST_RETRY;

@@ -373,7 +373,7 @@ fn put(
 
 /// Removes the service: refused while another service or a project's task needs it.
 fn remove(daemon: &Daemon, name: &str) -> Result<(), Failure> {
-    let needed_by = needed_by(daemon, name);
+    let needed_by = needed_by_said(daemon, name);
     if !needed_by.is_empty() {
         return Err(Failure::refused(format!(
             "{} need the service {name}: change them first",
@@ -422,9 +422,11 @@ pub fn by_an_agent(daemon: &Daemon, name: &str) -> bool {
     !matches!(daemon.read(|store| store.service_writer(name)), Ok(None))
 }
 
-/// The projects' tasks that need the service, through other services too: `app (api:dev)`.
-fn needed_by(daemon: &Daemon, name: &str) -> Vec<String> {
-    let services = load(daemon).unwrap_or_default();
+/// By service, the projects whose tasks need it, directly or through what another service
+/// needs, each with those tasks. The projects' files are read once for all the services.
+type Needed = BTreeMap<String, Vec<(String, Vec<String>)>>;
+
+fn needed(daemon: &Daemon, services: &BTreeMap<String, Service>) -> Needed {
     let loaded = daemon
         .projects
         .lock()
@@ -432,22 +434,35 @@ fn needed_by(daemon: &Daemon, name: &str) -> Vec<String> {
         .registry()
         .load_all()
         .unwrap_or_default();
-    loaded
-        .projects
-        .iter()
-        .filter_map(|project| {
-            let tasks: Vec<&str> = project
-                .tasks
-                .iter()
-                .filter(|(_, task)| {
-                    service::in_order(&services, &task.needs)
-                        .iter()
-                        .any(|need| need == name)
-                })
-                .map(|(task, _)| task.as_str())
-                .collect();
-            (!tasks.is_empty()).then(|| format!("{} ({})", project.name, tasks.join(", ")))
-        })
+    let mut needed = Needed::new();
+    for project in &loaded.projects {
+        let mut by_service: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (task, settings) in &project.tasks {
+            for service in service::in_order(services, &settings.needs) {
+                by_service.entry(service).or_default().push(task.clone());
+            }
+        }
+        for (service, tasks) in by_service {
+            needed
+                .entry(service)
+                .or_default()
+                .push((project.name.clone(), tasks));
+        }
+    }
+    needed
+}
+
+/// The projects whose tasks need the service, each with those tasks: `app (api, web)` in words.
+fn needed_by(daemon: &Daemon, name: &str) -> Vec<(String, Vec<String>)> {
+    let services = load(daemon).unwrap_or_default();
+    needed(daemon, &services).remove(name).unwrap_or_default()
+}
+
+/// [`needed_by`] in words: `app (api, web)`.
+fn needed_by_said(daemon: &Daemon, name: &str) -> Vec<String> {
+    needed_by(daemon, name)
+        .into_iter()
+        .map(|(project, tasks)| format!("{project} ({})", tasks.join(", ")))
         .collect()
 }
 
@@ -526,7 +541,13 @@ fn last_line(output: &str) -> Option<String> {
 }
 
 /// A service as the protocol shows it.
-fn to_json(daemon: &Daemon, services: &BTreeMap<String, Service>, name: &str) -> Value {
+/// `needed` is [`needed`]'s, read once for every service shown.
+fn to_json(
+    daemon: &Daemon,
+    services: &BTreeMap<String, Service>,
+    needed: &Needed,
+    name: &str,
+) -> Value {
     let service = &services[name];
     let now = now(daemon, name);
     let home = flottille_core::place::home();
@@ -553,6 +574,12 @@ fn to_json(daemon: &Daemon, services: &BTreeMap<String, Service>, name: &str) ->
         "run": now.run,
         "address": address,
         "needs_stopped": stopped,
+        "needed_by": needed
+            .get(name)
+            .into_iter()
+            .flatten()
+            .map(|(project, tasks)| json!({"project": project, "tasks": tasks}))
+            .collect::<Vec<_>>(),
     })
 }
 
@@ -865,9 +892,10 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         "service.list" => {
             let services = load(&daemon)?;
             probed(&daemon, &services).await;
+            let needed = needed(&daemon, &services);
             let listed: Vec<Value> = services
                 .keys()
-                .map(|name| to_json(&daemon, &services, name))
+                .map(|name| to_json(&daemon, &services, &needed, name))
                 .collect();
             Ok(json!({"services": listed}))
         }
@@ -876,7 +904,12 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let services = load(&daemon)?;
             find(&services, &name)?;
             probed(&daemon, &services).await;
-            Ok(to_json(&daemon, &services, &name))
+            Ok(to_json(
+                &daemon,
+                &services,
+                &needed(&daemon, &services),
+                &name,
+            ))
         }
         "service.add" | "service.edit" => {
             let (taken, keys) = split(params, &["name"])?;
@@ -885,7 +918,12 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             };
             put(&daemon, name, &keys, method == "service.edit", None)?;
             let services = load(&daemon)?;
-            Ok(to_json(&daemon, &services, name))
+            Ok(to_json(
+                &daemon,
+                &services,
+                &needed(&daemon, &services),
+                name,
+            ))
         }
         "service.remove" => {
             let Named { name } = serde_json::from_value(params)?;
@@ -896,13 +934,15 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let Named { name } = serde_json::from_value(params)?;
             let started = start(&daemon, &name, None).await?;
             let services = load(&daemon)?;
-            Ok(json!({"service": to_json(&daemon, &services, &name), "started": started}))
+            let shown = to_json(&daemon, &services, &needed(&daemon, &services), &name);
+            Ok(json!({"service": shown, "started": started}))
         }
         "service.stop" => {
             let Named { name } = serde_json::from_value(params)?;
             stop(&daemon, &name).await?;
             let services = load(&daemon)?;
-            Ok(json!({"service": to_json(&daemon, &services, &name)}))
+            let shown = to_json(&daemon, &services, &needed(&daemon, &services), &name);
+            Ok(json!({"service": shown}))
         }
         "service.output" => {
             let asked: OutputAsked = serde_json::from_value(params)?;
@@ -1100,7 +1140,7 @@ pub fn says(
                 }
                 _ => {}
             }
-            let needed = needed_by(daemon, name);
+            let needed = needed_by_said(daemon, name);
             let by = match needed.is_empty() {
                 true => "no project's task needs it".to_owned(),
                 false => format!("the tasks that need it: {}", needed.join("; ")),
@@ -1258,7 +1298,8 @@ pub async fn tool(daemon: &Arc<Daemon>, grant: &Grant, args: Value, judged: &[St
 
 /// One line of a service: its name, its state, its folder and its address.
 fn line_text(daemon: &Daemon, services: &BTreeMap<String, Service>, name: &str) -> String {
-    let shown = to_json(daemon, services, name);
+    // A line of text says nothing of what needs it.
+    let shown = to_json(daemon, services, &Needed::new(), name);
     let mut text = format!(
         "- {name}: {} in {}",
         shown["state"].as_str().unwrap_or_default(),

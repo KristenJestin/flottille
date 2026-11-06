@@ -83,6 +83,24 @@ pub enum Selection {
     Settings,
     /// A project's own settings.
     ProjectSettings(String),
+    /// The services of the machine.
+    Services,
+}
+
+/// The links an agent shares in a row: the toast that says them is named by the agent and the
+/// row's number, so that the next row is a toast of its own.
+#[derive(Default)]
+struct Sharing {
+    row: u64,
+    links: Vec<LinkShown>,
+}
+
+impl Sharing {
+    /// The row ends: the next link starts another, and another toast.
+    fn end(&mut self) {
+        self.row += 1;
+        self.links.clear();
+    }
 }
 
 pub struct Shell {
@@ -121,6 +139,9 @@ pub struct Shell {
     /// row says it with one dot, unless a state mark takes its place; they live as long as the
     /// window.
     news: HashMap<String, String>,
+    /// The links each agent shared in a row, while the toast that says them is on screen: the
+    /// toast counts them, and the agent's next words start a new row.
+    sharing: HashMap<String, Sharing>,
     /// Each project's composer and new workspace form, made when its page first opens: a draft,
     /// a send and a name asked belong to their project.
     forms: HashMap<String, Forms>,
@@ -147,6 +168,8 @@ pub struct Shell {
     /// a composer with no project default starts there.
     last_pick: Option<Pick>,
     settings: Entity<SettingsPage>,
+    /// The services page, one for the window's life.
+    services: Entity<crate::services::ServicesPage>,
     /// The editor of the user's rules, on the settings page.
     rules: Entity<RulesEditor>,
     /// The notice of the Auto judge Flottille picked was dismissed here, before the daemon says
@@ -239,9 +262,13 @@ impl Shell {
                 workspaces.clone(),
             )
         });
+        let services = {
+            let this = this.clone();
+            cx.new(|cx| crate::services::ServicesPage::new(this, cx))
+        };
         let main = {
-            let (this, settings) = (this.clone(), settings.clone());
-            cx.new(|cx| MainArea::new(this, settings, cx))
+            let (this, settings, services) = (this.clone(), settings.clone(), services.clone());
+            cx.new(|cx| MainArea::new(this, settings, services, cx))
         };
         let left = cx.new(|_| Drawer::new("tree-drawer", Side::Left, px(SIDEBAR), sidebar.clone()));
         let bell = cx.new(|_| BellList::new(this.clone()));
@@ -286,6 +313,7 @@ impl Shell {
             pulls: HashMap::new(),
             forged: Vec::new(),
             news: HashMap::new(),
+            sharing: HashMap::new(),
             forms: HashMap::new(),
             actions,
             details_of: None,
@@ -299,6 +327,7 @@ impl Shell {
             providers_read: 0,
             last_pick: None,
             settings,
+            services,
             rules,
             judge_noticed: false,
             appearance_asked: 0,
@@ -666,6 +695,11 @@ impl Shell {
             Update::DeveloperChanged => self.actions.send(Command::DeveloperRead),
             Update::ToolResultsChanged => self.actions.send(Command::ToolResultsRead),
             Update::SessionsChanged => self.actions.send(Command::SessionsRead),
+            Update::ServicesChanged => {
+                if self.main.read(cx).services_page().is_some() {
+                    self.actions.send(Command::Services);
+                }
+            }
             // A default that changed changes the folder every project shows, so the open
             // project's section reads again too.
             Update::WorkspacesFolderChanged { project } => {
@@ -687,6 +721,7 @@ impl Shell {
             Update::Forged(forged) => self.forged(forged, cx),
             Update::News(news) => self.news(news, cx),
             Update::Link(link) => self.linked(link, cx),
+            Update::Prompted(agent) => self.spoke(&agent),
             Update::Items { project, item } => {
                 if let Some(items) = self.project_items_of(&project, cx) {
                     items.update(cx, |items, cx| items.changed(item, cx));
@@ -772,9 +807,13 @@ impl Shell {
                     });
                 }
             }
-            Outcome::Replied { session, refused } => {
+            Outcome::Replied {
+                session,
+                key,
+                answer,
+            } => {
                 if let Some(reply) = self.replies.get(&session).cloned() {
-                    reply.update(cx, |reply, cx| reply.replied(refused, window, cx));
+                    reply.update(cx, |reply, cx| reply.replied(key, answer, cx));
                 }
             }
             Outcome::Unqueued {
@@ -848,6 +887,22 @@ impl Shell {
                     && page.read(cx).id() == session
                 {
                     page.update(cx, |page, cx| page.resumed(refused, cx));
+                }
+            }
+            Outcome::ToolsReloaded {
+                session,
+                after_turn,
+                refused,
+            } => {
+                if let Some(page) = self.session_page.clone()
+                    && page.read(cx).id() == session
+                {
+                    page.update(cx, |page, cx| page.tools_reloaded(after_turn, refused, cx));
+                } else if let Some(why) = refused {
+                    flottille_ui::toast(
+                        flottille_ui::Toast::failure(crate::session::NOT_RELOADED).detail(why),
+                        cx,
+                    );
                 }
             }
             Outcome::ModeSet { session, refused } => {
@@ -1278,6 +1333,34 @@ impl Shell {
                     tasks.update(cx, |tasks, cx| tasks.run_answered(answer, cx));
                 }
             }
+            Outcome::Services { listed } => {
+                // The open task form offers them as what a task may need, or says why it cannot.
+                if let Some(page) = self.project_settings.clone() {
+                    let names = listed
+                        .as_ref()
+                        .map(|services| services.iter().map(|s| s.name.clone()).collect())
+                        .map_err(Clone::clone);
+                    let section = page.read(cx).tasks().clone();
+                    section.update(cx, |section, cx| section.set_services(names, cx));
+                }
+                self.services.update(cx, |page, cx| page.listed(listed, cx));
+            }
+            Outcome::ServiceWritten { refused } => {
+                self.services
+                    .update(cx, |page, cx| page.written(refused, cx));
+            }
+            Outcome::ServiceActed {
+                name,
+                start,
+                answer,
+            } => {
+                self.services
+                    .update(cx, |page, cx| page.acted(&name, start, answer, cx));
+            }
+            Outcome::ServiceOutput { output } => {
+                self.services
+                    .update(cx, |page, cx| page.output(output.map(|o| *o), cx));
+            }
             Outcome::Setup { project, listed } => {
                 if let Some(page) = self.settings_of_project(&project, cx) {
                     let section = page.read(cx).setup().clone();
@@ -1707,27 +1790,67 @@ impl Shell {
         self.ring(cx);
     }
 
-    /// An agent handed the user a link: a toast offers it with an Open button, on any page (the
-    /// session's conversation keeps a card of it). Nothing opens until the click.
+    /// An agent handed the user a link: a toast offers it with an Open button, unless the session's
+    /// conversation is on screen, where its card is. Links shared in a row are one toast, which
+    /// counts them while it is on screen. Nothing opens until the click.
     fn linked(&mut self, link: LinkShown, cx: &mut Context<Self>) {
+        let session = self.snapshot.root_of(&link.agent);
+        // On screen is the conversation of the agent itself: a sub-agent's link, while the
+        // root's conversation is shown, is not in sight.
+        let on_screen = self.selected == Some(Selection::Session(session.clone()))
+            && self
+                .session_page
+                .as_ref()
+                .is_some_and(|page| page.read(cx).shown() == link.agent);
+        let sharing = self.sharing.entry(link.agent.clone()).or_default();
+        if on_screen {
+            sharing.end();
+            return;
+        }
+        let mut key = format!("links-{}-{}", link.agent, sharing.row);
+        if !sharing.links.is_empty() && !flottille_ui::toast::shown(&key, cx) {
+            sharing.end();
+            key = format!("links-{}-{}", link.agent, sharing.row);
+        }
+        sharing.links.push(link);
         let shell = cx.entity().downgrade();
-        let target = link.target.clone();
-        flottille_ui::toast(
-            flottille_ui::Toast::success(format!("The agent shares a link: {}", link.name()))
-                .action("Open", move |_, cx| {
-                    shell
-                        .update(cx, |shell, cx| {
-                            crate::open::shown(&shell.follow.opener, &target, cx)
-                        })
-                        .ok();
-                }),
-            cx,
-        );
+        let toast = match sharing.links.as_slice() {
+            [only] => {
+                let target = only.target.clone();
+                flottille_ui::Toast::success(format!("The agent shares a link: {}", only.name()))
+                    .action("Open", move |_, cx| {
+                        shell
+                            .update(cx, |shell, cx| {
+                                crate::open::shown(&shell.follow.opener, &target, cx)
+                            })
+                            .ok();
+                    })
+            }
+            shared => {
+                flottille_ui::Toast::success(format!("The agent shares {} links", shared.len()))
+                    .action("Show", move |window, cx| {
+                        shell
+                            .update(cx, |shell, cx| {
+                                shell.open(Selection::Session(session.clone()), window, cx)
+                            })
+                            .ok();
+                    })
+            }
+        };
+        flottille_ui::toast(toast.keyed(key), cx);
+    }
+
+    /// What the agent said or what the user told it ends the row of links it was sharing.
+    fn spoke(&mut self, agent: &str) {
+        if let Some(sharing) = self.sharing.get_mut(agent) {
+            sharing.end();
+        }
     }
 
     /// An agent said something, reported or was woken: its session's row says it, unless the
     /// session is the one open, where it is in sight.
     fn news(&mut self, news: News, cx: &mut Context<Self>) {
+        self.spoke(&news.agent);
         let session = self.snapshot.root_of(&news.agent);
         if self.selected == Some(Selection::Session(session.clone())) {
             return;
@@ -1995,6 +2118,14 @@ impl Shell {
                 .send(Command::WorkspacesFolderRead { project: None });
             self.ask_appearance(None);
         }
+        // Left, the services page stops reading the output it shows: nothing is in sight.
+        if self.selected == Some(Selection::Services) && selection != Selection::Services {
+            self.services.update(cx, |page, cx| page.close_output(cx));
+        }
+        // Opened, the services are read again: what runs changes outside the window too.
+        if selection == Selection::Services && self.selected != Some(Selection::Services) {
+            self.services.update(cx, |page, cx| page.opened(cx));
+        }
         let page = self.page_of(&selection, cx);
         self.selected = Some(selection);
         let forms = self.forms_for(&page, window, cx);
@@ -2010,6 +2141,7 @@ impl Shell {
     fn page_of(&self, selection: &Selection, cx: &App) -> Page {
         match selection {
             Selection::Settings => Page::Settings,
+            Selection::Services => Page::Services,
             // A project just added is not in the daemon's last read yet: its page, open, stays.
             Selection::ProjectSettings(name) => {
                 let open = self
@@ -2063,7 +2195,7 @@ impl Shell {
             Some(Selection::Project(name)) => Some(name.clone()),
             Some(Selection::Session(id)) => self.snapshot.session(id).map(|s| s.project.clone()),
             Some(Selection::ProjectSettings(name)) => Some(name.clone()),
-            Some(Selection::Settings) | None => None,
+            Some(Selection::Settings | Selection::Services) | None => None,
         }
         .or_else(|| self.snapshot.projects.first().map(|p| p.name.clone()));
         if let Some(project) = project {
@@ -2329,6 +2461,7 @@ impl Render for TopBar {
         let search_shell = self.shell.clone();
         let menu_shell = self.shell.clone();
         let settings_shell = self.shell.clone();
+        let services_shell = self.shell.clone();
         let mut bell =
             Button::icon("bell", Icon::Bell, "Waiting for you").on_click(move |_, _, cx| {
                 shell.update(cx, |shell, cx| shell.toggle_bell(cx)).ok();
@@ -2407,6 +2540,15 @@ impl Render for TopBar {
                         .text_color(mix(p.faint, p.text, hover))
                 },
             ))
+            .child(
+                Button::icon("services", Icon::Service, "Services").on_click(
+                    move |_, window, cx| {
+                        services_shell
+                            .update(cx, |shell, cx| shell.open(Selection::Services, window, cx))
+                            .ok();
+                    },
+                ),
+            )
             .child(
                 Button::icon("settings", Icon::Settings, "Settings").on_click(
                     move |_, window, cx| {

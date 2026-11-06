@@ -90,6 +90,13 @@ pub enum AgentAction {
         #[arg(long)]
         json: bool,
     },
+    /// Reload a root agent's tools: its process restarts on its conversation with the tools its
+    /// role has now, once its turn ended, and it is told what changed
+    ReloadTools {
+        agent: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Set a session's mode: in ask, every call to judge comes to you; in auto, the judge you
     /// chose in Settings decides it; in full, nothing is asked: every call the gate would hold
     /// passes, and what it refuses stays refused (`docs/design.md` §7)
@@ -315,6 +322,26 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                     "Resumed agent {} on its own session; it is {} now. Its next message starts it.",
                     text(&resumed["agent"], "id"),
                     text(&resumed["agent"], "state")
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        AgentAction::ReloadTools { agent, json } => {
+            let reloaded = Client::connect_or_start(paths)?.request(
+                "agent.reload_tools",
+                serde_json::to_value(AgentName { agent, after: None })?,
+            )?;
+            if json {
+                println!("{reloaded}");
+            } else {
+                let after = match reloaded["after_turn"] == true {
+                    true => ", once its turn ended",
+                    false => "",
+                };
+                println!(
+                    "Reloading the tools of agent {}: they are given at its next message{after}, \
+                     which tells it what changed.",
+                    text(&reloaded["agent"], "id")
                 );
             }
             Ok(ExitCode::SUCCESS)
@@ -651,7 +678,7 @@ fn agent_line(agent: &Value, entry: Option<&Value>) -> String {
 
 /// What is said of a session that did not take the tools its role gained.
 pub const OUTDATED: &str = "its session runs an older list of tools than its role has now: \
-    restart the session (stop, then resume) for the new one";
+    reload them (`flottille agent reload-tools`) for the new one";
 
 /// The model and the effort an agent is to change to, as a phrase.
 fn pending_text(agent: &Value) -> String {

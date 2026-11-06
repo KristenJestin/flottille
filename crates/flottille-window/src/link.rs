@@ -54,6 +54,9 @@ pub enum Update {
     /// After how many days an inactive session is ended was chosen, from any client: the settings
     /// page reads it again.
     SessionsChanged,
+    /// A service of the machine started, became ready, ended or was changed, or a project's tasks
+    /// changed what needs one: the services page reads them again.
+    ServicesChanged,
     /// Where workspaces go was chosen (a project's own when it names one, the default of every
     /// project when `None`), from any client: the sections read it again.
     WorkspacesFolderChanged { project: Option<String> },
@@ -63,6 +66,8 @@ pub enum Update {
     News(model::News),
     /// An agent handed the user a link: a toast offers it.
     Link(model::LinkShown),
+    /// An agent was told something (`agent.prompted`): it ends the row of links it was sharing.
+    Prompted(String),
     /// An item of the project changed (`item.*`, which names it), or what it declares
     /// (`project.changed`): its pull requests and tickets are read again.
     Items {
@@ -192,11 +197,19 @@ fn follow(
         if event.name == "tool_results.changed" {
             let _ = updates.unbounded_send(Update::ToolResultsChanged);
         }
+        if event.name.starts_with("service.") || event.name == "project.changed" {
+            let _ = updates.unbounded_send(Update::ServicesChanged);
+        }
         if let Some(forged) = model::Forged::of(event) {
             let _ = updates.unbounded_send(Update::Forged(forged));
         }
         if let Some(news) = model::News::of(event) {
             let _ = updates.unbounded_send(Update::News(news));
+        }
+        if event.name == "agent.prompted"
+            && let Some(agent) = event.data["agent"].as_str()
+        {
+            let _ = updates.unbounded_send(Update::Prompted(agent.to_owned()));
         }
         if let Some(link) = model::LinkShown::of(event) {
             let _ = updates.unbounded_send(Update::Link(link));
