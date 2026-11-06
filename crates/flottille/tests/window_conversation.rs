@@ -3232,8 +3232,10 @@ fn a_queued_message_taken_back_before_the_tree_lists_it_leaves(cx: &mut TestAppC
     )
     .unwrap();
     gate.open();
+    // The tree the window read when the daemon queued it may still list it: the read that
+    // follows the withdrawal (`delivery.withdrawn` is a tree event) takes it out.
     until(&shell, cx, "it leaves", |cx| {
-        reply.read_with(cx, |r, _| r.pending().is_empty())
+        reply.read_with(cx, |r, _| r.pending().is_empty()) && queued(&page, cx).is_empty()
     });
     at_rest(cx);
     assert!(!has(queued_id(&format!("pending-{key}")), cx));
