@@ -399,7 +399,7 @@ pub struct ProjectSettingsPage {
     rules: Entity<RulesEditor>,
     /// The checks of its agents' messages, under its rules (`docs/projects.md`, "Message checks").
     message_checks: Entity<MessageChecks>,
-    /// The regular expression its branches match, beside the branch prefix.
+    /// The regular expression its branches match, under the setup.
     branch_format: Entity<Convention>,
     /// The description of a pull request opened without one, beside the message checks.
     pull_request_template: Entity<Convention>,
@@ -2286,8 +2286,9 @@ impl Render for ProjectSettingsPage {
                 .gap(space::XXL)
                 .child(self.workspaces.clone())
                 .child(self.branch_prefix_section(window, cx))
-                .child(self.branch_format.clone())
                 .child(self.setup.clone())
+                // Under the setup, which stays where its tab shows it first.
+                .child(self.branch_format.clone())
                 .into_any_element(),
             // What checks the agents' messages belongs with how they are told to work.
             div()

@@ -1,5 +1,5 @@
 //! The project's conventions in its Settings (`docs/projects.md`, "Branch format" and "Pull
-//! request template"): the regular expression its branches match, beside the branch prefix, and
+//! request template"): the regular expression its branches match, under the setup, and
 //! the description of a pull request opened without one, beside the message checks. Each is off
 //! when empty. The window writes nothing itself: Save is the daemon's
 //! (`project.set_conventions`), and the field shows what the daemon says next.

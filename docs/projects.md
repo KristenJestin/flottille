@@ -55,7 +55,7 @@ or as last fetched): the creation then decides, once it knows which repositories
 creation refuses a branch named outside the format that no repository has, nor its remote (listed,
 not fetched), before it fetches any base. A
 pattern that is not a regular expression is refused when the file is read and when it is saved,
-with the reason. The project's Settings, Setup tab, "Branch format", under the branch prefix,
+with the reason. The project's Settings, Setup tab, "Branch format", under the setup,
 edits it (`project.set_conventions`, `docs/protocol.md`); empty turns it off. Agents read it with
 `project settings`.
 
