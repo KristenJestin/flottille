@@ -259,7 +259,9 @@ fn a_run_started_by_an_agent_wakes_it_when_it_ends() {
 
     let answer = started_run(&user, &id, &mcp, json!({}));
     assert!(answer.contains("#43"), "{answer}");
-    assert!(answer.contains("Following it"), "{answer}");
+    for said in ["Followed until it ends", "no wake is needed"] {
+        assert!(answer.contains(said), "{said} in {answer}");
+    }
     let listed = subscriptions(&user);
     assert_eq!(listed.len(), 1, "{listed:?}");
     assert_eq!(listed[0]["source"], "run");
@@ -368,7 +370,7 @@ fn follow_false_starts_the_run_without_following_it() {
     let answer = started_run(&user, &id, &mcp, json!({"follow": false}));
 
     assert!(answer.contains("#43"), "{answer}");
-    assert!(!answer.contains("Following it"), "{answer}");
+    assert!(!answer.contains("Followed"), "{answer}");
     assert!(subscriptions(&user).is_empty());
     // A run is followed only when it is started.
     let refused = mcp.call("forge", json!({"action": "runs", "follow": false}));
@@ -451,7 +453,11 @@ fn a_github_workflow_run_wakes_the_agent_when_it_ends() {
             "variables": [{"key": "suite", "value": "smoke"}]}),
     );
     assert!(!answer.error, "{}", answer.text);
-    assert!(answer.text.contains("Following it"), "{}", answer.text);
+    assert!(
+        answer.text.contains("Followed until it ends"),
+        "{}",
+        answer.text
+    );
     a_round(&user);
     assert!(delivered(&user).is_empty(), "still running is no news");
 
@@ -471,4 +477,50 @@ fn a_github_workflow_run_wakes_the_agent_when_it_ends() {
         assert!(delivery.contains(part), "{part} in {delivery}");
     }
     assert!(subscriptions(&user).is_empty());
+}
+
+#[test]
+fn a_subscription_to_a_pull_request_says_its_running_checks_and_the_run_followed_on_its_branch() {
+    let (user, id, mcp) = setup();
+    let check = |name: &str, status: &str, conclusion: &str| {
+        json!({"__typename": "CheckRun", "name": name, "status": status,
+            "conclusion": conclusion})
+    };
+    let mut script = gh_script();
+    script["pulls"] = json!({"acme/web": {"app/login": {
+        "number": 12, "title": "Add the login page", "state": "OPEN", "isDraft": false,
+        "headRefName": "app/login", "headRefOid": "aaaaaaa1", "baseRefName": "main",
+        "url": "https://github.com/acme/web/pull/12",
+        "statusCheckRollup": [check("build", "COMPLETED", "SUCCESS"),
+            check("test", "IN_PROGRESS", "")],
+        "comments": [], "reviews": []
+    }}});
+    script["run_views"]["acme/web"]["78"] = json!({"databaseId": 78, "status": "in_progress",
+        "conclusion": "", "jobs": []});
+    user.gh_script(script);
+    set_mode(&user, &id, "full");
+    idle(&user, &id);
+    let started = mcp.call(
+        "forge",
+        json!({"action": "run", "repository": "web", "pipeline": "e2e.yml"}),
+    );
+    assert!(!started.error, "{}", started.text);
+
+    let answer = read(
+        &mcp,
+        json!({"action": "subscribe", "repository": "web", "events": ["checks"]}),
+    );
+
+    for said in [
+        "Its checks running as you subscribed: test.",
+        "a run started on its branch outside them is followed by forge run, not by this \
+         subscription",
+        "You already follow the run 78 of web (e2e.yml on app/login)",
+    ] {
+        assert!(answer.contains(said), "{said:?} in {answer}");
+    }
+    assert!(
+        !answer.contains("running as you subscribed: build"),
+        "{answer}"
+    );
 }

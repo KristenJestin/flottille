@@ -1584,7 +1584,40 @@ async fn forge_subscribe(
     for line in runs.map(|runs| runs.line()).into_iter().chain(duration) {
         text.push_str(&format!("\n{line}"));
     }
+    text.push_str(&checks_when_subscribed(daemon, agent, &path, pull));
     Outcome::Done(text)
+}
+
+/// What `subscribe` says of the checks: those running as it subscribed, which `checks` waits
+/// for, and the runs the agent follows on the pull request's branch, which wake it on their own.
+fn checks_when_subscribed(daemon: &Daemon, agent: &str, path: &str, pull: &Pull) -> String {
+    let running: Vec<&str> = pull
+        .checks
+        .iter()
+        .filter(|(_, state)| *state == "pending")
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let mut text = match running.is_empty() {
+        true => "\nNo check of it was running as you subscribed.".to_owned(),
+        false => format!(
+            "\nIts checks running as you subscribed: {}.",
+            masked(&running.join(", "))
+        ),
+    };
+    text.push_str(
+        " checks is the end of the pull request's checks: a run started on its branch outside \
+         them is followed by forge run, not by this subscription.",
+    );
+    for run in followed::of(daemon, agent, Some(path), None)
+        .into_iter()
+        .filter(|s| s.target["branch"] == pull.head.as_str())
+    {
+        text.push_str(&format!(
+            "\nYou already follow the {}: its end wakes you on its own.",
+            followed::named(&run.target)
+        ));
+    }
+    text
 }
 
 /// Marks the comments of a pull request that an agent posted, as Flottille's record says

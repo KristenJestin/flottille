@@ -706,7 +706,9 @@ const SERVED: [Definition; 29] = [
         name: "wake",
         title: "Wake later",
         description: "Wakes you once, in minutes, by a delivery saying why; end your turn \
-            meanwhile. A new one replaces yours; cancel drops it.",
+            meanwhile. A new one replaces yours; cancel drops it. For a time the user asked: \
+            never poll CI, forge run follows its run and forge subscribe a pull request's \
+            checks.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -3207,6 +3209,19 @@ mod tests {
             "{}",
             workspace.description.len()
         );
+    }
+
+    #[test]
+    fn the_wake_description_steers_a_wait_on_ci_to_forge() {
+        let wake = definition("wake").unwrap().description;
+        assert!(
+            wake.contains(
+                "never poll CI, forge run follows its run and forge subscribe a pull request's \
+                 checks"
+            ),
+            "{wake}"
+        );
+        assert!(wake.len() < 1000, "{}", wake.len());
     }
 
     #[test]

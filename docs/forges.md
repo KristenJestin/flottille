@@ -566,8 +566,11 @@ link in its answer.
 
 An agent that starts a run waits for it: `run` **follows the run it started** unless it is given
 `follow: false`. The following is a subscription of the source `run` (`docs/design.md` §5.6), with
-no time of its own, and its answer ends with `Following it: a delivery wakes you when it ends or
-waits on a manual step; forge unsubscribe {"run": 43} stops it.`
+no time of its own, and its answer ends with `Followed until it ends: a delivery wakes you then,
+and once if it waits on a manual step, so no wake is needed; forge unsubscribe {"run": 43} stops
+following it.` A subscription to the pull request of the run's branch does not follow the run:
+its `checks` is the end of the pull request's checks, which its answer names as they run, and it
+names the runs the agent already follows there (`docs/tools.md`, "The forge").
 
 - **Read by the rounds of the items**, with the pull requests of the run's repository ("Subscriptions"
   below): one request a followed run in each round, `bkt pipeline view <run> --json` (its

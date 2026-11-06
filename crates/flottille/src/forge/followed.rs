@@ -56,8 +56,8 @@ pub(super) fn follow(
         return format!("\nNot followed: {error}");
     }
     format!(
-        "\nFollowing it: a delivery wakes you when it ends or waits on a manual step; forge \
-         unsubscribe {{\"run\": {}}} stops it.",
+        "\nFollowed until it ends: a delivery wakes you then, and once if it waits on a manual \
+         step, so no wake is needed; forge unsubscribe {{\"run\": {}}} stops following it.",
         started.number
     )
 }

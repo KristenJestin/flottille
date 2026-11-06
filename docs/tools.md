@@ -521,7 +521,12 @@ pending requests.
   repository's CI instead, and the answer says the duration taken and why: twice the average of
   its recent runs, from 15 minutes to the longest, 60 when there is no run to measure by
   ([`forges.md`](forges.md), "How long CI takes"); the answer carries the line `show` gives about
-  the runs, with `minutes` too. `checks` delivers how many passed and failed, with
+  the runs, with `minutes` too. It also says the pull request's checks running as it subscribed
+  (`Its checks running as you subscribed: test.`, or that none was), that `checks` is the end of
+  those and that a run started on its branch outside them is followed by `run`, not by the
+  subscription, and each run the agent already follows on that branch (`You already follow the
+  run #43 of api (custom: nightly on app/login): its end wakes you on its own.`): a short
+  `default` pipeline that ends first no longer hides a long custom one. `checks` delivers how many passed and failed, with
   for each failed job (three at most, the others counted) its name, its duration and the line
   that says why it failed, the end of its log being in `show` ([`forges.md`](forges.md), "A wake about failed checks is a summary"); `review` and `comment` their author, their
   state and an excerpt (200 characters, on one line). The events are those of the daemon's rounds
@@ -633,7 +638,7 @@ pending requests.
   in every result and record) and follows it unless `follow: false`: a `subscription` delivery
   wakes the agent when it ends (its result, its duration, the failed steps by name) and once when
   it waits on a manual step, read by the rounds of the items ([`forges.md`](forges.md),
-  "Following a run"), **`stop {repository?, run}`** stops a run, **`step {repository?, run, step,
+  "Following a run"); the answer says it is followed until it ends and that no `wake` is needed, **`stop {repository?, run}`** stops a run, **`step {repository?, run, step,
   do}`** starts a manual step (`do: start`) or runs one again (`do: rerun`) where the forge allows
   it, refused naming why elsewhere. A Bitbucket Data Center repository is refused for all of them.
 
@@ -669,6 +674,10 @@ agent at start; an agent that ends takes its wake with it. `forge show` and `for
 leave it alone.
 
 It is the agent's own bookkeeping: the gate allows it in every mode, never held.
+
+**It is for a time the user asked, not for CI.** Agents used it to poll a pipeline, even beside a
+pull request's subscription: its description says `For a time the user asked: never poll CI, forge
+run follows its run and forge subscribe a pull request's checks.`
 
 ## The workspace
 
