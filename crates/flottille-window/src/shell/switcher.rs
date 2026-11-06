@@ -48,6 +48,8 @@ pub enum Do {
     SettingsAt(Reveal),
     /// That project's own settings.
     ProjectSettings(String),
+    /// The services of the machine.
+    Services,
     /// The bell's list: what waits for the user.
     Bell,
 }
@@ -89,6 +91,12 @@ pub fn actions(projects: &[String]) -> Vec<Action> {
             icon: Icon::Settings,
             then: Do::Settings,
         },
+        Action {
+            title: "Services".into(),
+            words: "machine database cache server start stop",
+            icon: Icon::Service,
+            then: Do::Services,
+        },
     ];
     found.extend(SECTIONS.iter().enumerate().map(|(at, (_, label))| Action {
         title: format!("Settings: {label}"),
@@ -118,6 +126,7 @@ impl Do {
             Do::NewSession => shell.new_session(window, cx),
             Do::AddProject => shell.add_project(window, cx),
             Do::Settings => shell.open(Selection::Settings, window, cx),
+            Do::Services => shell.open(Selection::Services, window, cx),
             Do::SettingsTab(tab) => shell.open_settings_tab(*tab, window, cx),
             Do::SettingsAt(at) => shell.open_settings_at(*at, window, cx),
             Do::ProjectSettings(project) => {

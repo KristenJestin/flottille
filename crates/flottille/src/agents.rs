@@ -5,7 +5,7 @@
 //! and replaces its session then. The methods only write the store and hand the task its orders:
 //! none of them waits on the agent. Every prompt an agent gets is a delivery (`deliveries`).
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -102,6 +102,9 @@ pub struct Live {
     /// The processes this daemon started that have not ended, with their start times: the only
     /// ones it kills when it stops, whatever the shared table holds.
     processes: Mutex<HashMap<u32, u64>>,
+    /// The agents whose tools the user reloads: their process goes between turns, and the next
+    /// one says what changed (`mcp::mint`).
+    reloads: Mutex<HashSet<String>>,
 }
 
 /// Answers an `agent.*` request.
@@ -178,6 +181,26 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             tree::stop_tree(daemon, &agent.id, "stopped by the user");
             let agent = find(daemon, &agent.id)?;
             Ok(json!({"agent": agent.to_json()}))
+        }
+        "agent.reload_tools" => {
+            let asked: AgentName = serde_json::from_value(params)?;
+            let agent = find(daemon, &asked.agent)?;
+            refuse_child(daemon, &agent, "reloads its tools")?;
+            refuse_final(&agent)?;
+            let asked = daemon
+                .agents
+                .reloads
+                .lock()
+                .unwrap()
+                .insert(agent.id.clone());
+            if asked {
+                say_reload(daemon, &agent.id, true);
+            }
+            // Its session loop looks between turns: woken as by a delivery, it lets its process
+            // go at once, or once the turn that runs ended.
+            tell(daemon, &agent.id, Order::Ring);
+            let after_turn = agent.state == AgentState::Working;
+            Ok(json!({"agent": agent.to_json(), "after_turn": after_turn}))
         }
         "agent.resume" => {
             let asked: AgentName = serde_json::from_value(params)?;
@@ -341,6 +364,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             events.truncate(PAGE);
             let mut shown = agent.to_json();
             shown["tools_outdated"] = daemon.mcp.outdated(&agent.id).into();
+            shown["tools_reload"] = reloading(daemon, &agent.id).into();
             Ok(json!({"agent": shown, "events": events, "more": more}))
         }
         method => Err(Failure::new(
@@ -845,6 +869,31 @@ pub fn stopping(daemon: &Daemon, id: &str) -> bool {
         .is_some_and(|(sender, _)| !sender.is_closed())
 }
 
+/// Whether the user asked to reload the agent's tools since its process was given them.
+pub fn reloading(daemon: &Daemon, id: &str) -> bool {
+    daemon.agents.reloads.lock().unwrap().contains(id)
+}
+
+/// Takes the agent's reload, its new process being given its tools: whether one was asked.
+pub fn take_reload(daemon: &Daemon, id: &str) -> bool {
+    let taken = daemon.agents.reloads.lock().unwrap().remove(id);
+    if taken {
+        say_reload(daemon, id, false);
+    }
+    taken
+}
+
+/// Says that a reload of the agent's tools waits for its next process, or no longer.
+fn say_reload(daemon: &Daemon, id: &str, pending: bool) {
+    record(
+        daemon,
+        id,
+        "agent.tools_reload",
+        json!({"pending": pending}),
+        false,
+    );
+}
+
 /// What a resumed root reads first in its next prompt, without being woken for it: that the user
 /// stopped it, and which of its requests were cancelled then, never to be executed.
 fn tell_resumed(daemon: &Arc<Daemon>, agent: &Agent, ended_at: u64) {
@@ -930,6 +979,8 @@ fn idle_release() -> Duration {
 /// root that can be resumed on it.
 async fn agent_task(daemon: Arc<Daemon>, id: String, orders: mpsc::UnboundedReceiver<Order>) {
     agent_life(daemon.clone(), id.clone(), orders).await;
+    // A reload asked of an agent that ended is over: a resumed one starts on the tools of then.
+    take_reload(&daemon, &id);
     let Ok(Some(agent)) = daemon.read(|store| store.agent(&id)) else {
         return;
     };
@@ -1164,6 +1215,17 @@ async fn process(
                 AgentState::Idle,
                 None,
                 Some(("agent.released", json!({"reason": "idle"}))),
+            );
+            Ok(true)
+        }
+        Ok(Exit::Reload) => {
+            stop(&mut child, pid).await;
+            change(
+                daemon,
+                &agent.id,
+                AgentState::Idle,
+                None,
+                Some(("agent.released", json!({"reason": "reload"}))),
             );
             Ok(true)
         }
@@ -1702,6 +1764,10 @@ impl acp::Events for Recorder {
 
     fn pump(&self) -> Option<deliveries::Prompt> {
         deliveries::pump(&self.daemon, &self.agent)
+    }
+
+    fn reloading(&self) -> bool {
+        reloading(&self.daemon, &self.agent)
     }
 
     fn image(&self, name: &str) -> Option<(&'static str, String)> {
