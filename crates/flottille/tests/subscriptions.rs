@@ -2079,7 +2079,10 @@ fn a_subscription_stored_with_a_deadline_keeps_it() {
 
     user.call("test.advance", json!({"ms": 61 * 60_000}))
         .unwrap();
-    assert!(the_delivery(&user).contains("Nothing came in 60 min"));
+    let delivery = the_delivery(&user);
+    assert!(delivery.contains("Nothing came in 60 min"), "{delivery}");
+    // The hour was the old default, not the agent's choice: it is not said to be.
+    assert!(!delivery.contains("you gave"), "{delivery}");
     assert!(listed(&user, &id).is_empty());
 }
 

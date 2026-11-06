@@ -1150,7 +1150,7 @@ pub fn woken_by(body: &str) -> String {
         let (minutes, events) = deadline(rest);
         return format!("nothing came for the {events} of {pull} after {minutes} min");
     }
-    if let Some(rest) = body.strip_prefix("The deadline you gave, ") {
+    if let Some(rest) = body.strip_prefix("Its deadline, ") {
         let (minutes, events) = deadline(rest);
         return format!("the deadline for the {events} of {pull} passed after {minutes} min");
     }
@@ -1627,13 +1627,13 @@ mod tests {
         );
         assert_eq!(
             woken_by(
-                "Nothing came in 5 min: your subscription to checks, review of pull request #3 of app, workspace w reached the deadline you gave and ended. Subscribe again if you still wait for them."
+                "Nothing came in 5 min: your subscription to checks, review of pull request #3 of app, workspace w reached its deadline and ended. Subscribe again if you still wait for them."
             ),
             "nothing came for the checks, review of #3 after 5 min"
         );
         assert_eq!(
             woken_by(
-                "The deadline you gave, 30 min, passed: your subscription to comment of pull request #3 of app, workspace w ended. Subscribe again if you still wait for them."
+                "Its deadline, 30 min, passed: your subscription to comment of pull request #3 of app, workspace w ended. Subscribe again if you still wait for them."
             ),
             "the deadline for the comment of #3 passed after 30 min"
         );

@@ -655,14 +655,14 @@ fn due(daemon: &Arc<Daemon>, subscription: &Subscription) {
             crate::session_read::shown_date(subscription.created_at)
         ),
         _ if subscription.seen["delivered"] == true => format!(
-            "The deadline you gave, {minutes} min, passed: your subscription to {} of {} ended. \
-             Subscribe again if you still wait for them.",
+            "Its deadline, {minutes} min, passed: your subscription to {} of {} ended. Subscribe \
+             again if you still wait for them.",
             subscription.events.join(", "),
             named(subscription)
         ),
         _ => format!(
-            "Nothing came in {minutes} min: your subscription to {} of {} reached the deadline \
-             you gave and ended. Subscribe again if you still wait for them.",
+            "Nothing came in {minutes} min: your subscription to {} of {} reached its deadline \
+             and ended. Subscribe again if you still wait for them.",
             subscription.events.join(", "),
             named(subscription)
         ),
