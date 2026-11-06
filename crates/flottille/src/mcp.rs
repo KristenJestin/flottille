@@ -390,15 +390,16 @@ const SERVED: [Definition; 29] = [
             types: a Jira project's work item types (a guess is refused); link_types: link kinds. \
             Writes, judged, answered at once, the result maybe later: create, comment, edit, close, \
             reopen, status, link and unlink (ticket kind other: ABC-2 blocks ABC-1), comment_edit and \
-            comment_delete (yours only). Assign only when asked: assignee \"@me\" is the user (Jira \
-            create, edit; null on edit removes; GitHub edit: assignees). subscribe: a ticket's next \
-            events wake you once (people only; minutes: default 60); unsubscribe.",
+            comment_delete (yours only). Assign only when asked (assignee \"me\": the user; \
+            GitHub: assignees). Jira create: parent, sprint (sprints lists them). \
+            subscribe: a ticket's next events wake you once (people only; minutes: default 60); \
+            unsubscribe.",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "search", "show", "types", "link_types", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "sprint"]},
+                "action": {"type": "string", "enum": ["list", "search", "show", "types", "link_types", "sprints", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete"]},
                 "ticket": {"type": "string", "description": "#123 or ABC-123; the workspace's when left out."},
                 "workspace": {"type": "string"},
                 "query": {"type": "string", "description": "search: words."},
@@ -407,22 +408,24 @@ const SERVED: [Definition; 29] = [
                 "jql": {"type": "string", "description": "search on Jira: a JQL query, answered only within the tracker's projects (what it may refer to is not checked); ORDER BY allowed. Not for list."},
                 "state": {"type": "string", "enum": ["open", "closed", "all"]},
                 "label": {"type": "string"},
-                "assignee": {"type": ["string", "null"], "description": "list, search: only those assigned to them. create, edit on Jira: whom to assign, \"@me\" (the user signed in to acli), an email or an account id; edit: null removes the assignee."},
+                "assignee": {"type": ["string", "null"], "description": "list, search: only those assigned to them. create, edit on Jira: whom to assign: \"me\" is the user you work for (\"assign it to me\", \"to the user\"), else an email or an account id, not a display name; edit: null removes the assignee."},
                 "detail": {"type": "string", "enum": ["short", "full"]},
                 "fresh": {"type": "boolean", "description": "show: read the ticket again; one read in the last 30 s is given again otherwise (detail full always reads)."},
                 "title": {"type": "string"},
                 "body": {"type": "string", "description": "create, edit: description; comment, comment_edit: the comment. Markdown, converted for Jira."},
-                "labels": {"type": "array", "items": {"type": "string"}, "description": "create, edit: labels to add (GitHub)."},
+                "labels": {"type": "array", "items": {"type": "string"}, "description": "create, edit: labels to add."},
                 "reason": {"enum": ["completed", "not planned"], "description": "close: completed or not planned (GitHub)."},
-                "remove_labels": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to remove (GitHub)."},
-                "assignees": {"type": "array", "items": {"type": "string"}, "description": "edit: logins to add (GitHub), \"@me\" for the user."},
+                "remove_labels": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to remove."},
+                "assignees": {"type": "array", "items": {"type": "string"}, "description": "edit: logins to add (GitHub), \"me\" for the user."},
                 "remove_assignees": {"type": "array", "items": {"type": "string"}, "description": "edit: logins to remove (GitHub)."},
                 "status": {"type": "string", "description": "status: its name."},
                 "other": {"type": "string", "description": "link, unlink: the other ticket. The link reads ticket, kind, other: ABC-2 blocks ABC-1 is ticket ABC-2, kind blocks, other ABC-1."},
                 "kind": {"type": "string", "description": "link, unlink: a kind link_types lists (blocks, is blocked by, relates to; GitHub: parent of, sub-task of)."},
                 "comment": {"type": "string", "description": "comment_edit, comment_delete: the id show (detail full) gives a comment an agent posted; no one else's."},
-                "sprint": {"type": "string", "description": "sprint: refused, acli cannot do it."},
-                "project": {"type": "string", "description": "create, types on Jira: the tracker's project; status: the board."},
+                "sprint": {"type": "string", "description": "create on Jira (with type): an open sprint, by the name or id sprints gives. An existing item's sprint cannot be changed (acli)."},
+                "parent": {"type": "string", "description": "create on Jira: the work item it goes under (an epic, or a sub-task's parent). An existing item's parent cannot be changed (acli)."},
+                "board": {"type": "string", "description": "sprints: one board of the project, by name or id; all of them otherwise."},
+                "project": {"type": "string", "description": "create, types, sprints on Jira: the tracker's project; status: the board."},
                 "type": {"type": "string", "description": "create on Jira: work item type, one of those types lists."},
                 "events": {"type": "array", "items": {"enum": crate::tickets::EVENTS}},
                 "from": {"enum": crate::subscriptions::FROM},
@@ -3004,6 +3007,36 @@ mod tests {
             tickets
                 .description
                 .contains("Jira images and files are named, not shown (the user can paste one)")
+        );
+    }
+
+    #[test]
+    fn the_tickets_tool_says_me_is_the_user_and_names_parent_sprint_and_sprints() {
+        let tickets = SERVED.iter().find(|d| d.name == "tickets").unwrap();
+        let schema = (tickets.schema)();
+        let assignee = schema["properties"]["assignee"]["description"]
+            .as_str()
+            .unwrap();
+
+        assert!(
+            assignee.contains("\"me\" is the user you work for"),
+            "{assignee}"
+        );
+        assert!(assignee.contains("not a display name"), "{assignee}");
+        for word in ["sprints", "parent", "sprint"] {
+            assert!(tickets.description.contains(word), "{word}");
+        }
+        assert!(
+            !schema["properties"]["action"]["enum"]
+                .as_array()
+                .unwrap()
+                .contains(&Value::from("sprint"))
+        );
+        assert!(
+            schema["properties"]["action"]["enum"]
+                .as_array()
+                .unwrap()
+                .contains(&Value::from("sprints"))
         );
     }
 
