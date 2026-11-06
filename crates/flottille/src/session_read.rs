@@ -227,6 +227,22 @@ fn page(daemon: &Daemon, grant: &Grant, args: Value) -> Result<String, Outcome> 
         "That session's tree is in {} mode.\n",
         crate::judge::mode(daemon, &session.id).as_str()
     ));
+    // A question asked with ask_user is no message: said apart, for the reader to relay it.
+    let questions = crate::tree::open_questions(daemon, &session).map_err(|f| failed(f.message))?;
+    if !questions.is_empty() {
+        text.push_str(
+            "\nIts open questions to the user, asked with ask_user, the oldest first: each waits \
+             for the user's answer.\n",
+        );
+        for question in &questions {
+            text.push_str(&format!(
+                "\nOpen question, asked at {}, waits for the user:\n<session_question>\n{}\n\
+                 </session_question>\n",
+                shown_date(question["at"].as_u64().unwrap_or_default()),
+                escaped(&mask(question["question"].as_str().unwrap_or_default()))
+            ));
+        }
+    }
     if messages.is_empty() {
         text.push_str("\n(no message here)\n");
     }

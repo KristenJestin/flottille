@@ -181,7 +181,11 @@ fn took(daemon: &Daemon, agent: &str, kinds: &[String]) {
     };
     if change.quiet_turns.is_some() || change.waiting_on_answer.is_some() {
         let _ = daemon.write(|store| {
-            let (_, event) = store.change_agent(agent, change, None)?;
+            // Its open questions close with the answer: `agent.answered` says until where.
+            let answered = change.waiting_on_answer == Some(false)
+                && store.agent(agent)?.is_some_and(|a| a.waiting_on_answer);
+            let event = answered.then(|| ("agent.answered", json!({"agent": agent})));
+            let (_, event) = store.change_agent(agent, change, event)?;
             Ok(((), event))
         });
     }
