@@ -970,6 +970,125 @@ fn a_merge_key_that_cannot_be_applied_is_said_and_the_rest_is_listed() {
     );
 }
 
+/// `check-all` is defined at lines 10 and 14, the way a file with a pasted block has it.
+const REPEATED_KEY: &str = "definitions:
+  steps:
+    - step: &audit
+        name: Audit
+        script: [./audit.sh]
+  checks: &check-all
+    - step: *audit
+pipelines:
+  custom:
+    check-all:
+      - parallel: *check-all
+    audit:
+      - step: *audit
+    check-all:
+      - variables:
+          - name: SCOPE
+      - parallel: *check-all
+";
+
+#[test]
+fn a_custom_pipeline_defined_twice_is_listed_once_with_a_note() {
+    let (user, _, mcp) = setup();
+    api_holds(&user, "feature/x", REPEATED_KEY);
+
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "pipelines", "repository": "api", "branch": "feature/x"}),
+    );
+
+    assert!(!answer.error, "{}", answer.text);
+    let text = answer.text;
+    assert_eq!(text.matches("- custom: check-all").count(), 1, "{text}");
+    assert!(text.contains("- custom: audit"), "{text}");
+    assert!(
+        text.contains(
+            "bitbucket-pipelines.yml: pipelines.custom.check-all is defined twice (lines 10 and \
+             14); the last one is listed"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn the_last_definition_of_a_repeated_key_is_the_one_listed() {
+    let (user, _, mcp) = setup();
+    api_holds(&user, "feature/x", REPEATED_KEY);
+
+    let text = read(
+        &mcp,
+        json!({"action": "pipelines", "repository": "api", "branch": "feature/x"}),
+    );
+
+    assert!(
+        text.contains("- custom: check-all, variables: SCOPE\n"),
+        "the variables of the second definition: {text}"
+    );
+}
+
+#[test]
+fn a_github_workflow_with_a_repeated_key_is_listed_with_a_note() {
+    let (user, _, mcp) = setup();
+    let dir = user.path("work/app/web");
+    std::fs::write(
+        dir.join(".github/workflows/twice.yml"),
+        "name: Twice\non:\n  workflow_dispatch:\n    inputs:\n      scope:\n        required: true\n  \
+         workflow_dispatch:\n    inputs:\n      round:\n        required: false\njobs:\n  x:\n    runs-on: a\n",
+    )
+    .unwrap();
+    user.git(&dir, &["add", "."]);
+    user.git(&dir, &["commit", "--quiet", "-m", "twice"]);
+    user.git(
+        &dir,
+        &["update-ref", "refs/remotes/origin/feature/x", "HEAD"],
+    );
+
+    let text = read(
+        &mcp,
+        json!({"action": "pipelines", "repository": "web", "branch": "feature/x"}),
+    );
+
+    assert!(
+        text.contains("- Twice (.github/workflows/twice.yml), inputs: round"),
+        "the last workflow_dispatch is the one read: {text}"
+    );
+    assert!(
+        text.contains(
+            ".github/workflows/twice.yml: on.workflow_dispatch is defined twice (lines 3 and 7); \
+             the last one is listed"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("- E2E (.github/workflows/e2e.yml)"), "{text}");
+}
+
+#[test]
+fn a_file_with_a_syntax_error_is_still_refused_with_its_line() {
+    let (user, _, mcp) = setup();
+    api_holds(
+        &user,
+        "feature/x",
+        "pipelines:\n  custom:\n    check-all:\n      - step: {script: [a]}\n    check-all:\n      - step:\n          name: Deploy: prod\n",
+    );
+
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "pipelines", "repository": "api", "branch": "feature/x"}),
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    for part in [
+        "cannot be parsed",
+        "mapping values are not allowed",
+        "line 7 column 23",
+    ] {
+        assert!(answer.text.contains(part), "{part:?} in {}", answer.text);
+    }
+}
+
 #[test]
 fn a_broken_workflow_is_named_and_the_others_are_listed() {
     let (user, _, mcp) = setup();

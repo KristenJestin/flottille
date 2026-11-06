@@ -6348,6 +6348,11 @@ impl Reply {
         self.attached.pictures()
     }
 
+    /// The composer holds something the user has not sent: text, or a picture.
+    pub fn holds_draft(&self) -> bool {
+        self.has_text || !self.attachments.is_empty()
+    }
+
     /// A big picture is still being scaled down.
     pub fn is_scaling(&self) -> bool {
         self.attached.is_scaling()
