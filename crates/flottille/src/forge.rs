@@ -38,6 +38,7 @@ mod bitbucket;
 mod ci;
 mod closing;
 mod events;
+pub(crate) mod followed;
 mod logs;
 mod pipelines;
 
@@ -1077,7 +1078,9 @@ pub(crate) struct ForgeCall {
     pipeline: Option<String>,
     /// run: the pipeline's variables, the workflow's inputs.
     variables: Option<Vec<pipelines::Variable>>,
-    /// run_view, run_logs, stop, step: the run's number.
+    /// run: follow the run started, which wakes the agent when it ends (the default).
+    follow: Option<bool>,
+    /// run_view, run_logs, stop, step, unsubscribe: the run's number.
     run: Option<u64>,
     /// run_logs, step: a step's (a job's) name or id.
     step: Option<String>,
@@ -1328,6 +1331,12 @@ pub async fn forge(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Value
         Ok(asked) => asked,
         Err(refusal) => return refusal,
     };
+    if asked.follow.is_some() && asked.action != "run" {
+        return Outcome::Refused(format!(
+            "refused: forge {} takes no follow: follow is for run",
+            asked.action
+        ));
+    }
     match (asked.action.as_str(), asked.number) {
         ("list", _) => forge_list(daemon, place, asked).await,
         ("show", number) => {
@@ -1359,7 +1368,7 @@ pub async fn forge(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Value
         }
         (action, _) if pipelines::ACTIONS.contains(&action) => {
             // A run started or stopped changes the checks of the pull request it is for.
-            let done = pipelines::call(daemon, place, asked).await;
+            let done = pipelines::call(daemon, agent, place, asked).await;
             daemon.forges.pulls.drop_all();
             done
         }
@@ -1377,11 +1386,18 @@ fn subscriptions_text(daemon: &Daemon, agent: &str) -> String {
         .filter(|s| s.source == "forge")
         .collect();
     let following = crate::subscriptions::following(daemon, agent, None);
-    if mine.is_empty() && following.is_empty() {
+    let runs = followed::of(daemon, agent, None, None);
+    if mine.is_empty() && following.is_empty() && runs.is_empty() {
         return String::new();
     }
     let now = now_ms();
     let mut text = "\nYour subscriptions:\n".to_owned();
+    for subscription in runs {
+        text.push_str(&format!(
+            "- {}: until it ends\n",
+            followed::named(&subscription.target)
+        ));
+    }
     for subscription in following {
         text.push_str(&format!(
             "- {}{}\n",
@@ -1617,19 +1633,27 @@ fn forge_unsubscribe(daemon: &Daemon, agent: &str, asked: ForgeCall) -> Outcome 
         |s: &flottille_core::subscription::Subscription, key: &str, asked: &Option<String>| {
             asked.as_ref().is_none_or(|a| s.target[key] == a.as_str())
         };
-    let cancelled: Vec<_> = crate::subscriptions::of(daemon, agent)
+    let mut cancelled: Vec<_> = crate::subscriptions::of(daemon, agent)
         .into_iter()
-        .filter(|s| s.source == "forge")
+        .filter(|s| s.source == "forge" && asked.run.is_none())
         .filter(|s| named(s, "workspace", &asked.workspace))
         .filter(|s| named(s, "repository", &asked.repository))
         .collect();
+    cancelled.extend(
+        followed::of(daemon, agent, asked.repository.as_deref(), asked.run)
+            .into_iter()
+            .filter(|s| named(s, "workspace", &asked.workspace)),
+    );
     if cancelled.is_empty() {
         return Outcome::Refused("refused: you have no such subscription".into());
     }
     let mut text = "Cancelled your subscriptions:\n".to_owned();
     for subscription in cancelled {
         crate::subscriptions::end(daemon, &subscription, "cancelled");
-        text.push_str(&format!("- {}\n", target_named(&subscription.target)));
+        text.push_str(&format!(
+            "- {}\n",
+            crate::subscriptions::named(&subscription)
+        ));
     }
     Outcome::Done(text)
 }

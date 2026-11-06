@@ -472,7 +472,7 @@ pending requests.
 
 | Tool | |
 |---|---|
-| `forge {action, workspace?, repository?, number?, state?, branch?, detail?, fresh?, title?, body?, draft?, reviewers?, labels?, delete_branch_on_merge?, delete_branch?, reviewers_add?, reviewers_remove?, labels_add?, labels_remove?, base?, waive?, method?, message?, events?, from?, minutes?, pipeline?, variables?, run?, step?, do?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
+| `forge {action, workspace?, repository?, number?, state?, branch?, detail?, fresh?, title?, body?, draft?, reviewers?, labels?, delete_branch_on_merge?, delete_branch?, reviewers_add?, reviewers_remove?, labels_add?, labels_remove?, base?, waive?, method?, message?, events?, from?, minutes?, pipeline?, variables?, follow?, run?, step?, do?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
 
 - **The repositories** are those of the agent's place: its workspace's, or the project's in
   `main`. One the place does not take is refused (`refused: X is not a repository of this
@@ -531,7 +531,9 @@ pending requests.
   said; so does its time, said. Subscribing again to the same pull request replaces the agent's
   subscription. A pull request merged or closed, a repository with no forge or no pull request,
   and `number` are refused. **`unsubscribe {workspace?, repository?}`** cancels the agent's
-  subscriptions to them, every one when it names none; **`unsubscribe {session}`** stops following a
+  subscriptions to them (the runs it follows there with them), every one when it names none;
+  **`unsubscribe {run, repository?}`** stops following a run it started; **`unsubscribe
+  {session}`** stops following a
   session the agent started ("Following a session", under "The tree's tools").
 - **`create`, `merge`, `checks` `{workspace?, repository?, …}`** (`repository` is needed when the
   workspace has several, and the refusal lists them): opens the pull request of a
@@ -626,9 +628,12 @@ pending requests.
   GitHub's workflows that can be dispatched with their inputs), **`runs {repository?, branch?}`**
   the recent runs, **`run_view {repository?, run}`** a run's steps (jobs), **`run_logs
   {repository?, run, step}`** a step's log, masked and cut like other results; **`run
-  {repository?, pipeline, branch?, variables?}`** runs any pipeline on the workspace's branch (or
-  the one named) with `variables` (`[{key, value, secured?}]`, a secured value masked in every
-  result and record), **`stop {repository?, run}`** stops a run, **`step {repository?, run, step,
+  {repository?, pipeline, branch?, variables?, follow?}`** runs any pipeline on the workspace's
+  branch (or the one named) with `variables` (`[{key, value, secured?}]`, a secured value masked
+  in every result and record) and follows it unless `follow: false`: a `subscription` delivery
+  wakes the agent when it ends (its result, its duration, the failed steps by name) and once when
+  it waits on a manual step, read by the rounds of the items ([`forges.md`](forges.md),
+  "Following a run"), **`stop {repository?, run}`** stops a run, **`step {repository?, run, step,
   do}`** starts a manual step (`do: start`) or runs one again (`do: rerun`) where the forge allows
   it, refused naming why elsewhere. A Bitbucket Data Center repository is refused for all of them.
 

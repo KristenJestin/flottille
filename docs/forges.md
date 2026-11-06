@@ -285,7 +285,7 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
 | `bkt api /repositories/W/R/pipelines/ --context C --param pagelen=50 --param sort=-created_on` (GET; the sort is a `--param`, not a `?` in the path: `bkt api` is not known to merge one into the other) | `values[]`: `build_number`, `state.result.name`, `target.type`, then `target.ref_name` (a branch's pipeline) or `target.source` and `target.destination` (a pull request's: `pipeline_pullrequest_target`), `target.selector.type`, `target.selector.pattern` | Atlassian's REST documentation (Pipelines, list pipelines). Not `bkt pipeline list`: it decodes `target.ref.name` (`pkg/bbcloud/client.go:140-152`) while the API sends `ref_name`, so every branch it prints is empty (seen live with v0.37.0), and a pull request's pipeline has no `ref` at all |
 | `bkt pipeline list --context C --workspace W --repo R --limit 50 --json`, for the CI durations only ("How long CI takes") | `pipelines[]`: `state.result.name`, `created_on`, `completed_on` (`pkg/bbcloud/client.go:139-152`; the list has no duration field; its `target.ref.name` is empty, which the durations do not need) | `pkg/cmd/pipeline/pipeline.go:177-210`; `pkg/bbcloud/client.go:100-120`, `:145` (newest first: `sort=-created_on`) |
 | `bkt pipeline run --context C --workspace W --repo R --ref <branch> [--selector-type pull-requests --selector-pattern <p>]` | the exit code | `pkg/cmd/pipeline/pipeline.go:81-133` (v0.37.0; the selector flags at `:127-128`), `pkg/bbcloud/client.go:431-482` (`ref_type: branch`, `ref_name`, `selector`) |
-| `bkt pipeline view <build> --context C --workspace W --repo R --json` | `steps[]`: `uuid`, `state.result.name` | `pkg/cmd/pipeline/pipeline.go:416-480` (v0.37.0; `{pipeline, steps}`), `pkg/bbcloud/client.go:559-604` (`PipelineStep`) |
+| `bkt pipeline view <build> --context C --workspace W --repo R --json` | `steps[]`: `uuid`, `name`, `state.name`, `state.result.name`; for a followed run `pipeline.state` and its times ("Following a run") | `pkg/cmd/pipeline/pipeline.go:416-480` (v0.37.0; `{pipeline, steps}`), `pkg/bbcloud/client.go:559-604` (`PipelineStep`) |
 | `bkt pipeline logs <build> --context C --workspace W --repo R --step <uuid>` | the step's log, as text | `pkg/cmd/pipeline/pipeline.go:679-726` (v0.37.0), `pkg/bbcloud/client.go:692-725` (Cloud only) |
 | `bkt pipeline run … --ref <branch> [--selector-type custom --selector-pattern <name>]`, for `forge` `run` with no variable ("The CI family") | the exit code, and a run's number `#N` when it prints one | `bkt pipeline run --help` of v0.37.0 (`--selector-type`, `--selector-pattern`, `--var`) |
 | `bkt api /repositories/W/R/pipelines/ --context C --method POST --input <json>`, for `forge` `run` with variables | the new pipeline's `build_number` | Atlassian's REST documentation (Pipelines, run a pipeline: `target` a `pipeline_ref_target` with `ref_type`, `ref_name`, `selector.type` and `.pattern`; `variables[]` with `key`, `value`, `secured`); `bkt api --help` of v0.37.0 (`--method`, `--input`) |
@@ -517,7 +517,7 @@ in `main`, the one the project's checkout is on.
 | `runs {repository?, branch?}` (read) | `gh run list -R … [--branch <b>] --limit 20 --json databaseId,workflowName,status,conclusion,event,headBranch,createdAt,startedAt,updatedAt,url` | `bkt api /repositories/W/R/pipelines/ --param pagelen=50 --param sort=-created_on`, the branch's (`target.ref_name`, or `target.source` of a pull request's): `build_number`, the selector, `state`, `trigger.name`, `created_on`, `duration_in_seconds` |
 | `run_view {repository?, run}` (read) | `gh run view <run> -R … --json databaseId,workflowName,status,conclusion,url,jobs` | `bkt pipeline view <run> --json`: `steps[]` (`name`, `uuid`, `state.name`, `state.result.name`) |
 | `run_logs {repository?, run, step}` (read) | `gh run view --job <id> -R … --log`, the job found by its name or id among the run's | `bkt pipeline logs <run> --step <uuid>`, the step found by its name or uuid |
-| `run {repository?, pipeline, branch?, variables?}` (write) | `gh workflow run <file> -R … --ref <b> -f k=v…`; the answer is the run's link when `gh` prints it | without variables `bkt pipeline run --ref <b> [--selector-type <t> --selector-pattern <p>]`; with variables the REST call through `bkt api` (table above); the answer is the run's number and link |
+| `run {repository?, pipeline, branch?, variables?, follow?}` (write) | `gh workflow run <file> -R … --ref <b> -f k=v…`; the answer is the run's link when `gh` prints it | without variables `bkt pipeline run --ref <b> [--selector-type <t> --selector-pattern <p>]`, the run's number read by its uuid (`bkt api …/pipelines/{uuid}`) when it prints no `#N`; with variables the REST call through `bkt api` (table above); the answer is the run's number and link |
 | `stop {repository?, run}` (write) | `gh run cancel <run> -R …` | `bkt api …/pipelines/{uuid}/stopPipeline --method POST`, the uuid read with `bkt pipeline view` |
 | `step {repository?, run, step, do: start \| rerun}` (write) | `rerun`: `gh run rerun <run> -R … --job <id>`; `start` is refused | refused, naming why |
 
@@ -561,6 +561,40 @@ in `main`, the one the project's checkout is on.
 The window says a run an agent started like its other forge writes: `Ran a pipeline` with the
 pipeline's name, in the session's list of what was written, and the tool's step with the run's
 link in its answer.
+
+### Following a run
+
+An agent that starts a run waits for it: `run` **follows the run it started** unless it is given
+`follow: false`. The following is a subscription of the source `run` (`docs/design.md` §5.6), with
+no time of its own, and its answer ends with `Following it: a delivery wakes you when it ends or
+waits on a manual step; forge unsubscribe {"run": 43} stops it.`
+
+- **Read by the rounds of the items**, with the pull requests of the run's repository ("Subscriptions"
+  below): one request a followed run in each round, `bkt pipeline view <run> --json` (its
+  `pipeline` and `steps`) or `gh run view <run> -R … --json status,conclusion,startedAt,updatedAt,jobs`,
+  as often as the rounds come, and nothing at all when no run is followed there.
+- **Its end wakes the agent**, a `subscription` delivery that names the run (its number, its
+  repository, its pipeline, its branch and its link), says its result as the forge does
+  (Bitbucket `successful`, `failed`, `error`, `stopped`; GitHub `success`, `failure`, `cancelled`…)
+  and its duration (Bitbucket `created_on` to `completed_on`; GitHub `startedAt` to `updatedAt`),
+  and for a failure the failed steps (jobs) by name, no log: `run_logs` reads it. The following is
+  then over.
+- **A wait wakes it once**: a Bitbucket run paused on a manual step (the step named, someone
+  starting it on the run's page), a GitHub run held by its environment's reviewers. The following
+  goes on until the run ends; the same wait is not said twice.
+- **A run that cannot be read** (the forge down, `bkt` without a context, the run gone) is said
+  once, `It cannot be read now: <why>`, and the following goes on: nothing more is said of it
+  until it is read again.
+- **It ends** with the run, when the agent ends, or with `unsubscribe {run, repository?}` (or the
+  user's Cancel); `forge show` lists it under `Your subscriptions:` (`- run #43 of api (custom:
+  nightly on app/login): until it ends`), the window's rail as `Run #43 of api`, since when.
+- **A run whose number the forge did not say** (GitHub printed no link, `bkt` neither a number nor a
+  uuid) is not followed, and the answer says so.
+- **Assumed**, and the maintainer checks it on his Bitbucket: that `bkt pipeline run` prints the
+  new run's uuid (`✓ Triggered pipeline {…} on …`) when it prints no number; that `bkt pipeline
+  view --json` gives the run's `state` (`name`, `result.name`) and `created_on` and `completed_on`;
+  that a run waiting on a manual step says `state.stage.name` `PAUSED`, or else shows as no step
+  running, one done and the next `PENDING` (a run read between two steps then reads as waiting).
 
 ## Why a check failed
 
