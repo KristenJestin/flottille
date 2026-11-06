@@ -297,13 +297,20 @@ when it could leave them (`docs/tools.md`, "The tickets").
 
 ### Subscribing to a ticket
 
-**`subscribe {ticket?, workspace?, events, from?, minutes?}`**: the next of `events` of the
-ticket (the one named, or the workspace's) wakes the agent once, as a `subscription` delivery
-(`docs/design.md` §5.6), with the same shape as `forge` `subscribe`: `commented` (a new comment,
-its author and an excerpt), `status` (Jira's status moved, or the ticket was reopened), `assigned`
-(its assignees changed) and `closed`, which ends any subscription to it. `from: people` leaves out
-a bot (a GitHub login `app/<name>` or `<name>[bot]`, as for a pull request) and a comment
-known as posted by an agent; `minutes` is 60 by default, 6000 at most. The
+**`subscribe {ticket?, workspace?, events, from?, minutes?}`**: each of `events` of the ticket
+(the one named, or the workspace's) wakes the agent, as a `subscription` delivery
+(`docs/design.md` §5.6), until the ticket is closed, with the same shape as `forge` `subscribe`:
+the agent subscribes once (`it wakes you at each of these events until the ticket is closed; no
+need to subscribe again`). The events are `commented` (a new comment, its author and an excerpt),
+`status` (Jira's status moved, or the ticket was reopened), `assigned` (its assignees changed) and
+`closed`, which ends any subscription to it, said: a GitHub issue closed, or a Jira work item moved
+to a status of the category `done`, whatever the status is called (its item's state is `closed`
+then, "What is read"). `from: people` leaves out a bot (a GitHub login `app/<name>` or
+`<name>[bot]`, as for a pull request) and a comment known as posted by an agent; `minutes`,
+optional and with no cap, is a deadline: past it the agent is woken once and the subscription
+ends; without it there is none. `show` ends with the agent's subscriptions to tickets (`Your
+subscriptions:` then `- ticket #5 of api: commented, until the ticket is closed`, or `for 52 min
+more` with a deadline). The
 ticket is read once and stored first: what is so now is no event. The answer says when the rounds
 do not see it yet, and so miss what happens before their next one: the tracker had no complete
 round (it never worked), or the item is not stored (a Jira work item whose status Jira gives no
@@ -313,7 +320,7 @@ call per followed work item that changed: the one the round's search lists in it
 search never prints `updated`, below), since a tracker's every work item would cost one call each;
 a comment is then an `item.commented` as on GitHub, and an agent's own, known by its record,
 is said `posted by an agent` and left out of `from: people`. Subscribing again to the same
-ticket replaces the agent's subscription; **`unsubscribe {ticket?}`** cancels those to the ticket
+ticket replaces the agent's subscription (its events, `from` and deadline); **`unsubscribe {ticket?}`** cancels those to the ticket
 named, every one when it names none. The events are the rounds' (`item.commented`,
 `item.changed`, `item.closed`): a subscription hears as often as the rounds come. It is listed,
 cancelled and ends as a pull request's (`docs/protocol.md`, "The subscription methods"); the
