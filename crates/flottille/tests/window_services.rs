@@ -458,9 +458,10 @@ fn removing_a_service_names_the_tasks_that_need_it(cx: &mut TestAppContext) {
     // The dialog names the tasks, and cannot remove it.
     let why = label_of("service-removal-refused", cx).unwrap();
     assert!(why.contains("app (api)"), "{why}");
-    click("service-removal-action", cx);
-    settle(cx);
-    assert!(services_text(&user).contains("[services.mongo]"));
+    assert!(
+        page.read_with(cx, |p, _| p.removal_refused().is_some()),
+        "its Remove is disabled"
+    );
     click("service-removal-cancel", cx);
     settle(cx);
 
@@ -567,6 +568,136 @@ fn a_task_s_needs_are_chosen_from_the_services(cx: &mut TestAppContext) {
     });
     until(&shell, cx, "the row follows", |cx| {
         label_of("task-needs-api", cx).as_deref() == Some("Needs mongo")
+    });
+    settle(cx);
+    assert_eq!(pending_frames(cx), 0);
+}
+
+#[gpui_kit::test]
+fn removing_a_service_another_service_needs_names_it(cx: &mut TestAppContext) {
+    let user = user();
+    services_file(
+        &user,
+        &format!(
+            "{}{}",
+            listening(&user, "mongo", 0, &[]),
+            listening(&user, "auth", 0, &["mongo"])
+        ),
+    );
+    let (shell, cx) = window(&user, cx);
+    let page = open_services(&shell, cx);
+
+    click("service-more-mongo", cx);
+    settle(cx);
+    click("remove-service-mongo", cx);
+    settle(cx);
+
+    let why = label_of("service-removal-refused", cx).unwrap();
+    assert!(why.contains("services auth"), "{why}");
+    assert!(
+        page.read_with(cx, |p, _| p.removal_refused().is_some()),
+        "its Remove is disabled"
+    );
+    click("service-removal-cancel", cx);
+    settle(cx);
+    assert!(services_text(&user).contains("[services.mongo]"));
+    assert_eq!(pending_frames(cx), 0);
+}
+
+#[gpui_kit::test]
+fn a_service_that_says_no_ready_is_running_with_the_solid_dot(cx: &mut TestAppContext) {
+    let user = user();
+    services_file(
+        &user,
+        &format!(
+            "[services.relay]\nfolder = \"{}\"\nline = \"{} --listen 0\"\n",
+            folder(&user, "relay").display(),
+            server_program(&user).display(),
+        ),
+    );
+    let (shell, cx) = window(&user, cx);
+    open_services(&shell, cx);
+
+    click("service-start-relay", cx);
+    until(&shell, cx, "the row says it runs", |cx| {
+        state_of("relay", cx).as_deref() == Some("running")
+    });
+    settle(cx);
+
+    assert!(has("service-dot-relay", cx), "the solid dot, no spinner");
+    assert!(has("service-stop-relay", cx) && !has("service-start-relay", cx));
+    assert_eq!(pending_frames(cx), 0, "nothing turns while it runs");
+}
+
+#[gpui_kit::test]
+fn editing_a_service_keeps_its_folder_as_written(cx: &mut TestAppContext) {
+    let user = user();
+    std::fs::create_dir_all(user.path("home/tools/mongo")).unwrap();
+    let program = server_program(&user);
+    services_file(
+        &user,
+        &format!(
+            "[services.cache]\nline = \"{0} --listen 0\"\n\n[services.mongo]\nfolder = \"~/tools/mongo\"\nline = \"{0} --listen 0\"\n",
+            program.display()
+        ),
+    );
+    let (shell, cx) = window(&user, cx);
+    let page = open_services(&shell, cx);
+    let form = page.read_with(cx, |p, _| p.form().clone());
+
+    for name in ["cache", "mongo"] {
+        click(&format!("service-{name}"), cx);
+        until(&shell, cx, "the form is open on it", |cx| {
+            form.read_with(cx, |f, _| f.is_open())
+        });
+        settle(cx);
+        click("service-flag-ask_before_running", cx);
+        click("save-service", cx);
+        until(&shell, cx, "the form closed", |cx| {
+            form.read_with(cx, |f, _| !f.is_open())
+        });
+        settle(cx);
+    }
+
+    let text = services_text(&user);
+    assert_eq!(
+        text.matches("ask_before_running = true").count(),
+        2,
+        "{text}"
+    );
+    assert!(text.contains("folder = \"~/tools/mongo\""), "{text}");
+    assert_eq!(
+        text.matches("folder").count(),
+        1,
+        "cache gained no folder: {text}"
+    );
+}
+
+#[gpui_kit::test]
+fn a_task_s_needs_say_why_the_services_cannot_be_read(cx: &mut TestAppContext) {
+    let user = user();
+    services_file(&user, "[services.mongo]\nbogus = 1\n");
+    project(&user, &[]);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    shell.update_in(cx, |s, window, cx| {
+        s.open_project_settings_at("app", Reveal::Tasks, window, cx)
+    });
+    until(&shell, cx, "the settings are read", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .project_settings_page()
+                .is_some_and(|page| page.read(cx).is_loaded())
+        })
+    });
+    settle(cx);
+
+    click("add-task", cx);
+    until(&shell, cx, "the form says why", |cx| {
+        label_of("task-no-needs", cx).is_some_and(|said| said.contains("services.toml"))
     });
     settle(cx);
     assert_eq!(pending_frames(cx), 0);

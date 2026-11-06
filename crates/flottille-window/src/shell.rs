@@ -1273,9 +1273,12 @@ impl Shell {
                 }
             }
             Outcome::Services { listed } => {
-                // The open task form offers them as what a task may need.
-                if let (Ok(services), Some(page)) = (&listed, self.project_settings.clone()) {
-                    let names = services.iter().map(|s| s.name.clone()).collect();
+                // The open task form offers them as what a task may need, or says why it cannot.
+                if let Some(page) = self.project_settings.clone() {
+                    let names = listed
+                        .as_ref()
+                        .map(|services| services.iter().map(|s| s.name.clone()).collect())
+                        .map_err(Clone::clone);
                     let section = page.read(cx).tasks().clone();
                     section.update(cx, |section, cx| section.set_services(names, cx));
                 }
@@ -2013,6 +2016,10 @@ impl Shell {
             self.actions
                 .send(Command::WorkspacesFolderRead { project: None });
             self.ask_appearance(None);
+        }
+        // Left, the services page stops reading the output it shows: nothing is in sight.
+        if self.selected == Some(Selection::Services) && selection != Selection::Services {
+            self.services.update(cx, |page, cx| page.close_output(cx));
         }
         // Opened, the services are read again: what runs changes outside the window too.
         if selection == Selection::Services && self.selected != Some(Selection::Services) {

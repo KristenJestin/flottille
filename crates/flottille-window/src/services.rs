@@ -303,16 +303,21 @@ impl ServiceForm {
         let ready = self.shown.ready.as_ref().map(|(kind, _)| *kind);
         let url = self.shown.url.as_ref().map(|(kind, _)| *kind);
         let (ready, url) = fields.ready.params(ready, url, cx);
-        let params = json!({
+        let mut params = json!({
             "name": name,
             "line": value(&fields.line),
-            // `""` puts it back in the home.
-            "folder": value(&fields.folder),
             "needs": self.shown.needs,
             "ready": ready,
             "url": url,
             "ask_before_running": self.shown.ask_before_running,
         });
+        // The daemon gives the folder resolved (`~` expanded, the home for none): sent back as it
+        // is, it would rewrite the file's `~/…` or give a folder to one that had none. It is sent
+        // only when the user changed it; `""` puts it back in the home.
+        let folder = value(&fields.folder);
+        if original.is_none() || Some(&folder) != self.shown.folder.as_ref() {
+            params["folder"] = folder.into();
+        }
         let (method, writing) = match original {
             Some(_) => ("service.edit", Writing::Saved(name)),
             None => ("service.add", Writing::Added(name)),
@@ -401,7 +406,7 @@ impl Render for ServiceForm {
             )
             .child(needs_field(
                 "service",
-                Some(&self.services),
+                Some(Ok(&self.services)),
                 original.as_deref().or(Some(self.shown.name.as_str())),
                 &self.shown.needs,
                 |this: &mut Self, name, cx| this.toggle_need(name, cx),
@@ -521,6 +526,38 @@ impl ServicesPage {
 
     pub fn is_confirming(&self) -> bool {
         self.confirming.is_some()
+    }
+
+    /// Why the service whose removal is asked cannot be removed: the tasks and the services
+    /// that need it. The confirmation says it, and its button is disabled then.
+    pub fn removal_refused(&self) -> Option<String> {
+        let name = &self.asked;
+        let listed = self.listed.as_deref().unwrap_or_default();
+        let mut needing: Vec<String> = Vec::new();
+        if let Some(info) = listed.iter().find(|s| &s.name == name)
+            && !info.needed_by.is_empty()
+        {
+            needing.push(format!("the tasks of {}", info.needed_said()));
+        }
+        let services: Vec<&str> = listed
+            .iter()
+            .filter(|s| s.needs.contains(name))
+            .map(|s| s.name.as_str())
+            .collect();
+        if !services.is_empty() {
+            needing.push(format!("the services {}", services.join(", ")));
+        }
+        (!needing.is_empty()).then(|| {
+            format!(
+                "{} need it: change them first.",
+                capitalized(&needing.join(" and "))
+            )
+        })
+    }
+
+    /// Whether the open output is read again each second.
+    pub fn follows_output(&self) -> bool {
+        self.ticker.is_some()
     }
 
     pub fn set_narrow(&mut self, narrow: bool, cx: &mut Context<Self>) {
@@ -1049,27 +1086,7 @@ impl ServicesPage {
     /// which.
     fn confirm(&self, cx: &mut Context<Self>) -> Confirm {
         let name = self.asked.clone();
-        let listed = self.listed.as_deref().unwrap_or_default();
-        let mut needing: Vec<String> = Vec::new();
-        if let Some(info) = listed.iter().find(|s| s.name == name)
-            && !info.needed_by.is_empty()
-        {
-            needing.push(format!("the tasks of {}", info.needed_said()));
-        }
-        let services: Vec<&str> = listed
-            .iter()
-            .filter(|s| s.needs.contains(&name))
-            .map(|s| s.name.as_str())
-            .collect();
-        if !services.is_empty() {
-            needing.push(format!("the services {}", services.join(", ")));
-        }
-        let refused = (!needing.is_empty()).then(|| {
-            SharedString::from(format!(
-                "{} need it: change them first.",
-                capitalized(&needing.join(" and "))
-            ))
-        });
+        let refused = self.removal_refused().map(SharedString::from);
         let (this, again) = (cx.entity().downgrade(), cx.entity().downgrade());
         Confirm::new("service-removal", format!("Remove the service {name}?"))
             .sentence("No task can need it any more, and it leaves services.toml.")

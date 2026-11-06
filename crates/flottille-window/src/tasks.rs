@@ -17,8 +17,9 @@ use flottille_ui::{
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, Focusable as _,
-    InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Subscription,
-    Task, TestSupportExt as _, WeakEntity, Window, div, px,
+    InteractiveElement, IntoElement, ParentElement, Render, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, Task, TestSupportExt as _, WeakEntity,
+    Window, div, px,
 };
 use serde_json::{Value, json};
 
@@ -397,8 +398,9 @@ pub struct TasksSection {
     /// The flags and the repository the form shows.
     flags: TaskInfo,
     fields: Option<Fields>,
-    /// The services of the machine, which a task may need; `None` until the daemon has said.
-    services: Option<Vec<String>>,
+    /// The services of the machine, which a task may need, or why they cannot be read; `None`
+    /// until the daemon has said.
+    services: Option<Result<Vec<String>, String>>,
     saving: bool,
     writing: Option<Writing>,
     form_error: Option<SharedString>,
@@ -471,8 +473,8 @@ impl TasksSection {
         &self.flags.needs
     }
 
-    /// The services of the machine the daemon listed, which the form offers.
-    pub fn set_services(&mut self, services: Vec<String>, cx: &mut Context<Self>) {
+    /// The services of the machine the daemon listed, which the form offers, or why it could not.
+    pub fn set_services(&mut self, services: Result<Vec<String>, String>, cx: &mut Context<Self>) {
         if self.services.as_ref() != Some(&services) {
             self.services = Some(services);
             cx.notify();
@@ -875,7 +877,9 @@ impl TasksSection {
             ))
             .child(needs_field(
                 "task",
-                self.services.as_deref(),
+                self.services
+                    .as_ref()
+                    .map(|listed| listed.as_deref().map_err(String::as_str)),
                 None,
                 &self.flags.needs,
                 |this: &mut Self, name, cx| this.toggle_need(name, cx),
@@ -932,17 +936,19 @@ pub(crate) fn needs_line(id: ElementId, needs: &[String]) -> LabelledLine {
 
 /// The services a task or a service needs, chosen from those of the machine (`<prefix>-need-<name>`
 /// switches each); `own` is a service's own name, never offered to itself. `offered` is `None`
-/// until the daemon has listed them.
+/// until the daemon has listed them, and why it could not when it failed.
 pub(crate) fn needs_field<V: 'static>(
     prefix: &'static str,
-    offered: Option<&[String]>,
+    offered: Option<Result<&[String], &str>>,
     own: Option<&str>,
     chosen: &[String],
     toggle: fn(&mut V, &str, &mut Context<V>),
     cx: &mut Context<V>,
 ) -> AnyElement {
     let p = palette(cx);
+    let offered_or_why = offered;
     let offered: Vec<String> = offered
+        .and_then(Result::ok)
         .unwrap_or_default()
         .iter()
         .filter(|name| Some(name.as_str()) != own)
@@ -958,11 +964,21 @@ pub(crate) fn needs_field<V: 'static>(
         .on_click(cx.listener(move |this, _, _, cx| toggle(this, &toggled, cx)))
     });
     let none = offered.is_empty().then(|| {
+        let (said, ink) = match offered_or_why {
+            None => ("Reading the services of the machine…".to_owned(), p.faint),
+            Some(Err(why)) => (format!("The services cannot be read: {why}"), p.fail),
+            Some(Ok(_)) => (
+                "No service to need: the Services page adds them.".to_owned(),
+                p.faint,
+            ),
+        };
+        let said = SharedString::from(said);
         div()
             .id(ElementId::Name(format!("{prefix}-no-needs").into()))
+            .aria_label(said.clone())
             .text_size(px(12.5))
-            .text_color(p.faint)
-            .child("No service to need: the Services page adds them.")
+            .text_color(ink)
+            .child(said)
             .test_support()
     });
     Field::new(

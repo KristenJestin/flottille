@@ -343,3 +343,61 @@ fn the_services_page_is_still_at_rest(cx: &mut TestAppContext) {
         "(frames drawn, frames asked)"
     );
 }
+
+#[gpui_kit::test]
+fn leaving_the_services_page_with_an_output_open_leaves_the_window_at_rest(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    idle_session(&user);
+    std::fs::create_dir_all(user.path("bin")).unwrap();
+    let server = user.path("bin/fake-server");
+    std::os::unix::fs::symlink(common::fake_server(), &server).unwrap();
+    std::fs::write(
+        user.path("config/flottille/services.toml"),
+        format!(
+            "[services.mongo]\nline = \"{} --listen 0\"\nready = {{ line = \"listening on\" }}\n",
+            server.display()
+        ),
+    )
+    .unwrap();
+    user.call("service.start", json!({"name": "mongo"}))
+        .unwrap();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    cx.update(|window, cx| window.click("services", cx));
+    until(&shell, cx, "mongo is listed with its run", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).services_page().is_some_and(|page| {
+                page.read(cx)
+                    .services()
+                    .is_some_and(|l| l.iter().any(|s| s.run.is_some()))
+            })
+        })
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("service-output-mongo", cx));
+    let page = shell.read_with(cx, |s, cx| {
+        s.main().read(cx).services_page().cloned().unwrap()
+    });
+    until(&shell, cx, "its output is followed", |cx| {
+        page.read_with(cx, |p, _| p.follows_output())
+    });
+
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::Project("app".into()), window, cx)
+    });
+    settle(&shell, cx);
+
+    assert!(
+        !page.read_with(cx, |p, _| p.follows_output()),
+        "no more run.output is asked"
+    );
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
