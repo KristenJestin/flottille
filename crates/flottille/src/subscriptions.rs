@@ -2,8 +2,9 @@
 //! source watches. Sources turn their reads into events; this module matches the events with the
 //! subscriptions and delivers the first that matches, which ends the subscription. The sources
 //! are the daemon's rounds of the items (`docs/items.md`), whose `item.*` events a subscription to
-//! a pull request (`forge`) or a ticket (`tickets`) filters, and the timer of a wake the agent
-//! asked for itself (`timer`, `wake`), whose time is its event. No subscription reads anything of
+//! a pull request (`forge`) or a ticket (`tickets`) filters, the timer of a wake the agent
+//! asked for itself (`timer`, `wake`), whose time is its event, and the run an agent started
+//! (`run`), which the same rounds read (`forge::followed`). No subscription reads anything of
 //! its own.
 //!
 //! A subscription costs the agent a turn each time it wakes it: one delivery holds every event of
@@ -36,6 +37,9 @@ pub const TICKETS: &str = "tickets";
 /// The source of the following of a session an agent started for the user: its target is that
 /// session, its one event the end of a turn of it, and it lasts until it ends.
 pub const SESSION: &str = "session";
+/// The source of the following of a run an agent started (`forge` `run`): its target is that run,
+/// its one event its end, and it lasts until then.
+pub const RUN: &str = "run";
 /// The kind of the delivery that wakes the agent that follows a session.
 pub const TURN_ENDED: &str = "session-turn-ended";
 /// How many `session_send` the two sessions of a following write to each other, with no message
@@ -97,6 +101,9 @@ pub fn waiting_for(daemon: &Daemon, agent: &str) -> Option<String> {
                 let left = s.expires_at.saturating_sub(now_ms()).div_ceil(60_000);
                 return format!("its wake in {left} min");
             }
+            if s.source == RUN {
+                return crate::forge::followed::named(&s.target);
+            }
             if s.source == TICKETS {
                 return format!(
                     "ticket {}: {}",
@@ -127,6 +134,7 @@ pub fn named(subscription: &Subscription) -> String {
     match subscription.source.as_str() {
         "forge" => crate::forge::target_named(&subscription.target),
         TICKETS => crate::tickets::target_named(&subscription.target),
+        RUN => crate::forge::followed::named(&subscription.target),
         TIMER => format!("wake: {}", why_of(subscription)),
         SESSION => format!(
             "session {} (agent {}): each end of a turn",
@@ -454,6 +462,28 @@ pub fn offer(
     }
     body.push_str("\nSubscribe again for the next one.");
     deliver(daemon, subscription, &body, "delivered");
+}
+
+/// Delivers `body` to the agent and ends the subscription.
+pub fn delivered(daemon: &Arc<Daemon>, subscription: &Subscription, body: &str) {
+    deliver(daemon, subscription, body, "delivered");
+}
+
+/// Delivers `body` to the agent, the subscription going on: a run that waits on a manual step,
+/// or cannot be read.
+pub fn tell(daemon: &Arc<Daemon>, subscription: &Subscription, body: &str) {
+    deliveries::deliver(
+        daemon,
+        &subscription.agent,
+        "subscription",
+        Some(format!(
+            "subscription-{}-{}",
+            subscription.id,
+            new_subscription_id()
+        )),
+        body,
+        approval::BETWEEN_TURNS,
+    );
 }
 
 fn deliver(daemon: &Arc<Daemon>, subscription: &Subscription, body: &str, why: &str) {

@@ -1,7 +1,8 @@
 //! The rail's Subscriptions section: what the session's agents wait for outside Flottille (the
 //! next event of a pull request or a ticket, `docs/design.md` §5.6): the pull request or the
 //! ticket, the events, since when
-//! and until when, or a wake the agent asked for and when it is due, each with a Cancel that the daemon carries out (`subscription.cancel`). Nothing
+//! and until when, a run the agent started and follows (`Run #43 of api`, since when), or a wake
+//! the agent asked for and when it is due, each with a Cancel that the daemon carries out (`subscription.cancel`). Nothing
 //! is drawn while the session waits for nothing; a row unfolds when a subscription opens and folds
 //! away when it ends, whatever ended it.
 
@@ -34,7 +35,8 @@ pub struct SubscriptionRow {
     pub pull: String,
     /// A wake the agent asked for (the source `timer`), not a pull request's events.
     pub wake: bool,
-    /// The following of a session the agent started (the source `session`): no end of its own.
+    /// The following of a session the agent started (the source `session`), or of a run it
+    /// started (the source `run`): no end of its own.
     pub following: bool,
     /// A following paused because the two sessions wrote to each other without the user.
     pub paused: bool,
@@ -48,12 +50,22 @@ impl SubscriptionRow {
         let target = &value["target"];
         let text = |value: &Value| value.as_str().unwrap_or_default().to_owned();
         let wake = value["source"] == "timer";
-        let following = value["source"] == "session";
+        let run = value["source"] == "run";
+        let following = value["source"] == "session" || run;
         SubscriptionRow {
             id: text(&value["id"]),
             agent: text(&value["agent"]),
             pull: match (wake, value["source"] == "tickets") {
                 (true, _) => format!("Wake: {}", text(&target["why"])),
+                _ if run => format!(
+                    "Run {}{} of {}",
+                    if target["forge"] == "github" { "" } else { "#" },
+                    target["run"].as_u64().unwrap_or_default(),
+                    repository_label(
+                        target["project"].as_str().unwrap_or_default(),
+                        target["repository"].as_str().unwrap_or_default()
+                    )
+                ),
                 _ if following => format!("Following {}", text(&target["title"])),
                 (false, true) => match text(&target["repository"]).as_str() {
                     "" => format!("Ticket {}", text(&target["key"])),
@@ -404,6 +416,26 @@ mod tests {
             "{times}"
         );
         assert!(!row(5 * 60_000).following);
+    }
+
+    #[test]
+    fn a_followed_run_is_named_by_its_number_and_repository_and_has_no_end() {
+        let run = |forge: &str| {
+            SubscriptionRow::of(&json!({
+                "id": "sub-5", "agent": "a1", "source": "run",
+                "target": {"project": "app", "repository": "api", "forge": forge, "run": 43,
+                    "pipeline": "custom: nightly", "branch": "app/login"},
+                "events": ["ended"], "created_at": 0, "expires_at": u64::MAX,
+            }))
+        };
+        assert_eq!(run("bitbucket").pull, "Run #43 of api");
+        assert_eq!(run("github").pull, "Run 43 of api");
+        assert!(run("bitbucket").following && !run("bitbucket").wake);
+        let times = run("bitbucket").times(0);
+        assert!(
+            times.starts_with("since") && !times.contains("expires"),
+            "{times}"
+        );
     }
 
     #[test]

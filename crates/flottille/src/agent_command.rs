@@ -175,6 +175,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                     mode: None,
                     role,
                     message,
+                    images: Vec::new(),
                 })?,
             )?;
             if json {
@@ -399,6 +400,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                 mode: None,
                 role: None,
                 message,
+                images: Vec::new(),
             },
             json,
         ),
