@@ -22,6 +22,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use flottille_ui::card::Block as CardBlock;
 use flottille_ui::color::mix;
 use flottille_ui::motion::{HOVER, Motion, PANEL};
 use flottille_ui::{
@@ -1340,6 +1341,10 @@ impl SessionPage {
                     runs_on: runs_on(&self.providers, &agent.provider, agent.model.as_deref()),
                     doing: agent.doing.clone(),
                     status: self.statuses.get(&agent.id)?.clone(),
+                    asks: self
+                        .requests
+                        .values()
+                        .any(|r| r.agent == agent.id && self.decision(r.number).is_none()),
                 })
             })
             .collect()
@@ -2689,6 +2694,9 @@ pub struct SubAgent {
     pub runs_on: String,
     pub doing: String,
     pub status: Entity<Status>,
+    /// A request of its own waits for the user: a child never needs them itself, but what it
+    /// asked and its parent forwarded is theirs to answer.
+    pub asks: bool,
 }
 
 /// What a request's card shows, once the page knows it.
@@ -3128,6 +3136,39 @@ fn allowed_said(calls: &[Call]) -> String {
             false => format!(" · {n} allowed by {by}"),
         })
         .collect()
+}
+
+/// What the folded sub-agents card says: how many there are and in which state, as in
+/// `23 sub-agents · 21 completed · 2 running`, and how many wait for the user, who are counted
+/// there and not under their state.
+fn sub_agents_said(agents: &[SubAgent], cx: &App) -> (String, usize) {
+    let asks = agents.iter().filter(|agent| agent.asks).count();
+    let mut line = format!(
+        "{} {}",
+        agents.len(),
+        if agents.len() == 1 {
+            "sub-agent"
+        } else {
+            "sub-agents"
+        }
+    );
+    for state in [
+        AgentState::Completed,
+        AgentState::Running,
+        AgentState::Waiting,
+        AgentState::Idle,
+        AgentState::Stopped,
+        AgentState::Failed,
+    ] {
+        let n = agents
+            .iter()
+            .filter(|agent| !agent.asks && agent.status.read(cx).state() == state)
+            .count();
+        if n > 0 {
+            line.push_str(&format!(" · {n} {}", state.label().to_lowercase()));
+        }
+    }
+    (line, asks)
 }
 
 /// What the user typed, as the Markdown that draws it as typed: each mark is escaped, each line
@@ -4161,13 +4202,78 @@ impl Render for Row {
                         }
                     })
                 });
+                // Folded to one line that counts them until a click opens the list: twenty
+                // sub-agents would fill several screens of the conversation.
+                let turn = turning(id("sub-agents-toggle"), self.open, window, cx);
+                let (counts, asks) = sub_agents_said(&self.sub_agents, cx);
+                let line = match asks {
+                    0 => counts.clone(),
+                    1 => format!("{counts} · 1 needs you"),
+                    n => format!("{counts} · {n} need you"),
+                };
+                let (open, needs_id) = (self.open, id("sub-agents-needs"));
+                let shown = SharedString::from(match open {
+                    true => "Sub-agents".to_owned(),
+                    false => line.clone(),
+                });
+                let (wait, _) = AgentState::NeedsYou.colors(&p);
+                let title =
+                    hoverable(
+                        div()
+                            .id(id("sub-agents-toggle"))
+                            .flex()
+                            .items_center()
+                            .gap(space::SM)
+                            .cursor_pointer()
+                            .aria_label(SharedString::from(line))
+                            .aria_expanded(open)
+                            .child(changing(id("sub-agents-said"), shown, move |shown| {
+                                match open {
+                                    true => div().child(shown),
+                                    false => div().flex().gap(space::XS).child(counts).when(
+                                        asks > 0,
+                                        |d| {
+                                            d.child(
+                                                div()
+                                                    .id(needs_id)
+                                                    .text_color(wait)
+                                                    .child(match asks {
+                                                        1 => "· 1 needs you".to_owned(),
+                                                        n => format!("· {n} need you"),
+                                                    })
+                                                    .test_support(),
+                                            )
+                                        },
+                                    ),
+                                }
+                                .into_any_element()
+                            }))
+                            .child(
+                                icon(Icon::Chevron)
+                                    .size(px(12.))
+                                    .text_color(p.faint)
+                                    .with_transformation(Transformation::rotate(radians(
+                                        -FRAC_PI_2 * turn,
+                                    ))),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.open = !this.open;
+                                cx.notify();
+                            })),
+                        move |d, t| d.text_color(mix(p.mute, p.text, t)),
+                    );
                 div()
                     .id(id("sub-agents"))
                     .child(
                         Card::new()
-                            .title("Sub-agents")
+                            .id(id("sub-agents-card"))
+                            .title(title)
                             .meta(by)
-                            .child(div().p(space::XS).children(rows)),
+                            .block(
+                                CardBlock::new()
+                                    .present(id("sub-agents-list"), open)
+                                    .child(div().p(space::XS).children(rows)),
+                            ),
                     )
                     .test_support()
                     .into_any_element()

@@ -2873,6 +2873,9 @@ fn a_child_appearing_adds_its_row_to_the_rail_and_the_sub_agents_list(cx: &mut T
         .position(|b| *b == Block::SubAgents)
         .unwrap();
     unfold(&page, at, cx);
+    // The card starts folded: a click on its title lists the sub-agents.
+    cx.update(|window, cx| window.click(format!("row-{at}-sub-agents-toggle"), cx));
+    settle(cx);
     assert!(cx.update(|window, _| window.try_find(format!("sub-agent-{child}")).is_some()));
     let listed = page.read_with(cx, |p, cx| {
         p.conversation()
