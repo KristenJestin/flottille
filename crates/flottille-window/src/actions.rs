@@ -407,6 +407,11 @@ pub enum Command {
     Resume {
         session: String,
     },
+    /// Reloads the tools of the session's root: its process restarts on its conversation, once
+    /// the turn that runs ended.
+    ReloadTools {
+        session: String,
+    },
     /// Interrupts the turn the session's root agent runs; the agent stays.
     Interrupt {
         session: String,
@@ -904,6 +909,13 @@ pub enum Outcome {
     /// The session's root was resumed, or the daemon refused with why.
     Resumed {
         session: String,
+        refused: Option<String>,
+    },
+    /// The session's tools reload, now or once its turn ends (`after_turn`), or the daemon
+    /// refused with why.
+    ToolsReloaded {
+        session: String,
+        after_turn: bool,
         refused: Option<String>,
     },
     /// The session's turn was interrupted (or none ran), or the daemon refused with why.
@@ -1951,6 +1963,23 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 Ok(Err(why)) | Err(why) => Some(why),
             };
             Outcome::Resumed { session, refused }
+        }
+        Command::ReloadTools { session } => {
+            let answer = ask_alone(
+                connect,
+                "agent.reload_tools",
+                json!({"agent": session}),
+                bounds.quick,
+            );
+            let (after_turn, refused) = match answer {
+                Ok(Ok(answer)) => (answer["after_turn"] == true, None),
+                Ok(Err(why)) | Err(why) => (false, Some(why)),
+            };
+            Outcome::ToolsReloaded {
+                session,
+                after_turn,
+                refused,
+            }
         }
         Command::SetMode { session, mode } => {
             let refused = match ask_alone(

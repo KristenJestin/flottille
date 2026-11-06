@@ -1461,12 +1461,23 @@ pub fn mint(daemon: &Daemon, grant: Grant, provider: &Provider) -> Result<String
         say_outdated(daemon, &agent, outdated);
     }
     // Its conversation still holds what it said of its old tools: an agent that does not list
-    // them again reads what changed with its next turn.
-    if let Some(before) = newer
-        && !provider.lists_tools_again
-        && let Some(changes) = given.since(before)
-    {
-        deliveries::queue(daemon, &agent, "tools", None, &changes);
+    // them again reads what changed with its next turn. One whose tools the user reloaded reads
+    // it whatever its agent does, and that nothing changed when nothing did.
+    let changes = newer.and_then(|before| given.since(before));
+    if crate::agents::take_reload(daemon, &agent) {
+        let said = match changes {
+            Some(changes) => format!("{RELOADED_CHANGED}\n{changes}"),
+            None => RELOADED_UNCHANGED.to_owned(),
+        };
+        deliveries::queue(daemon, &agent, "tools", None, &said);
+    } else if let Some(changes) = changes.filter(|_| !provider.lists_tools_again) {
+        deliveries::queue(
+            daemon,
+            &agent,
+            "tools",
+            None,
+            &format!("{UPDATED}\n{changes}"),
+        );
     }
     let kept = serde_json::to_string(&given).expect("a list given is JSON");
     let kept = daemon.write(|store| {
@@ -1478,6 +1489,15 @@ pub fn mint(daemon: &Daemon, grant: Grant, provider: &Provider) -> Result<String
     }
     Ok(token)
 }
+
+/// What an agent whose tools changed since its last process is told, before what changed.
+const UPDATED: &str = "Flottille was updated: your tools changed since you last read them. They \
+                       are as listed now, whatever was said of them before:";
+/// The same, for an agent whose tools the user reloaded.
+const RELOADED_CHANGED: &str = "Your tools were reloaded: they changed since you last read them. \
+                                They are as listed now, whatever was said of them before:";
+/// What an agent whose tools the user reloaded is told when they are as they were.
+const RELOADED_UNCHANGED: &str = "Your tools were reloaded: nothing changed.";
 
 /// The tool list a process is given (`docs/tools.md`, "When the tools change"), kept with its
 /// agent: a digest of the tools as they are listed (names, schemas, descriptions), and the
@@ -1546,13 +1566,7 @@ impl Given {
                 lines.push(format!("- {tool}: gone"));
             }
         }
-        (!lines.is_empty()).then(|| {
-            format!(
-                "Flottille was updated: your tools changed since you last read them. They are as \
-                 listed now, whatever was said of them before:\n{}",
-                lines.join("\n")
-            )
-        })
+        (!lines.is_empty()).then(|| lines.join("\n"))
     }
 }
 

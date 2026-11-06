@@ -1414,7 +1414,8 @@ impl Store {
                SELECT max(created_at, coalesce(active_at, 0), coalesce(exchanged_at, 0)) AS at \
                  FROM agents WHERE id IN tree \
                UNION ALL SELECT max(e.at) FROM agent_events a JOIN events e ON e.seq = a.seq \
-                 WHERE a.agent IN tree AND e.name NOT IN ('agent.tools_outdated', 'agent.released') \
+                 WHERE a.agent IN tree \
+                 AND e.name NOT IN ('agent.tools_outdated', 'agent.tools_reload', 'agent.released') \
                UNION ALL SELECT max(created_at, coalesce(sent_at, 0)) FROM deliveries \
                  WHERE agent IN tree \
                UNION ALL SELECT max(started_at, coalesce(ended_at, 0)) FROM runs \
@@ -5274,7 +5275,11 @@ mod tests {
 
         // The daemon's own words are no activity.
         std::thread::sleep(std::time::Duration::from_millis(5));
-        for name in ["agent.tools_outdated", "agent.released"] {
+        for name in [
+            "agent.tools_outdated",
+            "agent.tools_reload",
+            "agent.released",
+        ] {
             store
                 .append_agent_event(&agent.id, name, json!({}), false)
                 .unwrap();

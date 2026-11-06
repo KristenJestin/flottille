@@ -848,6 +848,22 @@ impl Shell {
                     page.update(cx, |page, cx| page.resumed(refused, cx));
                 }
             }
+            Outcome::ToolsReloaded {
+                session,
+                after_turn,
+                refused,
+            } => {
+                if let Some(page) = self.session_page.clone()
+                    && page.read(cx).id() == session
+                {
+                    page.update(cx, |page, cx| page.tools_reloaded(after_turn, refused, cx));
+                } else if let Some(why) = refused {
+                    flottille_ui::toast(
+                        flottille_ui::Toast::failure(crate::session::NOT_RELOADED).detail(why),
+                        cx,
+                    );
+                }
+            }
             Outcome::ModeSet { session, refused } => {
                 if let Some(reply) = self.replies.get(&session) {
                     let mode = reply.read(cx).mode.clone();
