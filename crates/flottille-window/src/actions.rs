@@ -110,6 +110,8 @@ pub enum Command {
         target: Target,
         pick: Pick,
         message: String,
+        /// The pictures that go with the first message.
+        images: Vec<Picture>,
     },
     /// Enables or disables a provider in `providers.toml`.
     SetProvider {
@@ -1128,6 +1130,7 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             target,
             pick,
             message,
+            images,
         } => {
             let workspace = match target {
                 Target::Main => None,
@@ -1136,7 +1139,7 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             match ask_alone(
                 connect,
                 "agent.start",
-                start_params(&project, workspace.as_deref(), &pick, &message),
+                start_params(&project, workspace.as_deref(), &pick, &message, &images),
                 bounds.quick,
             ) {
                 Ok(Ok(started)) => started_outcome(&project, &started),
@@ -2117,7 +2120,13 @@ fn workspace_outcome(
     }
 }
 
-fn start_params(project: &str, workspace: Option<&str>, pick: &Pick, message: &str) -> Value {
+fn start_params(
+    project: &str,
+    workspace: Option<&str>,
+    pick: &Pick,
+    message: &str,
+    images: &[Picture],
+) -> Value {
     // What is left out is sent as a null, which the daemon reads as absent: its to choose.
     json!({
         "project": project,
@@ -2126,6 +2135,7 @@ fn start_params(project: &str, workspace: Option<&str>, pick: &Pick, message: &s
         "model": pick.model,
         "effort": pick.effort,
         "message": message,
+        "images": images.iter().map(Picture::to_json).collect::<Vec<_>>(),
     })
 }
 
@@ -2380,6 +2390,7 @@ mod tests {
             target: Target::Main,
             pick: Pick::default(),
             message: "Fix the timeout".into(),
+            images: Vec::new(),
         }
     }
 

@@ -169,6 +169,47 @@ fn the_window_draws_no_frame_at_rest_on_the_project_page(cx: &mut TestAppContext
 }
 
 #[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_the_project_page_with_a_picture_attached(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    idle_session(&user);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::Project("app".into()), window, cx)
+    });
+    until(&shell, cx, "the project's page is shown", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).project_page().is_some())
+    });
+    let composer = shell
+        .read_with(cx, |s, _| s.composer_of("app").cloned())
+        .expect("the page has a composer");
+    let mut picture = std::io::Cursor::new(Vec::new());
+    image::RgbImage::from_pixel(8, 8, image::Rgb([200, 80, 40]))
+        .write_to(&mut picture, image::ImageFormat::Png)
+        .unwrap();
+    composer.update_in(cx, |composer, _, cx| {
+        composer.attach(
+            gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, picture.into_inner()),
+            cx,
+        )
+    });
+    until(&shell, cx, "the thumbnail is there", |cx| {
+        cx.update(|window, _| window.try_find("attachment-0").is_some())
+    });
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
+
+#[gpui_kit::test]
 fn the_window_draws_no_frame_at_rest_on_a_project_s_rules_and_message_checks(
     cx: &mut TestAppContext,
 ) {

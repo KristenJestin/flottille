@@ -22,7 +22,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use flottille_core::images::{MAX_IMAGE_BYTES, MAX_IMAGES};
 use flottille_ui::color::mix;
 use flottille_ui::motion::{HOVER, Motion, PANEL};
 use flottille_ui::{
@@ -33,7 +32,7 @@ use flottille_ui::{
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{
-    Escape, Input, InputEvent, InputState, MoveDown, MoveUp, Paste, TextareaState,
+    Escape, Input, InputEvent, InputState, MoveDown, MoveUp, TextareaState,
 };
 use gpui_kit::base::text::{TextView, TextViewState, TextViewStyle};
 use gpui_kit::base::{ElementExt as _, TextSelection, TextSelectionScopeId};
@@ -48,6 +47,7 @@ use gpui_kit::{
 };
 
 use crate::actions::{Answer, Command, Picture, RepositoryStatus, RunAct, RunAnswer};
+use crate::attachments::{Attachments, STILL_SCALING};
 use crate::commands::CommandInfo;
 use crate::conversation::{
     Activity, Block, Call, CallState, Change, Conversation, DiffLine, Ending, STARTED_SESSION_KIND,
@@ -98,25 +98,9 @@ pub const SEND: &str = "Send";
 pub const STOP: &str = "Stop the turn";
 /// The reply field is one line high when empty, and grows with its lines up to this many.
 const REPLY_MAX_ROWS: usize = 10;
-/// What a toast says of a picture the composer does not attach: its title, and why.
-pub const NOT_ATTACHED: &str = "The picture was not attached";
-pub const NO_IMAGES: &str = "This agent takes no images.";
-const IMAGE_KINDS: &str = "Flottille takes png, jpeg, gif and webp images.";
-const IMAGE_TOO_BIG: &str = "An image can be 5 MiB at most.";
-const NOT_READ: &str = "That file could not be read.";
 /// What a toast says when the daemon refuses the message, or the interruption.
 pub const NOT_SENT: &str = "The message was not sent";
-const STILL_SCALING: &str = "A picture is still being scaled down: send once it is there.";
 pub const NOT_INTERRUPTED: &str = "The turn was not interrupted";
-/// The biggest file read to be attached: a screenshot of a big screen weighs more than a message
-/// may, and is scaled down before its size is judged.
-const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
-
-/// The key of a thumbnail in the composer: the picture itself, which stays alive while it leaves.
-fn thumb_key(image: &Arc<gpui_kit::Image>) -> String {
-    format!("{:x}", Arc::as_ptr(image) as usize)
-}
-
 /// The state an agent of the tree is drawn with, from what the daemon says of it: only a root can
 /// need the user; a child waiting on its parent is waiting, in grey.
 pub fn state_of(agent: &TreeAgent) -> AgentState {
@@ -6260,20 +6244,8 @@ pub struct Reply {
     sent: Option<String>,
     /// What the root does while its turn runs, for the line above the field.
     activity: Option<Activity>,
-    /// Pictures pasted or dropped, sent with the next message.
-    attachments: Vec<Arc<gpui_kit::Image>>,
-    /// The ones the message being sent holds: they leave when it is taken, whatever was removed
-    /// or added meanwhile.
-    sent_images: Vec<Arc<gpui_kit::Image>>,
-    /// Whether the root's agent takes images; `None` until it first started.
-    images: Option<bool>,
-    /// The thumbnails, which unfold as a picture is attached and fold away as it leaves.
-    thumbs: Listing<Arc<gpui_kit::Image>>,
-    /// The big pictures being scaled down off the window's thread, each held by a skeleton in
-    /// the strip until its thumbnail is ready.
-    scaling: Vec<u64>,
-    scaling_places: Listing<()>,
-    scaled: u64,
+    /// The pictures that go with the next message.
+    attached: Attachments,
     renders: usize,
     _subscriptions: Vec<Subscription>,
 }
@@ -6344,13 +6316,7 @@ impl Reply {
             interrupting: false,
             sent: None,
             activity: None,
-            attachments: Vec::new(),
-            sent_images: Vec::new(),
-            images: None,
-            thumbs: Listing::default(),
-            scaling: Vec::new(),
-            scaling_places: Listing::default(),
-            scaled: 0,
+            attached: Attachments::default(),
             renders: 0,
             _subscriptions: subscriptions,
         };
@@ -6379,12 +6345,12 @@ impl Reply {
 
     /// The pictures that go with the next message.
     pub fn attachments(&self) -> &[Arc<gpui_kit::Image>] {
-        &self.attachments
+        self.attached.pictures()
     }
 
     /// A big picture is still being scaled down.
     pub fn is_scaling(&self) -> bool {
-        !self.scaling.is_empty()
+        self.attached.is_scaling()
     }
 
     /// The line above the field while a turn runs: what the root does.
@@ -6410,148 +6376,25 @@ impl Reply {
     }
 
     fn set_images(&mut self, images: Option<bool>) {
-        self.images = images;
+        self.attached.set_takes(images);
     }
 
-    /// Says in a toast why a picture was not attached: the composer never changes for it.
-    fn not_attached(why: impl Into<SharedString>, cx: &mut Context<Self>) {
-        toast(Toast::failure(NOT_ATTACHED).detail(why), cx);
+    fn attached_of(&mut self) -> &mut Attachments {
+        &mut self.attached
     }
 
-    /// Attaches a picture, or says in a toast why not; the text in the field stays. A big one is
-    /// scaled down first, so that its weight is judged as it will be stored: decoding and
-    /// resizing a 4K screenshot takes long enough to freeze the window, so it happens on the
-    /// background executor and the picture is attached once it is done.
+    /// Attaches a picture, or says in a toast why not; the text in the field stays.
     pub fn attach(&mut self, image: gpui_kit::Image, cx: &mut Context<Self>) {
-        use gpui_kit::ImageFormat::{Gif, Jpeg, Png, Webp};
-        if self.images == Some(false) {
-            return Self::not_attached(NO_IMAGES, cx);
-        }
-        if !matches!(image.format, Png | Jpeg | Gif | Webp) {
-            return Self::not_attached(IMAGE_KINDS, cx);
-        }
-        if self.attachments.len() + self.scaling.len() >= MAX_IMAGES {
-            return Self::not_attached(
-                format!("A message carries {MAX_IMAGES} images at most."),
-                cx,
-            );
-        }
-        let mime = image.format.mime_type();
-        if !flottille_core::images::needs_scaling(mime, &image.bytes) {
-            return self.keep(image, cx);
-        }
-        let (id, format) = (self.scaled, image.format);
-        self.scaled += 1;
-        self.scaling.push(id);
-        let scaling =
-            cx.background_spawn(
-                async move { flottille_core::images::scaled_down(mime, image.bytes) },
-            );
-        cx.spawn(async move |this, cx| {
-            let bytes = scaling.await;
-            this.update(cx, |this, cx| {
-                this.scaling.retain(|scaling| *scaling != id);
-                this.keep(gpui_kit::Image::from_bytes(format, bytes), cx);
-            })
-            .ok();
-        })
-        .detach();
-        cx.notify();
-    }
-
-    /// Keeps a picture that is ready to be sent, if it weighs what a message may carry.
-    fn keep(&mut self, image: gpui_kit::Image, cx: &mut Context<Self>) {
-        if image.bytes.len() > MAX_IMAGE_BYTES {
-            return Self::not_attached(IMAGE_TOO_BIG, cx);
-        }
-        self.attachments.push(Arc::new(image));
-        cx.notify();
+        self.attached.attach(image, cx, Self::attached_of);
     }
 
     /// Attaches the picture a file holds (a file dropped on the composer, or picked).
     pub fn attach_file(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
-        use gpui_kit::ImageFormat::{Gif, Jpeg, Png, Webp};
-        let format = match path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(str::to_ascii_lowercase)
-            .as_deref()
-        {
-            Some("png") => Png,
-            Some("jpg" | "jpeg") => Jpeg,
-            Some("gif") => Gif,
-            Some("webp") => Webp,
-            _ => return Self::not_attached(IMAGE_KINDS, cx),
-        };
-        if std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_FILE_BYTES) {
-            return Self::not_attached(IMAGE_TOO_BIG, cx);
-        }
-        match std::fs::read(path) {
-            Ok(bytes) => self.attach(gpui_kit::Image::from_bytes(format, bytes), cx),
-            Err(_) => Self::not_attached(NOT_READ, cx),
-        }
+        self.attached.attach_file(path, cx, Self::attached_of);
     }
 
     pub fn detach(&mut self, at: usize, cx: &mut Context<Self>) {
-        if at < self.attachments.len() {
-            self.attachments.remove(at);
-            cx.notify();
-        }
-    }
-
-    /// Paste: a clipboard that holds a picture attaches it, whatever text comes with it (a copy in
-    /// a browser gives the picture's address or its HTML as well); else the field takes it.
-    fn pasted(&mut self, cx: &mut Context<Self>) -> bool {
-        use gpui_kit::ClipboardEntry;
-        let Some(clipboard) = cx.read_from_clipboard() else {
-            return false;
-        };
-        let has_image = clipboard
-            .entries()
-            .iter()
-            .any(|entry| matches!(entry, ClipboardEntry::Image(_)));
-        if clipboard.text().is_some() && !has_image {
-            return false;
-        }
-        let mut taken = false;
-        for entry in clipboard.into_entries() {
-            match entry {
-                ClipboardEntry::Image(image) => {
-                    self.attach(image, cx);
-                    taken = true;
-                }
-                ClipboardEntry::ExternalPaths(paths) => {
-                    for path in paths.paths() {
-                        self.attach_file(path, cx);
-                        taken = true;
-                    }
-                }
-                ClipboardEntry::String(_) => {}
-            }
-        }
-        taken
-    }
-
-    /// The Attach button: pictures picked in the system's file chooser.
-    fn pick_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let picked = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: true,
-            prompt: Some("Attach".into()),
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = picked.await else {
-                return;
-            };
-            this.update(cx, |this, cx| {
-                for path in &paths {
-                    this.attach_file(path, cx);
-                }
-            })
-            .ok();
-        })
-        .detach();
+        self.attached.detach(at, cx);
     }
 
     /// The root runs a turn.
@@ -6895,20 +6738,12 @@ impl Reply {
         if self.is_scaling() {
             return toast(Toast::failure(NOT_SENT).detail(STILL_SCALING), cx);
         }
-        if message.is_empty() && self.attachments.is_empty() {
+        if message.is_empty() && self.attached.is_empty() {
             return;
         }
         self.sending = true;
         self.sent = Some(typed);
-        self.sent_images = self.attachments.clone();
-        let images = self
-            .attachments
-            .iter()
-            .map(|image| Picture {
-                mime: image.format.mime_type().to_owned(),
-                bytes: image.bytes.clone(),
-            })
-            .collect();
+        let images = self.attached.sending();
         let command = Command::Reply {
             session: self.session.clone(),
             message,
@@ -6943,11 +6778,7 @@ impl Reply {
         // list, and Enter sends it.
         self.dismissed = self.slash.is_some();
         self.list_commands(cx);
-        for picture in pictures {
-            if let Some(format) = gpui_kit::ImageFormat::from_mime_type(&picture.mime) {
-                self.attach(gpui_kit::Image::from_bytes(format, picture.bytes), cx);
-            }
-        }
+        self.attached.restore(pictures, cx, Self::attached_of);
         let focus = self.field.read(cx).focus_handle(cx);
         window.focus(&focus, cx);
         cx.notify();
@@ -6965,9 +6796,7 @@ impl Reply {
         let sent = self.sent.take();
         match refused {
             None => {
-                let sent_images = std::mem::take(&mut self.sent_images);
-                self.attachments
-                    .retain(|image| !sent_images.iter().any(|sent| Arc::ptr_eq(sent, image)));
+                self.attached.sent();
                 let now = self.field.read(cx).value().to_string();
                 // A sent text changed meanwhile is left as it is: nothing typed is lost.
                 if let Some(rest) = sent.as_deref().and_then(|sent| now.strip_prefix(sent)) {
@@ -6989,7 +6818,7 @@ impl Render for Reply {
         let focus = fade("reply-focus", self.focused, HOVER, window, cx);
         self.renders += 1;
         let p = palette(cx);
-        let can_send = (self.has_text || !self.attachments.is_empty()) && !self.sending;
+        let can_send = (self.has_text || !self.attached.is_empty()) && !self.sending;
         let swap = fade(
             "reply-stop-swap",
             self.running && !can_send,
@@ -6997,161 +6826,12 @@ impl Render for Reply {
             window,
             cx,
         );
-        // A picture unfolds into the strip as it is attached and folds away as it leaves: the
-        // gone ones stay in the listing until they have.
-        let now = cx.background_executor().now();
-        self.thumbs.sync(
-            self.attachments.iter().map(|i| (thumb_key(i), i.clone())),
-            now,
-            cx.reduce_motion(),
-        );
-        let listed: Vec<(String, Arc<gpui_kit::Image>, bool)> = self
-            .thumbs
-            .rows()
-            .map(|row| {
-                (
-                    row.key.to_owned(),
-                    row.value.clone(),
-                    row.placement.is_gone(),
-                )
-            })
-            .collect();
-        self.scaling_places.sync(
-            self.scaling.iter().map(|id| (format!("scaling-{id}"), ())),
-            now,
-            cx.reduce_motion(),
-        );
-        let places: Vec<(String, bool)> = self
-            .scaling_places
-            .rows()
-            .map(|row| (row.key.to_owned(), row.placement.is_gone()))
-            .collect();
-        let mut live = 0;
-        let thumbs: Vec<AnyElement> = listed
-            .into_iter()
-            .map(|(key, image, gone)| {
-                let at = live;
-                let id = match gone {
-                    true => ElementId::Name(format!("attachment-leaving-{key}").into()),
-                    false => ElementId::Name(format!("attachment-{at}").into()),
-                };
-                live += usize::from(!gone);
-                let shown = fade(
-                    ElementId::Name(format!("attachment-shown-{key}").into()),
-                    !gone,
-                    PANEL,
-                    window,
-                    cx,
-                );
-                let thumb = div()
-                    .id(id)
-                    .relative()
-                    .flex_none()
-                    .size(px(56.))
-                    .child(
-                        gpui_kit::img(image)
-                            .size_full()
-                            .rounded(px(8.))
-                            .object_fit(gpui_kit::ObjectFit::Cover),
-                    )
-                    .when(!gone, |d| {
-                        d.child(hoverable(
-                            div()
-                                .id(ElementId::Name(format!("attachment-remove-{at}").into()))
-                                .absolute()
-                                .top(px(-5.))
-                                .right(px(-5.))
-                                .size(px(18.))
-                                .rounded_full()
-                                .bg(p.card2)
-                                .border_1()
-                                .border_color(p.line2)
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_pointer()
-                                .aria_label("Remove the picture")
-                                .on_click(cx.listener(move |this, _, _, cx| this.detach(at, cx))),
-                            // An icon does not inherit the ink: it is drawn here, in the ink this frame.
-                            move |d, t| {
-                                d.bg(mix(p.card2, p.hover, t)).child(
-                                    icon(Icon::Close)
-                                        .size(px(12.))
-                                        .text_color(mix(p.mute, p.text, t)),
-                                )
-                            },
-                        ))
-                    })
-                    .test_support();
-                // The slot is as wide as the picture and the gap after it, narrowing as it leaves.
-                let slot = div()
-                    .flex_none()
-                    .w(px(68. * shown))
-                    .pr(space::MD)
-                    .pb(space::SM)
-                    .opacity(shown)
-                    .when(shown < 1.0, |d| d.overflow_hidden())
-                    .child(thumb);
-                enter(
-                    ElementId::Name(format!("attachment-enter-{key}").into()),
-                    0,
-                    slot,
-                )
-                .into_any_element()
-            })
-            .collect();
-        // A skeleton holds the place of a picture being scaled, and folds away as its thumbnail
-        // unfolds.
-        let mut held = 0;
-        let places: Vec<AnyElement> = places
-            .into_iter()
-            .map(|(key, gone)| {
-                let id = match gone {
-                    true => ElementId::Name(format!("attachment-scaling-leaving-{key}").into()),
-                    false => ElementId::Name(format!("attachment-scaling-{held}").into()),
-                };
-                held += usize::from(!gone);
-                let shown = fade(
-                    ElementId::Name(format!("attachment-scaling-shown-{key}").into()),
-                    !gone,
-                    PANEL,
-                    window,
-                    cx,
-                );
-                let slot = div()
-                    .flex_none()
-                    .w(px(68. * shown))
-                    .pr(space::MD)
-                    .pb(space::SM)
-                    .opacity(shown)
-                    .when(shown < 1.0, |d| d.overflow_hidden())
-                    .child(Skeleton::new(id).w(px(56.)).h(px(56.)));
-                enter(
-                    ElementId::Name(format!("attachment-scaling-enter-{key}").into()),
-                    0,
-                    slot,
-                )
-                .into_any_element()
-            })
-            .collect();
-        let strip = presence(
-            "reply-attachments",
-            !self.attachments.is_empty() || !self.scaling_places.is_empty(),
-            div()
-                .flex()
-                .flex_wrap()
-                .px(space::SM)
-                .pt(space::SM)
-                .pb(space::SM)
-                .children(thumbs)
-                .children(places),
-        );
+        let strip = self
+            .attached
+            .strip(window, cx, |this, at, cx| this.detach(at, cx));
         let slash = self.render_slash(cx);
         let chips = self.render_chips(cx);
-        div()
-            .id("reply")
-            .relative()
-            .w_full()
+        Attachments::taken_by(div().id("reply").relative().w_full(), cx, Self::attached_of)
             // While the `/` list is open, the arrows move in it and Escape closes it, before the
             // field takes them.
             .capture_action(cx.listener(|this, _: &MoveUp, _, cx| {
@@ -7174,17 +6854,6 @@ impl Render for Reply {
                 }
             }))
             .child(gpui_kit::deferred(slash).priority(1))
-            // A picture on the clipboard is an attachment; text is left to the field.
-            .capture_action(cx.listener(|this, _: &Paste, _, cx| {
-                if this.pasted(cx) {
-                    cx.stop_propagation();
-                }
-            }))
-            .on_drop(cx.listener(|this, paths: &gpui_kit::ExternalPaths, _, cx| {
-                for path in paths.paths() {
-                    this.attach_file(path, cx);
-                }
-            }))
             // Escape interrupts the turn that runs; with none running it is left to others.
             .on_key_down(cx.listener(|this, event: &gpui_kit::KeyDownEvent, _, cx| {
                 if this.running && event.keystroke.key == "escape" {
@@ -7231,13 +6900,7 @@ impl Render for Reply {
                     .px(space::XS)
                     .child(self.options.clone())
                     .child(self.mode.clone())
-                    .child(
-                        Button::quiet("attach", "Attach")
-                            .tooltip("Attach pictures")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.pick_files(window, cx)),
-                            ),
-                    )
+                    .child(Attachments::button(cx, Self::attached_of))
                     // What the root does while its turn runs, where the line above the field was.
                     .child(
                         div()
