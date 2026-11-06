@@ -247,6 +247,122 @@ fn a_start_with_an_image_the_daemon_refuses_starts_no_agent() {
 }
 
 #[test]
+fn a_start_with_a_picture_and_no_text_is_a_first_message() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"images": true}));
+    project(&user);
+
+    let started = user
+        .call(
+            "agent.start",
+            json!({"project": "app", "message": "", "images": [image("image/png", PNG)]}),
+        )
+        .unwrap();
+    let id = started["agent"]["id"].as_str().unwrap().to_owned();
+    eventually("the first turn ends", || {
+        show(&user, &id)["agent"]["state"] == "idle"
+    });
+
+    let prompt = &user.received_requests("session/prompt")[0]["params"]["prompt"];
+    assert_eq!(prompt[1]["type"], "image");
+    assert_eq!(prompt[1]["data"], base64_of(PNG));
+    // Neither text nor picture is still no message.
+    let nothing = user
+        .call("agent.start", json!({"project": "app", "message": " "}))
+        .unwrap_err();
+    assert!(nothing.1.contains("empty"), "{}", nothing.1);
+}
+
+#[test]
+fn a_start_for_a_provider_that_takes_no_images_is_refused_and_starts_no_agent() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"images": false}));
+    project(&user);
+    let first = idle_agent(&user);
+    let provider = show(&user, &first)["agent"]["provider"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // The provider says so in its list, for the window's composer to say it before a start.
+    let listed = user.call("provider.list", json!({})).unwrap();
+    let entry = listed["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == provider.as_str())
+        .unwrap();
+    assert_eq!(entry["images"], false, "{entry}");
+
+    let refused = user
+        .call(
+            "agent.start",
+            json!({"project": "app", "message": "look", "images": [image("image/png", PNG)]}),
+        )
+        .unwrap_err();
+    assert!(refused.1.contains("takes no images"), "{}", refused.1);
+    let agents = user.call("agent.list", json!({})).unwrap();
+    assert_eq!(
+        agents["agents"].as_array().map(Vec::len),
+        Some(1),
+        "{agents}"
+    );
+}
+
+#[test]
+fn a_start_whose_pictures_cannot_be_stored_leaves_no_agent_to_start_again() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"images": true}));
+    project(&user);
+    // The folder of pictures cannot be made: a file stands in its place.
+    std::fs::create_dir_all(user.path("data/flottille")).unwrap();
+    std::fs::write(user.path("data/flottille/images"), "in the way").unwrap();
+
+    let failed = user
+        .call(
+            "agent.start",
+            json!({"project": "app", "message": "look", "images": [image("image/png", PNG)]}),
+        )
+        .unwrap_err();
+    assert_eq!(failed.0, "unavailable", "{failed:?}");
+    let agents = user.call("agent.list", json!({})).unwrap();
+    assert_eq!(
+        agents["agents"].as_array().map(Vec::len),
+        Some(0),
+        "{agents}"
+    );
+}
+
+#[test]
+fn the_pictures_of_a_first_message_are_given_again_to_the_session_that_replaces_it() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"images": true, "turns": [
+        {"when": "die", "do": [{"say": "Bye"}, {"die": 3}]}]}));
+    project(&user);
+
+    let started = user
+        .call(
+            "agent.start",
+            json!({"project": "app", "message": "die now", "images": [image("image/png", PNG)]}),
+        )
+        .unwrap();
+    let id = started["agent"]["id"].as_str().unwrap().to_owned();
+    eventually("the agent failed after its replacements", || {
+        show(&user, &id)["agent"]["state"] == "failed"
+    });
+
+    let prompts = user.received_requests("session/prompt");
+    assert!(prompts.len() >= 2, "{} prompts", prompts.len());
+    for prompt in &prompts {
+        let blocks = prompt["params"]["prompt"].as_array().unwrap();
+        assert!(
+            blocks.iter().any(|b| b["type"] == "image"),
+            "a prompt without the picture: {prompt}"
+        );
+    }
+}
+
+#[test]
 fn an_image_alone_is_a_message() {
     let user = User::with_fake_agent();
     user.fake_script(json!({"images": true}));

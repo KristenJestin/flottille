@@ -488,15 +488,10 @@ fn refuse_empty(message: &str) -> Result<(), Failure> {
 
 async fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
     let project = projects::load_project(daemon, &asked.project)?;
-    refuse_empty(&asked.message)?;
-    // The pictures are judged before the agent exists, so that a refusal leaves nothing behind;
-    // like a later message's, off the runtime's threads.
-    let checked = {
-        let uploads = asked.images;
-        tokio::task::spawn_blocking(move || check_images(&uploads))
-            .await
-            .map_err(|e| Failure::new("unavailable", format!("images not kept: {e}")))??
-    };
+    // Pictures alone are a first message, as they are a later one.
+    if asked.images.is_empty() {
+        refuse_empty(&asked.message)?;
+    }
     // An agent's own permission modes decide which of its calls run unasked: in bare mode every
     // call goes through Flottille's gate, which no mode may loosen.
     if let Some(mode) = &asked.mode {
@@ -512,6 +507,41 @@ async fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
             roles::ROLES.map(|role| role.name).join(", ")
         ))
     })?;
+    // A provider whose last agent said it takes no images is not given any: said now, as a later
+    // message to such an agent is. Not yet known, they go, and the agent says what it did with them.
+    if !asked.images.is_empty() {
+        let (provider, _) = providers::choose(
+            daemon,
+            &project,
+            providers::Asked {
+                provider: asked.provider.clone(),
+                model: asked.model.clone(),
+                effort: asked.effort.clone(),
+            },
+        )?;
+        if providers::takes_images(daemon, provider.name) == Some(false) {
+            return Err(Failure::refused(format!(
+                "the agent of {} takes no images",
+                provider.name
+            )));
+        }
+    }
+    // The pictures are judged, and written to the folder of the agent-to-be, before the agent
+    // exists: a refusal or a failure leaves nothing, not a session to start again. Off the
+    // runtime's threads, like a later message's.
+    let id = new_id().map_err(|e| Failure::new("unavailable", e.to_string()))?;
+    let images = {
+        let (daemon, id, uploads) = (daemon.clone(), id.clone(), asked.images);
+        tokio::task::spawn_blocking(move || {
+            let stored = store_images(&daemon, &id, check_images(&uploads)?);
+            if stored.is_err() {
+                deliveries::forget_images(&daemon.paths, &id);
+            }
+            stored
+        })
+        .await
+        .map_err(|e| Failure::new("unavailable", format!("images not kept: {e}")))??
+    };
     let after = daemon.read(Store::last_seq)?;
     // `/name` starts the session with the project's command of that name.
     let message = crate::commands::message_for(
@@ -519,11 +549,13 @@ async fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
         &project.name,
         asked.workspace.as_deref(),
         &asked.message,
-    )?;
+    )
+    .inspect_err(|_| deliveries::forget_images(&daemon.paths, &id))?;
     let agent = create(
         daemon,
         &project,
         New {
+            id: Some(id.clone()),
             workspace: asked.workspace,
             preparing: false,
             role,
@@ -536,12 +568,10 @@ async fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
             gate_mode: None,
             launched_by: None,
         },
-    )?;
-    let images = store_images(daemon, &agent.id, checked).inspect_err(|_| {
-        tree::stop_tree(daemon, &agent.id, "its pictures could not be stored");
-    })?;
+    )
+    .inspect_err(|_| deliveries::forget_images(&daemon.paths, &id))?;
     // The root's brief is its first message: a replacement supersedes it by its id, as any
-    // brief, and delivers the brief again (its text: the pictures are said once).
+    // brief, and delivers the brief again, with its pictures.
     if deliveries::deliver_message(
         daemon,
         &agent.id,
@@ -553,13 +583,15 @@ async fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
     )
     .is_none()
     {
-        deliveries::discard_images(&daemon.paths, &agent.id, &images);
+        deliveries::forget_images(&daemon.paths, &agent.id);
     }
     Ok(json!({"agent": agent.to_json(), "after": after}))
 }
 
 /// What a new agent is made of.
 pub struct New {
+    /// Its id, when the caller made it first (the folder of its pictures is named by it).
+    pub id: Option<String>,
     pub workspace: Option<String>,
     /// Its workspace may still be preparing: the agent is sent nothing until it is ready.
     pub preparing: bool,
@@ -664,7 +696,10 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         &files,
     );
     let agent = Agent {
-        id: new_id().map_err(|e| Failure::new("unavailable", e.to_string()))?,
+        id: match new.id {
+            Some(id) => id,
+            None => new_id().map_err(|e| Failure::new("unavailable", e.to_string()))?,
+        },
         provider: provider.name.into(),
         role: new.role.name.into(),
         project: project.name.clone(),
@@ -1236,13 +1271,22 @@ pub fn replace(daemon: &Arc<Daemon>, id: &str, reason: &str, counted: bool, tell
     }
     if agent.brief.is_some() {
         let (kind, brief) = crate::tree::first_message(daemon, &agent);
-        deliveries::deliver(
+        // The pictures of the user's first message are given again with it: their files stay
+        // in the agent's folder as long as the agent does.
+        let images = daemon
+            .read(|store| store.delivery(&format!("brief-{id}-0")))
+            .ok()
+            .flatten()
+            .map(|first| first.images)
+            .unwrap_or_default();
+        deliveries::deliver_message(
             daemon,
             id,
             kind,
             Some(format!("brief-{id}-{}", agent.epoch)),
-            &brief,
+            &crate::commands::Message::plain(&brief),
             approval::BETWEEN_TURNS,
+            images,
         );
     }
     deliveries::deliver(
