@@ -312,16 +312,15 @@ pub(crate) fn offer(
             })
             .collect();
         let mut ends = ends;
-        let kept = READING
-            .lock()
-            .unwrap()
-            .remove(&subscription.id)
-            .unwrap_or_default();
-        for (later, ended) in kept {
+        // Held until the delivery is queued: what a round finds meanwhile waits for it, and comes
+        // after it, never between the entry's removal and the delivery.
+        let mut reading = READING.lock().unwrap();
+        for (later, ended) in reading.remove(&subscription.id).unwrap_or_default() {
             found.extend(later);
             ends = ends.or(ended);
         }
         subscriptions::offer(&daemon, &subscription, &named, &found, ends.as_ref(), true);
+        drop(reading);
     });
     false
 }
