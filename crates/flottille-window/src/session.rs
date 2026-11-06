@@ -6350,7 +6350,7 @@ impl Reply {
 
     /// The composer holds something the user has not sent: text, or a picture.
     pub fn holds_draft(&self) -> bool {
-        self.has_text || !self.attachments.is_empty()
+        self.has_text || !self.attachments().is_empty()
     }
 
     /// A big picture is still being scaled down.
