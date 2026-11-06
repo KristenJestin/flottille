@@ -1856,23 +1856,57 @@ pub fn asks_the_user(agent: &Agent) -> bool {
     agent.parent.is_none() && agent.waiting_on_answer && !agent.state.is_final()
 }
 
-/// The questions a root asked the user that wait for the answer, the oldest first: each
-/// `agent.asked` since its last answer was taken (`agent.answered`), with when it was asked.
+/// The questions a root asked the user that wait for the answer, the oldest first, each with
+/// when it was asked: none while it does not wait (`waiting_on_answer`), else [`unanswered`].
 pub fn open_questions(daemon: &Daemon, agent: &Agent) -> Result<Vec<Value>, Failure> {
     if !asks_the_user(agent) {
         return Ok(Vec::new());
     }
+    unanswered(daemon, &agent.id)
+}
+
+/// The questions the root asked the user (`agent.asked`) that nothing answered since: a question
+/// is answered once the root took a message of the user written after it was asked, and none
+/// asked before the root's session was replaced or resumed waits any more. The store alone says
+/// it, whatever version wrote it: `agent.answered` only tells a client to read again.
+pub fn unanswered(daemon: &Daemon, id: &str) -> Result<Vec<Value>, Failure> {
+    let last = |name: &str| {
+        daemon.read(|store| {
+            Ok(store
+                .last_agent_events(id, name, 1)?
+                .first()
+                .map_or(0, |event| event.seq))
+        })
+    };
+    let limit = last("agent.replaced")?.max(last("agent.resumed")?);
+    // When the newest message of the user the root took was written.
     let answered = daemon
-        .read(|store| store.last_agent_events(&agent.id, "agent.answered", 1))?
-        .first()
-        .map_or(0, |event| event.seq);
-    let mut asked = daemon.read(|store| store.last_agent_events(&agent.id, "agent.asked", 50))?;
+        .read(|store| store.last_deliveries_of(id, "user", 64))?
+        .into_iter()
+        .filter(|delivery| matches!(delivery.state.as_str(), "sending" | "sent"))
+        .map(|delivery| delivery.created_at)
+        .max();
+    let mut asked = daemon.read(|store| store.last_agent_events(id, "agent.asked", 50))?;
     asked.reverse();
     Ok(asked
         .into_iter()
-        .filter(|event| event.seq > answered && event.data["to"] == "user")
+        .filter(|event| event.seq > limit && event.data["to"] == "user")
+        .filter(|event| answered.is_none_or(|written| written <= event.at))
         .map(|event| json!({"seq": event.seq, "at": event.at, "question": event.data["question"]}))
         .collect())
+}
+
+/// The root's questions no longer wait (`why`: its session was replaced or resumed): clients
+/// read them again.
+pub fn answered(daemon: &Daemon, id: &str, why: &str) {
+    let _ = daemon.write(|store| {
+        let (_, event) = store.change_agent(
+            id,
+            AgentChange::default(),
+            Some(("agent.answered", json!({"agent": id, "why": why}))),
+        )?;
+        Ok(((), event))
+    });
 }
 
 /// The agent's whole tree, from its root, each agent before its children: what it does, whom it

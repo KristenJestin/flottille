@@ -2166,6 +2166,7 @@ dependencies = [
  "markdown",
  "pdf_oxide",
  "rmcp",
+ "rusqlite",
  "rustix",
  "rustls",
  "rustls-native-certs",

@@ -204,6 +204,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 )));
             }
             let ended_at = agent.ended_at.unwrap_or(agent.updated_at);
+            let waited = agent.waiting_on_answer;
             let resumed = daemon.write(|store| match store.resume_agent(&agent.id)? {
                 Some((agent, event)) => Ok((Some(agent), Some(event))),
                 None => Ok((None, None)),
@@ -211,6 +212,9 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let agent = resumed.ok_or_else(|| {
                 Failure::refused(format!("agent {} was resumed already", agent.id))
             })?;
+            if waited {
+                crate::tree::answered(daemon, &agent.id, "resumed");
+            }
             tell_resumed(daemon, &agent, ended_at);
             Ok(json!({"agent": agent.to_json()}))
         }
@@ -1257,8 +1261,18 @@ pub fn replace(daemon: &Arc<Daemon>, id: &str, reason: &str, counted: bool, tell
         .ok()
         .flatten()
         .and_then(|agent| Some((providers::of(&agent).ok()?, agent.native_id?)));
+    let waited = daemon
+        .read(|store| store.agent(id))
+        .ok()
+        .flatten()
+        .is_some_and(|agent| agent.waiting_on_answer);
     let agent = match daemon.write(|store| store.replace_agent(id, &reason, counted)) {
-        Ok(agent) if !agent.state.is_final() => agent,
+        Ok(agent) if !agent.state.is_final() => {
+            if waited {
+                crate::tree::answered(daemon, id, "replaced");
+            }
+            agent
+        }
         Ok(_) => return false,
         Err(error) => {
             eprintln!("flottille daemon: agent {id}: {error}");

@@ -285,3 +285,197 @@ fn a_followed_session_s_question_reaches_its_starter_at_the_turn_s_end() {
     );
     assert!(woken.contains(&session), "{woken}");
 }
+
+/// A root of `app` in Full mode whose agent plays `script`, its first turn ended: its id and its
+/// MCP session.
+fn root(user: &User, script: Value) -> (String, Mcp) {
+    project(user);
+    user.fake_script(script);
+    lead(user)
+}
+
+fn ask(question: &str) -> Value {
+    json!({"mcp": {"tool": "ask_user", "arguments": {"question": question}}})
+}
+
+fn send(user: &User, id: &str, message: &str) {
+    user.call("agent.send", json!({"agent": id, "message": message}))
+        .unwrap();
+}
+
+/// The open questions of the root, as its tree says them.
+fn open_of(user: &User, id: &str) -> Vec<String> {
+    root_of_tree(user, id)["questions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|q| q["question"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+fn events_of(user: &User, id: &str, name: &str) -> usize {
+    Store::open(&user.path("state/flottille/flottille.db"))
+        .unwrap()
+        .last_agent_events(id, name, 100)
+        .unwrap()
+        .len()
+}
+
+#[test]
+fn a_question_answered_before_a_replacement_is_not_open() {
+    let user = User::with_fake_agent();
+    let (id, _) = root(
+        &user,
+        json!({"turns": [
+            {"when": "ask then die", "times": 1, "do": [ask("Q1: which chart?"), {"die": 3}]},
+            {"when": "ask again", "do": [ask("Q2: which colour?"), {"hold": "release"}]}
+        ]}),
+    );
+    send(&user, &id, "ask then die");
+    eventually("the replacement", || {
+        events_of(&user, &id, "agent.replaced") == 1
+    });
+    eventually("its new session at rest", || state(&user, &id) == "idle");
+    assert!(open_of(&user, &id).is_empty(), "{:?}", open_of(&user, &id));
+    assert!(
+        events_of(&user, &id, "agent.answered") >= 1,
+        "the replacement closes the question"
+    );
+
+    send(&user, &id, "ask again");
+    eventually("the second question", || !open_of(&user, &id).is_empty());
+    assert_eq!(open_of(&user, &id), ["Q2: which colour?"]);
+    release(&user);
+}
+
+#[test]
+fn a_question_answered_before_the_upgrade_is_not_open() {
+    let user = User::with_fake_agent();
+    let (id, _) = root(
+        &user,
+        json!({"turns": [
+            {"when": "ask first", "do": [ask("Q1: which database?")]},
+            {"when": "Postgres", "do": [{"say": "Postgres it is."}]},
+            {"when": "ask again", "do": [ask("Q2: which port?"), {"hold": "release"}]}
+        ]}),
+    );
+    send(&user, &id, "ask first");
+    eventually("the first question", || open_of(&user, &id).len() == 1);
+    eventually("its turn's end", || state(&user, &id) == "idle");
+    send(&user, &id, "Postgres.");
+    eventually("the answer taken", || open_of(&user, &id).is_empty());
+    eventually("its turn's end", || state(&user, &id) == "idle");
+    // An older version stored no `agent.answered`.
+    let db = rusqlite::Connection::open(user.path("state/flottille/flottille.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(5)).unwrap();
+    db.execute(
+        "DELETE FROM agent_events WHERE seq IN (SELECT seq FROM events WHERE name = 'agent.answered')",
+        [],
+    )
+    .unwrap();
+    db.execute("DELETE FROM events WHERE name = 'agent.answered'", [])
+        .unwrap();
+    assert_eq!(events_of(&user, &id, "agent.answered"), 0);
+
+    send(&user, &id, "ask again");
+    eventually("the second question", || !open_of(&user, &id).is_empty());
+    assert_eq!(open_of(&user, &id), ["Q2: which port?"]);
+    release(&user);
+}
+
+#[test]
+fn a_message_written_before_a_question_does_not_answer_it() {
+    let user = User::with_fake_agent();
+    let (id, _) = root(
+        &user,
+        json!({"turns": [
+            {"when": "work then ask", "do": [
+                {"hold": "asked"},
+                ask("Q: keep the minimum?"),
+                {"mcp": {"tool": "fs_list", "arguments": {"path": "."}}}]},
+            {"when": "Also check the logs.", "do": [{"say": "Checked."}]}
+        ]}),
+    );
+    send(&user, &id, "work then ask");
+    eventually("the turn runs", || state(&user, &id) == "working");
+    // Written while the agent works, before it asks: it waits for the turn's end.
+    send(&user, &id, "Also check the logs.");
+    std::fs::write(user.path("fake/asked"), "").unwrap();
+    let taken = || {
+        Store::open(&user.path("state/flottille/flottille.db"))
+            .unwrap()
+            .last_deliveries_of(&id, "user", 10)
+            .unwrap()
+            .into_iter()
+            .any(|d| d.body.contains("Also check the logs.") && d.state == "sent")
+    };
+    eventually("the message read after the question", taken);
+    eventually("its turn's end", || state(&user, &id) == "idle");
+
+    assert_eq!(open_of(&user, &id), ["Q: keep the minimum?"]);
+    assert_eq!(root_of_tree(&user, &id)["needs_user"], true);
+}
+
+#[test]
+fn the_wake_carries_at_most_4000_characters_of_questions() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let long = |n: usize| format!("Question {n}: {}", "x".repeat(1_900));
+    user.fake_script(json!({"turns": [{"when": "Ask a lot.", "do": [
+        ask(&long(1)), ask(&long(2)), ask(&long(3)), ask(&long(4)), {"say": "Asked."}]}]}));
+    let (lead, mcp) = lead(&user);
+    launched(&user, &mcp, "Ask a lot.");
+    eventually("the wake", || wakes(&user, &lead).len() == 1);
+
+    let woken = wakes(&user, &lead).remove(0);
+    assert_eq!(
+        woken.matches("Its open question to the user").count(),
+        2,
+        "{woken}"
+    );
+    assert!(
+        woken.contains("Question 1:") && woken.contains("Question 2:"),
+        "{woken}"
+    );
+    assert!(
+        woken.contains("[2 more questions; session_read reads them]"),
+        "{woken}"
+    );
+    assert!(woken.contains("Asked."), "{woken}");
+}
+
+#[test]
+fn session_read_cuts_each_question_and_counts_them_in_its_page() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let long = |n: usize| format!("Question {n}: {}", "y".repeat(5_000));
+    user.fake_script(json!({"turns": [{"when": "Ask a lot.", "do": [
+        ask(&long(1)), ask(&long(2)), ask(&long(3)), ask(&long(4)), ask(&long(5)),
+        {"say": "z".repeat(3_000)}]}]}));
+    let (_, mcp) = lead(&user);
+    let session = launched(&user, &mcp, "Ask a lot.");
+    eventually("the session's turn", || {
+        state(&user, &session) == "idle" && open_of(&user, &session).len() == 5
+    });
+
+    let read = mcp.call("session_read", json!({"session": session}));
+
+    assert!(!read.error, "{}", read.text);
+    let longest = read.text.split(|c| c != 'y').map(str::len).max().unwrap();
+    assert!(
+        longest <= 4_000,
+        "a question is cut to a message's size: {longest}"
+    );
+    assert!(read.text.contains("Question 1:"), "the oldest first");
+    assert!(
+        read.text.contains("more open questions"),
+        "{}",
+        &read.text[read.text.len() - 600..]
+    );
+    assert!(
+        read.text.chars().count() < 30_000,
+        "{}",
+        read.text.chars().count()
+    );
+}
