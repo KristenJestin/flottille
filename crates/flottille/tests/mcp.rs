@@ -1776,8 +1776,8 @@ fn a_session_whose_client_ignores_the_change_is_said_to_run_an_older_list() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
         text.contains(
-            "runs an older list of tools than its role has now: restart the session (stop, then \
-             resume) for the new one"
+            "runs an older list of tools than its role has now: reload them (`flottille agent \
+             reload-tools`) for the new one"
         ),
         "{text}"
     );

@@ -367,9 +367,11 @@ ticket itself.
   its standard types, Blocks, Cloners, Duplicate and Relates (`blocks (is blocked by) [Blocks]`), and
   by its name alone otherwise (`- Escalates`). `link` finds the kind among the outward wordings (or a
   type's name: `ticket` is on the outward end), then the inward ones (`ticket` is on the inward end),
-  in any case, and runs `acli jira workitem link create --out <the outward item> --in <the inward
-  item> --type <the type's name> --yes` (`--out` is the item the outward wording applies to: `A
-  blocks B` is out A, in B; on a real site, `--out A --in B --type Blocks` printed `A Blocks B`). A kind the site does not have is refused before the user is asked, naming
+  in any case, and runs `acli jira workitem link create --out <the item the outward wording points
+  at> --in <the other> --type <the type's name> --yes`: `A blocks B` is out B, in A. On a real site
+  (#520), `--out A --in B --type Blocks` made Jira's page and its JQL say `A is blocked by B`
+  (`issue in linkedIssues(A, "is blocked by")` is B), though acli printed `A Blocks B`: its message
+  is not the direction. A kind the site does not have is refused before the user is asked, naming
   the ones it has (`"devours" is not a link type of example.atlassian.net: its kinds are blocks, is
   blocked by, relates to, …`). `unlink` reads the links of `ticket` (below), finds the link to
   `other` of that type with `ticket` at that end and deletes it by its id (`link delete --id <id>
@@ -390,10 +392,12 @@ ticket itself.
   is not used: it gives only `{"issueLinks": [{"id", "outwardIssueKey", "typeName"}]}`, the key `null`
   when the item is the outward one, so it
   cannot name the other item. Each of `issuelinks` is `{id, type: {name, inward, outward},
-  inwardIssue, outwardIssue}`, one of the two null, and the field names the **other** item's side,
-  as measured on a real site: a link made with `--out A --in B --type Blocks` is on A `inwardIssue:
-  B` (A reads it `blocks B`, the outward wording) and on B `outwardIssue: A` (B `is blocked by A`,
-  the inward one). Web links are not among them and are not listed. GitHub's sub-issues are not listed yet.
+  inwardIssue, outwardIssue}`, one of the two null, the field holding the other item, and **it
+  reads with the wording the field is named after**, as Jira's page says it (#520): on A,
+  `outwardIssue: B` is `A blocks B` (the outward wording) and `inwardIssue: B` is `A is blocked by
+  B` (the inward one). Measured on a real site: a link made with `--out A --in B --type Blocks` is
+  on A `inwardIssue: B` and on B `outwardIssue: A`, and Jira says B blocks A. Web links are not
+  among them and are not listed. GitHub's sub-issues are not listed yet.
 - **Comments**: `comment_edit` and `comment_delete` change only a comment Flottille recorded by its
   id as posted by an agent (`posts`, "What Flottille posts is recorded", `forges.md`; on Jira the id
   is read right after the post, never later by its words), found by the id that

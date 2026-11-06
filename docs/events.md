@@ -351,6 +351,7 @@ A turn starts with this message.
 | `agent` | |
 | `text` | The message. |
 | `images` | The names of the images that went with it, when some did (`agent.image` gives each back). An image that did not go is said in `text` instead. |
+| `deliveries` | The ids of the deliveries the message is made of, in order: one per delivery of `text` (the id `agent.send` answered for a message of the user). An event written before it was kept has none. |
 | `typed` | When a delivery of the message used commands (`docs/commands.md`): one entry per delivery of `text`, in order, `{"text", "commands"}` for one that used commands (what was typed, masked, and the names of the commands in the order of their first use), `null` for the others. Left out when none did; an event written before it was kept has none. |
 
 #### `agent.user_message`, `agent.message`, `agent.thought`
@@ -459,6 +460,17 @@ tracker, or its process starts on a version whose tools differ from those it was
 | `agent` | |
 | `added`, `removed` | The tools' names, without their prefix, sorted. |
 
+#### `agent.tools_reload`
+
+A reload of the agent's tools waits for its next process (`pending: true`, `agent.reload_tools`),
+or no longer (`pending: false`): the next process took it and was given the tools its role has
+now, or the agent ended first. Like `agent.tools_outdated`, it is no sign of activity.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `pending` | |
+
 #### `agent.tools_outdated`
 
 The agent's running session runs an older list of tools than its role has (`outdated: true`):
@@ -554,7 +566,7 @@ Its process was let go; the next message starts it again.
 | Field | |
 |---|---|
 | `agent` | |
-| `reason` | `idle` (no turn for the idle release time), `restart` (the daemon that ran it is gone) or `stopped` (an ended root whose session is kept: it can be resumed now, `agent.resume`). |
+| `reason` | `idle` (no turn for the idle release time), `restart` (the daemon that ran it is gone), `reload` (the user reloaded its tools, `agent.reload_tools`) or `stopped` (an ended root whose session is kept: it can be resumed now, `agent.resume`). |
 
 #### `agent.died`
 
