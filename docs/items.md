@@ -191,6 +191,10 @@ again on its own (#257):
   `item.closed` its `closed`. The failed jobs' logs a `checks` delivery summarises are read then (three at most), after
   the round, which does not wait for them; that delivery ends the subscription, so an event that
   comes while they are read (a comment) is not delivered before it, nor after.
+- **A run an agent follows** (`forge` `run`, [`forges.md`](forges.md), "Following a run") is read
+  by the round of its repository's pull requests, after them and whatever they gave: one request
+  a run, none when no run is followed there. It is no item and stores nothing but what its
+  following last said (a wait, a read that failed).
 - **What changed with no event of its own is no event of a subscription**: an `item.changed` that
   names only a `description`, a `discussion` or `checks` delivers nothing, and `items.forgotten`
   neither delivers nor ends a subscription to an item of that source: it ends at its time, as one

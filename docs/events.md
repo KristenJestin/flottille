@@ -804,15 +804,16 @@ and `subscription`, its id. What it delivers is a `delivery.queued` of kind `sub
 
 #### `subscription.opened`
 
-An agent subscribed (`forge` `subscribe`), or asked to be woken (`wake`). Subscribing again to the
+An agent subscribed (`forge` `subscribe`), asked to be woken (`wake`), or started a run it
+follows (`forge` `run`). Subscribing again to the
 same target replaces the agent's subscription, as a new wake replaces the agent's wake: the old one
 ends first, `cancelled`.
 
 | Field | |
 |---|---|
 | `agent`, `subscription` | |
-| `source` | What produces its events: `forge`, `tickets`, `timer` for a wake, or `session` for the following of a session the agent started for the user. |
-| `named` | What it watches in a few words, as the agent reads it (`pull request #12 of api, workspace login`; `wake: <why>`). |
+| `source` | What produces its events: `forge`, `tickets`, `timer` for a wake, `session` for the following of a session the agent started for the user, or `run` for the following of a run it started (`docs/forges.md`, "Following a run"). |
+| `named` | What it watches in a few words, as the agent reads it (`pull request #12 of api, workspace login`; `wake: <why>`; `run #43 of api (custom: nightly on app/login)`). |
 | `events` | The events it waits for. |
 
 #### `session.following_paused`, `session.following_resumed`
@@ -837,5 +838,5 @@ A subscription is over, once.
 | Field | |
 |---|---|
 | `agent`, `subscription` | |
-| `why` | `delivered` (an event it waited for, or the end of its target, or a wake's time, was delivered), `expired` (its time was up, said to the agent), `cancelled` (the agent's `unsubscribe`, the user's `subscription.cancel`, or a new subscription to the same target), `agent-ended` (its agent ended), `session-ended` (the session it followed ended or failed, said to the agent), `unavailable` (until #257, when a subscription held a watch of its own: the daemon could not watch its target again after a restart). Only the first two wake the agent. |
+| `why` | `delivered` (an event it waited for, or the end of its target, or a wake's time, or the end of a followed run, was delivered), `expired` (its time was up, said to the agent), `cancelled` (the agent's `unsubscribe`, the user's `subscription.cancel`, or a new subscription to the same target), `agent-ended` (its agent ended), `session-ended` (the session it followed ended or failed, said to the agent), `unavailable` (until #257, when a subscription held a watch of its own: the daemon could not watch its target again after a restart). Only the first two wake the agent. |
 
