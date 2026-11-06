@@ -45,7 +45,7 @@ fn same(a: &str, b: &str) -> bool {
 }
 
 /// Why a write of this file cannot be done, before anyone is asked: the words it lacks, a link
-/// kind the tracker has none of, a sprint.
+/// kind the tracker has none of.
 pub(super) fn unwritable(project: &Project, action: &str, args: &Value) -> Option<String> {
     let text = |key: &str| {
         args[key]
@@ -55,13 +55,6 @@ pub(super) fn unwritable(project: &Project, action: &str, args: &Value) -> Optio
     };
     let needs = |what: &str| format!("refused: tickets {action} needs {what}");
     match action {
-        "sprint" => Some(
-            "refused: acli (1.3.39) has no command that puts a work item in a sprint: `workitem \
-             edit` has no sprint flag, and `acli jira sprint` creates, updates, deletes, views \
-             and lists the work items of one; put it in its sprint on the board; nothing was \
-             written"
-                .into(),
-        ),
         "link" | "unlink" => {
             let (Some(ticket), Some(kind), Some(other)) =
                 (text("ticket"), text("kind"), text("other"))

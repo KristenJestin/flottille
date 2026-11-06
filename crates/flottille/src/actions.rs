@@ -544,7 +544,7 @@ pub async fn approved_losses(
 fn posted_says(args: &Value) -> Vec<String> {
     if matches!(
         args["action"].as_str(),
-        Some("list" | "search" | "show" | "types" | "link_types") | None
+        Some("list" | "search" | "show" | "types" | "link_types" | "sprints") | None
     ) {
         return Vec::new();
     }
@@ -552,11 +552,23 @@ fn posted_says(args: &Value) -> Vec<String> {
         ("title", "Its title"),
         ("body", "Its body"),
         ("message", "Its message"),
-        ("assignee", "Its assignee"),
     ]
     .into_iter()
     .filter_map(|(key, said)| Some(format!("{said}: {}", args[key].as_str()?)))
     .collect();
+    // Whom a ticket goes to, where it goes, in words: `me` is the user reading the card.
+    if let Some(who) = args["assignee"].as_str() {
+        says.push(match who.trim() {
+            "me" | "@me" => "It assigns it to you".into(),
+            who => format!("It assigns it to {who}"),
+        });
+    }
+    if let Some(sprint) = args["sprint"].as_str() {
+        says.push(format!("It puts it in sprint \"{}\"", sprint.trim()));
+    }
+    if let Some(parent) = args["parent"].as_str() {
+        says.push(format!("It puts it under {}", parent.trim().to_uppercase()));
+    }
     // A `null` assignee is how an edit takes the assignee away.
     if args["action"] == "edit" && args["assignee"].is_null() && args.get("assignee").is_some() {
         says.push("It removes the assignee".into());

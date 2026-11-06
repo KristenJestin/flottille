@@ -35,6 +35,7 @@ use crate::reads::{self, Reads};
 
 mod events;
 mod links;
+mod sprints;
 
 pub use events::{EVENTS, offer, reference_of, target_named};
 pub use links::checked as checked_links;
@@ -50,7 +51,9 @@ const ATTACHMENTS: usize = 30;
 /// What `gh issue view` is asked for.
 const GH_FIELDS: &str = "number,title,state,body,comments,url";
 /// What `acli jira workitem view` is asked for.
-const ACLI_FIELDS: &str = "summary,status,description,comment,issuelinks,attachment";
+/// `*navigable` brings the site's Sprint field, whose id is the site's own (`sprints`).
+const ACLI_FIELDS: &str =
+    "summary,status,description,comment,issuelinks,attachment,assignee,parent,*navigable";
 
 /// A ticket as its tracker said it, its texts masked.
 #[derive(Clone, Debug, PartialEq)]
@@ -78,6 +81,11 @@ pub struct Ticket {
     pub links: Vec<String>,
     /// The files attached to a Jira work item, named only: Flottille never fetches one.
     pub attachments: Vec<Attachment>,
+    /// A Jira work item's assignee (`nobody` when it has none), its parent (`ABC-10 Sign-in`) and
+    /// its sprints; none for GitHub.
+    pub assignee: Option<String>,
+    pub parent: Option<String>,
+    pub sprint: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -143,6 +151,9 @@ impl Ticket {
                 .map(|c| json!({"author": c.author, "at": c.at, "body": c.body}))
                 .collect::<Vec<_>>(),
             "older_comments": self.older,
+            "assignee": self.assignee,
+            "parent": self.parent,
+            "sprint": self.sprint,
             "attachments": self.attachments.iter()
                 .map(|a| json!({"name": a.name, "type": a.mime, "bytes": a.bytes,
                     "author": a.author, "at": a.at}))
@@ -178,6 +189,15 @@ impl Ticket {
         );
         if let Some(url) = &self.url {
             text.push_str(&format!("  {url}\n"));
+        }
+        for (said, value) in [
+            ("Assignee", &self.assignee),
+            ("Parent", &self.parent),
+            ("Sprint", &self.sprint),
+        ] {
+            if let Some(value) = value {
+                text.push_str(&format!("  {said}: {value}\n"));
+            }
         }
         if let Some(age) = age {
             text.push_str(&format!(
@@ -410,6 +430,9 @@ async fn read_issue(forge: &Forge, number: u64) -> Result<Ticket, String> {
         comments: newest(comments),
         links: Vec::new(),
         attachments: Vec::new(),
+        assignee: None,
+        parent: None,
+        sprint: None,
     })
 }
 
@@ -567,6 +590,18 @@ fn work_item(key: &str, item: &Value, site: &str) -> Ticket {
         comments: newest(comments),
         links: links::said_in(item),
         attachments: attachments_of(fields),
+        assignee: Some(
+            fields["assignee"]["displayName"]
+                .as_str()
+                .map_or_else(|| "nobody".to_owned(), masked),
+        ),
+        parent: fields["parent"]["key"].as_str().map(|key| {
+            match fields["parent"]["fields"]["summary"].as_str() {
+                Some(summary) => masked(&format!("{key} {summary}")),
+                None => masked(key),
+            }
+        }),
+        sprint: sprints::said_in(fields),
     }
 }
 
@@ -850,9 +885,12 @@ struct TicketsCall {
     link_kind: Option<String>,
     /// `comment_edit`, `comment_delete`: the id of a comment an agent posted.
     comment: Option<String>,
-    /// `sprint`: refused, said why (`links::unwritable`).
-    #[allow(dead_code)]
+    /// `create` on Jira: the open sprint to put the work item in, by its name or its id, and the
+    /// work item it goes under.
     sprint: Option<String>,
+    parent: Option<String>,
+    /// `sprints`: the board whose sprints are listed, by its name or its id.
+    board: Option<String>,
 }
 
 /// A field that is there even when it is `null`: `Some(None)` for `null`, `None` when left out.
@@ -878,8 +916,51 @@ impl TicketsCall {
     }
 }
 
+/// An assignee as `acli` takes it: `me` is its `@me`, the user signed in to it.
+fn acli_assignee(who: &str) -> &str {
+    match who {
+        "me" => "@me",
+        who => who,
+    }
+}
+
+/// An assignee as the user reads it on a result: `me` is them.
+fn assignee_said(who: &str) -> String {
+    match who {
+        "me" | "@me" => "you".to_owned(),
+        who => format!("\"{}\"", masked(who)),
+    }
+}
+
+/// Whether `who` is what `acli` takes as an assignee: `me`, an email or an account id (24
+/// hexadecimal digits, or `<number>:<uuid>`). A display name is none of them: `acli` refuses it
+/// (`invalid format for assignee email`), and has no way to look one up.
+fn assignable(who: &str) -> bool {
+    if ["me", "@me"].contains(&who) {
+        return true;
+    }
+    if who.contains(char::is_whitespace) {
+        return false;
+    }
+    if let Some((local, domain)) = who.split_once('@') {
+        return !local.is_empty()
+            && !domain.contains('@')
+            && domain.contains('.')
+            && !domain.starts_with('.')
+            && !domain.ends_with('.');
+    }
+    let hex = |text: &str| text.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+    (who.len() == 24 && who.chars().all(|c| c.is_ascii_hexdigit()))
+        || who.split_once(':').is_some_and(|(number, id)| {
+            !number.is_empty()
+                && number.chars().all(|c| c.is_ascii_digit())
+                && !id.is_empty()
+                && hex(id)
+        })
+}
+
 /// The writes of `tickets`.
-const WRITES: [&str; 11] = [
+const WRITES: [&str; 10] = [
     "create",
     "comment",
     "edit",
@@ -890,7 +971,6 @@ const WRITES: [&str; 11] = [
     "unlink",
     "comment_edit",
     "comment_delete",
-    "sprint",
 ];
 
 /// Why a write of `tickets` cannot be done on the project's tracker, before anyone is asked: a
@@ -906,6 +986,9 @@ pub fn unwritable(project: &Project, args: &Value) -> Option<String> {
     let tracker = project.tracker.as_ref()?;
     if let Some(Err(why)) = args["ticket"].as_str().map(|text| accepted(project, text)) {
         return Some(format!("refused: {why}"));
+    }
+    if let Some(why) = unplannable(project, tracker, action, args) {
+        return Some(why);
     }
     let named = args["status"]
         .as_str()
@@ -927,18 +1010,85 @@ pub fn unwritable(project: &Project, args: &Value) -> Option<String> {
                  assignee"
             ))
         }
-        // What `acli` is never given: labels, assignees and a close reason are GitHub's.
+        // What `acli` is never given: assignees and a close reason are GitHub's; labels are an
+        // edit's and a creation's.
         ProjectTracker::Jira { .. } => [
-            "reason",
-            "labels",
-            "remove_labels",
-            "assignees",
-            "remove_assignees",
+            ("reason", true),
+            ("labels", action != "edit"),
+            ("remove_labels", action != "edit"),
+            ("assignees", true),
+            ("remove_assignees", true),
         ]
         .into_iter()
+        .filter(|(_, refused)| *refused)
+        .map(|(key, _)| key)
         .find(|key| action != "create" && !args[key].is_null())
         .map(|key| format!("refused: tickets {action} on Jira takes no {key}: it is GitHub's")),
         _ => None,
+    }
+}
+
+/// Why an assignee, a parent or a sprint of a write cannot be done, before anyone is asked: an
+/// assignee `acli` cannot take, a parent or a sprint where `acli` sets none, or a sprint without
+/// the type its JSON creation needs.
+fn unplannable(
+    project: &Project,
+    tracker: &ProjectTracker,
+    action: &str,
+    args: &Value,
+) -> Option<String> {
+    let jira = matches!(tracker, ProjectTracker::Jira { .. });
+    let given = |key: &str| {
+        args[key]
+            .as_str()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+    };
+    if let (true, "create" | "edit", Some(who)) = (jira, action, given("assignee"))
+        && !assignable(who)
+    {
+        return Some(format!(
+            "refused: assignee is me, an email or an account id; a display name cannot be looked \
+             up with acli (\"{}\"): give the person's email, me for the user, or no assignee",
+            masked(who)
+        ));
+    }
+    let nothing = "; nothing was written";
+    match (action, given("parent"), given("sprint")) {
+        ("edit", Some(_), _) if jira => Some(format!(
+            "refused: acli's workitem edit has no parent (only workitem create --parent has): \
+             changing the parent of an existing work item needs Jira's REST API, which Flottille \
+             does not call yet (#382); the user changes it in Jira{nothing}"
+        )),
+        ("edit", _, Some(_)) if jira => Some(format!(
+            "refused: acli's workitem edit takes no sprint (it sets no custom field): moving an \
+             existing work item to a sprint needs Jira's REST API, which Flottille does not call \
+             yet (#382); the user moves it on the board{nothing}"
+        )),
+        ("create", parent, sprint) if !jira && (parent.is_some() || sprint.is_some()) => {
+            Some(format!(
+                "refused: tickets create on GitHub takes no {}: GitHub issues have no sprint, \
+                 and an issue goes under another with link, kind sub-task of, once it exists",
+                if parent.is_some() { "parent" } else { "sprint" }
+            ))
+        }
+        ("create", parent, sprint) => {
+            if let Some(Err(why)) = parent.map(|parent| accepted(project, parent)) {
+                return Some(format!("refused: parent: {why}"));
+            }
+            let typed = given("type").is_some();
+            (sprint.is_some() && !typed).then(|| {
+                "refused: tickets create with sprint needs type: acli creates a work item in a \
+                 sprint from a JSON definition, which takes no default type; types lists them"
+                    .to_owned()
+            })
+        }
+        (_, parent, sprint) => [("parent", parent), ("sprint", sprint)]
+            .into_iter()
+            .find(|(_, given)| given.is_some())
+            .map(|(key, _)| {
+                format!("refused: tickets {action} takes no {key}: {key} is for create")
+            }),
     }
 }
 
@@ -1092,6 +1242,7 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
         "show" => show(daemon, place, &project, &asked).await,
         "types" => types(&project, &asked).await,
         "link_types" => links::types(&project).await,
+        "sprints" => sprints::listed(&project, &asked).await,
         "subscribe" => events::subscribe(daemon, agent, place, &project, &asked).await,
         "unsubscribe" => events::unsubscribe(daemon, agent, &project, &asked),
         "create" => {
@@ -1890,11 +2041,18 @@ async fn write(daemon: &Daemon, project: &Project, asked: &TicketsCall, key: &Ke
             .filter(|name| !name.is_empty())
             .collect()
     };
+    // `me` is the user, `gh`'s `@me` as `acli`'s.
+    let people = |list: &'_ Option<Vec<String>>| -> Vec<String> {
+        named(list)
+            .into_iter()
+            .map(|name| acli_assignee(&name).to_owned())
+            .collect()
+    };
     let flagged = [
         ("--add-label", named(&asked.labels)),
         ("--remove-label", named(&asked.remove_labels)),
-        ("--add-assignee", named(&asked.assignees)),
-        ("--remove-assignee", named(&asked.remove_assignees)),
+        ("--add-assignee", people(&asked.assignees)),
+        ("--remove-assignee", people(&asked.remove_assignees)),
     ];
     match (action, body, title) {
         ("comment", None, _) => {
@@ -1917,7 +2075,11 @@ async fn write(daemon: &Daemon, project: &Project, asked: &TicketsCall, key: &Ke
         };
         let on = events::item_of(project, key).unwrap_or_default();
         let on = (project.name.as_str(), "jira", on.0.as_str(), on.1.as_str());
-        return write_work_item(daemon, on, site, asked, (body, title)).await;
+        let labels = [
+            ("--labels", flagged[0].1.join(",")),
+            ("--remove-labels", flagged[1].1.join(",")),
+        ];
+        return write_work_item(daemon, on, site, asked, (body, title), &labels).await;
     };
     let forge = match issues_of(project).await {
         Ok(forge) => forge,
@@ -2007,7 +2169,8 @@ async fn acli_run(args: &[&str]) -> Result<String, String> {
 
 /// A text for `acli` as Atlassian Document Format, in a file of its own: the agent's Markdown
 /// converted (`adf::from_markdown`), written to a folder only the user can open and removed with
-/// it when this is dropped, so its size and its quotes never reach a command line.
+/// it when this is dropped, so its size and its quotes never reach a command line. A work item's
+/// whole definition for `create --from-json` is written the same way (`AdfFile::json`).
 struct AdfFile {
     folder: std::path::PathBuf,
     path: String,
@@ -2015,6 +2178,10 @@ struct AdfFile {
 
 impl AdfFile {
     fn of(daemon: &Daemon, markdown: &str) -> Result<AdfFile, String> {
+        AdfFile::json(daemon, &crate::adf::from_markdown(markdown))
+    }
+
+    fn json(daemon: &Daemon, value: &Value) -> Result<AdfFile, String> {
         use std::io::Write;
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
         static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -2038,9 +2205,7 @@ impl AdfFile {
             .create_new(true)
             .mode(0o600)
             .open(&file.path)
-            .and_then(|mut out| {
-                out.write_all(crate::adf::from_markdown(markdown).to_string().as_bytes())
-            })
+            .and_then(|mut out| out.write_all(value.to_string().as_bytes()))
             .map_err(failed)?;
         Ok(file)
     }
@@ -2081,7 +2246,9 @@ fn work_item_fields<'a>(
 }
 
 /// `tickets create` on Jira: a work item of one of the tracker's projects, of the type named or
-/// the project's default one.
+/// the project's default one, under its parent and in its sprint when given. In a sprint, from a
+/// JSON definition (`--from-json`, which takes no other flag and no `@me`): its assignee is then
+/// set right after, with `edit`.
 async fn create_work_item(
     daemon: &Daemon,
     (name, tracker): (&str, &ProjectTracker),
@@ -2097,52 +2264,148 @@ async fn create_work_item(
         return Outcome::Failed(problem);
     }
     let labels = asked.labels.as_deref().unwrap_or_default().join(",");
-    let mut args = vec!["jira", "workitem", "create", "--project", project];
     let body = asked.body.as_deref().filter(|b| !b.trim().is_empty());
-    let description = match body.map(|body| AdfFile::of(daemon, body)).transpose() {
-        Ok(file) => file,
-        Err(why) => return Outcome::Failed(why),
-    };
-    args.extend(work_item_fields(
-        Some(title),
-        description.as_ref(),
-        asked.assigned_to().map(Some),
-    ));
     let kind = asked.kind.as_deref().filter(|k| !k.trim().is_empty());
-    if let Some(kind) = kind {
-        args.extend(["--type", kind]);
-    }
-    if !labels.is_empty() {
-        args.extend(["--label", &labels]);
+    let parent = asked
+        .parent
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_ascii_uppercase);
+    let assignee = asked.assigned_to();
+    let sprint = match asked.sprint.as_deref().filter(|s| !s.trim().is_empty()) {
+        Some(named) => match sprints::chosen(project, named).await {
+            Ok(sprint) => Some(sprint),
+            Err(why) => return Outcome::Refused(format!("refused: {why}")),
+        },
+        None => None,
+    };
+    let mut args = vec!["jira", "workitem", "create"];
+    let description;
+    let definition;
+    match &sprint {
+        Some(sprint) => {
+            let field = match sprints::field_of(site, projects).await {
+                Ok(field) => field,
+                Err(why) => return Outcome::Refused(format!("refused: {why}")),
+            };
+            let mut item = json!({"projectKey": project, "summary": title, "type": kind,
+                "additionalAttributes": {field: sprint.id}});
+            if let Some(body) = body {
+                item["description"] = crate::adf::from_markdown(body);
+            }
+            if let Some(labels) = asked.labels.as_ref().filter(|l| !l.is_empty()) {
+                item["labels"] = json!(labels);
+            }
+            if let Some(parent) = &parent {
+                // A key, as measured on a real site, though its name says an id.
+                item["parentIssueId"] = Value::from(parent.as_str());
+            }
+            definition = match AdfFile::json(daemon, &item) {
+                Ok(file) => file,
+                Err(why) => return Outcome::Failed(why),
+            };
+            args.extend(["--from-json", definition.path()]);
+        }
+        None => {
+            args.extend(["--project", project]);
+            description = match body.map(|body| AdfFile::of(daemon, body)).transpose() {
+                Ok(file) => file,
+                Err(why) => return Outcome::Failed(why),
+            };
+            args.extend(work_item_fields(
+                Some(title),
+                description.as_ref(),
+                assignee.map(|who| Some(acli_assignee(who))),
+            ));
+            if let Some(kind) = kind {
+                args.extend(["--type", kind]);
+            }
+            if !labels.is_empty() {
+                args.extend(["--label", &labels]);
+            }
+            if let Some(parent) = &parent {
+                args.extend(["--parent", parent]);
+            }
+        }
     }
     args.push("--json");
     let said = match acli_run(&args).await {
         Ok(said) => said,
         Err(why) => {
-            return Outcome::Failed(match kind {
-                Some(kind) => refused_for_its_type(site, project, kind, why).await,
-                None => why,
+            let explained = match kind {
+                Some(kind) => refused_for_its_type(site, project, kind, why.clone()).await,
+                None => why.clone(),
+            };
+            return Outcome::Failed(match (assignee, explained == why, &sprint) {
+                // Its assignee is one reason acli may refuse it: said, and never left out to try
+                // again, which is the user's to decide.
+                (Some(who), true, None) => format!(
+                    "acli refused the creation assigned to {}: {why}; nothing was created; the \
+                     assignee is me, an email or an account id the site knows: ask the user \
+                     before creating it without one",
+                    Value::from(masked(who))
+                ),
+                _ => explained,
             });
         }
     };
     // Assumed: the created work item as Jira's REST answers it, `{"key": …}`.
     let created = serde_json::from_str::<Value>(&said).ok();
-    match created.as_ref().and_then(|item| item["key"].as_str()) {
-        Some(key) => {
-            let key = masked(key);
-            if let Some(body) = body {
-                let posted = crate::adf::round_trip(body);
-                crate::posts::record_body(daemon, (name, "jira", "", key.as_str()), &posted);
-            }
-            Outcome::Done(format!(
-                "The ticket {key} was opened in {project}: https://{site}/browse/{key}"
-            ))
-        }
-        None => Outcome::Done(format!(
+    let Some(key) = created.as_ref().and_then(|item| item["key"].as_str()) else {
+        return Outcome::Done(format!(
             "The ticket was opened in {project}: {}",
             masked(said.trim())
-        )),
+        ));
+    };
+    let key = masked(key);
+    if let Some(body) = body {
+        let posted = crate::adf::round_trip(body);
+        crate::posts::record_body(daemon, (name, "jira", "", key.as_str()), &posted);
     }
+    let mut placed = String::new();
+    if let Some(sprint) = &sprint {
+        placed.push_str(&format!(", in sprint \"{}\"", sprint.name));
+    }
+    if let Some(parent) = &parent {
+        placed.push_str(&format!(", under {}", masked(parent)));
+    }
+    let mut after = String::new();
+    match (assignee, &sprint) {
+        (Some(who), Some(_)) => {
+            let assigned = acli_run(&[
+                "jira",
+                "workitem",
+                "edit",
+                "--key",
+                &key,
+                "--assignee",
+                acli_assignee(who),
+                "--yes",
+            ])
+            .await
+            .and_then(|said| {
+                match said.lines().find(|l| l.trim_start().starts_with('✗')) {
+                    Some(failure) => Err(masked(failure.trim())),
+                    None => Ok(()),
+                }
+            });
+            match assigned {
+                Ok(()) => placed.push_str(&format!(", assigned to {}", assignee_said(who))),
+                Err(why) => {
+                    after = format!(
+                        "; acli did not assign it to {}: {why}; it has no assignee",
+                        assignee_said(who)
+                    )
+                }
+            }
+        }
+        (Some(who), None) => placed.push_str(&format!(", assigned to {}", assignee_said(who))),
+        (None, _) => {}
+    }
+    Outcome::Done(format!(
+        "The ticket {key} was opened in {project}{placed}: https://{site}/browse/{key}{after}"
+    ))
 }
 
 /// `tickets comment`, `edit`, `close`, `reopen` and `status` of a Jira work item, once `acli` is
@@ -2153,6 +2416,7 @@ async fn write_work_item(
     site: &str,
     asked: &TicketsCall,
     (body, title): (Option<&str>, Option<&str>),
+    labels: &[(&str, String)],
 ) -> Outcome {
     let key = on.3;
     if let Err(problem) = jira_site(site, "written").await {
@@ -2171,7 +2435,14 @@ async fn write_work_item(
     };
     match (action, &file) {
         ("comment", Some(file)) => args.extend(["--body-file", file.path()]),
-        ("edit", file) => args.extend(work_item_fields(title, file.as_ref(), asked.assignment())),
+        ("edit", file) => {
+            let assignee = asked.assignment().map(|who| who.map(acli_assignee));
+            args.extend(work_item_fields(title, file.as_ref(), assignee));
+            // `--labels` adds to those the work item has, as measured on a real site.
+            for (flag, names) in labels.iter().filter(|(_, names)| !names.is_empty()) {
+                args.extend([*flag, names.as_str()]);
+            }
+        }
         _ => {}
     }
     if action == "edit" {
@@ -2185,6 +2456,24 @@ async fn write_work_item(
                 crate::posts::record_comment(daemon, on, id, &posted);
             }
             Outcome::Done(format!("The comment was posted on {key}."))
+        }
+        // A bulk command: `edit` ends with 0 on a work item it could not change (an assignee the
+        // site does not know, as measured), saying it on its output.
+        Ok(said) if said.lines().any(|line| line.trim_start().starts_with('✗')) => {
+            let failure = said
+                .lines()
+                .find(|line| line.trim_start().starts_with('✗'))
+                .unwrap_or_default();
+            let who = asked.assigned_to().map_or(String::new(), |who| {
+                format!(
+                    "; its assignee was {}: me, an email or an account id the site knows",
+                    assignee_said(who)
+                )
+            });
+            Outcome::Failed(format!(
+                "acli did not change {key}: {}{who}",
+                masked(failure.trim())
+            ))
         }
         Ok(_) => {
             if let (Some(body), "edit") = (body, action) {

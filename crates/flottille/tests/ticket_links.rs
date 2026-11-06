@@ -373,7 +373,7 @@ fn show_lists_an_item_s_links() {
     // asked with the ticket's own fields so that one read serves both.
     assert!(
         acli_calls(&user).contains(
-            &"jira workitem view ABC-1 --json --fields summary,status,description,comment,issuelinks,attachment"
+            &"jira workitem view ABC-1 --json --fields summary,status,description,comment,issuelinks,attachment,assignee,parent,*navigable"
                 .to_owned()
         ),
         "{:?}",
@@ -626,25 +626,6 @@ fn a_jira_parent_is_refused_naming_what_acli_lacks() {
     assert!(said.contains("parent"), "{said}");
     assert!(said.contains("workitem edit"), "{said}");
     assert!(said.contains("nothing was written"), "{said}");
-}
-
-#[test]
-fn a_sprint_is_refused_naming_what_acli_lacks() {
-    let user = user();
-    on_jira(&user);
-    jira_script(&user, json!({}));
-    let mcp = root_in(&user);
-
-    let said = refused_at_once(
-        &user,
-        &mcp,
-        json!({"action": "sprint", "ticket": "ABC-1", "sprint": "Sprint 4"}),
-    );
-
-    assert!(said.contains("acli"), "{said}");
-    assert!(said.contains("sprint"), "{said}");
-    assert!(said.contains("nothing was written"), "{said}");
-    assert!(acli_calls(&user).is_empty(), "{:?}", acli_calls(&user));
 }
 
 /// A work item whose comments are `comments` (Jira's shape).
