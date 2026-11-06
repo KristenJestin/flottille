@@ -51,6 +51,9 @@ pub enum Update {
     /// After how many days an inactive session is ended was chosen, from any client: the settings
     /// page reads it again.
     SessionsChanged,
+    /// A service of the machine started, became ready, ended or was changed, or a project's tasks
+    /// changed what needs one: the services page reads them again.
+    ServicesChanged,
     /// Where workspaces go was chosen (a project's own when it names one, the default of every
     /// project when `None`), from any client: the sections read it again.
     WorkspacesFolderChanged { project: Option<String> },
@@ -188,6 +191,9 @@ fn follow(
         }
         if event.name == "tool_results.changed" {
             let _ = updates.unbounded_send(Update::ToolResultsChanged);
+        }
+        if event.name.starts_with("service.") || event.name == "project.changed" {
+            let _ = updates.unbounded_send(Update::ServicesChanged);
         }
         if let Some(forged) = model::Forged::of(event) {
             let _ = updates.unbounded_send(Update::Forged(forged));

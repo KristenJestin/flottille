@@ -2873,6 +2873,9 @@ fn a_child_appearing_adds_its_row_to_the_rail_and_the_sub_agents_list(cx: &mut T
         .position(|b| *b == Block::SubAgents)
         .unwrap();
     unfold(&page, at, cx);
+    // The card starts folded: a click on its title lists the sub-agents.
+    cx.update(|window, cx| window.click(format!("row-{at}-sub-agents-toggle"), cx));
+    settle(cx);
     assert!(cx.update(|window, _| window.try_find(format!("sub-agent-{child}")).is_some()));
     let listed = page.read_with(cx, |p, cx| {
         p.conversation()
@@ -3622,9 +3625,10 @@ fn text_typed_while_a_reply_sends_is_kept(cx: &mut TestAppContext) {
         reply.read_with(cx, |r, _| !r.is_sending())
     });
 
+    // The field emptied as the message was sent: what was typed after it is all it holds.
     assert_eq!(
         reply.read_with(cx, |r, cx| r.field().read(cx).value().to_string()),
-        "and then"
+        " and then"
     );
     let prompts = user.received_requests("session/prompt");
     assert!(prompts.iter().any(|p| p.to_string().contains("first")));
@@ -7809,10 +7813,13 @@ fn slash_lists_the_commands_and_filters_them_as_the_user_types(cx: &mut TestAppC
     cx.update(|window, cx| window.click("reply-field", cx));
     cx.simulate_input("/");
     until(&shell, cx, "the list offers the commands", |cx| {
-        slash_offered(&shell, cx).len() == 2
+        slash_offered(&shell, cx).len() == 3
     });
     settle(cx);
-    assert_eq!(slash_offered(&shell, cx), ["close", "open-prs"]);
+    assert_eq!(
+        slash_offered(&shell, cx),
+        ["close", "open-prs", "reload-tools"]
+    );
     let reply = reply_open(&shell, cx);
     let entries = reply.read_with(cx, |r, _| r.slash_entries());
     assert!(
@@ -7861,7 +7868,7 @@ fn the_command_menu_unfolds_when_slash_is_typed_and_folds_away_when_closed(
     cx.update(|window, cx| window.click("reply-field", cx));
     cx.simulate_input("/");
     until(&shell, cx, "the list offers the commands", |cx| {
-        slash_offered(&shell, cx).len() == 2
+        slash_offered(&shell, cx).len() == 3
     });
     let first = slash_height(cx).expect("drawn from the first frame");
     run_for(Duration::from_millis(60), cx);
@@ -7897,7 +7904,7 @@ fn the_command_menu_s_height_follows_its_rows_smoothly(cx: &mut TestAppContext) 
     cx.update(|window, cx| window.click("reply-field", cx));
     cx.simulate_input("/");
     until(&shell, cx, "the list offers the commands", |cx| {
-        slash_offered(&shell, cx).len() == 2
+        slash_offered(&shell, cx).len() == 3
     });
     run_for(Duration::from_millis(600), cx);
     let two = slash_height(cx).unwrap();
@@ -7944,7 +7951,7 @@ fn the_highlight_moves_with_a_fade(cx: &mut TestAppContext) {
     cx.update(|window, cx| window.click("reply-field", cx));
     cx.simulate_input("/");
     until(&shell, cx, "the list offers the commands", |cx| {
-        slash_offered(&shell, cx).len() == 2
+        slash_offered(&shell, cx).len() == 3
     });
     run_for(Duration::from_millis(600), cx);
     assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
@@ -7976,7 +7983,7 @@ fn picking_a_command_with_slash_puts_its_name_in_the_field_and_sends_nothing(
     cx.update(|window, cx| window.click("reply-field", cx));
     cx.simulate_input("/");
     until(&shell, cx, "the list offers the commands", |cx| {
-        slash_offered(&shell, cx).len() == 2
+        slash_offered(&shell, cx).len() == 3
     });
     // The keyboard picks: down to the second, Enter.
     cx.simulate_keystrokes("down");
@@ -8001,7 +8008,7 @@ fn picking_a_command_with_slash_puts_its_name_in_the_field_and_sends_nothing(
     });
     cx.simulate_input("/");
     until(&shell, cx, "the list is back", |cx| {
-        slash_offered(&shell, cx).len() == 2
+        slash_offered(&shell, cx).len() == 3
     });
     settle(cx);
     cx.update(|window, cx| window.click("slash-close", cx));

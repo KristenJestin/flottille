@@ -394,8 +394,8 @@ methods").
 When it is on, the daemon ends a root that is between turns and had **no activity for that many
 days** in its whole tree: no event of its conversation (a turn, a tool call, a message of the
 user's), no delivery made or sent, no command started or ended, no request asked or answered
-(`docs/events.md` has the events; the two the daemon says on its own, `agent.tools_outdated` and
-`agent.released`, do not count). Nothing new is recorded for it: the latest of those is the
+(`docs/events.md` has the events; the three the daemon says on its own, `agent.tools_outdated`,
+`agent.tools_reload` and `agent.released`, do not count). Nothing new is recorded for it: the latest of those is the
 session's last activity. **A session with anything pending or running is never ended, whatever
 the dates**: a turn running, a message queued, a command running, a request or a question
 waiting for an answer, a subscription or a timer pending anywhere in its tree.

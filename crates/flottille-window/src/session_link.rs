@@ -64,6 +64,8 @@ pub struct TreeAgent {
     /// Its running session runs an older list of tools than its role has: a restart gives the
     /// new one.
     pub tools_outdated: bool,
+    /// A reload of its tools waits for its next process (`agent.reload_tools`).
+    pub tools_reload: bool,
 }
 
 /// A change of model and effort waiting for the end of the turn.
@@ -146,6 +148,7 @@ impl TreeAgent {
                 })
                 .collect(),
             tools_outdated: agent["tools_outdated"] == true,
+            tools_reload: agent["tools_reload"] == true,
         }
     }
 }
@@ -536,6 +539,8 @@ const TREE_EVENTS: &[&str] = &[
     "agent.usage",
     // The line that says the session runs an older list of tools.
     "agent.tools_outdated",
+    // The line that says the tools reload after this turn.
+    "agent.tools_reload",
     "delivery.queued",
     // A waiting message taken back leaves the queue under the conversation.
     "delivery.withdrawn",

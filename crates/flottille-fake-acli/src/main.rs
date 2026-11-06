@@ -86,16 +86,18 @@
 //! site was seen to answer: `acli jira workitem link type --json` prints the names of the
 //! script's `link_types` only (`{"issueLinkTypes": [{"name": "Blocks"}]}`; the script gives each
 //! its `inward` and `outward` wordings too, which `view` shows). `link create --out A --in B
-//! --type T --yes` (A blocks B) ends with 0 for two work items of `items` and a type whose name or
-//! outward wording is T, printing `✓ A Blocks B`, with 1 saying why otherwise, and keeps the link
-//! in `linked.json` numbered from 10000. `view K --json` gives K's links in `fields.issuelinks`,
-//! those of the script's `links` (`[{"id": "500", "type": "Blocks", "out": "ABC-2", "in":
-//! "ABC-1"}]`) and those created, as `{"id", "type": {name, inward, outward}, "inwardIssue",
-//! "outwardIssue"}`, one of the two `null`: on the outward item (`out`) the other is the
-//! `inwardIssue`, on the inward one the `outwardIssue`, each `{"key", "fields": {summary,
-//! status}}`. `link list --key K --json` prints `{"issueLinks": [{"id", "outwardIssueKey",
-//! "typeName"}]}`, the key `null` when K is the outward item. `link delete --id N --yes` ends with
-//! 0 for a link that is there, 1 otherwise, and keeps the ids deleted in `unlinked.json`.
+//! --type T --yes` (B blocks A, as Jira's page says it: `--out` is the item the outward wording
+//! points at) ends with 0 for two work items of `items` and a type whose name or outward wording
+//! is T, printing `✓ A Blocks B` as the real acli does, with 1 saying why otherwise, and keeps
+//! the link in `linked.json` numbered from 10000. `view K --json` gives K's links in
+//! `fields.issuelinks`, those of the script's `links` (`[{"id": "500", "type": "Blocks", "out":
+//! "ABC-2", "in": "ABC-1"}]`) and those created, as `{"id", "type": {name, inward, outward},
+//! "inwardIssue", "outwardIssue"}`, one of the two `null`: on the item `out` the other is the
+//! `inwardIssue` (`A is blocked by B`), on the item `in` the `outwardIssue` (`B blocks A`), each
+//! `{"key", "fields": {summary, status}}`. `link list --key K --json` prints `{"issueLinks":
+//! [{"id", "outwardIssueKey", "typeName"}]}`, the key `null` when K is the outward item. `link
+//! delete --id N --yes` ends with 0 for a link that is there, 1 otherwise, and keeps the ids
+//! deleted in `unlinked.json`.
 //!
 //! `comment update --key K --id I (--body | --body-file | --body-adf)` (the first two plain text,
 //! the last a document, refused when it is none) and `comment delete --key K --id I`
@@ -920,9 +922,9 @@ fn asks_links(rest: &[&str]) -> bool {
         })
 }
 
-/// One link of `view`'s `issuelinks` on K, none when K is not on it. As a real site gives it, the
-/// field names the other item's side: on the outward item (the one that blocks) the other is an
-/// `inwardIssue`, on the inward one an `outwardIssue`.
+/// One link of `view`'s `issuelinks` on K, none when K is not on it. As a real site gives it
+/// (#520): on the item `--out` named (the one that is blocked) the other is an `inwardIssue`, on
+/// the one `--in` named (the one that blocks) an `outwardIssue`.
 fn link_of(script: &Value, link: &Value, key: &str) -> Option<Value> {
     let kind = link_types(script)
         .into_iter()
