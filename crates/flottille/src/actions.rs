@@ -1784,6 +1784,7 @@ async fn workspace_says(
                 name,
                 &call.repositories,
                 call.branch.as_deref(),
+                &BTreeMap::new(),
             )
             .await?;
             if let Some(Some(ticket)) = &call.ticket {
@@ -1871,6 +1872,7 @@ async fn create_says(
     name: &str,
     repositories: &Option<Vec<String>>,
     branch: Option<&str>,
+    bases: &BTreeMap<String, String>,
 ) -> Result<Vec<String>, Outcome> {
     if !flottille_core::project::valid_name(name) {
         return Err(Outcome::Refused(format!(
@@ -1895,6 +1897,30 @@ async fn create_says(
             listed(project.repositories.iter().map(|r| &r.path))
         )));
     }
+    // A base the workspace cannot use is refused here, from what is known without the network:
+    // whether its remote has the branch is read when the workspace is made.
+    let refused = |failure: crate::projects::Failure| {
+        Outcome::Refused(format!("refused: {}", failure.message))
+    };
+    let used =
+        crate::workspaces::taken_repositories(project, repositories.as_deref()).map_err(refused)?;
+    for (path, base) in bases {
+        if !known(path) {
+            return Err(Outcome::Refused(format!(
+                "refused: {path} is not a repository of project {}: its repositories are {}",
+                project.name,
+                listed(project.repositories.iter().map(|r| &r.path))
+            )));
+        }
+        if !used.contains(path) {
+            return Err(Outcome::Refused(format!(
+                "refused: a base is chosen for {path}, which the workspace does not take"
+            )));
+        }
+        crate::workspaces::check_branch(&project.folder, base)
+            .await
+            .map_err(refused)?;
+    }
     let taken = match repositories {
         Some(paths) => format!("with the repositories {}", paths.join(", ")),
         None => "with the project's default repositories".into(),
@@ -1913,6 +1939,9 @@ async fn create_says(
     let mut says = vec![format!(
         "Create the workspace {name} on the branch {branch}, {taken}"
     )];
+    says.extend(bases.iter().map(|(path, base)| {
+        format!("The repository {path} starts from {base}, in place of its base rule")
+    }));
     match project.setup.is_empty() {
         true => says.push("The project has no setup: nothing else runs.".into()),
         false => {
@@ -1954,8 +1983,18 @@ async fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec
             let repositories: Option<Vec<String>> =
                 serde_json::from_value(args["repositories"].clone()).unwrap_or_default();
             let branch = args["branch"].as_str();
-            let mut says =
-                create_says(daemon, &grant.place, &project, name, &repositories, branch).await?;
+            let bases: BTreeMap<String, String> =
+                serde_json::from_value(args["base"].clone()).unwrap_or_default();
+            let mut says = create_says(
+                daemon,
+                &grant.place,
+                &project,
+                name,
+                &repositories,
+                branch,
+                &bases,
+            )
+            .await?;
             let whose = match root {
                 true => "a session of the user's",
                 false => "a child",

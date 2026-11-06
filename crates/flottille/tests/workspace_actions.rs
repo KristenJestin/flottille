@@ -1109,3 +1109,34 @@ fn agent_launch_refuses_a_branch_outside_the_format_naming_the_pattern() {
     // Within the format, the user is asked.
     held(launch_in_login(&mcp, json!({"branch": "fix/ABC-12-login"})));
 }
+
+#[test]
+fn the_launch_card_shows_the_base_chosen_and_refuses_one_the_workspace_cannot_use() {
+    let user = user();
+    project(&user);
+    let (_, mcp) = root(&user);
+
+    let number = held(launch_in_login(&mcp, json!({"base": {".": "main"}})));
+    let says = request(&user, number)["says"].to_string();
+    assert!(
+        says.contains("The repository . starts from main, in place of its base rule"),
+        "{says}"
+    );
+    answer(&user, "deny", number);
+
+    // A repository the workspace does not take, or a name git refuses: before the user is asked.
+    for (base, why) in [
+        (
+            json!({"api": "main"}),
+            "api is not a repository of project app",
+        ),
+        (
+            json!({".": "main..x"}),
+            "main..x is not a branch name git accepts",
+        ),
+    ] {
+        let text = refused(launch_in_login(&mcp, json!({"base": base})));
+        assert!(text.contains(why), "{text}");
+    }
+    assert!(no_request(&user));
+}
