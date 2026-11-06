@@ -90,8 +90,21 @@ fn script() -> Value {
             call("q1", "fs_list", "completed", json!({"path": "."})),
             call("q2", "ask_user", "completed", json!({"question": "Which colour?"}))]},
         {"when": "work at length", "do": at_length()},
-        {"when": "work past a page", "do": past_a_page()}
+        {"when": "work past a page", "do": past_a_page()},
+        {"when": "talk at length", "do": talk_at_length()}
     ]})
+}
+
+/// A sentence and a thought, again and again: three pages of the history (a page holds a
+/// thousand events), each a few hundred blocks to scroll through.
+fn talk_at_length() -> Vec<Value> {
+    let mut steps = Vec::new();
+    for n in 0..1050 {
+        steps.push(json!({"say": format!("Paragraph {n}.")}));
+        steps.push(json!({"think": format!("Thought {n}.")}));
+    }
+    steps.push(json!({"say": "Finally."}));
+    steps
 }
 
 /// A group of 300 rows: a thought and a call, again and again, between two sentences.
@@ -3240,4 +3253,345 @@ fn a_queued_message_taken_back_before_the_tree_lists_it_leaves(cx: &mut TestAppC
     at_rest(cx);
     assert!(!has(queued_id(&format!("pending-{key}")), cx));
     assert!(queued(&page, cx).is_empty());
+}
+
+// #505: earlier events load on their own when the user scrolls near the top.
+
+/// The lead's long talk, read from its last page: earlier pages remain.
+fn talked<'a>(
+    user: &User,
+    cx: &'a mut TestAppContext,
+) -> (
+    String,
+    Entity<Shell>,
+    Entity<SessionPage>,
+    &'a mut VisualTestContext,
+) {
+    let lead = lead(user);
+    worked(user, &lead, "talk at length");
+    eventually("the long turn ends", || {
+        user.call("agent.show", json!({"agent": lead, "before": u64::MAX}))
+            .unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .last()
+            .is_some_and(|e| e["name"] == "agent.turn_ended")
+    });
+    let (shell, page, cx) = open_session(user, &lead, cx);
+    until(&shell, cx, "the last page is read", |cx| {
+        row_of(&page, cx, |b| is_text(b, "Finally.")).is_some()
+    });
+    settle(cx);
+    assert!(page.read_with(cx, |p, cx| p.conversation().read(cx).has_earlier()));
+    (lead, shell, page, cx)
+}
+
+fn pages(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> usize {
+    page.read_with(cx, |page, _| page.pages())
+}
+
+/// One notch of the wheel, up by `by` pixels, then a frame: nothing is polled, so what the
+/// window asked of the daemon is not answered yet.
+fn wheel(agent: &str, by: f32, cx: &mut VisualTestContext) {
+    let middle = cx.update(|window, _| {
+        window
+            .find(format!("conversation-{agent}"))
+            .bounds()
+            .center()
+    });
+    cx.simulate_event(gpui_kit::ScrollWheelEvent {
+        position: middle,
+        delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(by))),
+        ..Default::default()
+    });
+    frame(cx);
+}
+
+/// Scrolls up, notch by notch, until a page is asked.
+fn scroll_until_asked(
+    agent: &str,
+    page: &Entity<SessionPage>,
+    asked: usize,
+    cx: &mut VisualTestContext,
+) {
+    for _ in 0..100 {
+        if pages(page, cx) > asked {
+            return;
+        }
+        wheel(agent, 600., cx);
+    }
+    panic!("scrolling up never asked for a page (still {asked})");
+}
+
+/// Answers what the window asked: the page is read and drawn.
+fn page_arrives(shell: &Entity<Shell>, page: &Entity<SessionPage>, cx: &mut VisualTestContext) {
+    let before = blocks(page, cx).len();
+    until(shell, cx, "the earlier page", |cx| {
+        blocks(page, cx).len() != before
+    });
+    settle(cx);
+}
+
+#[gpui_kit::test]
+fn scrolling_near_the_top_loads_earlier_events(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, shell, page, cx) = talked(&user, cx);
+    let before = blocks(&page, cx).len();
+    assert_eq!(pages(&page, cx), 1);
+
+    // Far from the top, nothing is asked.
+    wheel(&lead, 400., cx);
+    wheel(&lead, 400., cx);
+    assert_eq!(pages(&page, cx), 1, "far from the top");
+
+    scroll_until_asked(&lead, &page, 1, cx);
+    page_arrives(&shell, &page, cx);
+    assert!(blocks(&page, cx).len() > before, "events came in above");
+    assert_eq!(pages(&page, cx), 2);
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn loading_earlier_events_keeps_what_is_read_in_place(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, shell, page, cx) = talked(&user, cx);
+    scroll_until_asked(&lead, &page, 1, cx);
+    settle(cx);
+
+    // The first paragraph drawn in the conversation, and where it is.
+    let (read, top) = cx.update(|window, cx| {
+        let area = window.find(format!("conversation-{lead}")).bounds();
+        let shown = page.read(cx).conversation().read(cx).blocks().to_vec();
+        shown
+            .iter()
+            .enumerate()
+            .filter(
+                |(_, block)| matches!(block, Block::Text { text } if text.starts_with("Paragraph")),
+            )
+            .find_map(|(at, block)| {
+                let bounds = window.try_find(format!("row-{at}-text"))?.bounds();
+                (bounds.top() >= area.top() && bounds.bottom() <= area.bottom())
+                    .then(|| (block.clone(), bounds.top()))
+            })
+            .expect("a paragraph in sight")
+    });
+    // From the first frame of the new rows, not once their entrances ended: what is read does
+    // not enter again, nor rise.
+    let before = blocks(&page, cx).len();
+    until(&shell, cx, "the earlier page", |cx| {
+        blocks(&page, cx).len() != before
+    });
+    let at_top = |cx: &mut VisualTestContext| {
+        let at = row_of(&page, cx, |block| *block == read).expect("still there");
+        let now = cx.update(|window, _| window.find(format!("row-{at}-text")).bounds().top());
+        f32::from(now)
+    };
+    assert!(
+        (at_top(cx) - f32::from(top)).abs() <= 1.0,
+        "it was at {top:?}, it is at {}",
+        at_top(cx)
+    );
+    settle(cx);
+    assert!(
+        (at_top(cx) - f32::from(top)).abs() <= 1.0,
+        "it was at {top:?}, it settled at {}",
+        at_top(cx)
+    );
+}
+
+#[gpui_kit::test]
+fn only_one_page_is_asked_at_a_time(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, shell, page, cx) = talked(&user, cx);
+    scroll_until_asked(&lead, &page, 1, cx);
+    for _ in 0..6 {
+        wheel(&lead, 600., cx);
+    }
+    assert_eq!(pages(&page, cx), 2, "the first is not answered yet");
+
+    page_arrives(&shell, &page, cx);
+    scroll_until_asked(&lead, &page, 2, cx);
+    for _ in 0..6 {
+        wheel(&lead, 600., cx);
+    }
+    assert_eq!(pages(&page, cx), 3, "the second is not answered yet either");
+}
+
+/// Scrolls up and reads the pages as they are asked, until none remains.
+fn load_all(
+    agent: &str,
+    shell: &Entity<Shell>,
+    page: &Entity<SessionPage>,
+    cx: &mut VisualTestContext,
+) {
+    for _ in 0..10 {
+        if !page.read_with(cx, |p, cx| p.conversation().read(cx).has_earlier()) {
+            return;
+        }
+        let asked = pages(page, cx);
+        scroll_until_asked(agent, page, asked, cx);
+        page_arrives(shell, page, cx);
+    }
+    panic!("the history never ended");
+}
+
+#[gpui_kit::test]
+fn nothing_is_asked_once_everything_is_loaded(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, shell, page, cx) = talked(&user, cx);
+    load_all(&lead, &shell, &page, cx);
+    let all = pages(&page, cx);
+    assert!(all >= 3, "the talk takes several pages: {all}");
+    at_rest(cx);
+
+    for _ in 0..40 {
+        wheel(&lead, 2000., cx);
+    }
+    settle(cx);
+    assert_eq!(pages(&page, cx), all, "nothing more is asked");
+    assert!(!has("show-earlier", cx), "no button");
+    assert!(!has("earlier-loading", cx), "no line");
+    assert!(blocks(&page, cx).len() > 100);
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn opening_a_long_conversation_does_not_load_earlier_events(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, _shell, page, cx) = talked(&user, cx);
+    settle(cx);
+    assert_eq!(pages(&page, cx), 1, "opened at its end");
+
+    // A jump back to the end is no scroll toward the top.
+    wheel(&lead, 400., cx);
+    cx.update(|window, cx| window.click("conversation-to-end", cx));
+    at_rest(cx);
+    assert_eq!(pages(&page, cx), 1);
+    assert!(following(&page, cx));
+}
+
+#[gpui_kit::test]
+fn a_short_loaded_part_waits_for_the_user_to_scroll(cx: &mut TestAppContext) {
+    let user = user();
+    let (_shell, page, cx) = past_a_page_read(&user, cx);
+    settle(cx);
+    assert_eq!(
+        pages(&page, cx),
+        1,
+        "everything shown is in sight, still nothing is asked"
+    );
+}
+
+#[gpui_kit::test]
+fn a_failed_load_shows_show_earlier_with_the_reason(cx: &mut TestAppContext) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let user = user();
+    let lead = lead(&user);
+    worked(&user, &lead, "talk at length");
+    eventually("the long turn ends", || {
+        user.call("agent.show", json!({"agent": lead, "before": u64::MAX}))
+            .unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .last()
+            .is_some_and(|e| e["name"] == "agent.turn_ended")
+    });
+    let (down, real) = (Arc::new(AtomicBool::new(false)), user.connector());
+    let connect: Connect = {
+        let down = down.clone();
+        Arc::new(move || match down.load(Ordering::SeqCst) {
+            true => Err(std::io::Error::other("the daemon is not answering")),
+            false => real(),
+        })
+    };
+    let (shell, page, cx) = open_session_through(&user, &lead, connect, cx);
+    until(&shell, cx, "the last page is read", |cx| {
+        row_of(&page, cx, |b| is_text(b, "Finally.")).is_some()
+    });
+    settle(cx);
+
+    down.store(true, Ordering::SeqCst);
+    scroll_until_asked(&lead, &page, 1, cx);
+    for _ in 0..4 {
+        wheel(&lead, 2000., cx);
+    }
+    until(&shell, cx, "the load failed", |cx| {
+        has("show-earlier-failed", cx)
+    });
+    settle(cx);
+    let said = label("show-earlier-reason", cx).unwrap();
+    assert!(said.contains("the daemon is not answering"), "{said}");
+    assert!(has("show-earlier", cx), "the button stays");
+    assert!(!has("earlier-loading", cx));
+
+    // Scrolling does not try again by itself.
+    for _ in 0..4 {
+        wheel(&lead, 2000., cx);
+    }
+    assert_eq!(pages(&page, cx), 2);
+
+    // The button does, and the failure goes.
+    down.store(false, Ordering::SeqCst);
+    let before = blocks(&page, cx).len();
+    cx.update(|window, cx| window.click("show-earlier", cx));
+    until(&shell, cx, "the earlier page", |cx| {
+        blocks(&page, cx).len() > before
+    });
+    settle(cx);
+    assert!(!has("show-earlier-failed", cx));
+    assert_eq!(pages(&page, cx), 2, "the same page, asked again");
+}
+
+#[gpui_kit::test]
+fn the_loading_line_unfolds_and_folds_away(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, page, cx) = past_a_page_read(&user, cx);
+    let lead = page.read_with(cx, |p, _| p.id().to_owned());
+    settle(cx);
+    assert!(has("show-earlier", cx), "the button waits at the top");
+    assert!(!has("earlier-loading", cx));
+
+    // The wheel at the top asks the page: the line unfolds as the button folds away.
+    wheel(&lead, 400., cx);
+    let mut heights = Vec::new();
+    for _ in 0..30 {
+        frame(cx);
+        heights.push(cx.update(|window, _| {
+            window
+                .try_find("earlier-loading")
+                .map(|l| l.bounds().size.height)
+        }));
+    }
+    let shown: Vec<f32> = heights.iter().flatten().map(|h| f32::from(*h)).collect();
+    assert_eq!(
+        label("earlier-loading-line", cx).as_deref(),
+        Some("Loading earlier…")
+    );
+    assert!(
+        shown.first() < shown.last() && shown.windows(2).all(|w| w[0] <= w[1]),
+        "it unfolds: {shown:?}"
+    );
+    assert!(!has("show-earlier", cx), "the button gave way");
+
+    // The page arrives: the line folds away with nothing left in its place.
+    until(&shell, cx, "the earlier page", |cx| {
+        !page.read_with(cx, |p, cx| p.conversation().read(cx).has_earlier())
+    });
+    let mut folding = Vec::new();
+    for _ in 0..30 {
+        frame(cx);
+        folding.push(cx.update(|window, _| {
+            window
+                .try_find("earlier-loading")
+                .map(|l| f32::from(l.bounds().size.height))
+        }));
+    }
+    let folding: Vec<f32> = folding.into_iter().flatten().collect();
+    assert!(
+        folding.windows(2).all(|w| w[0] >= w[1]),
+        "it folds away: {folding:?}"
+    );
+    at_rest(cx);
+    assert!(!has("earlier-loading", cx));
+    assert!(!has("show-earlier", cx));
 }
