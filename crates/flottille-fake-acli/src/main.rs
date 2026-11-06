@@ -101,6 +101,23 @@
 //! change the comments a `comment create` added, which are numbered from 10100 (`id`, in the
 //! views); the script's own comments take an `id` of their own.
 //!
+//! Assignment, parents and sprints (#362), as measured on a real site where it could be: a
+//! `--assignee` that is no email, no account id and not `@me` ends with 1 (`✗ Error: invalid
+//! format for assignee email: …`), and one that is none of the script's `users` (every one known
+//! without them) ends `create` with 1 (`✗ Error: User not found for email: …`) and `edit` with 0,
+//! saying `✗ Failure: K can't be edited: …` on its output, as the real bulk command does.
+//! `workitem create --from-json F --json` reads the work item's definition from F (recorded under
+//! `files` as `json`): no `type` ends with 1 (`no value given for required property type`), and
+//! an `assignee` of `@me` too (its JSON takes no `@me`). `jira board search --project P --json`
+//! prints the script's `boards` of P (`{"ABC": [{"id": 7, "name": "ABC board", "type":
+//! "scrum"}]}`) as Jira's agile page (`{"values": [...], …}`, as a real site printed it), and
+//! `jira board list-sprints --id N [--state a,b] --json` the script's `sprints` of that board
+//! (`{"7": [{"id": 42, "name": "Sprint 42", "state": "active"}]}`) in those states, in the same
+//! page (**assumed**: no real board with sprints could be read); a board with none ends with 1,
+//! `✗ The board does not support sprints`, as the real one does. A view asked `*navigable` or
+//! `*all` gives every field of the script, and a search's `sprint is not EMPTY` finds the work
+//! items with a field holding sprints (`[{"id", "name", "state", "boardId"}]`).
+//!
 //! A transition that ends with 0 moves the work item: a later `view` shows the status as the
 //! script spells it in `transitions` (kept in `moved.json`). Three more script keys, each a list
 //! of work item keys (`die` a map of key to `"before"` or `"after"`), play what a real `acli` does:
@@ -186,6 +203,15 @@ fn found_by(jql: &str, item: &Value) -> bool {
         {
             return false;
         }
+    }
+    if jql.contains("sprint is not EMPTY")
+        && !fields
+            .as_object()
+            .into_iter()
+            .flatten()
+            .any(|(_, value)| value[0]["boardId"].is_number())
+    {
+        return false;
     }
     if let Some(words) = quoted_after(jql, "text ~ ")
         && !holds(&all, &words)
@@ -397,11 +423,41 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
             0
         }
         ["jira", "workitem", "create", rest @ ..]
+            if rest.contains(&"--json") && rest.contains(&"--from-json") =>
+        {
+            let Some(item) = value(rest, "--from-json").and_then(file_text) else {
+                return not_run(&words);
+            };
+            if item["type"].as_str().is_none() {
+                eprintln!("✗ Error: no value given for required property type");
+                return 1;
+            }
+            // As measured: the JSON's assignee is an email or an account id, `@me` none of them.
+            if let Some(who) = item["assignee"].as_str()
+                && let Some(refused) = unknown_user(script, who, false)
+            {
+                eprintln!("{refused}");
+                return 1;
+            }
+            let key = script["created"].as_str().map_or_else(
+                || format!("{}-1", item["projectKey"].as_str().unwrap_or("X")),
+                str::to_owned,
+            );
+            println!("{}", json!({"key": key}));
+            0
+        }
+        ["jira", "workitem", "create", rest @ ..]
             if rest.contains(&"--json") && rest.contains(&"--summary") =>
         {
             let Some(project) = value(rest, "--project") else {
                 return not_run(&words);
             };
+            if let Some(who) = value(rest, "--assignee")
+                && let Some(refused) = unknown_user(script, who, true)
+            {
+                eprintln!("{refused}");
+                return 1;
+            }
             if let (Some(kind), Some(types)) = (value(rest, "--type"), types_of(script, project))
                 && !types.iter().any(|t| t.0.eq_ignore_ascii_case(kind))
             {
@@ -560,7 +616,51 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
             }
             done
         }
-        ["jira", "workitem", "edit", rest @ ..] if rest.contains(&"--yes") => known(script, rest),
+        ["jira", "workitem", "edit", rest @ ..] if rest.contains(&"--yes") => {
+            // As the real bulk command does: it ends with 0 and says its failure on its output.
+            if let (Some(who), Some(key)) = (value(rest, "--assignee"), value(rest, "--key"))
+                && unknown_user(script, who, true).is_some()
+            {
+                println!("✗ Failure: {key} can't be edited: unexpected error, trace id: 0");
+                return 0;
+            }
+            known(script, rest)
+        }
+        ["jira", "board", "search", rest @ ..] if rest.contains(&"--json") => {
+            let Some(project) = value(rest, "--project") else {
+                return not_run(&words);
+            };
+            let boards = script["boards"][project].as_array().cloned().unwrap_or_default();
+            // As a real site printed it: Jira's agile REST page.
+            println!(
+                "{}",
+                json!({"isLast": true, "maxResults": 50, "startAt": 0, "total": boards.len(),
+                    "values": boards})
+            );
+            0
+        }
+        ["jira", "board", "list-sprints", rest @ ..] if rest.contains(&"--json") => {
+            let Some(board) = value(rest, "--id") else {
+                return not_run(&words);
+            };
+            let Some(sprints) = script["sprints"][board].as_array() else {
+                eprintln!("✗ The board does not support sprints");
+                eprintln!("✗ Error: command execution failed");
+                return 1;
+            };
+            let states: Vec<&str> = value(rest, "--state")
+                .map(|states| states.split(',').collect())
+                .unwrap_or_default();
+            let sprints: Vec<&Value> = sprints
+                .iter()
+                .filter(|s| states.is_empty() || states.iter().any(|st| s["state"] == *st))
+                .collect();
+            println!(
+                "{}",
+                json!({"isLast": true, "maxResults": 50, "startAt": 0, "values": sprints})
+            );
+            0
+        }
         ["jira", "workitem", "transition", rest @ ..] if rest.contains(&"--yes") => {
             let (Some(key), Some(status)) = (value(rest, "--key"), value(rest, "--status")) else {
                 return not_run(&words);
@@ -616,7 +716,7 @@ fn files_of(args: &[String]) -> Vec<Value> {
     use std::os::unix::fs::PermissionsExt;
     let mut files = Vec::new();
     for (at, flag) in args.iter().enumerate() {
-        if flag != "--description-file" && flag != "--body-file" {
+        if flag != "--description-file" && flag != "--body-file" && flag != "--from-json" {
             continue;
         }
         let Some(path) = args.get(at + 1) else {
@@ -630,6 +730,14 @@ fn files_of(args: &[String]) -> Vec<Value> {
         let mut file = json!({"flag": flag, "path": path, "mode": mode(Path::new(path)),
             "dir_mode": Path::new(path).parent().map(mode)});
         match std::fs::read_to_string(path) {
+            // A work item's definition, its description a document as `acli` takes it there.
+            Ok(text) if flag == "--from-json" => match serde_json::from_str::<Value>(&text) {
+                Ok(item) => match item.get("description").map_or(Ok(()), check) {
+                    Ok(()) => file["json"] = item,
+                    Err(why) => file["invalid"] = Value::from(why),
+                },
+                Err(error) => file["invalid"] = Value::from(format!("{path}: {error}")),
+            },
             Ok(text) => match serde_json::from_str::<Value>(&text) {
                 Ok(adf) => match check(&adf) {
                     Ok(()) => file["adf"] = adf,
@@ -913,6 +1021,10 @@ fn only_asked(args: &[&str], item: &mut Value) {
         return;
     };
     let asked: Vec<&str> = asked.split(',').map(str::trim).collect();
+    // The script's fields are all navigable ones: asked so, they all come.
+    if asked.contains(&"*navigable") || asked.contains(&"*all") {
+        return;
+    }
     if let Some(fields) = item["fields"].as_object_mut() {
         fields.retain(|name, _| asked.contains(&name.as_str()));
     }
@@ -944,6 +1056,24 @@ fn not_allowed(args: &[&str]) -> Option<String> {
 fn listed(list: &Value, key: &str) -> bool {
     list.as_array()
         .is_some_and(|keys| keys.iter().any(|k| k == key))
+}
+
+/// Why the site refuses `who` as an assignee, in the real `acli`'s words: not an email nor an
+/// account id (`@me` is taken by its flags, `flag`, and not in its JSON), or one of none of the
+/// script's `users`. Without `users`, every email and account id is known.
+fn unknown_user(script: &Value, who: &str, flag: bool) -> Option<String> {
+    if who == "@me" {
+        return (!flag).then(|| "✗ Error: User not found for email: @me".to_owned());
+    }
+    let hex = who.len() == 24 && who.chars().all(|c| c.is_ascii_hexdigit());
+    if !who.contains('@') && !hex && !who.contains(':') {
+        return Some(
+            "✗ Error: invalid format for assignee email: mail: missing '@' or angle-addr".into(),
+        );
+    }
+    let users = script["users"].as_array()?;
+    (!users.iter().any(|user| user == who))
+        .then(|| format!("✗ Error: User not found for email: {who}"))
 }
 
 /// What follows `flag` in `args`.
