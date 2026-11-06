@@ -274,6 +274,18 @@ pub(super) async fn subscribe(
             ));
         }
     };
+    // Closed already, no `item.closed` would ever end it: as `forge subscribe` refuses a merged or
+    // closed pull request. On Jira, closed is a status of the category done.
+    if ticket.state == "closed" || ticket.category == "done" {
+        let status = match ticket.category.is_empty() {
+            true => String::new(),
+            false => format!(" (it is in {})", ticket.state),
+        };
+        return Outcome::Refused(format!(
+            "refused: the ticket {} is already closed{status}: nothing more happens to it",
+            key.text()
+        ));
+    }
     let Some((repository, item)) = item_of(project, &key) else {
         return Outcome::Failed(format!("{} is not of this tracker", key.text()));
     };

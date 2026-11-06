@@ -766,7 +766,8 @@ reasons.
 - **`subscribe {ticket?, workspace?, events, from?, minutes?}`**: each of `events`
   (`commented`, `status`, `assigned`, `closed`) of the ticket wakes the agent, as a
   `subscription` delivery, until the ticket is closed (on Jira, moved to a status of the category
-  done), the same shape as `forge` `subscribe` (no deadline unless `minutes` gives one, `from:
+  done; a ticket already closed is refused, as a merged pull request is), the same shape as
+  `forge` `subscribe` (no deadline unless `minutes` gives one, `from:
   people` without bots nor what an agent posted; `show` ends with the agent's subscriptions to
   tickets, `- ticket #5 of api: commented, until the ticket is closed`); a Jira work item's comments are
   read by the rounds while a subscription to them follows it. **`unsubscribe {ticket?}`** cancels the agent's

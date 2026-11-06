@@ -308,7 +308,9 @@ to a status of the category `done`, whatever the status is called (its item's st
 then, "What is read"). `from: people` leaves out a bot (a GitHub login `app/<name>` or
 `<name>[bot]`, as for a pull request) and a comment known as posted by an agent; `minutes`,
 optional and with no cap, is a deadline: past it the agent is woken once and the subscription
-ends; without it there is none. `show` ends with the agent's subscriptions to tickets (`Your
+ends; without it there is none. A ticket already closed (or a Jira work item already in a `done`
+status) is refused, `the ticket ABC-1 is already closed (it is in Done)`: nothing would end the
+subscription. `show` ends with the agent's subscriptions to tickets (`Your
 subscriptions:` then `- ticket #5 of api: commented, until the ticket is closed`, or `for 52 min
 more` with a deadline). The
 ticket is read once and stored first: what is so now is no event. The answer says when the rounds

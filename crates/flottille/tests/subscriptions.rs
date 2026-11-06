@@ -1211,8 +1211,9 @@ fn the_live_read_of_a_jira_item_has_its_status_category() {
     user.acli_script(json!({
         "items": {"ABC-1": work_item_in("ABC-1", "Done", "done")}, "search": []}));
 
-    let said = subscribe_ticket(&mcp, json!({"ticket": "ABC-1", "events": ["status"]}));
-    assert!(!said.contains("Flottille's rounds have not"), "{said}");
+    // A closed ticket cannot be subscribed to (nothing would end it): `show` reads it live.
+    let shown = mcp.call("tickets", json!({"action": "show", "ticket": "ABC-1"}));
+    assert!(!shown.error, "{}", shown.text);
 
     // Stored by that read, closed because its status is in the done category.
     let stored = user
@@ -1227,17 +1228,23 @@ fn the_live_read_of_a_jira_item_has_its_status_category() {
     assert_eq!(stored[0]["details"]["category"], "done");
 
     // So its reopening, the next round finds, is a change from there.
+    let watch = user.watch(&["--after", "0"]);
     let mut reopened = work_item_in("ABC-1", "In Progress", "indeterminate");
     reopened["fields"]["updated"] = "2026-10-02T10:05:00.000+0000".into();
     jira_script(&user, &[reopened]);
     a_round(&user);
-    let delivery = the_delivery(&user);
-    for part in [
-        "Its state changed from closed to open.",
-        "Its status changed from Done to In Progress.",
-    ] {
-        assert!(delivery.contains(part), "{part} in {delivery}");
-    }
+    let events = watch.until(|e| e["name"] == "item.changed" && e["data"]["key"] == "ABC-1");
+    let changes = &events.last().unwrap()["data"]["changes"];
+    assert_eq!(
+        changes["state"],
+        json!({"from": "closed", "to": "open"}),
+        "{changes}"
+    );
+    assert_eq!(
+        changes["status"],
+        json!({"from": "Done", "to": "In Progress"}),
+        "{changes}"
+    );
 }
 
 #[test]
@@ -2108,4 +2115,51 @@ fn the_subscribe_answers_say_no_need_to_subscribe_again() {
         "{}",
         shown.text
     );
+}
+
+#[test]
+fn subscribing_to_a_closed_ticket_is_refused() {
+    // A GitHub issue closed: no `item.closed` would ever come to end it.
+    let user = user();
+    fixture(&user);
+    track(&user, json!({"kind": "github", "repository": "api"}));
+    let mut closed = issue(json!([]));
+    closed["state"] = "CLOSED".into();
+    script_issue(&user, closed);
+    let (id, mcp) = agent(&user);
+
+    let answer = mcp.call(
+        "tickets",
+        json!({"action": "subscribe", "ticket": "#5", "events": ["commented"]}),
+    );
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("the ticket #5 is already closed"),
+        "{}",
+        answer.text
+    );
+    assert!(listed(&user, &id).is_empty());
+
+    // A Jira work item in a status of the category done, whatever it is called.
+    let user = self::user().with_fake_acli();
+    fixture(&user);
+    track(
+        &user,
+        json!({"kind": "jira", "site": "example.atlassian.net", "projects": ["ABC"]}),
+    );
+    script(&user, pull());
+    user.acli_script(json!({"items": {"ABC-1": work_item_in("ABC-1", "Shipped", "done")}}));
+    let (id, mcp) = agent(&user);
+
+    let answer = mcp.call(
+        "tickets",
+        json!({"action": "subscribe", "ticket": "ABC-1", "events": ["commented"]}),
+    );
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("the ticket ABC-1 is already closed"),
+        "{}",
+        answer.text
+    );
+    assert!(listed(&user, &id).is_empty());
 }
