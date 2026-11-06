@@ -37,6 +37,31 @@ pub const STILL_SCALING: &str = "A picture is still being scaled down: send once
 /// may, and is scaled down before its size is judged.
 const MAX_FILE_BYTES: u64 = 20 * 1024 * 1024;
 
+/// The picture a file holds, by its extension: or why it is none (`IMAGE_KINDS`, `IMAGE_TOO_BIG`,
+/// `NOT_READ`). Read as it is; the composer scales it down, a card of links only draws it.
+pub fn read_picture(path: &std::path::Path) -> Result<gpui_kit::Image, &'static str> {
+    use gpui_kit::ImageFormat::{Gif, Jpeg, Png, Webp};
+    let format = match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => Png,
+        Some("jpg" | "jpeg") => Jpeg,
+        Some("gif") => Gif,
+        Some("webp") => Webp,
+        _ => return Err(IMAGE_KINDS),
+    };
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_FILE_BYTES) {
+        return Err(IMAGE_TOO_BIG);
+    }
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(gpui_kit::Image::from_bytes(format, bytes)),
+        Err(_) => Err(NOT_READ),
+    }
+}
+
 /// The key of a thumbnail in the composer: the picture itself, which stays alive while it leaves.
 fn thumb_key(image: &Arc<gpui_kit::Image>) -> String {
     format!("{:x}", Arc::as_ptr(image) as usize)
@@ -145,25 +170,9 @@ impl Attachments {
         cx: &mut Context<T>,
         of: Of<T>,
     ) {
-        use gpui_kit::ImageFormat::{Gif, Jpeg, Png, Webp};
-        let format = match path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(str::to_ascii_lowercase)
-            .as_deref()
-        {
-            Some("png") => Png,
-            Some("jpg" | "jpeg") => Jpeg,
-            Some("gif") => Gif,
-            Some("webp") => Webp,
-            _ => return Self::not_attached(IMAGE_KINDS, cx),
-        };
-        if std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_FILE_BYTES) {
-            return Self::not_attached(IMAGE_TOO_BIG, cx);
-        }
-        match std::fs::read(path) {
-            Ok(bytes) => self.attach(gpui_kit::Image::from_bytes(format, bytes), cx, of),
-            Err(_) => Self::not_attached(NOT_READ, cx),
+        match read_picture(path) {
+            Ok(image) => self.attach(image, cx, of),
+            Err(why) => Self::not_attached(why, cx),
         }
     }
 

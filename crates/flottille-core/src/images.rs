@@ -53,6 +53,18 @@ pub fn needs_scaling(mime: &str, bytes: &[u8]) -> bool {
         .is_ok_and(|(width, height)| width.max(height) > MAX_SIDE)
 }
 
+/// Whether these bytes begin as a picture of that type (png, jpeg, gif or webp): the signature
+/// alone, since a file is named by an extension its writer chose.
+pub fn is_picture(mime: &str, bytes: &[u8]) -> bool {
+    match mime {
+        "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg" => bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
+        "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+        "image/webp" => bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
+        _ => false,
+    }
+}
+
 fn scaled_format(mime: &str) -> Option<ImageFormat> {
     match mime {
         "image/png" => Some(ImageFormat::Png),
@@ -83,6 +95,19 @@ mod tests {
         }));
         rgb.write_to(&mut out, format).unwrap();
         out.into_inner()
+    }
+
+    #[test]
+    fn a_picture_is_told_by_its_signature() {
+        let png = picture(4, 4, ImageFormat::Png);
+        let jpeg = picture(4, 4, ImageFormat::Jpeg);
+        assert!(is_picture("image/png", &png));
+        assert!(is_picture("image/jpeg", &jpeg));
+        assert!(is_picture("image/gif", b"GIF89a\x01\x00"));
+        assert!(is_picture("image/webp", b"RIFF\x00\x00\x00\x00WEBPVP8 "));
+        assert!(!is_picture("image/png", &jpeg));
+        assert!(!is_picture("image/png", b"<p>not a picture</p>"));
+        assert!(!is_picture("image/svg+xml", b"<svg/>"));
     }
 
     fn size_of(bytes: &[u8]) -> (u32, u32, Option<ImageFormat>) {

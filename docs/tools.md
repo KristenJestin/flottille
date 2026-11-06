@@ -1207,11 +1207,28 @@ agent never drives the user's desktop through a program (`run` has no graphical 
   read`'s: a link is for the user's eyes, so `localhost` (a dev server) is allowed.
 - **The gate lets it through in every mode**, with no card: like a read it changes nothing, and
   the user decides by clicking. A link that fails the checks above is refused in every mode.
-- **In the window**: a toast `The agent shares a link: <title or host>` with an Open button, and a
-  small card in the agent's conversation (title, host or path, Open), so that a toast missed is
-  not lost. Open checks the file again right before it opens it, by the same rules, since it may
-  have changed between the call and the click: if it no longer passes (made executable, replaced
-  by a link or a folder, removed), nothing opens and a failure toast says why (`Not opened: it is
+- **In the window**: the links an agent shows one after the other, with no text of its own
+  between them (one turn, consecutive calls), are **one** card in its conversation: `3 links`
+  above one line each (title, host or path, **Open**); a single link is the same card without the
+  count. The `show_link` steps are not drawn apart (the card is what the user sees of them; one
+  that failed or was refused stays a step, since no card says it). The grouping is the window's,
+  made from the events in order, so it is the same after a history rebuild or a page left and
+  come back; a text of the agent's own, a report or a message ends the row, and the next link
+  starts a new card. A link added to a card unfolds into it as a line.
+- **One toast, only when it is needed**: a row of links gives one toast, `The agent shares a
+  link: <title or host>` with an **Open** button when it holds one, `The agent shares 3 links`
+  with **Show** (it goes to the conversation) when it holds more, and only while the session's
+  conversation is not on screen, where the card is. A link shown while that toast is still on
+  screen updates it; it never adds a second one.
+- **A picture is a thumbnail**: a shown file that is a picture (`.png`, `.jpg`, `.jpeg`, `.gif`,
+  `.webp`, by extension, and one by its first bytes) is drawn in its line at a bounded size, read
+  the way an attachment is (at most 20 MiB) after the checks Open makes, and it fades in once
+  read. A click on it opens it, the same way and by the same checks as **Open**. An address
+  gets none: the window fetches nothing from the network. A picture that cannot be read
+  (removed, too large, not a picture, made a program) keeps its plain line.
+- **Open checks the file again** right before it opens it, by the same rules, since it may have
+  changed between the call and the click: if it no longer passes (made executable, replaced by a
+  link or a folder, removed), nothing opens and a failure toast says why (`Not opened: it is
   executable, and opening it would run it`). An address opens unchanged.
 
 ## The gate

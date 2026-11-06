@@ -437,8 +437,10 @@ activity.
 #### `agent.link_shown`
 
 The agent handed the user a link (`web` `show_link`, `docs/tools.md`, "Showing a link"). Nothing
-was opened: the window turns it into a toast with an Open button and a card in the conversation,
-and the user's click opens it with the system's default handler.
+was opened: the window turns it into a toast with an Open button and a line of a card in the
+conversation (links shown in a row are one card and one toast, `docs/tools.md`, "Showing a
+link"), and the user's click opens it with the system's default handler. The event carries
+nothing to tell a row apart: the window makes the rows from the events in order.
 
 | Field | |
 |---|---|
