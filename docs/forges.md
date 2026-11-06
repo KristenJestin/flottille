@@ -528,8 +528,12 @@ in `main`, the one the project's checkout is on.
   custom pipeline whose variables come from an anchor lists them. A file that cannot be read
   says which of three it is: not in that commit, git could not give it (git's words), or it is
   there and the parser refuses it (its message, line and column); a merge key that cannot be
-  applied is said and the rest is listed; a GitHub workflow that cannot be parsed is named under
-  `Not read:` and never hides the others. GitHub runs a workflow by `workflow_dispatch`
+  applied is said and the rest is listed; **a key repeated in a mapping is read as the forges read
+  it, the last one kept** (strict YAML refuses it; Bitbucket and GitHub run the file), and said
+  beside the list: `bitbucket-pipelines.yml: pipelines.custom.check-all is defined twice (lines
+  12 and 18); the last one is listed`, the lines being the file's (a file that also has a syntax
+  error is still refused, with that error's line and column); a GitHub workflow that cannot be
+  parsed is named under `Not read:` and never hides the others. GitHub runs a workflow by `workflow_dispatch`
   only when the file is also on the default branch: that is GitHub's own refusal, passed on.
 - **A pipeline is named as `pipelines` lists it**: Bitbucket `default`, `custom: <name>` (a bare
   name is a custom one), `branches: <pattern>`, `tags: <pattern>`, `pull-requests: <pattern>`;
