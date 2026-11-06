@@ -329,7 +329,7 @@ const SERVED: [Definition; 29] = [
             (squash by default; refused with no check, while checks fail or a review asks for changes unless waive gives the \
             user's words) and checks act on a workspace's branch; edit (title, body, draft, \
             reviewers, labels, base), comment, close (comment first), reopen on number. \
-            subscribe: its next events wake you once; unsubscribe. CI: pipelines lists what can \
+            subscribe: events wake you until merged or closed; unsubscribe. CI: pipelines lists what can \
             be run; run starts one by name (custom: <name>) with its variables and follows it unless \
             follow: false; runs, run_view, \
             run_logs read; run, stop, step judged. {\"action\": \"create\", \"repository\": \
@@ -365,7 +365,7 @@ const SERVED: [Definition; 29] = [
                 "message": {"type": "string", "description": "merge by squash: the squashed commit's message, its subject on the first line; the forge's own when left out."},
                 "events": {"type": "array", "items": {"enum": crate::forge::EVENTS}},
                 "from": {"enum": crate::subscriptions::FROM, "description": "subscribe: whose reviews and comments count: anyone (the default), or people (no bot nor agent)."},
-                "minutes": {"type": "integer", "minimum": 1, "maximum": crate::subscriptions::LONGEST_MINUTES, "description": "subscribe: how long it waits; sized by CI when left out, else 60."},
+                "minutes": {"type": "integer", "minimum": 1, "description": "subscribe: a deadline: past it with nothing come, you are woken once and it ends. Left out: none; each event wakes you, no need to subscribe again."},
                 "session": {"type": "string", "description": "unsubscribe: a session you follow, by its agent id, to stop following it."},
                 "pipeline": {"type": "string", "description": "run: as pipelines lists it (Bitbucket default, custom: <name>, branches: <pattern>; GitHub a workflow's file)."},
                 "variables": {"type": "array", "description": "run: Bitbucket variables, GitHub inputs.", "items": {"type": "object", "properties": {
@@ -391,8 +391,8 @@ const SERVED: [Definition; 29] = [
             Writes, judged, answered at once, the result maybe later: create, comment, edit, close, \
             reopen, status, link and unlink (ticket kind other: ABC-2 blocks ABC-1), comment_edit and \
             comment_delete (yours only). Assign only when asked: assignee \"@me\" is the user (Jira \
-            create, edit; null on edit removes; GitHub edit: assignees). subscribe: a ticket's next \
-            events wake you once (people only; minutes: default 60); unsubscribe.",
+            create, edit; null on edit removes; GitHub edit: assignees). subscribe: a ticket's events \
+            wake you until it is closed; unsubscribe.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -425,8 +425,8 @@ const SERVED: [Definition; 29] = [
                 "project": {"type": "string", "description": "create, types on Jira: the tracker's project; status: the board."},
                 "type": {"type": "string", "description": "create on Jira: work item type, one of those types lists."},
                 "events": {"type": "array", "items": {"enum": crate::tickets::EVENTS}},
-                "from": {"enum": crate::subscriptions::FROM},
-                "minutes": {"type": "integer", "minimum": 1, "maximum": crate::subscriptions::LONGEST_MINUTES}
+                "from": {"enum": crate::subscriptions::FROM, "description": "subscribe: whose comments count: anyone (the default), or people (no bot nor agent)."},
+                "minutes": {"type": "integer", "minimum": 1, "description": "subscribe: a deadline: past it with nothing come, you are woken once and it ends. Left out: none; each event wakes you until the ticket is closed (Jira: a done status), no need to subscribe again."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },

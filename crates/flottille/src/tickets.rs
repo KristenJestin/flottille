@@ -842,7 +842,7 @@ struct TicketsCall {
     events: Option<Vec<String>>,
     /// subscribe: whose comments count (`subscriptions::FROM`).
     from: Option<String>,
-    /// subscribe: how long it waits at most.
+    /// subscribe: a deadline, in minutes; none when left out.
     minutes: Option<u64>,
     /// `link`, `unlink`: the other ticket, and the kind of link, read as `ticket kind other`.
     other: Option<String>,
@@ -1089,7 +1089,10 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
     }
     match asked.action.as_str() {
         "list" | "search" => listed(daemon, &project, &asked).await,
-        "show" => show(daemon, place, &project, &asked).await,
+        "show" => match show(daemon, place, &project, &asked).await {
+            Outcome::Done(text) => Outcome::Done(text + &events::subscriptions_text(daemon, agent)),
+            other => other,
+        },
         "types" => types(&project, &asked).await,
         "link_types" => links::types(&project).await,
         "subscribe" => events::subscribe(daemon, agent, place, &project, &asked).await,

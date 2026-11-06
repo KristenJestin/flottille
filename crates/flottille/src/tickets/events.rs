@@ -201,13 +201,13 @@ fn events_of(named: &str, events: &[&(&'static str, Value)]) -> (Vec<Event>, Opt
 }
 
 /// Offers what the items stored to a subscription to a ticket, when some of the events are of its
-/// ticket.
+/// ticket; whether a delivery was queued, for the caller to ring the agent.
 pub fn offer(
     daemon: &Arc<Daemon>,
     subscription: &Subscription,
     _items: &[Item],
     events: &[(&'static str, Value)],
-) {
+) -> bool {
     let target = &subscription.target;
     let mine: Vec<&(&'static str, Value)> = events
         .iter()
@@ -219,16 +219,16 @@ pub fn offer(
         })
         .collect();
     if mine.is_empty() {
-        return;
+        return false;
     }
     let named = target_named(target);
     let (found, ends) = events_of(&named, &mine);
-    subscriptions::offer(daemon, subscription, &named, &found, ends.as_ref());
+    subscriptions::offer(daemon, subscription, &named, &found, ends.as_ref(), false)
 }
 
-/// `tickets subscribe`: the agent waits, once, for the next of the events it names of a ticket
-/// (the one named, or its workspace's); the answer comes at once, the event later as a delivery,
-/// from the next rounds of the items. What is so now is no event: this read is stored first.
+/// `tickets subscribe`: the agent is woken at each of the events it names of a ticket (the one
+/// named, or its workspace's), until it is closed (on Jira, its status in the category done);
+/// the answer comes at once, the events later as deliveries, from the next rounds of the items. What is so now is no event: this read is stored first.
 pub(super) async fn subscribe(
     daemon: &Arc<Daemon>,
     agent: &str,
@@ -254,12 +254,10 @@ pub(super) async fn subscribe(
             "refused: from is anyone (the default) or people (no bot, not your own), not {from:?}"
         ));
     }
-    let longest = subscriptions::LONGEST_MINUTES;
-    let minutes = asked.minutes.unwrap_or(subscriptions::DEFAULT_MINUTES);
-    if !(1..=longest).contains(&minutes) {
-        return Outcome::Refused(format!(
-            "refused: minutes is from 1 to {longest}, 60 by default"
-        ));
+    if asked.minutes == Some(0) {
+        return Outcome::Refused(
+            "refused: minutes is a deadline of 1 min or more; leave it out for none".into(),
+        );
     }
     let key = match super::key_of(daemon, place, project, asked) {
         Ok(key) => key,
@@ -300,7 +298,7 @@ pub(super) async fn subscribe(
         from: from.to_owned(),
         seen: json!({}),
         created_at: now,
-        expires_at: now + minutes * 60_000,
+        expires_at: subscriptions::deadline(now, asked.minutes),
     };
     let subscribed = subscriptions::subscribe(daemon, &subscription);
     drop(held);
@@ -312,10 +310,11 @@ pub(super) async fn subscribe(
         _ => "",
     };
     let mut text = format!(
-        "Subscribed: the next {}{from} of the {} wakes you once, as a delivery, within {minutes} \
-         min. What is so now is no event: tickets show reads it.",
-        subscription.events.join(" or "),
-        target_named(&subscription.target)
+        "Subscribed to {}{from} of the {}: {}. What is so now is no event: tickets show reads \
+         it.",
+        subscription.events.join(", "),
+        target_named(&subscription.target),
+        subscriptions::wakes_until(&subscription, asked.minutes)
     );
     match unseen {
         Some(crate::items::Unseen::Source) => text.push_str(
@@ -329,6 +328,31 @@ pub(super) async fn subscribe(
         None => {}
     }
     Outcome::Done(text)
+}
+
+/// What `tickets show` ends with: the agent's subscriptions to tickets, when it has some.
+pub(super) fn subscriptions_text(daemon: &Daemon, agent: &str) -> String {
+    let mine: Vec<Subscription> = subscriptions::of(daemon, agent)
+        .into_iter()
+        .filter(|s| s.source == TICKETS)
+        .collect();
+    if mine.is_empty() {
+        return String::new();
+    }
+    let mut text = "\nYour subscriptions:\n".to_owned();
+    for subscription in mine {
+        let from = match subscription.from.as_str() {
+            "people" => " (from people)",
+            _ => "",
+        };
+        text.push_str(&format!(
+            "- {}: {}{from}, {}\n",
+            target_named(&subscription.target),
+            subscription.events.join(", "),
+            subscriptions::lasts(&subscription)
+        ));
+    }
+    text
 }
 
 /// `tickets unsubscribe`: the agent's subscriptions to the ticket it names, every one when it
