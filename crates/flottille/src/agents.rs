@@ -1670,9 +1670,9 @@ impl acp::Events for Recorder {
         }
     }
 
-    fn turn_started(&self, text: &str, images: &[String], typed: &Value) {
+    fn turn_started(&self, text: &str, images: &[String], typed: &Value, deliveries: &[String]) {
         *self.started_at.lock().unwrap() = Some(now_ms());
-        let mut data = json!({"text": text});
+        let mut data = json!({"text": text, "deliveries": deliveries});
         if !images.is_empty() {
             data["images"] = json!(images);
         }
