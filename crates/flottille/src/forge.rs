@@ -1350,7 +1350,7 @@ pub async fn forge(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Value
             }
         }
         ("subscribe", _) => forge_subscribe(daemon, agent, place, asked).await,
-        ("unsubscribe", _) => forge_unsubscribe(daemon, agent, asked),
+        ("unsubscribe", _) => forge_unsubscribe(daemon, agent, place, asked),
         ("create" | "merge" | "checks", _) => {
             let written = forge_write(daemon, place, asked).await;
             daemon.forges.pulls.drop_all();
@@ -1642,7 +1642,7 @@ fn remember(daemon: &Arc<Daemon>, project: &str, path: &str, forge: &Forge, pull
 
 /// `forge unsubscribe`: the agent's subscriptions to the workspace and repository it names, every
 /// one when it names none.
-fn forge_unsubscribe(daemon: &Daemon, agent: &str, asked: ForgeCall) -> Outcome {
+fn forge_unsubscribe(daemon: &Daemon, agent: &str, place: &Place, asked: ForgeCall) -> Outcome {
     if let Some(session) = &asked.session {
         if asked.workspace.is_some() || asked.repository.is_some() {
             return Outcome::Refused(
@@ -1661,6 +1661,22 @@ fn forge_unsubscribe(daemon: &Daemon, agent: &str, asked: ForgeCall) -> Outcome 
             crate::subscriptions::end(daemon, subscription, "cancelled");
         }
         return Outcome::Done(format!("You no longer follow {session}."));
+    }
+    // A run's number is of one repository: with several, it is named.
+    if let (Some(run), None) = (asked.run, &asked.repository)
+        && let Ok(project) = projects::load_project(daemon, &place.project)
+        && project.repositories.len() > 1
+    {
+        let names: Vec<&str> = project
+            .repositories
+            .iter()
+            .map(|r| r.path.as_str())
+            .collect();
+        return Outcome::Refused(format!(
+            "refused: forge unsubscribe of the run {run} needs repository, one of {}: a run's \
+             number is of one repository",
+            names.join(", ")
+        ));
     }
     let named =
         |s: &flottille_core::subscription::Subscription, key: &str, asked: &Option<String>| {

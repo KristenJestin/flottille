@@ -567,8 +567,8 @@ link in its answer.
 An agent that starts a run waits for it: `run` **follows the run it started** unless it is given
 `follow: false`. The following is a subscription of the source `run` (`docs/design.md` §5.6), with
 no time of its own, and its answer ends with `Followed until it ends: a delivery wakes you then,
-and once if it waits on a manual step, so no wake is needed; forge unsubscribe {"run": 43} stops
-following it.` A subscription to the pull request of the run's branch does not follow the run:
+and once if it waits on a manual step, so no wake is needed; forge unsubscribe {"run": 43,
+"repository": "api"} stops following it.` (the repository named when the project has several). A subscription to the pull request of the run's branch does not follow the run:
 its `checks` is the end of the pull request's checks, which its answer names as they run, and it
 names the runs the agent already follows there (`docs/tools.md`, "The forge").
 
@@ -589,7 +589,8 @@ names the runs the agent already follows there (`docs/tools.md`, "The forge").
   once, `It cannot be read now: <why>`, and the following goes on: nothing more is said of it
   until it is read again.
 - **It ends** with the run, when the agent ends, or with `unsubscribe {run, repository?}` (or the
-  user's Cancel); `forge show` lists it under `Your subscriptions:` (`- run #43 of api (custom:
+  user's Cancel), `repository` needed when the project has several, a run's number being of one
+  repository; a following cancelled while a round reads its run is neither written back nor said; `forge show` lists it under `Your subscriptions:` (`- run #43 of api (custom:
   nightly on app/login): until it ends`), the window's rail as `Run #43 of api`, since when.
 - **A run whose number the forge did not say** (GitHub printed no link, `bkt` neither a number nor a
   uuid) is not followed, and the answer says so.

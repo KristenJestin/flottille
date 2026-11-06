@@ -537,7 +537,8 @@ pending requests.
   subscription. A pull request merged or closed, a repository with no forge or no pull request,
   and `number` are refused. **`unsubscribe {workspace?, repository?}`** cancels the agent's
   subscriptions to them (the runs it follows there with them), every one when it names none;
-  **`unsubscribe {run, repository?}`** stops following a run it started; **`unsubscribe
+  **`unsubscribe {run, repository?}`** stops following a run it started (`repository` needed
+  when the project has several); **`unsubscribe
   {session}`** stops following a
   session the agent started ("Following a session", under "The tree's tools").
 - **`create`, `merge`, `checks` `{workspace?, repository?, …}`** (`repository` is needed when the

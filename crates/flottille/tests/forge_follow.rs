@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use common::User;
 use common::mcp::{Mcp, server_of};
+use flottille_core::store::Store;
 use serde_json::{Value, json};
 
 /// What `bitbucket-pipelines.yml` holds on every branch of `api`.
@@ -204,21 +205,24 @@ fn completed(result: &str) -> Value {
     json!({"name": "COMPLETED", "result": {"name": result}})
 }
 
-/// A round of the project's items, as the daemon makes every few minutes, with what it found
-/// delivered after it.
+/// A round of the project's items, as the daemon makes every few minutes: what it found of the
+/// runs followed is stored as deliveries by the time it answers.
 fn a_round(user: &User) {
     user.call("items.refresh", json!({"project": "app"}))
         .unwrap();
-    std::thread::sleep(Duration::from_millis(300));
 }
 
-/// The deliveries of subscriptions the agent was sent.
-fn delivered(user: &User) -> Vec<String> {
-    user.received_requests("session/prompt")
-        .iter()
-        .filter_map(|p| p["params"]["prompt"][0]["text"].as_str().map(str::to_owned))
-        .filter(|p| p.contains("[flottille:subscription]"))
-        .collect()
+/// The bodies of the subscription deliveries made to the agent, oldest first, as stored.
+fn delivered(user: &User, agent: &str) -> Vec<String> {
+    let store = Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let mut bodies: Vec<String> = store
+        .last_deliveries_of(agent, "subscription", 100)
+        .unwrap()
+        .into_iter()
+        .map(|delivery| delivery.body)
+        .collect();
+    bodies.reverse();
+    bodies
 }
 
 /// The agent's open subscriptions, as the window lists them.
@@ -274,7 +278,7 @@ fn a_run_started_by_an_agent_wakes_it_when_it_ends() {
     );
 
     a_round(&user);
-    assert!(delivered(&user).is_empty(), "still running is no news");
+    assert!(delivered(&user, &id).is_empty(), "still running is no news");
 
     bkt_with_run(
         &user,
@@ -282,10 +286,11 @@ fn a_run_started_by_an_agent_wakes_it_when_it_ends() {
         json!([step("{step-e2e}", "e2e", "COMPLETED", "SUCCESSFUL")]),
     );
     a_round(&user);
-    eventually("the end of the run delivered", || {
-        !delivered(&user).is_empty()
-    });
-    let delivery = delivered(&user).remove(0);
+    assert!(
+        !delivered(&user, &id).is_empty(),
+        "the end of the run delivered"
+    );
+    let delivery = delivered(&user, &id).remove(0);
     for part in [
         "run #43 of api",
         "custom: nightly",
@@ -300,7 +305,7 @@ fn a_run_started_by_an_agent_wakes_it_when_it_ends() {
     // Over with the run.
     assert!(subscriptions(&user).is_empty());
     a_round(&user);
-    assert_eq!(delivered(&user).len(), 1);
+    assert_eq!(delivered(&user, &id).len(), 1);
 }
 
 #[test]
@@ -319,8 +324,8 @@ fn a_failed_run_names_its_failed_steps() {
         ]),
     );
     a_round(&user);
-    eventually("the failure delivered", || !delivered(&user).is_empty());
-    let delivery = delivered(&user).remove(0);
+    assert!(!delivered(&user, &id).is_empty(), "the failure delivered");
+    let delivery = delivered(&user, &id).remove(0);
     assert!(delivery.contains("failed"), "{delivery}");
     assert!(delivery.contains("Failed steps: e2e, lint"), "{delivery}");
     assert!(!delivery.contains("build,"), "{delivery}");
@@ -348,17 +353,17 @@ fn a_run_waiting_on_a_manual_step_wakes_the_agent() {
     ]);
     bkt_with_run(&user, paused, steps);
     a_round(&user);
-    eventually("the wait delivered", || !delivered(&user).is_empty());
-    let delivery = delivered(&user).remove(0);
+    assert!(!delivered(&user, &id).is_empty(), "the wait delivered");
+    let delivery = delivered(&user, &id).remove(0);
     assert!(delivery.contains("manual step deploy"), "{delivery}");
     // Still followed, and the same wait is not said again.
     assert_eq!(subscriptions(&user).len(), 1);
     a_round(&user);
-    assert_eq!(delivered(&user).len(), 1);
+    assert_eq!(delivered(&user, &id).len(), 1);
 
     bkt_with_run(&user, completed("SUCCESSFUL"), json!([]));
     a_round(&user);
-    eventually("the end delivered", || delivered(&user).len() == 2);
+    assert!(delivered(&user, &id).len() == 2, "the end delivered");
     assert!(subscriptions(&user).is_empty());
 }
 
@@ -397,7 +402,11 @@ fn unsubscribe_ends_the_following_of_a_run() {
     assert!(subscriptions(&user).is_empty());
     bkt_with_run(&user, completed("SUCCESSFUL"), json!([]));
     a_round(&user);
-    assert!(delivered(&user).is_empty(), "{:?}", delivered(&user));
+    assert!(
+        delivered(&user, &id).is_empty(),
+        "{:?}",
+        delivered(&user, &id)
+    );
 }
 
 #[test]
@@ -414,17 +423,17 @@ fn a_run_that_cannot_be_read_is_said_once() {
         .remove("43");
     user.bkt_script(script);
     a_round(&user);
-    eventually("the failure said", || !delivered(&user).is_empty());
+    assert!(!delivered(&user, &id).is_empty(), "the failure said");
     a_round(&user);
     a_round(&user);
-    let all = delivered(&user);
+    let all = delivered(&user, &id);
     assert_eq!(all.len(), 1, "{all:?}");
     assert!(all[0].contains("cannot be read"), "{}", all[0]);
     // Still followed: it ends when it can be read and has ended.
     assert_eq!(subscriptions(&user).len(), 1);
     bkt_with_run(&user, completed("SUCCESSFUL"), json!([]));
     a_round(&user);
-    eventually("the end delivered", || delivered(&user).len() == 2);
+    assert!(delivered(&user, &id).len() == 2, "the end delivered");
 }
 
 #[test]
@@ -459,12 +468,12 @@ fn a_github_workflow_run_wakes_the_agent_when_it_ends() {
         answer.text
     );
     a_round(&user);
-    assert!(delivered(&user).is_empty(), "still running is no news");
+    assert!(delivered(&user, &id).is_empty(), "still running is no news");
 
     gh_with("completed", "failure");
     a_round(&user);
-    eventually("the end delivered", || !delivered(&user).is_empty());
-    let delivery = delivered(&user).remove(0);
+    assert!(!delivered(&user, &id).is_empty(), "the end delivered");
+    let delivery = delivered(&user, &id).remove(0);
     for part in [
         "run 78 of web",
         "e2e.yml",
@@ -522,5 +531,124 @@ fn a_subscription_to_a_pull_request_says_its_running_checks_and_the_run_followed
     assert!(
         !answer.contains("running as you subscribed: build"),
         "{answer}"
+    );
+}
+
+fn gh_calls(user: &User) -> Vec<String> {
+    user.gh_received()
+        .iter()
+        .map(|call| {
+            call["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a.as_str().unwrap())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect()
+}
+
+/// How many reads of a run the fakes were asked: `bkt pipeline view`, `gh run view`.
+fn run_reads(user: &User) -> usize {
+    let views =
+        |calls: Vec<String>, head: &str| calls.iter().filter(|c| c.starts_with(head)).count();
+    views(bkt_calls(user), "pipeline view") + views(gh_calls(user), "run view")
+}
+
+#[test]
+fn a_round_with_no_run_followed_reads_no_run_and_one_followed_is_read_once() {
+    let (user, id, mcp) = setup();
+    bkt_with_run(&user, running(), json!([]));
+
+    a_round(&user);
+    a_round(&user);
+    assert_eq!(run_reads(&user), 0, "{:?}", bkt_calls(&user));
+
+    started_run(&user, &id, &mcp, json!({}));
+    let before = run_reads(&user);
+    a_round(&user);
+    assert_eq!(run_reads(&user) - before, 1, "{:?}", bkt_calls(&user));
+}
+
+#[test]
+fn a_run_cancelled_while_a_round_reads_it_wakes_nobody_and_stays_cancelled() {
+    let (user, id, mcp) = setup();
+    bkt_with_run(&user, running(), json!([]));
+    started_run(&user, &id, &mcp, json!({}));
+    let subscription = subscriptions(&user)[0]["id"].as_str().unwrap().to_owned();
+    // Waiting on a manual step, which would wake the agent; every read held a while.
+    let paused = json!({"name": "IN_PROGRESS", "stage": {"name": "PAUSED"}});
+    bkt_with_run(
+        &user,
+        paused,
+        json!([step("{step-deploy}", "deploy", "PENDING", "")]),
+    );
+    let mut script: Value =
+        serde_json::from_str(&std::fs::read_to_string(user.path("bkt/script.json")).unwrap())
+            .unwrap();
+    script["read_delay_ms"] = json!(1500);
+    user.bkt_script(script);
+    let before = run_reads(&user);
+
+    std::thread::scope(|scope| {
+        let round = scope.spawn(|| a_round(&user));
+        eventually("the round reading the run", || run_reads(&user) > before);
+        user.call("subscription.cancel", json!({"subscription": subscription}))
+            .unwrap();
+        round.join().unwrap();
+    });
+
+    assert!(
+        subscriptions(&user).is_empty(),
+        "{:?}",
+        subscriptions(&user)
+    );
+    assert!(
+        delivered(&user, &id).is_empty(),
+        "{:?}",
+        delivered(&user, &id)
+    );
+}
+
+#[test]
+fn unsubscribing_a_run_names_its_repository_when_the_project_has_several() {
+    let (user, id, mcp) = setup();
+    bkt_with_run(&user, running(), json!([]));
+
+    let answer = started_run(&user, &id, &mcp, json!({}));
+
+    assert!(
+        answer.contains(r#"forge unsubscribe {"run": 43, "repository": "api"}"#),
+        "{answer}"
+    );
+    let refused = mcp.call("forge", json!({"action": "unsubscribe", "run": 43}));
+    assert!(refused.error, "{}", refused.text);
+    assert!(
+        refused.text.contains("needs repository") && refused.text.contains("api, web"),
+        "{}",
+        refused.text
+    );
+    assert_eq!(subscriptions(&user).len(), 1);
+}
+
+#[test]
+fn a_run_bkt_cannot_read_says_what_bkt_needs() {
+    let (user, id, mcp) = setup();
+    bkt_with_run(&user, running(), json!([]));
+    started_run(&user, &id, &mcp, json!({}));
+
+    // The user's bkt lost its sign-in to Bitbucket Cloud: it has a Data Center context alone.
+    let mut script = bkt_script();
+    script["contexts"] = json!([{"name": "work", "host": "bitbucket.example.com", "active": true}]);
+    user.bkt_script(script);
+    a_round(&user);
+
+    let all = delivered(&user, &id);
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert!(
+        all[0].contains("bkt has no context for bitbucket.org: sign in with `bkt auth login"),
+        "{}",
+        all[0]
     );
 }

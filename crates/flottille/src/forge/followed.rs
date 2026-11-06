@@ -55,9 +55,17 @@ pub(super) fn follow(
     if let Err(error) = subscriptions::subscribe(daemon, &subscription) {
         return format!("\nNot followed: {error}");
     }
+    // A number is a run of one repository: with several, the repository is named.
+    let several = crate::projects::load_project(daemon, &place.project)
+        .is_ok_and(|project| project.repositories.len() > 1);
+    let which = match several {
+        true => format!(", \"repository\": {}", Value::from(repository)),
+        false => String::new(),
+    };
     format!(
         "\nFollowed until it ends: a delivery wakes you then, and once if it waits on a manual \
-         step, so no wake is needed; forge unsubscribe {{\"run\": {}}} stops following it.",
+         step, so no wake is needed; forge unsubscribe {{\"run\": {}{which}}} stops following \
+         it.",
         started.number
     )
 }
@@ -167,13 +175,13 @@ fn github_seen(run: &Value) -> Seen {
 }
 
 /// One read of the run: `bkt pipeline view` or `gh run view`.
-async fn read(forge: &Forge, context: Option<&str>, run: u64) -> Result<Seen, String> {
-    match (forge, context) {
-        (Forge::Bitbucket { .. }, Some(context)) => Ok(bitbucket_seen(
-            &pipelines::bitbucket_seen(forge, context, run).await?,
+/// `context` is `bkt`'s for a Bitbucket repository, or why it has none.
+async fn read(forge: &Forge, context: &Result<String, String>, run: u64) -> Result<Seen, String> {
+    match forge {
+        Forge::Bitbucket { .. } => Ok(bitbucket_seen(
+            &pipelines::bitbucket_seen(forge, context.as_ref()?, run).await?,
         )),
-        (Forge::Bitbucket { .. }, None) => Err("bkt has no context for it".into()),
-        (Forge::GitHub { .. }, _) => {
+        Forge::GitHub { .. } => {
             let id = run.to_string();
             let run = gh_json(&[
                 "run",
@@ -210,13 +218,13 @@ pub(crate) async fn round(daemon: &Arc<Daemon>, project: &str, checkout: &Checko
         .await
         .map_err(|why| why.unwrap_or_else(|| "the repository declares no forge any more".into()));
     let context = match &forge {
-        Ok(forge @ Forge::Bitbucket { .. }) => bitbucket::Contexts::default().of(forge).await.ok(),
-        _ => None,
+        Ok(forge @ Forge::Bitbucket { .. }) => bitbucket::Contexts::default().of(forge).await,
+        _ => Err(String::new()),
     };
     for subscription in runs {
         let run = subscription.target["run"].as_u64().unwrap_or_default();
         let seen = match &forge {
-            Ok(forge) => read(forge, context.as_deref(), run).await,
+            Ok(forge) => read(forge, &context, run).await,
             Err(why) => Err(why.clone()),
         };
         said(daemon, &subscription, seen);
@@ -236,9 +244,9 @@ fn said(daemon: &Arc<Daemon>, subscription: &Subscription, seen: Result<Seen, St
     );
     let seen = match seen {
         Err(why) => {
-            if !unread {
-                seen_now["unread"] = json!(true);
-                keep(daemon, subscription, seen_now);
+            seen_now["unread"] = json!(true);
+            // A following cancelled while it was read is not written back nor said.
+            if !unread && keep(daemon, subscription, seen_now) {
                 subscriptions::tell(
                     daemon,
                     subscription,
@@ -279,7 +287,9 @@ fn said(daemon: &Arc<Daemon>, subscription: &Subscription, seen: Result<Seen, St
         Seen::Waiting(why) => {
             if seen_now["waiting"] != why.as_str() {
                 seen_now["waiting"] = json!(why);
-                keep(daemon, subscription, seen_now);
+                if !keep(daemon, subscription, seen_now) {
+                    return;
+                }
                 subscriptions::tell(
                     daemon,
                     subscription,
@@ -302,13 +312,12 @@ fn said(daemon: &Arc<Daemon>, subscription: &Subscription, seen: Result<Seen, St
     }
 }
 
-/// What the following saw last, stored with it.
-fn keep(daemon: &Daemon, subscription: &Subscription, seen: Value) {
-    let kept = Subscription {
-        seen,
-        ..subscription.clone()
-    };
-    let _ = daemon.write(|store| Ok((store.subscribe(&kept)?, None)));
+/// What the following saw last, stored with it; false when it ended meanwhile (the user's
+/// Cancel, an unsubscribe while the round read the run), which then wakes nobody.
+fn keep(daemon: &Daemon, subscription: &Subscription, seen: Value) -> bool {
+    daemon
+        .read(|store| store.set_seen(&subscription.id, &seen))
+        .unwrap_or(false)
 }
 
 /// The agent's followings of runs, of `repository` and `run` when named: `forge unsubscribe`
