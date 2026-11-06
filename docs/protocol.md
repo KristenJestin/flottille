@@ -862,7 +862,8 @@ a result:
   "why": null,
   "run": "5d2c0f1a9b3e",
   "address": "http://localhost:3001",
-  "needs_stopped": []
+  "needs_stopped": [],
+  "needed_by": [{"project": "app", "tasks": ["api"]}]
 }
 ```
 
@@ -871,7 +872,9 @@ as the file says them. `state` is `stopped`, `starting`, `ready`, `running` (it 
 `outside` (it answered before Flottille started it) or `failed`, `why` then the line that says why.
 `run` is its run, going on or the last one, read with the run methods' `run.output` too; a
 service's run has an empty `project` and is not listed by `run.list`. `address` is its run's
-address, or the file's. `needs_stopped` lists what it needs that does not run. `not-found` for a
+address, or the file's. `needs_stopped` lists what it needs that does not run. `needed_by` lists
+the projects whose tasks need it, directly or through another service's `needs`, each with those
+tasks. `not-found` for a
 service the file does not hold, `invalid-config` when the file cannot be used, `refused` for a
 write the file would refuse (nothing is written).
 
@@ -1018,9 +1021,16 @@ Each method answers `not-found` when the agent does not exist.
 
 #### `agent.start`
 
-`{"project", "workspace"?, "provider"?, "model"?, "effort"?, "mode"?, "role"?, "message"}`. Creates
-a root agent in the project folder or the workspace, and gives it its first message: `{"agent",
-"after"}`. `role` is `lead` (the default) or `worker`. `provider` is the project's, else the first
+`{"project", "workspace"?, "provider"?, "model"?, "effort"?, "mode"?, "role"?, "message", "images"?}`.
+Creates a root agent in the project folder or the workspace, and gives it its first message:
+`{"agent", "after"}`. `images` is as in `agent.send`, and goes with the first message; with
+images, the message may be empty (pictures alone are a first message). They are judged and stored
+before the agent exists, so that one refused, or one that cannot be stored, starts none, and a
+session replaced is given them again with its first message. A provider whose last agent that
+started said it takes no images (`images: false` in `provider.list`) is refused them (`refused`,
+"the agent of `<provider>` takes no images"); while none of its agents has said, they go with the
+message, and an agent that takes none says so in the text it keeps ("`[n images not sent: this
+agent takes no images]`"). `role` is `lead` (the default) or `worker`. `provider` is the project's, else the first
 one enabled, when left out; `model` the project's when the provider is the project's, else the
 provider's default; `model` and `effort` are values of the session's options, as the provider
 lists them (`provider.list`). `not-found` when the project or the workspace does not exist;
@@ -1387,7 +1397,8 @@ when they name none:
       "override": null,
       "models": [{"id": "sonnet", "name": "Sonnet", "efforts": ["low", "medium", "high"], "default": true},
                  {"id": "opus", "name": "Opus", "efforts": null}],
-      "models_outdated": false
+      "models_outdated": false,
+      "images": true
     },
     {"name": "opencode", "title": "OpenCode", "enabled": false, "ready": false,
      "why": "is not enabled (`enabled = true` under [opencode] in providers.toml enables it)", "…": "…",
@@ -1404,6 +1415,8 @@ when they name none:
 `why` is `null` when the provider's agents can run, else a clause after its name that says why
 not and what to do. `warnings` say what may stop its agents that the daemon cannot tell for
 sure: a version other than the one Flottille was checked against, no sign-in it can see.
+`images` says whether its agents take images in a prompt, as the last of them that started said
+(`null` before one did): the window's composer says "takes no images" for a `false` before a start.
 `login.api_key` is the name of the API key found set, never its value. `override` is the test
 program standing for the provider (`docs/agents.md`, "For tests and development"). `models` is
 `null` until the daemon read them from the provider's agent (as soon as it is enabled and ready, with

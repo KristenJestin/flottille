@@ -325,13 +325,13 @@ const SERVED: [Definition; 29] = [
             own gh or bkt (no forge sign-in here: never run them). list: by state and branch, \
             as last read. show: a workspace's branch's (yours; in main, name it), or number's, \
             with checks (the log's end of each failed job), review and comment counts; detail \
-            full: texts. Writes, judged, answered at once, the result maybe later: create \
-            (reviewers, labels, delete_branch_on_merge), merge (squash by default; refused with \
-            no check, while checks fail or a review asks for changes unless waive gives the \
+            full: texts. Writes, judged, answered at once, the result maybe later: create, merge \
+            (squash by default; refused with no check, while checks fail or a review asks for changes unless waive gives the \
             user's words) and checks act on a workspace's branch; edit (title, body, draft, \
             reviewers, labels, base), comment, close (comment first), reopen on number. \
             subscribe: its next events wake you once; unsubscribe. CI: pipelines lists what can \
-            be run; run starts one by name (custom: <name>) with its variables; runs, run_view, \
+            be run; run starts one by name (custom: <name>) with its variables and follows it unless \
+            follow: false; runs, run_view, \
             run_logs read; run, stop, step judged. {\"action\": \"create\", \"repository\": \
             \"api\", \"title\": \"fix\", \"body\": \"...\"}",
         read_only: false,
@@ -371,7 +371,8 @@ const SERVED: [Definition; 29] = [
                 "variables": {"type": "array", "description": "run: Bitbucket variables, GitHub inputs.", "items": {"type": "object", "properties": {
                     "key": {"type": "string"}, "value": {"type": "string"}, "secured": {"type": "boolean"}
                 }, "required": ["key", "value"], "additionalProperties": false}},
-                "run": {"type": "integer", "minimum": 1, "description": "run_view, run_logs, stop, step: as runs lists it."},
+                "follow": {"type": "boolean", "description": "run: true (the default) follows the run started: a delivery wakes you when it ends (successful, failed with its failed steps, stopped) or waits on a manual step; false starts it alone. forge unsubscribe {run} stops following it."},
+                "run": {"type": "integer", "minimum": 1, "description": "run_view, run_logs, stop, step: as runs lists it; unsubscribe: a run you follow."},
                 "step": {"type": "string", "description": "run_logs, step: a step's (job's) name, as run_view lists it."},
                 "do": {"type": "string", "enum": ["start", "rerun"], "description": "step: start a manual step, or run one again."}
             }, "required": ["action"], "additionalProperties": false})
@@ -705,7 +706,9 @@ const SERVED: [Definition; 29] = [
         name: "wake",
         title: "Wake later",
         description: "Wakes you once, in minutes, by a delivery saying why; end your turn \
-            meanwhile. A new one replaces yours; cancel drops it.",
+            meanwhile. A new one replaces yours; cancel drops it. For a time the user asked: \
+            never poll CI, forge run follows its run and forge subscribe a pull request's \
+            checks.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -3223,11 +3226,25 @@ mod tests {
     }
 
     #[test]
+    fn the_wake_description_steers_a_wait_on_ci_to_forge() {
+        let wake = definition("wake").unwrap().description;
+        assert!(
+            wake.contains(
+                "never poll CI, forge run follows its run and forge subscribe a pull request's \
+                 checks"
+            ),
+            "{wake}"
+        );
+        assert!(wake.len() < 1000, "{}", wake.len());
+    }
+
+    #[test]
     fn the_forge_description_says_what_the_ci_actions_do() {
         let forge = definition("forge").unwrap().description;
         for said in [
             "pipelines lists what can be run",
             "run starts one by name (custom: <name>) with its variables",
+            "follows it unless follow: false",
         ] {
             assert!(forge.contains(said), "{said:?} in {forge}");
         }

@@ -2873,6 +2873,9 @@ fn a_child_appearing_adds_its_row_to_the_rail_and_the_sub_agents_list(cx: &mut T
         .position(|b| *b == Block::SubAgents)
         .unwrap();
     unfold(&page, at, cx);
+    // The card starts folded: a click on its title lists the sub-agents.
+    cx.update(|window, cx| window.click(format!("row-{at}-sub-agents-toggle"), cx));
+    settle(cx);
     assert!(cx.update(|window, _| window.try_find(format!("sub-agent-{child}")).is_some()));
     let listed = page.read_with(cx, |p, cx| {
         p.conversation()
@@ -3622,9 +3625,10 @@ fn text_typed_while_a_reply_sends_is_kept(cx: &mut TestAppContext) {
         reply.read_with(cx, |r, _| !r.is_sending())
     });
 
+    // The field emptied as the message was sent: what was typed after it is all it holds.
     assert_eq!(
         reply.read_with(cx, |r, cx| r.field().read(cx).value().to_string()),
-        "and then"
+        " and then"
     );
     let prompts = user.received_requests("session/prompt");
     assert!(prompts.iter().any(|p| p.to_string().contains("first")));

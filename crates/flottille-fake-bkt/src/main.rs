@@ -53,12 +53,14 @@
 //! `bkt api <path> --method POST [--input <json>]` starts a run of a Cloud repository
 //! (`/repositories/<w>/<r>/pipelines/`, answering the new pipeline numbered `triggered`, 1 by
 //! default) or stops one of `pipelines` (`…/pipelines/<uuid>/stopPipeline`, answering nothing);
-//! `pipeline view` gives the run its `uuid` when `pipelines` holds it. `pipeline run` takes
-//! `--var KEY=VALUE` as the real one does.
+//! `pipeline view` gives the run as `pipelines` holds it (its `uuid`, `state` and times), and
+//! `bkt api /repositories/<w>/<r>/pipelines/<uuid>` the one of `pipelines` with that uuid.
+//! `pipeline run` takes `--var KEY=VALUE` as the real one does, and prints the new run's uuid,
+//! `{N}`, N being `triggered`.
 //!
 //! The writes answer as `bkt` does when they work: `pr create` prints `✓ Created pull request #N`
 //! (N is `created`, 1 by default), `pr merge` prints `✓ Merged pull request #N` and `pipeline run`
-//! `✓ Triggered pipeline …`. `pr comment <id> --text T` prints `✓ Commented on pull request #N`
+//! `✓ Triggered pipeline {N} on <w>/<r> (PENDING)`. `pr comment <id> --text T` prints `✓ Commented on pull request #N`
 //! and `pr edit <id>` (`--title`, `--description`, at least one) `✓ Updated pull request #N`, as
 //! `pkg/cmd/pr/pr.go` does (`:1707`, `:829`); both need a pull request of `pulls`, as does `pr decline <id>` (it prints `Declined pull
 //! request #N`, `pkg/cmd/pr/pr.go` v0.37.0). With `strategies` (`{"acme/api": ["merge_commit"]}`), `pr merge` fails for a `--strategy` the
@@ -279,17 +281,14 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 return 1;
             };
             let number = build.parse::<u64>().unwrap_or(0);
-            payload["pipeline"] = json!({"build_number": number});
-            // Its uuid, when the script's pipelines hold the run.
-            if let Some(uuid) = script["pipelines"][&key]
+            // The run as the script's pipelines hold it (its uuid, state and times), when they do.
+            payload["pipeline"] = script["pipelines"][&key]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .find(|pipeline| pipeline["build_number"] == number)
-                .and_then(|pipeline| pipeline.get("uuid"))
-            {
-                payload["pipeline"]["uuid"] = uuid.clone();
-            }
+                .cloned()
+                .unwrap_or_else(|| json!({"build_number": number}));
             payload["steps"] = steps.clone();
         }
         ["pipeline", "logs", build] => {
@@ -378,7 +377,10 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             return 0;
         }
         ["pipeline", "run"] => {
-            println!("✓ Triggered pipeline {{0000}} on {key} (PENDING)");
+            println!(
+                "✓ Triggered pipeline {{{}}} on {key} (PENDING)",
+                script["triggered"].as_u64().unwrap_or(1)
+            );
             return 0;
         }
         _ => {
@@ -393,10 +395,23 @@ fn answer(script: &Value, args: &[String]) -> i32 {
     0
 }
 
-/// The body the script holds for `path`: its `api`, else the `pipelines` of a Cloud repository.
+/// The body the script holds for `path`: its `api`, else the `pipelines` of a Cloud repository,
+/// or one of them by its uuid.
 fn body_of(script: &Value, path: &str) -> Option<Value> {
     if let Some(body) = script["api"].get(path) {
         return Some(body.clone());
+    }
+    if let Some((repository, uuid)) = path
+        .strip_prefix("/repositories/")
+        .and_then(|rest| rest.split_once("/pipelines/"))
+        .filter(|(_, uuid)| !uuid.is_empty() && !uuid.contains('/'))
+    {
+        return script["pipelines"]
+            .get(repository)?
+            .as_array()?
+            .iter()
+            .find(|pipeline| pipeline["uuid"].as_str() == Some(uuid))
+            .cloned();
     }
     let repository = path
         .strip_prefix("/repositories/")?

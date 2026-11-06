@@ -110,6 +110,8 @@ pub enum Command {
         target: Target,
         pick: Pick,
         message: String,
+        /// The pictures that go with the first message.
+        images: Vec<Picture>,
     },
     /// Enables or disables a provider in `providers.toml`.
     SetProvider {
@@ -295,6 +297,23 @@ pub enum Command {
         run: String,
         act: RunAct,
     },
+    /// The services of the machine (`service.list`).
+    Services,
+    /// A change to the services: `service.add`, `service.edit` or `service.remove`, with its
+    /// parameters.
+    ServiceWrite {
+        method: &'static str,
+        params: Value,
+    },
+    /// Starts a service (and what it needs first), or stops it.
+    ServiceAct {
+        name: String,
+        start: bool,
+    },
+    /// The output of a service's run, as a run's.
+    ServiceOutput {
+        run: String,
+    },
     /// The project's setup.
     Setup {
         project: String,
@@ -357,6 +376,8 @@ pub enum Command {
     /// A message to a session's root agent: the only agent the window writes to.
     Reply {
         session: String,
+        /// The message being sent, as the composer keeps it until the daemon answers.
+        key: u64,
         message: String,
         /// Pasted or dropped pictures that go with it, as the clipboard gave them.
         images: Vec<Picture>,
@@ -828,6 +849,23 @@ pub enum Outcome {
         project: String,
         answer: RunAnswer,
     },
+    Services {
+        listed: Result<Vec<crate::services::ServiceInfo>, String>,
+    },
+    /// A change to the services was made, or refused with why.
+    ServiceWritten {
+        refused: Option<String>,
+    },
+    /// A service was started (with what started) or stopped, or the daemon refused with why.
+    ServiceActed {
+        name: String,
+        start: bool,
+        answer: Result<Value, String>,
+    },
+    /// The output of a service's run.
+    ServiceOutput {
+        output: Option<Box<CommandOutput>>,
+    },
     Setup {
         project: String,
         listed: Result<Vec<flottille_core::project::SetupStep>, String>,
@@ -846,7 +884,8 @@ pub enum Outcome {
     /// A message to the session's root was taken, or refused with why.
     Replied {
         session: String,
-        refused: Option<String>,
+        key: u64,
+        answer: Result<crate::session::Accepted, String>,
     },
     /// A waiting message was taken back, with its text and pictures, or the daemon refused with
     /// why ("already read by the agent").
@@ -1140,6 +1179,7 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             target,
             pick,
             message,
+            images,
         } => {
             let workspace = match target {
                 Target::Main => None,
@@ -1148,7 +1188,7 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             match ask_alone(
                 connect,
                 "agent.start",
-                start_params(&project, workspace.as_deref(), &pick, &message),
+                start_params(&project, workspace.as_deref(), &pick, &message, &images),
                 bounds.quick,
             ) {
                 Ok(Ok(started)) => started_outcome(&project, &started),
@@ -1742,6 +1782,48 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             project,
             answer: ask_run(connect, act, &run, bounds.quick),
         },
+        Command::Services => {
+            let listed = ask_alone(connect, "service.list", json!({}), bounds.quick);
+            Outcome::Services {
+                listed: listed.and_then(|listed| listed).map(|listed| {
+                    listed["services"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(crate::services::ServiceInfo::of)
+                        .collect()
+                }),
+            }
+        }
+        Command::ServiceWrite { method, params } => {
+            let refused = match ask_alone(connect, method, params, bounds.quick) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::ServiceWritten { refused }
+        }
+        Command::ServiceAct { name, start } => {
+            // A start waits for what the service needs to be ready.
+            let (method, bound) = match start {
+                true => ("service.start", bounds.slow),
+                false => ("service.stop", bounds.quick),
+            };
+            let answer = ask_alone(connect, method, json!({"name": name}), bound).and_then(|a| a);
+            Outcome::ServiceActed {
+                name,
+                start,
+                answer,
+            }
+        }
+        Command::ServiceOutput { run } => {
+            let output = ask_alone(connect, "run.output", json!({"run": run}), bounds.quick);
+            Outcome::ServiceOutput {
+                output: match output {
+                    Ok(Ok(output)) => Some(Box::new(CommandOutput::of(&output))),
+                    Ok(Err(_)) | Err(_) => None,
+                },
+            }
+        }
         Command::Setup { project } => {
             let listed = ask_alone(
                 connect,
@@ -1790,24 +1872,29 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
         }
         Command::Reply {
             session,
+            key,
             message,
             images,
-        } => match ask_alone(
-            connect,
-            "agent.send",
-            json!({"agent": session, "message": message,
-                "images": images.iter().map(Picture::to_json).collect::<Vec<_>>()}),
-            bounds.quick,
-        ) {
-            Ok(Ok(_)) => Outcome::Replied {
+        } => {
+            let answer = match ask_alone(
+                connect,
+                "agent.send",
+                json!({"agent": session, "message": message,
+                    "images": images.iter().map(Picture::to_json).collect::<Vec<_>>()}),
+                bounds.quick,
+            ) {
+                Ok(Ok(taken)) => Ok(crate::session::Accepted {
+                    delivery: taken["delivery"].as_str().unwrap_or_default().to_owned(),
+                    after: taken["after"].as_u64().unwrap_or_default(),
+                }),
+                Ok(Err(why)) | Err(why) => Err(why),
+            };
+            Outcome::Replied {
                 session,
-                refused: None,
-            },
-            Ok(Err(why)) | Err(why) => Outcome::Replied {
-                session,
-                refused: Some(why),
-            },
-        },
+                key,
+                answer,
+            }
+        }
         Command::Unqueue {
             session,
             delivery,
@@ -2146,7 +2233,13 @@ fn workspace_outcome(
     }
 }
 
-fn start_params(project: &str, workspace: Option<&str>, pick: &Pick, message: &str) -> Value {
+fn start_params(
+    project: &str,
+    workspace: Option<&str>,
+    pick: &Pick,
+    message: &str,
+    images: &[Picture],
+) -> Value {
     // What is left out is sent as a null, which the daemon reads as absent: its to choose.
     json!({
         "project": project,
@@ -2155,6 +2248,7 @@ fn start_params(project: &str, workspace: Option<&str>, pick: &Pick, message: &s
         "model": pick.model,
         "effort": pick.effort,
         "message": message,
+        "images": images.iter().map(Picture::to_json).collect::<Vec<_>>(),
     })
 }
 
@@ -2409,6 +2503,7 @@ mod tests {
             target: Target::Main,
             pick: Pick::default(),
             message: "Fix the timeout".into(),
+            images: Vec::new(),
         }
     }
 

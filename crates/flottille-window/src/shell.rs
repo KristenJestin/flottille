@@ -83,6 +83,8 @@ pub enum Selection {
     Settings,
     /// A project's own settings.
     ProjectSettings(String),
+    /// The services of the machine.
+    Services,
 }
 
 pub struct Shell {
@@ -138,6 +140,8 @@ pub struct Shell {
     /// Each session's composer, made when its page first opens: a draft and a send belong to
     /// their session.
     replies: HashMap<String, Entity<Reply>>,
+    /// Each composer's changes, which the session's row says as a pencil while it is left.
+    _drafts: Vec<Subscription>,
     /// The providers as the daemon last listed them, and the number of that read.
     providers: Providers,
     providers_read: u64,
@@ -145,6 +149,8 @@ pub struct Shell {
     /// a composer with no project default starts there.
     last_pick: Option<Pick>,
     settings: Entity<SettingsPage>,
+    /// The services page, one for the window's life.
+    services: Entity<crate::services::ServicesPage>,
     /// The editor of the user's rules, on the settings page.
     rules: Entity<RulesEditor>,
     /// The notice of the Auto judge Flottille picked was dismissed here, before the daemon says
@@ -237,9 +243,13 @@ impl Shell {
                 workspaces.clone(),
             )
         });
+        let services = {
+            let this = this.clone();
+            cx.new(|cx| crate::services::ServicesPage::new(this, cx))
+        };
         let main = {
-            let (this, settings) = (this.clone(), settings.clone());
-            cx.new(|cx| MainArea::new(this, settings, cx))
+            let (this, settings, services) = (this.clone(), settings.clone(), services.clone());
+            cx.new(|cx| MainArea::new(this, settings, services, cx))
         };
         let left = cx.new(|_| Drawer::new("tree-drawer", Side::Left, px(SIDEBAR), sidebar.clone()));
         let bell = cx.new(|_| BellList::new(this.clone()));
@@ -292,10 +302,12 @@ impl Shell {
             session_page: None,
             _chose: None,
             replies: HashMap::new(),
+            _drafts: Vec::new(),
             providers: Providers::default(),
             providers_read: 0,
             last_pick: None,
             settings,
+            services,
             rules,
             judge_noticed: false,
             appearance_asked: 0,
@@ -442,6 +454,20 @@ impl Shell {
         (self.follow.opener)(std::path::Path::new(url));
     }
 
+    /// Tells a session's row whether its composer holds a draft; the row says it as a pencil
+    /// while the session is not the open one.
+    fn say_draft(&self, session: &str, cx: &mut Context<Self>) {
+        let held = self
+            .replies
+            .get(session)
+            .is_some_and(|reply| reply.read(cx).holds_draft());
+        if let Some(row) = self.sessions.get(session)
+            && row.read(cx).draft() != held
+        {
+            row.update(cx, |row, cx| row.set_draft(held, cx));
+        }
+    }
+
     /// The composer of a session whose page was opened.
     pub fn reply_of(&self, session: &str) -> Option<&Entity<Reply>> {
         self.replies.get(session)
@@ -495,15 +521,20 @@ impl Shell {
             started_by,
         };
         let this = cx.entity().downgrade();
-        let reply = self
-            .replies
-            .entry(id.clone())
-            .or_insert_with(|| {
-                let (this, id) = (this.clone(), id.clone());
-                let project = opened.project.clone();
-                cx.new(|cx| Reply::new(this, id, project, window, cx))
-            })
-            .clone();
+        let reply = match self.replies.get(id) {
+            Some(reply) => reply.clone(),
+            None => {
+                let (shell, project) = (this.clone(), opened.project.clone());
+                let session = id.clone();
+                let reply = cx.new(|cx| Reply::new(shell, session, project, window, cx));
+                self._drafts.push(cx.observe(&reply, |shell, reply, cx| {
+                    let session = reply.read(cx).session().to_owned();
+                    shell.say_draft(&session, cx);
+                }));
+                self.replies.insert(id.clone(), reply.clone());
+                reply
+            }
+        };
         if self.providers.known {
             let mode = reply.read(cx).mode.clone();
             let chosen = self.providers.judge.is_some();
@@ -644,6 +675,11 @@ impl Shell {
             Update::DeveloperChanged => self.actions.send(Command::DeveloperRead),
             Update::ToolResultsChanged => self.actions.send(Command::ToolResultsRead),
             Update::SessionsChanged => self.actions.send(Command::SessionsRead),
+            Update::ServicesChanged => {
+                if self.main.read(cx).services_page().is_some() {
+                    self.actions.send(Command::Services);
+                }
+            }
             // A default that changed changes the folder every project shows, so the open
             // project's section reads again too.
             Update::WorkspacesFolderChanged { project } => {
@@ -730,9 +766,13 @@ impl Shell {
                     page.update(cx, |page, cx| page.picture_read(name, image, cx));
                 }
             }
-            Outcome::Replied { session, refused } => {
+            Outcome::Replied {
+                session,
+                key,
+                answer,
+            } => {
                 if let Some(reply) = self.replies.get(&session).cloned() {
-                    reply.update(cx, |reply, cx| reply.replied(refused, window, cx));
+                    reply.update(cx, |reply, cx| reply.replied(key, answer, cx));
                 }
             }
             Outcome::Unqueued {
@@ -1252,6 +1292,34 @@ impl Shell {
                     tasks.update(cx, |tasks, cx| tasks.run_answered(answer, cx));
                 }
             }
+            Outcome::Services { listed } => {
+                // The open task form offers them as what a task may need, or says why it cannot.
+                if let Some(page) = self.project_settings.clone() {
+                    let names = listed
+                        .as_ref()
+                        .map(|services| services.iter().map(|s| s.name.clone()).collect())
+                        .map_err(Clone::clone);
+                    let section = page.read(cx).tasks().clone();
+                    section.update(cx, |section, cx| section.set_services(names, cx));
+                }
+                self.services.update(cx, |page, cx| page.listed(listed, cx));
+            }
+            Outcome::ServiceWritten { refused } => {
+                self.services
+                    .update(cx, |page, cx| page.written(refused, cx));
+            }
+            Outcome::ServiceActed {
+                name,
+                start,
+                answer,
+            } => {
+                self.services
+                    .update(cx, |page, cx| page.acted(&name, start, answer, cx));
+            }
+            Outcome::ServiceOutput { output } => {
+                self.services
+                    .update(cx, |page, cx| page.output(output.map(|o| *o), cx));
+            }
             Outcome::Setup { project, listed } => {
                 if let Some(page) = self.settings_of_project(&project, cx) {
                     let section = page.read(cx).setup().clone();
@@ -1552,6 +1620,13 @@ impl Shell {
             }
             if row.read(cx).commands() != session.commands {
                 row.update(cx, |row, cx| row.set_commands(session.commands, cx));
+            }
+            let held = self
+                .replies
+                .get(&session.id)
+                .is_some_and(|reply| reply.read(cx).holds_draft());
+            if row.read(cx).draft() != held {
+                row.update(cx, |row, cx| row.set_draft(held, cx));
             }
             // Ended, it sits among other projects' sessions: its row says whose it is.
             let scope = session.ended.then_some(session.project.as_str());
@@ -1962,6 +2037,14 @@ impl Shell {
                 .send(Command::WorkspacesFolderRead { project: None });
             self.ask_appearance(None);
         }
+        // Left, the services page stops reading the output it shows: nothing is in sight.
+        if self.selected == Some(Selection::Services) && selection != Selection::Services {
+            self.services.update(cx, |page, cx| page.close_output(cx));
+        }
+        // Opened, the services are read again: what runs changes outside the window too.
+        if selection == Selection::Services && self.selected != Some(Selection::Services) {
+            self.services.update(cx, |page, cx| page.opened(cx));
+        }
         let page = self.page_of(&selection, cx);
         self.selected = Some(selection);
         let forms = self.forms_for(&page, window, cx);
@@ -1977,6 +2060,7 @@ impl Shell {
     fn page_of(&self, selection: &Selection, cx: &App) -> Page {
         match selection {
             Selection::Settings => Page::Settings,
+            Selection::Services => Page::Services,
             // A project just added is not in the daemon's last read yet: its page, open, stays.
             Selection::ProjectSettings(name) => {
                 let open = self
@@ -2030,7 +2114,7 @@ impl Shell {
             Some(Selection::Project(name)) => Some(name.clone()),
             Some(Selection::Session(id)) => self.snapshot.session(id).map(|s| s.project.clone()),
             Some(Selection::ProjectSettings(name)) => Some(name.clone()),
-            Some(Selection::Settings) | None => None,
+            Some(Selection::Settings | Selection::Services) | None => None,
         }
         .or_else(|| self.snapshot.projects.first().map(|p| p.name.clone()));
         if let Some(project) = project {
@@ -2296,6 +2380,7 @@ impl Render for TopBar {
         let search_shell = self.shell.clone();
         let menu_shell = self.shell.clone();
         let settings_shell = self.shell.clone();
+        let services_shell = self.shell.clone();
         let mut bell =
             Button::icon("bell", Icon::Bell, "Waiting for you").on_click(move |_, _, cx| {
                 shell.update(cx, |shell, cx| shell.toggle_bell(cx)).ok();
@@ -2374,6 +2459,15 @@ impl Render for TopBar {
                         .text_color(mix(p.faint, p.text, hover))
                 },
             ))
+            .child(
+                Button::icon("services", Icon::Service, "Services").on_click(
+                    move |_, window, cx| {
+                        services_shell
+                            .update(cx, |shell, cx| shell.open(Selection::Services, window, cx))
+                            .ok();
+                    },
+                ),
+            )
             .child(
                 Button::icon("settings", Icon::Settings, "Settings").on_click(
                     move |_, window, cx| {

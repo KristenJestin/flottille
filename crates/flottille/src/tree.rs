@@ -295,6 +295,7 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
         daemon,
         &project,
         New {
+            id: None,
             workspace: workspace.clone(),
             preparing,
             role,

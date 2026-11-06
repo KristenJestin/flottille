@@ -9,9 +9,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use serde_norway::Value as Yaml;
 
+use super::followed::{self, Started};
 use super::{
     Forge, ForgeCall, NO_FORGE, bitbucket, chosen, ci, declared_forge, events, gh_json, gh_text,
-    logs, place_checkouts, signed_in,
+    logs, place_checkouts, signed_in, yaml,
 };
 use crate::daemon::Daemon;
 use crate::git::{self, Class};
@@ -49,7 +50,7 @@ pub(crate) struct Variable {
 
 /// One action of the family, once the gate let it through. A secured variable's value is said in
 /// no answer, whatever the forge echoed of it.
-pub(super) async fn call(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
+pub(super) async fn call(daemon: &Daemon, agent: &str, place: &Place, asked: ForgeCall) -> Outcome {
     let secured: Vec<String> = asked
         .variables
         .iter()
@@ -62,7 +63,7 @@ pub(super) async fn call(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Ou
             .iter()
             .fold(text, |text, value| text.replace(value.as_str(), "[masked]"))
     };
-    match acted(daemon, place, asked).await {
+    match acted(daemon, agent, place, asked).await {
         Outcome::Done(text) => Outcome::Done(hide(text)),
         Outcome::Refused(text) => Outcome::Refused(hide(text)),
         Outcome::Failed(text) => Outcome::Failed(hide(text)),
@@ -70,7 +71,7 @@ pub(super) async fn call(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Ou
     }
 }
 
-async fn acted(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
+async fn acted(daemon: &Daemon, agent: &str, place: &Place, asked: ForgeCall) -> Outcome {
     let action = asked.action.as_str();
     if let Some(refusal) = malformed(&asked) {
         return Outcome::Refused(refusal);
@@ -131,6 +132,13 @@ async fn acted(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
     };
     let run = asked.run.unwrap_or_default();
     let step = asked.step.as_deref().unwrap_or_default();
+    // A run started is followed unless the agent said no.
+    let follow = |(outcome, started): (Outcome, Option<Started>)| match outcome {
+        Outcome::Done(text) if asked.follow != Some(false) => {
+            Outcome::Done(text + &followed::follow(daemon, agent, place, &path, &forge, started))
+        }
+        outcome => outcome,
+    };
     match (&forge, action) {
         (_, "pipelines") => listed(&checkout, &forge, &path, &branch.unwrap_or_default()).await,
         (Forge::Bitbucket { .. }, action) => {
@@ -147,7 +155,7 @@ async fn acted(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
                     let pipeline = asked.pipeline.as_deref().unwrap_or_default();
                     let variables = asked.variables.unwrap_or_default();
                     let branch = branch.unwrap_or_default();
-                    bitbucket_run(&forge, context, pipeline, &branch, &variables).await
+                    follow(bitbucket_run(&forge, context, pipeline, &branch, &variables).await)
                 }
                 _ => bitbucket_stop(&forge, context, run).await,
             }
@@ -158,7 +166,7 @@ async fn acted(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
         (Forge::GitHub { .. }, "run") => {
             let pipeline = asked.pipeline.as_deref().unwrap_or_default();
             let variables = asked.variables.unwrap_or_default();
-            github_run(&forge, pipeline, &branch.unwrap_or_default(), &variables).await
+            follow(github_run(&forge, pipeline, &branch.unwrap_or_default(), &variables).await)
         }
         (Forge::GitHub { .. }, "stop") => {
             let id = run.to_string();
@@ -384,7 +392,8 @@ impl Unread {
     }
 }
 
-/// A file at a commit, parsed, merge keys (`<<: *anchor`) applied: why not when it cannot be read.
+/// A file at a commit, parsed, a repeated key read as the forge reads it (the last one kept, said
+/// in the notes), merge keys (`<<: *anchor`) applied: why not when it cannot be read.
 async fn yaml_at(
     checkout: &super::Checkout,
     reference: &str,
@@ -414,8 +423,8 @@ async fn yaml_at(
         }
         Err(why) => return Err(Unread::Git(why)),
     };
-    let mut yaml: Yaml = serde_norway::from_str(&text).map_err(|e| Unread::Yaml(e.to_string()))?;
-    let mut notes = Vec::new();
+    let (mut yaml, mut notes) =
+        yaml::parse(&text, path).map_err(|e| Unread::Yaml(e.to_string()))?;
     // `Value` keeps `<<` as a key of its own: the anchors it names are merged in, or the file is
     // used as written and the note says so.
     let mut merged = yaml.clone();
@@ -430,7 +439,7 @@ async fn yaml_at(
 }
 
 /// A YAML scalar as words.
-fn scalar(value: &Yaml) -> Option<String> {
+pub(super) fn scalar(value: &Yaml) -> Option<String> {
     match value {
         Yaml::String(text) => Some(text.clone()),
         Yaml::Number(number) => Some(number.to_string()),
@@ -745,7 +754,11 @@ fn runs_text(slug: &str, branch: Option<&str>, lines: Vec<String>, among: &str) 
 }
 
 /// `bkt pipeline view <run> --json`: the run and its steps.
-async fn bitbucket_seen(forge: &Forge, context: &str, run: u64) -> Result<Value, String> {
+pub(super) async fn bitbucket_seen(
+    forge: &Forge,
+    context: &str,
+    run: u64,
+) -> Result<Value, String> {
     let run = run.to_string();
     bitbucket::json(&bitbucket::command(
         forge,
@@ -855,14 +868,14 @@ async fn bitbucket_log(forge: &Forge, context: &str, run: u64, step: &str) -> Ou
 
 /// `run` on Bitbucket: `bkt pipeline run` when no variable is given; with variables, the API's own
 /// call through `bkt api`, since `bkt`'s `--var` splits a value at its commas and has no secured
-/// variable.
+/// variable. The run started, when the forge said its number.
 async fn bitbucket_run(
     forge: &Forge,
     context: &str,
     pipeline: &str,
     branch: &str,
     variables: &[Variable],
-) -> Outcome {
+) -> (Outcome, Option<Started>) {
     let slug = forge.slug();
     let pipeline = pipeline.trim();
     let selector = match pipeline.split_once(':') {
@@ -875,11 +888,14 @@ async fn bitbucket_run(
             || pattern.is_empty()
             || pattern.starts_with('-'))
     {
-        return Outcome::Refused(format!(
-            "refused: {pipeline:?} is no pipeline of Bitbucket: default, custom: <name>, \
-             branches: <pattern>, tags: <pattern> or pull-requests: <pattern>, as forge pipelines \
-             lists them"
-        ));
+        return (
+            Outcome::Refused(format!(
+                "refused: {pipeline:?} is no pipeline of Bitbucket: default, custom: <name>, \
+                 branches: <pattern>, tags: <pattern> or pull-requests: <pattern>, as forge \
+                 pipelines lists them"
+            )),
+            None,
+        );
     }
     let named = match selector {
         None => "default".to_owned(),
@@ -893,7 +909,7 @@ async fn bitbucket_run(
         let args = bitbucket::command(forge, context, &["pipeline", "run"], &flags);
         match bitbucket::text(&args).await {
             // It may say the run's number (`#43`); the API's answer always does.
-            Ok(said) => said
+            Ok(said) => match said
                 .split('#')
                 .nth(1)
                 .map(|rest| {
@@ -901,8 +917,12 @@ async fn bitbucket_run(
                         .take_while(char::is_ascii_digit)
                         .collect::<String>()
                 })
-                .and_then(|digits| digits.parse::<u64>().ok()),
-            Err(why) => return Outcome::Failed(why),
+                .and_then(|digits| digits.parse::<u64>().ok())
+            {
+                Some(number) => Some(number),
+                None => number_of(forge, context, &said).await,
+            },
+            Err(why) => return (Outcome::Failed(why), None),
         }
     } else {
         let mut target = json!({"type": "pipeline_ref_target", "ref_type": "branch",
@@ -928,21 +948,47 @@ async fn bitbucket_run(
         ];
         match bitbucket::json(&args).await {
             Ok(created) => created["build_number"].as_u64(),
-            Err(why) => return Outcome::Failed(why),
+            Err(why) => return (Outcome::Failed(why), None),
         }
     };
     let Forge::Bitbucket { owner, name, .. } = forge else {
         unreachable!("a Bitbucket repository")
     };
+    let link =
+        |number: u64| format!("https://bitbucket.org/{owner}/{name}/pipelines/results/{number}");
     let said = match number {
-        Some(number) => {
-            format!("#{number}, https://bitbucket.org/{owner}/{name}/pipelines/results/{number}")
-        }
+        Some(number) => format!("#{number}, {}", link(number)),
         None => "forge runs lists it".to_owned(),
     };
-    Outcome::Done(format!(
-        "The pipeline {named} was started on {branch} in {slug}: {said}."
-    ))
+    let started = number.map(|number| Started {
+        number,
+        pipeline: named.clone(),
+        branch: branch.to_owned(),
+        link: link(number),
+    });
+    (
+        Outcome::Done(format!(
+            "The pipeline {named} was started on {branch} in {slug}: {said}."
+        )),
+        started,
+    )
+}
+
+/// The number of the run `bkt pipeline run` named by its uuid (`{…}`) alone, read from the API;
+/// none when it named neither, or the read failed.
+async fn number_of(forge: &Forge, context: &str, said: &str) -> Option<u64> {
+    let uuid = said
+        .split_whitespace()
+        .find(|word| word.starts_with('{') && word.ends_with('}') && word.len() > 2)
+        .filter(|uuid| {
+            uuid.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "{}-".contains(c))
+        })?;
+    let path = format!("{}/pipelines/{uuid}", bitbucket::cloud_repository(forge));
+    bitbucket::json(&["api", &path, "--context", context])
+        .await
+        .ok()?["build_number"]
+        .as_u64()
 }
 
 /// `stop` on Bitbucket: the run's uuid, from `bkt pipeline view`, then the API's `stopPipeline`.
@@ -1132,7 +1178,7 @@ async fn github_run(
     workflow: &str,
     branch: &str,
     variables: &[Variable],
-) -> Outcome {
+) -> (Outcome, Option<Started>) {
     let repo = forge.gh_repository();
     let workflow = workflow.trim();
     let fields: Vec<String> = variables
@@ -1149,13 +1195,24 @@ async fn github_run(
             let link = said
                 .split_whitespace()
                 .find(|word| word.starts_with("https://") && word.contains("/actions/runs/"));
-            Outcome::Done(format!(
-                "The workflow {workflow} was started on {branch} in {}: {}.",
-                forge.slug(),
-                link.unwrap_or("forge runs lists it")
-            ))
+            let started = link.and_then(|link| {
+                Some(Started {
+                    number: link.rsplit('/').next()?.parse().ok()?,
+                    pipeline: workflow.to_owned(),
+                    branch: branch.to_owned(),
+                    link: link.to_owned(),
+                })
+            });
+            (
+                Outcome::Done(format!(
+                    "The workflow {workflow} was started on {branch} in {}: {}.",
+                    forge.slug(),
+                    link.unwrap_or("forge runs lists it")
+                )),
+                started,
+            )
         }
-        Err(why) => Outcome::Failed(why),
+        Err(why) => (Outcome::Failed(why), None),
     }
 }
 

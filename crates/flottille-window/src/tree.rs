@@ -5,11 +5,12 @@
 
 use std::collections::HashSet;
 
+use flottille_ui::color::mix;
 use flottille_ui::motion::{ENTER, PANEL};
 use flottille_ui::rows::TreeLevel;
 use flottille_ui::{
     AgentState, Button, Fold, Icon, Item, Listing, Menu, Modal, StateIcon, Status, TreeRow, fade,
-    meta, palette, presence, presence_of, section_label, space, tipped, tree_children,
+    hoverable, meta, palette, presence, presence_of, section_label, space, tipped, tree_children,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -95,6 +96,12 @@ pub fn session_unread_id(id: &str) -> ElementId {
 /// its label and its tooltip say what it means.
 pub fn session_mark_id(id: &str) -> ElementId {
     ElementId::Name(format!("mark-session-{id}").into())
+}
+
+/// The element id of the pencil a session's row shows while its composer holds a draft the user
+/// has not sent and has left.
+pub fn session_draft_id(id: &str) -> ElementId {
+    ElementId::Name(format!("draft-session-{id}").into())
 }
 
 /// The element id of the icon that says a command runs in a session.
@@ -714,6 +721,9 @@ pub struct SessionRow {
     /// What is new in the session since it was last opened, the last of it in words: a small dot
     /// on the row says it until the session is opened, unless a state takes its place.
     unread: Option<SharedString>,
+    /// Its composer holds something unsent: a pencil says it once the session is not the open
+    /// one.
+    draft: bool,
     /// What its state mark means, in words.
     said: SharedString,
     /// The words of the mark shown, kept while it folds away.
@@ -754,6 +764,7 @@ impl SessionRow {
             mark: Mark::new(cx),
             commands: 0,
             unread: None,
+            draft: false,
             said: SharedString::default(),
             words: SharedString::default(),
             active_at: 0,
@@ -870,6 +881,18 @@ impl SessionRow {
     pub fn set_unread(&mut self, unread: Option<&str>, cx: &mut Context<Self>) {
         if self.unread() != unread {
             self.unread = unread.map(|said| SharedString::from(said.to_owned()));
+            cx.notify();
+        }
+    }
+
+    /// Whether its composer holds a draft, in the session being open or not.
+    pub fn draft(&self) -> bool {
+        self.draft
+    }
+
+    pub fn set_draft(&mut self, draft: bool, cx: &mut Context<Self>) {
+        if self.draft != draft {
+            self.draft = draft;
             cx.notify();
         }
     }
@@ -1018,6 +1041,11 @@ impl Render for SessionRow {
                 .child(div().size(px(6.)).rounded_full().bg(p.acc))
                 .test_support(),
         );
+        let draft = presence(
+            ElementId::Name(format!("session-draft-fade-{}", self.id).into()),
+            self.draft && !self.selected,
+            self.draft_mark(window, cx).into_any_element(),
+        );
         // One mark: the state, the dot or the time take each other's place, one folding away as
         // the other comes. The state and the dot share the tooltip that says what they mean.
         let mark = flottille_ui::tipped(
@@ -1037,6 +1065,7 @@ impl Render for SessionRow {
         let last = div()
             .flex()
             .items_center()
+            .child(draft)
             .child(mark)
             .child(presence(
                 ElementId::Name(format!("meta-{}", self.id).into()),
@@ -1048,6 +1077,44 @@ impl Render for SessionRow {
             row = row.second(self.second_line(window, cx));
         }
         row.trailing(trailing(id, self.commands, last, cx))
+    }
+}
+
+/// The words the pencil of a draft says.
+const DRAFT_SAID: &str = "Draft not sent";
+
+impl SessionRow {
+    /// The pencil of an unsent draft, beside the row's own mark: its ink warms on the pointer.
+    fn draft_mark(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let pencil = hoverable(
+            div()
+                .id(ElementId::Name(format!("draft-ink-{}", self.id).into()))
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(14.))
+                .h(px(MARK)),
+            move |element, t| {
+                element.child(
+                    flottille_ui::icon(Icon::Edit)
+                        .size(px(12.))
+                        .text_color(mix(p.mute, p.text, t)),
+                )
+            },
+        );
+        flottille_ui::tipped(
+            div()
+                .id(session_draft_id(&self.id))
+                .flex_none()
+                .h(px(MARK))
+                .aria_label(DRAFT_SAID)
+                .child(pencil),
+            DRAFT_SAID,
+            MARK,
+            window,
+            cx,
+        )
     }
 }
 

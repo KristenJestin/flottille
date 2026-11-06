@@ -46,6 +46,8 @@
 //! - `child`: start a `sleep` in the process group at startup, recording its pid (`{"child": <pid>}`).
 //! - `stall`: never answer `session/new`, `session/load` or `session/resume`: an agent stuck while
 //!   it opens.
+//! - `die_on_open`: exit with that code on `session/new`, `session/load` or `session/resume`: an
+//!   agent whose process dies before it takes a prompt.
 //! - `models`, `efforts`: the values of the `model` and `thought_level` options, the first one
 //!   current; no effort option without `efforts`.
 //! - `refuse`: values the options list but `session/set_config_option` refuses, as an agent whose
@@ -244,6 +246,10 @@ impl Agent {
         let params = &request["params"];
         let session = params["sessionId"].as_str().unwrap_or_default().to_owned();
         let method = request["method"].as_str().unwrap_or_default();
+        let opens = matches!(method, "session/new" | "session/load" | "session/resume");
+        if opens && let Some(code) = self.script["die_on_open"].as_i64() {
+            std::process::exit(code as i32);
+        }
         if self.script["stall"] == true
             && method.starts_with("session/")
             && method != "session/prompt"

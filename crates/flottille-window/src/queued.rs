@@ -6,21 +6,25 @@
 //! A waiting message can still be changed (never one the root has read): Cancel takes it back,
 //! Edit takes it back into the composer, Send now stops the root's turn and hands it this one next.
 //! The daemon decides each, in one transaction; the window only asks.
+//!
+//! A message sent from the composer while the root works shows here at once, being sent, and
+//! becomes the waiting one in its place once the daemon put it in the queue.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use flottille_ui::{
-    Button, Icon, Item, Listing, Placement, commanded_text, icon, palette, space, tipped,
+    Button, Icon, Item, Listing, Placement, changing, commanded_text, icon, palette, presence,
+    space, tipped,
 };
 use gpui_kit::{
-    AnyElement, Context, ElementId, InteractiveElement, IntoElement, ParentElement, Render,
+    AnyElement, Context, ElementId, Entity, InteractiveElement, IntoElement, ParentElement, Render,
     SharedString, StatefulInteractiveElement as _, Styled, StyledImage as _, TestSupportExt as _,
     WeakEntity, Window, div, px,
 };
 
 use crate::actions::Command;
-use crate::session::command_chips;
+use crate::session::{NOT_SENT_LINE, Pending, RETRY, Reply, SENDING, command_chips};
 use crate::session_link::Queued;
 use crate::shell::Shell;
 
@@ -34,7 +38,11 @@ pub struct QueuedMessages {
     /// The session's root: the only agent a message waits for.
     session: String,
     messages: Vec<Queued>,
-    list: Listing<Queued>,
+    /// The messages sent from the composer while the root worked, not in the queue yet.
+    pending: Vec<Pending>,
+    /// The waiting messages that were one of those, by delivery: the key they are drawn under.
+    aliases: HashMap<String, String>,
+    list: Listing<Entry>,
     /// The messages a request was sent for and not answered yet: their buttons wait.
     asked: HashSet<String>,
     /// The pictures of the waiting messages, read back from the daemon by name.
@@ -47,6 +55,8 @@ impl QueuedMessages {
             shell,
             session,
             messages: Vec::new(),
+            pending: Vec::new(),
+            aliases: HashMap::new(),
             list: Listing::default(),
             asked: HashSet::new(),
             pictures: HashMap::new(),
@@ -84,9 +94,33 @@ impl QueuedMessages {
 
     pub fn set(&mut self, messages: Vec<Queued>, cx: &mut Context<Self>) {
         if self.messages != messages {
+            self.aliases
+                .retain(|delivery, _| messages.iter().any(|m| m.delivery == *delivery));
             self.messages = messages;
             cx.notify();
         }
+    }
+
+    /// The messages being sent that are to wait here.
+    pub fn set_pending(&mut self, pending: Vec<Pending>, cx: &mut Context<Self>) {
+        let said = |list: &[Pending]| -> Vec<(u64, Option<String>)> {
+            list.iter().map(|p| (p.key, p.refused.clone())).collect()
+        };
+        if said(&self.pending) != said(&pending) {
+            self.pending = pending;
+            cx.notify();
+        }
+    }
+
+    /// The message being sent `key` is the waiting `delivery` now: it is drawn in its place.
+    pub fn alias(&mut self, delivery: String, key: u64, cx: &mut Context<Self>) {
+        self.aliases.insert(delivery, sending_key(key));
+        cx.notify();
+    }
+
+    fn reply(&self, cx: &gpui_kit::App) -> Option<Entity<Reply>> {
+        let shell = self.shell.upgrade()?;
+        shell.read(cx).reply_of(&self.session).cloned()
     }
 
     /// Asks the daemon to take the message back (`edit`: to put it back in the composer).
@@ -139,6 +173,18 @@ impl QueuedMessages {
     }
 }
 
+/// The key a message being sent is drawn under, and the waiting one it becomes.
+fn sending_key(key: u64) -> String {
+    format!("pending-{key}")
+}
+
+/// A bubble under the conversation: a message waiting for the root, or one being sent.
+#[derive(Clone)]
+enum Entry {
+    Waiting(Queued),
+    Sending(Pending),
+}
+
 /// What a waiting message's buttons are called.
 pub const SEND_NOW: &str = "Send now";
 pub const EDIT: &str = "Edit";
@@ -157,31 +203,52 @@ pub fn queued_id(delivery: &str) -> ElementId {
 impl Render for QueuedMessages {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let now = cx.background_executor().now();
-        self.list.sync(
-            self.messages
-                .iter()
-                .map(|m| (m.delivery.clone(), m.clone())),
-            now,
-            cx.reduce_motion(),
-        );
+        let entries = self
+            .messages
+            .iter()
+            .map(|m| {
+                let key = self.aliases.get(&m.delivery).cloned();
+                (
+                    key.unwrap_or_else(|| m.delivery.clone()),
+                    Entry::Waiting(m.clone()),
+                )
+            })
+            .chain(
+                self.pending
+                    .iter()
+                    .map(|p| (sending_key(p.key), Entry::Sending(p.clone()))),
+            );
+        self.list.sync(entries, now, cx.reduce_motion());
         let p = palette(cx);
-        let listed: Vec<(String, Queued, Placement)> = self
+        let listed: Vec<(String, Entry, Placement)> = self
             .list
             .rows()
             .map(|row| (row.key.to_owned(), row.value.clone(), row.placement))
             .collect();
         let items: Vec<AnyElement> = listed
             .into_iter()
-            .map(|(key, message, placement)| {
-                let text = SharedString::from(message.text.clone());
-                let thumbs = (!message.pictures.is_empty()).then(|| {
+            .map(|(key, entry, placement)| {
+                let (text, commands) = match &entry {
+                    Entry::Waiting(m) => (m.text.clone(), m.commands.clone()),
+                    Entry::Sending(p) => (p.text.clone(), Vec::new()),
+                };
+                let text = SharedString::from(text);
+                let pictures: Vec<Option<Arc<gpui_kit::Image>>> = match &entry {
+                    Entry::Waiting(m) => m
+                        .pictures
+                        .iter()
+                        .map(|name| self.pictures.get(name).cloned())
+                        .collect(),
+                    Entry::Sending(p) => p.images.iter().cloned().map(Some).collect(),
+                };
+                let thumbs = (!pictures.is_empty()).then(|| {
                     div()
                         .id(ElementId::Name(format!("queued-{key}-images").into()))
                         .flex()
                         .flex_wrap()
                         .justify_end()
                         .gap(space::SM)
-                        .children(message.pictures.iter().enumerate().map(|(n, name)| {
+                        .children(pictures.into_iter().enumerate().map(|(n, picture)| {
                             let thumb = div()
                                 .id(ElementId::Name(format!("queued-{key}-image-{n}").into()))
                                 .flex_none()
@@ -191,9 +258,9 @@ impl Render for QueuedMessages {
                                 .border_color(p.line2)
                                 .bg(p.card)
                                 .overflow_hidden();
-                            match self.pictures.get(name) {
+                            match picture {
                                 Some(picture) => thumb.child(
-                                    gpui_kit::img(picture.clone())
+                                    gpui_kit::img(picture)
                                         .size_full()
                                         .rounded(px(6.))
                                         .object_fit(gpui_kit::ObjectFit::Cover),
@@ -204,32 +271,60 @@ impl Render for QueuedMessages {
                         }))
                 });
                 // What the user typed, each command a chip in it.
-                let shown = match message.commands.is_empty() {
+                let shown = match commands.is_empty() {
                     true => text.clone().into_any_element(),
-                    false => commanded_text(
-                        &message.text,
-                        &command_chips(&message.text, &message.commands),
-                        cx,
-                    )
-                    .into_any_element(),
+                    false => commanded_text(&text, &command_chips(&text, &commands), cx)
+                        .into_any_element(),
                 };
+                // One line says where it is: waiting, being sent, or refused and why.
                 let waits_id = ElementId::Name(format!("queued-{key}-waits").into());
-                let waits = tipped(
+                let line = |glyph: Icon, said: SharedString, ink| {
                     div()
-                        .id(waits_id)
+                        .id(waits_id.clone())
                         .flex()
                         .items_center()
                         .justify_end()
                         .gap(space::XS)
                         .text_size(px(11.5))
-                        .text_color(p.faint)
-                        .aria_label(SharedString::from(WAITS))
-                        .child(icon(Icon::Clock).size(px(11.)).text_color(p.faint))
-                        .child(WAITS),
-                    WAITS_FULL,
-                    16.,
-                    window,
-                    cx,
+                        .text_color(ink)
+                        .aria_label(said.clone())
+                        .child(icon(glyph).size(px(11.)).text_color(ink))
+                        .child(said)
+                };
+                let (said, line) = match &entry {
+                    Entry::Waiting(_) => (
+                        SharedString::from(WAITS),
+                        tipped(
+                            line(Icon::Clock, WAITS.into(), p.faint),
+                            WAITS_FULL,
+                            16.,
+                            window,
+                            cx,
+                        )
+                        .into_any_element(),
+                    ),
+                    Entry::Sending(Pending {
+                        refused: Some(why), ..
+                    }) => {
+                        let said = SharedString::from(format!("{NOT_SENT_LINE} · {why}"));
+                        (
+                            said.clone(),
+                            line(Icon::Warning, said, p.fail)
+                                .test_support()
+                                .into_any_element(),
+                        )
+                    }
+                    Entry::Sending(_) => (
+                        SharedString::from(SENDING),
+                        line(Icon::Clock, SENDING.into(), p.faint)
+                            .test_support()
+                            .into_any_element(),
+                    ),
+                };
+                let line = changing(
+                    ElementId::Name(format!("queued-{key}-line").into()),
+                    said,
+                    move |_| line,
                 );
                 let bubble = div()
                     .id(queued_id(&key))
@@ -257,35 +352,68 @@ impl Render for QueuedMessages {
                             .child(shown)
                             .test_support(),
                     )
-                    .child(waits)
+                    .child(line)
                     .test_support();
-                let waiting = self.asked.contains(&key);
-                let button = |which: &str, label: &str, glyph: Icon| {
-                    Button::quiet(queued_button(&key, which), label.to_owned())
-                        .leading(glyph)
-                        .disabled(waiting)
+                let buttons: Vec<AnyElement> = match &entry {
+                    Entry::Waiting(message) => {
+                        let delivery = message.delivery.clone();
+                        let waiting = self.asked.contains(&delivery);
+                        let button = |which: &str, label: &str, glyph: Icon| {
+                            Button::quiet(queued_button(&key, which), label.to_owned())
+                                .leading(glyph)
+                                .disabled(waiting)
+                        };
+                        let on =
+                            |act: fn(&mut QueuedMessages, &str, &mut Context<QueuedMessages>)| {
+                                let delivery = delivery.clone();
+                                cx.listener(move |this, _, _, cx| act(this, &delivery, cx))
+                            };
+                        vec![
+                            button("send-now", SEND_NOW, Icon::Send)
+                                .on_click(on(|this, delivery, cx| this.send_now(delivery, cx)))
+                                .into_any_element(),
+                            button("edit", EDIT, Icon::Edit)
+                                .on_click(on(|this, delivery, cx| this.unqueue(delivery, true, cx)))
+                                .into_any_element(),
+                            button("cancel", CANCEL, Icon::Close)
+                                .on_click(on(|this, delivery, cx| {
+                                    this.unqueue(delivery, false, cx)
+                                }))
+                                .into_any_element(),
+                        ]
+                    }
+                    Entry::Sending(pending) if pending.refused.is_some() => {
+                        let sent = pending.key;
+                        vec![
+                            Button::quiet(queued_button(&key, "retry"), RETRY)
+                                .leading(Icon::Restart)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(reply) = this.reply(cx) {
+                                        reply.update(cx, |reply, cx| reply.retry(sent, cx));
+                                    }
+                                }))
+                                .into_any_element(),
+                            Button::quiet(queued_button(&key, "edit"), EDIT)
+                                .leading(Icon::Edit)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    if let Some(reply) = this.reply(cx) {
+                                        reply.update(cx, |reply, cx| {
+                                            reply.edit_pending(sent, window, cx)
+                                        });
+                                    }
+                                }))
+                                .into_any_element(),
+                        ]
+                    }
+                    Entry::Sending(_) => Vec::new(),
                 };
-                let on = |act: fn(&mut QueuedMessages, &str, &mut Context<QueuedMessages>)| {
-                    let delivery = key.clone();
-                    cx.listener(move |this, _, _, cx| act(this, &delivery, cx))
-                };
+                let has_buttons = !buttons.is_empty();
                 let buttons = div()
                     .id(ElementId::Name(format!("queued-{key}-buttons").into()))
                     .flex()
                     .justify_end()
                     .gap(space::XS)
-                    .child(
-                        button("send-now", SEND_NOW, Icon::Send)
-                            .on_click(on(|this, delivery, cx| this.send_now(delivery, cx))),
-                    )
-                    .child(
-                        button("edit", EDIT, Icon::Edit)
-                            .on_click(on(|this, delivery, cx| this.unqueue(delivery, true, cx))),
-                    )
-                    .child(
-                        button("cancel", CANCEL, Icon::Close)
-                            .on_click(on(|this, delivery, cx| this.unqueue(delivery, false, cx))),
-                    )
+                    .children(buttons)
                     .test_support();
                 // The gap under it is its own: it folds away with it.
                 let content = div()
@@ -295,7 +423,14 @@ impl Render for QueuedMessages {
                     .items_end()
                     .gap(space::XS)
                     .child(bubble)
-                    .child(buttons);
+                    .child(
+                        presence(
+                            ElementId::Name(format!("queued-{key}-buttons-shown").into()),
+                            has_buttons,
+                            buttons,
+                        )
+                        .gap(space::XS),
+                    );
                 Item::new(
                     ElementId::Name(format!("queued-item-{key}").into()),
                     placement,
