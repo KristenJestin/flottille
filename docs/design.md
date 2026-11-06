@@ -234,7 +234,8 @@ Flottille's own tools:
   (never blocks). It is open at once, whatever the agent does next: in the inbox, as "needs you"
   on its session's row, as a card at its place in the conversation with the field that answers it
   (the call's own line says `asked you: <its first line>`), and in what `session_read` gives,
-  until the agent takes a message of the user.
+  until the agent takes a message of the user written after it (one message answers every question
+  open then), or its session is replaced or resumed.
 - `ask_parent {question}` (a child only, in place of `ask_user`): a question to its parent,
   delivered as `child-question`; the parent answers with `agent_send`.
 - `approval_answer {request_id, decision: forward | deny, why}`: answer a request held for the
