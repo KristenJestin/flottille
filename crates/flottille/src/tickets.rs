@@ -916,6 +916,15 @@ impl TicketsCall {
     }
 }
 
+/// The names of a list the agent gave, trimmed, the blank ones left out.
+fn named(list: &Option<Vec<String>>) -> Vec<String> {
+    list.iter()
+        .flatten()
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
 /// An assignee as `acli` takes it: `me` is its `@me`, the user signed in to it.
 fn acli_assignee(who: &str) -> &str {
     match who {
@@ -977,8 +986,27 @@ const WRITES: [&str; 10] = [
 /// ticket or a Jira project the tracker does not take, a status not named.
 pub fn unwritable(project: &Project, args: &Value) -> Option<String> {
     let action = args["action"].as_str()?;
+    if action != "sprints" && !args["board"].is_null() {
+        return Some(format!(
+            "refused: tickets {action} takes no board: board is for sprints"
+        ));
+    }
     if !WRITES.contains(&action) {
         return None;
+    }
+    // `acli` takes labels separated by commas, and `gh` too: one holding a comma would be two.
+    if let Some(label) = ["labels", "remove_labels"]
+        .iter()
+        .filter_map(|key| args[key].as_array())
+        .flatten()
+        .filter_map(Value::as_str)
+        .find(|label| label.contains(','))
+    {
+        return Some(format!(
+            "refused: a label holds no comma (\"{}\"): acli and gh take labels separated by \
+             commas and would split it",
+            masked(label)
+        ));
     }
     if let Some(why) = links::unwritable(project, action, args) {
         return Some(why);
@@ -1090,6 +1118,32 @@ fn unplannable(
                 format!("refused: tickets {action} takes no {key}: {key} is for create")
             }),
     }
+}
+
+/// What the card of a Jira creation in a sprint says of it: the sprint as the site names it and
+/// its board, found before the user is asked, with the site's Sprint field; refused when the
+/// sprint is not open, names several, or the field is not known. Nothing for another call.
+pub async fn sprint_says(project: &Project, args: &Value) -> Result<Vec<String>, String> {
+    let (Some("create"), Some(named), Some(tracker @ ProjectTracker::Jira { site, projects })) = (
+        args["action"].as_str(),
+        args["sprint"].as_str().filter(|s| !s.trim().is_empty()),
+        &project.tracker,
+    ) else {
+        return Ok(Vec::new());
+    };
+    let in_project = created_in(tracker, projects, args["project"].as_str())
+        .map_err(|why| format!("refused: {why}"))?;
+    jira_site(site, "written").await?;
+    let sprint = sprints::chosen(in_project, named)
+        .await
+        .map_err(|why| format!("refused: {why}"))?;
+    sprints::field_of(site, projects)
+        .await
+        .map_err(|why| format!("refused: {why}"))?;
+    Ok(vec![format!(
+        "It puts it in sprint \"{}\" (board \"{}\")",
+        sprint.name, sprint.board
+    )])
 }
 
 /// A work item type of a Jira project.
@@ -2001,7 +2055,8 @@ async fn create(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
     let mut args = vec![
         "issue", "create", "-R", &repo, "--title", title, "--body", body,
     ];
-    for label in asked.labels.iter().flatten() {
+    let labels = named(&asked.labels);
+    for label in &labels {
         args.extend(["--label", label.as_str()]);
     }
     match forge::gh_text(&args).await {
@@ -2034,13 +2089,6 @@ async fn write(daemon: &Daemon, project: &Project, asked: &TicketsCall, key: &Ke
     let action = asked.action.as_str();
     let body = asked.body.as_deref().filter(|b| !b.trim().is_empty());
     let title = asked.title.as_deref().filter(|t| !t.trim().is_empty());
-    let named = |list: &'_ Option<Vec<String>>| -> Vec<String> {
-        list.iter()
-            .flatten()
-            .map(|name| name.trim().to_owned())
-            .filter(|name| !name.is_empty())
-            .collect()
-    };
     // `me` is the user, `gh`'s `@me` as `acli`'s.
     let people = |list: &'_ Option<Vec<String>>| -> Vec<String> {
         named(list)
@@ -2263,7 +2311,7 @@ async fn create_work_item(
     if let Err(problem) = jira_site(site, "written").await {
         return Outcome::Failed(problem);
     }
-    let labels = asked.labels.as_deref().unwrap_or_default().join(",");
+    let labels = named(&asked.labels);
     let body = asked.body.as_deref().filter(|b| !b.trim().is_empty());
     let kind = asked.kind.as_deref().filter(|k| !k.trim().is_empty());
     let parent = asked
@@ -2283,6 +2331,7 @@ async fn create_work_item(
     let mut args = vec!["jira", "workitem", "create"];
     let description;
     let definition;
+    let joined;
     match &sprint {
         Some(sprint) => {
             let field = match sprints::field_of(site, projects).await {
@@ -2294,7 +2343,7 @@ async fn create_work_item(
             if let Some(body) = body {
                 item["description"] = crate::adf::from_markdown(body);
             }
-            if let Some(labels) = asked.labels.as_ref().filter(|l| !l.is_empty()) {
+            if !labels.is_empty() {
                 item["labels"] = json!(labels);
             }
             if let Some(parent) = &parent {
@@ -2322,7 +2371,8 @@ async fn create_work_item(
                 args.extend(["--type", kind]);
             }
             if !labels.is_empty() {
-                args.extend(["--label", &labels]);
+                joined = labels.join(",");
+                args.extend(["--label", &joined]);
             }
             if let Some(parent) = &parent {
                 args.extend(["--parent", parent]);
@@ -2353,8 +2403,36 @@ async fn create_work_item(
     // Assumed: the created work item as Jira's REST answers it, `{"key": …}`.
     let created = serde_json::from_str::<Value>(&said).ok();
     let Some(key) = created.as_ref().and_then(|item| item["key"].as_str()) else {
-        return Outcome::Done(format!(
-            "The ticket was opened in {project}: {}",
+        // What was asked beside the creation itself may not have been done: said, so that a
+        // work item opened in part is not taken for a whole one.
+        let mut unsure = Vec::new();
+        if let Some(sprint) = &sprint {
+            unsure.push(format!("its sprint \"{}\"", sprint.name));
+        }
+        if let Some(parent) = &parent {
+            unsure.push(format!("its parent {}", masked(parent)));
+        }
+        let mut not_done = String::new();
+        match (assignee, &sprint) {
+            // In a sprint, the assignee is set by an edit of the key acli did not say.
+            (Some(who), Some(_)) => {
+                not_done = format!("; it was not assigned to {}", assignee_said(who));
+            }
+            (Some(who), None) => unsure.push(format!("its assignee {}", assignee_said(who))),
+            (None, _) => {}
+        }
+        let unsure = match unsure.is_empty() {
+            true => String::new(),
+            false => format!(
+                ", and whether {} {} set is not known",
+                and_listed(&unsure.iter().map(String::as_str).collect::<Vec<_>>()),
+                if unsure.len() == 1 { "was" } else { "were" }
+            ),
+        };
+        return Outcome::Failed(format!(
+            "acli answered without the key of the new work item, so what it did is not known: it \
+             may have been opened in {project}{unsure}{not_done}; look at {project} before \
+             creating it again (acli said: {})",
             masked(said.trim())
         ));
     };
@@ -2393,10 +2471,13 @@ async fn create_work_item(
             match assigned {
                 Ok(()) => placed.push_str(&format!(", assigned to {}", assignee_said(who))),
                 Err(why) => {
+                    placed.push_str(", without its assignee");
                     after = format!(
-                        "; acli did not assign it to {}: {why}; it has no assignee",
+                        "; acli did not assign it to {}: {why}; it exists with no assignee: \
+                         assign it with edit once the user gives an email or an account id the \
+                         site knows",
                         assignee_said(who)
-                    )
+                    );
                 }
             }
         }

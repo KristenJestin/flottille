@@ -445,7 +445,10 @@ refused it, and the new work item went to the project's default assignee.
   assigns it to you` for `me`, `It assigns it to ana@example.org`, `It removes the assignee`, `It
   puts it in sprint "Sprint 42"`, `It puts it under ABC-10`); each is a write judged as before.
 - **Labels on Jira**: `create` `--label a,b`; `edit` `--labels a,b` (which adds to the work item's
-  labels, measured) and `--remove-labels c`.
+  labels, measured) and `--remove-labels c`. The card says them (`It adds the labels bug, p1`,
+  `It removes the labels wontfix`). A label holding a comma is refused before anything is asked
+  (`acli` and `gh` take labels separated by commas and would split it), and a blank one is left
+  out, on GitHub as on Jira, with flags or in a JSON definition.
 - **Assumed**, as the other shapes of this page: `project view --json` prints Jira's REST
   project, with `issueTypes[].name` and `.subtask`. Its page gives flags and no output, and it
   could not be run (a call to a site). The maintainer checks it with one `tickets {"action":
@@ -510,14 +513,18 @@ does (#362):
   (#382)`. A `link` of kind `parent of` is refused the same way.
 - **`sprints {project?, board?}`**, a read: the project's boards (`acli jira board search
   --project <P> --json`, Jira's agile page `{"values": [{"id", "name", "type"}]}`, as a real site
-  printed it), the one named alone when `board` names one (its name or its id), and for each its
+  printed it), the one named alone when `board` names one (its name or its id; `board` on any
+  other action is refused), and for each its
   active and future sprints (`acli jira board list-sprints --id <N> --state active,future
   --json`), one line each: `- Sprint 42 [id 42], active, ends 2026-11-20`. A board without
   sprints is said in `acli`'s words (`✗ The board does not support sprints`, measured on a simple
   board). On GitHub the answer is that issues have no sprint.
 - **A sprint at `create`**: `sprint`, an open sprint of the project's boards by its name (any
-  case) or its id, read after the user allowed the creation; one that is not open is refused,
-  nothing written, naming those that are; a name two boards share asks for its id. `acli` sets a
+  case) or its id, **found before the user is asked**, with the site's Sprint field (below), so
+  that the card names the sprint as the site does, with its board (`It puts it in sprint "Sprint
+  42" (board "ABC board")`, for an agent that gave `42`). One that is not open, a name two boards
+  share (asking for its id), and a site whose Sprint field is not known are refused then, nothing
+  asked. Once allowed, the sprint is read again (it may have closed meanwhile). `acli` sets a
   sprint only through a custom field, and a custom field only from a JSON definition (`create
   --from-json`, `additionalAttributes`), which takes no other flag (measured: `--assignee`
   alongside is ignored) and no `@me` (measured: `User not found for email: @me`). So a creation
@@ -525,7 +532,13 @@ does (#362):
   (`projectKey`, `summary`, `type`, `description` as ADF, `labels`, `parentIssueId`, which takes a
   key as measured, and `additionalAttributes: {"<the Sprint field>": <the sprint's id>}`), and
   sets its assignee right after with `edit --assignee`; if that edit fails, the answer says the
-  work item was opened without its assignee. The JSON definition has no default type (measured:
+  work item was opened **without its assignee** (`The ticket ABC-11 was opened in ABC, in sprint
+  "Sprint 42", without its assignee: …; acli did not assign it to "…": …; it exists with no
+  assignee`).
+- **A creation `acli` answers without the new key** (on either path) is no success: the answer
+  says that what was done is not known, that it may have been opened, which of its sprint,
+  parent and assignee may not be set (in a sprint, the assignee was not set: its edit needs the
+  key), and to look at the project before creating it again, with `acli`'s own words. The JSON definition has no default type (measured:
   `no value given for required property type`), so **a `sprint` without `type` is refused before
   anything is asked**.
 - **The Sprint field** is a custom field whose id is the site's own (`customfield_10020` on many

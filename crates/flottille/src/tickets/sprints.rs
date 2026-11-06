@@ -27,6 +27,8 @@ pub(super) struct Sprint {
     pub state: String,
     /// The day it ends, when it has one.
     pub ends: Option<String>,
+    /// The name of its board.
+    pub board: String,
 }
 
 impl Sprint {
@@ -102,6 +104,7 @@ async fn open_sprints(board: &Board) -> Result<Vec<Sprint>, String> {
                 ends: sprint["endDate"]
                     .as_str()
                     .map(|at| masked(&at.chars().take(10).collect::<String>())),
+                board: board.name.clone(),
             })
         })
         .collect())

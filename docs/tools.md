@@ -828,9 +828,15 @@ reasons.
   of the project's boards (`acli jira board search --project <P> --json`, then `acli jira board
   list-sprints --id <N> --state active,future --json`). A creation in a sprint is written as a
   JSON definition (`acli jira workitem create --from-json <file> --json`, the site's Sprint field
-  in its `additionalAttributes`), its assignee set right after with `edit`. The parent and the
+  in its `additionalAttributes`), its assignee set right after with `edit`. The sprint and the
+  Sprint field are found before the user is asked: an unknown or ambiguous sprint, or a site whose
+  Sprint field is not known, is refused then, and the card names the sprint and its board as the
+  site does. A creation that loses its assignee, or that `acli` answers without its key, says
+  what may not be set. A label holding a comma is refused, a blank one left out; `board` is
+  `sprints`' alone. The parent and the
   sprint of an existing work item are refused, saying why: `acli`'s `edit` sets neither. The
-  request says them (`It puts it in sprint "Sprint 42"`, `It puts it under ABC-10`), and `show`
+  request says them (`It puts it in sprint "Sprint 42" (board "ABC board")`, `It puts it under
+  ABC-10`, `It adds the labels bug, p1`), and `show`
   says a work item's assignee, parent and sprint ([`tickets.md`](tickets.md), "Parents and
   sprints").
 - **`status` on GitHub**: sets the Status of the issue on the GitHub Projects (v2) board it is on,

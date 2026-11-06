@@ -334,7 +334,30 @@ pub async fn prepared(
         if let Some(why) = crate::tickets::checked_links(daemon, &project, args).await {
             return Err(Outcome::Refused(why));
         }
-        return Ok(posted_says(args));
+        let mut says = posted_says(args);
+        // The labels, which the user reads whole; the sprint as the site names it.
+        for (key, said) in [
+            ("labels", "It adds the labels"),
+            ("remove_labels", "It removes the labels"),
+        ] {
+            let names: Vec<&str> = args[key]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .collect();
+            if !names.is_empty() {
+                says.push(format!("{said} {}", names.join(", ")));
+            }
+        }
+        says.extend(
+            crate::tickets::sprint_says(&project, args)
+                .await
+                .map_err(Outcome::Refused)?,
+        );
+        return Ok(says);
     }
     if tool == "forge" {
         // What no forge could do is refused at once: the user is not asked for it.
@@ -562,9 +585,6 @@ fn posted_says(args: &Value) -> Vec<String> {
             "me" | "@me" => "It assigns it to you".into(),
             who => format!("It assigns it to {who}"),
         });
-    }
-    if let Some(sprint) = args["sprint"].as_str() {
-        says.push(format!("It puts it in sprint \"{}\"", sprint.trim()));
     }
     if let Some(parent) = args["parent"].as_str() {
         says.push(format!("It puts it under {}", parent.trim().to_uppercase()));

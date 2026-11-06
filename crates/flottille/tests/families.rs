@@ -2033,6 +2033,11 @@ fn an_assignee_where_the_tracker_or_the_action_takes_none_is_refused_before_anyt
 /// ABC-4 in the active one (on the site's Sprint field, `customfield_10020`), assigned and under
 /// the epic ABC-10, and the one user `acli` knows besides the signed-in one.
 fn jira_planned(user: &User) {
+    jira_planned_with(user, |_| {});
+}
+
+/// [`jira_planned`], its script changed by `change` first.
+fn jira_planned_with(user: &User, change: impl FnOnce(&mut Value)) {
     let site = "example.atlassian.net";
     let todo = in_status(work_item("ABC-1", "The login fails", site), "To Do", "new");
     let mut planned = work_item("ABC-4", "Remember the user", site);
@@ -2041,7 +2046,7 @@ fn jira_planned(user: &User) {
     planned["fields"]["customfield_10020"] = json!([
         {"id": 41, "name": "Sprint 41", "state": "closed", "boardId": 7},
         {"id": 42, "name": "Sprint 42", "state": "active", "boardId": 7}]);
-    user.acli_script(json!({
+    let mut script = json!({
         "items": {"ABC-1": todo, "ABC-4": planned,
             "ABC-10": work_item("ABC-10", "Sign-in", site)},
         "created": "ABC-11",
@@ -2052,7 +2057,9 @@ fn jira_planned(user: &User) {
             {"id": 42, "name": "Sprint 42", "state": "active",
                 "endDate": "2026-11-20T10:00:00.000Z"},
             {"id": 43, "name": "Sprint 43", "state": "future"}]},
-    }));
+    });
+    change(&mut script);
+    user.acli_script(script);
 }
 
 #[test]
@@ -2178,11 +2185,29 @@ fn a_jira_item_is_created_assigned_under_a_parent_in_a_sprint() {
     ));
     let card = last_card(&user);
     assert!(card.contains("It assigns it to you"), "{card}");
+    // The sprint as the site names it, found before the user is asked.
     assert!(
-        card.contains("It puts it in sprint \\\"sprint 42\\\""),
+        card.contains("It puts it in sprint \\\"Sprint 42\\\" (board \\\"ABC board\\\")"),
         "{card}"
     );
     assert!(card.contains("It puts it under ABC-10"), "{card}");
+    let not_auth = |calls: Vec<String>| -> Vec<String> {
+        calls
+            .into_iter()
+            .filter(|call| call != "jira auth status")
+            .collect()
+    };
+    let before = not_auth(words(user.acli_received()));
+    assert_eq!(
+        before,
+        [
+            "jira board search --project ABC --json",
+            "jira board list-sprints --id 7 --state active,future --json",
+            "jira workitem search --jql project in (\"ABC\", \"DEF\") AND sprint is not EMPTY \
+             ORDER BY updated DESC --fields key,summary --json --limit 1",
+            "jira workitem view ABC-4 --json --fields *navigable",
+        ]
+    );
     let done = allow(&user, number);
 
     assert!(
@@ -2192,32 +2217,27 @@ fn a_jira_item_is_created_assigned_under_a_parent_in_a_sprint() {
         ),
         "{done}"
     );
-    let calls = words(user.acli_received());
-    let after_check: Vec<&str> = calls
-        .iter()
-        .map(String::as_str)
-        .filter(|call| *call != "jira auth status")
-        .collect();
+    let calls = not_auth(words(user.acli_received()));
+    let after = &calls[before.len()..];
+    // Read again once allowed (it may have closed since); the Sprint field is kept.
     assert_eq!(
-        after_check[..4],
+        after[..2],
         [
             "jira board search --project ABC --json",
             "jira board list-sprints --id 7 --state active,future --json",
-            "jira workitem search --jql project in (\"ABC\", \"DEF\") AND sprint is not EMPTY \
-             ORDER BY updated DESC --fields key,summary --json --limit 1",
-            "jira workitem view ABC-4 --json --fields *navigable",
         ],
         "{calls:?}"
     );
     assert!(
-        after_check[4].starts_with("jira workitem create --from-json "),
+        after[2].starts_with("jira workitem create --from-json "),
         "{calls:?}"
     );
     // `@me` is acli's flag's and not its JSON's: the user is assigned right after, by its flag.
     assert_eq!(
-        after_check[5],
+        after[3],
         "jira workitem edit --key ABC-11 --assignee @me --yes"
     );
+    assert_eq!(after.len(), 4, "{calls:?}");
     let created = user
         .acli_received()
         .into_iter()
@@ -2250,14 +2270,31 @@ fn a_jira_item_is_created_assigned_under_a_parent_in_a_sprint() {
     );
 }
 
+/// A `tickets` call refused before the user is asked: its refusal.
+fn refused_unasked(user: &User, mcp: &Mcp, args: Value) -> String {
+    let refused = mcp.call("tickets", args.clone());
+    assert!(refused.error, "{args}: {}", refused.text);
+    assert!(no_request(user), "{args}");
+    assert!(
+        !words(user.acli_received())
+            .iter()
+            .any(|call| call.starts_with("jira workitem create")
+                || call.starts_with("jira workitem edit")),
+        "{args}"
+    );
+    refused.text
+}
+
 #[test]
 fn a_sprint_that_is_not_open_on_the_project_s_boards_is_refused_naming_those_that_are() {
     let user = user();
     on_jira(&user);
     jira_planned(&user);
+    let (_, mcp) = root_in(&user, None);
 
-    let (answer, calls) = jira_asked(
+    let answer = refused_unasked(
         &user,
+        &mcp,
         json!({"action": "create", "project": "ABC", "title": "Add a logout", "type": "Task",
             "sprint": "Sprint 41"}),
     );
@@ -2271,12 +2308,254 @@ fn a_sprint_that_is_not_open_on_the_project_s_boards_is_refused_naming_those_tha
         "{answer}"
     );
     assert!(answer.contains("nothing was written"), "{answer}");
+}
+
+#[test]
+fn the_card_names_the_sprint_an_id_resolves_to_and_an_unknown_one_is_refused_unasked() {
+    let user = user();
+    on_jira(&user);
+    jira_planned(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    let unknown = refused_unasked(
+        &user,
+        &mcp,
+        json!({"action": "create", "project": "ABC", "title": "Add a logout", "type": "Task",
+            "sprint": "57"}),
+    );
+    held(&mcp.call(
+        "tickets",
+        json!({"action": "create", "project": "ABC", "title": "Add a logout", "type": "Task",
+            "sprint": "43"}),
+    ));
+    let card = last_card(&user);
+
+    assert!(
+        unknown.contains("\"57\" is no open sprint of ABC"),
+        "{unknown}"
+    );
+    assert!(
+        card.contains("It puts it in sprint \\\"Sprint 43\\\" (board \\\"ABC board\\\")"),
+        "{card}"
+    );
+    assert!(!card.contains("sprint \\\"43\\\""), "{card}");
+}
+
+#[test]
+fn a_sprint_two_boards_share_is_refused_unasked_asking_for_its_id() {
+    let user = user();
+    on_jira(&user);
+    jira_planned_with(&user, |script| {
+        script["boards"]["ABC"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id": 9, "name": "Ops board", "type": "scrum"}));
+        script["sprints"]["9"] = json!([{"id": 90, "name": "Sprint 42", "state": "active"}]);
+    });
+    let (_, mcp) = root_in(&user, None);
+
+    let answer = refused_unasked(
+        &user,
+        &mcp,
+        json!({"action": "create", "project": "ABC", "title": "Add a logout", "type": "Task",
+            "sprint": "Sprint 42"}),
+    );
+
+    assert!(
+        answer.contains("names several open sprints of ABC"),
+        "{answer}"
+    );
+    assert!(answer.contains("give its id as sprint"), "{answer}");
+}
+
+#[test]
+fn a_creation_in_a_sprint_on_a_site_whose_sprint_field_is_unknown_is_refused_unasked() {
+    let user = user();
+    on_jira(&user);
+    jira_planned_with(&user, |script| {
+        // No work item has been in a sprint: the field cannot be found.
+        script["items"]["ABC-4"]["fields"]
+            .as_object_mut()
+            .unwrap()
+            .remove("customfield_10020");
+    });
+    let (_, mcp) = root_in(&user, None);
+
+    let answer = refused_unasked(
+        &user,
+        &mcp,
+        json!({"action": "create", "project": "ABC", "title": "Add a logout", "type": "Task",
+            "sprint": "Sprint 42"}),
+    );
+
+    assert!(
+        answer.contains("the Sprint field of example.atlassian.net is not known"),
+        "{answer}"
+    );
+    assert!(answer.contains("nothing was written"), "{answer}");
+}
+
+#[test]
+fn a_creation_acli_answers_without_its_key_says_what_may_not_be_applied() {
+    let user = user();
+    on_jira(&user);
+    jira_planned_with(&user, |script| {
+        script["created_said"] = Value::from("✓ Work item created");
+    });
+
+    let (answer, calls) = jira_asked(
+        &user,
+        json!({"action": "create", "project": "ABC", "title": "Add a logout", "type": "Task",
+            "assignee": "me", "parent": "ABC-10", "sprint": "Sprint 42"}),
+    );
+
+    assert!(!answer.contains("The ticket was opened"), "{answer}");
+    assert!(
+        answer.contains("without the key of the new work item"),
+        "{answer}"
+    );
+    assert!(answer.contains("sprint \"Sprint 42\""), "{answer}");
+    assert!(answer.contains("parent ABC-10"), "{answer}");
+    assert!(answer.contains("not assigned to you"), "{answer}");
+    assert!(answer.contains("✓ Work item created"), "{answer}");
+    // No key, nothing to assign.
     assert!(
         !calls
             .iter()
-            .any(|call| call.starts_with("jira workitem create")),
+            .any(|call| call.starts_with("jira workitem edit")),
         "{calls:?}"
     );
+}
+
+#[test]
+fn a_created_item_acli_does_not_assign_is_said_opened_without_its_assignee() {
+    let user = user();
+    on_jira(&user);
+    jira_planned(&user);
+
+    let (answer, _) = jira_asked(
+        &user,
+        json!({"action": "create", "project": "ABC", "title": "Add a logout", "type": "Task",
+            "assignee": "bob@example.org", "sprint": "Sprint 42"}),
+    );
+
+    assert!(
+        answer.contains(
+            "The ticket ABC-11 was opened in ABC, in sprint \"Sprint 42\", without its assignee"
+        ),
+        "{answer}"
+    );
+    assert!(
+        answer.contains("acli did not assign it to \"bob@example.org\""),
+        "{answer}"
+    );
+    assert!(answer.contains("can't be edited"), "{answer}");
+    assert!(
+        answer.contains("https://example.atlassian.net/browse/ABC-11"),
+        "{answer}"
+    );
+}
+
+#[test]
+fn the_card_of_a_jira_edit_says_the_labels_added_and_removed() {
+    let user = user();
+    on_jira(&user);
+    jira_planned(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    held(&mcp.call(
+        "tickets",
+        json!({"action": "edit", "ticket": "ABC-1", "labels": ["bug", "p1"],
+            "remove_labels": ["wontfix"]}),
+    ));
+    let card = last_card(&user);
+
+    assert!(card.contains("It adds the labels bug, p1"), "{card}");
+    assert!(card.contains("It removes the labels wontfix"), "{card}");
+}
+
+#[test]
+fn a_label_holding_a_comma_is_refused_before_anything_is_asked() {
+    let user = user();
+    on_jira(&user);
+    jira_planned(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    for args in [
+        json!({"action": "edit", "ticket": "ABC-1", "labels": ["front,back"]}),
+        json!({"action": "edit", "ticket": "ABC-1", "remove_labels": ["a,b"]}),
+        json!({"action": "create", "project": "ABC", "title": "T", "labels": ["front,back"]}),
+    ] {
+        let refused = refused_unasked(&user, &mcp, args);
+        assert!(refused.contains("a label holds no comma"), "{refused}");
+    }
+}
+
+#[test]
+fn blank_labels_are_left_out_on_every_path() {
+    let (_, flags) = jira_written(
+        json!({"action": "create", "project": "def", "title": "Add a logout",
+            "labels": ["auth", " ", ""]}),
+        "jira workitem create",
+    );
+    assert_eq!(
+        flags,
+        ["jira workitem create --project DEF --summary Add a logout --label auth --json"]
+    );
+    let (_, edited) = jira_written(
+        json!({"action": "edit", "ticket": "ABC-1", "labels": [" ", "bug"],
+            "remove_labels": [""]}),
+        "jira workitem edit",
+    );
+    assert_eq!(
+        edited,
+        ["jira workitem edit --key ABC-1 --labels bug --yes"]
+    );
+
+    let user = user();
+    on_jira(&user);
+    jira_planned(&user);
+    let (_, calls) = jira_asked(
+        &user,
+        json!({"action": "create", "project": "ABC", "title": "Add a logout", "type": "Task",
+            "labels": ["auth", " "], "sprint": "Sprint 42"}),
+    );
+    assert!(
+        calls.iter().any(|c| c.starts_with("jira workitem create")),
+        "{calls:?}"
+    );
+    let created = user
+        .acli_received()
+        .into_iter()
+        .find(|call| call["args"][2] == "create")
+        .unwrap();
+    assert_eq!(created["files"][0]["json"]["labels"], json!(["auth"]));
+}
+
+#[test]
+fn board_is_refused_on_another_action_than_sprints() {
+    let user = user();
+    on_jira(&user);
+    jira_planned(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    for args in [
+        json!({"action": "show", "ticket": "ABC-1", "board": "ABC board"}),
+        json!({"action": "edit", "ticket": "ABC-1", "title": "T", "board": "ABC board"}),
+    ] {
+        let refused = mcp.call("tickets", args.clone());
+        assert!(refused.error, "{args}: {}", refused.text);
+        assert!(
+            refused.text.contains(&format!(
+                "tickets {} takes no board: board is for sprints",
+                args["action"].as_str().unwrap()
+            )),
+            "{args}: {}",
+            refused.text
+        );
+    }
+    assert!(no_request(&user));
+    assert!(user.acli_received().is_empty());
 }
 
 #[test]
