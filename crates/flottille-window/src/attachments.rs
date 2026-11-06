@@ -241,6 +241,13 @@ impl Attachments {
             .collect()
     }
 
+    /// The pictures of a message that leaves the composer at once: they go with it, and fold
+    /// away from the strip.
+    pub fn take<T: 'static>(&mut self, cx: &mut Context<T>) -> Vec<Arc<gpui_kit::Image>> {
+        cx.notify();
+        std::mem::take(&mut self.images)
+    }
+
     /// The message was taken: the pictures it held leave, and those changed meanwhile stay.
     pub fn sent(&mut self) {
         let sent = std::mem::take(&mut self.sent);

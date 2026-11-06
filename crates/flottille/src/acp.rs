@@ -102,7 +102,7 @@ pub trait Events: Send + Sync + 'static {
     /// An image a prompt carries, as its MIME type and its bytes in base64.
     fn image(&self, name: &str) -> Option<(&'static str, String)>;
     /// `typed`: the prompt's `Prompt::typed`.
-    fn turn_started(&self, text: &str, images: &[String], typed: &Value);
+    fn turn_started(&self, text: &str, images: &[String], typed: &Value, deliveries: &[String]);
     /// The end of a turn, with what it used, one entry per model.
     fn turn_ended(&self, stop_reason: &str, usage: Value, used: Vec<Used>);
     /// The agent's tools as they are now: its role may have gained some since the session began
@@ -428,7 +428,7 @@ async fn drive(
                 text.push_str(&note);
             }
             let names: Vec<String> = sent.iter().map(|(name, ..)| name.clone()).collect();
-            events.turn_started(&text, &names, &prompt.typed);
+            events.turn_started(&text, &names, &prompt.typed, &prompt.deliveries);
             turns.running = true;
             let mut blocks = vec![ContentBlock::Text(TextContent::new(text))];
             blocks.extend(
