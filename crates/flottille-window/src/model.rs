@@ -391,8 +391,8 @@ pub struct Answers<'a> {
     pub needs_user: &'a HashSet<String>,
     /// Each root's first message, by id.
     pub briefs: &'a HashMap<String, String>,
-    /// The question each root asking the user asked last, by id: its text and when.
-    pub questions: &'a HashMap<String, (String, u64)>,
+    /// The open questions of each root asking the user, by id, the oldest first (`agent.trees`).
+    pub questions: &'a HashMap<String, Vec<OpenQuestion>>,
     /// `run.list`: the commands running.
     pub commands: &'a Value,
     /// `subscription.list`: what the agents wait for outside Flottille.
@@ -463,6 +463,31 @@ fn session_title(id: &str, brief: Option<&String>) -> String {
         .map(|brief| title_of(brief))
         .filter(|title| !title.is_empty())
         .unwrap_or_else(|| format!("agent {id}"))
+}
+
+/// A question a root asked the user that waits for the answer, as `agent.trees` gives it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OpenQuestion {
+    /// The number of its `agent.asked` event: the card at its place in the conversation.
+    pub seq: u64,
+    pub text: String,
+    pub at: u64,
+}
+
+impl OpenQuestion {
+    /// The open questions of an entry of a tree.
+    pub fn of_entry(entry: &Value) -> Vec<OpenQuestion> {
+        entry["questions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|question| OpenQuestion {
+                seq: number(question, "seq"),
+                text: text(question, "question"),
+                at: number(question, "at"),
+            })
+            .collect()
+    }
 }
 
 /// A root of `agent.list` whose question waits for the user's answer, as the daemon keeps it.
@@ -538,14 +563,21 @@ impl Snapshot {
         }
         for root in agents.iter().filter(|agent| asks_the_user(agent)) {
             let id = text(root, "id");
-            let (question, at) = answers.questions.get(&id).cloned().unwrap_or_default();
-            bell.push(BellItem {
-                key: format!("question-{id}"),
-                label: "Asks you a question".into(),
-                detail: question,
-                at,
-                session: id,
-            });
+            let open = answers.questions.get(&id).map_or(&[][..], Vec::as_slice);
+            // Its open questions each, or one item while the tree has not been read yet.
+            let open = match open {
+                [] => &[OpenQuestion::default()][..],
+                open => open,
+            };
+            for question in open {
+                bell.push(BellItem {
+                    key: format!("question-{id}-{}", question.seq),
+                    label: "Asks you a question".into(),
+                    detail: question.text.clone(),
+                    at: question.at,
+                    session: id.clone(),
+                });
+            }
         }
         bell.sort_by_key(|item| item.at);
 
@@ -1236,7 +1268,14 @@ mod tests {
             agents: &agents,
             approvals: &approvals,
             needs_user: &asking,
-            questions: &HashMap::from([("r2".to_owned(), ("Which one?".to_owned(), 40))]),
+            questions: &HashMap::from([(
+                "r2".to_owned(),
+                vec![OpenQuestion {
+                    seq: 7,
+                    text: "Which one?".to_owned(),
+                    at: 40,
+                }],
+            )]),
             briefs: &HashMap::new(),
             commands: &json!({"commands": []}),
             subscriptions: &subscriptions,

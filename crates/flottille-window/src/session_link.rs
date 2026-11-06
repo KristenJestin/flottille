@@ -24,6 +24,7 @@ use crate::actions::{Changes, RepositoryStatus};
 use crate::conversation::one_line;
 use crate::leaves::LeaveRow;
 use crate::link::{Conn, Connect, Update, quiet_wait};
+use crate::model::OpenQuestion;
 use crate::runs::{CommandOutput, CommandRow};
 use crate::subscriptions::SubscriptionRow;
 
@@ -47,6 +48,8 @@ pub struct TreeAgent {
     /// `parent`, `user` or nothing.
     pub waiting_on: Option<String>,
     pub needs_user: bool,
+    /// The questions it asked the user that wait for the answer, the oldest first.
+    pub questions: Vec<OpenQuestion>,
     /// An ended root the daemon can start again on its own session (`agent.resume`).
     pub resumable: bool,
     /// An agent that ended whose process is still stopping: it cannot be resumed yet.
@@ -116,6 +119,7 @@ impl TreeAgent {
             doing: text(&entry["doing"]).unwrap_or_default(),
             waiting_on: text(&entry["waiting_on"]),
             needs_user: entry["needs_user"] == true,
+            questions: OpenQuestion::of_entry(entry),
             resumable: agent["resumable"] == true,
             stopping: agent["stopping"] == true,
             images: agent["images"].as_bool(),
@@ -532,6 +536,8 @@ const TREE_EVENTS: &[&str] = &[
     "agent.options_refused",
     "agent.reported",
     "agent.asked",
+    // A question answered: its card folds away.
+    "agent.answered",
     // The rail's gauge of each agent's context.
     "agent.usage",
     // The line that says the session runs an older list of tools.

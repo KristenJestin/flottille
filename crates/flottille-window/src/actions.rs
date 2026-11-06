@@ -363,6 +363,13 @@ pub enum Command {
         /// Pasted or dropped pictures that go with it, as the clipboard gave them.
         images: Vec<Picture>,
     },
+    /// The user's answer to the question of `seq` the session's root asked, from its card: a
+    /// message to the root like any other.
+    AnswerQuestion {
+        session: String,
+        seq: u64,
+        message: String,
+    },
     /// Takes back a message that waits for the session's root (`edit`: to change it and send it
     /// again). The daemon refuses one the root read first.
     Unqueue {
@@ -843,6 +850,12 @@ pub enum Outcome {
     /// A message to the session's root was taken, or refused with why.
     Replied {
         session: String,
+        refused: Option<String>,
+    },
+    /// The answer to the question of `seq` was taken, or refused with why.
+    QuestionAnswered {
+        session: String,
+        seq: u64,
         refused: Option<String>,
     },
     /// A waiting message was taken back, with its text and pictures, or the daemon refused with
@@ -1777,6 +1790,26 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 session,
                 name,
                 image,
+            }
+        }
+        Command::AnswerQuestion {
+            session,
+            seq,
+            message,
+        } => {
+            let refused = match ask_alone(
+                connect,
+                "agent.send",
+                json!({"agent": session, "message": message}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::QuestionAnswered {
+                session,
+                seq,
+                refused,
             }
         }
         Command::Reply {

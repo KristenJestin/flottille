@@ -752,6 +752,21 @@ impl Shell {
                     page.update(cx, |page, cx| page.picture_read(name, image, cx));
                 }
             }
+            Outcome::QuestionAnswered {
+                session,
+                seq,
+                refused,
+            } => {
+                if let Some(page) = self
+                    .session_page
+                    .clone()
+                    .filter(|page| page.read(cx).id() == session)
+                {
+                    page.update(cx, |page, cx| {
+                        page.question_answered(seq, refused, window, cx)
+                    });
+                }
+            }
             Outcome::Replied { session, refused } => {
                 if let Some(reply) = self.replies.get(&session).cloned() {
                     reply.update(cx, |reply, cx| reply.replied(refused, window, cx));
