@@ -730,9 +730,13 @@ impl Shell {
                     page.update(cx, |page, cx| page.picture_read(name, image, cx));
                 }
             }
-            Outcome::Replied { session, refused } => {
+            Outcome::Replied {
+                session,
+                key,
+                answer,
+            } => {
                 if let Some(reply) = self.replies.get(&session).cloned() {
-                    reply.update(cx, |reply, cx| reply.replied(refused, window, cx));
+                    reply.update(cx, |reply, cx| reply.replied(key, answer, cx));
                 }
             }
             Outcome::Unqueued {

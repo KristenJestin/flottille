@@ -20,7 +20,9 @@ use flottille_window::link::Connect;
 use flottille_window::queued::{
     CANCEL, EDIT, SEND_NOW, WAITS, WAITS_FULL, queued_button, queued_id,
 };
-use flottille_window::session::{COPIED, SessionPage, said_at};
+use flottille_window::session::{
+    COPIED, RETRY, Reply, SENDING, SessionPage, pending_part, said_at,
+};
 use flottille_window::tree::session_id;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
@@ -29,6 +31,7 @@ use serde_json::{Value, json};
 fn script() -> Value {
     json!({"turns": [
         {"when": "work a while", "do": [{"wait": 4000}, {"say": "Done with that."}]},
+        {"when": "think it over", "do": [{"wait": 1500}, {"say": "Thought over."}]},
         {"when": "work until stopped", "do": [{"hold": "release"}, {"say": "Done with that."}]},
         {"when": "start the docs session", "do": [{"mcp": {"tool": "agent_launch",
             "arguments": {"title": "Docs", "brief": "Write the docs", "follow": false, "root": true,
@@ -442,6 +445,8 @@ fn a_message_sent_during_a_turn_shows_as_waiting_then_as_sent(cx: &mut TestAppCo
         field.set_value("and update the docs", window, cx)
     });
     reply.update_in(cx, |reply, window, cx| reply.send(window, cx));
+    // It is drawn under the key it was sent with, which it keeps while it waits.
+    let delivery = format!("pending-{}", reply.read_with(cx, |r, _| r.pending()[0].key));
     until(
         &shell,
         cx,
@@ -449,9 +454,6 @@ fn a_message_sent_during_a_turn_shows_as_waiting_then_as_sent(cx: &mut TestAppCo
         |cx| queued(&page, cx) == ["and update the docs"],
     );
     settle(cx);
-    let delivery = page.read_with(cx, |page, cx| {
-        page.queued().read(cx).messages()[0].delivery.clone()
-    });
     assert_eq!(
         label(queued_id(&delivery), cx).as_deref(),
         Some("and update the docs")
@@ -2593,4 +2595,276 @@ fn a_long_command_in_a_step_is_cut_and_whole_on_hover(cx: &mut TestAppContext) {
     settle(cx);
     assert!(!has(format!("{args}-tooltip"), cx), "the tooltip left");
     std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+/// The composer of the session, its field holding `text`, and the pictures it holds.
+fn composer(shell: &Entity<Shell>, lead: &str, cx: &mut VisualTestContext) -> Entity<Reply> {
+    shell
+        .read_with(cx, |s, _| s.reply_of(lead).cloned())
+        .expect("the session has a composer")
+}
+
+/// Types `text` in the composer and sends it: the key of the message being sent.
+fn send(reply: &Entity<Reply>, text: &str, cx: &mut VisualTestContext) -> u64 {
+    let field = reply.read_with(cx, |r, _| r.field().clone());
+    field.update_in(cx, |field, window, cx| field.set_value(text, window, cx));
+    reply.update_in(cx, |reply, window, cx| reply.send(window, cx));
+    reply.read_with(cx, |r, _| {
+        r.pending().last().expect("a message is sent").key
+    })
+}
+
+/// Draws the window without taking anything from the daemon: what shows before it answers.
+fn draw_alone(cx: &mut VisualTestContext) {
+    for _ in 0..3 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+    }
+}
+
+fn user_messages(page: &Entity<SessionPage>, said: &str, cx: &mut VisualTestContext) -> usize {
+    blocks(page, cx)
+        .iter()
+        .filter(|b| is_message(b, said))
+        .count()
+}
+
+fn field_text(reply: &Entity<Reply>, cx: &mut VisualTestContext) -> String {
+    reply.read_with(cx, |r, cx| r.field().read(cx).value().to_string())
+}
+
+#[gpui_kit::test]
+fn a_sent_message_shows_before_the_daemon_answers(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let mut with_images = script();
+    with_images["images"] = true.into();
+    user.fake_script(with_images);
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let lead = lead(&user);
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    let reply = composer(&shell, &lead, cx);
+    use base64::Engine as _;
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(PNG_BASE64)
+        .unwrap();
+    reply.update_in(cx, |reply, _, cx| {
+        reply.attach(
+            gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, png),
+            cx,
+        )
+    });
+    settle(cx);
+
+    let key = send(&reply, "think it over", cx);
+    draw_alone(cx);
+
+    // Nothing came from the daemon yet: the message is in the conversation, with its picture,
+    // quieter and saying it is being sent; the composer is empty.
+    assert_eq!(
+        label(pending_part(key, "bubble"), cx).as_deref(),
+        Some("think it over")
+    );
+    assert!(has(pending_part(key, "image-0"), cx), "its picture");
+    assert_eq!(
+        label(pending_part(key, "sending"), cx).as_deref(),
+        Some(SENDING)
+    );
+    assert_eq!(user_messages(&page, "think it over", cx), 0);
+    assert_eq!(field_text(&reply, cx), "");
+    assert!(reply.read_with(cx, |r, _| r.attachments().is_empty()));
+    let bubble = cx.update(|window, _| window.find(pending_part(key, "bubble")).bounds());
+    let composer = cx.update(|window, _| window.find("reply-field").bounds());
+    assert!(bubble.bottom() <= composer.top(), "in the conversation");
+
+    until(&shell, cx, "the turn ends", |cx| {
+        user_messages(&page, "think it over", cx) == 1
+            && !reply.read_with(cx, |r, _| r.is_running())
+    });
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn the_pending_message_becomes_the_recorded_one_without_a_second_copy(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    let reply = composer(&shell, &lead, cx);
+
+    let key = send(&reply, "think it over", cx);
+    settle(cx);
+    let pending = cx.update(|window, _| window.find(pending_part(key, "bubble")).bounds());
+
+    until(&shell, cx, "the daemon records it", |cx| {
+        user_messages(&page, "think it over", cx) == 1
+    });
+    // The frame it is recorded on: one bubble, where the pending one was.
+    assert!(!has(pending_part(key, "bubble"), cx), "no second copy");
+    let at = row_of(&page, cx, |b| is_message(b, "think it over")).unwrap();
+    let recorded = cx.update(|window, _| window.find(format!("row-{at}-bubble")).bounds());
+    assert_eq!(recorded, pending, "in place");
+    assert!(reply.read_with(cx, |r, _| r.pending().is_empty()));
+    settle(cx);
+    assert!(
+        !has(pending_part(key, "sending"), cx),
+        "the line folded away"
+    );
+
+    until(&shell, cx, "the turn ends", |cx| {
+        !reply.read_with(cx, |r, _| r.is_running())
+    });
+    at_rest(cx);
+    assert_eq!(user_messages(&page, "think it over", cx), 1);
+}
+
+/// A project command that reads a file which is gone: a message that uses it is refused.
+fn a_command_that_cannot_be_read(user: &User) -> PathBuf {
+    let folder = user.path("work/app");
+    let file = folder.join(".claude/commands/review.md");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "Review the diff.\n").unwrap();
+    user.call("command.import", json!({"project": "app"}))
+        .unwrap();
+    std::fs::remove_file(&file).unwrap();
+    file
+}
+
+#[gpui_kit::test]
+fn a_refused_message_stays_with_retry_and_edit(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    a_command_that_cannot_be_read(&user);
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    let reply = composer(&shell, &lead, cx);
+
+    let key = send(&reply, "/review now", cx);
+    until(&shell, cx, "the daemon refuses it", |cx| {
+        has(pending_part(key, "failed"), cx)
+    });
+    settle(cx);
+
+    let said = label(pending_part(key, "failed"), cx).unwrap_or_default();
+    assert!(said.contains("nothing was sent"), "{said}");
+    assert_eq!(
+        label(pending_part(key, "bubble"), cx).as_deref(),
+        Some("/review now")
+    );
+    assert!(!has(pending_part(key, "sending"), cx));
+    assert_eq!(
+        label(pending_part(key, "retry"), cx).as_deref(),
+        Some(RETRY)
+    );
+    assert_eq!(label(pending_part(key, "edit"), cx).as_deref(), Some(EDIT));
+    assert_eq!(
+        toasts(&shell, cx),
+        Vec::<String>::new(),
+        "said once, in place"
+    );
+    assert_eq!(user_messages(&page, "/review now", cx), 0);
+
+    // Edit puts it back in the composer, and the failed message folds away.
+    cx.update(|window, cx| window.click(pending_part(key, "edit"), cx));
+    at_rest(cx);
+    assert_eq!(field_text(&reply, cx), "/review now");
+    assert!(!has(pending_part(key, "bubble"), cx));
+    assert!(reply.read_with(cx, |r, _| r.pending().is_empty()));
+}
+
+#[gpui_kit::test]
+fn retry_sends_the_failed_message_again(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    let file = a_command_that_cannot_be_read(&user);
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    let reply = composer(&shell, &lead, cx);
+    let key = send(&reply, "/review now", cx);
+    until(&shell, cx, "the daemon refuses it", |cx| {
+        has(pending_part(key, "failed"), cx)
+    });
+    settle(cx);
+
+    std::fs::write(&file, "Review the diff.\n").unwrap();
+    cx.update(|window, cx| window.click(pending_part(key, "retry"), cx));
+    draw_alone(cx);
+    assert_eq!(
+        label(pending_part(key, "sending"), cx).as_deref(),
+        Some(SENDING),
+        "sent again, in place"
+    );
+
+    until(&shell, cx, "the agent takes it", |cx| {
+        user_messages(&page, "/review now", cx) == 1
+            && reply.read_with(cx, |r, _| r.pending().is_empty())
+    });
+    until(&shell, cx, "the turn ends", |cx| {
+        !reply.read_with(cx, |r, _| r.is_running())
+    });
+    at_rest(cx);
+    assert!(!has(pending_part(key, "bubble"), cx));
+    assert_eq!(user_messages(&page, "/review now", cx), 1);
+}
+
+#[gpui_kit::test]
+fn a_message_sent_during_a_turn_keeps_its_queued_state(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": "work a while"}),
+    )
+    .unwrap();
+    let reply = composer(&shell, &lead, cx);
+    until(&shell, cx, "the turn runs", |cx| {
+        reply.read_with(cx, |r, _| r.is_running())
+    });
+    settle(cx);
+
+    let key = send(&reply, "and update the docs", cx);
+    draw_alone(cx);
+    // Before the daemon answers, it is under the conversation where it is to wait, being sent.
+    let shown = format!("pending-{key}");
+    assert_eq!(
+        label(queued_id(&shown), cx).as_deref(),
+        Some("and update the docs")
+    );
+    assert_eq!(
+        label(format!("queued-{shown}-waits"), cx).as_deref(),
+        Some(SENDING)
+    );
+    assert!(
+        !has(pending_part(key, "bubble"), cx),
+        "not in the conversation"
+    );
+
+    until(&shell, cx, "it waits", |cx| {
+        queued(&page, cx) == ["and update the docs"]
+    });
+    let delivery = page.read_with(cx, |page, cx| {
+        page.queued().read(cx).messages()[0].delivery.clone()
+    });
+    // The same bubble, now waiting as today, with its buttons.
+    assert!(has(format!("queued-item-{shown}"), cx), "in place");
+    assert!(
+        !has(format!("queued-item-{delivery}"), cx),
+        "no second copy"
+    );
+    settle(cx);
+    assert_eq!(
+        label(format!("queued-{shown}-waits"), cx).as_deref(),
+        Some(WAITS)
+    );
+    assert_eq!(
+        label(queued_button(&shown, "edit"), cx).as_deref(),
+        Some(EDIT)
+    );
+    assert!(reply.read_with(cx, |r, _| r.pending().is_empty()));
+
+    until(&shell, cx, "the message is sent", |cx| {
+        user_messages(&page, "and update the docs", cx) == 1 && queued(&page, cx).is_empty()
+    });
+    until(&shell, cx, "the turn ends", |cx| {
+        !reply.read_with(cx, |r, _| r.is_running())
+    });
+    at_rest(cx);
+    assert_eq!(user_messages(&page, "and update the docs", cx), 1);
 }
