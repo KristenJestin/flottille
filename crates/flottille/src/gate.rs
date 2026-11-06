@@ -700,8 +700,8 @@ const FORGE_ONLY: [(&str, &[&str]); 10] = [
 pub const FORGE_ACTIONS: &str = "list, show, subscribe, unsubscribe, create, comment, edit, merge, checks, close, reopen, \
      pipelines, runs, run_view, run_logs, run, stop and step";
 /// The actions of `tickets`, as a refusal names them.
-pub const TICKET_ACTIONS: &str = "list, search, show, types, link_types, subscribe, unsubscribe, create, comment, edit, \
-     close, reopen, status, link, unlink, comment_edit, comment_delete and sprint";
+pub const TICKET_ACTIONS: &str = "list, search, show, types, link_types, sprints, subscribe, unsubscribe, create, comment, \
+     edit, close, reopen, status, link, unlink, comment_edit and comment_delete";
 /// What `tickets close` closes for, as `gh issue close --reason` names it.
 pub const CLOSE_REASONS: [&str; 2] = ["completed", "not planned"];
 /// The arguments of `tickets` that belong to `edit` or `close` alone.
@@ -720,7 +720,8 @@ fn tickets(call: &Call) -> Verdict {
     // What the agent wrote, as the card shows it: masked.
     let shown = |key: &str| crate::mcp::masked(&words(key), &call.grant.place);
     let said = match action {
-        "list" | "search" | "show" | "types" | "link_types" | "subscribe" | "unsubscribe" => {
+        "list" | "search" | "show" | "types" | "link_types" | "sprints" | "subscribe"
+        | "unsubscribe" => {
             return Verdict::Allow;
         }
         // The link as the ticket named reads it, so that the card says its direction.
@@ -748,7 +749,6 @@ fn tickets(call: &Call) -> Verdict {
             shown("comment"),
             shown("ticket")
         ),
-        "sprint" => "it puts a ticket in a sprint on the tracker".into(),
         "create" => "it opens a ticket on the tracker".into(),
         "comment" => "it comments on a ticket on the tracker".into(),
         "edit" => {
@@ -767,9 +767,7 @@ fn tickets(call: &Call) -> Verdict {
     };
     let none: &[&str] = match action {
         "comment" | "comment_edit" => &["title"],
-        "close" | "reopen" | "status" | "link" | "unlink" | "comment_delete" | "sprint" => {
-            &["title", "body"]
-        }
+        "close" | "reopen" | "status" | "link" | "unlink" | "comment_delete" => &["title", "body"],
         _ => &[],
     };
     if let Err(refused) = untexted("tickets", action, call.args, none) {
@@ -4231,7 +4229,6 @@ mod tests {
             "unlink",
             "comment_edit",
             "comment_delete",
-            "sprint",
         ] {
             let verdict = fixture.judge(
                 "tickets",

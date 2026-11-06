@@ -1696,6 +1696,7 @@ fn run_of(run: &str, agent: &str, task: Option<&str>, running: bool, at: u64) ->
         step: false,
         ready: None,
         url: None,
+        service: false,
     }
 }
 

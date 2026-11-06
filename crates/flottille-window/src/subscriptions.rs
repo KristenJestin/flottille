@@ -1,13 +1,15 @@
 //! The rail's Subscriptions section: what the session's agents wait for outside Flottille (the
 //! next event of a pull request or a ticket, `docs/design.md` §5.6): the pull request or the
 //! ticket, the events, since when
-//! and until when, a run the agent started and follows (`Run #43 of api`, since when), or a wake
+//! and until when (`until merged or closed`, or the deadline the agent gave), a run the agent
+//! started and follows (`Run #43 of api`, since when), or a wake
 //! the agent asked for and when it is due, each with a Cancel that the daemon carries out (`subscription.cancel`). Nothing
 //! is drawn while the session waits for nothing; a row unfolds when a subscription opens and folds
 //! away when it ends, whatever ended it.
 
 use std::time::Duration;
 
+use flottille_core::subscription::NO_DEADLINE;
 use flottille_ui::{
     Button, Icon, Item, Listing, Palette, Type, icon, palette, presence, presence_of, space,
 };
@@ -43,6 +45,8 @@ pub struct SubscriptionRow {
     pub events: Vec<String>,
     pub created_at: u64,
     pub expires_at: u64,
+    /// What ends a subscription the agent gave no deadline: `until merged or closed`.
+    pub until: Option<&'static str>,
 }
 
 impl SubscriptionRow {
@@ -52,6 +56,12 @@ impl SubscriptionRow {
         let wake = value["source"] == "timer";
         let run = value["source"] == "run";
         let following = value["source"] == "session" || run;
+        let expires_at = value["expires_at"].as_u64().unwrap_or(0);
+        let until = match value["source"].as_str() {
+            _ if wake || following || expires_at < NO_DEADLINE => None,
+            Some("tickets") => Some("until closed"),
+            _ => Some("until merged or closed"),
+        };
         SubscriptionRow {
             id: text(&value["id"]),
             agent: text(&value["agent"]),
@@ -97,11 +107,18 @@ impl SubscriptionRow {
                 .filter_map(|event| event.as_str().map(str::to_owned))
                 .collect(),
             created_at: value["created_at"].as_u64().unwrap_or(0),
-            expires_at: value["expires_at"].as_u64().unwrap_or(0),
+            expires_at,
+            until,
         }
     }
 
-    /// `since 14:05 · expires in 30 min`; `at 10:42` for a wake.
+    /// Whether its time left is drawn, and drawn again as it passes.
+    fn timed(&self) -> bool {
+        !self.following && self.until.is_none()
+    }
+
+    /// `since 14:05 · until merged or closed`; `since 14:05 · expires in 30 min` with a deadline;
+    /// `at 10:42` for a wake.
     pub fn times(&self, now: u64) -> String {
         if self.wake {
             return format!("at {}", clock(self.expires_at));
@@ -111,6 +128,9 @@ impl SubscriptionRow {
         // A following has no end of its own.
         if self.following {
             return format!("since {since}");
+        }
+        if let Some(until) = self.until {
+            return format!("since {since} · {until}");
         }
         let left = self.expires_at.saturating_sub(now).div_ceil(60_000);
         let left = match left {
@@ -160,8 +180,8 @@ impl SubscriptionList {
         if self.rows == rows {
             return;
         }
-        // A following has no time left to draw again.
-        if rows.iter().all(|row| row.following) {
+        // A following, or a subscription with no deadline, has no time left to draw again.
+        if !rows.iter().any(SubscriptionRow::timed) {
             self.ticker = None;
         } else if self.ticker.is_none() {
             self.ticker = Some(cx.spawn(async move |this, cx| {
@@ -436,6 +456,26 @@ mod tests {
             times.starts_with("since") && !times.contains("expires"),
             "{times}"
         );
+    }
+
+    #[test]
+    fn a_subscription_without_a_deadline_says_until_merged_or_closed() {
+        let lasting = row(i64::MAX as u64);
+        assert_eq!(lasting.until, Some("until merged or closed"));
+        let times = lasting.times(0);
+        assert!(
+            times.starts_with("since") && times.ends_with(" · until merged or closed"),
+            "{times}"
+        );
+        let ticket = SubscriptionRow::of(&json!({
+            "id": "sub-6", "agent": "a1", "source": "tickets",
+            "target": {"project": "app", "repository": "", "key": "ABC-1"},
+            "events": ["commented"], "created_at": 0, "expires_at": i64::MAX as u64,
+        }));
+        assert!(ticket.times(0).ends_with(" · until closed"));
+        // A deadline the agent gave is said as before.
+        assert_eq!(row(30 * 60_000).until, None);
+        assert!(row(30 * 60_000).times(0).ends_with("expires in 30 min"));
     }
 
     #[test]

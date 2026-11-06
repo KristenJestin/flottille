@@ -10,15 +10,16 @@ use std::collections::HashMap;
 
 use flottille_ui::drawer::Closed;
 use flottille_ui::{
-    AgentState, Button, Confirm, Drawer, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu,
-    Modal, Placement, RadioChoices, Section, Select, SelectOption, StateIcon, Status, Switch,
-    Toast, Type, icon, palette, presence, space, toast,
+    AgentState, Button, Confirm, Drawer, EmptyLine, Field, Icon, LabelledLine, ListCard, ListRow,
+    Listing, Menu, Modal, Placement, RadioChoices, Section, Select, SelectOption, StateIcon,
+    Status, Switch, Toast, Type, icon, palette, presence, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, Focusable as _,
-    InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Subscription,
-    Task, TestSupportExt as _, WeakEntity, Window, div, px,
+    InteractiveElement, IntoElement, ParentElement, Render, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, Task, TestSupportExt as _, WeakEntity,
+    Window, div, px,
 };
 use serde_json::{Value, json};
 
@@ -49,6 +50,8 @@ pub struct TaskInfo {
     pub ready: Option<(ReadyKind, String)>,
     /// Where a run of it answers: an address, or a line that prints it.
     pub url: Option<(AddressKind, String)>,
+    /// The services of the machine it needs, started first.
+    pub needs: Vec<String>,
 }
 
 /// How a task says it is ready (`docs/projects.md`, "Tasks").
@@ -85,7 +88,8 @@ impl ReadyKind {
         }
     }
 
-    fn field(self) -> (&'static str, &'static str, &'static str) {
+    /// The field's label, its placeholder and its hint.
+    pub(crate) fn field(self) -> (&'static str, &'static str, &'static str) {
         match self {
             ReadyKind::Line => (
                 "Text in its output",
@@ -124,18 +128,30 @@ impl AddressKind {
         }
     }
 
-    fn choice(self) -> (&'static str, &'static str) {
-        match self {
-            AddressKind::Address => ("An address", "The same for every run, or templated."),
-            AddressKind::Command => (
+    /// `service`: a service of the machine, which has no workspace.
+    fn choice(self, service: bool) -> (&'static str, &'static str) {
+        match (self, service) {
+            (AddressKind::Address, false) => {
+                ("An address", "The same for every run, or templated.")
+            }
+            (AddressKind::Address, true) => ("An address", "Where it answers."),
+            (AddressKind::Command, false) => (
                 "A command prints it",
                 "For an address given by a tool, per workspace.",
             ),
+            (AddressKind::Command, true) => {
+                ("A command prints it", "For an address given by a tool.")
+            }
         }
     }
 
-    fn field(self) -> (&'static str, &'static str, &'static str) {
+    fn field(self, service: bool) -> (&'static str, &'static str, &'static str) {
         match self {
+            AddressKind::Address if service => (
+                "Address",
+                "http://localhost:3001",
+                "For example: http://localhost:3001",
+            ),
             AddressKind::Address => (
                 "Address",
                 "https://{workspace}.app.localhost",
@@ -173,6 +189,7 @@ impl TaskInfo {
                     .as_str()
                     .map(|line| (AddressKind::Command, line.to_owned())),
             },
+            needs: names_of(&value["needs"]),
         }
     }
 
@@ -194,6 +211,16 @@ impl TaskInfo {
         }
         notes.join(" · ")
     }
+}
+
+/// A list of names as the daemon gives it.
+pub(crate) fn names_of(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|name| name.as_str().map(str::to_owned))
+        .collect()
 }
 
 /// The flags of a task, as the form switches them.
@@ -267,9 +294,72 @@ impl Flag {
 struct Fields {
     name: Entity<InputState>,
     line: Entity<InputState>,
-    /// One field for each kind of ready, and of address: a kind keeps what was typed for it.
-    ready: [Entity<InputState>; 3],
-    url: [Entity<InputState>; 2],
+    ready: ReadyFields,
+}
+
+/// The fields of when a run is ready and where it answers, one for each kind of ready and of
+/// address: a kind keeps what was typed for it. A task's form and a service's share them.
+pub(crate) struct ReadyFields {
+    pub ready: [Entity<InputState>; 3],
+    pub url: [Entity<InputState>; 2],
+}
+
+impl ReadyFields {
+    pub fn new(service: bool, window: &mut Window, cx: &mut App) -> Self {
+        Self {
+            ready: ReadyKind::ALL.map(|kind| line_field(kind.field().1, window, cx)),
+            url: AddressKind::ALL.map(|kind| line_field(kind.field(service).1, window, cx)),
+        }
+    }
+
+    pub fn inputs(&self) -> impl Iterator<Item = &Entity<InputState>> {
+        self.ready.iter().chain(&self.url)
+    }
+
+    /// Fills each field with what `ready` and `url` say, and empties the others.
+    pub fn fill(
+        &self,
+        ready: &Option<(ReadyKind, String)>,
+        url: &Option<(AddressKind, String)>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        for (at, field) in self.ready.iter().enumerate() {
+            let text = match ready {
+                Some((kind, text)) if ready_at(*kind) == at => text.clone(),
+                _ => String::new(),
+            };
+            field.update(cx, |f, cx| f.set_value(text, window, cx));
+        }
+        for (at, field) in self.url.iter().enumerate() {
+            let text = match url {
+                Some((kind, text)) if url_at(*kind) == at => text.clone(),
+                _ => String::new(),
+            };
+            field.update(cx, |f, cx| f.set_value(text, window, cx));
+        }
+    }
+
+    /// `ready` and `url` as a write gives them. None is `""`: the link drops a `null`, which
+    /// would leave it as it was.
+    pub fn params(
+        &self,
+        ready: Option<ReadyKind>,
+        url: Option<AddressKind>,
+        cx: &App,
+    ) -> (Value, Value) {
+        let value = |field: &Entity<InputState>| field.read(cx).value().trim().to_owned();
+        let ready = match ready {
+            Some(kind) => json!({kind.key(): value(&self.ready[ready_at(kind)])}),
+            None => "".into(),
+        };
+        let url = match url {
+            Some(AddressKind::Address) => value(&self.url[0]).into(),
+            Some(AddressKind::Command) => json!({"command": value(&self.url[1])}),
+            None => "".into(),
+        };
+        (ready, url)
+    }
 }
 
 fn ready_at(kind: ReadyKind) -> usize {
@@ -308,6 +398,9 @@ pub struct TasksSection {
     /// The flags and the repository the form shows.
     flags: TaskInfo,
     fields: Option<Fields>,
+    /// The services of the machine, which a task may need, or why they cannot be read; `None`
+    /// until the daemon has said.
+    services: Option<Result<Vec<String>, String>>,
     saving: bool,
     writing: Option<Writing>,
     form_error: Option<SharedString>,
@@ -330,6 +423,7 @@ impl TasksSection {
             editing: None,
             flags: TaskInfo::default(),
             fields: None,
+            services: None,
             saving: false,
             writing: None,
             form_error: None,
@@ -366,12 +460,31 @@ impl TasksSection {
 
     /// The field of a kind of ready.
     pub fn ready_field(&self, kind: ReadyKind) -> Option<&Entity<InputState>> {
-        self.fields.as_ref().map(|f| &f.ready[ready_at(kind)])
+        self.fields.as_ref().map(|f| &f.ready.ready[ready_at(kind)])
     }
 
     /// The field of a kind of address.
     pub fn url_field(&self, kind: AddressKind) -> Option<&Entity<InputState>> {
-        self.fields.as_ref().map(|f| &f.url[url_at(kind)])
+        self.fields.as_ref().map(|f| &f.ready.url[url_at(kind)])
+    }
+
+    /// The services the form says the task needs.
+    pub fn needs(&self) -> &[String] {
+        &self.flags.needs
+    }
+
+    /// The services of the machine the daemon listed, which the form offers, or why it could not.
+    pub fn set_services(&mut self, services: Result<Vec<String>, String>, cx: &mut Context<Self>) {
+        if self.services.as_ref() != Some(&services) {
+            self.services = Some(services);
+            cx.notify();
+        }
+    }
+
+    /// The task needs the service, or no longer does.
+    pub fn toggle_need(&mut self, service: &str, cx: &mut Context<Self>) {
+        toggle_name(&mut self.flags.needs, service);
+        cx.notify();
     }
 
     /// The kind of ready the form says, none when it says nothing.
@@ -439,10 +552,9 @@ impl TasksSection {
         if self.fields.is_none() {
             let name = line_field("test", window, cx);
             let line = line_field("pnpm test", window, cx);
-            let ready = ReadyKind::ALL.map(|kind| line_field(kind.field().1, window, cx));
-            let url = AddressKind::ALL.map(|kind| line_field(kind.field().1, window, cx));
+            let ready = ReadyFields::new(false, window, cx);
             // Typing clears what a refusal said.
-            for input in [&name, &line].into_iter().chain(&ready).chain(&url) {
+            for input in [&name, &line].into_iter().chain(ready.inputs()) {
                 self._subscriptions
                     .push(cx.subscribe(input, |this, _, event, cx| {
                         if matches!(event, InputEvent::Change) && this.form_error.take().is_some() {
@@ -450,38 +562,22 @@ impl TasksSection {
                         }
                     }));
             }
-            self.fields = Some(Fields {
-                name,
-                line,
-                ready,
-                url,
-            });
+            self.fields = Some(Fields { name, line, ready });
         }
         self.fields.as_ref().expect("made above")
     }
 
     /// "New task", or "Edit" on one: the form, filled with it.
     pub fn open(&mut self, info: Option<&TaskInfo>, window: &mut Window, cx: &mut Context<Self>) {
-        let fields = self.fields(window, cx);
+        self.fields(window, cx);
+        let fields = self.fields.as_ref().expect("made above");
         let (name, line) = (fields.name.clone(), fields.line.clone());
-        let (ready, url) = (fields.ready.clone(), fields.url.clone());
         let shown = info.cloned().unwrap_or_default();
         name.update(cx, |f, cx| f.set_value(shown.name.clone(), window, cx));
         line.update(cx, |f, cx| f.set_value(shown.line.clone(), window, cx));
-        for (at, field) in ready.iter().enumerate() {
-            let text = match &shown.ready {
-                Some((kind, text)) if ready_at(*kind) == at => text.clone(),
-                _ => String::new(),
-            };
-            field.update(cx, |f, cx| f.set_value(text, window, cx));
-        }
-        for (at, field) in url.iter().enumerate() {
-            let text = match &shown.url {
-                Some((kind, text)) if url_at(*kind) == at => text.clone(),
-                _ => String::new(),
-            };
-            field.update(cx, |f, cx| f.set_value(text, window, cx));
-        }
+        fields.ready.fill(&shown.ready, &shown.url, window, cx);
+        // The services a task may need: the file is the user's to edit by hand too.
+        perform_later(&self.shell, Command::Services, cx);
         self.flags = shown;
         self.editing = Some(info.map(|info| info.name.clone()));
         self.form_error = None;
@@ -549,16 +645,9 @@ impl TasksSection {
         for flag in Flag::ALL {
             params[flag.key()] = flag.of(&self.flags).into();
         }
-        // None is `""`: the link drops a `null`, which would leave it as it was.
-        params["ready"] = match self.ready_kind() {
-            Some(kind) => json!({kind.key(): value(&fields.ready[ready_at(kind)])}),
-            None => "".into(),
-        };
-        params["url"] = match self.flags.url.as_ref().map(|(kind, _)| *kind) {
-            Some(AddressKind::Address) => value(&fields.url[0]).into(),
-            Some(AddressKind::Command) => json!({"command": value(&fields.url[1])}),
-            None => "".into(),
-        };
+        let url = self.flags.url.as_ref().map(|(kind, _)| *kind);
+        (params["ready"], params["url"]) = fields.ready.params(self.ready_kind(), url, cx);
+        params["needs"] = json!(self.flags.needs);
         let (method, writing) = match original {
             Some(_) => ("task.edit", Writing::Saved(name)),
             None => ("task.add", Writing::Added(name)),
@@ -658,6 +747,12 @@ impl TasksSection {
             Some(repository) => format!("in {}", repository_label(&self.project, repository)),
             None => "in each place's folder".to_owned(),
         }));
+        if !info.needs.is_empty() {
+            row = row.below(needs_line(
+                ElementId::Name(format!("task-needs-{}", info.name).into()),
+                &info.needs,
+            ));
+        }
         let edit = info.clone();
         row.on_click(cx.listener(move |this, _, window, cx| this.open(Some(&edit), window, cx)))
     }
@@ -780,7 +875,26 @@ impl TasksSection {
                 "What it is",
                 div().flex().flex_col().gap(space::MD).children(switches),
             ))
-            .child(self.ready_and_url(cx))
+            .child(needs_field(
+                "task",
+                self.services
+                    .as_ref()
+                    .map(|listed| listed.as_deref().map_err(String::as_str)),
+                None,
+                &self.flags.needs,
+                |this: &mut Self, name, cx| this.toggle_need(name, cx),
+                cx,
+            ))
+            .child(ready_and_url(
+                "task",
+                false,
+                &fields.ready,
+                self.ready_kind(),
+                self.flags.url.as_ref().map(|(kind, _)| *kind),
+                |this: &mut Self, kind, cx| this.choose_ready(kind, cx),
+                |this: &mut Self, kind, cx| this.choose_url(kind, cx),
+                cx,
+            ))
             .child(problem_line(
                 "task-error",
                 self.form_error.clone(),
@@ -803,115 +917,206 @@ impl TasksSection {
     }
 }
 
-impl TasksSection {
-    /// When a run of the task is ready, and where it answers: each a choice, and under it the
-    /// field the choice needs, which unfolds with it.
-    fn ready_and_url(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(fields) = self.fields.as_ref() else {
-            return div().into_any_element();
-        };
-        let this = cx.entity().downgrade();
-        let mut ready = RadioChoices::new("task-ready", "Ready when").choice(
-            "none",
-            "Not said",
-            "A run of it is running, and that is all.",
-        );
-        for kind in ReadyKind::ALL {
-            let (title, line) = kind.choice();
-            ready = ready.choice(kind.key(), title, line);
+/// Adds `name` to `names`, or takes it out when it is there.
+pub(crate) fn toggle_name(names: &mut Vec<String>, name: &str) {
+    match names.iter().position(|n| n == name) {
+        Some(at) => {
+            names.remove(at);
         }
-        let ready = ready
-            .chosen(self.ready_kind().map_or(0, |kind| ready_at(kind) + 1))
-            .on_choose(move |index, _, cx| {
-                let kind = index.checked_sub(1).map(|at| ReadyKind::ALL[at]);
-                this.update(cx, |this, cx| this.choose_ready(kind, cx)).ok();
-            });
-        let this = cx.entity().downgrade();
-        let url_kind = self.flags.url.as_ref().map(|(kind, _)| *kind);
-        let mut url = RadioChoices::new("task-url", "Its address").choice(
-            "none",
-            "None",
-            "It serves nothing to open.",
-        );
-        for kind in AddressKind::ALL {
-            let (title, line) = kind.choice();
-            url = url.choice(kind.key(), title, line);
-        }
-        let url = url
-            .chosen(url_kind.map_or(0, |kind| url_at(kind) + 1))
-            .on_choose(move |index, _, cx| {
-                let kind = index.checked_sub(1).map(|at| AddressKind::ALL[at]);
-                this.update(cx, |this, cx| this.choose_url(kind, cx)).ok();
-            });
-        // `input` is the box's id, `<kind>-input`; the block and its field are named after the kind.
-        let block = |input_id: &'static str, shown: bool, field: (&str, &str, &str), input| {
-            let (label, _, hint) = field;
-            let id = input_id.trim_end_matches("-input");
-            presence(
-                ElementId::Name(format!("{id}-block").into()),
-                shown,
-                Field::new(
-                    ElementId::Name(format!("{id}-text").into()),
-                    label.to_owned(),
-                    boxed(input_id, Input::new(input), cx),
-                )
-                .hint(hint.to_owned()),
-            )
-            .gap(space::MD)
+        None => names.push(name.to_owned()),
+    }
+}
+
+/// What a task or a service needs, as a row says it under its line: `Needs mongo, redis`.
+pub(crate) fn needs_line(id: ElementId, needs: &[String]) -> LabelledLine {
+    let said = needs.join(", ");
+    LabelledLine::new(id, Icon::Service, "Needs", SharedString::from(said.clone()))
+        .child(SharedString::from(said))
+}
+
+/// The services a task or a service needs, chosen from those of the machine (`<prefix>-need-<name>`
+/// switches each); `own` is a service's own name, never offered to itself. `offered` is `None`
+/// until the daemon has listed them, and why it could not when it failed.
+pub(crate) fn needs_field<V: 'static>(
+    prefix: &'static str,
+    offered: Option<Result<&[String], &str>>,
+    own: Option<&str>,
+    chosen: &[String],
+    toggle: fn(&mut V, &str, &mut Context<V>),
+    cx: &mut Context<V>,
+) -> AnyElement {
+    let p = palette(cx);
+    let offered_or_why = offered;
+    let offered: Vec<String> = offered
+        .and_then(Result::ok)
+        .unwrap_or_default()
+        .iter()
+        .filter(|name| Some(name.as_str()) != own)
+        .cloned()
+        .collect();
+    let switches = offered.iter().map(|name| {
+        let toggled = name.clone();
+        Switch::new(
+            ElementId::Name(format!("{prefix}-need-{name}").into()),
+            chosen.contains(name),
+            SharedString::from(name.clone()),
+        )
+        .on_click(cx.listener(move |this, _, _, cx| toggle(this, &toggled, cx)))
+    });
+    let none = offered.is_empty().then(|| {
+        let (said, ink) = match offered_or_why {
+            None => ("Reading the services of the machine…".to_owned(), p.faint),
+            Some(Err(why)) => (format!("The services cannot be read: {why}"), p.fail),
+            Some(Ok(_)) => (
+                "No service to need: the Services page adds them.".to_owned(),
+                p.faint,
+            ),
         };
-        let ready_blocks: Vec<_> = ReadyKind::ALL
-            .into_iter()
-            .map(|kind| {
-                block(
-                    match kind {
-                        ReadyKind::Line => "task-ready-line-input",
-                        ReadyKind::Url => "task-ready-url-input",
-                        ReadyKind::Command => "task-ready-command-input",
-                    },
-                    self.ready_kind() == Some(kind),
-                    kind.field(),
-                    &fields.ready[ready_at(kind)],
-                )
-            })
-            .collect();
-        let url_blocks: Vec<_> = AddressKind::ALL
-            .into_iter()
-            .map(|kind| {
-                block(
-                    match kind {
-                        AddressKind::Address => "task-url-address-input",
-                        AddressKind::Command => "task-url-command-input",
-                    },
-                    url_kind == Some(kind),
-                    kind.field(),
-                    &fields.url[url_at(kind)],
-                )
-            })
-            .collect();
+        let said = SharedString::from(said);
+        div()
+            .id(ElementId::Name(format!("{prefix}-no-needs").into()))
+            .aria_label(said.clone())
+            .text_size(px(12.5))
+            .text_color(ink)
+            .child(said)
+            .test_support()
+    });
+    Field::new(
+        ElementId::Name(format!("{prefix}-needs-field").into()),
+        "Needs",
         div()
             .flex()
             .flex_col()
-            .gap(space::LG)
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(Field::new("task-ready-field", "Ready when", ready).optional())
-                    .children(ready_blocks),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        Field::new("task-url-field", "Its address", url)
-                            .optional()
-                            .hint("Shown on its run, a link that opens it."),
-                    )
-                    .children(url_blocks),
-            )
-            .into_any_element()
+            .gap(space::MD)
+            .children(switches)
+            .children(none),
+    )
+    .optional()
+    .hint("The services of the machine it needs: started first, and waited for until ready.")
+    .into_any_element()
+}
+
+/// When a run is ready, and where it answers: each a choice, and under it the field the choice
+/// needs, which unfolds with it. A task's form (`prefix` `task`) and a service's draw it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ready_and_url<V: 'static>(
+    prefix: &'static str,
+    service: bool,
+    fields: &ReadyFields,
+    ready_kind: Option<ReadyKind>,
+    url_kind: Option<AddressKind>,
+    choose_ready: fn(&mut V, Option<ReadyKind>, &mut Context<V>),
+    choose_url: fn(&mut V, Option<AddressKind>, &mut Context<V>),
+    cx: &mut Context<V>,
+) -> AnyElement {
+    let this = cx.entity().downgrade();
+    let mut ready = RadioChoices::new(format!("{prefix}-ready"), "Ready when").choice(
+        "none",
+        "Not said",
+        "A run of it is running, and that is all.",
+    );
+    for kind in ReadyKind::ALL {
+        let (title, line) = kind.choice();
+        ready = ready.choice(kind.key(), title, line);
     }
+    let ready = ready
+        .chosen(ready_kind.map_or(0, |kind| ready_at(kind) + 1))
+        .on_choose(move |index, _, cx| {
+            let kind = index.checked_sub(1).map(|at| ReadyKind::ALL[at]);
+            this.update(cx, |this, cx| choose_ready(this, kind, cx))
+                .ok();
+        });
+    let this = cx.entity().downgrade();
+    let mut url = RadioChoices::new(format!("{prefix}-url"), "Its address").choice(
+        "none",
+        "None",
+        "It serves nothing to open.",
+    );
+    for kind in AddressKind::ALL {
+        let (title, line) = kind.choice(service);
+        url = url.choice(kind.key(), title, line);
+    }
+    let url = url
+        .chosen(url_kind.map_or(0, |kind| url_at(kind) + 1))
+        .on_choose(move |index, _, cx| {
+            let kind = index.checked_sub(1).map(|at| AddressKind::ALL[at]);
+            this.update(cx, |this, cx| choose_url(this, kind, cx)).ok();
+        });
+    // `<prefix>-<choice>-<kind>` is the block and its field; the box is `<id>-input`.
+    let block = |id: String, shown: bool, field: (&str, &str, &str), input| {
+        let (label, _, hint) = field;
+        presence(
+            ElementId::Name(format!("{id}-block").into()),
+            shown,
+            Field::new(
+                ElementId::Name(format!("{id}-text").into()),
+                label.to_owned(),
+                boxed(
+                    ElementId::Name(format!("{id}-input").into()),
+                    Input::new(input),
+                    cx,
+                ),
+            )
+            .hint(hint.to_owned()),
+        )
+        .gap(space::MD)
+    };
+    let ready_blocks: Vec<_> = ReadyKind::ALL
+        .into_iter()
+        .map(|kind| {
+            block(
+                format!("{prefix}-ready-{}", kind.key()),
+                ready_kind == Some(kind),
+                kind.field(),
+                &fields.ready[ready_at(kind)],
+            )
+        })
+        .collect();
+    let url_blocks: Vec<_> = AddressKind::ALL
+        .into_iter()
+        .map(|kind| {
+            block(
+                format!("{prefix}-url-{}", kind.key()),
+                url_kind == Some(kind),
+                kind.field(service),
+                &fields.url[url_at(kind)],
+            )
+        })
+        .collect();
+    div()
+        .flex()
+        .flex_col()
+        .gap(space::LG)
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .child(
+                    Field::new(
+                        ElementId::Name(format!("{prefix}-ready-field").into()),
+                        "Ready when",
+                        ready,
+                    )
+                    .optional(),
+                )
+                .children(ready_blocks),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .child(
+                    Field::new(
+                        ElementId::Name(format!("{prefix}-url-field").into()),
+                        "Its address",
+                        url,
+                    )
+                    .optional()
+                    .hint("Shown on its run, a link that opens it."),
+                )
+                .children(url_blocks),
+        )
+        .into_any_element()
 }
 
 impl Render for TasksSection {

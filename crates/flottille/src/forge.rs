@@ -1071,7 +1071,7 @@ pub(crate) struct ForgeCall {
     events: Option<Vec<String>>,
     /// subscribe: whose reviews and comments count (`subscriptions::FROM`).
     from: Option<String>,
-    /// subscribe: how long it waits at most.
+    /// subscribe: a deadline, in minutes; none when left out.
     minutes: Option<u64>,
     /// unsubscribe: a session the agent follows (`agent_launch` with `follow`), to stop following.
     session: Option<String>,
@@ -1391,7 +1391,6 @@ fn subscriptions_text(daemon: &Daemon, agent: &str) -> String {
     if mine.is_empty() && following.is_empty() && runs.is_empty() {
         return String::new();
     }
-    let now = now_ms();
     let mut text = "\nYour subscriptions:\n".to_owned();
     for subscription in runs {
         text.push_str(&format!(
@@ -1417,18 +1416,19 @@ fn subscriptions_text(daemon: &Daemon, agent: &str) -> String {
             _ => "",
         };
         text.push_str(&format!(
-            "- {}: {}{from}, for {} min more\n",
+            "- {}: {}{from}, {}\n",
             target_named(&subscription.target),
             subscription.events.join(", "),
-            subscription.expires_at.saturating_sub(now).div_ceil(60_000)
+            crate::subscriptions::lasts(&subscription)
         ));
     }
     text
 }
 
-/// `forge subscribe`: the agent waits, once, for the next of the events it names of the pull
-/// request of a workspace's branch; the answer comes at once, the event later as a delivery. What
-/// is already so is not an event: this read is what the next ones are compared with.
+/// `forge subscribe`: the agent is woken at each of the events it names of the pull request of a
+/// workspace's branch, until it is merged or closed; the answer comes at once, the events later as
+/// deliveries. What is already so is not an event: this read is what the next ones are compared
+/// with.
 async fn forge_subscribe(
     daemon: &Arc<Daemon>,
     agent: &str,
@@ -1453,13 +1453,10 @@ async fn forge_subscribe(
             "refused: from is anyone (the default) or people (no bot, not your own), not {from:?}"
         ));
     }
-    let longest = crate::subscriptions::LONGEST_MINUTES;
-    if let Some(minutes) = asked.minutes
-        && !(1..=longest).contains(&minutes)
-    {
-        return Outcome::Refused(format!(
-            "refused: minutes is from 1 to {longest}, 60 by default"
-        ));
+    if asked.minutes == Some(0) {
+        return Outcome::Refused(
+            "refused: minutes is a deadline of 1 min or more; leave it out for none".into(),
+        );
     }
     if asked.number.is_some() {
         return Outcome::Refused(
@@ -1515,17 +1512,10 @@ async fn forge_subscribe(
             pull.number, pull.state
         ));
     }
-    // The one read of the runs: it tells the agent, and sizes the wait it did not size.
+    // The one read of the runs: how long CI usually takes, for the agent to know.
     let runs = match &repository.forge {
         Some(forge) => ci::recent(forge).await,
         None => None,
-    };
-    let (minutes, duration) = match asked.minutes {
-        Some(minutes) => (minutes, None),
-        None => {
-            let (minutes, why) = ci::wait_for(runs.as_ref());
-            (minutes, Some(why))
-        }
     };
     let target = events::target(&workspace, &path, pull.number);
     let held = crate::items::held_after(daemon, &place.project, before).await;
@@ -1554,7 +1544,7 @@ async fn forge_subscribe(
         from: from.to_owned(),
         seen: json!({}),
         created_at: now,
-        expires_at: now + minutes * 60_000,
+        expires_at: crate::subscriptions::deadline(now, asked.minutes),
     };
     let subscribed = crate::subscriptions::subscribe(daemon, &subscription);
     drop(held);
@@ -1566,10 +1556,10 @@ async fn forge_subscribe(
         _ => "",
     };
     let mut text = format!(
-        "Subscribed: the next {}{from} of the {} wakes you once, as a delivery, within {minutes} \
-         min. What is so now is no event: forge show reads it.",
-        subscription.events.join(" or "),
-        target_named(&subscription.target)
+        "Subscribed to {}{from} of the {}: {}. What is so now is no event: forge show reads it.",
+        subscription.events.join(", "),
+        target_named(&subscription.target),
+        crate::subscriptions::wakes_until(&subscription, asked.minutes)
     );
     match unseen {
         Some(crate::items::Unseen::Source) => text.push_str(&format!(
@@ -1582,8 +1572,17 @@ async fn forge_subscribe(
         ),
         None => {}
     }
-    for line in runs.map(|runs| runs.line()).into_iter().chain(duration) {
-        text.push_str(&format!("\n{line}"));
+    if let Some(runs) = runs {
+        text.push_str(&format!("\n{}", runs.line()));
+    }
+    // GitHub says no decision when the base branch requires no review: `approved` waits for one.
+    if pull.review.is_none()
+        && matches!(repository.forge, Some(Forge::GitHub { .. }))
+        && subscription.events.iter().any(|e| e == "approved")
+    {
+        text.push_str(
+            "\nThis repository asks for no review, so approved will not come; subscribe to review.",
+        );
     }
     text.push_str(&checks_when_subscribed(daemon, agent, &path, pull));
     Outcome::Done(text)

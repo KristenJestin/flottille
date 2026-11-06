@@ -875,7 +875,8 @@ a result:
   "why": null,
   "run": "5d2c0f1a9b3e",
   "address": "http://localhost:3001",
-  "needs_stopped": []
+  "needs_stopped": [],
+  "needed_by": [{"project": "app", "tasks": ["api"]}]
 }
 ```
 
@@ -884,7 +885,9 @@ as the file says them. `state` is `stopped`, `starting`, `ready`, `running` (it 
 `outside` (it answered before Flottille started it) or `failed`, `why` then the line that says why.
 `run` is its run, going on or the last one, read with the run methods' `run.output` too; a
 service's run has an empty `project` and is not listed by `run.list`. `address` is its run's
-address, or the file's. `needs_stopped` lists what it needs that does not run. `not-found` for a
+address, or the file's. `needs_stopped` lists what it needs that does not run. `needed_by` lists
+the projects whose tasks need it, directly or through another service's `needs`, each with those
+tasks. `not-found` for a
 service the file does not hold, `invalid-config` when the file cannot be used, `refused` for a
 write the file would refuse (nothing is written).
 
@@ -1136,6 +1139,20 @@ whose session was forgotten (7 days after it ended), one whose workspace or proj
 `resumable` says, in short (`agent.tree`); and one whose last process is still stopping
 (`stopping`), with a sentence to try again in a moment.
 
+#### `agent.reload_tools`
+
+`{"agent"}`. Reloads a root's tools (`docs/tools.md`, "When the tools change"): `{"agent",
+"after_turn"}`. Its process is let go between turns, as after an idle release
+(`agent.released`, reason `reload`), and the next message starts the next one, which resumes or
+loads its session with the tools its role has now. A turn that runs is never cut: the process goes
+once it ended (`after_turn` true), the prompts waiting going to the next process. The next
+process's prompt carries a `tools` delivery: what changed since the last list the agent was given,
+by tool, else `Your tools were reloaded: nothing changed.`, whatever its agent does with
+`list_changed`. Until that process takes it, the reload waits: `tools_reload` of the agent
+(`agent.show`, `agent.tree`) is true, and `agent.tools_reload` says when it is asked and when it
+is taken (`docs/events.md`). Its children keep their processes. `refused` for a child (the
+sentence names its root) and an agent in a final state.
+
 #### `agent.mode`
 
 `{"agent", "mode"}`, `mode` `ask`, `auto` or `full`. Puts the agent's tree in that mode
@@ -1176,7 +1193,8 @@ started; `effort`: the same for its effort; `pending`: `{"model", "effort"}` the
 the session has not taken yet, `null` when nothing waits; `resumable`: whether `agent.resume` takes it once its last process is gone; `stopping`:
 whether the process of an agent that ended is still stopping; `images`: as in the agent's full
 form; `tools_outdated`: whether its running session runs an older list of tools than its role
-has, which a restart replaces, `docs/tools.md`, "When the tools change"); `doing` a sentence of what it does
+has, which a restart replaces, `docs/tools.md`, "When the tools change"; `tools_reload`: whether
+a reload of its tools waits for its next process, `agent.reload_tools`); `doing` a sentence of what it does
 (`working`, `idle`, `running \`cargo test\` for 12 min`, `waiting for approval #3`, `failed: …`);
 `waiting_on` `parent` for a child whose request or question waits for its parent, `user` for a
 root whose own does, `subscription` for an agent between turns that has an open subscription (`doing` then
@@ -1334,7 +1352,9 @@ source's own (`forge`: `project`, `workspace`, `repository`, `number`; `tickets`
 `repository`, the tracker's, empty for Jira, and `key`, `5` or `ABC-1`; `timer`: `why`,
 `expires_at` being when it wakes; `session`: `session` and `title`, the session followed, with no
 end of its own), `from` is `anyone` or `people`, the times are in milliseconds since the Unix
-epoch. `paused` is true for a following paused because its two sessions wrote to each other
+epoch. A subscription with no deadline (one to a pull request or a ticket the agent gave no
+`minutes`, a following) has `expires_at` 9223372036854775807 (`i64::MAX`): it lasts until its
+target ends. `paused` is true for a following paused because its two sessions wrote to each other
 without the user (`docs/tools.md`, "Sessions that talk to each other"), false otherwise.
 
 #### `subscription.cancel`

@@ -343,24 +343,28 @@ review) subscribes to it instead of reading again and again. Four parts, each it
   subscribed is no event. The sources are the daemon's rounds of the items ([`items.md`](items.md),
   "What reads this stream"), which compare each read with what the store holds and say it as
   `item.*` events: a subscription to a pull request filters those of its pull request, as
-  `checks` (all ended), `review`, `comment`, `merged` and `closed` (`docs/forges.md`,
+  `checks` (all ended), `review`, `approved`, `comment`, `merged` and `closed` (`docs/forges.md`,
   "Subscriptions"), one to a ticket those of its ticket, as `commented`, `status`, `assigned` and
   `closed` (`docs/tickets.md`). No subscription reads anything of its own; it hears as often as
   the rounds come. The **timer** of a wake is a source too: its target is the agent's reason, its
   one event the time it asked for (`wake`, `docs/tools.md`, "Waking later").
-- **A subscription** is (agent, source, target, the events chosen, whose events count, an
-  expiry), stored, so that it survives a restart of the daemon; nothing that happened meanwhile
+- **A subscription** is (agent, source, target, the events chosen, whose events count, a
+  deadline when the agent gave one), stored, so that it survives a restart of the daemon; nothing that happened meanwhile
   is lost, since the next round compares with what the store kept
   (`crates/flottille/src/subscriptions.rs`). The agent subscribes itself (`forge` `subscribe`,
   `tickets` `subscribe`, `wake`, `docs/tools.md`); nothing subscribes it.
-- **One shot.** The first read that holds an event the subscription waits for is delivered, every
-  such event of that read in one delivery, and the subscription is over. It also ends when the
-  target ends (a pull request merged or closed, a ticket closed, said when that was not what it
-  waited for), when
-  its time is up (an hour by default, 100 hours at most, said), when the agent ends, or when the agent unsubscribes.
-  Nothing is delivered of what does not change: each delivery costs the agent a turn.
+- **Until the target ends.** Each read that holds events the subscription waits for is
+  delivered, every such event of that read in one delivery, and the subscription goes on: the
+  agent subscribes once, and never renews it nor adds a timed wake "as a safety net". Since it
+  reads nothing of its own, keeping it costs nothing. It ends when the target ends (a pull request
+  merged or closed, a ticket closed, a Jira work item in a status of the category done, said),
+  when the agent ends, when it unsubscribes or the user cancels it, or at the deadline the agent
+  gave (`minutes`, optional, no cap: woken once, `Nothing came in N min` when nothing did). A
+  subscription stored with a deadline keeps it. Nothing is delivered of what does not change: each
+  delivery costs the agent a turn, so the deliveries of one round of the items ring the agent once,
+  and those that come while it is in a turn are pumped together, in order, at its end (§5.2).
 - **A following** is a subscription whose source is a session the agent started for the user
-  (`agent_launch` with `root` and `follow: true`): it is not one shot and has no time, and ends
+  (`agent_launch` with `root` and `follow: true`): it has no deadline, and ends
   when the agent unsubscribes (`forge unsubscribe` with `session`), when the session ends or
   fails, or when the agent ends. It wakes the agent at each end of a turn of the session, never
   more than once for a turn. A run the agent started (`forge` `run`) is followed the same way
@@ -374,7 +378,8 @@ Left for later: relaunching an agent that has ended when an event comes; a rhyth
 the rounds' for a subscription that needs it.
 
 The window shows them: the session page's rail lists the session's open subscriptions (the pull
-request or the ticket, the events, since when and until when; a wake, `Wake: <why>` and when it is due), each with a Cancel that ends it through the daemon
+request or the ticket, the events, since when and until when: `until merged or closed`,
+`until closed` for a ticket, or the deadline the agent gave; a wake, `Wake: <why>` and when it is due), each with a Cancel that ends it through the daemon
 (`subscription.cancel`); the following of a session an agent started, `Following <title>`, since
 when, and, paused because the two sessions wrote to each other five times without the user, a line
 that says so with a Resume (`subscription.resume`), unfolding when it pauses and folding away when
@@ -394,8 +399,8 @@ methods").
 When it is on, the daemon ends a root that is between turns and had **no activity for that many
 days** in its whole tree: no event of its conversation (a turn, a tool call, a message of the
 user's), no delivery made or sent, no command started or ended, no request asked or answered
-(`docs/events.md` has the events; the two the daemon says on its own, `agent.tools_outdated` and
-`agent.released`, do not count). Nothing new is recorded for it: the latest of those is the
+(`docs/events.md` has the events; the three the daemon says on its own, `agent.tools_outdated`,
+`agent.tools_reload` and `agent.released`, do not count). Nothing new is recorded for it: the latest of those is the
 session's last activity. **A session with anything pending or running is never ended, whatever
 the dates**: a turn running, a message queued, a command running, a request or a question
 waiting for an answer, a subscription or a timer pending anywhere in its tree.

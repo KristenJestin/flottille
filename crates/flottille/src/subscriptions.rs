@@ -1,6 +1,6 @@
-//! Subscriptions (`docs/design.md` §5.6): an agent waits, once, for the next event of a target a
-//! source watches. Sources turn their reads into events; this module matches the events with the
-//! subscriptions and delivers the first that matches, which ends the subscription. The sources
+//! Subscriptions (`docs/design.md` §5.6): an agent waits for the events of a target a source
+//! watches. Sources turn their reads into events; this module matches the events with the
+//! subscriptions and delivers each read's that match, until the target ends. The sources
 //! are the daemon's rounds of the items (`docs/items.md`), whose `item.*` events a subscription to
 //! a pull request (`forge`) or a ticket (`tickets`) filters, the timer of a wake the agent
 //! asked for itself (`timer`, `wake`), whose time is its event, and the run an agent started
@@ -8,9 +8,13 @@
 //! its own.
 //!
 //! A subscription costs the agent a turn each time it wakes it: one delivery holds every event of
-//! a read, nothing is delivered of what does not change, and it is over once delivered.
+//! a read, a round's deliveries ring the agent once, nothing is delivered of what does not change,
+//! and what comes during a turn waits for its end, pumped as one prompt (`deliveries`). Since it
+//! reads nothing of its own, it costs nothing to keep: it lasts until its target ends, its agent
+//! ends, it is cancelled, or the deadline the agent gave passes.
 
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 
 use flottille_core::agent::{Agent, new_id};
 use flottille_core::approval;
@@ -24,10 +28,10 @@ use crate::deliveries;
 use crate::mcp::{Outcome, arguments};
 use crate::projects::Failure;
 
-/// How long a subscription waits when the agent says nothing.
-pub const DEFAULT_MINUTES: u64 = 60;
-/// The longest an agent can make it wait.
+/// The longest a wake waits.
 pub const LONGEST_MINUTES: u64 = 100 * 60;
+/// The time of a subscription with no deadline.
+pub use flottille_core::subscription::NO_DEADLINE;
 /// Whose events count.
 pub const FROM: [&str; 2] = ["anyone", "people"];
 /// The source of a wake: its time is its one event.
@@ -411,38 +415,130 @@ pub fn end(daemon: &Daemon, subscription: &Subscription, why: &str) -> bool {
     was_open
 }
 
-/// Offers what the items' rounds and live reads stored to the subscriptions to those items: each
-/// source picks the events of its targets (`forge::offer`, `tickets::offer`).
+/// The projects whose round of the items runs, with the agents a delivery was queued for meanwhile:
+/// rung once, at the round's end.
+static ROUNDS: Mutex<BTreeMap<String, BTreeSet<String>>> = Mutex::new(BTreeMap::new());
+
+/// A round of a project's items that runs: the agents its events are delivered to are rung when it
+/// is dropped, once each.
+pub struct Round {
+    daemon: Arc<Daemon>,
+    project: String,
+}
+
+impl Round {
+    pub fn hold(daemon: &Arc<Daemon>, project: &str) -> Round {
+        ROUNDS
+            .lock()
+            .unwrap()
+            .insert(project.to_owned(), BTreeSet::new());
+        Round {
+            daemon: daemon.clone(),
+            project: project.to_owned(),
+        }
+    }
+}
+
+impl Drop for Round {
+    fn drop(&mut self) {
+        let woken = ROUNDS.lock().unwrap().remove(&self.project);
+        for agent in woken.into_iter().flatten() {
+            deliveries::ring(&self.daemon, &agent);
+        }
+    }
+}
+
+/// Offers what the items' rounds and live reads of `project` stored to the subscriptions to those
+/// items: each source picks the events of its targets (`forge::offer`, `tickets::offer`). The
+/// deliveries are queued; each agent they are for is rung once, at the end of the round that runs,
+/// or now after a live read: one wake for the round.
 pub fn items(
     daemon: &Arc<Daemon>,
+    project: &str,
     items: &[flottille_core::item::Item],
     events: &[(&'static str, Value)],
 ) {
     if events.is_empty() {
         return;
     }
+    let mut woken: BTreeSet<String> = BTreeSet::new();
     for subscription in all(daemon) {
-        match subscription.source.as_str() {
+        let queued = match subscription.source.as_str() {
             "forge" => crate::forge::offer(daemon, &subscription, items, events),
             TICKETS => crate::tickets::offer(daemon, &subscription, items, events),
-            _ => {}
+            _ => false,
+        };
+        if queued {
+            woken.insert(subscription.agent);
         }
+    }
+    if let Some(held) = ROUNDS.lock().unwrap().get_mut(project) {
+        held.append(&mut woken);
+    }
+    for agent in woken {
+        deliveries::ring(daemon, &agent);
     }
 }
 
-/// What a source found happened to the subscription's target. The first events that match are
-/// delivered as one, and end it; an end of the target (`ends`) ends it too, said when it was not
-/// waited for. Otherwise nothing changes.
+/// What ends a subscription with no deadline, as `forge show`, `tickets show` and the answers say
+/// it.
+pub fn until(subscription: &Subscription) -> &'static str {
+    match subscription.source.as_str() {
+        TICKETS => "until the ticket is closed",
+        _ => "until it is merged or closed",
+    }
+}
+
+/// How long the subscription lasts, as `forge show` and `tickets show` say it: `until it is
+/// merged or closed`, or `for 30 min more` when the agent gave a deadline.
+pub fn lasts(subscription: &Subscription) -> String {
+    match subscription.expires_at >= NO_DEADLINE {
+        true => until(subscription).to_owned(),
+        false => format!(
+            "for {} min more",
+            subscription
+                .expires_at
+                .saturating_sub(now_ms())
+                .div_ceil(60_000)
+        ),
+    }
+}
+
+/// When a subscription asked for `minutes` ends: never when none were given.
+pub fn deadline(now: u64, minutes: Option<u64>) -> u64 {
+    minutes.map_or(NO_DEADLINE, |minutes| {
+        now.saturating_add(minutes.saturating_mul(60_000))
+            .min(NO_DEADLINE - 1)
+    })
+}
+
+/// What a subscribe answers says of when it wakes the agent and until when.
+pub fn wakes_until(subscription: &Subscription, minutes: Option<u64>) -> String {
+    let deadline = match minutes {
+        Some(minutes) => format!(", or for {minutes} min, the deadline you gave"),
+        None => String::new(),
+    };
+    format!(
+        "it wakes you at each of these events {}{deadline}; no need to subscribe again",
+        until(subscription)
+    )
+}
+
+/// What a source found happened to the subscription's target. The events that match are queued as
+/// one delivery, the subscription going on; an end of the target (`ends`) ends it, said whether it
+/// was waited for or not. Otherwise nothing changes. Whether a delivery was queued: the caller
+/// rings the agent (`ring` rings it at once).
 pub fn offer(
     daemon: &Arc<Daemon>,
     subscription: &Subscription,
     named: &str,
     events: &[Event],
     ends: Option<&Event>,
-) {
+    ring: bool,
+) -> bool {
     let matched: Vec<&Event> = events.iter().filter(|e| matches(subscription, e)).collect();
     if matched.is_empty() && ends.is_none() {
-        return;
+        return false;
     }
     let says = match subscription.source.as_str() {
         TICKETS => "the tracker",
@@ -453,15 +549,58 @@ pub fn offer(
     for event in &matched {
         body.push_str(&format!("\n{}\n", event.text));
     }
-    if let Some(end) = ends.filter(|end| !matched.contains(end)) {
-        body.push_str(&format!(
-            "\n{}: your subscription to {} is over.\n",
-            end.text,
-            subscription.events.join(", ")
-        ));
+    let events = subscription.events.join(", ");
+    let queued = match ends {
+        Some(over) => {
+            match matched.contains(&over) {
+                true => body.push_str(&format!("\nYour subscription to {events} of it is over.")),
+                false => body.push_str(&format!(
+                    "\n{}: your subscription to {events} is over.",
+                    over.text
+                )),
+            }
+            // A subscription the user cancelled while the source was reading wakes nobody.
+            end(daemon, subscription, "delivered") && queue(daemon, subscription, &body)
+        }
+        None => {
+            body.push_str(&format!(
+                "\nYour subscription goes on: the next of {events} wakes you too, {}.",
+                until(subscription)
+            ));
+            // Marked as having delivered, and only when still open: one cancelled while the
+            // source was reading wakes nobody.
+            let mut seen = subscription.seen.clone();
+            if !seen.is_object() {
+                seen = json!({});
+            }
+            seen["delivered"] = json!(true);
+            daemon
+                .read(|store| store.set_seen(&subscription.id, &seen))
+                .unwrap_or(false)
+                && queue(daemon, subscription, &body)
+        }
+    };
+    if queued && ring {
+        deliveries::ring(daemon, &subscription.agent);
     }
-    body.push_str("\nSubscribe again for the next one.");
-    deliver(daemon, subscription, &body, "delivered");
+    queued
+}
+
+/// Stores `body` for the subscription's agent, between turns, under an id of its own: a
+/// subscription delivers again and again.
+fn queue(daemon: &Daemon, subscription: &Subscription, body: &str) -> bool {
+    deliveries::queue(
+        daemon,
+        &subscription.agent,
+        "subscription",
+        Some(format!(
+            "subscription-{}-{}",
+            subscription.id,
+            new_subscription_id()
+        )),
+        body,
+    )
+    .is_some()
 }
 
 /// Delivers `body` to the agent and ends the subscription.
@@ -515,9 +654,15 @@ fn due(daemon: &Arc<Daemon>, subscription: &Subscription) {
             why_of(subscription),
             crate::session_read::shown_date(subscription.created_at)
         ),
+        _ if subscription.seen["delivered"] == true => format!(
+            "Its deadline, {minutes} min, passed: your subscription to {} of {} ended. Subscribe \
+             again if you still wait for them.",
+            subscription.events.join(", "),
+            named(subscription)
+        ),
         _ => format!(
-            "Your subscription to {} of {} ended after {minutes} min with nothing of what you \
-             waited for: subscribe again if you still wait for it.",
+            "Nothing came in {minutes} min: your subscription to {} of {} reached its deadline \
+             and ended. Subscribe again if you still wait for them.",
             subscription.events.join(", "),
             named(subscription)
         ),

@@ -4,7 +4,7 @@
 //! A link is said as the ticket named reads it: `ticket` `kind` `other`, so `ABC-2 blocks ABC-1`
 //! and `ABC-1 is blocked by ABC-2` are the same link, and the card the user is shown says it in
 //! those words. On Jira the kinds are the site's own link types (`acli jira workitem link type`),
-//! the outward wording putting `ticket` on the outward end (`--out`), the inward one on the other.
+//! the outward wording putting `ticket` on the outward end, the inward one on the other.
 
 use flottille_core::declared::ProjectTracker;
 use flottille_core::project::Project;
@@ -45,7 +45,7 @@ fn same(a: &str, b: &str) -> bool {
 }
 
 /// Why a write of this file cannot be done, before anyone is asked: the words it lacks, a link
-/// kind the tracker has none of, a sprint.
+/// kind the tracker has none of.
 pub(super) fn unwritable(project: &Project, action: &str, args: &Value) -> Option<String> {
     let text = |key: &str| {
         args[key]
@@ -55,13 +55,6 @@ pub(super) fn unwritable(project: &Project, action: &str, args: &Value) -> Optio
     };
     let needs = |what: &str| format!("refused: tickets {action} needs {what}");
     match action {
-        "sprint" => Some(
-            "refused: acli (1.3.39) has no command that puts a work item in a sprint: `workitem \
-             edit` has no sprint flag, and `acli jira sprint` creates, updates, deletes, views \
-             and lists the work items of one; put it in its sprint on the board; nothing was \
-             written"
-                .into(),
-        ),
         "link" | "unlink" => {
             let (Some(ticket), Some(kind), Some(other)) =
                 (text("ticket"), text("kind"), text("other"))
@@ -359,10 +352,10 @@ impl Seen {
 
 /// The links of `key`, from `acli jira workitem view K --json --fields issuelinks`: `link list`
 /// names no other item when `K` is the outward one (seen on a real site). Each is Jira's REST
-/// `{id, type: {name, inward, outward}, inwardIssue, outwardIssue}`, one of the two null, and the
-/// field names the other item's side, as a real site answered for a link made with `--out K`:
-/// on `K` the other is the `inwardIssue` and `K` reads it with the outward wording (`K blocks
-/// it`); with an `outwardIssue`, `K` reads the inward one (`K is blocked by it`).
+/// `{id, type: {name, inward, outward}, inwardIssue, outwardIssue}`, one of the two null, read
+/// with the wording of the field that holds the other item, as Jira's page and its JQL
+/// `linkedIssues` say it on a real site (#520): with an `outwardIssue`, `K blocks it`; with an
+/// `inwardIssue`, `K is blocked by it`.
 async fn seen_on(site: &str, key: &str) -> Result<Vec<Seen>, String> {
     let item = super::viewed(key, site, "issuelinks").await?;
     Ok(seen_in(&item))
@@ -381,9 +374,9 @@ fn seen_in(item: &Value) -> Vec<Seen> {
                 .map(str::to_owned)
                 .or_else(|| link["id"].as_u64().map(|n| n.to_string()))?;
             let kind = &link["type"];
-            let (issue, end) = match link["inwardIssue"].is_object() {
-                true => (&link["inwardIssue"], End::Outward),
-                false if link["outwardIssue"].is_object() => (&link["outwardIssue"], End::Inward),
+            let (issue, end) = match link["outwardIssue"].is_object() {
+                true => (&link["outwardIssue"], End::Outward),
+                false if link["inwardIssue"].is_object() => (&link["inwardIssue"], End::Inward),
                 false => return None,
             };
             let name = text(&kind["name"]);
@@ -483,9 +476,11 @@ async fn jira_link(site: &str, (ticket, kind, other): (&str, &str, &str), unlink
             Err(why) => Outcome::Failed(why),
         };
     }
+    // acli's `--out` is the item the outward wording points at: on a real site `--out A --in B
+    // --type Blocks` made `B blocks A` (#520), though acli printed `A Blocks B`.
     let (out, inward) = match end {
-        End::Outward => (ticket, other),
-        End::Inward => (other, ticket),
+        End::Outward => (other, ticket),
+        End::Inward => (ticket, other),
     };
     // `--type` takes the type's name, as a real site was seen to.
     match acli_run(&[
@@ -751,5 +746,38 @@ pub(super) async fn comment(
             }
         }
         _ => Outcome::Refused("refused: the ticket is not of the project's tracker".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// `view K --json --fields issuelinks` as a real site answered for K, holding one link of the
+    /// type Blocks to `other` in the field named.
+    fn viewed_with(field: &str, other: &str) -> Value {
+        let mut link = json!({"id": "10001",
+            "type": {"name": "Blocks", "inward": "is blocked by", "outward": "blocks"},
+            "inwardIssue": null, "outwardIssue": null});
+        link[field] = json!({"key": other,
+            "fields": {"summary": "Add search", "status": {"name": "To Do"}}});
+        json!({"key": "ABC-8", "fields": {"issuelinks": [link]}})
+    }
+
+    #[test]
+    fn a_link_holding_an_outward_issue_reads_with_the_outward_wording() {
+        assert_eq!(
+            said_in(&viewed_with("outwardIssue", "ABC-9")),
+            ["blocks ABC-9 (To Do): Add search"]
+        );
+    }
+
+    #[test]
+    fn a_link_holding_an_inward_issue_reads_with_the_inward_wording() {
+        assert_eq!(
+            said_in(&viewed_with("inwardIssue", "ABC-7")),
+            ["is blocked by ABC-7 (To Do): Add search"]
+        );
     }
 }

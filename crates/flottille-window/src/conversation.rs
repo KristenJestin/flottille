@@ -327,6 +327,8 @@ pub struct Conversation {
     times: Vec<u64>,
     /// The number of the event that made each block, 0 for one made before the events read.
     seqs: Vec<u64>,
+    /// The delivery each block of a message the agent received is, when the daemon said it.
+    deliveries: Vec<Option<String>>,
     /// When the event being folded came.
     now: u64,
     /// The number of the last event applied: an event read twice (history, then live) is applied
@@ -386,6 +388,7 @@ impl Conversation {
             blocks: Vec::new(),
             times: Vec::new(),
             seqs: Vec::new(),
+            deliveries: Vec::new(),
             now: 0,
             last_seq: 0,
             last_at: None,
@@ -445,6 +448,11 @@ impl Conversation {
 
     pub fn parent(&self) -> Option<&str> {
         self.parent.as_deref()
+    }
+
+    /// The delivery the block at this index is, when it is a message the daemon named.
+    pub fn delivery_of(&self, index: usize) -> Option<&str> {
+        self.deliveries.get(index)?.as_deref()
     }
 
     pub fn last_seq(&self) -> u64 {
@@ -516,6 +524,7 @@ impl Conversation {
         self.times
             .insert(0, self.times.first().copied().unwrap_or(self.now));
         self.seqs.insert(0, 0);
+        self.deliveries.insert(0, None);
         let shift = |at: &mut usize| *at += 1;
         self.calls.values_mut().for_each(shift);
         self.running = self.running.iter().map(|at| at + 1).collect();
@@ -643,13 +652,23 @@ impl Conversation {
                     .flatten()
                     .filter_map(|name| name.as_str().map(str::to_owned))
                     .collect();
+                let delivery = |at: usize| data["deliveries"][at].as_str().map(str::to_owned);
+                // The delivery of a picture sent alone, for the bubble its thumbnails make.
+                let mut alone = None;
                 for (at, (kind, body)) in sections(&text("text")).into_iter().enumerate() {
                     // A picture sent alone has no words: its thumbnails are the message.
                     if body.trim().is_empty() && !names.is_empty() {
+                        alone = alone.or_else(|| delivery(at));
                         continue;
                     }
                     let said = changes.len();
+                    let rows = self.blocks.len();
                     changes.extend(self.deliver(&kind, body.clone()));
+                    if self.blocks.len() > rows
+                        && let Some(last) = self.deliveries.last_mut()
+                    {
+                        *last = delivery(at);
+                    }
                     // A message that used commands shows what was typed; what the agent received
                     // unfolds under it. The daemon says which, one entry per delivery.
                     let entry = &data["typed"][at];
@@ -677,12 +696,17 @@ impl Conversation {
                         {
                             *images = names;
                         }
-                        _ => changes.extend(self.push(Block::Message {
-                            from: USER.into(),
-                            text: String::new(),
-                            images: names,
-                            commands: None,
-                        })),
+                        _ => {
+                            changes.extend(self.push(Block::Message {
+                                from: USER.into(),
+                                text: String::new(),
+                                images: names,
+                                commands: None,
+                            }));
+                            if let Some(last) = self.deliveries.last_mut() {
+                                *last = alone;
+                            }
+                        }
                     }
                 }
                 changes
@@ -790,6 +814,7 @@ impl Conversation {
         self.blocks.push(block);
         self.times.push(self.now);
         self.seqs.push(self.last_seq);
+        self.deliveries.push(None);
         vec![Change::Added]
     }
 
@@ -1136,6 +1161,24 @@ pub fn woken_by(body: &str) -> String {
         (!digits.is_empty()).then(|| format!("#{digits}"))
     };
     let pull = number(body).unwrap_or_else(|| "the pull request".into());
+    // A deadline the agent gave: `Nothing came in 5 min: your subscription to checks of …`.
+    let deadline = |rest: &str| {
+        let minutes = rest.split(" min").next().unwrap_or_default().to_owned();
+        let events = rest
+            .split_once("your subscription to ")
+            .and_then(|(_, rest)| rest.split(" of ").next())
+            .unwrap_or_default()
+            .to_owned();
+        (minutes, events)
+    };
+    if let Some(rest) = body.strip_prefix("Nothing came in ") {
+        let (minutes, events) = deadline(rest);
+        return format!("nothing came for the {events} of {pull} after {minutes} min");
+    }
+    if let Some(rest) = body.strip_prefix("Its deadline, ") {
+        let (minutes, events) = deadline(rest);
+        return format!("the deadline for the {events} of {pull} passed after {minutes} min");
+    }
     if let Some(rest) = body.strip_prefix("Your subscription to ") {
         let events = rest.split(" of pull request").next().unwrap_or_default();
         let minutes = rest
@@ -1606,6 +1649,18 @@ mod tests {
                 "Your subscription to checks of pull request #3 of app, workspace w ended after 60 min with nothing of what you waited for: subscribe again."
             ),
             "nothing came for the checks of #3 after 60 min"
+        );
+        assert_eq!(
+            woken_by(
+                "Nothing came in 5 min: your subscription to checks, review of pull request #3 of app, workspace w reached its deadline and ended. Subscribe again if you still wait for them."
+            ),
+            "nothing came for the checks, review of #3 after 5 min"
+        );
+        assert_eq!(
+            woken_by(
+                "Its deadline, 30 min, passed: your subscription to comment of pull request #3 of app, workspace w ended. Subscribe again if you still wait for them."
+            ),
+            "the deadline for the comment of #3 passed after 30 min"
         );
         assert_eq!(
             woken_by(
@@ -2834,6 +2889,7 @@ mod tests {
             step: false,
             ready: None,
             url: None,
+            service: false,
         }
     }
 
