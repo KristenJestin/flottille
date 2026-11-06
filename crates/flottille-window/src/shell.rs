@@ -83,6 +83,8 @@ pub enum Selection {
     Settings,
     /// A project's own settings.
     ProjectSettings(String),
+    /// The services of the machine.
+    Services,
 }
 
 pub struct Shell {
@@ -147,6 +149,8 @@ pub struct Shell {
     /// a composer with no project default starts there.
     last_pick: Option<Pick>,
     settings: Entity<SettingsPage>,
+    /// The services page, one for the window's life.
+    services: Entity<crate::services::ServicesPage>,
     /// The editor of the user's rules, on the settings page.
     rules: Entity<RulesEditor>,
     /// The notice of the Auto judge Flottille picked was dismissed here, before the daemon says
@@ -239,9 +243,13 @@ impl Shell {
                 workspaces.clone(),
             )
         });
+        let services = {
+            let this = this.clone();
+            cx.new(|cx| crate::services::ServicesPage::new(this, cx))
+        };
         let main = {
-            let (this, settings) = (this.clone(), settings.clone());
-            cx.new(|cx| MainArea::new(this, settings, cx))
+            let (this, settings, services) = (this.clone(), settings.clone(), services.clone());
+            cx.new(|cx| MainArea::new(this, settings, services, cx))
         };
         let left = cx.new(|_| Drawer::new("tree-drawer", Side::Left, px(SIDEBAR), sidebar.clone()));
         let bell = cx.new(|_| BellList::new(this.clone()));
@@ -299,6 +307,7 @@ impl Shell {
             providers_read: 0,
             last_pick: None,
             settings,
+            services,
             rules,
             judge_noticed: false,
             appearance_asked: 0,
@@ -666,6 +675,11 @@ impl Shell {
             Update::DeveloperChanged => self.actions.send(Command::DeveloperRead),
             Update::ToolResultsChanged => self.actions.send(Command::ToolResultsRead),
             Update::SessionsChanged => self.actions.send(Command::SessionsRead),
+            Update::ServicesChanged => {
+                if self.main.read(cx).services_page().is_some() {
+                    self.actions.send(Command::Services);
+                }
+            }
             // A default that changed changes the folder every project shows, so the open
             // project's section reads again too.
             Update::WorkspacesFolderChanged { project } => {
@@ -1261,6 +1275,34 @@ impl Shell {
                 if let Some(tasks) = self.project_tasks_of(&project, cx) {
                     tasks.update(cx, |tasks, cx| tasks.run_answered(answer, cx));
                 }
+            }
+            Outcome::Services { listed } => {
+                // The open task form offers them as what a task may need, or says why it cannot.
+                if let Some(page) = self.project_settings.clone() {
+                    let names = listed
+                        .as_ref()
+                        .map(|services| services.iter().map(|s| s.name.clone()).collect())
+                        .map_err(Clone::clone);
+                    let section = page.read(cx).tasks().clone();
+                    section.update(cx, |section, cx| section.set_services(names, cx));
+                }
+                self.services.update(cx, |page, cx| page.listed(listed, cx));
+            }
+            Outcome::ServiceWritten { refused } => {
+                self.services
+                    .update(cx, |page, cx| page.written(refused, cx));
+            }
+            Outcome::ServiceActed {
+                name,
+                start,
+                answer,
+            } => {
+                self.services
+                    .update(cx, |page, cx| page.acted(&name, start, answer, cx));
+            }
+            Outcome::ServiceOutput { output } => {
+                self.services
+                    .update(cx, |page, cx| page.output(output.map(|o| *o), cx));
             }
             Outcome::Setup { project, listed } => {
                 if let Some(page) = self.settings_of_project(&project, cx) {
@@ -1979,6 +2021,14 @@ impl Shell {
                 .send(Command::WorkspacesFolderRead { project: None });
             self.ask_appearance(None);
         }
+        // Left, the services page stops reading the output it shows: nothing is in sight.
+        if self.selected == Some(Selection::Services) && selection != Selection::Services {
+            self.services.update(cx, |page, cx| page.close_output(cx));
+        }
+        // Opened, the services are read again: what runs changes outside the window too.
+        if selection == Selection::Services && self.selected != Some(Selection::Services) {
+            self.services.update(cx, |page, cx| page.opened(cx));
+        }
         let page = self.page_of(&selection, cx);
         self.selected = Some(selection);
         let forms = self.forms_for(&page, window, cx);
@@ -1994,6 +2044,7 @@ impl Shell {
     fn page_of(&self, selection: &Selection, cx: &App) -> Page {
         match selection {
             Selection::Settings => Page::Settings,
+            Selection::Services => Page::Services,
             // A project just added is not in the daemon's last read yet: its page, open, stays.
             Selection::ProjectSettings(name) => {
                 let open = self
@@ -2047,7 +2098,7 @@ impl Shell {
             Some(Selection::Project(name)) => Some(name.clone()),
             Some(Selection::Session(id)) => self.snapshot.session(id).map(|s| s.project.clone()),
             Some(Selection::ProjectSettings(name)) => Some(name.clone()),
-            Some(Selection::Settings) | None => None,
+            Some(Selection::Settings | Selection::Services) | None => None,
         }
         .or_else(|| self.snapshot.projects.first().map(|p| p.name.clone()));
         if let Some(project) = project {
@@ -2313,6 +2364,7 @@ impl Render for TopBar {
         let search_shell = self.shell.clone();
         let menu_shell = self.shell.clone();
         let settings_shell = self.shell.clone();
+        let services_shell = self.shell.clone();
         let mut bell =
             Button::icon("bell", Icon::Bell, "Waiting for you").on_click(move |_, _, cx| {
                 shell.update(cx, |shell, cx| shell.toggle_bell(cx)).ok();
@@ -2391,6 +2443,15 @@ impl Render for TopBar {
                         .text_color(mix(p.faint, p.text, hover))
                 },
             ))
+            .child(
+                Button::icon("services", Icon::Service, "Services").on_click(
+                    move |_, window, cx| {
+                        services_shell
+                            .update(cx, |shell, cx| shell.open(Selection::Services, window, cx))
+                            .ok();
+                    },
+                ),
+            )
             .child(
                 Button::icon("settings", Icon::Settings, "Settings").on_click(
                     move |_, window, cx| {

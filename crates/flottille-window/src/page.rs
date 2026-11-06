@@ -11,6 +11,7 @@ use crate::composer::Composer;
 use crate::model::Place;
 use crate::project::{NewWorkspace, ProjectPage};
 use crate::project_settings::ProjectSettingsPage;
+use crate::services::ServicesPage;
 use crate::session::SessionPage;
 use crate::settings::SettingsPage;
 use crate::shell::{Layout, Shell};
@@ -33,6 +34,8 @@ pub enum Page {
     ProjectSettings {
         name: String,
     },
+    /// The services of the machine.
+    Services,
 }
 
 pub struct MainArea {
@@ -47,12 +50,15 @@ pub struct MainArea {
     settings: Entity<SettingsPage>,
     /// The open project's settings page.
     project_settings: Option<Entity<ProjectSettingsPage>>,
+    /// The services page, one for the window's life.
+    services: Entity<ServicesPage>,
 }
 
 impl MainArea {
     pub fn new(
         shell: WeakEntity<Shell>,
         settings: Entity<SettingsPage>,
+        services: Entity<ServicesPage>,
         _: &mut Context<Self>,
     ) -> Self {
         Self {
@@ -63,7 +69,13 @@ impl MainArea {
             session: None,
             settings,
             project_settings: None,
+            services,
         }
+    }
+
+    /// The services page, when it is the one shown.
+    pub fn services_page(&self) -> Option<&Entity<ServicesPage>> {
+        (self.page == Page::Services).then_some(&self.services)
     }
 
     /// The settings page, when it is the one shown.
@@ -148,6 +160,8 @@ impl MainArea {
             }
             self.settings
                 .update(cx, |page, cx| page.set_narrow(layout == Layout::Narrow, cx));
+            self.services
+                .update(cx, |page, cx| page.set_narrow(layout == Layout::Narrow, cx));
             if let Some(page) = &self.project_settings {
                 page.update(cx, |page, cx| page.set_narrow(layout == Layout::Narrow, cx));
             }
@@ -192,6 +206,7 @@ impl Render for MainArea {
             Page::Project { .. } => root.children(self.project.clone()),
             Page::Session { .. } => root.children(self.session.clone()),
             Page::Settings => root.child(self.settings.clone()),
+            Page::Services => root.child(self.services.clone()),
             Page::ProjectSettings { .. } => root.children(self.project_settings.clone()),
         }
     }

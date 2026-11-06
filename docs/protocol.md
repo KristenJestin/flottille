@@ -862,7 +862,8 @@ a result:
   "why": null,
   "run": "5d2c0f1a9b3e",
   "address": "http://localhost:3001",
-  "needs_stopped": []
+  "needs_stopped": [],
+  "needed_by": [{"project": "app", "tasks": ["api"]}]
 }
 ```
 
@@ -871,7 +872,9 @@ as the file says them. `state` is `stopped`, `starting`, `ready`, `running` (it 
 `outside` (it answered before Flottille started it) or `failed`, `why` then the line that says why.
 `run` is its run, going on or the last one, read with the run methods' `run.output` too; a
 service's run has an empty `project` and is not listed by `run.list`. `address` is its run's
-address, or the file's. `needs_stopped` lists what it needs that does not run. `not-found` for a
+address, or the file's. `needs_stopped` lists what it needs that does not run. `needed_by` lists
+the projects whose tasks need it, directly or through another service's `needs`, each with those
+tasks. `not-found` for a
 service the file does not hold, `invalid-config` when the file cannot be used, `refused` for a
 write the file would refuse (nothing is written).
 

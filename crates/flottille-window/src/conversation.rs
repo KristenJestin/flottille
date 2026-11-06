@@ -2859,6 +2859,7 @@ mod tests {
             step: false,
             ready: None,
             url: None,
+            service: false,
         }
     }
 
