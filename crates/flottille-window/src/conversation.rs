@@ -80,12 +80,10 @@ pub enum Block {
         kind: String,
         text: String,
     },
-    /// A link it handed the user (`web show_link`): a card with an Open button, so that a toast
-    /// missed is not lost. `whence` is the address's host, or the file's path in the place.
-    Link {
-        title: Option<String>,
-        whence: String,
-        target: String,
+    /// The links it handed the user (`web show_link`) in a row, with no text of its own between
+    /// them: one card, a line each with its Open button, so that a toast missed is not lost.
+    Links {
+        links: Vec<ShownLink>,
     },
     /// The edits of a file it changed.
     Diff {
@@ -103,6 +101,22 @@ pub enum Block {
     Answered {
         number: u64,
     },
+}
+
+/// A link an agent handed the user: one line of a card of links. `whence` is the address's host,
+/// or the file's path in the place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShownLink {
+    pub title: Option<String>,
+    pub whence: String,
+    pub target: String,
+}
+
+impl ShownLink {
+    /// What names the link: the title, else where it leads.
+    pub fn name(&self) -> &str {
+        self.title.as_deref().unwrap_or(&self.whence)
+    }
 }
 
 /// How a command ended, as its result says it.
@@ -175,17 +189,40 @@ pub struct Call {
     /// How many characters of its result Flottille left out when it cut it at the source
     /// (`docs/tools.md`, "Long results").
     pub cut: Option<u64>,
+    /// It is a `web` `show_link`: the card of links is what the user sees of it.
+    pub shows: bool,
+    /// Its arguments are known: an agent may send them in an update after the call is first said.
+    pub asked: bool,
 }
 
 impl Call {
+    /// Whether the call is left out of the steps: a link shown has its card. A `web` call whose
+    /// arguments are not known yet is left out too while it runs, so that one that turns out to
+    /// show a link never was a row to take away; one that turns out to read appears. A call that
+    /// failed or was interrupted is a step, since no card says it.
+    pub fn hidden(&self) -> bool {
+        match self.state {
+            CallState::Failed | CallState::Interrupted => false,
+            state => {
+                self.shows || (self.name == "web" && !self.asked && state == CallState::Running)
+            }
+        }
+    }
+
     /// How long it took, once it ended.
     pub fn duration_ms(&self) -> Option<u64> {
         self.until.map(|until| until.saturating_sub(self.since))
     }
 }
 
+/// Whether a block draws nothing: the calls of a block of steps are all links shown, which the
+/// card of links says.
+pub fn is_hidden(block: &Block) -> bool {
+    matches!(block, Block::Steps { calls } if !calls.is_empty() && calls.iter().all(Call::hidden))
+}
+
 /// Whether a block stays in sight between the groups: what the agent said, the messages it was
-/// sent, a link it shared (a toast missed is not lost), the children it launched (where one that
+/// sent, links it shared (a toast missed is not lost), the children it launched (where one that
 /// needs the user shows), and why it ended or came back. Everything else folds into the group between two of them.
 pub fn in_sight(block: &Block) -> bool {
     match block {
@@ -193,7 +230,7 @@ pub fn in_sight(block: &Block) -> bool {
         | Block::Message { .. }
         | Block::Relayed { .. }
         | Block::SubAgents
-        | Block::Link { .. } => true,
+        | Block::Links { .. } => true,
         Block::Notice { kind, .. } => matches!(kind.as_str(), "failed" | "ended" | "resumed"),
         _ => false,
     }
@@ -240,7 +277,7 @@ impl Summary {
                     }
                 }
                 Block::Steps { calls } => {
-                    for call in calls {
+                    for call in calls.iter().filter(|call| !call.hidden()) {
                         summary.steps += 1;
                         kind(&mut summary.kinds, &call.name);
                         seen(call.since);
@@ -615,6 +652,8 @@ impl Conversation {
                     id: text("id"),
                     args: args_of(&name, &data["raw_input"]),
                     path: path_of(&name, &data["raw_input"]),
+                    shows: shows_link(&name, &data["raw_input"]),
+                    asked: input_known(&data["raw_input"]),
                     name,
                     state: call_state(data["status"].as_str()),
                     since: event.at,
@@ -753,12 +792,28 @@ impl Conversation {
                 let Some(shown) = crate::model::LinkShown::of(event) else {
                     return Vec::new();
                 };
-                let mut changes = self.close(Some(event.at));
-                changes.extend(self.push(Block::Link {
+                let link = ShownLink {
                     title: shown.title,
                     whence: shown.whence,
                     target: shown.target,
-                }));
+                };
+                let mut changes = self.close(Some(event.at));
+                // Links shown in a row are one card: only thoughts, and the calls that show them,
+                // may sit between two; any other call, and any text, starts a new one.
+                let card = self
+                    .blocks
+                    .iter()
+                    .rposition(|block| !matches!(block, Block::Thought { .. }) && !is_hidden(block))
+                    .filter(|&at| matches!(self.blocks[at], Block::Links { .. }));
+                match card {
+                    Some(at) => {
+                        if let Block::Links { links } = &mut self.blocks[at] {
+                            links.push(link);
+                        }
+                        changes.push(Change::Changed(at));
+                    }
+                    None => changes.extend(self.push(Block::Links { links: vec![link] })),
+                }
                 changes
             }
             "agent.reported" => {
@@ -881,6 +936,8 @@ impl Conversation {
         if !data["raw_input"].is_null() {
             call.args = args_of(&call.name, &data["raw_input"]);
             call.path = path_of(&call.name, &data["raw_input"]);
+            call.shows = shows_link(&call.name, &data["raw_input"]);
+            call.asked |= input_known(&data["raw_input"]);
             if call.name == "fs_edit" {
                 self.edits
                     .insert(call.id.clone(), data["raw_input"].clone());
@@ -1465,6 +1522,16 @@ fn args_of(tool: &str, input: &Value) -> String {
     }
 }
 
+/// Whether a call's arguments came: an empty object is what an agent sends before them.
+fn input_known(input: &Value) -> bool {
+    !input.is_null() && input.as_object().is_none_or(|object| !object.is_empty())
+}
+
+/// Whether a call is `web` `show_link`.
+fn shows_link(tool: &str, input: &Value) -> bool {
+    tool == "web" && input["action"] == "show_link"
+}
+
 /// The file a file's tool works on: what its line shows in place of its arguments.
 fn path_of(tool: &str, input: &Value) -> Option<String> {
     match tool {
@@ -1976,45 +2043,294 @@ mod tests {
         );
     }
 
+    fn shown(seq: u64, target: &str, title: Option<&str>) -> Event {
+        let host = target.trim_start_matches("https://");
+        event(
+            seq,
+            "agent.link_shown",
+            json!({"agent": "a1", "kind": "url", "target": target, "title": title, "host": host}),
+        )
+    }
+
+    fn line(target: &str, title: Option<&str>) -> ShownLink {
+        ShownLink {
+            title: title.map(str::to_owned),
+            whence: target.trim_start_matches("https://").to_owned(),
+            target: target.to_owned(),
+        }
+    }
+
     #[test]
     fn a_link_the_agent_shared_becomes_a_card_where_it_was_shared() {
         let mut c = Conversation::new("the conversation".into(), None);
         c.apply(&event(1, "agent.message", json!({"text": "Done."})));
-        c.apply(&event(
-            2,
-            "agent.link_shown",
-            json!({"agent": "a1", "kind": "url", "target": "https://example.org/t/42",
-                "title": "Ticket 42", "host": "example.org"}),
-        ));
-        c.apply(&event(
-            3,
-            "agent.link_shown",
-            json!({"agent": "a1", "kind": "file", "target": "/work/app/docs/r.html",
-                "title": null, "host": null, "shown": "docs/r.html"}),
-        ));
+        c.apply(&shown(2, "https://example.org/t/42", Some("Ticket 42")));
         assert_eq!(
             &c.blocks()[1..],
-            [
-                Block::Link {
-                    title: Some("Ticket 42".into()),
-                    whence: "example.org".into(),
-                    target: "https://example.org/t/42".into(),
-                },
-                Block::Link {
-                    title: None,
-                    whence: "docs/r.html".into(),
-                    target: "/work/app/docs/r.html".into(),
-                },
-            ]
+            [Block::Links {
+                links: vec![line("https://example.org/t/42", Some("Ticket 42"))]
+            }]
         );
     }
 
     #[test]
+    fn links_shown_in_a_row_are_one_card() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        c.apply(&event(1, "agent.message", json!({"text": "Done."})));
+        c.apply(&shown(2, "https://example.org/1", Some("One")));
+        // The calls between them, and the thoughts, are no text of the agent's own.
+        c.apply(&event(
+            3,
+            "agent.tool_call",
+            json!({"id": "w2", "title": "mcp__flottille__web", "status": "in_progress",
+                "raw_input": {"action": "show_link", "url": "https://example.org/2"}}),
+        ));
+        c.apply(&event(4, "agent.thought", json!({"text": "Next one."})));
+        c.apply(&shown(5, "https://example.org/2", Some("Two")));
+        let changes = c.apply(&shown(6, "https://example.org/3", None));
+        assert_eq!(
+            c.blocks()
+                .iter()
+                .filter(|block| matches!(block, Block::Links { .. }))
+                .count(),
+            1
+        );
+        let Some(Block::Links { links }) = c
+            .blocks()
+            .iter()
+            .find(|block| matches!(block, Block::Links { .. }))
+        else {
+            panic!("no card");
+        };
+        assert_eq!(
+            links,
+            &[
+                line("https://example.org/1", Some("One")),
+                line("https://example.org/2", Some("Two")),
+                line("https://example.org/3", None),
+            ]
+        );
+        // The card is drawn again, not added again.
+        assert_eq!(changes, [Change::Changed(1)]);
+    }
+
+    #[test]
+    fn a_link_after_the_agent_s_text_starts_a_new_card() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        c.apply(&shown(1, "https://example.org/1", None));
+        c.apply(&event(2, "agent.message", json!({"text": "And another."})));
+        c.apply(&shown(3, "https://example.org/2", None));
+        let cards: Vec<&Block> = c
+            .blocks()
+            .iter()
+            .filter(|block| matches!(block, Block::Links { .. }))
+            .collect();
+        assert_eq!(cards.len(), 2);
+        assert!(
+            matches!(cards[1], Block::Links { links } if links == &[line("https://example.org/2", None)])
+        );
+    }
+
+    #[test]
+    fn the_group_is_the_same_whatever_page_of_the_history_is_read() {
+        let events = [
+            shown(1, "https://example.org/1", None),
+            shown(2, "https://example.org/2", None),
+            event(3, "agent.message", json!({"text": "Look."})),
+            shown(4, "https://example.org/3", None),
+        ];
+        let mut live = Conversation::new("the conversation".into(), None);
+        events.iter().for_each(|event| {
+            live.apply(event);
+        });
+        let mut rebuilt = live.restarted();
+        events.iter().for_each(|event| {
+            rebuilt.apply(event);
+        });
+        assert_eq!(live.blocks(), rebuilt.blocks());
+        assert_eq!(live.blocks().len(), 3);
+    }
+
+    #[test]
+    fn the_call_that_shows_a_link_is_no_step_of_its_own() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        c.apply(&event(
+            1,
+            "agent.tool_call",
+            json!({"id": "r", "title": "fs_read", "status": "completed",
+                "raw_input": {"path": "a.txt"}}),
+        ));
+        // Its arguments come after the call is first said.
+        c.apply(&event(
+            2,
+            "agent.tool_call",
+            json!({"id": "w", "title": "mcp__flottille__web", "status": "in_progress"}),
+        ));
+        let Block::Steps { calls } = &c.blocks()[0] else {
+            panic!("no steps");
+        };
+        assert!(
+            calls[1].hidden(),
+            "a web call whose arguments are not known waits to be drawn"
+        );
+        c.apply(&event(
+            3,
+            "agent.tool_call",
+            json!({"id": "w", "update": true, "raw_input": {"action": "show_link", "url": "https://example.org"}}),
+        ));
+        let Block::Steps { calls } = &c.blocks()[0] else {
+            panic!("no steps");
+        };
+        assert!(calls[1].hidden());
+        assert!(!is_hidden(&c.blocks()[0]), "the read is still a step");
+        let said = Summary::of(c.blocks(), c.times());
+        assert_eq!((said.steps, said.kinds), (1, vec!["fs_read".to_owned()]));
+        c.apply(&event(
+            4,
+            "agent.tool_call",
+            json!({"id": "w", "update": true, "status": "failed"}),
+        ));
+        let Block::Steps { calls } = &c.blocks()[0] else {
+            panic!("no steps");
+        };
+        assert!(
+            !calls[1].hidden(),
+            "a link refused is a step: no card says it"
+        );
+    }
+
+    #[test]
+    fn an_interrupted_show_link_stays_a_visible_step() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        c.apply(&event(
+            1,
+            "agent.tool_call",
+            json!({"id": "w", "title": "mcp__flottille__web", "status": "in_progress",
+                "raw_input": {"action": "show_link", "url": "https://example.org"}}),
+        ));
+        let Block::Steps { calls } = &c.blocks()[0] else {
+            panic!("no steps");
+        };
+        assert!(calls[0].hidden(), "running, its card to come");
+        c.apply(&event(2, "agent.turn_ended", json!({})));
+        let Block::Steps { calls } = &c.blocks()[0] else {
+            panic!("no steps");
+        };
+        assert_eq!(calls[0].state, CallState::Interrupted);
+        assert!(!calls[0].hidden(), "no card will say it: it is a step");
+    }
+
+    /// Whether the first call of the first block is drawn, after each event.
+    fn drawn_after(events: &[Event]) -> Vec<bool> {
+        let mut c = Conversation::new("the conversation".into(), None);
+        events
+            .iter()
+            .map(|event| {
+                c.apply(event);
+                match c.blocks().first() {
+                    Some(Block::Steps { calls }) => !calls[0].hidden(),
+                    _ => false,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_web_call_is_not_drawn_until_its_arguments_say_what_it_is() {
+        let first = |seq| {
+            event(
+                seq,
+                "agent.tool_call",
+                json!({"id": "w", "title": "mcp__flottille__web", "status": "in_progress",
+                    "raw_input": {}}),
+            )
+        };
+        let late = |seq, input: Value, status: &str| {
+            event(
+                seq,
+                "agent.tool_call",
+                json!({"id": "w", "update": true, "status": status, "raw_input": input}),
+            )
+        };
+        // A link: never drawn, so no row vanishes without folding when the arguments come.
+        let shown = drawn_after(&[
+            first(1),
+            late(
+                2,
+                json!({"action": "show_link", "url": "https://example.org"}),
+                "in_progress",
+            ),
+            late(3, Value::Null, "completed"),
+        ]);
+        assert_eq!(shown, [false, false, false]);
+        // A page read: it appears once it is known (an appearance folds in; a row never leaves).
+        let read = drawn_after(&[
+            first(1),
+            late(
+                2,
+                json!({"action": "read", "url": "https://example.org"}),
+                "in_progress",
+            ),
+            late(3, Value::Null, "completed"),
+        ]);
+        assert_eq!(read, [false, true, true]);
+        // Whatever the order, a drawn call is never taken away.
+        for events in [
+            vec![first(1), late(2, Value::Null, "completed")],
+            vec![
+                first(1),
+                late(
+                    2,
+                    json!({"action": "show_link", "path": "a.html"}),
+                    "failed",
+                ),
+            ],
+        ] {
+            let drawn = drawn_after(&events);
+            assert!(
+                drawn.windows(2).all(|pair| !(pair[0] && !pair[1])),
+                "{drawn:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn links_with_another_call_between_them_are_two_cards() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        c.apply(&shown(1, "https://example.org/1", None));
+        c.apply(&event(
+            2,
+            "agent.tool_call",
+            json!({"id": "r", "title": "fs_read", "status": "completed",
+                "raw_input": {"path": "a.txt"}}),
+        ));
+        c.apply(&shown(3, "https://example.org/2", None));
+        assert_eq!(
+            c.blocks()
+                .iter()
+                .filter(|block| matches!(block, Block::Links { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_block_of_nothing_but_links_shown_draws_nothing() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        c.apply(&event(
+            1,
+            "agent.tool_call",
+            json!({"id": "w", "title": "mcp__flottille__web", "status": "completed",
+                "raw_input": {"action": "show_link", "path": "report.html"}}),
+        ));
+        assert!(is_hidden(&c.blocks()[0]));
+        assert_eq!(Summary::of(c.blocks(), c.times()).steps, 0);
+    }
+
+    #[test]
     fn a_shared_link_stays_in_sight_between_the_groups() {
-        let link = Block::Link {
-            title: None,
-            whence: "example.org".into(),
-            target: "https://example.org".into(),
+        let link = Block::Links {
+            links: vec![line("https://example.org", None)],
         };
         assert!(in_sight(&link));
     }

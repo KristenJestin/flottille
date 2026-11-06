@@ -14,6 +14,7 @@ pub mod instance;
 pub mod items;
 pub mod leaves;
 pub mod link;
+pub mod links_card;
 pub mod message_checks;
 pub mod mode;
 pub mod model;

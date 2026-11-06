@@ -52,10 +52,11 @@ use crate::attachments::{Attachments, STILL_SCALING};
 use crate::commands::CommandInfo;
 use crate::conversation::{
     Activity, Block, Call, CallState, Change, Conversation, DiffLine, Ending, STARTED_SESSION_KIND,
-    Summary, USER, WOKEN_BY_KIND, asks_the_user, in_sight,
+    Summary, USER, WOKEN_BY_KIND, asks_the_user, in_sight, is_hidden,
 };
 use crate::leaves::LeaveList;
 use crate::link::{Connect, Update};
+use crate::links_card::{LinksCard, Open};
 use crate::mode::ModeSwitch;
 use crate::model::Place;
 use crate::open::Opener;
@@ -2380,7 +2381,10 @@ impl ConversationView {
             true => group
                 .rows
                 .clone()
-                .filter(|&at| !matches!(self.model.blocks()[at], Block::Answered { .. }))
+                .filter(|&at| {
+                    let block = &self.model.blocks()[at];
+                    !matches!(block, Block::Answered { .. }) && !is_hidden(block)
+                })
                 .collect(),
             false => group.needs.clone(),
         }
@@ -3249,6 +3253,16 @@ impl ConversationView {
             return centred(column(gap).child(head));
         }
         match self.segments.get(segment) {
+            // The steps of links shown are their card's: a group of nothing else has no line.
+            Some(Segment::Group(group))
+                if piece == 0
+                    && group
+                        .rows
+                        .clone()
+                        .all(|at| is_hidden(&self.model.blocks()[at])) =>
+            {
+                div().into_any_element()
+            }
             Some(Segment::Group(_)) if piece == 0 => {
                 let line = self.render_group_line(segment, window, cx);
                 centred(column(gap).child(line))
@@ -3517,6 +3531,8 @@ pub struct Row {
     asks_only: bool,
     /// It is a message the user sent from the composer: being sent, refused, or recorded since.
     sent: Option<Sent>,
+    /// The lines of a card of links, and the pictures among them.
+    links: LinksCard,
     renders: usize,
 }
 
@@ -3585,6 +3601,7 @@ impl Row {
                 pills: HashMap::new(),
                 asks_only: false,
                 sent: None,
+                links: LinksCard::default(),
                 renders: 0,
             };
             row.set_block(block, cx);
@@ -3912,6 +3929,9 @@ impl Row {
     }
 
     fn set_block(&mut self, block: Block, cx: &mut Context<Self>) {
+        if let Block::Links { links } = &block {
+            self.links.show(links, cx, |row: &mut Row| &mut row.links);
+        }
         if let Block::Text { text } | Block::Thought { text, .. } | Block::Report { text, .. } =
             &block
         {
@@ -4925,20 +4945,24 @@ impl Render for Row {
                     false => self.said_text(reply, p).into_any_element(),
                 }
             }
+            // The calls that show a link are the card of links': the steps say the others.
+            Block::Steps { .. } if is_hidden(&block) => div().into_any_element(),
             Block::Steps { calls } => {
                 let running = calls
                     .iter()
-                    .filter(|c| c.state == CallState::Running)
+                    .filter(|c| !c.hidden() && c.state == CallState::Running)
                     .count();
-                let done = calls.len() - running;
+                let counted = calls.iter().filter(|c| !c.hidden()).count();
+                let done = counted - running;
                 let meta = match running {
-                    0 => format!("{done} of {}", calls.len()),
+                    0 => format!("{done} of {counted}"),
                     _ => "running".to_owned(),
                 };
                 let rows = calls
                     .iter()
                     .zip(&self.calls)
                     .enumerate()
+                    .filter(|(_, (call, _))| !call.hidden())
                     .map(|(at, (call, (_, mark)))| {
                         let shown = !self.asks_only || call.name == "ask_user";
                         let step = div()
@@ -5059,6 +5083,7 @@ impl Render for Row {
                 // would push the conversation down. The line and the card fold into each other.
                 let said: Vec<&Call> = calls
                     .iter()
+                    .filter(|call| !call.hidden())
                     .filter(|call| !self.asks_only || call.name == "ask_user")
                     .collect();
                 let last = said.last().expect("a block of steps holds a call");
@@ -5261,69 +5286,19 @@ impl Render for Row {
                     .test_support()
                     .into_any_element()
             }
-            // A link the agent handed the user: its title, where it leads and Open, so that a
-            // toast missed is not lost. Nothing opens until the click.
-            Block::Link {
-                title,
-                whence,
-                target,
-            } => {
-                let name = title.clone().unwrap_or_else(|| whence.clone());
-                let said = format!("Link shared by the agent: {name}, {whence}");
-                let (page, target) = (self.page.clone(), target.clone());
-                let words = div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .medium()
-                            .truncate()
-                            .child(SharedString::from(name)),
-                    )
-                    .when(title.is_some(), |d| {
-                        d.child(
-                            div()
-                                .mono(12.)
-                                .text_color(p.faint)
-                                .truncate()
-                                .child(SharedString::from(whence.clone())),
-                        )
-                    });
-                div()
-                    .id(id("link"))
-                    .aria_label(SharedString::from(said))
-                    .child(
-                        Card::new().child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(space::MD)
-                                .px(space::LG)
-                                .py(space::MD)
-                                .child(
-                                    icon(Icon::OpenInEditor)
-                                        .size(px(14.))
-                                        .flex_none()
-                                        .text_color(p.faint),
-                                )
-                                .child(words)
-                                .child(div().flex_none().child(
-                                    Button::secondary(id("link-open"), "Open").on_click(
-                                        move |_, _, cx| {
-                                            page.update(cx, |page, cx| {
-                                                crate::open::shown(&page.follow.opener, &target, cx)
-                                            })
-                                            .ok();
-                                        },
-                                    ),
-                                )),
-                        ),
-                    )
-                    .test_support()
-                    .into_any_element()
+            // The links the agent handed the user in a row: one card, a line each with its title,
+            // where it leads and Open (a thumbnail for a picture), so that a toast missed is not
+            // lost. Nothing opens until the click.
+            Block::Links { links } => {
+                let page = self.page.clone();
+                let open: Open = Rc::new(move |target, cx| {
+                    let target = target.to_owned();
+                    page.update(cx, |page, cx| {
+                        crate::open::shown(&page.follow.opener, &target, cx)
+                    })
+                    .ok();
+                });
+                self.links.draw(self.at, links, &open, cx)
             }
             // The agent's own end is shown whole: a failure's reason, what was not done and why.
             Block::Notice { kind, text } if !is_delivery(kind) => div()
@@ -8306,6 +8281,8 @@ mod tests {
             until: Some(1),
             allowed_by: by.map(str::to_owned),
             cut: None,
+            shows: false,
+            asked: true,
         }
     }
 

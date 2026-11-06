@@ -1251,11 +1251,36 @@ agent never drives the user's desktop through a program (`run` has no graphical 
   read`'s: a link is for the user's eyes, so `localhost` (a dev server) is allowed.
 - **The gate lets it through in every mode**, with no card: like a read it changes nothing, and
   the user decides by clicking. A link that fails the checks above is refused in every mode.
-- **In the window**: a toast `The agent shares a link: <title or host>` with an Open button, and a
-  small card in the agent's conversation (title, host or path, Open), so that a toast missed is
-  not lost. Open checks the file again right before it opens it, by the same rules, since it may
-  have changed between the call and the click: if it no longer passes (made executable, replaced
-  by a link or a folder, removed), nothing opens and a failure toast says why (`Not opened: it is
+- **In the window**: the links an agent shows one after the other, with nothing between them but
+  its thoughts (one turn, consecutive calls), are **one** card in its conversation: `3 links`
+  above one line each (title, host or path, **Open**); a single link is the same card without the
+  count. The `show_link` steps are not drawn apart (the card is what the user sees of them; one
+  that failed, was refused or was interrupted stays a step, since no card says it; a `web` call
+  whose arguments have not come yet is not drawn while it runs, so that a row is never taken
+  away). The grouping is the window's, made from the events in order, so it is the same after a
+  history rebuild or a page left and come back; a text of the agent's own, a report, a message
+  or any other call ends the row, and the next link starts a new card. A link added to a card
+  unfolds into it as a line.
+- **One toast, only when it is needed**: a row of links gives one toast, `The agent shares a
+  link: <title or host>` with an **Open** button when it holds one, `The agent shares 3 links`
+  with **Show** (it goes to the conversation) when it holds more, and only while the
+  conversation of the agent that shared them is not on screen (a sub-agent's link, while its
+  parent's conversation is shown, is a toast). A link shown while that toast is still on screen
+  updates it; it never adds a second one. The agent's words, or the user's message to it, end
+  the row: the next link is a toast of its own.
+- **A picture is a thumbnail**: a shown file that is a picture (`.png`, `.jpg`, `.jpeg`, `.gif`,
+  `.webp`, by extension, and one by its first bytes) is drawn in its line at a bounded size. The
+  file is opened once, without following a link, and checked as Open checks it on the file
+  opened (a regular file, no execute bit); at most 20 MiB of it are read. Its size is read from
+  its header before anything is decoded, and a picture of more than 2,000 pixels on a side is
+  refused (a small file can declare gigabytes); what is decoded is limited in memory, is the
+  first frame of a GIF, and only a small copy of it is kept and drawn. It fades in once read. A
+  click on it opens it, the same way and by the same checks as **Open**. An address gets none:
+  the window fetches nothing from the network. A picture that cannot be read (removed, too
+  large, not a picture, made a program) keeps its plain line.
+- **Open checks the file again** right before it opens it, by the same rules, since it may have
+  changed between the call and the click: if it no longer passes (made executable, replaced by a
+  link or a folder, removed), nothing opens and a failure toast says why (`Not opened: it is
   executable, and opening it would run it`). An address opens unchanged.
 
 ## The gate
