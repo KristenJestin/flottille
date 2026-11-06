@@ -373,7 +373,7 @@ fn put(
 
 /// Removes the service: refused while another service or a project's task needs it.
 fn remove(daemon: &Daemon, name: &str) -> Result<(), Failure> {
-    let needed_by = needed_by(daemon, name);
+    let needed_by = needed_by_said(daemon, name);
     if !needed_by.is_empty() {
         return Err(Failure::refused(format!(
             "{} need the service {name}: change them first",
@@ -423,7 +423,9 @@ pub fn by_an_agent(daemon: &Daemon, name: &str) -> bool {
 }
 
 /// The projects' tasks that need the service, through other services too: `app (api:dev)`.
-fn needed_by(daemon: &Daemon, name: &str) -> Vec<String> {
+/// The projects whose tasks need the service, directly or through what another service needs,
+/// each with those tasks.
+fn needed_by(daemon: &Daemon, name: &str) -> Vec<(String, Vec<String>)> {
     let services = load(daemon).unwrap_or_default();
     let loaded = daemon
         .projects
@@ -436,7 +438,7 @@ fn needed_by(daemon: &Daemon, name: &str) -> Vec<String> {
         .projects
         .iter()
         .filter_map(|project| {
-            let tasks: Vec<&str> = project
+            let tasks: Vec<String> = project
                 .tasks
                 .iter()
                 .filter(|(_, task)| {
@@ -444,10 +446,18 @@ fn needed_by(daemon: &Daemon, name: &str) -> Vec<String> {
                         .iter()
                         .any(|need| need == name)
                 })
-                .map(|(task, _)| task.as_str())
+                .map(|(task, _)| task.clone())
                 .collect();
-            (!tasks.is_empty()).then(|| format!("{} ({})", project.name, tasks.join(", ")))
+            (!tasks.is_empty()).then(|| (project.name.clone(), tasks))
         })
+        .collect()
+}
+
+/// [`needed_by`] in words: `app (api, web)`.
+fn needed_by_said(daemon: &Daemon, name: &str) -> Vec<String> {
+    needed_by(daemon, name)
+        .into_iter()
+        .map(|(project, tasks)| format!("{project} ({})", tasks.join(", ")))
         .collect()
 }
 
@@ -553,6 +563,10 @@ fn to_json(daemon: &Daemon, services: &BTreeMap<String, Service>, name: &str) ->
         "run": now.run,
         "address": address,
         "needs_stopped": stopped,
+        "needed_by": needed_by(daemon, name)
+            .into_iter()
+            .map(|(project, tasks)| json!({"project": project, "tasks": tasks}))
+            .collect::<Vec<_>>(),
     })
 }
 
@@ -1100,7 +1114,7 @@ pub fn says(
                 }
                 _ => {}
             }
-            let needed = needed_by(daemon, name);
+            let needed = needed_by_said(daemon, name);
             let by = match needed.is_empty() {
                 true => "no project's task needs it".to_owned(),
                 false => format!("the tasks that need it: {}", needed.join("; ")),
