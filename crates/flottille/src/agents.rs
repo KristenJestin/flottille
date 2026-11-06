@@ -187,12 +187,15 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let agent = find(daemon, &asked.agent)?;
             refuse_child(daemon, &agent, "reloads its tools")?;
             refuse_final(&agent)?;
-            daemon
+            let asked = daemon
                 .agents
                 .reloads
                 .lock()
                 .unwrap()
                 .insert(agent.id.clone());
+            if asked {
+                say_reload(daemon, &agent.id, true);
+            }
             // Its session loop looks between turns: woken as by a delivery, it lets its process
             // go at once, or once the turn that runs ended.
             tell(daemon, &agent.id, Order::Ring);
@@ -361,6 +364,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             events.truncate(PAGE);
             let mut shown = agent.to_json();
             shown["tools_outdated"] = daemon.mcp.outdated(&agent.id).into();
+            shown["tools_reload"] = reloading(daemon, &agent.id).into();
             Ok(json!({"agent": shown, "events": events, "more": more}))
         }
         method => Err(Failure::new(
@@ -807,7 +811,22 @@ pub fn reloading(daemon: &Daemon, id: &str) -> bool {
 
 /// Takes the agent's reload, its new process being given its tools: whether one was asked.
 pub fn take_reload(daemon: &Daemon, id: &str) -> bool {
-    daemon.agents.reloads.lock().unwrap().remove(id)
+    let taken = daemon.agents.reloads.lock().unwrap().remove(id);
+    if taken {
+        say_reload(daemon, id, false);
+    }
+    taken
+}
+
+/// Says that a reload of the agent's tools waits for its next process, or no longer.
+fn say_reload(daemon: &Daemon, id: &str, pending: bool) {
+    record(
+        daemon,
+        id,
+        "agent.tools_reload",
+        json!({"pending": pending}),
+        false,
+    );
 }
 
 /// What a resumed root reads first in its next prompt, without being woken for it: that the user
@@ -896,7 +915,7 @@ fn idle_release() -> Duration {
 async fn agent_task(daemon: Arc<Daemon>, id: String, orders: mpsc::UnboundedReceiver<Order>) {
     agent_life(daemon.clone(), id.clone(), orders).await;
     // A reload asked of an agent that ended is over: a resumed one starts on the tools of then.
-    daemon.agents.reloads.lock().unwrap().remove(&id);
+    take_reload(&daemon, &id);
     let Ok(Some(agent)) = daemon.read(|store| store.agent(&id)) else {
         return;
     };

@@ -459,6 +459,17 @@ tracker, or its process starts on a version whose tools differ from those it was
 | `agent` | |
 | `added`, `removed` | The tools' names, without their prefix, sorted. |
 
+#### `agent.tools_reload`
+
+A reload of the agent's tools waits for its next process (`pending: true`, `agent.reload_tools`),
+or no longer (`pending: false`): the next process took it and was given the tools its role has
+now, or the agent ended first. Like `agent.tools_outdated`, it is no sign of activity.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `pending` | |
+
 #### `agent.tools_outdated`
 
 The agent's running session runs an older list of tools than its role has (`outdated: true`):

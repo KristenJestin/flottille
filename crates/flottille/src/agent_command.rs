@@ -333,13 +333,13 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
             if json {
                 println!("{reloaded}");
             } else {
-                let when = match reloaded["after_turn"] == true {
-                    true => "once its turn ends",
-                    false => "now",
+                let after = match reloaded["after_turn"] == true {
+                    true => ", once its turn ended",
+                    false => "",
                 };
                 println!(
-                    "Reloading the tools of agent {}: its process restarts on its conversation \
-                     {when}, and its next message tells it what changed.",
+                    "Reloading the tools of agent {}: they are given at its next message{after}, \
+                     which tells it what changed.",
                     text(&reloaded["agent"], "id")
                 );
             }

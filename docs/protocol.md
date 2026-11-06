@@ -1125,8 +1125,10 @@ loads its session with the tools its role has now. A turn that runs is never cut
 once it ended (`after_turn` true), the prompts waiting going to the next process. The next
 process's prompt carries a `tools` delivery: what changed since the last list the agent was given,
 by tool, else `Your tools were reloaded: nothing changed.`, whatever its agent does with
-`list_changed`. Its children keep their processes. `refused` for a child (the sentence names its
-root) and an agent in a final state.
+`list_changed`. Until that process takes it, the reload waits: `tools_reload` of the agent
+(`agent.show`, `agent.tree`) is true, and `agent.tools_reload` says when it is asked and when it
+is taken (`docs/events.md`). Its children keep their processes. `refused` for a child (the
+sentence names its root) and an agent in a final state.
 
 #### `agent.mode`
 
@@ -1168,7 +1170,8 @@ started; `effort`: the same for its effort; `pending`: `{"model", "effort"}` the
 the session has not taken yet, `null` when nothing waits; `resumable`: whether `agent.resume` takes it once its last process is gone; `stopping`:
 whether the process of an agent that ended is still stopping; `images`: as in the agent's full
 form; `tools_outdated`: whether its running session runs an older list of tools than its role
-has, which a restart replaces, `docs/tools.md`, "When the tools change"); `doing` a sentence of what it does
+has, which a restart replaces, `docs/tools.md`, "When the tools change"; `tools_reload`: whether
+a reload of its tools waits for its next process, `agent.reload_tools`); `doing` a sentence of what it does
 (`working`, `idle`, `running \`cargo test\` for 12 min`, `waiting for approval #3`, `failed: …`);
 `waiting_on` `parent` for a child whose request or question waits for its parent, `user` for a
 root whose own does, `subscription` for an agent between turns that has an open subscription (`doing` then

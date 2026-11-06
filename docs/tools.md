@@ -119,7 +119,8 @@ window the outdated line's button, the root's menu and `/reload-tools` in the co
 root's process go, as an idle release does (`agent.released`, reason `reload`); the next message
 starts the next one on the same session, with the tools its role has now. A turn that runs is
 never cut: the process goes once it ended, and the window says `Reloads after this turn` until
-then. It relies on the new process, not on `list_changed`, so it works the same for every agent:
+then, whoever asked (the agent's `tools_reload`, `agent.tools_reload`). Between turns nothing
+restarts until the next message: the window and the command line say the tools are given then. It relies on the new process, not on `list_changed`, so it works the same for every agent:
 the new process's first prompt carries the `tools` delivery, what changed by tool as above, or
 `Your tools were reloaded: nothing changed.`, so that the agent knows its list is current. Its
 children keep their processes and lists. A session that ended or failed does not offer it.

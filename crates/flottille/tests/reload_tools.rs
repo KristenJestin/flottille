@@ -161,6 +161,12 @@ fn a_reload_with_new_tools_sends_the_tools_delivery_with_what_changed() {
 
     assert!(prompt.contains("go on"), "with what woke it: {prompt}");
     assert!(prompt.contains("[flottille:tools]"), "{prompt}");
+    // The reload's own words, not those of an update a restart would give.
+    assert!(
+        prompt.contains("Your tools were reloaded: they changed"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("Flottille was updated"), "{prompt}");
     assert!(prompt.contains("- tickets: new"), "{prompt}");
     assert!(!prompt.contains("nothing changed"), "{prompt}");
 }
@@ -236,4 +242,183 @@ fn an_ended_session_does_not_offer_reload_tools() {
     assert_eq!(refused.0, "refused", "{refused:?}");
     let out = user.run(&["agent", "reload-tools", &id]);
     assert!(!out.status.success());
+}
+
+#[test]
+fn a_reload_of_an_idle_agent_says_its_new_tools_come_with_its_next_message() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (id, after) = run(&user, "hello");
+    events_until(&user, &id, after, "agent.turn_ended");
+
+    let out = user.run(&["agent", "reload-tools", &id]);
+
+    assert!(out.status.success(), "{out:?}");
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(said.contains("at its next message"), "{said}");
+    assert!(
+        !said.contains("restarts"),
+        "nothing restarts before it: {said}"
+    );
+}
+
+#[test]
+fn a_pending_reload_is_shown_and_said_until_the_new_process_takes_it() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "work", "do": [{"hold": "release"}, {"say": "Done."}]}
+    ]}));
+    project(&user);
+    let (id, _) = run(&user, "work");
+    eventually("the turn runs", || state(&user, &id) == "working");
+    let after = last_event(&user, &id);
+    let pending = |user: &User| -> (Value, Value) {
+        let shown =
+            user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["tools_reload"].clone();
+        let tree = user.call("agent.tree", json!({"agent": id})).unwrap()["agents"][0]["agent"]
+            ["tools_reload"]
+            .clone();
+        (shown, tree)
+    };
+    assert_eq!(pending(&user), (json!(false), json!(false)));
+
+    user.call("agent.reload_tools", json!({"agent": id}))
+        .unwrap();
+
+    let asked = events_until(&user, &id, after, "agent.tools_reload");
+    assert_eq!(asked.last().unwrap()["data"]["pending"], true);
+    assert_eq!(pending(&user), (json!(true), json!(true)));
+    std::fs::write(user.path("fake/release"), "").unwrap();
+    events_until(&user, &id, after, "agent.released");
+    assert_eq!(
+        pending(&user),
+        (json!(true), json!(true)),
+        "until the next process takes it"
+    );
+    let sent = user
+        .call("agent.send", json!({"agent": id, "message": "go on"}))
+        .unwrap();
+    let taken = events_until(
+        &user,
+        &id,
+        sent["after"].as_u64().unwrap(),
+        "agent.tools_reload",
+    );
+    assert_eq!(taken.last().unwrap()["data"]["pending"], false);
+    assert_eq!(pending(&user), (json!(false), json!(false)));
+}
+
+#[test]
+fn a_message_sent_during_the_turn_reaches_the_new_process() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "work", "do": [{"hold": "release"}, {"say": "Done."}]}
+    ]}));
+    project(&user);
+    let (id, _) = run(&user, "work");
+    eventually("the turn runs", || state(&user, &id) == "working");
+    user.call("agent.reload_tools", json!({"agent": id}))
+        .unwrap();
+
+    user.call(
+        "agent.send",
+        json!({"agent": id, "message": "and then this"}),
+    )
+    .unwrap();
+    std::fs::write(user.path("fake/release"), "").unwrap();
+
+    eventually("the message is sent", || {
+        prompts(&user).iter().any(|p| p.contains("and then this"))
+    });
+    let received = user.received();
+    let pid_of = |text: &str| {
+        received
+            .iter()
+            .find(|e| {
+                e["received"]["method"] == "session/prompt"
+                    && e["received"]["params"]["prompt"].to_string().contains(text)
+            })
+            .map(|e| e["pid"].as_u64().unwrap())
+            .unwrap()
+    };
+    assert_ne!(
+        pid_of("work"),
+        pid_of("and then this"),
+        "played by the new process"
+    );
+    let prompt = prompts(&user)
+        .into_iter()
+        .find(|p| p.contains("and then this"))
+        .unwrap();
+    assert!(prompt.contains("[flottille:tools]"), "{prompt}");
+}
+
+/// A project `team` whose ready workspace `w` a lead launches a child in.
+fn team(user: &User) {
+    let folder = user.path("work/team");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "team\n").unwrap();
+    user.git(&folder, &["add", "."]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    let remote = user.path("remotes/team.git");
+    user.git(
+        &user.path(""),
+        &["init", "--quiet", "--bare", remote.to_str().unwrap()],
+    );
+    user.git(
+        &folder,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    user.git(&folder, &["push", "--quiet", "origin", "main"]);
+    user.call("project.add", json!({"folder": folder, "name": "team"}))
+        .unwrap();
+    user.call("workspace.create", json!({"project": "team", "name": "w"}))
+        .unwrap();
+    eventually("the workspace", || {
+        user.call("workspace.show", json!({"project": "team", "name": "w"}))
+            .unwrap()["state"]
+            == "ready"
+    });
+}
+
+#[test]
+fn a_reload_of_a_child_is_refused() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "LAUNCH", "do": [
+            {"mcp": {"tool": "agent_launch", "arguments": {"title": "worker one",
+                "brief": "HANG here", "workspace": "w"}}}]},
+        {"when": "HANG", "do": [{"hang": true}]}
+    ]}));
+    team(&user);
+    let answer = user
+        .call(
+            "agent.run",
+            json!({"project": "team", "workspace": "w", "message": "LAUNCH"}),
+        )
+        .unwrap();
+    let lead = answer["agent"]["id"].as_str().unwrap().to_owned();
+    let child_of = || {
+        user.call("agent.tree", json!({"agent": lead})).unwrap()["agents"][1]["agent"]["id"]
+            .as_str()
+            .map(str::to_owned)
+    };
+    eventually("the child exists", || child_of().is_some());
+    let child = child_of().unwrap();
+
+    let refused = user
+        .call("agent.reload_tools", json!({"agent": child}))
+        .unwrap_err();
+
+    assert_eq!(refused.0, "refused", "{refused:?}");
+    assert!(refused.1.contains(&lead), "names its root: {refused:?}");
+    assert!(
+        !user.call("agent.show", json!({"agent": child})).unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["name"] == "agent.tools_reload"),
+        "nothing pending"
+    );
+    user.call("agent.stop", json!({"agent": lead})).unwrap();
 }

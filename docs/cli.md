@@ -681,15 +681,15 @@ Stopped agent bd7ed8152969 and its tree; it is ended now. Its workspace stays.
 ### `flottille agent reload-tools <agent>`
 
 Reloads a root's tools (`agent.reload_tools`, `docs/protocol.md`; `docs/tools.md`, "When the
-tools change"): its process is let go, as an idle one is, and the next one starts on its own
-session with the tools its role has now. The turn that runs is never cut: the process goes once it
-ended. The next prompt tells the agent what changed, by tool, or that nothing did (`tools`
+tools change"): its process is let go, as an idle one is, and nothing starts until its next
+message, whose process starts on its own session with the tools its role has now. The turn that
+runs is never cut: the process goes once it ended (`, once its turn ended` is then added). The next prompt tells the agent what changed, by tool, or that nothing did (`tools`
 delivery). Its children keep their processes. `--json` prints `{"agent": {...}, "after_turn"}`,
 `after_turn` true when a turn ran. Refused for a child, and for an agent in a final state.
 
 ```
 $ flottille agent reload-tools bd7ed8152969
-Reloading the tools of agent bd7ed8152969: its process restarts on its conversation now, and its next message tells it what changed.
+Reloading the tools of agent bd7ed8152969: they are given at its next message, which tells it what changed.
 ```
 
 ### `flottille agent resume <agent>`
