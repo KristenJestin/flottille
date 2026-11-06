@@ -72,7 +72,8 @@
 //! why: `✗ Error: invalid ADF: …`.
 //!
 //! - `acli jira workitem create --project P --summary S … --json` prints `{"key": …}`, the
-//!   script's `created` (`P-1` without it); without `--project` or `--summary` it ends with 2.
+//!   script's `created` (`P-1` without it), or the script's `created_said` as it is (an answer
+//!   naming no key); without `--project` or `--summary` it ends with 2.
 //! - `acli jira workitem comment create --key K --body B` and `acli jira workitem edit --key K …
 //!   --yes` end with 0 for a key of `items`, with 1 for another. A comment created is added, as
 //!   the script's `user` wrote it, to the next views of the work item.
@@ -443,7 +444,7 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
                 || format!("{}-1", item["projectKey"].as_str().unwrap_or("X")),
                 str::to_owned,
             );
-            println!("{}", json!({"key": key}));
+            print_created(script, &key);
             0
         }
         ["jira", "workitem", "create", rest @ ..]
@@ -469,7 +470,7 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
             let key = script["created"]
                 .as_str()
                 .map_or_else(|| format!("{project}-1"), str::to_owned);
-            println!("{}", json!({"key": key}));
+            print_created(script, &key);
             0
         }
         ["jira", "project", "view", rest @ ..] if rest.contains(&"--json") => {
@@ -1059,6 +1060,15 @@ fn not_allowed(args: &[&str]) -> Option<String> {
 fn listed(list: &Value, key: &str) -> bool {
     list.as_array()
         .is_some_and(|keys| keys.iter().any(|k| k == key))
+}
+
+/// What a creation prints: the new work item, `{"key": …}`, or the script's `created_said` as it
+/// is, for an answer that names no key.
+fn print_created(script: &Value, key: &str) {
+    match script["created_said"].as_str() {
+        Some(said) => println!("{said}"),
+        None => println!("{}", json!({"key": key})),
+    }
 }
 
 /// Why the site refuses `who` as an assignee, in the real `acli`'s words: not an email nor an

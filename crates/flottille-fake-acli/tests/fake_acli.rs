@@ -624,3 +624,42 @@ fn a_view_asked_the_navigable_fields_gives_them_all() {
 
     assert_eq!(all["fields"]["customfield_10020"][0]["id"], 42);
 }
+
+#[test]
+fn a_creation_the_script_says_answers_no_key_prints_what_the_script_says() {
+    let dir = scripted(json!({"created_said": "✓ Work item created"}));
+    let file = dir.path().join("item.json");
+    std::fs::write(
+        &file,
+        json!({"projectKey": "ABC", "summary": "S", "type": "Task"}).to_string(),
+    )
+    .unwrap();
+
+    let from_json = fake(dir.path())
+        .args(["jira", "workitem", "create", "--from-json"])
+        .arg(&file)
+        .arg("--json")
+        .output()
+        .unwrap();
+    let flags = fake(dir.path())
+        .args([
+            "jira",
+            "workitem",
+            "create",
+            "--project",
+            "ABC",
+            "--summary",
+            "S",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    for output in [from_json, flags] {
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "✓ Work item created"
+        );
+    }
+}
