@@ -637,9 +637,12 @@ log, or why there is none:
   have no names nor timestamp to drop.
 - **The failing command's output** (Bitbucket Cloud): the log of a step holds its setup, each
   script command, then Bitbucket's teardown, and an agent needs the part of the command that
-  failed. The kept lines run from the **last command echoed** (`+ <command>`) to the **teardown**
-  (or to the end of the log, or to a command that lists the environment), the command line
-  included. In between, a run of 3 or more `NAME=value` lines (capitals, digits and `_` in the
+  failed. The kept lines are the output of **one command**, from its echo (`+ <command>`) to the
+  next command echoed, the **teardown**, or the end of the log, the command line included. It is
+  the **first command whose output has a line that looks like an error** (the words `error`,
+  `failed` or `panicked`, as "The line that says why" below), else the last command echoed. A
+  step with an `after-script` echoes the commands of the cleanup after the one that failed, so
+  the last command echoed is not the failing one. In between, a run of 3 or more `NAME=value` lines (capitals, digits and `_` in the
   name) is an environment listing and is left out; a command that is only `env`, `printenv`,
   `export` or `set` is not taken for the failing one. When no command is echoed, or nothing
   is left, the end of the log is given as before, and the line says `lines of its log` instead
@@ -651,15 +654,25 @@ log, or why there is none:
     (support article "Successful test reports not showing in the Pipelines UI"). The first one
     is the teardown marker.
   - **Assumed**, from logs seen and not from documentation (Atlassian describes no log format):
-    that each script command is echoed as `+ <command>`; that the failing command is the last
-    one echoed (an `after-script` command that is not an environment listing would take its
-    place; output that itself starts with `+ ` too); that a teardown line starting
+    that each script command is echoed as `+ <command>`; that the `script` commands are not told
+    from the `after-script` ones (neither the log nor the step that `bkt pipeline view --json`
+    returns holds a marker or a command list that does: Atlassian documents `script` and
+    `after-script` in the pipeline's file only), so the failing command is the first that printed
+    an error-looking line, which is wrong when an earlier command that succeeded printed one, and
+    when no command did the last one is taken, which is an `after-script` command if the step has
+    one (output that itself starts with `+ ` ends a command too); that a teardown line starting
     `Searching for files matching artifact pattern`, `Uploading cache` or `Uploading artifact`
     comes after the commands; that an environment listing is `NAME=value` lines. Each marker is
     a constant of `crates/flottille/src/forge/logs.rs`: a wrong one makes the log fall back to
     its end, or to a wrong part, never to an error.
 - **Bitbucket Data Center**: `no log: bkt gives no job logs, read it on Bitbucket`; `bkt` has no
   pipelines there.
+- **The whole log**: each failed job whose log was read has one more line after its lines, the
+  exact call that reads all of it, `forge run_logs` (`Read the whole log with forge {"action":
+  "run_logs", "repository": "api", "run": 31, "step": "{…}"}.`): the run is the GitHub Actions run
+  or the Bitbucket build, the step is the GitHub job's id or the Bitbucket failed step's uuid, and
+  `repository` is the workspace's repository, given even when it has only one. A job with no log
+  has no such line.
 - **Cleaned**: the job's and step's names and the timestamp that start every line, the colours and
   the carriage returns of a terminal are dropped; the empty lines at both ends too.
 - **Bounded**: the last 40 lines of a job, 4,000 bytes at most (the oldest lines go first, whole;
@@ -783,6 +796,8 @@ The end of each failed job's log is in `forge` `show` of the pull request.
   with exit code N`, which says nothing of why. The line is cut at 160 characters, and masked as
   every line of a log is. A job whose log cannot be read says `no log:` and why, whole.
 - **The details are `forge` `show`**, which gives the end of every failed job's log as before.
+  The wake gives, under each failed job whose log was read, the same call that reads the whole
+  log (`Read the whole log with forge {"action": "run_logs", …}.`, "The whole log" above).
 
 ## What Flottille posts is recorded
 

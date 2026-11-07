@@ -1123,12 +1123,12 @@ pub(super) fn build_of(forge: &Forge, link: Option<&str>) -> Option<u64> {
 }
 
 /// The log of the first failed step of the build `build`: `bkt pipeline view` names the steps,
-/// `bkt pipeline logs --step` prints one. Masked.
+/// `bkt pipeline logs --step` prints one. The step's uuid and its log, masked.
 pub(super) async fn failed_step_log(
     forge: &Forge,
     context: &str,
     build: u64,
-) -> Result<String, String> {
+) -> Result<(String, String), String> {
     let build = build.to_string();
     let seen = json(&command(
         forge,
@@ -1155,13 +1155,14 @@ pub(super) async fn failed_step_log(
     let Some(uuid) = uuid else {
         return Err(format!("the pipeline #{build} has no failed step"));
     };
-    text(&command(
+    let log = text(&command(
         forge,
         context,
         &["pipeline", "logs", &build],
         &["--step", uuid],
     ))
-    .await
+    .await?;
+    Ok((uuid.to_owned(), log))
 }
 
 /// The path of a Cloud pull request's own page, for `bkt api`.
