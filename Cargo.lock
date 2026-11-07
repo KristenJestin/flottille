@@ -2164,6 +2164,7 @@ dependencies = [
  "image",
  "libc",
  "markdown",
+ "oo7",
  "pdf_oxide",
  "rmcp",
  "rusqlite",

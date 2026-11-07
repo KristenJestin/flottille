@@ -105,7 +105,7 @@ const REPLACED: &str = "refused: this session has been replaced: a new session o
 
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
 /// the order frozen in the agent.
-const SERVED: [Definition; 29] = [
+const SERVED: [Definition; 30] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -323,13 +323,13 @@ const SERVED: [Definition; 29] = [
         title: "Pull requests",
         description: "Pull requests and CI of the project's repositories, through the user's \
             gh or bkt (no forge sign-in here: never run them). list: by state and branch, \
-            as last read. show: a workspace's branch's, or number's, \
+            as last read. show: a branch's or number's, \
             with checks (the log's end of each failed job), review and comment counts; detail \
             full: texts. Writes, judged, answered at once, the result maybe later: create, merge \
             (squash by default; refused with no check, while checks fail or a review asks for changes unless waive gives the \
             user's words) and checks act on a workspace's branch (create, no body: \
-            the template); edit (title, body, draft, \
-            reviewers, labels, base), comment, close (comment first), reopen on number. \
+            the template); edit, comment, review (approve and request_changes wait for the user), \
+            close (comment first), reopen on number. \
             subscribe: events wake you until merged or closed; unsubscribe. CI: pipelines lists what can \
             be run; run starts one by name (custom: <name>) with its variables and follows it unless \
             follow: false; runs, run_view, \
@@ -340,16 +340,16 @@ const SERVED: [Definition; 29] = [
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "show", "subscribe", "unsubscribe", "create", "comment", "edit", "merge", "checks", "close", "reopen", "pipelines", "runs", "run_view", "run_logs", "run", "stop", "step"]},
+                "action": {"type": "string", "enum": ["list", "show", "subscribe", "unsubscribe", "create", "comment", "edit", "merge", "checks", "close", "reopen", "review", "pipelines", "runs", "run_view", "run_logs", "run", "stop", "step"]},
                 "workspace": {"type": "string", "description": "Yours when left out; in main, name it."},
                 "repository": {"type": "string", "description": "A repository of the project, by its path (\".\" is the project folder itself), never a folder inside one; all of the place's when left out (list, show); the only one is taken without being named."},
-                "number": {"type": "integer", "minimum": 1, "description": "show, comment, edit: a pull request."},
+                "number": {"type": "integer", "minimum": 1, "description": "show, comment, review, edit: a pull request."},
                 "state": {"type": "string", "enum": ["open", "closed", "merged", "all"]},
                 "branch": {"type": "string", "description": "list: its source branch."},
                 "detail": {"type": "string", "enum": ["short", "full"]},
                 "fresh": {"type": "boolean", "description": "show: read the pull request again; one read in the last 30 s is given again otherwise (detail full always reads)."},
                 "title": {"type": "string", "description": "create, edit: the pull request's title. create needs the branch pushed first (git push -u origin <branch>)."},
-                "body": {"type": "string", "description": "create, edit: description; comment: the comment. create without it takes the project's pull request template when it has one (project settings shows it): fill the template in body rather than replace it."},
+                "body": {"type": "string", "description": "create, edit: description; comment: the comment. review: its words. create without it takes the project's pull request template when it has one (project settings shows it): fill the template in body rather than replace it."},
                 "draft": {"type": "boolean", "description": "create: open as a draft. edit: false marks it ready for review, true makes it a draft again."},
                 "reviewers": {"type": "array", "items": {"type": "string"}, "description": "create: reviewers besides the project's."},
                 "labels": {"type": "array", "items": {"type": "string"}, "description": "create: labels (GitHub only)."},
@@ -360,6 +360,12 @@ const SERVED: [Definition; 29] = [
                 "labels_remove": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to take off (GitHub only)."},
                 "base": {"type": "string", "description": "edit: the branch it goes into; it must exist on the remote."},
                 "comment": {"type": "string", "description": "close, reopen: posted on the pull request first."},
+                "verdict": {"type": "string", "enum": crate::forge::REVIEW_VERDICTS, "description": "review: comment, approve or request_changes; the last two wait for the user in every mode."},
+                "comments": {"type": "array", "description": "review: comments on lines of the diff.", "items": {"type": "object", "properties": {
+                    "path": {"type": "string", "description": "The file, as the diff names it."},
+                    "line": {"type": "integer", "minimum": 1, "description": "The line in the new file."},
+                    "body": {"type": "string"}
+                }, "required": ["path", "line", "body"], "additionalProperties": false}},
                 "delete_branch": {"type": "boolean", "description": "close: also delete the pull request's branch, unless a workspace is on it or it comes from a fork. merge: delete its source branch after the merge; the project's setting when left out; never a branch the workspace resumed."},
                 "waive": {"type": "string", "description": "merge: the user's words letting a blocked pull request be merged; held for them."},
                 "method": {"type": "string", "enum": ["squash", "merge", "rebase"], "description": "merge: squash when left out."},
@@ -587,6 +593,22 @@ const SERVED: [Definition; 29] = [
                     {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"], "additionalProperties": false}
                 ]},
                 "ask_before_running": {"type": "boolean", "description": "add, edit: held for approval each time an agent starts it, itself or as a need."}
+            }, "required": ["action"], "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "vault",
+        title: "The user's vault",
+        description: "The secrets the user keeps for agents (a tracker's token, a test \
+            account's login): list gives each entry's name, what it is for, its URL and its \
+            username. A secret is never shown: a tool of Flottille's that needs one takes the \
+            entry's name and puts the secret where it goes itself. {\"action\": \"list\"}.",
+        read_only: true,
+        idempotent: true,
+        destructive: false,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["list"]}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -1397,7 +1419,13 @@ pub fn grant_of(daemon: &Daemon, agent: &Agent) -> Result<Grant, String> {
 /// changed.
 pub fn with_tools_now(daemon: &Daemon, agent: &Agent, project: &Project) -> Option<Agent> {
     let provider = providers::of(agent).ok()?;
-    let tools = crate::agents::tools_of(provider, project, agent.parent.is_none(), agent.depth);
+    let tools = crate::agents::tools_of(
+        provider,
+        project,
+        agent.parent.is_none(),
+        agent.depth,
+        crate::vault::seen_by(daemon, &project.name),
+    );
     // The same tools in another order are the same list: a new order would only cost the
     // session its prompt cache.
     let (now, had): (HashSet<&String>, HashSet<&String>) =
@@ -2119,11 +2147,13 @@ async fn played_in(
                             // In Full, what the gate holds passes, base included: what it
                             // refuses was refused above.
                             // Its own workspace is removed only with the user's word, and so is
-                            // a session written to for the first time.
+                            // a session written to for the first time; so are a service stopped
+                            // and a pull request approved or blocked, by `forge` or by a line.
                             _ if mode == GateMode::Full
                                 && !removes_own_workspace(grant, tool, &args)
                                 && !gate::asks_leave(&ask)
-                                && !crate::services::stops(tool, &args) =>
+                                && !crate::services::stops(tool, &args)
+                                && !gate::asks_review(&ask) =>
                             {
                                 verdict = Some("full");
                                 if removes_a_workspace(tool, &args) {
@@ -2870,6 +2900,7 @@ async fn performed_once(
         "forge" => crate::forge::forge(daemon, &grant.agent, &grant.place, args).await,
         "tickets" => crate::tickets::tickets(daemon, &grant.agent, &grant.place, args).await,
         "wake" => crate::subscriptions::wake(daemon, &grant.agent, args),
+        "vault" => crate::vault::tool(daemon, grant, args),
         tool if tree::TOOLS.contains(&tool) => tree::call(daemon, grant, tool, args).await,
         tool if crate::actions::TOOLS.contains(&tool) => {
             crate::actions::perform(daemon, grant, tool, args).await
@@ -3054,10 +3085,10 @@ mod tests {
             let name = format!("mcp__flottille__{}", definition.name);
             assert!(
                 claude::PROVIDER
-                    .tools(true, false, true, true)
+                    .tools(true, false, true, true, true)
                     .contains(&name)
                     || claude::PROVIDER
-                        .tools(false, false, true, true)
+                        .tools(false, false, true, true, true)
                         .contains(&name),
                 "{} is a tool agents get",
                 definition.name
@@ -3067,7 +3098,7 @@ mod tests {
 
     #[test]
     fn a_grant_holds_the_agent_s_served_tools_in_its_own_order() {
-        let mut leaf = claude::PROVIDER.tools(false, true, true, true);
+        let mut leaf = claude::PROVIDER.tools(false, true, true, true, false);
         assert_eq!(served(&claude::PROVIDER, &leaf).len(), 17);
         leaf.reverse();
         leaf.retain(|tool| !tool.ends_with("__search"));
@@ -3092,7 +3123,7 @@ mod tests {
         let lead = ["mcp__flottille__agent_status", "mcp__flottille__report"].map(String::from);
 
         for stored in [&worker[..], &lead[..]] {
-            let given = claude::PROVIDER.tools(false, false, true, true);
+            let given = claude::PROVIDER.tools(false, false, true, true, false);
             assert!(stored.iter().all(|tool| given.contains(tool)), "{stored:?}");
         }
         let served_worker = served(&claude::PROVIDER, &worker);
@@ -3429,7 +3460,7 @@ mod tests {
             ("a child", false, false),
             ("a child at the depth limit", false, true),
         ] {
-            let list = claude::PROVIDER.tools(root, at_depth_limit, true, true);
+            let list = claude::PROVIDER.tools(root, at_depth_limit, true, true, false);
             let names = served(&claude::PROVIDER, &list);
             assert!(
                 names.len() <= TOOLS,

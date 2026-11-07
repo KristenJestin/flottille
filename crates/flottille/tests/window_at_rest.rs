@@ -299,6 +299,33 @@ fn the_window_draws_no_frame_at_rest_on_settings(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_the_vault(cx: &mut TestAppContext) {
+    let user = User::new();
+    user.call(
+        "vault.set",
+        json!({"name": "jira", "secret": "at-rest-s3cret", "description": "Logs time"}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    cx.update(|window, cx| window.click("settings", cx));
+    until(&shell, cx, "the settings page is shown", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).settings_page().is_some())
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("settings-tabs-vault", cx));
+    until(&shell, cx, "the entry is listed", |cx| {
+        cx.update(|window, _| window.try_find("vault-jira").is_some())
+    });
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
+
+#[gpui_kit::test]
 fn the_window_draws_no_frame_at_rest_on_a_session_with_a_leave(cx: &mut TestAppContext) {
     let user = User::with_fake_agent();
     let x = idle_session(&user);

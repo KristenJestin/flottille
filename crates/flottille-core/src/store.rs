@@ -661,6 +661,18 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT;
     CREATE INDEX session_leaves_session ON session_leaves (session);
 ",
+    "
+    -- The vault's entries (`docs/vault.md`): their metadata only. Their secrets are the
+    -- keyring's, never the store's.
+    CREATE TABLE vault_entries (
+        name        TEXT PRIMARY KEY,
+        description TEXT,
+        url         TEXT,
+        username    TEXT,
+        project     TEXT,
+        updated_at  INTEGER NOT NULL
+    ) STRICT;
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -2276,6 +2288,86 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The vault's entries, by name.
+    pub fn vault_entries(&self) -> Result<Vec<crate::vault::Entry>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT name, description, url, username, project, updated_at FROM vault_entries \
+             ORDER BY name",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(crate::vault::Entry {
+                name: row.get(0)?,
+                description: row.get(1)?,
+                url: row.get(2)?,
+                username: row.get(3)?,
+                project: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Keeps `entry`, in place of the one of its name, with its `vault.changed` event: its
+    /// metadata, never a secret.
+    pub fn put_vault_entry(&mut self, entry: &crate::vault::Entry) -> Result<((), Event)> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO vault_entries (name, description, url, username, project, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT (name) DO UPDATE SET \
+             description = ?2, url = ?3, username = ?4, project = ?5, updated_at = ?6",
+            params![
+                entry.name,
+                entry.description,
+                entry.url,
+                entry.username,
+                entry.project,
+                entry.updated_at
+            ],
+        )?;
+        let event = append_event(
+            &transaction,
+            "vault.changed",
+            json!({"name": entry.name, "project": entry.project}),
+        )?;
+        transaction.commit()?;
+        Ok(((), event))
+    }
+
+    /// Forgets the entry `name`, with its `vault.changed` event; `None` when there was none.
+    pub fn remove_vault_entry(
+        &mut self,
+        name: &str,
+    ) -> Result<(Option<crate::vault::Entry>, Option<Event>)> {
+        let transaction = self.connection.transaction()?;
+        let removed = transaction
+            .query_row(
+                "DELETE FROM vault_entries WHERE name = ?1 \
+                 RETURNING description, url, username, project, updated_at",
+                params![name],
+                |row| {
+                    Ok(crate::vault::Entry {
+                        name: name.to_owned(),
+                        description: row.get(0)?,
+                        url: row.get(1)?,
+                        username: row.get(2)?,
+                        project: row.get(3)?,
+                        updated_at: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+        let Some(removed) = removed else {
+            return Ok((None, None));
+        };
+        let event = append_event(
+            &transaction,
+            "vault.changed",
+            json!({"name": name, "project": removed.project, "removed": true}),
+        )?;
+        transaction.commit()?;
+        Ok((Some(removed), Some(event)))
     }
 
     /// The user takes the leave back, with its `leave.withdrawn` event; `None` when there was
