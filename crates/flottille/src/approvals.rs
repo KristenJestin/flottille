@@ -548,6 +548,7 @@ mod tests {
             gate_mode: GateMode::Auto,
             launched_by: None,
             led: false,
+            detached_from: None,
         }
     }
 

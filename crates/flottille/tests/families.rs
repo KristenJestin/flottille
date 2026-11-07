@@ -3871,6 +3871,81 @@ fn a_root_started_by_an_agent_cannot_start_one_without_the_user() {
 }
 
 #[test]
+fn a_handed_session_keeps_the_chain_rule_until_detached() {
+    let user = User::with_fake_agent()
+        .with_fake_gh()
+        .with_fake_escalation()
+        .with_allowing_judge();
+    let (lead, second, mcp) = launched_root(&user, "auto", "Go on with the docs.");
+    let first = mcp.call(
+        "agent_launch",
+        json!({"title": "Third", "brief": "And the tests.", "kind": "handed"}),
+    );
+    held(&first);
+    assert_eq!(
+        user.call("approval.list", json!({})).unwrap()["requests"][0]["class"],
+        "base"
+    );
+    user.call("approval.deny", json!({"number": held(&first)}))
+        .unwrap();
+
+    user.call("agent.detach", json!({"agent": second})).unwrap();
+
+    // The user took it: what it starts is judged as any of the user's sessions' launches.
+    let judged = judge_prompts(&user).len();
+    let answer = mcp.call(
+        "agent_launch",
+        json!({"title": "Fourth", "brief": "And the docs.", "kind": "handed"}),
+    );
+    assert!(answer.text.contains("Started a session"), "{}", answer.text);
+    assert!(
+        judge_prompts(&user).len() > judged,
+        "the judge was not asked"
+    );
+    let fourth = agents(&user)
+        .into_iter()
+        .find(|a| a["title"] == "Fourth")
+        .unwrap();
+    assert_eq!(fourth["launched_by"], second.as_str());
+    let detached = user.call("agent.show", json!({"agent": second})).unwrap();
+    assert!(detached["agent"]["launched_by"].is_null(), "{detached}");
+    assert_eq!(detached["agent"]["detached_from"], lead.as_str());
+}
+
+#[test]
+fn a_detached_session_may_start_a_session_in_its_mode() {
+    let user = User::with_fake_agent()
+        .with_fake_gh()
+        .with_fake_escalation()
+        .with_allowing_judge();
+    let (_, second, mcp) = launched_root(&user, "auto", "Go on with the docs.");
+    user.call("agent.detach", json!({"agent": second})).unwrap();
+
+    let answer = mcp.call(
+        "agent_launch",
+        json!({"title": "Third", "brief": "And the tests.", "kind": "led"}),
+    );
+
+    // Auto lets the judge decide it, as for any session of the user's: no chain is left.
+    assert!(
+        answer.text.contains("Started a session led by you"),
+        "{}",
+        answer.text
+    );
+    assert!(
+        user.call("approval.list", json!({})).unwrap()["requests"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let third = agents(&user)
+        .into_iter()
+        .find(|a| a["title"] == "Third")
+        .unwrap();
+    assert_eq!(third["launched_by"], second.as_str());
+}
+
+#[test]
 fn a_root_session_with_a_brief_longer_than_the_judge_sees_whole_is_refused() {
     let user = user();
     on_github(&user);

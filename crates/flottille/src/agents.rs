@@ -241,6 +241,14 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             tell_resumed(daemon, &agent, ended_at);
             Ok(json!({"agent": agent.to_json()}))
         }
+        "agent.detach" => {
+            let asked: AgentName = serde_json::from_value(params)?;
+            let mut agent = tree::detach(daemon, &asked.agent)?;
+            agent.gate_mode = crate::judge::mode(daemon, &agent.id);
+            let mut shown = agent.to_json();
+            shown["led_by"] = Value::Null;
+            Ok(json!({"agent": shown}))
+        }
         "agent.mode" => {
             #[derive(serde::Deserialize)]
             #[serde(deny_unknown_fields)]
@@ -764,6 +772,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         gate_mode: new.gate_mode.unwrap_or_default(),
         launched_by: new.launched_by,
         led: new.led,
+        detached_from: None,
     };
     daemon.write(|store| {
         let event = store.create_agent(

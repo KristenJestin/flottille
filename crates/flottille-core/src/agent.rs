@@ -80,6 +80,10 @@ pub struct Agent {
     /// agent starts").
     #[serde(default)]
     pub led: bool,
+    /// The agent the user detached this session from, kept for the record once `launched_by`
+    /// is cleared; `None` for a session never detached.
+    #[serde(default)]
+    pub detached_from: Option<String>,
     /// The system prompt, frozen at creation, with its cache boundary.
     pub instructions: String,
     /// The exact names of its tools, frozen at creation (the prompt cache depends on it).

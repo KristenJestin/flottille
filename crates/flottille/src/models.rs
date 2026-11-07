@@ -341,5 +341,6 @@ fn as_agent(provider: &Provider, folder: &Path) -> Agent {
         gate_mode: GateMode::Ask,
         launched_by: None,
         led: false,
+        detached_from: None,
     }
 }

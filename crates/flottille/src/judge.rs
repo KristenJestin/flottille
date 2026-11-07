@@ -413,7 +413,9 @@ pub fn prompt(
 fn launched(daemon: &Daemon, agent: &str) -> Option<(String, String)> {
     let root = tree::root_of(daemon, agent);
     let root = daemon.read(|store| store.agent(&root)).ok()??;
-    Some((root.launched_by?, root.brief.unwrap_or_default()))
+    // Detached, its first message is still that agent's words.
+    let launcher = root.launched_by.or(root.detached_from)?;
+    Some((launcher, root.brief.unwrap_or_default()))
 }
 
 /// One of the user's last messages, as the judge is told it.
@@ -950,6 +952,7 @@ fn as_agent(folder: &Path, instructions: &str) -> Agent {
         gate_mode: GateMode::Ask,
         launched_by: None,
         led: false,
+        detached_from: None,
     }
 }
 

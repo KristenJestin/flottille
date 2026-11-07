@@ -461,3 +461,159 @@ fn a_led_session_goes_on_when_its_pilot_ends_and_is_handed() {
         questions_in_inbox(&user, &session) == ["Ship it?"]
     });
 }
+
+// Detach.
+
+fn subscriptions_of(user: &User, agent: &str) -> Vec<Value> {
+    user.call("subscription.list", json!({})).unwrap()["subscriptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["agent"] == agent)
+        .cloned()
+        .collect()
+}
+
+fn detach(user: &User, id: &str) -> Value {
+    user.call("agent.detach", json!({"agent": id})).unwrap()
+}
+
+#[test]
+fn the_user_detaches_a_led_session_from_its_pilot() {
+    let user = User::with_fake_agent();
+    let (lead, mcp) = lead(&user);
+    let (session, _) = led(&user, &mcp, "Fix the login.");
+    eventually("its first turn", || turns(&user, &session) == 1);
+
+    let detached = detach(&user, &session);
+
+    let agent = &detached["agent"];
+    assert!(agent["launched_by"].is_null(), "{detached}");
+    assert!(agent["led_by"].is_null(), "{detached}");
+    assert_eq!(agent["detached_from"], lead.as_str(), "{detached}");
+    let shown = shown(&user, &session);
+    assert_eq!(shown["detached_from"], lead.as_str());
+    assert!(shown["launched_by"].is_null());
+    let tree = entry(&user, &session);
+    assert_eq!(tree["agent"]["detached_from"], lead.as_str(), "{tree}");
+    assert_eq!(
+        store(&user)
+            .last_agent_events(&session, "agent.detached", 1)
+            .unwrap()[0]
+            .data["from"],
+        lead.as_str()
+    );
+    eventually("the session told", || {
+        delivered(&user, &session, "detached")
+            .iter()
+            .any(|body| body.contains("the user's alone"))
+    });
+    // Its first message stays the agent's words.
+    assert_eq!(delivered(&user, &session, "launched").len(), 1);
+    // No undo, nor a second time.
+    let again = user.call("agent.detach", json!({"agent": session}));
+    let refused = again.unwrap_err().1;
+    assert!(refused.contains("already detached"), "{refused}");
+}
+
+#[test]
+fn detaching_ends_the_pilot_s_subscription_and_tells_it_once() {
+    let user = User::with_fake_agent();
+    let (lead, mcp) = lead(&user);
+    let (session, _) = led(&user, &mcp, "Fix the login.");
+    eventually("its first turn", || turns(&user, &session) == 1);
+    assert_eq!(subscriptions_of(&user, &lead).len(), 1);
+
+    detach(&user, &session);
+
+    assert!(subscriptions_of(&user, &lead).is_empty());
+    eventually("the pilot told", || {
+        delivered(&user, &lead, "detached").len() == 1
+    });
+    let told = delivered(&user, &lead, "detached").remove(0);
+    assert!(
+        told.contains("the user detached the session \"Login\""),
+        "{told}"
+    );
+    settle();
+    assert_eq!(delivered(&user, &lead, "detached").len(), 1);
+    assert!(wakes(&user, &lead).is_empty(), "{:?}", wakes(&user, &lead));
+}
+
+#[test]
+fn a_detached_session_asks_the_user() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "Ask now", "do": [asks("Ship it?"), {"say": "Asked."}]}
+    ]}));
+    let (lead, mcp) = lead(&user);
+    let (session, session_mcp) = led(&user, &mcp, "Fix the login.");
+    eventually("its first turn", || turns(&user, &session) == 1);
+
+    detach(&user, &session);
+    user.call(
+        "agent.send",
+        json!({"agent": session, "message": "Ask now"}),
+    )
+    .unwrap();
+
+    eventually("the question in the inbox", || {
+        questions_in_inbox(&user, &session) == ["Ship it?"]
+    });
+    settle();
+    assert!(wakes(&user, &lead).is_empty());
+    let ask = session_mcp
+        .tools()
+        .into_iter()
+        .find(|tool| tool["name"] == "ask")
+        .unwrap();
+    assert!(
+        ask["description"]
+            .as_str()
+            .unwrap()
+            .contains("goes to the user"),
+        "{ask}"
+    );
+}
+
+#[test]
+fn a_detached_session_asks_the_users_leave_to_write_to_its_former_pilot() {
+    let user = User::with_fake_agent();
+    let (lead, mcp) = lead(&user);
+    let (session, session_mcp) = led(&user, &mcp, "Fix the login.");
+    eventually("its first turn", || turns(&user, &session) == 1);
+
+    detach(&user, &session);
+
+    // Both ways, the first message is held for the user's leave.
+    for (from, to) in [(&session_mcp, &lead), (&mcp, &session)] {
+        let sent = from.call("session_send", json!({"session": to, "text": "Hello."}));
+        assert!(!sent.error, "{}", sent.text);
+        assert!(
+            sent.text.starts_with("Waiting for the user's approval"),
+            "{}",
+            sent.text
+        );
+    }
+    let requests = user.call("approval.list", json!({})).unwrap()["requests"].clone();
+    assert_eq!(requests.as_array().unwrap().len(), 2, "{requests}");
+}
+
+#[test]
+fn detaching_a_session_no_agent_started_is_refused() {
+    let user = User::with_fake_agent();
+    let (lead, mcp) = lead(&user);
+    let (child, _) = child(&user, &mcp);
+
+    for (id, said) in [
+        (&lead, "no agent started it"),
+        (&child, "no agent started it"),
+        (&"000000000000".to_owned(), "there is no agent"),
+    ] {
+        let refused = user
+            .call("agent.detach", json!({"agent": id}))
+            .unwrap_err()
+            .1;
+        assert!(refused.contains(said), "{id}: {refused}");
+    }
+}

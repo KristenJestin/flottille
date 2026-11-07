@@ -491,7 +491,8 @@ pub fn brief_at_start(daemon: &Arc<Daemon>) {
     };
     for agent in agents {
         // A session the user started has its message delivered where it is made, as theirs.
-        let launched = agent.parent.is_some() || agent.launched_by.is_some();
+        let launched =
+            agent.parent.is_some() || agent.launched_by.is_some() || agent.detached_from.is_some();
         if agent.state.is_final() || agent.brief.is_none() || !launched {
             continue;
         }
@@ -519,7 +520,8 @@ pub const LAUNCHED: &str = " started this session for the user with this message
 /// for the window, the judge or the agent itself.
 pub fn first_message(daemon: &Daemon, agent: &Agent) -> (&'static str, String) {
     let brief = agent.brief.clone().unwrap_or_default();
-    let Some(launcher) = &agent.launched_by else {
+    // Detached, it is still that agent's words.
+    let Some(launcher) = agent.launched_by.as_ref().or(agent.detached_from.as_ref()) else {
         return ("brief", brief);
     };
     let who = match daemon.read(|store| store.agent(launcher)) {
@@ -1425,6 +1427,84 @@ pub fn pilot_of(daemon: &Daemon, agent: &Agent) -> Option<String> {
         .then(|| pilot.clone())
 }
 
+/// The user detaches a session from the agent that started it (`docs/tools.md`, "Detach"): the
+/// agent's subscription ends and it is told once, the session becomes the user's alone and is
+/// told so, at once. There is no undo.
+pub fn detach(daemon: &Arc<Daemon>, id: &str) -> Result<Agent, Failure> {
+    let session = daemon
+        .read(|store| store.agent(id))?
+        .ok_or_else(|| Failure::new("not-found", format!("there is no agent {id}")))?;
+    let Some(starter) = session.launched_by.clone() else {
+        let why = match &session.detached_from {
+            Some(from) => format!(
+                "{} is already detached from agent {from}: it is the user's alone, and there is \
+                 no undo",
+                named(&session)
+            ),
+            None => format!(
+                "{}: no agent started it, so there is nothing to detach it from",
+                named(&session)
+            ),
+        };
+        return Err(Failure::new("invalid-params", why));
+    };
+    for following in crate::subscriptions::following(daemon, &starter, Some(&session.id)) {
+        crate::subscriptions::end(daemon, &following, "detached");
+    }
+    daemon.write(|store| {
+        let (_, event) = store.change_agent(
+            &session.id,
+            AgentChange {
+                detached_from: Some(starter.clone()),
+                ..AgentChange::default()
+            },
+            Some((
+                "agent.detached",
+                json!({"agent": session.id, "from": starter}),
+            )),
+        )?;
+        Ok(((), event))
+    })?;
+    daemon.mcp.detached(&session.id);
+    let title = session.title.clone().unwrap_or_else(|| session.id.clone());
+    let starter_alive = daemon
+        .read(|store| store.agent(&starter))
+        .ok()
+        .flatten()
+        .is_some_and(|agent| !agent.state.is_final());
+    if starter_alive {
+        deliveries::deliver(
+            daemon,
+            &starter,
+            "detached",
+            Some(format!("detached-{starter}-from-{}", session.id)),
+            &format!(
+                "the user detached the session \"{title}\" (agent {}) from you. It is theirs \
+                 alone: you are no longer woken by it, and writing to it now asks the user's leave.",
+                session.id
+            ),
+            approval::BETWEEN_TURNS,
+        );
+    }
+    if !session.state.is_final() {
+        deliveries::deliver(
+            daemon,
+            &session.id,
+            "detached",
+            Some(format!("detached-{}", session.id)),
+            &format!(
+                "The user detached this session from agent {starter}: it is now the user's alone. \
+                 What you need answered goes through ask to the user, and writing to agent \
+                 {starter} now asks the user's leave."
+            ),
+            approval::BETWEEN_TURNS,
+        );
+    }
+    daemon
+        .read(|store| store.agent(id))?
+        .ok_or_else(|| Failure::new("not-found", format!("there is no agent {id}")))
+}
+
 /// The pilot ended: the sessions it led go on, handed to the user, each told once.
 fn hand_over(daemon: &Arc<Daemon>, pilot: &Agent) {
     let Ok(agents) = daemon.read(|store| store.agents()) else {
@@ -1908,6 +1988,8 @@ pub fn summary(daemon: &Daemon, agent: &Agent) -> Value {
         // The agent that leads it (`docs/tools.md`, "Sessions an agent starts"); `null` for a
         // session handed to the user.
         "led_by": agent.launched_by.as_ref().filter(|_| agent.led),
+        // The agent the user detached it from, kept for the record (`docs/tools.md`, "Detach").
+        "detached_from": agent.detached_from,
         "depth": agent.depth,
         "epoch": agent.epoch,
         "state": agent.state,

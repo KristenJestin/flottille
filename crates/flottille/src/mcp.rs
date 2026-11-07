@@ -1279,6 +1279,22 @@ impl Server {
         outdated
     }
 
+    /// The user detached the agent's session from the agent that started it: its running
+    /// session's grant no longer says so, and a session it starts from now on is judged as any
+    /// of the user's sessions' launches.
+    pub fn detached(&self, agent: &str) {
+        let mut tokens = self.tokens.lock().unwrap();
+        let Some(digest) = tokens.by_agent.get(agent).cloned() else {
+            return;
+        };
+        if let Some(grant) = tokens.grants.get_mut(&digest) {
+            *grant = Arc::new(Grant {
+                launched: false,
+                ..(**grant).clone()
+            });
+        }
+    }
+
     /// The agent's token no longer works: its process is gone. Whether it was said to run an
     /// older list of tools.
     pub fn revoke(&self, agent: &str) -> bool {

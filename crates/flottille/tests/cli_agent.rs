@@ -19,6 +19,10 @@ fn user() -> User {
             {"mcp": {"tool": "agent_launch", "arguments": {"kind": "child", "title": "worker one",
                 "brief": "HANG while the pilot looks", "workspace": "w"}, "keep": "w1"}},
             {"say": "launched the worker"}]},
+        {"when": "LEAD-LEADS", "do": [
+            {"mcp": {"tool": "agent_launch", "arguments": {"kind": "led", "title": "Login",
+                "brief": "GREET"}}},
+            {"say": "launched the session"}]},
         {"when": "HANG", "do": [{"hang": true}]},
         {"when": "ASK-USER", "do": [
             {"mcp": {"tool": "ask_user", "arguments": {"question": "which database?"}}}]},
@@ -784,4 +788,41 @@ fn agent_resume_starts_an_ended_root_again_and_its_show_says_it_ended_then_resum
     assert!(ended < again, "{shown}");
     let refused = failure_of(user.run(&["agent", "resume", &agent]));
     assert!(refused.contains("has not ended"), "{refused}");
+}
+
+#[test]
+fn agent_detach_takes_a_session_from_its_pilot_and_refuses_a_second_time() {
+    let user = user();
+    let lead = idle_agent(&user);
+    json_of(user.run(&["agent", "mode", &lead, "full", "--json"]));
+    user.run(&["agent", "send", &lead, "LEAD-LEADS"]);
+    let mut session = String::new();
+    eventually("the led session", || {
+        let listed = user.call("agent.list", json!({})).unwrap();
+        match listed["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["title"] == "Login")
+        {
+            Some(found) => {
+                session = found["id"].as_str().unwrap().to_owned();
+                true
+            }
+            None => false,
+        }
+    });
+
+    let detached = json_of(user.run(&["agent", "detach", &session, "--json"]));
+
+    assert_eq!(
+        detached["agent"]["detached_from"],
+        lead.as_str(),
+        "{detached}"
+    );
+    assert!(detached["agent"]["launched_by"].is_null(), "{detached}");
+    let again = failure_of(user.run(&["agent", "detach", &session]));
+    assert!(again.contains("already detached"), "{again}");
+    let root = failure_of(user.run(&["agent", "detach", &lead]));
+    assert!(root.contains("no agent started it"), "{root}");
 }
