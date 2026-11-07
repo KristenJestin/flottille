@@ -338,7 +338,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let asked: AgentName = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
             refuse_final(&agent)?;
-            let after_turn = crate::compaction::ask(&daemon, &agent)?;
+            let after_turn = crate::compaction::ask(daemon, &agent)?;
             Ok(json!({"agent": agent.to_json(), "after_turn": after_turn}))
         }
         "agent.cancel" => {

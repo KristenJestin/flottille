@@ -225,7 +225,8 @@ pub enum JudgeMenu {
     Model,
 }
 
-/// A judge as the daemon lists it: its provider and its model, the provider's default when none.
+/// A judge, or a compactor, as the daemon lists it: its provider and its model, the provider's
+/// default when none.
 pub type Judge = (String, Option<String>);
 
 /// Auto, in two lines, beside the judge's pickers.
@@ -376,7 +377,7 @@ impl SettingsPage {
 
     /// What the compactor's picker offers: `(key, label, the compactor it chooses)`, None first,
     /// then each enabled provider's default model and each model it lists.
-    pub fn compactor_entries(&self) -> Vec<(String, String, Option<(String, Option<String>)>)> {
+    pub fn compactor_entries(&self) -> Vec<(String, String, Option<Judge>)> {
         let mut entries = vec![("none".to_owned(), NO_COMPACTOR.to_owned(), None)];
         for provider in self.providers.list.iter().filter(|p| p.enabled) {
             entries.push((
@@ -463,8 +464,7 @@ impl SettingsPage {
                         .as_ref()
             })
             .unwrap_or(0);
-        let choices: Vec<Option<(String, Option<String>)>> =
-            entries.iter().map(|e| e.2.clone()).collect();
+        let choices: Vec<Option<Judge>> = entries.iter().map(|e| e.2.clone()).collect();
         let options = entries.iter().map(|(key, label, choice)| {
             let option = SelectOption::new(
                 SharedString::from(key.clone()),

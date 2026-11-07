@@ -396,18 +396,15 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
             let asked = Asked::of(&params)?;
             edit(paths, |before, document| {
                 let mut changed = false;
-                if let Some(compactor) = asked.compactor {
-                    if !before.compactor_set || before.compactor != compactor {
-                        document.remove("compactor");
-                        // Top-level keys stand before every table: the compactor goes last.
-                        match &compactor {
-                            Some(compactor) => {
-                                document.insert("compactor", compactor_table(compactor))
-                            }
-                            None => document.insert("compactor", toml_edit::value("none")),
-                        };
-                        changed = true;
-                    }
+                if let Some(compactor) = asked.compactor
+                    && (!before.compactor_set || before.compactor != compactor)
+                {
+                    document.remove("compactor");
+                    match &compactor {
+                        Some(compactor) => document.insert("compactor", compactor_table(compactor)),
+                        None => document.insert("compactor", toml_edit::value("none")),
+                    };
+                    changed = true;
                 }
                 let mut set = |key: &str, value: Option<toml_edit::Item>| {
                     let item = document.remove(key);
