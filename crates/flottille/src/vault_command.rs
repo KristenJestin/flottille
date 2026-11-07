@@ -125,21 +125,48 @@ fn read_secret(name: &str) -> Result<String> {
     Ok(secret)
 }
 
-/// The terminal's echo off while it lives.
+/// The terminal's echo off while it lives, given back when it ends and when a signal ends the
+/// command at the prompt (^C, a hang-up, a kill).
 struct Quiet(Option<libc::termios>);
+
+/// The signals that end the command while the echo is off.
+const ENDING: [libc::c_int; 4] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT];
+
+/// The terminal's flags before the prompt, for `give_back`: a signal handler reads them, so they
+/// are written once before it is installed and never moved.
+static mut WAS: std::mem::MaybeUninit<libc::termios> = std::mem::MaybeUninit::uninit();
+
+/// Gives the terminal its flags back, then ends the command as the signal would have.
+extern "C" fn give_back(signal: libc::c_int) {
+    // SAFETY: tcsetattr, signal and raise are async-signal-safe; `WAS` was written before this
+    // handler was installed and is not written again while it is.
+    unsafe {
+        libc::tcsetattr(0, libc::TCSANOW, (&raw const WAS).cast::<libc::termios>());
+        libc::signal(signal, libc::SIG_DFL);
+        libc::raise(signal);
+    }
+}
 
 impl Quiet {
     fn on() -> Quiet {
-        // SAFETY: tcgetattr and tcsetattr only read and set the terminal's flags of fd 0.
+        // SAFETY: tcgetattr and tcsetattr only read and set the terminal's flags of fd 0; `WAS`
+        // is written before the handlers that read it are installed.
         unsafe {
             let mut was: libc::termios = std::mem::zeroed();
             if libc::tcgetattr(0, &mut was) != 0 {
                 return Quiet(None);
             }
+            (&raw mut WAS).cast::<libc::termios>().write(was);
+            for signal in ENDING {
+                libc::signal(signal, give_back as *const () as libc::sighandler_t);
+            }
             let mut quiet = was;
             quiet.c_lflag &= !libc::ECHO;
             quiet.c_lflag |= libc::ECHONL;
             if libc::tcsetattr(0, libc::TCSANOW, &quiet) != 0 {
+                for signal in ENDING {
+                    libc::signal(signal, libc::SIG_DFL);
+                }
                 return Quiet(None);
             }
             Quiet(Some(was))
@@ -153,6 +180,9 @@ impl Drop for Quiet {
             // SAFETY: as in `on`, with the flags it read.
             unsafe {
                 libc::tcsetattr(0, libc::TCSANOW, was);
+                for signal in ENDING {
+                    libc::signal(signal, libc::SIG_DFL);
+                }
             }
         }
     }
