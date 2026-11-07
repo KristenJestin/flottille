@@ -466,8 +466,9 @@ door alone reaches them: an agent's only part is the `vault` tool, which lists.
   name that is not letters, digits, `.`, `_` and `-` (64 at most) or a secret under 6 characters;
   `not-found` for an unknown project; `unavailable` when the keyring cannot be reached, with its
   reason. An empty `description`, `url`, `username` or `project` is left out.
-- `vault.remove {name}` deletes the secret from the keyring and the entry, and answers
-  `{"removed": <entry>}`; `not-found` when there is none.
+- `vault.remove {name}` deletes the secret from the keyring, then the entry, and answers
+  `{"removed": <entry>}`; `not-found` when there is none; `unavailable` when the keyring refuses
+  (locked), the entry then left whole.
 
 Both writes emit `vault.changed`, and give the agents of every project the tools their roles have
 now (`vault` is listed to an agent whose project sees an entry).

@@ -27,14 +27,21 @@ Never a file of Flottille's and never its store: the store keeps only the entrie
 | `username` | The login that goes with it. Optional. |
 | `project` | The only project whose agents see it. Left out, every project's. Optional. |
 
+An entry is tied to its project **by name**, not by its folder: a project that is renamed leaves
+its entries under the old name, seen by no agent, until they are set again with the new one; a
+project removed and added again under the same name sees them again. The window keeps naming an
+entry's project when no project of that name exists.
+
 ## The secret is write-only
 
 It is set from the window (Settings, Vault) or with `flottille vault set <name>`, which reads it
 from the standard input or a prompt that does not echo it, **never from an argument** (the shell's
 history and the process list would keep it). It can be replaced (the entry is set again, its secret
-typed anew) or removed with its entry. It is **never shown again**: no method, no client, no tool
-returns it, no event or log line holds it, and an error about a call that carried it never repeats
-it. The window's field is masked, and empty again as soon as the secret is sent.
+typed anew) or removed with its entry: the secret is deleted from the keyring first, so that a
+keyring that refuses (locked) leaves the entry whole, to be removed again once it is unlocked. It
+is **never shown again**: no method, no client, no tool returns it, no event or log line holds it,
+and an error about a call that carried it never repeats it. The window's field is masked, and empty
+again as soon as the secret is sent.
 
 Every value of every entry is added to the masking of everything the daemon stores and shows
 (`flottille_core::secrets`): an agent that came across a secret some other way and writes it in a
@@ -56,12 +63,15 @@ a secret. An entry of another project is not listed, and is no entry for a tool 
 Through Flottille's own tools: a tool that needs a secret takes the entry's **name**, and the
 daemon puts the secret where it goes itself (an HTTP header, a command's standard input, a form
 field), with `vault::secret`, which only a tool's own code calls and whose value never leaves that
-use. The first users come with their own issues: `tickets log_time` (#383) and the Browser
-extension.
+use. It never waits for the user: an item of a locked keyring is answered at once that the keyring
+is locked and the user must unlock it, and a keyring that does not answer within 3 seconds is
+answered the same. The first users come with their own issues: `tickets log_time` (#383) and the
+Browser extension.
 
 ## The tests' keyring
 
-The tests never reach the user's keyring: their daemon's configuration folder holds
-`keyring.toml` with `backend = "memory"`, which keeps the secrets in the daemon's memory, lost when
-it stops. It is chosen by the daemon's configuration, never by an environment variable an agent
-could set for what it runs.
+The tests never reach the user's keyring: their daemon's configuration folder holds `keyring.toml`
+with `backend = "memory"`, which keeps the secrets in the daemon's memory, lost when it stops. The
+daemon says so in its log at start. `locked = true` in the same file, read again at each use, plays
+a locked keyring. It is chosen by the daemon's configuration, never by an environment variable an
+agent could set for what it runs.
