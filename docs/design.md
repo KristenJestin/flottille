@@ -689,6 +689,9 @@ who asked:
   from then on, one way, each message then judged as a write is, until either session ends or
   the user withdraws it where the session's rights are shown (`docs/tools.md`, "Sessions that
   talk to each other").
+  Ending a session that is not the agent's own child (`agent_stop`) is held for the user the same
+  way, in every mode, Full included, and every time: nothing is kept (`docs/tools.md`, "Ending
+  another session").
 - **A child's request is held by its parent**, as a `child-asks` delivery. The parent denies it or
   forwards it with one sentence of why (`approval_answer`); forwarding passes it to the parent's
   own parent, one level at a time, and from the root to the user, with every reason given on the

@@ -321,6 +321,9 @@ pub async fn prepared(
     if tool == "session_send" {
         return session_says(daemon, grant, args);
     }
+    if tool == "agent_stop" {
+        return crate::tree::stop_says(daemon, grant, args);
+    }
     if tool == "session_read" {
         return crate::session_read::says(daemon, grant, args);
     }
