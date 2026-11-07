@@ -3745,6 +3745,7 @@ fn settings_has_eight_tabs_in_order(cx: &mut TestAppContext) {
             ("compaction", "Compaction"),
             ("rules", "Rules"),
             ("workspaces", "Workspaces"),
+            ("vault", "Vault"),
             ("sessions", "Sessions"),
             ("appearance", "Appearance"),
             ("developer", "Developer mode"),

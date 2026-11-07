@@ -122,13 +122,15 @@ impl Provider {
     /// the workspace they act on. A tool that can only refuse is not listed (`docs/reference/mcp.md`
     /// §4 rule 9): `forge` needs a repository with a declared forge, `tickets` a declared
     /// tracker; `workspace` acts in any project (a child reads the workspaces and removes its
-    /// own). What each may do is the gate's business, not the list's.
+    /// own); `vault` an entry of the vault the project sees. What each may do is the gate's
+    /// business, not the list's.
     pub fn tools(
         &self,
         root: bool,
         at_depth_limit: bool,
         forge: bool,
         tracker: bool,
+        vault: bool,
     ) -> Vec<String> {
         let mut names: Vec<&str> = FILE_AND_COMMAND_TOOLS.to_vec();
         if forge {
@@ -141,6 +143,9 @@ impl Provider {
         names.push("workspace");
         names.push("web");
         names.push("services");
+        if vault {
+            names.push("vault");
+        }
         if !at_depth_limit {
             names.extend(AGENT_TOOLS);
         }
@@ -1448,7 +1453,7 @@ mod tests {
 
     #[test]
     fn a_root_agent_gets_ask_user_the_agent_tools_and_approval_answer() {
-        let tools = short(claude::PROVIDER.tools(true, false, false, false));
+        let tools = short(claude::PROVIDER.tools(true, false, false, false, false));
         assert_eq!(
             tools,
             [
@@ -1484,7 +1489,7 @@ mod tests {
 
     #[test]
     fn the_tools_follow_what_the_agent_can_do() {
-        let leaf = short(claude::PROVIDER.tools(false, true, false, false));
+        let leaf = short(claude::PROVIDER.tools(false, true, false, false, false));
         assert_eq!(leaf.len(), 15);
         assert!(leaf.contains(&"ask_parent".to_owned()));
         assert!(
@@ -1493,7 +1498,7 @@ mod tests {
                 .any(|t| t.starts_with("agent_") || t == "ask_user")
         );
         assert!(!leaf.contains(&"approval_answer".to_owned()));
-        let lead_child = short(claude::PROVIDER.tools(false, false, false, false));
+        let lead_child = short(claude::PROVIDER.tools(false, false, false, false, false));
         assert!(lead_child.contains(&"ask_parent".to_owned()));
         assert!(lead_child.contains(&"approval_answer".to_owned()));
         assert!(!lead_child.contains(&"ask_user".to_owned()));
@@ -1513,32 +1518,47 @@ mod tests {
     fn a_root_agent_in_main_with_a_forge_lists_the_forge_tools() {
         // The same tools in `main` and in a workspace: the place does not decide, the project's
         // declarations do, and what is allowed stays the gate's business.
-        let bare = short(claude::PROVIDER.tools(true, false, false, false));
+        let bare = short(claude::PROVIDER.tools(true, false, false, false, false));
         for tool in ["forge", "tickets"] {
             assert!(!bare.contains(&tool.to_owned()), "{tool}");
         }
-        let forge = short(claude::PROVIDER.tools(true, false, true, false));
+        let forge = short(claude::PROVIDER.tools(true, false, true, false, false));
         assert_eq!(forge[8], "forge", "after the command tools");
         assert_eq!(forge[9], "skill_read", "after forge");
         assert_eq!(forge[10], "workspace", "after skill_read");
         assert!(!forge.contains(&"tickets".to_owned()));
-        let both = short(claude::PROVIDER.tools(true, false, true, true));
+        let both = short(claude::PROVIDER.tools(true, false, true, true, false));
         assert_eq!(both.len(), 28);
         assert_eq!(both[10], "tickets", "after skill_read");
         assert_eq!(both[11], "workspace", "after tickets");
         assert_eq!(
-            short(claude::PROVIDER.tools(false, true, true, true)).len(),
+            short(claude::PROVIDER.tools(false, true, true, true, false)).len(),
             17
+        );
+    }
+
+    #[test]
+    fn vault_is_listed_only_when_the_project_sees_an_entry() {
+        // Without one it could only say the vault is empty (`docs/vault.md`).
+        let none = short(claude::PROVIDER.tools(true, false, false, false, false));
+        assert!(!none.contains(&"vault".to_owned()));
+        let seen = short(claude::PROVIDER.tools(true, false, false, false, true));
+        let services = seen.iter().position(|t| t == "services").unwrap();
+        assert_eq!(seen[services + 1], "vault", "after services");
+        let leaf = short(claude::PROVIDER.tools(false, true, false, false, true));
+        assert!(
+            leaf.contains(&"vault".to_owned()),
+            "a child uses secrets too"
         );
     }
 
     #[test]
     fn tickets_is_listed_only_when_a_tracker_is_declared() {
         // Without a tracker it could only refuse (`docs/reference/mcp.md` §4 rule 9).
-        let tracker = short(claude::PROVIDER.tools(true, false, false, true));
+        let tracker = short(claude::PROVIDER.tools(true, false, false, true, false));
         assert_eq!(tracker[9], "tickets", "after skill_read");
         assert!(!tracker.contains(&"forge".to_owned()));
-        let forge = short(claude::PROVIDER.tools(true, false, true, false));
+        let forge = short(claude::PROVIDER.tools(true, false, true, false, false));
         assert!(!forge.contains(&"tickets".to_owned()));
     }
 
@@ -1548,7 +1568,7 @@ mod tests {
         // any project; a child removes its own.
         for (forge, tracker) in [(false, false), (true, false), (false, true), (true, true)] {
             for root in [true, false] {
-                let listed = short(claude::PROVIDER.tools(root, false, forge, tracker));
+                let listed = short(claude::PROVIDER.tools(root, false, forge, tracker, false));
                 assert!(listed.contains(&"workspace".to_owned()));
             }
         }
@@ -1557,11 +1577,11 @@ mod tests {
     #[test]
     fn each_provider_names_flottille_s_tools_its_own_way() {
         assert_eq!(
-            claude::PROVIDER.tools(true, false, false, false)[0],
+            claude::PROVIDER.tools(true, false, false, false, false)[0],
             "mcp__flottille__fs_read"
         );
         assert_eq!(
-            opencode::PROVIDER.tools(true, false, false, false)[0],
+            opencode::PROVIDER.tools(true, false, false, false, false)[0],
             "flottille_fs_read"
         );
         assert_eq!(

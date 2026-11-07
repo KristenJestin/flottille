@@ -71,6 +71,8 @@ mod tasks;
 mod tickets;
 mod tree;
 mod update;
+mod vault;
+mod vault_command;
 mod web;
 mod workspace_command;
 mod workspaces;
@@ -91,6 +93,7 @@ use crate::project_command::ProjectAction;
 use crate::runs_command::RunsAction;
 use crate::service_command::ServiceAction;
 use crate::skill_command::SkillAction;
+use crate::vault_command::VaultAction;
 use crate::workspace_command::WorkspaceAction;
 
 pub const VERSION: &str = env!("FLOTTILLE_VERSION");
@@ -124,6 +127,12 @@ enum Command {
     Skill {
         #[command(subcommand)]
         action: SkillAction,
+    },
+    /// The vault: secrets kept by the keyring, that agents use through Flottille's tools and
+    /// never see
+    Vault {
+        #[command(subcommand)]
+        action: VaultAction,
     },
     /// Make, follow and remove the workspaces of a project
     Workspace {
@@ -324,6 +333,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         }
         Command::Project { action } => return project_command::run(&paths, action),
         Command::Skill { action } => return skill_command::run(&paths, action),
+        Command::Vault { action } => return vault_command::run(&paths, action),
         Command::Workspace { action } => return workspace_command::run(&paths, action),
         Command::Agent { action } => return agent_command::run(&paths, action),
         Command::Named { action } => return command_command::run(&paths, action),

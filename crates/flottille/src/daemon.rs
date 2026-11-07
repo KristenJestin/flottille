@@ -58,6 +58,8 @@ const SOCKET_CHECK: Duration = Duration::from_secs(2);
 /// What a client an agent started is answered, whatever it asks.
 const REFUSED_CLIENT: &str =
     "refused: this client was started by an agent; agents act only through their tools";
+/// How long the start waits for the vault's values to be read (`vault::load`).
+const VAULT_LOAD: Duration = Duration::from_secs(5);
 /// How long a refused client is answered before it is let go.
 const REFUSED_FOR: Duration = Duration::from_secs(10);
 
@@ -182,6 +184,8 @@ pub struct Daemon {
     pub developer: developer::Log,
     /// When the inactive sessions were last looked for (`inactive::check`); 0 before the first.
     pub inactive_checked: AtomicU64,
+    /// Where the vault's secrets are (`docs/vault.md`).
+    pub vault: crate::vault::Keyring,
     /// Becomes true when the daemon stops.
     stopping: watch::Sender<bool>,
 }
@@ -359,6 +363,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         items: items::Items::default(),
         developer: developer::Log::open(paths),
         inactive_checked: AtomicU64::new(0),
+        vault: crate::vault::Keyring::open(paths),
         stopping: watch::Sender::new(false),
     });
     let mut terminate = signal(SignalKind::terminate())?;
@@ -377,6 +382,11 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         "flottille daemon {VERSION} listening on {}",
         socket.display()
     );
+    // The vault's values are masked before an agent can say one; a keyring that waits for the
+    // user to unlock it holds the start back a little, then goes on on its own.
+    let loading = daemon.clone();
+    let loading = tokio::spawn(async move { crate::vault::load(&loading).await });
+    let _ = tokio::time::timeout(VAULT_LOAD, loading).await;
     workspaces::resume_at_start(&daemon);
     agents::settle_at_start(&daemon);
     tree::brief_at_start(&daemon);
@@ -589,6 +599,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
             "run.",
             "service.",
             "items.",
+            "vault.",
         ]
         .iter()
         .any(|prefix| request.method.starts_with(prefix))
@@ -615,6 +626,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     run_methods::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("service.") {
                     crate::services::call(daemon, &request.method, request.params).await
+                } else if request.method.starts_with("vault.") {
+                    crate::vault::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("items.") {
                     items::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("provider.") {

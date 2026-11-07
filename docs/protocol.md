@@ -485,6 +485,27 @@ Only the workspaces made afterwards follow a change; none is moved. `workspaces_
 `workspaces_folder.changed` with `{"project"}` (`null` for the default). The user's door alone
 reaches them: no tool of an agent does.
 
+### The vault methods
+
+The user's secrets, kept by the keyring, that agents use and never see (`docs/vault.md`). No
+method answers a secret, and an error about a call that carried one never repeats it. The user's
+door alone reaches them: an agent's only part is the `vault` tool, which lists.
+
+- `vault.list {project?}` answers `{"entries": [{"name", "description", "url", "username",
+  "project"}]}`, by name; with `project`, the entries its agents see (its own and every project's).
+- `vault.set {name, secret, description?, url?, username?, project?}` keeps the secret in the
+  keyring and the rest in the store, in place of the entry of that name if there is one, and
+  answers the entry as listed. `invalid-params` for a secret that is not a text; `refused` for a
+  name that is not letters, digits, `.`, `_` and `-` (64 at most) or a secret under 6 characters;
+  `not-found` for an unknown project; `unavailable` when the keyring cannot be reached, with its
+  reason. An empty `description`, `url`, `username` or `project` is left out.
+- `vault.remove {name}` deletes the secret from the keyring, then the entry, and answers
+  `{"removed": <entry>}`; `not-found` when there is none; `unavailable` when the keyring refuses
+  (locked), the entry then left whole.
+
+Both writes emit `vault.changed`, and give the agents of every project the tools their roles have
+now (`vault` is listed to an agent whose project sees an entry).
+
 ### The skill methods
 
 A project's skills (`docs/skills.md`). The daemon edits the project's file in place, the rest of it

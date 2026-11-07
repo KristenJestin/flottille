@@ -338,6 +338,36 @@ $ flottille skill remove shop react
 Removed skill react from shop. The project's files were not touched.
 ```
 
+## The vault
+
+The user's secrets, kept by the keyring, that agents use through Flottille's tools and never see
+(`docs/vault.md`). A secret is never printed, by these commands or any other.
+
+### `flottille vault list [--project <project>]`
+
+The entries: name, description, URL, username and project; never a secret. `--project` keeps the
+entries that project's agents see. `--json` prints `vault.list`.
+
+```
+$ flottille vault list
+The vault's entries (their secrets are never shown):
+  jira  Logs time on Jira  url https://tracker.example.com  username dev@example.com
+```
+
+### `flottille vault set <name>`
+
+Adds the entry, or replaces it whole, with `--description <line>`, `--url <url>`, `--username
+<login>` and `--project <project>` (left out, every project's agents see it). The secret is read
+from the standard input, less its last line end, or typed at a prompt that does not echo it when
+the standard input is a terminal: never an argument, which the shell's history and the process
+list would keep (`printf %s "$TOKEN" | flottille vault set jira`). Refused for an empty or short
+secret (6 characters at least), a name that is not letters, digits, `.`, `_` and `-`, or an
+unknown project. `--json` prints `vault.set`.
+
+### `flottille vault remove <name>`
+
+Removes the entry and its secret from the keyring. `--json` prints `vault.remove`.
+
 ## Workspaces
 
 A workspace is one git worktree per repository, on one branch, prepared by the project's setup

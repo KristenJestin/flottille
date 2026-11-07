@@ -155,6 +155,17 @@ workspaces go"); only the workspaces made afterwards follow it.
 |---|---|
 | `project` | The project whose own folder changed, `null` for the default of every project. |
 
+### `vault.changed`
+
+An entry of the vault was set or removed (`vault.set`, `vault.remove`, `docs/vault.md`). Never a
+secret.
+
+| Field | |
+|---|---|
+| `name` | The entry. |
+| `project` | The only project whose agents see it, `null` for every project. |
+| `removed` | `true` when it was removed; absent when it was set. |
+
 ### `workspace.created`
 
 A workspace was written, before anything is made on disk (`docs/workspaces.md`). Every event of a

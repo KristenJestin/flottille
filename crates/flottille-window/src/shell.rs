@@ -39,6 +39,7 @@ use crate::session::{Chose, Follow, Opened, Reply, SessionPage};
 use crate::session_link::PullRequest;
 use crate::settings::{Reveal, SettingsPage};
 use crate::tree::{EndedNode, ProjectNode, SessionRow, Sidebar};
+use crate::vault::VaultSection;
 use crate::workspaces_folder::WorkspacesFolder;
 
 pub mod switcher;
@@ -263,6 +264,7 @@ impl Shell {
         let judge_guidance = cx.new(|_| RulesEditor::judge(this.clone()));
         let compaction_guidance = cx.new(|_| RulesEditor::compaction(this.clone()));
         let workspaces = cx.new(|_| WorkspacesFolder::new(this.clone(), None));
+        let vault = cx.new(|_| VaultSection::new(this.clone()));
         let settings = cx.new(|_| {
             SettingsPage::new(
                 this.clone(),
@@ -270,6 +272,7 @@ impl Shell {
                 judge_guidance.clone(),
                 compaction_guidance.clone(),
                 workspaces.clone(),
+                vault.clone(),
             )
         });
         let services = {
@@ -710,6 +713,7 @@ impl Shell {
             Update::ToolResultsChanged => self.actions.send(Command::ToolResultsRead),
             Update::CompactionChanged => self.actions.send(Command::CompactionRead),
             Update::SessionsChanged => self.actions.send(Command::SessionsRead),
+            Update::VaultChanged => self.actions.send(Command::Vault),
             Update::ServicesChanged => {
                 if self.main.read(cx).services_page().is_some() {
                     self.actions.send(Command::Services);
@@ -1161,6 +1165,14 @@ impl Shell {
                     let section = page.read(cx).commands().clone();
                     section.update(cx, |section, cx| section.written(refused, cx));
                 }
+            }
+            Outcome::Vault { listed } => {
+                let section = self.settings.read(cx).vault().clone();
+                section.update(cx, |section, cx| section.listed(listed, cx));
+            }
+            Outcome::VaultWritten { refused } => {
+                let section = self.settings.read(cx).vault().clone();
+                section.update(cx, |section, cx| section.written(refused, cx));
             }
             Outcome::Developer { written, shown } => {
                 self.settings
@@ -2259,6 +2271,7 @@ impl Shell {
             self.actions.send(Command::SessionsRead);
             self.actions
                 .send(Command::WorkspacesFolderRead { project: None });
+            self.actions.send(Command::Vault);
             self.ask_appearance(None);
         }
         // Left, the services page stops reading the output it shows: nothing is in sight.

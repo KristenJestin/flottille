@@ -4,6 +4,7 @@
 //! `provider.disable`), and the page follows what the daemon lists next. The Auto judge is
 //! chosen here too (`provider.set_judge`), and its guidance edited (`judge.set`). The window's
 //! appearance is chosen (`appearance.set`): the Omarchy theme or Flottille's own, light or dark.
+//! The vault's entries are added, replaced and removed (`vault.*`, `crate::vault`).
 //! Last, the developer mode is switched (`developer.set`), its log's path beside the switch. The
 //! page is tabs, one section shown at a time; the Judge tab holds two, the Auto judge and then
 //! its guidance.
@@ -28,6 +29,7 @@ use crate::actions::Command;
 use crate::providers::{Provider, Providers};
 use crate::rules::RulesEditor;
 use crate::shell::Shell;
+use crate::vault::VaultSection;
 use crate::workspaces_folder::WorkspacesFolder;
 
 /// The sections of the page, in order: each index entry's key and label.
@@ -37,6 +39,7 @@ pub const SECTIONS: [(&str, &str); 8] = [
     ("compaction", "Compaction"),
     ("rules", "Rules"),
     ("workspaces", "Workspaces"),
+    ("vault", "Vault"),
     ("sessions", "Sessions"),
     ("appearance", "Appearance"),
     ("developer", "Developer mode"),
@@ -187,6 +190,8 @@ pub struct SettingsPage {
     compaction_pending: bool,
     /// Where the workspaces of every project go, chosen on this page.
     workspaces: Entity<WorkspacesFolder>,
+    /// The vault's entries, set and removed on this page.
+    vault: Entity<VaultSection>,
     /// The judge's picker whose list is open.
     judge_menu: Option<JudgeMenu>,
     /// A judge chosen, until the daemon lists it.
@@ -250,6 +255,7 @@ impl SettingsPage {
         judge_guidance: Entity<RulesEditor>,
         compaction_guidance: Entity<RulesEditor>,
         workspaces: Entity<WorkspacesFolder>,
+        vault: Entity<VaultSection>,
     ) -> Self {
         Self {
             rules,
@@ -258,6 +264,7 @@ impl SettingsPage {
             compaction: None,
             compaction_pending: false,
             workspaces,
+            vault,
             shell,
             providers: Providers::default(),
             pending: HashMap::new(),
@@ -661,6 +668,10 @@ impl SettingsPage {
 
     pub fn workspaces_folder(&self) -> &Entity<WorkspacesFolder> {
         &self.workspaces
+    }
+
+    pub fn vault(&self) -> &Entity<VaultSection> {
+        &self.vault
     }
 
     pub fn providers(&self) -> &Providers {
@@ -1654,12 +1665,14 @@ impl Render for SettingsPage {
             ],
             vec![("rules", self.rules.clone().into_any_element())],
             vec![("workspaces", self.workspaces.clone().into_any_element())],
+            vec![("vault", self.vault.clone().into_any_element())],
             vec![("sessions", self.sessions_section(cx).into_any_element())],
             vec![("appearance", self.appearance_section(cx).into_any_element())],
             vec![("developer", self.developer_section(cx).into_any_element())],
         ];
         let chosen = self.tab.min(sections.len() - 1);
         let shown = sections.swap_remove(chosen);
+        let vault = self.vault.read(cx).entries().map(<[_]>::len);
         let this = cx.entity().downgrade();
         let tabs = SECTIONS
             .iter()
@@ -1669,6 +1682,9 @@ impl Render for SettingsPage {
                     // The count shows once the daemon listed them, so it does not jump.
                     "providers" if self.providers.known => {
                         tabs.counted(*key, *label, count.to_string())
+                    }
+                    "vault" if let Some(entries) = vault => {
+                        tabs.counted(*key, *label, entries.to_string())
                     }
                     _ => tabs.tab(*key, *label),
                 },
