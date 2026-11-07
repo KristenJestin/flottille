@@ -63,6 +63,8 @@ pub enum Exit {
     Died(ExitStatus),
     /// Its session is to be replaced, for this reason.
     Replace(String),
+    /// Its conversation was summarised: a new session goes on from the summary.
+    Compact(Box<crate::compaction::Compacted>),
     /// The user reloads its tools: let go between turns, to be started again on its session with
     /// the tools its role has now.
     Reload,
@@ -473,6 +475,8 @@ async fn drive(
             order = orders.recv() => match order {
                 None | Some(Order::Stop) => return Ok(Exit::Stopped),
                 Some(Order::Replace(reason)) => return Ok(Exit::Replace(reason)),
+                // Asked between turns only: the agent's prompts wait while it is summarised.
+                Some(Order::Compact(compacted)) => return Ok(Exit::Compact(compacted)),
                 // What was delivered is pumped at the top of the loop, once no turn runs.
                 Some(Order::Ring) => {}
                 Some(Order::Cancel(answer)) => {

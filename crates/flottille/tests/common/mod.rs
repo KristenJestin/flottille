@@ -759,7 +759,7 @@ impl User {
 
 /// The records of a fake agent, one per line. A line it is still writing is left for the next
 /// read.
-fn records(file: &Path) -> Vec<Value> {
+pub fn records(file: &Path) -> Vec<Value> {
     match std::fs::read_to_string(file) {
         Ok(text) => text
             .split_inclusive('\n')

@@ -1196,17 +1196,13 @@ pub fn pick_judge(daemon: &Daemon) -> Option<Judge> {
             document.insert("judge", toml_edit::value(provider::NO_JUDGE));
             return true;
         }
-        let Some(judge) = PROVIDERS.iter().find_map(|provider| {
-            let (_, model) = SMALLEST.iter().find(|(name, _)| *name == provider.name)?;
-            let check = Check::of(provider, before, Version::Skip);
-            let signed_in = check.login_present || check.api_key.is_some();
-            (check.program.is_some() && check.ready() && signed_in).then(|| Judge {
-                provider: provider.name.to_owned(),
-                model: Some((*model).to_owned()),
-                picked: true,
-            })
-        }) else {
+        let Some((provider, model)) = smallest_ready(before) else {
             return false;
+        };
+        let judge = Judge {
+            provider: provider.to_owned(),
+            model: Some(model.to_owned()),
+            picked: true,
         };
         let mut table = judge_table(&judge);
         if let Some(table) = table.as_table_mut() {
@@ -1231,6 +1227,19 @@ pub fn pick_judge(daemon: &Daemon) -> Option<Judge> {
             None
         }
     }
+}
+
+/// The smallest model (`SMALLEST`) of the first provider, in Flottille's order, that is enabled,
+/// installed (its program on `PATH`; a test override is not an install) and signed in where
+/// Flottille can see it (its login file present, never opened, or its sign-in variable set): what
+/// Flottille picks as the Auto judge and as the compactor for a user who never chose one.
+pub fn smallest_ready(settings: &Settings) -> Option<(&'static str, &'static str)> {
+    PROVIDERS.iter().find_map(|provider| {
+        let (_, model) = SMALLEST.iter().find(|(name, _)| *name == provider.name)?;
+        let check = Check::of(provider, settings, Version::Skip);
+        let signed_in = check.login_present || check.api_key.is_some();
+        (check.program.is_some() && check.ready() && signed_in).then_some((provider.name, *model))
+    })
 }
 
 /// Whether the last `provider.judge_changed` chose no judge: read once from the end of the store

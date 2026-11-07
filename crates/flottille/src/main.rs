@@ -19,6 +19,7 @@ mod codex;
 mod codex_bridge;
 mod command_command;
 mod commands;
+mod compaction;
 mod daemon;
 mod deliveries;
 mod desktop;

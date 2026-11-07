@@ -183,10 +183,23 @@ fn command() -> Result<Program, String> {
     Ok((program, vec!["bridge".into(), "claude".into()]))
 }
 
-/// The bare mode is in the session's options: nothing to set on the process.
-fn env(_paths: &Paths, _agent: &Agent) -> Result<Env, String> {
-    Ok(Vec::new())
+/// The bare mode is in the session's options. With a compactor chosen, Claude Code compacts as
+/// late as it allows (`docs/agents.md`, "Compaction"): its override can only bring its threshold
+/// down, and 100 % leaves it at its default, whatever the user's environment says.
+fn env(paths: &Paths, _agent: &Agent) -> Result<Env, String> {
+    Ok(late_compaction(crate::compaction::chosen(paths)))
 }
+
+/// The variables that make Claude Code compact as late as it allows, when Flottille compacts.
+fn late_compaction(compactor: bool) -> Env {
+    match compactor {
+        true => vec![(COMPACT_AT.into(), "100".into())],
+        false => Vec::new(),
+    }
+}
+
+/// Claude Code's auto-compact threshold, a percent of its window, which can only lower its default.
+const COMPACT_AT: &str = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE";
 
 /// The bridge keeps nothing of an agent but its sessions' histories.
 fn forget_agent(_paths: &Paths, _agent: &str) {}
@@ -252,6 +265,17 @@ mod tests {
         ] {
             assert_eq!(withheld(name), gone, "{name}");
         }
+    }
+
+    #[test]
+    fn none_leaves_claude_to_compact_on_its_own_and_a_compactor_makes_it_compact_late() {
+        assert!(late_compaction(false).is_empty());
+        assert_eq!(
+            late_compaction(true),
+            vec![(COMPACT_AT.into(), "100".into())]
+        );
+        // The user's own value reaches the agent while Flottille does not compact.
+        assert!(!withheld(COMPACT_AT));
     }
 
     #[test]
