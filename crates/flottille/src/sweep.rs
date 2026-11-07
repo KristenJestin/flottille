@@ -54,7 +54,10 @@ pub fn sweep(daemon: &Arc<Daemon>) {
     for agent in &agents {
         match agent.state {
             AgentState::Working if agent.reported_at.is_none() => stuck(daemon, agent, now),
-            AgentState::Idle => children_status(daemon, agent, now),
+            AgentState::Idle => {
+                children_status(daemon, agent, now);
+                crate::compaction::at_rest(daemon, agent, now);
+            }
             _ => {}
         }
     }

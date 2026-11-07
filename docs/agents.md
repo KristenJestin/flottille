@@ -920,6 +920,27 @@ that its own compaction acts only when Flottille's could not:
   OpenCode reads only the configuration Flottille gives it, which sets nothing of compaction:
   nothing is set.
 
+### The prompt cache's lifetime
+
+The two triggers around the cache's expiry (`docs/design.md` §5.8, 6) count from each agent's
+last turn's end with its provider's lifetime, established from each CLI and never guessed:
+
+- **Claude Code**: an hour on a Claude subscription within its usage limits, five minutes on an
+  API key, Bedrock, Vertex or Foundry (its setting `promptCacheTtl`, documented in the CLI itself,
+  2.1.295: "Unset = automatic: 1 hour on a Claude subscription within its usage limits, 5 minutes
+  on an API key"). `CLAUDE_CODE_PROMPT_CACHE_TTL` and `FORCE_PROMPT_CACHING_5M`, which would
+  choose otherwise, are withheld from its environment, and Bedrock, Vertex and Foundry are chosen
+  by `CLAUDE_CODE_USE_*` variables, withheld too. Flottille takes five minutes when
+  `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is set (they win over the login), an hour
+  otherwise. A subscription past its usage limits falls to five minutes, which Flottille cannot
+  see: the first trigger then compacts after the cache expired, which still makes the next
+  request small.
+- **Codex**: OpenAI keeps a prompt's prefix "for 5 to 10 minutes of inactivity, up to an hour
+  off-peak" (OpenAI's prompt caching guide), with no lifetime to count on: unknown, neither
+  trigger.
+- **OpenCode**: its cache is the one of whichever model provider the user signed in to: unknown,
+  neither trigger.
+
 What a new session needs is all in the store: its brief (the root's first message, or a child's),
 the summary, and its messages, word for word as they were recorded; its tools and instructions
 come from its role at the start of every session, its children and subscriptions are rows of the

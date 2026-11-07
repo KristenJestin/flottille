@@ -63,6 +63,8 @@ pub static PROVIDER: Provider = Provider {
     takes_new_tools: false,
     // Told the list changed, it lists the tools again since its pull request #5913.
     lists_tools_again: true,
+    // Its cache is its model provider's, whichever the user signed in to (`docs/agents.md`).
+    cache_lifetime: || None,
     unready: providers::ready_here,
     forget_process,
     forget_session,

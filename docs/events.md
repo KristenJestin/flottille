@@ -421,6 +421,17 @@ compactor summarised it before the agent went on in a new session.
 | `after` | Flottille's only: the tokens of what the new session starts with (the brief, the summary and the messages kept), counted as 4 characters a token. |
 | `summary` | Flottille's only: the summary the compactor wrote. |
 
+#### `agent.cache_expired`
+
+The prompt cache of the agent, at rest, expired, and its context is past the minimum size of the
+compaction around the expiry (`docs/design.md` §5.8, 6): the composer shows **Compact before
+sending** until the agent's next turn or compaction. Said once per expiry.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `compact` | The setting `after_expiry` when it was said: whether the toggle starts ticked. |
+
 #### `agent.compaction_failed`
 
 Flottille's compaction of the agent failed, and changed nothing: the agent goes on in its

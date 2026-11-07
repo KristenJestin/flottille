@@ -153,6 +153,11 @@ fn the_compaction_tab_shows_the_compactor_its_settings_and_its_guidance(cx: &mut
         "compaction-threshold",
         "compaction-maximum",
         "compaction-kept",
+        "compaction-before-expiry",
+        "compaction-margin",
+        "compaction-after-expiry",
+        "compaction-minimum",
+        "compaction-lifetimes",
         "compactor-cost",
         "compaction-guidance-title",
         "compaction-guidance-text",
@@ -162,6 +167,11 @@ fn the_compaction_tab_shows_the_compactor_its_settings_and_its_guidance(cx: &mut
         assert!(visible(cx, id), "{id}");
     }
     assert!(visible(cx, "compaction-guidance-reach"));
+    let lifetimes = label(cx, "compaction-lifetimes").unwrap();
+    assert!(
+        lifetimes.contains("Claude: an hour") && lifetimes.contains("Codex: unknown"),
+        "{lifetimes}"
+    );
 
     // The switch asks the daemon, which keeps it.
     cx.update(|window, cx| window.click("compaction-automatic", cx));
@@ -334,4 +344,115 @@ fn the_session_menu_compacts_the_conversation(cx: &mut TestAppContext) {
     until(&shell, cx, "the compaction's line", |cx| {
         compacted_row(&page, cx).is_some()
     });
+}
+
+/// `user` whose daemon's clock the test moves, an agent whose first turn left 150k tokens of
+/// context (past the minimum size) at rest, and its session open in the window.
+fn expiring<'a>(
+    settings: &str,
+    cx: &'a mut TestAppContext,
+) -> (
+    User,
+    String,
+    Entity<Shell>,
+    Entity<SessionPage>,
+    &'a mut VisualTestContext,
+) {
+    let user =
+        user(&format!("automatic = false\n{settings}")).with_env("FLOTTILLE_TEST_CLOCK", "1");
+    let id = start(&user, "add the login page FULL");
+    eventually("the first turn ends", || {
+        user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["state"] == "idle"
+    });
+    let (shell, cx) = window(&user, cx);
+    let page = open_session(&shell, &id, cx);
+    settle(cx);
+    (user, id, shell, page, cx)
+}
+
+fn offer(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Option<bool> {
+    page.read_with(cx, |page, cx| {
+        page.reply().map(|r| r.read(cx).compact_offer())
+    })
+    .flatten()
+}
+
+fn compactions(user: &User, id: &str) -> usize {
+    user.call("agent.show", json!({"agent": id})).unwrap()["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["name"] == "agent.compacted")
+        .count()
+}
+
+#[gpui_kit::test]
+fn the_composer_toggle_shows_only_when_the_cache_expired_and_follows_the_setting(
+    cx: &mut TestAppContext,
+) {
+    let (user, _id, shell, page, cx) = expiring("after_expiry = false", cx);
+    assert_eq!(offer(&page, cx), None);
+    assert!(!present(cx, "reply-compact-toggle"));
+
+    // Claude's cache lives an hour here: not yet expired at 59 minutes.
+    user.call("test.advance", json!({"ms": 59 * 60_000}))
+        .unwrap();
+    settle(cx);
+    assert!(!present(cx, "reply-compact-toggle"));
+
+    user.call("test.advance", json!({"ms": 2 * 60_000}))
+        .unwrap();
+    until(&shell, cx, "the toggle is offered", |cx| {
+        offer(&page, cx).is_some()
+    });
+    // Unticked, as the setting is off; it unfolds.
+    assert_eq!(offer(&page, cx), Some(false));
+    one_frame(cx);
+    assert!(present(cx, "reply-compact-toggle"), "unfolding");
+    settle(cx);
+    assert!(visible(cx, "reply-compact-toggle"));
+    assert_eq!(
+        label(cx, "reply-compact-toggle").as_deref(),
+        Some("Compact before sending")
+    );
+}
+
+#[gpui_kit::test]
+fn unticking_the_toggle_sends_without_compacting(cx: &mut TestAppContext) {
+    let (user, id, shell, page, cx) = expiring("", cx);
+    user.call("test.advance", json!({"ms": 61 * 60_000}))
+        .unwrap();
+    until(&shell, cx, "the toggle is offered", |cx| {
+        offer(&page, cx).is_some()
+    });
+    assert_eq!(offer(&page, cx), Some(true), "ticked from the setting");
+    settle(cx);
+
+    cx.update(|window, cx| window.click("reply-compact-toggle", cx));
+    settle(cx);
+    assert_eq!(offer(&page, cx), Some(false));
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("go on");
+    settle(cx);
+    let reply = page.read_with(cx, |page, _| page.reply().cloned()).unwrap();
+    reply.update_in(cx, |reply, window, cx| reply.send(window, cx));
+
+    // The turn starts in the same session, and the toggle folds away.
+    until(&shell, cx, "the toggle leaves", |cx| {
+        offer(&page, cx).is_none()
+    });
+    one_frame(cx);
+    assert!(present(cx, "reply-compact-toggle"), "folding away");
+    settle(cx);
+    assert!(!present(cx, "reply-compact-toggle"));
+    eventually("the turn's end", || {
+        user.call("agent.show", json!({"agent": id})).unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["name"] == "agent.turn_ended")
+            .count()
+            == 2
+    });
+    assert_eq!(compactions(&user, &id), 0);
 }
