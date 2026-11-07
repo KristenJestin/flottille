@@ -377,8 +377,9 @@ holds. The guidance sits inside a fixed text (`crates/flottille/roles/compactor-
   `picked = true` and said once with `compaction.changed`. `invalid-config` when the file holds
   an unknown key or a value out of its range.
 - `compaction.set` takes any of `compactor` (`{"provider", "model", "effort"}`, or `"none"`),
-  `automatic` (a boolean), `threshold` (10 to 95), `maximum` (a number of tokens from 1000, or
-  `"none"`) and `kept` (0 to 200000); what is left out stays. It answers as `compaction.show`;
+  `automatic` (a boolean), `threshold` (50 to 95), `maximum` (a number of tokens from 20000, or
+  `"none"`) and `kept` (0 to 50000, and never more than a quarter of the size that compacts the
+  agent); what is left out stays. It answers as `compaction.show`;
   `invalid-params` for anything else, `not-found` for an unknown provider. `compactor = "none"`
   is a choice: no compactor is ever picked again.
 - `compaction.set_guidance {text}` writes the guidance (`refused` above 4,000 characters; an
@@ -1190,8 +1191,10 @@ sentence names its root) and an agent in a final state.
 `{"agent"}`. Compacts the agent's conversation (`docs/design.md` §5.8): the compactor summarises
 it and the agent goes on in a new session from its brief, the summary and its latest messages.
 `{"agent", "after_turn"}`: it starts at once between turns, or once the turn that runs ended
-(`after_turn` true); asked again meanwhile, nothing more happens. Its prompts wait while the
-compactor works. `agent.compacted` says it is done, `agent.compaction_failed` why it failed, in
+(`after_turn` true); asked again before it starts, nothing more happens; asked while the
+compactor works, `refused` (a compaction runs). Its prompts wait while the compactor works, and a
+turn that started before is never cut: the new session follows its end. A compaction by hand
+needs no threshold, no margin and no notice seen. `agent.compacted` says it is done, `agent.compaction_failed` why it failed, in
 which case nothing changed. `refused` when there is no compactor (none chosen, or none could be
 picked), and for an agent in a final state.
 

@@ -418,6 +418,7 @@ session, and its CLI's own compaction stays.
 | Field | |
 |---|---|
 | `agent` | |
+| `used` | The tokens of the context in use when it started, as the last `agent.usage` said: Flottille compacts by itself again only past this size plus a tenth of the window. |
 | `reason` | Why: the compactor failed or was silent, its summary was cut off by its length, tried to call a tool, or was not smaller than what it replaces. |
 
 #### `agent.plan`, `agent.usage`, `agent.mode_changed`, `agent.options_changed`

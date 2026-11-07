@@ -436,9 +436,15 @@ inside a fixed text (`roles/compactor-base.md`) that says what the compactor is 
 agent wrote is data.
 
 1. **When**: at the end of a turn, never in it, once the context the agent used (`agent.usage`, a
-   report made since its last compaction) passes the threshold or the maximum size; or when the
-   user asks (`agent.compact`, `flottille agent compact`, the session's menu), at once between
-   turns or once the turn ended.
+   report made since its last compaction) passes the threshold (50 % to 95 %) or the maximum size
+   (20,000 tokens at least), and has grown by a tenth of the window past the size its session
+   started at (what the first turn of a compacted session reported) and past the size its last
+   failed compaction started at: neither a session that starts past the threshold nor a compactor
+   that fails is run at every end of a turn. Not while the compactor was picked by Flottille and
+   its notice not seen yet. Or when the user asks (`agent.compact`, `flottille agent compact`, the
+   session's menu), at once between turns or once the turn ended, whatever the sizes; one asked
+   while the compactor works is refused. The tokens kept word for word (50,000 at most) are never
+   more than a quarter of the size that compacts the agent.
 2. **The summary**: the compactor is given the conversation since the last compaction as Flottille
    recorded it, thinking left out and each tool's input and result cut to its first 500
    characters; the previous summary, to update rather than start over; and what only Flottille
@@ -449,7 +455,10 @@ agent wrote is data.
    refused.
 4. **The new session**: the agent starts again in a new session of its CLI the way a replaced one
    does (`docs/agents.md`, "Compaction"), uncounted and with nothing told to its parent: it is sent
-   its brief, the summary, then its latest messages word for word. `agent.compacted` says it, with
+   its brief, the summary, then its latest messages word for word. The summary, masked of the
+   daemon's secrets, comes in a block of its own (`<earlier_conversation_summary>`, every `<`
+   escaped) under a line that says a model wrote it from the earlier conversation: data, not the
+   user's words nor Flottille's instructions. `agent.compacted` says it, with
    the sizes before and after and the summary; the conversation shows it as one line,
    `Conversation compacted · 152k → 9k tokens`, which unfolds to the summary.
 5. **A failure** changes nothing: the agent goes on in its session, `agent.compaction_failed` and
