@@ -168,20 +168,27 @@ fn kinds_of(daemon: &Daemon, ids: &[String]) -> Vec<String> {
 }
 
 /// What an agent taking deliveries changes: a delivery other than the reminder starts its count
-/// of quiet turns again, and a message of its parent (or, for a root, of the user) answers its
-/// question.
+/// of quiet turns again, and a message of its parent answers a child's question; a root's waits
+/// until no question of its is left unanswered (`tree::unanswered`): a message of the user
+/// written before a question does not answer it.
 fn took(daemon: &Daemon, agent: &str, kinds: &[String]) {
+    let Ok(Some(found)) = daemon.read(|store| store.agent(agent)) else {
+        return;
+    };
+    let answering = found.waiting_on_answer && kinds.iter().any(|k| k == "parent" || k == "user");
+    let still = answering
+        && found.parent.is_none()
+        && crate::tree::unanswered(daemon, agent).is_ok_and(|open| !open.is_empty());
     let change = AgentChange {
         quiet_turns: kinds.iter().any(|k| k != "reminder").then_some(0),
-        waiting_on_answer: kinds
-            .iter()
-            .any(|k| k == "parent" || k == "user")
-            .then_some(false),
+        waiting_on_answer: (answering && !still).then_some(false),
         ..AgentChange::default()
     };
-    if change.quiet_turns.is_some() || change.waiting_on_answer.is_some() {
+    if change.quiet_turns.is_some() || answering {
         let _ = daemon.write(|store| {
-            let (_, event) = store.change_agent(agent, change, None)?;
+            // Clients read its open questions again.
+            let event = answering.then(|| ("agent.answered", json!({"agent": agent})));
+            let (_, event) = store.change_agent(agent, change, event)?;
             Ok(((), event))
         });
     }

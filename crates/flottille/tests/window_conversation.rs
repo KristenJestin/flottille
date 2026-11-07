@@ -1699,7 +1699,7 @@ fn a_lone_thought_is_a_group_of_one_step(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn an_ask_user_call_stays_outside_the_fold_without_its_siblings(cx: &mut TestAppContext) {
+fn an_ask_user_call_folds_with_its_siblings_its_card_says_the_question(cx: &mut TestAppContext) {
     let user = user();
     let lead = lead(&user);
     worked(&user, &lead, "ask the user something");
@@ -1716,33 +1716,16 @@ fn an_ask_user_call_stays_outside_the_fold_without_its_siblings(cx: &mut TestApp
         cx.update(|window, _| window.find(line.clone()).expanded()),
         Some(false)
     );
-    assert!(has(format!("row-{at}-steps"), cx), "the question shows");
-    assert_eq!(
-        label(format!("row-{at}-steps-toggle"), cx).as_deref(),
-        Some("1 step · ask_user"),
-        "alone, without the call merged with it"
-    );
-    cx.update(|window, cx| window.click(format!("row-{at}-steps-toggle"), cx));
-    settle(cx);
-    assert!(has(format!("step-{at}-1"), cx), "the question");
-    assert!(!has(format!("step-{at}-0"), cx), "not its sibling");
-
-    // Unfolded, the group shows the sibling too.
-    cx.update(|window, cx| window.click(line.clone(), cx));
-    settle(cx);
-    assert!(has(format!("step-{at}-0"), cx));
+    // The question shows on its own card, from the daemon's open questions: the call that
+    // asked it folds with the others (this one is only reported, never asked to the daemon).
+    assert!(!has(format!("row-{at}-steps"), cx), "in the fold");
     cx.update(|window, cx| window.click(line, cx));
     settle(cx);
-    assert!(!has(format!("step-{at}-0"), cx), "folded again");
-    assert!(has(format!("step-{at}-1"), cx));
-
-    // The user answered: the group is no longer the last, and its question folds in.
-    worked(&user, &lead, "say more");
-    until(&shell, cx, "the answer is read", |cx| {
-        row_of(&page, cx, |b| is_text(b, "One more thing.")).is_some()
-    });
+    assert_eq!(
+        label(format!("row-{at}-steps-toggle"), cx).as_deref(),
+        Some("2 steps · ask_user")
+    );
     at_rest(cx);
-    assert!(!has(format!("row-{at}-steps"), cx), "in the fold");
 }
 
 #[gpui_kit::test]

@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use flottille_core::agent::{Agent, new_id};
 use flottille_core::approval;
+use flottille_core::secrets;
 use flottille_core::store::{Store, now_ms};
 use flottille_core::subscription::Subscription;
 use serde::Deserialize;
@@ -330,6 +331,37 @@ pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent, stop_reason: &str) {
     let last = crate::tree::last_messages_after(daemon, &session.id, prompted)
         .pop()
         .unwrap_or_else(|| NO_MESSAGE.to_owned());
+    // The questions it asked the user in this turn and that still wait, said whole above its
+    // last message: the starter relays them, or answers what it knows, without a read.
+    let env = std::env::vars_os().collect();
+    let mut asked: Vec<String> = Vec::new();
+    let (mut used, mut left) = (0, 0);
+    for question in crate::tree::open_questions(daemon, session)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|question| question["seq"].as_u64().unwrap_or(0) > prompted)
+    {
+        let text = secrets::mask(question["question"].as_str().unwrap_or_default(), &env);
+        let said = format!("Its open question to the user:\n\n{}", cut_said(&text));
+        let length = said.chars().count();
+        if left > 0 || used + length > QUESTIONS_CHARS {
+            left += 1;
+            continue;
+        }
+        used += length;
+        asked.push(said);
+    }
+    if left > 0 {
+        asked.push(format!(
+            "[{left} more question{}; session_read reads them]",
+            if left == 1 { "" } else { "s" }
+        ));
+    }
+    let last = asked
+        .into_iter()
+        .chain([format!("Its last message:\n\n{}", cut_said(&last))])
+        .collect::<Vec<_>>()
+        .join("\n\n");
     for follower in &woken {
         wake_follower(
             daemon,
@@ -338,6 +370,22 @@ pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent, stop_reason: &str) {
             &format!("ended a turn: {why}."),
             Some(&last),
         );
+    }
+}
+
+/// What the questions a wake carries hold at most, in all: those past it are counted.
+const QUESTIONS_CHARS: usize = 4_000;
+
+/// A text of the session cut at [`LAST_CHARS`], the cut said.
+fn cut_said(text: &str) -> String {
+    let count = text.chars().count();
+    match count > LAST_CHARS {
+        true => format!(
+            "{}\n[cut: {} more characters; session_read reads the rest]",
+            text.chars().take(LAST_CHARS).collect::<String>(),
+            count - LAST_CHARS
+        ),
+        false => text.to_owned(),
     }
 }
 
@@ -374,16 +422,8 @@ fn wake_follower(
         crate::tree::named(session)
     );
     if let Some(last) = last {
-        let count = last.chars().count();
-        body.push_str("\n\nIts last message:\n\n");
-        match count > LAST_CHARS {
-            true => body.push_str(&format!(
-                "{}\n[cut: {} more characters; session_read reads the rest]",
-                last.chars().take(LAST_CHARS).collect::<String>(),
-                count - LAST_CHARS
-            )),
-            false => body.push_str(last),
-        }
+        body.push_str("\n\n");
+        body.push_str(last);
     }
     deliveries::deliver(
         daemon,

@@ -1230,7 +1230,7 @@ does it with `agent_send` (`docs/tools.md`).
 #### `agent.tree`
 
 `{"agent"}`. The whole tree of the agent's root, each agent before its children:
-`{"agents": [{"agent", "doing", "waiting_on", "needs_user", "context", "context_tokens", "queued"}]}`. `agent` is the agent in short
+`{"agents": [{"agent", "doing", "waiting_on", "needs_user", "questions", "context", "context_tokens", "queued"}]}`. `agent` is the agent in short
 (`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `launched_by`, `depth`, `epoch`, `state`,
 `state_reason`, `created_at`, `active_at`, `exchanged_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
 took at the last start of its process, else the one asked, `null` for the agent's default before it
@@ -1244,7 +1244,12 @@ a reload of its tools waits for its next process, `agent.reload_tools`); `doing`
 `waiting_on` `parent` for a child whose request or question waits for its parent, `user` for a
 root whose own does, `subscription` for an agent between turns that has an open subscription (`doing` then
 says `waiting for #12: checks`, `#12 of api` when the project has several repositories, `waiting for its wake in 20 min`), else `null`; `needs_user`, for the root, whether a request of its tree or its
-own question waits for the user; `context`, how much of its context the agent used at its last
+own question waits for the user; `questions`, for a root, its questions to the user that wait for
+the answer, the oldest first, each `{"seq", "at", "question"}` (the number of its `agent.asked`
+event, when it was asked, the question masked): each asked while the root waits that no message of
+the user written after it, and taken by the root, answered, and that no replacement or resume of
+its session came after (a message written before a question does not answer it), empty once it
+ended; `context`, how much of its context the agent used at its last
 report (`agent.usage`), in percent, `null` before one and while the window's size is not known;
 `context_tokens`, the tokens its context holds at that report, `null` before one; `queued`, for the root, the messages the
 user wrote to it that wait for it to read them between its turns, the oldest first, each
@@ -1268,9 +1273,9 @@ is stored. `agent_status` with `action: conversation`, of the agents' tools, giv
 #### `agent.status`
 
 `{"agent"}`. What one agent is and does, for a client that shows one agent: `{"agent", "name",
-"line", "doing", "waiting_on", "needs_user", "messages"}`. `agent` is the agent in short as in
-`agent.tree`, `line` a sentence of what it is and does with its last sign of activity and its
-context use, `doing`, `waiting_on` and `needs_user` as in `agent.tree`, and `messages` its last
+"line", "doing", "waiting_on", "needs_user", "questions", "messages"}`. `agent` is the agent in
+short as in `agent.tree`, `line` a sentence of what it is and does with its last sign of activity
+and its context use, `doing`, `waiting_on`, `needs_user` and `questions` as in `agent.tree`, and `messages` its last
 messages, the oldest first, each cut at 600 characters.
 
 #### `agent.list`

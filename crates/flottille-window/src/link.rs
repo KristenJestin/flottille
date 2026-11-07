@@ -17,7 +17,10 @@ use serde_json::{Value, json};
 
 use crate::actions::Outcome;
 use crate::conversation::sections;
-use crate::model::{self, Answers, Snapshot};
+use crate::model::{self, Answers, OpenQuestion, Snapshot};
+
+/// The open questions of each root asking the user, by its id.
+type Questions = HashMap<String, Vec<OpenQuestion>>;
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -398,6 +401,7 @@ fn matters(event: &Event) -> bool {
                 | "agent.resumed"
                 | "agent.reported"
                 | "agent.asked"
+                | "agent.answered"
                 // A session that removed its own workspace goes on under main.
                 | "agent.moved"
         ),
@@ -457,7 +461,7 @@ fn read(conn: &mut Conn, briefs: &mut Briefs, seen: &Seen) -> Result<Snapshot> {
     let approvals = conn.request("approval.list", json!({}))?;
     let commands = conn.request("run.list", json!({}))?;
     let subscriptions = conn.request("subscription.list", json!({}))?;
-    let needs_user = needing_the_user(conn)?;
+    let (needs_user, questions) = needing_the_user(conn)?;
     let roots: Vec<&str> = agents["agents"]
         .as_array()
         .into_iter()
@@ -477,7 +481,6 @@ fn read(conn: &mut Conn, briefs: &mut Briefs, seen: &Seen) -> Result<Snapshot> {
             briefs.follow(conn, id)?;
         }
     }
-    let questions = questions(conn, &agents)?;
     let mut snapshot = Snapshot::build(Answers {
         projects: &projects,
         workspaces: &workspaces,
@@ -493,34 +496,12 @@ fn read(conn: &mut Conn, briefs: &mut Briefs, seen: &Seen) -> Result<Snapshot> {
     Ok(snapshot)
 }
 
-/// The last question of each root asking the user, from the inbox: read only while one asks.
-fn questions(conn: &mut Conn, agents: &Value) -> Result<HashMap<String, (String, u64)>> {
-    let asking: HashSet<&str> = agents["agents"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|agent| model::asks_the_user(agent))
-        .filter_map(|agent| agent["id"].as_str())
-        .collect();
-    let mut found = HashMap::new();
-    if asking.is_empty() {
-        return Ok(found);
-    }
-    let inbox = conn.request("inbox.list", json!({}))?;
-    for entry in inbox["entries"].as_array().into_iter().flatten() {
-        let agent = entry["agent"].as_str().unwrap_or_default();
-        if entry["kind"] == "question" && asking.contains(agent) {
-            let text = entry["text"].as_str().unwrap_or_default().to_owned();
-            found.insert(agent.to_owned(), (text, entry["at"].as_u64().unwrap_or(0)));
-        }
-    }
-    Ok(found)
-}
-
-/// The roots the daemon says need the user, as `agent.trees` gives them (the live roots, a page
-/// of them at a time): the window does not decide this itself.
-fn needing_the_user(conn: &mut Conn) -> Result<HashSet<String>> {
+/// The roots the daemon says need the user, and the open questions of each, as `agent.trees`
+/// gives them (the live roots, a page of them at a time): the window does not decide this
+/// itself.
+fn needing_the_user(conn: &mut Conn) -> Result<(HashSet<String>, Questions)> {
     let mut found = HashSet::new();
+    let mut questions = Questions::new();
     let mut before: Option<String> = None;
     loop {
         let page = conn.request("agent.trees", json!({"before": before}))?;
@@ -529,13 +510,13 @@ fn needing_the_user(conn: &mut Conn) -> Result<HashSet<String>> {
             .map(Vec::as_slice)
             .unwrap_or_default();
         for tree in trees {
+            let id = tree["status"]["agent"]["id"].as_str().unwrap_or_default();
             if tree["status"]["needs_user"] == true {
-                found.insert(
-                    tree["status"]["agent"]["id"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_owned(),
-                );
+                found.insert(id.to_owned());
+            }
+            let open = OpenQuestion::of_entry(&tree["status"]);
+            if !open.is_empty() {
+                questions.insert(id.to_owned(), open);
             }
         }
         before = trees
@@ -543,7 +524,7 @@ fn needing_the_user(conn: &mut Conn) -> Result<HashSet<String>> {
             .and_then(|tree| tree["status"]["agent"]["id"].as_str())
             .map(str::to_owned);
         if page["more"] != true || before.is_none() {
-            return Ok(found);
+            return Ok((found, questions));
         }
     }
 }

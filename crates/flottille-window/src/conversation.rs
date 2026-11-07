@@ -94,6 +94,12 @@ pub enum Block {
     Approval {
         number: u64,
     },
+    /// A question the agent asked the user with `ask_user`: `seq` is its `agent.asked` event,
+    /// which the daemon's open questions name while it waits for the answer.
+    Question {
+        seq: u64,
+        text: String,
+    },
     /// A command's result.
     Command(CommandCard),
     /// A request whose answer came as a card below: the line that told it was asked and decided
@@ -344,12 +350,6 @@ fn running(call: &Call) -> String {
         Some(line) => format!("running {line}"),
         None => format!("running {}", call.name),
     }
-}
-
-/// Whether a block of the conversation's last group waits on the user while it is folded: a
-/// question the agent asked them (its answer comes as a message, which ends the group).
-pub fn asks_the_user(block: &Block) -> bool {
-    matches!(block, Block::Steps { calls } if calls.iter().any(|call| call.name == "ask_user"))
 }
 
 /// What the agent does while a turn runs, as the line above the composer says it.
@@ -850,6 +850,14 @@ impl Conversation {
                 changes.extend(self.push(Block::Report {
                     from: self.me.clone(),
                     text: text("text"),
+                }));
+                changes
+            }
+            "agent.asked" if data["to"] == "user" => {
+                let mut changes = self.close(Some(event.at));
+                changes.extend(self.push(Block::Question {
+                    seq: event.seq,
+                    text: text("question"),
                 }));
                 changes
             }
@@ -1550,6 +1558,10 @@ fn shown_args(value: &Value) -> String {
 /// A call's arguments as its line shows them: a page read or a search says its URL or its words,
 /// which are what it asks.
 fn args_of(tool: &str, input: &Value) -> String {
+    if let ("ask_user", Some(question)) = (tool, input["question"].as_str()) {
+        let first = question.lines().find(|line| !line.trim().is_empty());
+        return cut_args(format!("asked you: {}", first.unwrap_or_default().trim()));
+    }
     match (tool, input["url"].as_str().or(input["query"].as_str())) {
         ("web", Some(asked)) => cut_args(asked.to_owned()),
         _ => shown_args(input),

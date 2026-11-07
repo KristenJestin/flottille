@@ -467,6 +467,44 @@ the base the repository started from):
 - `list`: `bkt pr list --state OPEN | MERGED | DECLINED | all` (`closed` is `DECLINED`), the
   newest 50, the branch picked from them; `show` with a number finds it among them.
 
+### Reviews
+
+`forge` `review {number, verdict, body?, comments?}` (`docs/tools.md`, "The forge") submits a
+review: `comment`, `approve` or `request_changes`, with comments on lines of the diff. **`approve`
+and `request_changes` are held for the user in every mode, Full included**, and the judge never
+decides them; `comment` is to judge like the other writes. Each is done once the same checks as
+`comment` passed (the remote leads where the forge is declared, the repository is the place's),
+and an approval or a change request is refused, once allowed, when the pull request is not open.
+
+- **GitHub**: one call of the review API, `gh api repos/<owner>/<name>/pulls/<n>/reviews
+  --hostname github.com --method POST --input <file>`, the file holding `{"event": "COMMENT" |
+  "APPROVE" | "REQUEST_CHANGES", "body": …, "comments": [{"path", "line", "side": "RIGHT",
+  "body"}], "commit_id": …}` (GitHub's documentation, "Create a review for a pull request";
+  `gh pr review` takes no comment on a line). `commit_id`, for an approval or a change request, is
+  the head the card was built on (`gh pr view --json headRefOid`). The file is removed when `gh`
+  ends. A line that is not in the diff is
+  GitHub's own refusal, and nothing is posted.
+- **Bitbucket**: `bkt pr comment <id> --text <body>`, then one `bkt pr comment <id> --text …
+  --file <path> --to-line <n>` for each comment, then the verdict: `bkt pr approve <id>` or, on
+  Cloud, `bkt api /repositories/W/R/pullrequests/<id>/request-changes --method POST`. The verdict
+  comes last, so that a failure before it leaves the pull request without it, and the failure says
+  what had already been posted. **`request_changes` on Data Center is refused** with nothing posted:
+  `bkt` has no command for it, and the API asks for the user's own slug, which Flottille never
+  asks for.
+
+**An approval or a change request is given on the head the user read.** The card says `Its head:
+<commit>` (GitHub's `headRefOid`; Bitbucket's page, Cloud `source.commit.hash`, Data Center
+`fromRef.latestCommit`), the answer reads it again and does nothing when it moved (`new commits
+since you were allowed; ask again`), and the state and the head are read again before the post.
+A pull request whose state or head cannot be read is refused, before the card and after it: an
+approval is never given on one nobody could look at. On Bitbucket a review that stops half way
+says how many comments the forge took (`3 of 10 line comments`) and records them as the agent's.
+
+**These shapes (the review API's body, `request-changes`, `bkt pr comment --file --to-line`) are
+assumed from the forges' REST documentation and `bkt`'s help (v0.37.0), not seen on a real server,
+and the maintainer checks them.** What was posted is recorded like a comment (the body and each
+comment on a line), so that it is read back as an agent's.
+
 ### Agents never run `bkt`
 
 The gate refuses every `bkt` line an agent runs, reads included, as it does `acli`
@@ -492,8 +530,9 @@ once the user allowed the call, like `close`'s.
 
 `forge {action, …}` (`docs/tools.md`, "The forge"): `list` the pull requests of the place's
 repositories by state and branch, `show` a workspace's branch's or one by its number with its
-checks, reviews and comments; `create`, `merge`, `checks`, `comment` and `edit`, each to judge (a
-merge that waives the checks base). The same `gh` (or `bkt`, for a Bitbucket repository) and the
+checks, reviews and comments; `create`, `merge`, `checks`, `comment`, `review` and `edit`, each to
+judge (a merge that waives the checks base, and a `review` that approves or requests changes).
+The same `gh` (or `bkt`, for a Bitbucket repository) and the
 same rules: spawned by the daemon, the repository named, its output masked, no token to the agent.
 It never reaches a repository outside the agent's place, and is listed to every agent of a
 project whose repository declares a forge, in `main` as in a workspace. Until #141 it was
@@ -637,9 +676,12 @@ log, or why there is none:
   have no names nor timestamp to drop.
 - **The failing command's output** (Bitbucket Cloud): the log of a step holds its setup, each
   script command, then Bitbucket's teardown, and an agent needs the part of the command that
-  failed. The kept lines run from the **last command echoed** (`+ <command>`) to the **teardown**
-  (or to the end of the log, or to a command that lists the environment), the command line
-  included. In between, a run of 3 or more `NAME=value` lines (capitals, digits and `_` in the
+  failed. The kept lines are the output of **one command**, from its echo (`+ <command>`) to the
+  next command echoed, the **teardown**, or the end of the log, the command line included. It is
+  the **first command whose output has a line that looks like an error** (the words `error`,
+  `failed` or `panicked`, as "The line that says why" below), else the last command echoed. A
+  step with an `after-script` echoes the commands of the cleanup after the one that failed, so
+  the last command echoed is not the failing one. In between, a run of 3 or more `NAME=value` lines (capitals, digits and `_` in the
   name) is an environment listing and is left out; a command that is only `env`, `printenv`,
   `export` or `set` is not taken for the failing one. When no command is echoed, or nothing
   is left, the end of the log is given as before, and the line says `lines of its log` instead
@@ -651,15 +693,25 @@ log, or why there is none:
     (support article "Successful test reports not showing in the Pipelines UI"). The first one
     is the teardown marker.
   - **Assumed**, from logs seen and not from documentation (Atlassian describes no log format):
-    that each script command is echoed as `+ <command>`; that the failing command is the last
-    one echoed (an `after-script` command that is not an environment listing would take its
-    place; output that itself starts with `+ ` too); that a teardown line starting
+    that each script command is echoed as `+ <command>`; that the `script` commands are not told
+    from the `after-script` ones (neither the log nor the step that `bkt pipeline view --json`
+    returns holds a marker or a command list that does: Atlassian documents `script` and
+    `after-script` in the pipeline's file only), so the failing command is the first that printed
+    an error-looking line, which is wrong when an earlier command that succeeded printed one, and
+    when no command did the last one is taken, which is an `after-script` command if the step has
+    one (output that itself starts with `+ ` ends a command too); that a teardown line starting
     `Searching for files matching artifact pattern`, `Uploading cache` or `Uploading artifact`
     comes after the commands; that an environment listing is `NAME=value` lines. Each marker is
     a constant of `crates/flottille/src/forge/logs.rs`: a wrong one makes the log fall back to
     its end, or to a wrong part, never to an error.
 - **Bitbucket Data Center**: `no log: bkt gives no job logs, read it on Bitbucket`; `bkt` has no
   pipelines there.
+- **The whole log**: each failed job whose log was read has one more line after its lines, the
+  exact call that reads all of it, `forge run_logs` (`Read the whole log with forge {"action":
+  "run_logs", "repository": "api", "run": 31, "step": "{…}"}.`): the run is the GitHub Actions run
+  or the Bitbucket build, the step is the GitHub job's id or the Bitbucket failed step's uuid, and
+  `repository` is the workspace's repository, given even when it has only one. A job with no log
+  has no such line.
 - **Cleaned**: the job's and step's names and the timestamp that start every line, the colours and
   the carriage returns of a terminal are dropped; the empty lines at both ends too.
 - **Bounded**: the last 40 lines of a job, 4,000 bytes at most (the oldest lines go first, whole;
@@ -783,6 +835,8 @@ The end of each failed job's log is in `forge` `show` of the pull request.
   with exit code N`, which says nothing of why. The line is cut at 160 characters, and masked as
   every line of a log is. A job whose log cannot be read says `no log:` and why, whole.
 - **The details are `forge` `show`**, which gives the end of every failed job's log as before.
+  The wake gives, under each failed job whose log was read, the same call that reads the whole
+  log (`Read the whole log with forge {"action": "run_logs", …}.`, "The whole log" above).
 
 ## What Flottille posts is recorded
 

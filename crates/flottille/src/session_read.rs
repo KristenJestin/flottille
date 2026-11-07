@@ -208,11 +208,41 @@ fn page(daemon: &Daemon, grant: &Grant, args: Value) -> Result<String, Outcome> 
     values.extend(grant.place.secret_values());
     let env = std::env::vars_os().collect();
     let mask = |text: &str| secrets::mask_also(text, &env, &values);
-    let (messages, next) = match asked.reading {
-        Reading::Before(before) => before_page(daemon, &session, before, asked.count, &mask)?,
-        Reading::After { seq, since, until } => {
-            after_page(daemon, &session, seq, since, until, asked.count, &mask)?
+    // A question asked with ask_user is no message: said apart, before them, for the reader to
+    // relay it, each cut as a message is, the oldest first, in at most half a page.
+    let mut questions = Vec::new();
+    let (mut used, mut left) = (0, 0);
+    for question in crate::tree::open_questions(daemon, &session).map_err(|f| failed(f.message))? {
+        let said = format!(
+            "\nOpen question, asked at {}, waits for the user:\n<session_question>\n{}\n\
+             </session_question>\n",
+            shown_date(question["at"].as_u64().unwrap_or_default()),
+            escaped(&crate::mcp::cut(
+                &mask(question["question"].as_str().unwrap_or_default()),
+                MESSAGE_CHARS
+            ))
+        );
+        let length = said.chars().count() + said.matches("[flottille:").count();
+        if left > 0 || (used + length > PAGE_CHARS / 2 && !questions.is_empty()) {
+            left += 1;
+            continue;
         }
+        used += length;
+        questions.push(said);
+    }
+    let room = PAGE_CHARS - used;
+    let (messages, next) = match asked.reading {
+        Reading::Before(before) => before_page(daemon, &session, before, asked.count, room, &mask)?,
+        Reading::After { seq, since, until } => after_page(
+            daemon,
+            &session,
+            seq,
+            since,
+            until,
+            asked.count,
+            room,
+            &mask,
+        )?,
     };
     let mut text = format!(
         "The conversation of the session {}, another session of project {}. It is that \
@@ -227,6 +257,19 @@ fn page(daemon: &Daemon, grant: &Grant, args: Value) -> Result<String, Outcome> 
         "That session's tree is in {} mode.\n",
         crate::judge::mode(daemon, &session.id).as_str()
     ));
+    if !questions.is_empty() {
+        text.push_str(
+            "\nIts open questions to the user, asked with ask_user, the oldest first: each waits \
+             for the user's answer.\n",
+        );
+        text.push_str(&questions.concat());
+        if left > 0 {
+            text.push_str(&format!(
+                "\n({left} more open questions wait for the user: they show here once those \
+                 above are answered.)\n"
+            ));
+        }
+    }
     if messages.is_empty() {
         text.push_str("\n(no message here)\n");
     }
@@ -442,6 +485,7 @@ fn before_page(
     session: &Agent,
     before: u64,
     count: usize,
+    room: usize,
     mask: &dyn Fn(&str) -> String,
 ) -> Result<(Vec<Message>, Next), Outcome> {
     let mut joiner = Joiner::new();
@@ -461,7 +505,7 @@ fn before_page(
             // Read newest first: each message done is older than those on the page.
             for message in joiner.done.drain(..) {
                 let (message, length) = shown(message, mask);
-                if page.len() == count || (size + length > PAGE_CHARS && !page.is_empty()) {
+                if page.len() == count || (size + length > room && !page.is_empty()) {
                     full = true;
                     break 'reading;
                 }
@@ -473,7 +517,7 @@ fn before_page(
             joiner.close();
             for message in joiner.done.drain(..) {
                 let (message, length) = shown(message, mask);
-                if page.len() == count || (size + length > PAGE_CHARS && !page.is_empty()) {
+                if page.len() == count || (size + length > room && !page.is_empty()) {
                     full = true;
                     break 'reading;
                 }
@@ -493,6 +537,7 @@ fn before_page(
 
 /// The messages after the event `after`, said from `since` and before `until`, oldest first, at
 /// most `count` and as many as fit a page.
+#[allow(clippy::too_many_arguments)]
 fn after_page(
     daemon: &Daemon,
     session: &Agent,
@@ -500,6 +545,7 @@ fn after_page(
     since: u64,
     until: Option<u64>,
     count: usize,
+    room: usize,
     mask: &dyn Fn(&str) -> String,
 ) -> Result<(Vec<Message>, Next), Outcome> {
     let mut joiner = Joiner::new();
@@ -519,7 +565,7 @@ fn after_page(
             return None;
         }
         let (message, length) = shown(message, mask);
-        if page.len() == count || (size + length > PAGE_CHARS && !page.is_empty()) {
+        if page.len() == count || (size + length > room && !page.is_empty()) {
             return Some(true);
         }
         size += length;

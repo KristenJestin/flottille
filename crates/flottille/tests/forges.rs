@@ -2046,7 +2046,12 @@ fn the_length_of_a_failed_job_s_log_is_bounded() {
     assert!(wide_log.len() <= 4000 + 200, "{} bytes", wide_log.len());
     // The whole is bounded, and what it leaves out is said, never silently dropped.
     let jobs = text.split("failed jobs").nth(1).unwrap();
-    assert!(jobs.len() <= 12_000 + 1_500, "{} bytes", jobs.len());
+    // The call that reads a whole log (about 120 bytes each, five at most) is beside the lines.
+    assert!(
+        jobs.len() <= 12_000 + 1_500 + 5 * 130,
+        "{} bytes",
+        jobs.len()
+    );
     for left_out in ["full-d", "full-e"] {
         let said = format!("- {left_out}: no log: at most 5 logs and 12000 bytes are given");
         assert!(text.contains(&said), "{said} in {text}");
@@ -2234,6 +2239,70 @@ fn the_failed_step_of_a_bitbucket_cloud_check_gives_the_end_of_its_log_masked() 
         )),
         "{:?}",
         bkt_calls(&user)
+    );
+}
+
+#[test]
+fn a_failed_job_says_how_to_read_its_whole_log() {
+    // GitHub: the run and the job the check's link names.
+    let user = User::with_fake_agent().with_fake_gh();
+    fixture(&user);
+    let lines = ["cargo test".to_owned(), "error: test failed".to_owned()];
+    script_logs(
+        &user,
+        pull_with_failed_jobs(&[("test", 456)]),
+        json!({"456": gh_log("test", &lines)}),
+    );
+    let (_, mcp) = agent_in(&user, Some("login"));
+
+    let answer = mcp.call("forge", json!({"action": "show", "repository": "api"}));
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains(
+            "    Read the whole log with forge {\"action\": \"run_logs\", \"repository\": \"api\", \"run\": 900, \"step\": \"456\"}."
+        ),
+        "{}",
+        answer.text
+    );
+
+    // Bitbucket: the build and the failed step's uuid.
+    let user = User::with_fake_agent().with_fake_bkt();
+    bitbucket_fixture(&user);
+    bitbucket_failed_checks(
+        &user,
+        json!([{"state": "FAILED", "key": "pipelines", "name": "Pipeline #31", "url": BUILD_31}]),
+    );
+    bitbucket_build(
+        &user,
+        json!([{"uuid": TEST_STEP, "name": "test", "state": {"name": "COMPLETED", "result": {"name": "FAILED"}}}]),
+        json!({TEST_STEP: "+ cargo test\nerror: test failed\n"}),
+    );
+    let (_, mcp) = agent_in(&user, Some("login"));
+
+    let answer = mcp.call("forge", json!({"action": "show", "repository": "api"}));
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains(&format!(
+            "    Read the whole log with forge {{\"action\": \"run_logs\", \"repository\": \"api\", \"run\": 31, \"step\": \"{TEST_STEP}\"}}."
+        )),
+        "{}",
+        answer.text
+    );
+    // A job with no log has no whole log to read.
+    let user = User::with_fake_agent().with_fake_bkt();
+    bitbucket_fixture(&user);
+    bitbucket_failed_checks(
+        &user,
+        json!([{"state": "FAILED", "key": "ci", "name": "Jenkins", "url": "https://ci.example.com/builds/5"}]),
+    );
+    let (_, mcp) = agent_in(&user, Some("login"));
+    let answer = mcp.call("forge", json!({"action": "show", "repository": "api"}));
+    assert!(
+        !answer.text.contains("Read the whole log"),
+        "{}",
+        answer.text
     );
 }
 
