@@ -285,7 +285,7 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
 | `bkt api /repositories/W/R/pipelines/ --context C --param pagelen=50 --param sort=-created_on` (GET; the sort is a `--param`, not a `?` in the path: `bkt api` is not known to merge one into the other) | `values[]`: `build_number`, `state.result.name`, `target.type`, then `target.ref_name` (a branch's pipeline) or `target.source` and `target.destination` (a pull request's: `pipeline_pullrequest_target`), `target.selector.type`, `target.selector.pattern` | Atlassian's REST documentation (Pipelines, list pipelines). Not `bkt pipeline list`: it decodes `target.ref.name` (`pkg/bbcloud/client.go:140-152`) while the API sends `ref_name`, so every branch it prints is empty (seen live with v0.37.0), and a pull request's pipeline has no `ref` at all |
 | `bkt pipeline list --context C --workspace W --repo R --limit 50 --json`, for the CI durations only ("How long CI takes") | `pipelines[]`: `state.result.name`, `created_on`, `completed_on` (`pkg/bbcloud/client.go:139-152`; the list has no duration field; its `target.ref.name` is empty, which the durations do not need) | `pkg/cmd/pipeline/pipeline.go:177-210`; `pkg/bbcloud/client.go:100-120`, `:145` (newest first: `sort=-created_on`) |
 | `bkt pipeline run --context C --workspace W --repo R --ref <branch> [--selector-type pull-requests --selector-pattern <p>]` | the exit code | `pkg/cmd/pipeline/pipeline.go:81-133` (v0.37.0; the selector flags at `:127-128`), `pkg/bbcloud/client.go:431-482` (`ref_type: branch`, `ref_name`, `selector`) |
-| `bkt pipeline view <build> --context C --workspace W --repo R --json` | `steps[]`: `uuid`, `state.result.name` | `pkg/cmd/pipeline/pipeline.go:416-480` (v0.37.0; `{pipeline, steps}`), `pkg/bbcloud/client.go:559-604` (`PipelineStep`) |
+| `bkt pipeline view <build> --context C --workspace W --repo R --json` | `steps[]`: `uuid`, `name`, `state.name`, `state.result.name`; for a followed run `pipeline.state` and its times ("Following a run") | `pkg/cmd/pipeline/pipeline.go:416-480` (v0.37.0; `{pipeline, steps}`), `pkg/bbcloud/client.go:559-604` (`PipelineStep`) |
 | `bkt pipeline logs <build> --context C --workspace W --repo R --step <uuid>` | the step's log, as text | `pkg/cmd/pipeline/pipeline.go:679-726` (v0.37.0), `pkg/bbcloud/client.go:692-725` (Cloud only) |
 | `bkt pipeline run … --ref <branch> [--selector-type custom --selector-pattern <name>]`, for `forge` `run` with no variable ("The CI family") | the exit code, and a run's number `#N` when it prints one | `bkt pipeline run --help` of v0.37.0 (`--selector-type`, `--selector-pattern`, `--var`) |
 | `bkt api /repositories/W/R/pipelines/ --context C --method POST --input <json>`, for `forge` `run` with variables | the new pipeline's `build_number` | Atlassian's REST documentation (Pipelines, run a pipeline: `target` a `pipeline_ref_target` with `ref_type`, `ref_name`, `selector.type` and `.pattern`; `variables[]` with `key`, `value`, `secured`); `bkt api --help` of v0.37.0 (`--method`, `--input`) |
@@ -382,9 +382,10 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
   ran on this pull request`; later, or in a repository with no pipeline, it is `none ran`. A merge
   is refused either way, there being no check, and says `its checks have not started yet for <short
   sha>` in the first case.
-- **Draft is not modelled.** A pull request is `open`, `merged` (`MERGED`) or `closed`
-  (`DECLINED`, `SUPERSEDED`); `bkt` has no draft flag, so none is shown, and `forge` `create` refuses
-  `draft: true` for Bitbucket.
+- **Draft is not read.** A pull request is `open`, `merged` (`MERGED`) or `closed`
+  (`DECLINED`, `SUPERSEDED`); `bkt pr list` has no draft field, so none is shown. `forge` `edit`
+  does set it (`bkt pr publish [--undo]`, below), and `create` still refuses `draft: true` for
+  Bitbucket (`bkt pr create --draft` exists, not used yet).
 
 ### `forge`'s writes on Bitbucket
 
@@ -434,6 +435,28 @@ the base the repository started from):
   `bkt pr edit <id> [--title T] [--description D]` (`pkg/cmd/pr/pr.go:1654-1669` and `:719-762`,
   which print `✓ Commented on pull request #<id>` and `✓ Updated pull request #<id>`); `bkt pr
   edit` refuses a call with neither, and Flottille refuses it before.
+- `edit` goes further than a title and a description (v0.37.0 help, #360): `--reviewer R` and
+  `--remove-reviewer R` of `bkt pr edit`, `bkt pr publish <id>` (alias `ready`) for `draft:
+  false` and `bkt pr publish <id> --undo` for `draft: true`, and, for `base`, Cloud's API: `bkt api
+  /repositories/<w>/<r>/pullrequests/<id> --method PUT --input
+  '{"destination":{"branch":{"name":"<base>"}}}'` once `/repositories/<w>/<r>/refs/branches/<base>`
+  answered (a 404 is `refused: <repo> has no branch <base> on the forge; nothing was written`).
+  **Assumed, and the maintainer checks them**: that body for the destination (it holds only
+  `destination`: check that the pull request's title and **reviewers are still there after the
+  move**, Atlassian's "update a pull request" being a `PUT` of the whole pull request, and a `PUT`
+  without `title` or `reviewers` having been refused or having dropped them), and that `bkt pr
+  publish` and `bkt pr edit --reviewer` behave on his Cloud and Data Center as their help says.
+  When a later step fails, the answer names the earlier one that had already changed the pull
+  request.
+  Data Center is refused for `base` (the `toRef` and the version it needs are not something `bkt`
+  helps with), and Bitbucket has no labels on pull requests: `labels` on `create` and
+  `labels_add`/`labels_remove` on `edit` are refused naming that, before anything is asked of `bkt`.
+- `create` adds the call's `reviewers` after the project's, and `delete_branch_on_merge` is `bkt pr
+  create --close-source` (refused before anything is opened for a branch the workspace resumed or
+  another workspace is on: the forge's own close of the source branch would delete it). `create` still refuses `draft` on Bitbucket (`bkt pr create --draft`
+  exists, and is not used yet). At `merge`, `--close-source=true` replaces `=false` when the branch
+  is to be deleted (`docs/tools.md`, "The forge"), since `bkt` sends the flag with every merge and
+  its default would override the pull request's own.
 - `close` of a pull request by its number: `bkt pr decline <id> [--comment T] [--delete-source]`
   (v0.37.0, `pkg/cmd/pr/pr.go`, `newDeclineCmd`; alias `close`; it prints `Declined pull request
   #<id>`). `--delete-source` is Data Center's only: on Cloud `bkt` ends with `--delete-source is
@@ -443,6 +466,44 @@ the base the repository started from):
   has no command for it.
 - `list`: `bkt pr list --state OPEN | MERGED | DECLINED | all` (`closed` is `DECLINED`), the
   newest 50, the branch picked from them; `show` with a number finds it among them.
+
+### Reviews
+
+`forge` `review {number, verdict, body?, comments?}` (`docs/tools.md`, "The forge") submits a
+review: `comment`, `approve` or `request_changes`, with comments on lines of the diff. **`approve`
+and `request_changes` are held for the user in every mode, Full included**, and the judge never
+decides them; `comment` is to judge like the other writes. Each is done once the same checks as
+`comment` passed (the remote leads where the forge is declared, the repository is the place's),
+and an approval or a change request is refused, once allowed, when the pull request is not open.
+
+- **GitHub**: one call of the review API, `gh api repos/<owner>/<name>/pulls/<n>/reviews
+  --hostname github.com --method POST --input <file>`, the file holding `{"event": "COMMENT" |
+  "APPROVE" | "REQUEST_CHANGES", "body": …, "comments": [{"path", "line", "side": "RIGHT",
+  "body"}], "commit_id": …}` (GitHub's documentation, "Create a review for a pull request";
+  `gh pr review` takes no comment on a line). `commit_id`, for an approval or a change request, is
+  the head the card was built on (`gh pr view --json headRefOid`). The file is removed when `gh`
+  ends. A line that is not in the diff is
+  GitHub's own refusal, and nothing is posted.
+- **Bitbucket**: `bkt pr comment <id> --text <body>`, then one `bkt pr comment <id> --text …
+  --file <path> --to-line <n>` for each comment, then the verdict: `bkt pr approve <id>` or, on
+  Cloud, `bkt api /repositories/W/R/pullrequests/<id>/request-changes --method POST`. The verdict
+  comes last, so that a failure before it leaves the pull request without it, and the failure says
+  what had already been posted. **`request_changes` on Data Center is refused** with nothing posted:
+  `bkt` has no command for it, and the API asks for the user's own slug, which Flottille never
+  asks for.
+
+**An approval or a change request is given on the head the user read.** The card says `Its head:
+<commit>` (GitHub's `headRefOid`; Bitbucket's page, Cloud `source.commit.hash`, Data Center
+`fromRef.latestCommit`), the answer reads it again and does nothing when it moved (`new commits
+since you were allowed; ask again`), and the state and the head are read again before the post.
+A pull request whose state or head cannot be read is refused, before the card and after it: an
+approval is never given on one nobody could look at. On Bitbucket a review that stops half way
+says how many comments the forge took (`3 of 10 line comments`) and records them as the agent's.
+
+**These shapes (the review API's body, `request-changes`, `bkt pr comment --file --to-line`) are
+assumed from the forges' REST documentation and `bkt`'s help (v0.37.0), not seen on a real server,
+and the maintainer checks them.** What was posted is recorded like a comment (the body and each
+comment on a line), so that it is read back as an agent's.
 
 ### Agents never run `bkt`
 
@@ -469,8 +530,9 @@ once the user allowed the call, like `close`'s.
 
 `forge {action, …}` (`docs/tools.md`, "The forge"): `list` the pull requests of the place's
 repositories by state and branch, `show` a workspace's branch's or one by its number with its
-checks, reviews and comments; `create`, `merge`, `checks`, `comment` and `edit`, each to judge (a
-merge that waives the checks base). The same `gh` (or `bkt`, for a Bitbucket repository) and the
+checks, reviews and comments; `create`, `merge`, `checks`, `comment`, `review` and `edit`, each to
+judge (a merge that waives the checks base, and a `review` that approves or requests changes).
+The same `gh` (or `bkt`, for a Bitbucket repository) and the
 same rules: spawned by the daemon, the repository named, its output masked, no token to the agent.
 It never reaches a repository outside the agent's place, and is listed to every agent of a
 project whose repository declares a forge, in `main` as in a workspace. Until #141 it was
@@ -486,15 +548,17 @@ for every forge write (Full runs it, Ask holds it for the user, Auto asks the ju
 (re-run the failed) stays as it is. The repository is one of the place's, its declared forge
 checked against its remote, as for `comment` and `edit`. The branch is the one named (`branch`,
 which git must take for a branch's name), else the one the workspace's repository is on now, else,
-in `main`, the one the project's checkout is on.
+in `main`, the one the project's checkout is on. A `run` that names no branch has it worked out
+**before the gate**, and put in the call: the card and the judge say where the pipeline will run
+(`branch` in its arguments), and what the user allows is exactly what is run.
 
 | Action | GitHub (`gh`) | Bitbucket Cloud (`bkt`) |
 |---|---|---|
 | `pipelines {repository?, branch?}` (read) | the workflows of `.github/workflows/` that accept `workflow_dispatch`: name, file, inputs (required, type, options, default, description) | the pipelines of `bitbucket-pipelines.yml`: `default`, each of `branches`, `tags` and `pull-requests` by its pattern, each `custom` by its name with the variables it declares (default, allowed values, description) |
-| `runs {repository?, branch?}` (read) | `gh run list -R … [--branch <b>] --limit 20 --json databaseId,workflowName,status,conclusion,event,headBranch,createdAt,startedAt,updatedAt,url` | `bkt api /repositories/W/R/pipelines/ --param pagelen=50 --param sort=-created_on`, the branch's (`target.ref_name`, or `target.source` of a pull request's): `build_number`, the selector, `state`, `trigger.name`, `created_on`, `duration_in_seconds` |
+| `runs {repository?, branch?}` (read) | `gh run list -R … [--branch <b>] --limit 20 --json databaseId,workflowName,status,conclusion,event,headBranch,createdAt,startedAt,updatedAt,url` | `bkt api /repositories/W/R/pipelines/ --param pagelen=50 --param sort=-created_on [--param target.ref_name=<b>]`, the API giving the branch's runs (the newest 50 of the branch, so a quiet branch's older runs are found): `build_number`, the selector, `state`, `trigger.name`, `created_on`, `duration_in_seconds` |
 | `run_view {repository?, run}` (read) | `gh run view <run> -R … --json databaseId,workflowName,status,conclusion,url,jobs` | `bkt pipeline view <run> --json`: `steps[]` (`name`, `uuid`, `state.name`, `state.result.name`) |
 | `run_logs {repository?, run, step}` (read) | `gh run view --job <id> -R … --log`, the job found by its name or id among the run's | `bkt pipeline logs <run> --step <uuid>`, the step found by its name or uuid |
-| `run {repository?, pipeline, branch?, variables?}` (write) | `gh workflow run <file> -R … --ref <b> -f k=v…`; the answer is the run's link when `gh` prints it | without variables `bkt pipeline run --ref <b> [--selector-type <t> --selector-pattern <p>]`; with variables the REST call through `bkt api` (table above); the answer is the run's number and link |
+| `run {repository?, pipeline, branch?, variables?, follow?}` (write) | `gh workflow run <file> -R … --ref <b> -f k=v…`; the answer is the run's link when `gh` prints it | without variables `bkt pipeline run --ref <b> [--selector-type <t> --selector-pattern <p>]`, the run's number read by its uuid (`bkt api …/pipelines/{uuid}`) when it prints no `#N`; with variables the REST call through `bkt api` (table above); the answer is the run's number and link |
 | `stop {repository?, run}` (write) | `gh run cancel <run> -R …` | `bkt api …/pipelines/{uuid}/stopPipeline --method POST`, the uuid read with `bkt pipeline view` |
 | `step {repository?, run, step, do: start \| rerun}` (write) | `rerun`: `gh run rerun <run> -R … --job <id>`; `start` is refused | refused, naming why |
 
@@ -505,19 +569,31 @@ in `main`, the one the project's checkout is on.
   custom pipeline whose variables come from an anchor lists them. A file that cannot be read
   says which of three it is: not in that commit, git could not give it (git's words), or it is
   there and the parser refuses it (its message, line and column); a merge key that cannot be
-  applied is said and the rest is listed; a GitHub workflow that cannot be parsed is named under
-  `Not read:` and never hides the others. GitHub runs a workflow by `workflow_dispatch`
+  applied is said and the rest is listed; **a key repeated in a mapping is read as the forges read
+  it, the last one kept** (strict YAML refuses it; Bitbucket and GitHub run the file), and said
+  beside the list: `bitbucket-pipelines.yml: pipelines.custom.check-all is defined twice (lines
+  12 and 18); the last one is listed`, the lines being the file's (a file that also has a syntax
+  error is still refused, with that error's line and column); a GitHub workflow that cannot be
+  parsed is named under `Not read:` and never hides the others. **A file past 1 MiB is not read**: its
+  size is asked first (`git cat-file -s`) and `pipelines` refuses past the limit, saying the size
+  and the limit (a Bitbucket file refuses the call; a workflow is named under `Not read:`); `run`
+  needs no file. GitHub runs a workflow by `workflow_dispatch`
   only when the file is also on the default branch: that is GitHub's own refusal, passed on.
 - **A pipeline is named as `pipelines` lists it**: Bitbucket `default`, `custom: <name>` (a bare
   name is a custom one), `branches: <pattern>`, `tags: <pattern>`, `pull-requests: <pattern>`;
   GitHub the workflow's file (`e2e.yml`), or anything `gh workflow run` takes.
 - **Variables** are `[{key, value, secured?}]`: a Bitbucket pipeline's variables, a GitHub
-  workflow's inputs. A key is letters, digits, `_` and `-`. On Bitbucket a run with variables goes
+  workflow's inputs. A key is letters, digits, `_` and `-` on GitHub; **on Bitbucket letters, digits
+  and `_`, not starting with a digit**, and any other is refused before the user is asked, saying
+  the rule (Bitbucket refuses it itself). On Bitbucket a run with variables goes
   through the REST call, not `bkt pipeline run --var`: `--var` is a list flag that splits a value
   at its commas (`PREVIEW_JOBS=api,web` would be two), and has no secured variable.
 - **A secured variable** is sent as Bitbucket's `secured: true`, and its value is in no record of
   the call (`[masked]` in the arguments stored, shown to the user and given to the judge), nor in
-  any answer, whatever the forge echoed. GitHub has no secured input: the value is still masked
+  any answer, whatever the forge echoed. **A value of fewer than 3 characters** (`4`, `ab`) would
+  garble every answer and record it appears in (`#43`, `table`): it is hidden only where it is
+  echoed as the variable's value (`KEY=value`, `"value": "…"`), never elsewhere; a value of 3
+  characters or more is hidden wherever it appears, as before. GitHub has no secured input: the value is still masked
   the same way in Flottille, and sent as an input.
 - **Steps.** Bitbucket Cloud's REST API has no call that starts a manual step nor runs one step
   again: its steps are read only (`GET …/steps/`, `…/log`), and only a whole pipeline is run or
@@ -535,9 +611,49 @@ in `main`, the one the project's checkout is on.
   that `bkt pipeline view --json` gives the run's `pipeline.uuid`; whether `bkt pipeline run`
   prints the run's number (when it does not, the answer says `forge runs lists it`).
 
-The window says a run an agent started like its other forge writes: `Ran a pipeline` with the
-pipeline's name, in the session's list of what was written, and the tool's step with the run's
-link in its answer.
+The window says what an agent did to a run like its other forge writes, in the session's list of
+what was written: `Ran a pipeline` with the pipeline's name and **the link of the run** (the
+`link` of the call's `agent.tool_served`, `docs/events.md`, which the daemon takes from the answer
+when the forge gave one), `Stopped a pipeline` with the run's number and `Ran a job again` with
+the run's number and the job's name. A call that was refused or held is none of them.
+
+### Following a run
+
+An agent that starts a run waits for it: `run` **follows the run it started** unless it is given
+`follow: false`. The following is a subscription of the source `run` (`docs/design.md` §5.6), with
+no time of its own, and its answer ends with `Followed until it ends: a delivery wakes you then,
+and once if it waits on a manual step, so no wake is needed; forge unsubscribe {"run": 43,
+"repository": "api"} stops following it.` (the repository named when the project has several). A subscription to the pull request of the run's branch does not follow the run:
+its `checks` is the end of the pull request's checks, which its answer names as they run, and it
+names the runs the agent already follows there (`docs/tools.md`, "The forge").
+
+- **Read by the rounds of the items**, with the pull requests of the run's repository ("Subscriptions"
+  below): one request a followed run in each round, `bkt pipeline view <run> --json` (its
+  `pipeline` and `steps`) or `gh run view <run> -R … --json status,conclusion,startedAt,updatedAt,jobs`,
+  as often as the rounds come, and nothing at all when no run is followed there.
+- **Its end wakes the agent**, a `subscription` delivery that names the run (its number, its
+  repository, its pipeline, its branch and its link), says its result as the forge does
+  (Bitbucket `successful`, `failed`, `error`, `stopped`; GitHub `success`, `failure`, `cancelled`…)
+  and its duration (Bitbucket `created_on` to `completed_on`; GitHub `startedAt` to `updatedAt`),
+  and for a failure the failed steps (jobs) by name, no log: `run_logs` reads it. The following is
+  then over.
+- **A wait wakes it once**: a Bitbucket run paused on a manual step (the step named, someone
+  starting it on the run's page), a GitHub run held by its environment's reviewers. The following
+  goes on until the run ends; the same wait is not said twice.
+- **A run that cannot be read** (the forge down, `bkt` without a context, the run gone) is said
+  once, `It cannot be read now: <why>`, and the following goes on: nothing more is said of it
+  until it is read again.
+- **It ends** with the run, when the agent ends, or with `unsubscribe {run, repository?}` (or the
+  user's Cancel), `repository` needed when the project has several, a run's number being of one
+  repository; a following cancelled while a round reads its run is neither written back nor said; `forge show` lists it under `Your subscriptions:` (`- run #43 of api (custom:
+  nightly on app/login): until it ends`), the window's rail as `Run #43 of api`, since when.
+- **A run whose number the forge did not say** (GitHub printed no link, `bkt` neither a number nor a
+  uuid) is not followed, and the answer says so.
+- **Assumed**, and the maintainer checks it on his Bitbucket: that `bkt pipeline run` prints the
+  new run's uuid (`✓ Triggered pipeline {…} on …`) when it prints no number; that `bkt pipeline
+  view --json` gives the run's `state` (`name`, `result.name`) and `created_on` and `completed_on`;
+  that a run waiting on a manual step says `state.stage.name` `PAUSED`, or else shows as no step
+  running, one done and the next `PENDING` (a run read between two steps then reads as waiting).
 
 ## Why a check failed
 
@@ -572,9 +688,12 @@ log, or why there is none:
   have no names nor timestamp to drop.
 - **The failing command's output** (Bitbucket Cloud): the log of a step holds its setup, each
   script command, then Bitbucket's teardown, and an agent needs the part of the command that
-  failed. The kept lines run from the **last command echoed** (`+ <command>`) to the **teardown**
-  (or to the end of the log, or to a command that lists the environment), the command line
-  included. In between, a run of 3 or more `NAME=value` lines (capitals, digits and `_` in the
+  failed. The kept lines are the output of **one command**, from its echo (`+ <command>`) to the
+  next command echoed, the **teardown**, or the end of the log, the command line included. It is
+  the **first command whose output has a line that looks like an error** (the words `error`,
+  `failed` or `panicked`, as "The line that says why" below), else the last command echoed. A
+  step with an `after-script` echoes the commands of the cleanup after the one that failed, so
+  the last command echoed is not the failing one. In between, a run of 3 or more `NAME=value` lines (capitals, digits and `_` in the
   name) is an environment listing and is left out; a command that is only `env`, `printenv`,
   `export` or `set` is not taken for the failing one. When no command is echoed, or nothing
   is left, the end of the log is given as before, and the line says `lines of its log` instead
@@ -586,15 +705,25 @@ log, or why there is none:
     (support article "Successful test reports not showing in the Pipelines UI"). The first one
     is the teardown marker.
   - **Assumed**, from logs seen and not from documentation (Atlassian describes no log format):
-    that each script command is echoed as `+ <command>`; that the failing command is the last
-    one echoed (an `after-script` command that is not an environment listing would take its
-    place; output that itself starts with `+ ` too); that a teardown line starting
+    that each script command is echoed as `+ <command>`; that the `script` commands are not told
+    from the `after-script` ones (neither the log nor the step that `bkt pipeline view --json`
+    returns holds a marker or a command list that does: Atlassian documents `script` and
+    `after-script` in the pipeline's file only), so the failing command is the first that printed
+    an error-looking line, which is wrong when an earlier command that succeeded printed one, and
+    when no command did the last one is taken, which is an `after-script` command if the step has
+    one (output that itself starts with `+ ` ends a command too); that a teardown line starting
     `Searching for files matching artifact pattern`, `Uploading cache` or `Uploading artifact`
     comes after the commands; that an environment listing is `NAME=value` lines. Each marker is
     a constant of `crates/flottille/src/forge/logs.rs`: a wrong one makes the log fall back to
     its end, or to a wrong part, never to an error.
 - **Bitbucket Data Center**: `no log: bkt gives no job logs, read it on Bitbucket`; `bkt` has no
   pipelines there.
+- **The whole log**: each failed job whose log was read has one more line after its lines, the
+  exact call that reads all of it, `forge run_logs` (`Read the whole log with forge {"action":
+  "run_logs", "repository": "api", "run": 31, "step": "{…}"}.`): the run is the GitHub Actions run
+  or the Bitbucket build, the step is the GitHub job's id or the Bitbucket failed step's uuid, and
+  `repository` is the workspace's repository, given even when it has only one. A job with no log
+  has no such line.
 - **Cleaned**: the job's and step's names and the timestamp that start every line, the colours and
   the carriage returns of a terminal are dropped; the empty lines at both ends too.
 - **Bounded**: the last 40 lines of a job, 4,000 bytes at most (the oldest lines go first, whole;
@@ -607,9 +736,11 @@ log, or why there is none:
 
 ## How long CI takes
 
-An agent that subscribes to its pull request picks a duration blind. So `forge` `show` of a pull
-request (the workspace's branch's or one by its number) and the answer of `forge` `subscribe` carry
-one line about the repository's recent CI runs, when there are finished ones to measure:
+An agent that waits on its pull request's checks is told how long they usually take, as
+information: a subscription needs no duration, it lasts until the pull request is merged or closed
+("Subscriptions" below). So `forge` `show` of a pull request (the workspace's branch's or one by
+its number) and the answer of `forge` `subscribe` carry one line about the repository's recent CI
+runs, when there are finished ones to measure:
 
 ```
 Recent CI runs of acme/app took 4 min on average (3 to 6 min, last 5).
@@ -632,18 +763,8 @@ Recent CI runs of acme/app took 4 min on average (3 to 6 min, last 5).
   of the items (which a subscription hears) nor the watch of a client. **A read that fails** (`gh` or `bkt` failing, an answer in a
   shape not expected) is not an error: `show` and `subscribe` answer without the line.
 
-**`forge` `subscribe` without `minutes`** is sized by those runs: twice their average, rounded up
-to the minute, from 15 minutes (`SHORTEST_MINUTES` in `forge/ci.rs`) to the longest allowed
-(`subscriptions::LONGEST_MINUTES`); with no run to measure by it stays
-`subscriptions::DEFAULT_MINUTES`, 60. The answer says which duration was taken and why:
-
-```
-Duration: 25 min, twice the average of the recent CI runs.
-Duration: 15 min, the shortest: twice the average of the recent CI runs is 4 min.
-Duration: 60 min, the default: no recent CI run to measure it by.
-```
-
-With `minutes`, the agent's choice is kept and the answer carries the line about the runs alone.
+Nothing is sized by those runs: `forge` `subscribe` without `minutes` has no deadline, and with
+`minutes` the agent's deadline is kept; the answer carries the line either way.
 
 ## Subscriptions
 
@@ -651,7 +772,12 @@ The pull requests the daemon keeps up to date are a source of events of the subs
 (`docs/design.md` §5.6). Each round of the items compares what it read of a pull request with
 what the store holds of it and says what changed as `item.*` events ([`items.md`](items.md),
 "Events"); a subscription to that pull request is offered them once they are stored, as the
-events it names:
+events it names, and wakes the agent at each read that holds some, until the pull request is
+merged or closed: the agent subscribes once, and is never asked to subscribe again. The events of
+one round are one delivery, the deliveries of a round ring the agent once, and those that come
+while it is in a turn are pumped together, in order, at its end. When the logs of failed jobs are
+read for a `checks` delivery, what comes for the subscription meanwhile is kept and delivered with
+it, after the checks.
 
 - `checks` (`item.checks`): none runs now, and one was running or the head commit changed; the
   delivery is a summary, not the logs: how many passed, failed and were skipped, then for each
@@ -661,13 +787,35 @@ events it names:
 - `review` (`item.reviewed`): a review that was not there (GitHub: its state, not `pending`;
   Bitbucket: a reviewer's new verdict), with its author, state and an excerpt (200 characters, on
   one line);
+- `approved` (`item.approved`): the pull request's review decision **becomes** approved, from any
+  other state, once: GitHub's `reviewDecision` turns `APPROVED`; Bitbucket (Cloud: `approved` on
+  each reviewer participant; Data Center: `APPROVED` on each reviewer) every reviewer has approved
+  and none asks for changes, a pull request with no reviewer never. Where `review` wakes the agent
+  at each reviewer's verdict, this wakes it once the review as a whole is approved, so it need not
+  read the pull request to know. The delivery says who approved and the checks in one line
+  (`checks: 12 passed`, `checks still running`, `checks: 2 failed`, `checks: 2 skipped`, `no checks`), as the round
+  stored them. It is judged against the decision the item held before the round, not read again
+  from the forge: a decision already approved when the agent subscribes (`show` says it), or read
+  approved again by a later round, is no event; one that goes back (a new commit dismisses it, a
+  reviewer asks for changes) and is approved again is a new one. **On GitHub a repository whose
+  base branch requires no review has no decision** (`reviewDecision` stays empty, stored as
+  `null`), so `approved` never comes there, whatever the reviews; `subscribe` says so when it is
+  asked for such a pull request (`This repository asks for no review, so approved will not come;
+  subscribe to review.`), and `review` is the event to wait for. The decision going from none to
+  approved, if a review is required later, is an `approved` like any other. It is not told for a pull request
+  that is merged or closed by the same round, which has its own event, and `from` does not filter
+  it: it is the review as a whole, not one person's;
 - `comment` (`item.commented`): a comment that was not there, with its author and an excerpt, the
   newest five of a round at most;
 - `merged`, `closed` (`item.merged`, `item.closed`): the pull request's state became that; either
-  ends every subscription to it.
+  ends every subscription to it, said (`The pull request #12 of api was merged: your subscription
+  to checks is over.`).
 
 `forge subscribe` reads the pull request once and stores it before the subscription opens: what
-is already so is no event. A round that fails changes nothing. A subscription hears as often as
+is already so is no event. It finds the pull request by the workspace's branch, or by `number` and
+`repository` (a pull request of the project's repository that no workspace of the agent holds): the
+events, the wake and the end are the same, and the subscription says `pull request #12 of api` with no
+workspace. A round that fails changes nothing. A subscription hears as often as
 the rounds come: every minute while a window is connected, every five otherwise. **A bot**, for `from: people`, is a GitHub author whose
 login starts with `app/` (as `gh` says an app) or ends with `[bot]`, or that `gh` says `is_bot`;
 this is assumed from `gh`'s output, and the maintainer checks it on a real pull request. A
@@ -702,6 +850,8 @@ The end of each failed job's log is in `forge` `show` of the pull request.
   with exit code N`, which says nothing of why. The line is cut at 160 characters, and masked as
   every line of a log is. A job whose log cannot be read says `no log:` and why, whole.
 - **The details are `forge` `show`**, which gives the end of every failed job's log as before.
+  The wake gives, under each failed job whose log was read, the same call that reads the whole
+  log (`Read the whole log with forge {"action": "run_logs", …}.`, "The whole log" above).
 
 ## What Flottille posts is recorded
 

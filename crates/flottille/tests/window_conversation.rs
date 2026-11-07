@@ -20,7 +20,9 @@ use flottille_window::link::Connect;
 use flottille_window::queued::{
     CANCEL, EDIT, SEND_NOW, WAITS, WAITS_FULL, queued_button, queued_id,
 };
-use flottille_window::session::{COPIED, SessionPage, said_at};
+use flottille_window::session::{
+    COPIED, RETRY, Reply, SENDING, SessionPage, pending_part, said_at,
+};
 use flottille_window::tree::session_id;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
@@ -29,9 +31,14 @@ use serde_json::{Value, json};
 fn script() -> Value {
     json!({"turns": [
         {"when": "work a while", "do": [{"wait": 4000}, {"say": "Done with that."}]},
+        {"when": "think it over", "do": [{"wait": 1500}, {"say": "Thought over."}]},
         {"when": "work until stopped", "do": [{"hold": "release"}, {"say": "Done with that."}]},
         {"when": "start the docs session", "do": [{"mcp": {"tool": "agent_launch",
-            "arguments": {"title": "Docs", "brief": "Write the docs", "follow": false, "root": true,
+            "arguments": {"title": "Docs", "brief": "Write the docs", "kind": "handed",
+                "workspace": "w"}}}]},
+        {"when": "start the long session", "do": [{"mcp": {"tool": "agent_launch",
+            "arguments": {"title": LONG_TITLE, "brief": "Write the docs",
+                "kind": "handed",
                 "workspace": "w"}}}]},
         {"when": "write to the session", "do": [{"mcp": {"tool": "session_send",
             "arguments": {"session": "{prompt:agent}",
@@ -55,7 +62,7 @@ fn script() -> Value {
                 "rawOutput": "run r9: `sleep 30` is running after 1.0 s\nit keeps going: ask run_status\n(no output)"}},
             call("h2", "fs_list", "completed", json!({"path": "."})),
             {"mcp": {"tool": "agent_launch", "arguments": {"title": "Docs",
-                "brief": "Write the docs", "follow": false, "root": true, "workspace": "w"}}}]},
+                "brief": "Write the docs", "kind": "handed", "workspace": "w"}}}]},
         {"when": "grep a while", "do": [
             call("g1", "fs_list", "completed", json!({"path": "."})),
             call("g2", "run", "in_progress", json!({"line": "git grep -n TODO"})),
@@ -65,8 +72,14 @@ fn script() -> Value {
             call("g3", "fs_read", "completed", json!({"path": "README.md"})),
             {"hold": "again"},
             {"say": "Found them."}]},
+        {"when": "run long", "do": [
+            call("r1", "fs_list", "completed", json!({"path": "."})),
+            call("r2", "run", "in_progress", json!({"line": LONG_LINE})),
+            {"hold": "release"},
+            {"update": {"sessionUpdate": "tool_call_update", "toolCallId": "r2",
+                "status": "completed"}}]},
         {"when": "ask through a child", "do": [{"mcp": {"tool": "agent_launch",
-            "arguments": {"title": "curious", "brief": "ask your parent"}}}]},
+            "arguments": {"kind": "child", "title": "curious", "brief": "ask your parent"}}}]},
         {"when": "ask your parent", "do": [{"mcp": {"tool": "ask_parent",
             "arguments": {"question": "Page Équipe asks: apps/front/src/team.tsx, which layout should the grid take?"}}}]},
         {"when": "say a lot", "do": [{"say": LONG}]},
@@ -77,8 +90,21 @@ fn script() -> Value {
             call("q1", "fs_list", "completed", json!({"path": "."})),
             call("q2", "ask_user", "completed", json!({"question": "Which colour?"}))]},
         {"when": "work at length", "do": at_length()},
-        {"when": "work past a page", "do": past_a_page()}
+        {"when": "work past a page", "do": past_a_page()},
+        {"when": "talk at length", "do": talk_at_length()}
     ]})
+}
+
+/// A sentence and a thought, again and again: three pages of the history (a page holds a
+/// thousand events), each a few hundred blocks to scroll through.
+fn talk_at_length() -> Vec<Value> {
+    let mut steps = Vec::new();
+    for n in 0..1050 {
+        steps.push(json!({"say": format!("Paragraph {n}.")}));
+        steps.push(json!({"think": format!("Thought {n}.")}));
+    }
+    steps.push(json!({"say": "Finally."}));
+    steps
 }
 
 /// A group of 300 rows: a thought and a call, again and again, between two sentences.
@@ -135,6 +161,14 @@ const LONG: &str = "One.\n\nTwo.\n\nThree.\n\nFour.\n\nFive.\n\nSix.\n\nSeven.\n
     Seventeen.\n\nEighteen.\n\nNineteen.\n\nTwenty.\n\nTwenty-one.\n\nTwenty-two.\n\n\
     Twenty-three.\n\nTwenty-four.\n\nTwenty-five.\n\nTwenty-six.\n\nTwenty-seven.\n\n\
     Twenty-eight.\n\nTwenty-nine.\n\nThirty.";
+
+/// What a user typed to start a session: its first words are the session's title.
+const LONG_TITLE: &str =
+    "lis mes 4 story en cours, ca me parait simple ? on peut voir pour les faires en meme temps ?";
+
+/// A command as long as a front-end test run's, as the steps summary names it.
+const LONG_LINE: &str = "pnpm --filter @app/front exec ng test --no-watch --include \
+    \"src/app/{pages/**/analytics,pages/**/reports,pages/**/settings,shared/**/charts}/**/*.spec.ts\"";
 
 fn user() -> User {
     let user = User::with_fake_agent();
@@ -201,11 +235,16 @@ fn project(user: &User) -> PathBuf {
 
 /// A session the user started in the workspace, its first turn ended.
 fn lead(user: &User) -> String {
+    lead_saying(user, "lead the work")
+}
+
+/// [`lead`], started with `message`: its title is the message's first words.
+fn lead_saying(user: &User, message: &str) -> String {
     project(user);
     let answer = user
         .call(
             "agent.run",
-            json!({"project": "app", "workspace": "w", "message": "lead the work"}),
+            json!({"project": "app", "workspace": "w", "message": message}),
         )
         .unwrap();
     let id = answer["agent"]["id"].as_str().unwrap().to_owned();
@@ -230,11 +269,13 @@ fn allow_the_request(user: &User) {
 
 /// The session the lead started for the user, its first turn ended.
 fn docs_session(user: &User, lead: &str) -> String {
-    user.call(
-        "agent.send",
-        json!({"agent": lead, "message": "start the docs session"}),
-    )
-    .unwrap();
+    session_started_by(user, lead, "start the docs session")
+}
+
+/// The session the lead started when told `message`, its first turn ended.
+fn session_started_by(user: &User, lead: &str, message: &str) -> String {
+    user.call("agent.send", json!({"agent": lead, "message": message}))
+        .unwrap();
     allow_the_request(user);
     let launched = || {
         user.call("agent.list", json!({})).unwrap()["agents"]
@@ -250,8 +291,9 @@ fn docs_session(user: &User, lead: &str) -> String {
     id
 }
 
-fn window<'a>(
+fn window_through<'a>(
     user: &User,
+    connect: Connect,
     cx: &'a mut TestAppContext,
 ) -> (Entity<Shell>, &'a mut VisualTestContext) {
     let env = Environment {
@@ -259,7 +301,6 @@ fn window<'a>(
         state_home: user.path("state"),
     };
     cx.update(|cx| flottille_ui::init_with(env, cx));
-    let connect: Connect = Arc::new(user.connector());
     let (shell, cx) = cx.add_window_view(|window, cx| Shell::new_polled(connect, window, cx));
     cx.simulate_resize(size(px(1440.), px(800.)));
     (shell, cx)
@@ -333,7 +374,20 @@ fn open_session<'a>(
     Entity<SessionPage>,
     &'a mut VisualTestContext,
 ) {
-    let (shell, cx) = window(user, cx);
+    open_session_through(user, agent, Arc::new(user.connector()), cx)
+}
+
+fn open_session_through<'a>(
+    user: &User,
+    agent: &str,
+    connect: Connect,
+    cx: &'a mut TestAppContext,
+) -> (
+    Entity<Shell>,
+    Entity<SessionPage>,
+    &'a mut VisualTestContext,
+) {
+    let (shell, cx) = window_through(user, connect, cx);
     until(&shell, cx, "the session is in the tree", |cx| {
         has(session_id(agent), cx)
     });
@@ -417,6 +471,8 @@ fn a_message_sent_during_a_turn_shows_as_waiting_then_as_sent(cx: &mut TestAppCo
         field.set_value("and update the docs", window, cx)
     });
     reply.update_in(cx, |reply, window, cx| reply.send(window, cx));
+    // It is drawn under the key it was sent with, which it keeps while it waits.
+    let delivery = format!("pending-{}", reply.read_with(cx, |r, _| r.pending()[0].key));
     until(
         &shell,
         cx,
@@ -424,9 +480,6 @@ fn a_message_sent_during_a_turn_shows_as_waiting_then_as_sent(cx: &mut TestAppCo
         |cx| queued(&page, cx) == ["and update the docs"],
     );
     settle(cx);
-    let delivery = page.read_with(cx, |page, cx| {
-        page.queued().read(cx).messages()[0].delivery.clone()
-    });
     assert_eq!(
         label(queued_id(&delivery), cx).as_deref(),
         Some("and update the docs")
@@ -1646,7 +1699,7 @@ fn a_lone_thought_is_a_group_of_one_step(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn an_ask_user_call_stays_outside_the_fold_without_its_siblings(cx: &mut TestAppContext) {
+fn an_ask_user_call_folds_with_its_siblings_its_card_says_the_question(cx: &mut TestAppContext) {
     let user = user();
     let lead = lead(&user);
     worked(&user, &lead, "ask the user something");
@@ -1663,33 +1716,16 @@ fn an_ask_user_call_stays_outside_the_fold_without_its_siblings(cx: &mut TestApp
         cx.update(|window, _| window.find(line.clone()).expanded()),
         Some(false)
     );
-    assert!(has(format!("row-{at}-steps"), cx), "the question shows");
-    assert_eq!(
-        label(format!("row-{at}-steps-toggle"), cx).as_deref(),
-        Some("1 step · ask_user"),
-        "alone, without the call merged with it"
-    );
-    cx.update(|window, cx| window.click(format!("row-{at}-steps-toggle"), cx));
-    settle(cx);
-    assert!(has(format!("step-{at}-1"), cx), "the question");
-    assert!(!has(format!("step-{at}-0"), cx), "not its sibling");
-
-    // Unfolded, the group shows the sibling too.
-    cx.update(|window, cx| window.click(line.clone(), cx));
-    settle(cx);
-    assert!(has(format!("step-{at}-0"), cx));
+    // The question shows on its own card, from the daemon's open questions: the call that
+    // asked it folds with the others (this one is only reported, never asked to the daemon).
+    assert!(!has(format!("row-{at}-steps"), cx), "in the fold");
     cx.update(|window, cx| window.click(line, cx));
     settle(cx);
-    assert!(!has(format!("step-{at}-0"), cx), "folded again");
-    assert!(has(format!("step-{at}-1"), cx));
-
-    // The user answered: the group is no longer the last, and its question folds in.
-    worked(&user, &lead, "say more");
-    until(&shell, cx, "the answer is read", |cx| {
-        row_of(&page, cx, |b| is_text(b, "One more thing.")).is_some()
-    });
+    assert_eq!(
+        label(format!("row-{at}-steps-toggle"), cx).as_deref(),
+        Some("2 steps · ask_user")
+    );
     at_rest(cx);
-    assert!(!has(format!("row-{at}-steps"), cx), "in the fold");
 }
 
 #[gpui_kit::test]
@@ -2325,4 +2361,1220 @@ fn a_queued_command_message_shows_what_the_user_typed(cx: &mut TestAppContext) {
     assert_eq!(waiting[0].text, "then /ship it");
     assert_eq!(waiting[0].commands, ["ship"]);
     assert!(has(format!("queued-{delivery}-text"), cx));
+}
+
+/// The bounds of an element, or `None` while it is not drawn.
+fn bounds_of(
+    id: impl Into<gpui_kit::ElementId>,
+    cx: &mut VisualTestContext,
+) -> Option<gpui_kit::Bounds<gpui_kit::Pixels>> {
+    let id = id.into();
+    cx.update(|window, _| window.try_find(id).map(|found| found.bounds()))
+}
+
+/// The lead's conversation once it sent a message to a session titled `title` (the lead's own
+/// title is `lead the work`).
+fn after_sending_to<'a>(
+    user: &User,
+    title_of: impl Fn(&User, &str) -> String,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, usize, &'a mut VisualTestContext) {
+    let lead = lead(user);
+    let session = title_of(user, &lead);
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": format!("write to the session {session}")}),
+    )
+    .unwrap();
+    allow_the_request(user);
+    let (shell, page, cx) = open_session(user, &lead, cx);
+    until(&shell, cx, "the lead shows what it sent", |cx| {
+        row_of(&page, cx, |b| {
+            matches!(b, Block::Relayed { sent: true, .. })
+        })
+        .is_some()
+    });
+    settle(cx);
+    let at = row_of(&page, cx, |b| {
+        matches!(b, Block::Relayed { sent: true, .. })
+    })
+    .unwrap();
+    (shell, at, cx)
+}
+
+/// The name in the header of the relayed card of row `at`, drawn inside the card.
+fn assert_inside_its_card(at: usize, cx: &mut VisualTestContext) {
+    let card = bounds_of(format!("row-{at}-relayed-card"), cx).expect("the card is drawn");
+    let name = bounds_of(format!("row-{at}-relayed-name"), cx).expect("the name is drawn");
+    assert!(
+        name.right() <= card.right() && name.origin.x >= card.origin.x,
+        "the name {name:?} runs out of its card {card:?}"
+    );
+    assert!(card.size.width <= px(541.), "the card grew: {card:?}");
+}
+
+#[gpui_kit::test]
+fn a_long_session_title_in_a_relayed_header_is_cut_inside_its_bubble(cx: &mut TestAppContext) {
+    let user = user();
+    let (_shell, at, cx) = after_sending_to(
+        &user,
+        |user, lead| session_started_by(user, lead, "start the long session"),
+        cx,
+    );
+    assert_eq!(
+        label(format!("row-{at}-relayed-peer"), cx).as_deref(),
+        Some(LONG_TITLE)
+    );
+    assert_inside_its_card(at, cx);
+    // The header keeps its one line, and the text below its width.
+    let from = bounds_of(format!("row-{at}-relayed-from"), cx).unwrap();
+    assert!(from.size.height < px(24.), "one line: {from:?}");
+    let card = bounds_of(format!("row-{at}-relayed-card"), cx).unwrap();
+    let text = bounds_of(format!("row-{at}-relayed-region"), cx).expect("the text is drawn");
+    assert!(text.right() <= card.right(), "{text:?} in {card:?}");
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn the_whole_title_of_a_cut_relayed_header_shows_on_hover(cx: &mut TestAppContext) {
+    let user = user();
+    let (_shell, at, cx) = after_sending_to(
+        &user,
+        |user, lead| session_started_by(user, lead, "start the long session"),
+        cx,
+    );
+    let name = format!("row-{at}-relayed-name");
+    assert!(!has(format!("{name}-tooltip"), cx), "no tooltip at rest");
+
+    cx.update(|window, cx| window.hover(name.clone(), cx));
+    settle(cx);
+    assert_eq!(
+        label(format!("{name}-tooltip"), cx).as_deref(),
+        Some(LONG_TITLE)
+    );
+
+    // The pointer leaves: it fades out and goes.
+    cx.simulate_mouse_move(
+        gpui_kit::point(px(1430.), px(790.)),
+        None,
+        Default::default(),
+    );
+    settle(cx);
+    assert!(!has(format!("{name}-tooltip"), cx), "the tooltip left");
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn a_short_relayed_header_is_not_cut(cx: &mut TestAppContext) {
+    let user = user();
+    let (_shell, at, cx) = after_sending_to(&user, docs_session, cx);
+    assert_inside_its_card(at, cx);
+    let name = format!("row-{at}-relayed-name");
+    cx.update(|window, cx| window.hover(name.clone(), cx));
+    settle(cx);
+    assert!(
+        !has(format!("{name}-tooltip"), cx),
+        "a title that fits has no tooltip"
+    );
+    assert_eq!(
+        label(format!("row-{at}-relayed-from"), cx).as_deref(),
+        Some("to Docs")
+    );
+    cx.simulate_mouse_move(
+        gpui_kit::point(px(1430.), px(790.)),
+        None,
+        Default::default(),
+    );
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn a_long_session_title_in_a_received_header_is_cut_inside_its_bubble(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead_saying(&user, LONG_TITLE);
+    let docs = docs_session(&user, &lead);
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": format!("write to the session {docs}")}),
+    )
+    .unwrap();
+    allow_the_request(&user);
+    let (shell, page, cx) = open_session(&user, &docs, cx);
+    until(&shell, cx, "the message reached the session", |cx| {
+        row_of(&page, cx, |b| {
+            matches!(b, Block::Relayed { sent: false, .. })
+        })
+        .is_some()
+    });
+    settle(cx);
+    let at = row_of(&page, cx, |b| {
+        matches!(b, Block::Relayed { sent: false, .. })
+    })
+    .unwrap();
+    assert_inside_its_card(at, cx);
+    // The chevron that unfolds it stays in the card, and the first line keeps its width.
+    let card = bounds_of(format!("row-{at}-relayed-card"), cx).unwrap();
+    let toggle = bounds_of(format!("row-{at}-relayed-toggle"), cx).unwrap();
+    assert!(toggle.right() <= card.right(), "{toggle:?} in {card:?}");
+    let first = bounds_of(format!("row-{at}-relayed-first"), cx).unwrap();
+    assert!(first.right() <= card.right(), "{first:?} in {card:?}");
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn a_long_steps_summary_is_cut_inside_the_conversation(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    worked(&user, &lead, "run long");
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    until(&shell, cx, "the long command runs", |cx| {
+        blocks(&page, cx)
+            .iter()
+            .any(|b| matches!(b, Block::Steps { calls } if calls.len() == 2))
+    });
+    settle(cx);
+    let group = group_of(&page, cx, |b| matches!(b, Block::Steps { .. }));
+    let id = line_of(&page, &group, cx);
+    let line = label(id.clone(), cx).unwrap();
+    assert!(
+        line.starts_with("2 steps · fs_list, run · running pnpm --filter"),
+        "{line}"
+    );
+    let row = bounds_of(id.clone(), cx).expect("the line is drawn");
+    let said = bounds_of(format!("{id}-said"), cx).expect("the summary is drawn");
+    assert!(
+        said.right() <= row.right(),
+        "the summary {said:?} runs out of its line {row:?}"
+    );
+    assert!(row.size.height < px(28.), "one line: {row:?}");
+
+    // The whole command shows on hover, and goes when the pointer leaves.
+    let running = format!("{id}-running");
+    assert!(!has(format!("{running}-tooltip"), cx));
+    cx.update(|window, cx| window.hover(running.clone(), cx));
+    settle(cx);
+    assert_eq!(
+        label(format!("{running}-tooltip"), cx).as_deref(),
+        Some(format!("running {LONG_LINE}").as_str())
+    );
+    cx.simulate_mouse_move(
+        gpui_kit::point(px(1430.), px(790.)),
+        None,
+        Default::default(),
+    );
+    settle(cx);
+    assert!(!has(format!("{running}-tooltip"), cx));
+    std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+#[gpui_kit::test]
+fn a_long_command_in_a_step_is_cut_and_whole_on_hover(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    worked(&user, &lead, "run long");
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    until(&shell, cx, "the long command runs", |cx| {
+        blocks(&page, cx)
+            .iter()
+            .any(|b| matches!(b, Block::Steps { calls } if calls.len() == 2))
+    });
+    settle(cx);
+    let at = row_of(&page, cx, |b| matches!(b, Block::Steps { .. })).unwrap();
+    unfold(&page, at, cx);
+    // Each step keeps its own fold.
+    cx.update(|window, cx| window.click(format!("row-{at}-steps-toggle"), cx));
+    settle(cx);
+    let args = format!("step-{at}-1-args");
+    let (row, line) = (
+        bounds_of(format!("step-{at}-1"), cx).expect("the step is drawn"),
+        bounds_of(args.clone(), cx).expect("its command is drawn"),
+    );
+    assert!(line.right() <= row.right(), "{line:?} runs out of {row:?}");
+    assert!(!has(format!("{args}-tooltip"), cx), "no tooltip at rest");
+
+    cx.update(|window, cx| window.hover(args.clone(), cx));
+    settle(cx);
+    let whole = label(format!("{args}-tooltip"), cx).expect("the whole command shows");
+    assert!(whole.contains("pnpm --filter @app/front"), "{whole}");
+    cx.simulate_mouse_move(
+        gpui_kit::point(px(1430.), px(790.)),
+        None,
+        Default::default(),
+    );
+    settle(cx);
+    assert!(!has(format!("{args}-tooltip"), cx), "the tooltip left");
+    std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+/// The composer of the session, its field holding `text`, and the pictures it holds.
+fn composer(shell: &Entity<Shell>, lead: &str, cx: &mut VisualTestContext) -> Entity<Reply> {
+    shell
+        .read_with(cx, |s, _| s.reply_of(lead).cloned())
+        .expect("the session has a composer")
+}
+
+/// Types `text` in the composer and sends it: the key of the message being sent.
+fn send(reply: &Entity<Reply>, text: &str, cx: &mut VisualTestContext) -> u64 {
+    let field = reply.read_with(cx, |r, _| r.field().clone());
+    field.update_in(cx, |field, window, cx| field.set_value(text, window, cx));
+    reply.update_in(cx, |reply, window, cx| reply.send(window, cx));
+    reply.read_with(cx, |r, _| {
+        r.pending().last().expect("a message is sent").key
+    })
+}
+
+/// Draws the window without taking anything from the daemon: what shows before it answers.
+fn draw_alone(cx: &mut VisualTestContext) {
+    for _ in 0..3 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+    }
+}
+
+fn user_messages(page: &Entity<SessionPage>, said: &str, cx: &mut VisualTestContext) -> usize {
+    blocks(page, cx)
+        .iter()
+        .filter(|b| is_message(b, said))
+        .count()
+}
+
+fn field_text(reply: &Entity<Reply>, cx: &mut VisualTestContext) -> String {
+    reply.read_with(cx, |r, cx| r.field().read(cx).value().to_string())
+}
+
+#[gpui_kit::test]
+fn a_sent_message_shows_before_the_daemon_answers(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let mut with_images = script();
+    with_images["images"] = true.into();
+    user.fake_script(with_images);
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let lead = lead(&user);
+    let gate = Gate::closed();
+    let (shell, page, cx) = open_session_through(&user, &lead, gate.connect(&user), cx);
+    let reply = composer(&shell, &lead, cx);
+    use base64::Engine as _;
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(PNG_BASE64)
+        .unwrap();
+    reply.update_in(cx, |reply, _, cx| {
+        reply.attach(
+            gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, png),
+            cx,
+        )
+    });
+    settle(cx);
+
+    let key = send(&reply, "think it over", cx);
+    draw_alone(cx);
+
+    // The daemon's answer is held: the message is in the conversation, with its picture,
+    // quieter and saying it is being sent; the composer is empty.
+    assert!(reply.read_with(cx, |r, _| r.pending()[0].accepted.is_none()));
+    assert_eq!(
+        label(pending_part(key, "bubble"), cx).as_deref(),
+        Some("think it over")
+    );
+    assert!(has(pending_part(key, "image-0"), cx), "its picture");
+    assert_eq!(
+        label(pending_part(key, "sending"), cx).as_deref(),
+        Some(SENDING)
+    );
+    assert_eq!(user_messages(&page, "think it over", cx), 0);
+    assert_eq!(field_text(&reply, cx), "");
+    assert!(reply.read_with(cx, |r, _| r.attachments().is_empty()));
+    let bubble = cx.update(|window, _| window.find(pending_part(key, "bubble")).bounds());
+    let composer = cx.update(|window, _| window.find("reply-field").bounds());
+    assert!(bubble.bottom() <= composer.top(), "in the conversation");
+
+    gate.open();
+    until(&shell, cx, "the turn ends", |cx| {
+        user_messages(&page, "think it over", cx) == 1
+            && !reply.read_with(cx, |r, _| r.is_running())
+    });
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn the_pending_message_becomes_the_recorded_one_without_a_second_copy(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    let reply = composer(&shell, &lead, cx);
+
+    let key = send(&reply, "think it over", cx);
+    settle(cx);
+    let pending = cx.update(|window, _| window.find(pending_part(key, "bubble")).bounds());
+
+    until(&shell, cx, "the daemon records it", |cx| {
+        user_messages(&page, "think it over", cx) == 1
+    });
+    // The frame it is recorded on: one bubble, where the pending one was.
+    assert!(!has(pending_part(key, "bubble"), cx), "no second copy");
+    let at = row_of(&page, cx, |b| is_message(b, "think it over")).unwrap();
+    let recorded = cx.update(|window, _| window.find(format!("row-{at}-bubble")).bounds());
+    assert_eq!(recorded, pending, "in place");
+    assert!(reply.read_with(cx, |r, _| r.pending().is_empty()));
+    settle(cx);
+    assert!(
+        !has(pending_part(key, "sending"), cx),
+        "the line folded away"
+    );
+
+    until(&shell, cx, "the turn ends", |cx| {
+        !reply.read_with(cx, |r, _| r.is_running())
+    });
+    at_rest(cx);
+    assert_eq!(user_messages(&page, "think it over", cx), 1);
+}
+
+/// A project command that reads a file which is gone: a message that uses it is refused.
+fn a_command_that_cannot_be_read(user: &User) -> PathBuf {
+    let folder = user.path("work/app");
+    let file = folder.join(".claude/commands/review.md");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "Review the diff.\n").unwrap();
+    user.call("command.import", json!({"project": "app"}))
+        .unwrap();
+    std::fs::remove_file(&file).unwrap();
+    file
+}
+
+#[gpui_kit::test]
+fn a_refused_message_stays_with_retry_and_edit(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    a_command_that_cannot_be_read(&user);
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    let reply = composer(&shell, &lead, cx);
+
+    let key = send(&reply, "/review now", cx);
+    until(&shell, cx, "the daemon refuses it", |cx| {
+        has(pending_part(key, "failed"), cx)
+    });
+    settle(cx);
+
+    let said = label(pending_part(key, "failed"), cx).unwrap_or_default();
+    assert!(said.contains("nothing was sent"), "{said}");
+    assert_eq!(
+        label(pending_part(key, "bubble"), cx).as_deref(),
+        Some("/review now")
+    );
+    assert!(!has(pending_part(key, "sending"), cx));
+    assert_eq!(
+        label(pending_part(key, "retry"), cx).as_deref(),
+        Some(RETRY)
+    );
+    assert_eq!(label(pending_part(key, "edit"), cx).as_deref(), Some(EDIT));
+    assert_eq!(
+        toasts(&shell, cx),
+        Vec::<String>::new(),
+        "said once, in place"
+    );
+    assert_eq!(user_messages(&page, "/review now", cx), 0);
+
+    // Edit puts it back in the composer, and the failed message folds away.
+    cx.update(|window, cx| window.click(pending_part(key, "edit"), cx));
+    at_rest(cx);
+    assert_eq!(field_text(&reply, cx), "/review now");
+    assert!(!has(pending_part(key, "bubble"), cx));
+    assert!(reply.read_with(cx, |r, _| r.pending().is_empty()));
+}
+
+#[gpui_kit::test]
+fn retry_sends_the_failed_message_again(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    let file = a_command_that_cannot_be_read(&user);
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    let reply = composer(&shell, &lead, cx);
+    let key = send(&reply, "/review now", cx);
+    until(&shell, cx, "the daemon refuses it", |cx| {
+        has(pending_part(key, "failed"), cx)
+    });
+    settle(cx);
+
+    std::fs::write(&file, "Review the diff.\n").unwrap();
+    cx.update(|window, cx| window.click(pending_part(key, "retry"), cx));
+    draw_alone(cx);
+    assert_eq!(
+        label(pending_part(key, "sending"), cx).as_deref(),
+        Some(SENDING),
+        "sent again, in place"
+    );
+
+    until(&shell, cx, "the agent takes it", |cx| {
+        user_messages(&page, "/review now", cx) == 1
+            && reply.read_with(cx, |r, _| r.pending().is_empty())
+    });
+    until(&shell, cx, "the turn ends", |cx| {
+        !reply.read_with(cx, |r, _| r.is_running())
+    });
+    at_rest(cx);
+    assert!(!has(pending_part(key, "bubble"), cx));
+    assert_eq!(user_messages(&page, "/review now", cx), 1);
+}
+
+#[gpui_kit::test]
+fn a_message_sent_during_a_turn_keeps_its_queued_state(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": "work a while"}),
+    )
+    .unwrap();
+    let reply = composer(&shell, &lead, cx);
+    until(&shell, cx, "the turn runs", |cx| {
+        reply.read_with(cx, |r, _| r.is_running())
+    });
+    settle(cx);
+
+    let key = send(&reply, "and update the docs", cx);
+    draw_alone(cx);
+    // Before the daemon answers, it is under the conversation where it is to wait, being sent.
+    let shown = format!("pending-{key}");
+    assert_eq!(
+        label(queued_id(&shown), cx).as_deref(),
+        Some("and update the docs")
+    );
+    assert_eq!(
+        label(format!("queued-{shown}-waits"), cx).as_deref(),
+        Some(SENDING)
+    );
+    assert!(
+        !has(pending_part(key, "bubble"), cx),
+        "not in the conversation"
+    );
+
+    until(&shell, cx, "it waits", |cx| {
+        queued(&page, cx) == ["and update the docs"]
+    });
+    let delivery = page.read_with(cx, |page, cx| {
+        page.queued().read(cx).messages()[0].delivery.clone()
+    });
+    // The same bubble, now waiting as today, with its buttons.
+    assert!(has(format!("queued-item-{shown}"), cx), "in place");
+    assert!(
+        !has(format!("queued-item-{delivery}"), cx),
+        "no second copy"
+    );
+    settle(cx);
+    assert_eq!(
+        label(format!("queued-{shown}-waits"), cx).as_deref(),
+        Some(WAITS)
+    );
+    assert_eq!(
+        label(queued_button(&shown, "edit"), cx).as_deref(),
+        Some(EDIT)
+    );
+    assert!(reply.read_with(cx, |r, _| r.pending().is_empty()));
+
+    until(&shell, cx, "the message is sent", |cx| {
+        user_messages(&page, "and update the docs", cx) == 1 && queued(&page, cx).is_empty()
+    });
+    until(&shell, cx, "the turn ends", |cx| {
+        !reply.read_with(cx, |r, _| r.is_running())
+    });
+    at_rest(cx);
+    assert_eq!(user_messages(&page, "and update the docs", cx), 1);
+}
+
+/// The window's connection to the daemon, through a relay that holds the daemon's answers to
+/// `agent.send` until the gate opens: what the daemon did is done, the window does not know it
+/// yet. Any other request goes through as it is.
+struct Gate(
+    Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    Arc<std::sync::atomic::AtomicUsize>,
+);
+
+impl Gate {
+    fn closed() -> Gate {
+        Gate(
+            Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new())),
+            Arc::default(),
+        )
+    }
+
+    /// How many answers of the daemon wait at the gate.
+    fn holding(&self) -> usize {
+        self.1.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn open(&self) {
+        *self.0.0.lock().unwrap() = true;
+        self.0.1.notify_all();
+    }
+
+    fn connect(&self, user: &User) -> Connect {
+        let (real, gate, holding) = (user.connector(), self.0.clone(), self.1.clone());
+        Arc::new(move || {
+            use std::io::{Read, Write};
+            use std::sync::atomic::{AtomicBool, Ordering};
+            let mut daemon = real()?;
+            let (window, mut relay) = std::os::unix::net::UnixStream::pair()?;
+            let held = Arc::new(AtomicBool::new(false));
+            let (mut to_daemon, mut from_daemon, mut to_window) =
+                (daemon.try_clone()?, daemon.try_clone()?, relay.try_clone()?);
+            let asks = held.clone();
+            let (gate, holding) = (gate.clone(), holding.clone());
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 65536];
+                while let Ok(n) = relay.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    if buf[..n].windows(12).any(|w| w == b"\"agent.send\"") {
+                        asks.store(true, Ordering::SeqCst);
+                    }
+                    if to_daemon.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                }
+                let _ = to_daemon.shutdown(std::net::Shutdown::Write);
+            });
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 65536];
+                while let Ok(n) = from_daemon.read(&mut buf) {
+                    if n == 0 {
+                        break;
+                    }
+                    if held.load(Ordering::SeqCst) {
+                        let (open, waiting) = &*gate;
+                        let mut open = open.lock().unwrap();
+                        if !*open {
+                            holding.fetch_add(1, Ordering::SeqCst);
+                        }
+                        while !*open {
+                            open = waiting.wait(open).unwrap();
+                        }
+                    }
+                    if to_window.write_all(&buf[..n]).is_err() {
+                        break;
+                    }
+                }
+                let _ = to_window.shutdown(std::net::Shutdown::Both);
+            });
+            drop(daemon.flush());
+            Ok(window)
+        })
+    }
+}
+
+/// The row of the user's message that says `said`, drawn: its bubble is in the window.
+fn drawn_record(page: &Entity<SessionPage>, said: &str, cx: &mut VisualTestContext) -> bool {
+    let Some(at) = row_of(page, cx, |b| is_message(b, said)) else {
+        return false;
+    };
+    has(format!("row-{at}-bubble"), cx)
+}
+
+fn is_masked(block: &Block) -> bool {
+    matches!(block, Block::Message { text, .. }
+        if text.starts_with("think it over with token=") && !text.contains("ghp_ABCDEF"))
+}
+
+#[gpui_kit::test]
+fn a_message_holding_a_secret_is_recorded_in_place(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    let reply = composer(&shell, &lead, cx);
+    // The daemon masks the token before it keeps the message: the record says it otherwise.
+    let text = "think it over with token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let key = send(&reply, text, cx);
+    settle(cx);
+    let pending = cx.update(|window, _| window.find(pending_part(key, "bubble")).bounds());
+
+    until(&shell, cx, "the daemon records it", |cx| {
+        row_of(&page, cx, is_masked).is_some()
+    });
+    assert!(!has(pending_part(key, "bubble"), cx), "no second copy");
+    let at = row_of(&page, cx, is_masked).unwrap();
+    let drawn = cx.update(|window, _| window.find(format!("row-{at}-bubble")).bounds());
+    assert_eq!(drawn.top(), pending.top(), "in place");
+    until(&shell, cx, "the turn ends", |cx| {
+        !reply.read_with(cx, |r, _| r.is_running())
+    });
+    at_rest(cx);
+    assert!(reply.read_with(cx, |r, _| r.pending().is_empty()));
+    assert!(!has(pending_part(key, "sending"), cx));
+    assert_eq!(blocks(&page, cx).iter().filter(|b| is_masked(b)).count(), 1);
+}
+
+#[gpui_kit::test]
+fn a_message_whose_picture_was_not_sent_is_recorded_in_place(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent().with_env("FLOTTILLE_IDLE_RELEASE_MS", "300");
+    let mut with_images = script();
+    with_images["images"] = true.into();
+    user.fake_script(with_images);
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let lead = lead(&user);
+    eventually("the lead's process is released", || {
+        user.call("agent.show", json!({"agent": lead})).unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["name"] == "agent.released")
+    });
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    let reply = composer(&shell, &lead, cx);
+    use base64::Engine as _;
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(PNG_BASE64)
+        .unwrap();
+    reply.update_in(cx, |reply, _, cx| {
+        reply.attach(
+            gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, png),
+            cx,
+        )
+    });
+    settle(cx);
+    // Its next process takes no pictures: the daemon says so in the text it records.
+    user.fake_script(script());
+
+    let key = send(&reply, "think it over", cx);
+    settle(cx);
+    let pending = cx.update(|window, _| window.find(pending_part(key, "bubble")).bounds());
+    let recorded = "think it over\n\n[1 image not sent: this agent takes no images]";
+    until(&shell, cx, "the daemon records it", |cx| {
+        row_of(&page, cx, |b| is_message(b, recorded)).is_some()
+    });
+    assert!(!has(pending_part(key, "bubble"), cx), "no second copy");
+    let at = row_of(&page, cx, |b| is_message(b, recorded)).unwrap();
+    let drawn = cx.update(|window, _| window.find(format!("row-{at}-bubble")).bounds());
+    assert_eq!(drawn.top(), pending.top(), "in place");
+    until(&shell, cx, "the turn ends", |cx| {
+        !reply.read_with(cx, |r, _| r.is_running())
+    });
+    at_rest(cx);
+    assert!(reply.read_with(cx, |r, _| r.pending().is_empty()));
+    assert_eq!(user_messages(&page, recorded, cx), 1);
+}
+
+#[gpui_kit::test]
+fn a_message_whose_agent_dies_before_taking_it_is_marked_failed(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent().with_env("FLOTTILLE_IDLE_RELEASE_MS", "300");
+    user.fake_script(script());
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let lead = lead(&user);
+    eventually("the lead's process is released", || {
+        user.call("agent.show", json!({"agent": lead})).unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["name"] == "agent.released")
+    });
+    let (shell, page, cx) = open_session(&user, &lead, cx);
+    let reply = composer(&shell, &lead, cx);
+    // Each process it starts dies while it opens its session, until the agent fails.
+    let mut dying = script();
+    dying["die_on_open"] = 3.into();
+    user.fake_script(dying);
+
+    let key = send(&reply, "think it over", cx);
+    until(&shell, cx, "the message is marked failed", |cx| {
+        has(pending_part(key, "failed"), cx)
+    });
+    at_rest(cx);
+    let said = label(pending_part(key, "failed"), cx).unwrap_or_default();
+    assert!(said.contains("before it read it"), "{said}");
+    assert!(!has(pending_part(key, "sending"), cx));
+    assert_eq!(
+        label(pending_part(key, "retry"), cx).as_deref(),
+        Some(RETRY)
+    );
+    assert_eq!(label(pending_part(key, "edit"), cx).as_deref(), Some(EDIT));
+    assert_eq!(user_messages(&page, "think it over", cx), 0);
+}
+
+#[gpui_kit::test]
+fn the_same_text_from_the_cli_does_not_take_the_window_s_message(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    let file = a_command_that_cannot_be_read(&user);
+    let gate = Gate::closed();
+    let (shell, page, cx) = open_session_through(&user, &lead, gate.connect(&user), cx);
+    let reply = composer(&shell, &lead, cx);
+
+    // The window's is refused, its answer held; the same words from the command line, once the
+    // command reads again, are taken and recorded first.
+    let key = send(&reply, "/review now", cx);
+    eventually("the daemon refused the window's", || gate.holding() == 1);
+    std::fs::write(&file, "Review the diff.\n").unwrap();
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": "/review now"}),
+    )
+    .unwrap();
+    until(&shell, cx, "the command line's is recorded", |cx| {
+        user_messages(&page, "/review now", cx) == 1
+    });
+    settle(cx);
+    assert_eq!(
+        label(pending_part(key, "sending"), cx).as_deref(),
+        Some(SENDING),
+        "the window's still waits for its answer"
+    );
+    assert!(!drawn_record(&page, "/review now", cx), "not drawn as it");
+
+    gate.open();
+    until(&shell, cx, "the refusal reaches the window's", |cx| {
+        has(pending_part(key, "failed"), cx)
+    });
+    until(&shell, cx, "the turn ends", |cx| {
+        !reply.read_with(cx, |r, _| r.is_running())
+    });
+    at_rest(cx);
+    assert!(drawn_record(&page, "/review now", cx), "the command line's");
+    assert_eq!(user_messages(&page, "/review now", cx), 1);
+    assert_eq!(
+        label(pending_part(key, "retry"), cx).as_deref(),
+        Some(RETRY)
+    );
+}
+
+#[gpui_kit::test]
+fn a_message_recorded_while_its_page_was_left_is_recorded_in_place(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    let other = user
+        .call(
+            "agent.run",
+            json!({"project": "app", "workspace": "w", "message": "another thing"}),
+        )
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    eventually("the other's first turn", || {
+        state_of(&user, &other) == "idle"
+    });
+    let gate = Gate::closed();
+    let (shell, _, cx) = open_session_through(&user, &lead, gate.connect(&user), cx);
+    let reply = composer(&shell, &lead, cx);
+
+    let key = send(&reply, "think it over", cx);
+    eventually("the daemon took it", || gate.holding() == 1);
+    eventually("the daemon records it", || {
+        user.received_requests("session/prompt")
+            .iter()
+            .any(|p| p.to_string().contains("think it over"))
+    });
+    until(&shell, cx, "the other session is listed", |cx| {
+        has(session_id(&other), cx)
+    });
+    // Away and back while its answer is held: the page reads the history again, record included.
+    cx.update(|window, cx| window.click(session_id(&other), cx));
+    until(&shell, cx, "the other session shows", |cx| {
+        session_page(&shell, cx).read_with(cx, |p, _| p.id() == other)
+    });
+    cx.update(|window, cx| window.click(session_id(&lead), cx));
+    until(&shell, cx, "the lead's page read its history", |cx| {
+        let page = session_page(&shell, cx);
+        page.read_with(cx, |p, _| p.id() == lead) && user_messages(&page, "think it over", cx) == 1
+    });
+    settle(cx);
+    let page = session_page(&shell, cx);
+    assert!(
+        !drawn_record(&page, "think it over", cx),
+        "one bubble: the one being sent"
+    );
+    assert!(has(pending_part(key, "bubble"), cx));
+
+    gate.open();
+    until(&shell, cx, "the answer comes", |cx| {
+        reply.read_with(cx, |r, _| r.pending().is_empty())
+    });
+    assert!(!has(pending_part(key, "bubble"), cx), "no second copy");
+    assert!(drawn_record(&page, "think it over", cx));
+    until(&shell, cx, "the turn ends", |cx| {
+        !reply.read_with(cx, |r, _| r.is_running())
+    });
+    at_rest(cx);
+    assert_eq!(user_messages(&page, "think it over", cx), 1);
+}
+
+#[gpui_kit::test]
+fn a_queued_message_taken_back_before_the_tree_lists_it_leaves(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = lead(&user);
+    let gate = Gate::closed();
+    let (shell, page, cx) = open_session_through(&user, &lead, gate.connect(&user), cx);
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": "work a while"}),
+    )
+    .unwrap();
+    let reply = composer(&shell, &lead, cx);
+    until(&shell, cx, "the turn runs", |cx| {
+        reply.read_with(cx, |r, _| r.is_running())
+    });
+    settle(cx);
+
+    let key = send(&reply, "and update the docs", cx);
+    eventually("the daemon queued it", || {
+        waiting_in_the_daemon(&user, &lead).len() == 1
+    });
+    let delivery = waiting_in_the_daemon(&user, &lead)[0]["delivery"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Another client takes it back before the window heard the daemon's answer.
+    user.call(
+        "agent.unqueue",
+        json!({"agent": lead, "delivery": delivery}),
+    )
+    .unwrap();
+    gate.open();
+    // The tree the window read when the daemon queued it may still list it: the read that
+    // follows the withdrawal (`delivery.withdrawn` is a tree event) takes it out.
+    until(&shell, cx, "it leaves", |cx| {
+        reply.read_with(cx, |r, _| r.pending().is_empty()) && queued(&page, cx).is_empty()
+    });
+    at_rest(cx);
+    assert!(!has(queued_id(&format!("pending-{key}")), cx));
+    assert!(queued(&page, cx).is_empty());
+}
+
+// #505: earlier events load on their own when the user scrolls near the top.
+
+/// The lead's long talk, read from its last page: earlier pages remain.
+fn talked<'a>(
+    user: &User,
+    cx: &'a mut TestAppContext,
+) -> (
+    String,
+    Entity<Shell>,
+    Entity<SessionPage>,
+    &'a mut VisualTestContext,
+) {
+    let lead = lead(user);
+    worked(user, &lead, "talk at length");
+    eventually("the long turn ends", || {
+        user.call("agent.show", json!({"agent": lead, "before": u64::MAX}))
+            .unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .last()
+            .is_some_and(|e| e["name"] == "agent.turn_ended")
+    });
+    let (shell, page, cx) = open_session(user, &lead, cx);
+    until(&shell, cx, "the last page is read", |cx| {
+        row_of(&page, cx, |b| is_text(b, "Finally.")).is_some()
+    });
+    settle(cx);
+    assert!(page.read_with(cx, |p, cx| p.conversation().read(cx).has_earlier()));
+    (lead, shell, page, cx)
+}
+
+fn pages(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> usize {
+    page.read_with(cx, |page, _| page.pages())
+}
+
+/// One notch of the wheel, up by `by` pixels, then a frame: nothing is polled, so what the
+/// window asked of the daemon is not answered yet.
+fn wheel(agent: &str, by: f32, cx: &mut VisualTestContext) {
+    let middle = cx.update(|window, _| {
+        window
+            .find(format!("conversation-{agent}"))
+            .bounds()
+            .center()
+    });
+    cx.simulate_event(gpui_kit::ScrollWheelEvent {
+        position: middle,
+        delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(by))),
+        ..Default::default()
+    });
+    frame(cx);
+}
+
+/// Scrolls up, notch by notch, until a page is asked.
+fn scroll_until_asked(
+    agent: &str,
+    page: &Entity<SessionPage>,
+    asked: usize,
+    cx: &mut VisualTestContext,
+) {
+    for _ in 0..100 {
+        if pages(page, cx) > asked {
+            return;
+        }
+        wheel(agent, 600., cx);
+    }
+    panic!("scrolling up never asked for a page (still {asked})");
+}
+
+/// Answers what the window asked: the page is read and drawn.
+fn page_arrives(shell: &Entity<Shell>, page: &Entity<SessionPage>, cx: &mut VisualTestContext) {
+    let before = blocks(page, cx).len();
+    until(shell, cx, "the earlier page", |cx| {
+        blocks(page, cx).len() != before
+    });
+    settle(cx);
+}
+
+#[gpui_kit::test]
+fn scrolling_near_the_top_loads_earlier_events(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, shell, page, cx) = talked(&user, cx);
+    let before = blocks(&page, cx).len();
+    assert_eq!(pages(&page, cx), 1);
+
+    // Far from the top, nothing is asked.
+    wheel(&lead, 400., cx);
+    wheel(&lead, 400., cx);
+    assert_eq!(pages(&page, cx), 1, "far from the top");
+
+    scroll_until_asked(&lead, &page, 1, cx);
+    page_arrives(&shell, &page, cx);
+    assert!(blocks(&page, cx).len() > before, "events came in above");
+    assert_eq!(pages(&page, cx), 2);
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn loading_earlier_events_keeps_what_is_read_in_place(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, shell, page, cx) = talked(&user, cx);
+    scroll_until_asked(&lead, &page, 1, cx);
+    settle(cx);
+
+    // The first paragraph drawn in the conversation, and where it is.
+    let (read, top) = cx.update(|window, cx| {
+        let area = window.find(format!("conversation-{lead}")).bounds();
+        let shown = page.read(cx).conversation().read(cx).blocks().to_vec();
+        shown
+            .iter()
+            .enumerate()
+            .filter(
+                |(_, block)| matches!(block, Block::Text { text } if text.starts_with("Paragraph")),
+            )
+            .find_map(|(at, block)| {
+                let bounds = window.try_find(format!("row-{at}-text"))?.bounds();
+                (bounds.top() >= area.top() && bounds.bottom() <= area.bottom())
+                    .then(|| (block.clone(), bounds.top()))
+            })
+            .expect("a paragraph in sight")
+    });
+    // From the first frame of the new rows, not once their entrances ended: what is read does
+    // not enter again, nor rise.
+    let before = blocks(&page, cx).len();
+    until(&shell, cx, "the earlier page", |cx| {
+        blocks(&page, cx).len() != before
+    });
+    let at_top = |cx: &mut VisualTestContext| {
+        let at = row_of(&page, cx, |block| *block == read).expect("still there");
+        let now = cx.update(|window, _| window.find(format!("row-{at}-text")).bounds().top());
+        f32::from(now)
+    };
+    assert!(
+        (at_top(cx) - f32::from(top)).abs() <= 1.0,
+        "it was at {top:?}, it is at {}",
+        at_top(cx)
+    );
+    settle(cx);
+    assert!(
+        (at_top(cx) - f32::from(top)).abs() <= 1.0,
+        "it was at {top:?}, it settled at {}",
+        at_top(cx)
+    );
+}
+
+#[gpui_kit::test]
+fn only_one_page_is_asked_at_a_time(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, shell, page, cx) = talked(&user, cx);
+    scroll_until_asked(&lead, &page, 1, cx);
+    for _ in 0..6 {
+        wheel(&lead, 600., cx);
+    }
+    assert_eq!(pages(&page, cx), 2, "the first is not answered yet");
+
+    page_arrives(&shell, &page, cx);
+    scroll_until_asked(&lead, &page, 2, cx);
+    for _ in 0..6 {
+        wheel(&lead, 600., cx);
+    }
+    assert_eq!(pages(&page, cx), 3, "the second is not answered yet either");
+}
+
+/// Scrolls up and reads the pages as they are asked, until none remains.
+fn load_all(
+    agent: &str,
+    shell: &Entity<Shell>,
+    page: &Entity<SessionPage>,
+    cx: &mut VisualTestContext,
+) {
+    for _ in 0..10 {
+        if !page.read_with(cx, |p, cx| p.conversation().read(cx).has_earlier()) {
+            return;
+        }
+        let asked = pages(page, cx);
+        scroll_until_asked(agent, page, asked, cx);
+        page_arrives(shell, page, cx);
+    }
+    panic!("the history never ended");
+}
+
+#[gpui_kit::test]
+fn nothing_is_asked_once_everything_is_loaded(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, shell, page, cx) = talked(&user, cx);
+    load_all(&lead, &shell, &page, cx);
+    let all = pages(&page, cx);
+    assert!(all >= 3, "the talk takes several pages: {all}");
+    at_rest(cx);
+
+    for _ in 0..40 {
+        wheel(&lead, 2000., cx);
+    }
+    settle(cx);
+    assert_eq!(pages(&page, cx), all, "nothing more is asked");
+    assert!(!has("show-earlier", cx), "no button");
+    assert!(!has("earlier-loading", cx), "no line");
+    assert!(blocks(&page, cx).len() > 100);
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn opening_a_long_conversation_does_not_load_earlier_events(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, _shell, page, cx) = talked(&user, cx);
+    settle(cx);
+    assert_eq!(pages(&page, cx), 1, "opened at its end");
+
+    // A jump back to the end is no scroll toward the top.
+    wheel(&lead, 400., cx);
+    cx.update(|window, cx| window.click("conversation-to-end", cx));
+    at_rest(cx);
+    assert_eq!(pages(&page, cx), 1);
+    assert!(following(&page, cx));
+}
+
+#[gpui_kit::test]
+fn a_short_loaded_part_waits_for_the_user_to_scroll(cx: &mut TestAppContext) {
+    let user = user();
+    let (_shell, page, cx) = past_a_page_read(&user, cx);
+    settle(cx);
+    assert_eq!(
+        pages(&page, cx),
+        1,
+        "everything shown is in sight, still nothing is asked"
+    );
+}
+
+#[gpui_kit::test]
+fn a_failed_load_shows_show_earlier_with_the_reason(cx: &mut TestAppContext) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let user = user();
+    let lead = lead(&user);
+    worked(&user, &lead, "talk at length");
+    eventually("the long turn ends", || {
+        user.call("agent.show", json!({"agent": lead, "before": u64::MAX}))
+            .unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .last()
+            .is_some_and(|e| e["name"] == "agent.turn_ended")
+    });
+    let (down, real) = (Arc::new(AtomicBool::new(false)), user.connector());
+    let connect: Connect = {
+        let down = down.clone();
+        Arc::new(move || match down.load(Ordering::SeqCst) {
+            true => Err(std::io::Error::other("the daemon is not answering")),
+            false => real(),
+        })
+    };
+    let (shell, page, cx) = open_session_through(&user, &lead, connect, cx);
+    until(&shell, cx, "the last page is read", |cx| {
+        row_of(&page, cx, |b| is_text(b, "Finally.")).is_some()
+    });
+    settle(cx);
+
+    down.store(true, Ordering::SeqCst);
+    scroll_until_asked(&lead, &page, 1, cx);
+    for _ in 0..4 {
+        wheel(&lead, 2000., cx);
+    }
+    until(&shell, cx, "the load failed", |cx| {
+        has("show-earlier-failed", cx)
+    });
+    settle(cx);
+    let said = label("show-earlier-reason", cx).unwrap();
+    assert!(said.contains("the daemon is not answering"), "{said}");
+    assert!(has("show-earlier", cx), "the button stays");
+    assert!(!has("earlier-loading", cx));
+
+    // Scrolling does not try again by itself.
+    for _ in 0..4 {
+        wheel(&lead, 2000., cx);
+    }
+    assert_eq!(pages(&page, cx), 2);
+
+    // The button does, and the failure goes.
+    down.store(false, Ordering::SeqCst);
+    let before = blocks(&page, cx).len();
+    cx.update(|window, cx| window.click("show-earlier", cx));
+    until(&shell, cx, "the earlier page", |cx| {
+        blocks(&page, cx).len() > before
+    });
+    settle(cx);
+    assert!(!has("show-earlier-failed", cx));
+    assert_eq!(pages(&page, cx), 2, "the same page, asked again");
+}
+
+#[gpui_kit::test]
+fn the_loading_line_unfolds_and_folds_away(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, page, cx) = past_a_page_read(&user, cx);
+    let lead = page.read_with(cx, |p, _| p.id().to_owned());
+    settle(cx);
+    assert!(has("show-earlier", cx), "the button waits at the top");
+    assert!(!has("earlier-loading", cx));
+
+    // The wheel at the top asks the page: the line unfolds as the button folds away.
+    wheel(&lead, 400., cx);
+    let mut heights = Vec::new();
+    for _ in 0..30 {
+        frame(cx);
+        heights.push(cx.update(|window, _| {
+            window
+                .try_find("earlier-loading")
+                .map(|l| l.bounds().size.height)
+        }));
+    }
+    let shown: Vec<f32> = heights.iter().flatten().map(|h| f32::from(*h)).collect();
+    assert_eq!(
+        label("earlier-loading-line", cx).as_deref(),
+        Some("Loading earlier…")
+    );
+    assert!(
+        shown.first() < shown.last() && shown.windows(2).all(|w| w[0] <= w[1]),
+        "it unfolds: {shown:?}"
+    );
+    assert!(!has("show-earlier", cx), "the button gave way");
+
+    // The page arrives: the line folds away with nothing left in its place.
+    until(&shell, cx, "the earlier page", |cx| {
+        !page.read_with(cx, |p, cx| p.conversation().read(cx).has_earlier())
+    });
+    let mut folding = Vec::new();
+    for _ in 0..30 {
+        frame(cx);
+        folding.push(cx.update(|window, _| {
+            window
+                .try_find("earlier-loading")
+                .map(|l| f32::from(l.bounds().size.height))
+        }));
+    }
+    let folding: Vec<f32> = folding.into_iter().flatten().collect();
+    assert!(
+        folding.windows(2).all(|w| w[0] >= w[1]),
+        "it folds away: {folding:?}"
+    );
+    at_rest(cx);
+    assert!(!has("earlier-loading", cx));
+    assert!(!has("show-earlier", cx));
 }

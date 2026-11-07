@@ -9,9 +9,9 @@ use std::collections::HashMap;
 use flottille_core::commands::TEMPLATES;
 use flottille_ui::{
     Button, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, Section,
-    Toast, Type, icon, palette, presence, presence_of, space, toast,
+    Toast, Type, follow_theme, icon, palette, presence, presence_of, space, toast,
 };
-use gpui_kit::base::input::{Input, InputEditorStyle, InputEvent, InputState, TextareaState};
+use gpui_kit::base::input::{Input, InputEvent, InputState, TextareaState};
 use gpui_kit::{
     App, AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement,
     IntoElement, ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement, Styled,
@@ -52,17 +52,6 @@ pub(crate) fn perform_later(shell: &WeakEntity<Shell>, command: Command, cx: &mu
     });
 }
 
-pub(crate) fn editor_style(cx: &App) -> InputEditorStyle {
-    let p = palette(cx);
-    InputEditorStyle {
-        foreground: p.text,
-        muted_foreground: p.faint,
-        selection: p.run.opacity(0.35),
-        caret: p.text,
-        ..Default::default()
-    }
-}
-
 /// A one-line field with the window's editor style.
 pub(crate) fn line_field(
     placeholder: &'static str,
@@ -71,13 +60,17 @@ pub(crate) fn line_field(
 ) -> Entity<InputState> {
     cx.new(|cx| {
         let mut field = InputState::new(window, cx).placeholder(placeholder);
-        field.set_editor_style(editor_style(cx));
+        follow_theme(&mut field, cx);
         field
     })
 }
 
 /// A field in the modals: a box around an input.
-pub(crate) fn boxed(id: &'static str, field: impl IntoElement, cx: &App) -> impl IntoElement {
+pub(crate) fn boxed(
+    id: impl Into<ElementId>,
+    field: impl IntoElement,
+    cx: &App,
+) -> impl IntoElement {
     let p = palette(cx);
     div()
         .id(id)
@@ -329,7 +322,7 @@ impl CommandsSection {
                 let mut field = TextareaState::new(window, cx)
                     .auto_grow(4, 10)
                     .placeholder("What the agent is sent");
-                field.set_editor_style(editor_style(cx));
+                follow_theme(&mut field, cx);
                 field
             });
             // Typing clears what a refusal said.

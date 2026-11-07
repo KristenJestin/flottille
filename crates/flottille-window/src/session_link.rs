@@ -22,7 +22,9 @@ use serde_json::{Value, json};
 
 use crate::actions::{Changes, RepositoryStatus};
 use crate::conversation::one_line;
+use crate::leaves::LeaveRow;
 use crate::link::{Conn, Connect, Update, quiet_wait};
+use crate::model::OpenQuestion;
 use crate::runs::{CommandOutput, CommandRow};
 use crate::subscriptions::SubscriptionRow;
 
@@ -46,6 +48,8 @@ pub struct TreeAgent {
     /// `parent`, `user` or nothing.
     pub waiting_on: Option<String>,
     pub needs_user: bool,
+    /// The questions it asked the user that wait for the answer, the oldest first.
+    pub questions: Vec<OpenQuestion>,
     /// An ended root the daemon can start again on its own session (`agent.resume`).
     pub resumable: bool,
     /// An agent that ended whose process is still stopping: it cannot be resumed yet.
@@ -63,6 +67,8 @@ pub struct TreeAgent {
     /// Its running session runs an older list of tools than its role has: a restart gives the
     /// new one.
     pub tools_outdated: bool,
+    /// A reload of its tools waits for its next process (`agent.reload_tools`).
+    pub tools_reload: bool,
 }
 
 /// A change of model and effort waiting for the end of the turn.
@@ -115,6 +121,7 @@ impl TreeAgent {
             doing: text(&entry["doing"]).unwrap_or_default(),
             waiting_on: text(&entry["waiting_on"]),
             needs_user: entry["needs_user"] == true,
+            questions: OpenQuestion::of_entry(entry),
             resumable: agent["resumable"] == true,
             stopping: agent["stopping"] == true,
             images: agent["images"].as_bool(),
@@ -145,6 +152,7 @@ impl TreeAgent {
                 })
                 .collect(),
             tools_outdated: agent["tools_outdated"] == true,
+            tools_reload: agent["tools_reload"] == true,
         }
     }
 }
@@ -440,6 +448,8 @@ pub enum SessionUpdate {
         events: Vec<Event>,
         earlier: bool,
     },
+    /// The history could not be read, with why: the link goes on trying.
+    HistoryFailed(String),
     /// An event of the shown agent, as it comes.
     Live(Event),
     /// The requests an agent of the session asked that reached the user, pending or decided,
@@ -465,6 +475,9 @@ pub enum SessionUpdate {
     CommandOutput(Box<CommandOutput>),
     /// What the agents of the session's tree wait for (`subscription.list`).
     Subscriptions(Vec<SubscriptionRow>),
+    /// The leaves that let the root write to another session, or another to write to it
+    /// (`leave.list`).
+    Leaves(Vec<LeaveRow>),
     /// The root's session refused a model or an effort the user changed to, with why.
     OptionsRefused(String),
 }
@@ -528,10 +541,14 @@ const TREE_EVENTS: &[&str] = &[
     "agent.options_refused",
     "agent.reported",
     "agent.asked",
+    // A question answered: its card folds away.
+    "agent.answered",
     // The rail's gauge of each agent's context.
     "agent.usage",
     // The line that says the session runs an older list of tools.
     "agent.tools_outdated",
+    // The line that says the tools reload after this turn.
+    "agent.tools_reload",
     "delivery.queued",
     // A waiting message taken back leaves the queue under the conversation.
     "delivery.withdrawn",
@@ -621,6 +638,7 @@ struct Stale {
     place: bool,
     commands: bool,
     subscriptions: bool,
+    leaves: bool,
     /// When the first of them was marked.
     since: Option<Instant>,
 }
@@ -658,16 +676,22 @@ impl Link {
         let mut resume = Resume::default();
         while !self.stopped() {
             let began = Instant::now();
-            if let Ok(stream) = (self.connect)()
-                && let Ok(clone) = stream.try_clone()
-            {
-                *self.stream.lock().unwrap() = Some(clone);
-                if self.stopped() {
-                    return;
+            let broke = match (self.connect)().and_then(|s| Ok((s.try_clone()?, s))) {
+                Ok((clone, stream)) => {
+                    *self.stream.lock().unwrap() = Some(clone);
+                    if self.stopped() {
+                        return;
+                    }
+                    match self.follow(stream, &mut resume) {
+                        Ok(()) => return,
+                        Err(why) => why,
+                    }
                 }
-                if self.follow(stream, &mut resume).is_ok() {
-                    return;
-                }
+                Err(why) => why.to_string(),
+            };
+            // A page of earlier events asked for says why it does not come.
+            if !resume.read {
+                self.send(SessionUpdate::HistoryFailed(broke));
             }
             if began.elapsed() >= HEALTHY {
                 retry = FIRST_RETRY;
@@ -696,6 +720,7 @@ impl Link {
         // The runs and the subscriptions never wait for the place, whose forge and tracker are
         // reads of seconds.
         self.read_subscriptions(&mut conn)?;
+        self.read_leaves(&mut conn)?;
         let mut running = self.read_commands(&mut conn)?;
         self.read_place(&mut conn, &mut resume.known)?;
         let mut next_commands = Instant::now() + COMMANDS_EVERY;
@@ -726,6 +751,9 @@ impl Link {
                 if stale.subscriptions {
                     self.read_subscriptions(&mut conn)?;
                 }
+                if stale.leaves {
+                    self.read_leaves(&mut conn)?;
+                }
                 let due = running && Instant::now() >= next_commands;
                 if stale.commands || due {
                     running = self.read_commands(&mut conn)?;
@@ -751,6 +779,14 @@ impl Link {
                 && data["project"] == self.place.project.as_str()
             {
                 stale.mark(false, false, true, false);
+            }
+            // A leave names two sessions, and goes with the end of either, the other one too.
+            let root = self.root.as_str();
+            if (name.starts_with("leave.") && (data["writer"] == root || data["session"] == root))
+                || matches!(name, "agent.ended" | "agent.failed")
+            {
+                stale.leaves = true;
+                stale.since.get_or_insert_with(Instant::now);
             }
             // A following that pauses or resumes is the follower's subscription.
             let following = name.starts_with("session.following_");
@@ -876,6 +912,19 @@ impl Link {
             .map(SubscriptionRow::of)
             .collect();
         self.send(SessionUpdate::Subscriptions(rows));
+        Ok(())
+    }
+
+    /// The leaves that name the session's root, sent.
+    fn read_leaves(&self, conn: &mut Conn) -> Result<(), String> {
+        let answer = conn.request("leave.list", json!({"session": self.root}))?;
+        let rows = answer["leaves"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(LeaveRow::of)
+            .collect();
+        self.send(SessionUpdate::Leaves(rows));
         Ok(())
     }
 

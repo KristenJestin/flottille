@@ -216,6 +216,11 @@ pub struct Session {
     /// The agent that started it for the user, by the name it goes by: `None` for a session the
     /// user started. Its title stays the first line of its brief.
     pub started_by: Option<String>,
+    /// The agent that leads it, by the name it goes by: `None` for a session no agent leads (one
+    /// handed to the user, or detached from its pilot).
+    pub led_by: Option<String>,
+    /// The session of the agent that leads it, whose row it sits under.
+    pub pilot: Option<String>,
 }
 
 /// One thing that waits for the user. Choosing it opens its session.
@@ -264,6 +269,10 @@ impl Forged {
             .as_u64()
             .map(|n| format!("#{n}"))
             .unwrap_or_default();
+        let run = arguments["run"]
+            .as_u64()
+            .map(|n| format!("run {n}"))
+            .unwrap_or_default();
         let ticket = match field("ticket") {
             "" => "its ticket",
             key => key,
@@ -281,6 +290,10 @@ impl Forged {
             ("forge", "create") => ("Opened a pull request", field("title").to_owned()),
             ("forge", "merge") => ("Merged a pull request", field("repository").to_owned()),
             ("forge", "run") => ("Ran a pipeline", field("pipeline").to_owned()),
+            ("forge", "stop") => ("Stopped a pipeline", on(&run, &[field("repository")])),
+            ("forge", "step") if field("do") == "rerun" => {
+                ("Ran a job again", on(&run, &[field("step")]))
+            }
             ("forge", "comment") => ("Commented on a pull request", on(&number, &[field("body")])),
             ("forge", "edit") => (
                 "Edited a pull request",
@@ -300,6 +313,12 @@ impl Forged {
         let excerpt = excerpt.split_whitespace().collect::<Vec<_>>().join(" ");
         let excerpt = match excerpt.char_indices().nth(EXCERPT) {
             Some((cut, _)) => format!("{}…", &excerpt[..cut]),
+            None => excerpt,
+        };
+        // A pipeline's run is told with its link, which the daemon puts in the event when the
+        // forge gave it; it is added after the cut, which would lose its end.
+        let excerpt = match data["link"].as_str().filter(|_| said == "Ran a pipeline") {
+            Some(link) => format!("{excerpt} {link}"),
             None => excerpt,
         };
         Some(Forged {
@@ -343,6 +362,40 @@ impl News {
     }
 }
 
+/// A link an agent handed the user (`agent.link_shown`, `docs/events.md`): the window offers it
+/// in a toast and in the conversation, and opens it only when the user clicks Open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkShown {
+    pub agent: String,
+    /// What Open opens: the address, or the file's absolute path.
+    pub target: String,
+    /// The few words the agent gave.
+    pub title: Option<String>,
+    /// The address's host, or the file's path in the place.
+    pub whence: String,
+}
+
+impl LinkShown {
+    pub fn of(event: &flottille_core::protocol::Event) -> Option<LinkShown> {
+        if event.name != "agent.link_shown" {
+            return None;
+        }
+        let data = &event.data;
+        let text = |field: &str| data[field].as_str().filter(|text| !text.is_empty());
+        Some(LinkShown {
+            agent: text("agent")?.to_owned(),
+            target: text("target")?.to_owned(),
+            title: text("title").map(str::to_owned),
+            whence: text("host").or_else(|| text("shown"))?.to_owned(),
+        })
+    }
+
+    /// What names the link: the title, else where it leads.
+    pub fn name(&self) -> &str {
+        self.title.as_deref().unwrap_or(&self.whence)
+    }
+}
+
 /// What the daemon answered, the raw results of each method.
 pub struct Answers<'a> {
     /// `project.list`
@@ -357,8 +410,8 @@ pub struct Answers<'a> {
     pub needs_user: &'a HashSet<String>,
     /// Each root's first message, by id.
     pub briefs: &'a HashMap<String, String>,
-    /// The question each root asking the user asked last, by id: its text and when.
-    pub questions: &'a HashMap<String, (String, u64)>,
+    /// The open questions of each root asking the user, by id, the oldest first (`agent.trees`).
+    pub questions: &'a HashMap<String, Vec<OpenQuestion>>,
     /// `run.list`: the commands running.
     pub commands: &'a Value,
     /// `subscription.list`: what the agents wait for outside Flottille.
@@ -429,6 +482,31 @@ fn session_title(id: &str, brief: Option<&String>) -> String {
         .map(|brief| title_of(brief))
         .filter(|title| !title.is_empty())
         .unwrap_or_else(|| format!("agent {id}"))
+}
+
+/// A question a root asked the user that waits for the answer, as `agent.trees` gives it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OpenQuestion {
+    /// The number of its `agent.asked` event: the card at its place in the conversation.
+    pub seq: u64,
+    pub text: String,
+    pub at: u64,
+}
+
+impl OpenQuestion {
+    /// The open questions of an entry of a tree.
+    pub fn of_entry(entry: &Value) -> Vec<OpenQuestion> {
+        entry["questions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|question| OpenQuestion {
+                seq: number(question, "seq"),
+                text: text(question, "question"),
+                at: number(question, "at"),
+            })
+            .collect()
+    }
 }
 
 /// A root of `agent.list` whose question waits for the user's answer, as the daemon keeps it.
@@ -504,14 +582,21 @@ impl Snapshot {
         }
         for root in agents.iter().filter(|agent| asks_the_user(agent)) {
             let id = text(root, "id");
-            let (question, at) = answers.questions.get(&id).cloned().unwrap_or_default();
-            bell.push(BellItem {
-                key: format!("question-{id}"),
-                label: "Asks you a question".into(),
-                detail: question,
-                at,
-                session: id,
-            });
+            let open = answers.questions.get(&id).map_or(&[][..], Vec::as_slice);
+            // Its open questions each, or one item while the tree has not been read yet.
+            let open = match open {
+                [] => &[OpenQuestion::default()][..],
+                open => open,
+            };
+            for question in open {
+                bell.push(BellItem {
+                    key: format!("question-{id}-{}", question.seq),
+                    label: "Asks you a question".into(),
+                    detail: question.text.clone(),
+                    at: question.at,
+                    session: id.clone(),
+                });
+            }
         }
         bell.sort_by_key(|item| item.at);
 
@@ -561,11 +646,20 @@ impl Snapshot {
                 .filter_map(Value::as_str)
                 .collect();
             let number = subscription["target"]["number"].as_u64();
+            let target = &subscription["target"];
+            let run = (subscription["source"] == "run")
+                .then(|| target["run"].as_u64())
+                .flatten()
+                .map(|run| match target["forge"] == "github" {
+                    true => format!("run {run}"),
+                    false => format!("run #{run}"),
+                });
             let wake = (subscription["source"] == "timer")
                 .then(|| subscription["expires_at"].as_u64())
                 .flatten();
             waiting_for.entry(root_of(&parents, agent)).or_insert(
                 match (events.is_empty(), number) {
+                    _ if run.is_some() => format!("Waiting: {}", run.unwrap_or_default()),
                     _ if wake.is_some() => {
                         format!(
                             "Waiting: wake at {}",
@@ -637,6 +731,10 @@ impl Snapshot {
                     created_at: number(agent, "created_at"),
                     commands: commands_of("root", &id),
                     started_by: agent["launched_by"].as_str().map(name_of),
+                    led_by: agent["led_by"].as_str().map(name_of),
+                    pilot: agent["led_by"]
+                        .as_str()
+                        .map(|pilot| root_of(&parents, pilot).to_owned()),
                     id,
                 }
             })
@@ -902,6 +1000,38 @@ mod tests {
         assert!(
             excerpt.ends_with('…') && excerpt.chars().count() == 121,
             "{excerpt}"
+        );
+    }
+
+    #[test]
+    fn the_window_links_a_pipeline_run_and_shows_stop_and_step() {
+        let mut ran = served(
+            "forge",
+            json!({"action": "run", "pipeline": "custom: deploy-preview"}),
+            "ok",
+        );
+        ran.data["link"] = json!("https://bitbucket.org/acme/api/pipelines/results/43");
+        let ran = Forged::of(&ran).unwrap();
+        assert_eq!(ran.said, "Ran a pipeline");
+        assert_eq!(
+            ran.excerpt,
+            "custom: deploy-preview https://bitbucket.org/acme/api/pipelines/results/43"
+        );
+        let said = |arguments: Value| {
+            Forged::of(&served("forge", arguments, "ok")).map(|f| (f.said, f.excerpt, f.ticket))
+        };
+        assert_eq!(
+            said(json!({"action": "stop", "repository": "api", "run": 7})),
+            Some(("Stopped a pipeline".into(), "run 7: api".into(), false))
+        );
+        assert_eq!(
+            said(json!({"action": "step", "run": 77, "step": "e2e", "do": "rerun"})),
+            Some(("Ran a job again".into(), "run 77: e2e".into(), false))
+        );
+        // A step that waits is started by nobody: that call is refused, and says nothing.
+        assert_eq!(
+            said(json!({"action": "step", "run": 77, "step": "e2e", "do": "start"})),
+            None
         );
     }
 
@@ -1176,13 +1306,16 @@ mod tests {
                 "waiting_on_answer": true, "created_at": 10, "active_at": 20}),
             agent("r3", None, "working", None),
             agent("r4", None, "idle", None), agent("c4", Some("r4"), "idle", None),
-            agent("r5", None, "idle", None), agent("r6", None, "idle", None)]});
+            agent("r5", None, "idle", None), agent("r6", None, "idle", None),
+            agent("r7", None, "idle", None)]});
         let approvals = json!({"requests": [{"number": 3, "agent": "r1", "tool": "fs_read",
             "call": {"path": ".env"}, "created_at": 30}]});
         let subscriptions = json!({"subscriptions": [{"agent": "c4", "events": ["checks"],
             "target": {"project": "app", "repository": ".", "number": 1}},
             {"agent": "r6", "source": "timer", "events": ["wake"], "target": {"why": "later"},
-            "expires_at": 600_000}]});
+            "expires_at": 600_000},
+            {"agent": "r7", "source": "run", "events": ["ended"],
+            "target": {"project": "app", "repository": "api", "forge": "bitbucket", "run": 43}}]});
         let asking = HashSet::from(["r1".to_owned(), "r2".to_owned()]);
         let snapshot = Snapshot::build(Answers {
             projects: &json!({"projects": [{"name": "app", "folder": "/work/app"}]}),
@@ -1190,7 +1323,14 @@ mod tests {
             agents: &agents,
             approvals: &approvals,
             needs_user: &asking,
-            questions: &HashMap::from([("r2".to_owned(), ("Which one?".to_owned(), 40))]),
+            questions: &HashMap::from([(
+                "r2".to_owned(),
+                vec![OpenQuestion {
+                    seq: 7,
+                    text: "Which one?".to_owned(),
+                    at: 40,
+                }],
+            )]),
             briefs: &HashMap::new(),
             commands: &json!({"commands": []}),
             subscriptions: &subscriptions,
@@ -1205,6 +1345,7 @@ mod tests {
             format!("Waiting: wake at {}", crate::session::clock(600_000))
         );
         assert_eq!(said("r5"), "", "no mark, no words");
+        assert_eq!(said("r7"), "Waiting: run #43");
     }
 
     #[test]

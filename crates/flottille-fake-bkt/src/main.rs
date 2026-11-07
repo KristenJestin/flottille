@@ -45,18 +45,27 @@
 //! `read_delay_ms` makes every call but `context list` wait that long first, as a slow network
 //! does; each record in `received.jsonl` then also holds `at`, the milliseconds since the epoch
 //! the call started at, so that a test sees which calls ran together.
+//! `step_fail` (`{"acme/api": {"publish": "Error: 502 Bad Gateway"}}`) makes `pr comment`,
+//! `edit`, `decline`, `publish` or `approve` of that repository alone fail that way.
+//! `comment_fail` (`{"acme/api": {"Typo.": "Error: 502 Bad Gateway"}}`) makes `pr comment` fail
+//! that way when its `--text` holds the key, the other comments posting.
+//! `pr approve <id>` prints `✓ Approved pull request #N` for a pull request of `pulls`, and
+//! `bkt api /repositories/<w>/<r>/pullrequests/<id>/request-changes --method POST` answers the
+//! participant it made, as Bitbucket Cloud's API does (assumed shape, `docs/forges.md`).
 //! `pipeline_fail` makes `pipeline list` alone fail that way, and `checks_fail`
 //! (`{"acme/api": {"12": "Error: 404 Not Found"}}`) `pr checks` of that pull request alone.
 //!
 //! `bkt api <path> --method POST [--input <json>]` starts a run of a Cloud repository
 //! (`/repositories/<w>/<r>/pipelines/`, answering the new pipeline numbered `triggered`, 1 by
 //! default) or stops one of `pipelines` (`…/pipelines/<uuid>/stopPipeline`, answering nothing);
-//! `pipeline view` gives the run its `uuid` when `pipelines` holds it. `pipeline run` takes
-//! `--var KEY=VALUE` as the real one does.
+//! `pipeline view` gives the run as `pipelines` holds it (its `uuid`, `state` and times), and
+//! `bkt api /repositories/<w>/<r>/pipelines/<uuid>` the one of `pipelines` with that uuid.
+//! `pipeline run` takes `--var KEY=VALUE` as the real one does, and prints the new run's uuid,
+//! `{N}`, N being `triggered`.
 //!
 //! The writes answer as `bkt` does when they work: `pr create` prints `✓ Created pull request #N`
 //! (N is `created`, 1 by default), `pr merge` prints `✓ Merged pull request #N` and `pipeline run`
-//! `✓ Triggered pipeline …`. `pr comment <id> --text T` prints `✓ Commented on pull request #N`
+//! `✓ Triggered pipeline {N} on <w>/<r> (PENDING)`. `pr comment <id> --text T` prints `✓ Commented on pull request #N`
 //! and `pr edit <id>` (`--title`, `--description`, at least one) `✓ Updated pull request #N`, as
 //! `pkg/cmd/pr/pr.go` does (`:1707`, `:829`); both need a pull request of `pulls`, as does `pr decline <id>` (it prints `Declined pull
 //! request #N`, `pkg/cmd/pr/pr.go` v0.37.0). With `strategies` (`{"acme/api": ["merge_commit"]}`), `pr merge` fails for a `--strategy` the
@@ -76,8 +85,9 @@
 //! that says its own `next` or `isLastPage` is passed through as it is.
 //!
 //! A Cloud `api` `--param q=updated_on>="<time>"` keeps the `values` whose `updated_on` is that
-//! time or later (compared as the RFC 3339 texts they are), as Bitbucket's filter does; the fake
-//! reads no other filter.
+//! time or later (compared as the RFC 3339 texts they are), as Bitbucket's filter does; and
+//! `--param target.ref_name=<branch>` keeps the pipelines whose `target.ref_name` is that branch,
+//! as the pipelines endpoint's query does. The fake reads no other filter.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -156,7 +166,9 @@ fn answer(script: &Value, args: &[String]) -> i32 {
         let mut found = Vec::new();
         let mut at = 0;
         while let Some(word) = words.get(at) {
-            if word.starts_with("--") && !word.contains('=') && *word != "--json" {
+            // The flags that take no value.
+            let alone = ["--json", "--undo", "--close-source", "--draft"];
+            if word.starts_with("--") && !word.contains('=') && !alone.contains(word) {
                 at += 2;
                 continue;
             }
@@ -275,17 +287,14 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 return 1;
             };
             let number = build.parse::<u64>().unwrap_or(0);
-            payload["pipeline"] = json!({"build_number": number});
-            // Its uuid, when the script's pipelines hold the run.
-            if let Some(uuid) = script["pipelines"][&key]
+            // The run as the script's pipelines hold it (its uuid, state and times), when they do.
+            payload["pipeline"] = script["pipelines"][&key]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .find(|pipeline| pipeline["build_number"] == number)
-                .and_then(|pipeline| pipeline.get("uuid"))
-            {
-                payload["pipeline"]["uuid"] = uuid.clone();
-            }
+                .cloned()
+                .unwrap_or_else(|| json!({"build_number": number}));
             payload["steps"] = steps.clone();
         }
         ["pipeline", "logs", build] => {
@@ -313,7 +322,11 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             );
             return 0;
         }
-        ["pr", verb @ ("comment" | "edit" | "decline"), id] => {
+        [
+            "pr",
+            verb @ ("comment" | "edit" | "decline" | "publish" | "approve"),
+            id,
+        ] => {
             let held = script["pulls"][&key]
                 .as_array()
                 .into_iter()
@@ -323,7 +336,27 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 eprintln!("Error: 404 Not Found: pull request {id}");
                 return 1;
             }
-            if *verb == "decline" {
+            if let Some(failure) = script["step_fail"][&key][*verb].as_str() {
+                eprintln!("{failure}");
+                return 1;
+            }
+            if *verb == "comment"
+                && let Some(failure) = script["comment_fail"][&key].as_object().and_then(|fails| {
+                    let text = option("--text").unwrap_or_default();
+                    fails
+                        .iter()
+                        .find(|(needle, _)| text.contains(needle.as_str()))
+                        .and_then(|(_, failure)| failure.as_str())
+                })
+            {
+                eprintln!("{failure}");
+                return 1;
+            }
+            if *verb == "approve" {
+                println!("✓ Approved pull request #{id}");
+            } else if *verb == "publish" {
+                println!("✓ Published pull request #{id}");
+            } else if *verb == "decline" {
                 println!("Declined pull request #{id}");
             } else if *verb == "comment" {
                 if option("--text").is_none_or(str::is_empty) {
@@ -332,9 +365,16 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 }
                 println!("✓ Commented on pull request #{id}");
             } else {
-                if option("--title").is_none() && option("--description").is_none() {
+                let flags = [
+                    "--title",
+                    "--description",
+                    "--reviewer",
+                    "--remove-reviewer",
+                ];
+                if flags.iter().all(|flag| option(flag).is_none()) {
                     eprintln!(
-                        "Error: at least one of --title, --body, or --description is required"
+                        "Error: at least one of --title, --body, --description or a reviewer is \
+                         required"
                     );
                     return 1;
                 }
@@ -357,7 +397,10 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             return 0;
         }
         ["pipeline", "run"] => {
-            println!("✓ Triggered pipeline {{0000}} on {key} (PENDING)");
+            println!(
+                "✓ Triggered pipeline {{{}}} on {key} (PENDING)",
+                script["triggered"].as_u64().unwrap_or(1)
+            );
             return 0;
         }
         _ => {
@@ -372,10 +415,23 @@ fn answer(script: &Value, args: &[String]) -> i32 {
     0
 }
 
-/// The body the script holds for `path`: its `api`, else the `pipelines` of a Cloud repository.
+/// The body the script holds for `path`: its `api`, else the `pipelines` of a Cloud repository,
+/// or one of them by its uuid.
 fn body_of(script: &Value, path: &str) -> Option<Value> {
     if let Some(body) = script["api"].get(path) {
         return Some(body.clone());
+    }
+    if let Some((repository, uuid)) = path
+        .strip_prefix("/repositories/")
+        .and_then(|rest| rest.split_once("/pipelines/"))
+        .filter(|(_, uuid)| !uuid.is_empty() && !uuid.contains('/'))
+    {
+        return script["pipelines"]
+            .get(repository)?
+            .as_array()?
+            .iter()
+            .find(|pipeline| pipeline["uuid"].as_str() == Some(uuid))
+            .cloned();
     }
     let repository = path
         .strip_prefix("/repositories/")?
@@ -433,6 +489,18 @@ fn api(
         let kept: Vec<Value> = values
             .iter()
             .filter(|value| value["updated_on"].as_str().is_some_and(|at| at >= since))
+            .cloned()
+            .collect();
+        body["values"] = Value::from(kept);
+    }
+    // The pipelines of one branch, as `target.ref_name` asks them.
+    let named = params
+        .iter()
+        .find_map(|(key, value)| (*key == "target.ref_name").then_some(*value));
+    if let (Some(named), Some(values)) = (named, body["values"].as_array()) {
+        let kept: Vec<Value> = values
+            .iter()
+            .filter(|value| value["target"]["ref_name"] == named)
             .cloned()
             .collect();
         body["values"] = Value::from(kept);
@@ -503,6 +571,28 @@ fn posted(script: &Value, method: &str, path: &str, input: Option<&str>) -> i32 
                 json!({"type": "pipeline", "uuid": format!("{{{number}}}"),
                     "build_number": number, "state": {"name": "PENDING"}, "target": target,
                     "repository": {"full_name": format!("{owner}/{repo}")}})
+            );
+            0
+        }
+        ("POST", [_, _, "pullrequests", id, "request-changes"]) => {
+            println!(
+                "{}",
+                json!({"role": "REVIEWER", "state": "changes_requested",
+                    "approved": false, "pull_request": id.parse::<u64>().unwrap_or(0)})
+            );
+            0
+        }
+        ("PUT", [_, _, "pullrequests", id]) => {
+            let body: Value = input
+                .and_then(|input| serde_json::from_str(input).ok())
+                .unwrap_or(Value::Null);
+            if body["destination"]["branch"]["name"].as_str().is_none() {
+                eprintln!("Error: 400 Bad Request: a destination needs a branch");
+                return 1;
+            }
+            println!(
+                "{}",
+                json!({"id": id.parse::<u64>().unwrap_or(0), "state": "OPEN"})
             );
             0
         }

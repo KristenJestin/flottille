@@ -7,11 +7,11 @@
 //! What `bkt` prints is taken from its source at the release `docs/forges.md` pins, and from
 //! Atlassian's REST documentation for what `bkt api` passes through.
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::{
-    Comment, Forge, ForgeCall, Gh, MERGE_METHODS, Pull, Seen, blocks, commit_hash, masked,
-    method_refused, run,
+    Branch, Comment, Deletion, Forge, ForgeCall, Gh, MERGE_METHODS, Pull, Seen, after, blocks,
+    commit_hash, masked, method_refused, run,
 };
 use crate::daemon::Daemon;
 use crate::mcp::Outcome;
@@ -1123,12 +1123,12 @@ pub(super) fn build_of(forge: &Forge, link: Option<&str>) -> Option<u64> {
 }
 
 /// The log of the first failed step of the build `build`: `bkt pipeline view` names the steps,
-/// `bkt pipeline logs --step` prints one. Masked.
+/// `bkt pipeline logs --step` prints one. The step's uuid and its log, masked.
 pub(super) async fn failed_step_log(
     forge: &Forge,
     context: &str,
     build: u64,
-) -> Result<String, String> {
+) -> Result<(String, String), String> {
     let build = build.to_string();
     let seen = json(&command(
         forge,
@@ -1155,13 +1155,14 @@ pub(super) async fn failed_step_log(
     let Some(uuid) = uuid else {
         return Err(format!("the pipeline #{build} has no failed step"));
     };
-    text(&command(
+    let log = text(&command(
         forge,
         context,
         &["pipeline", "logs", &build],
         &["--step", uuid],
     ))
-    .await
+    .await?;
+    Ok((uuid.to_owned(), log))
 }
 
 /// The path of a Cloud pull request's own page, for `bkt api`.
@@ -1360,15 +1361,80 @@ pub(super) async fn note(
         .map(|_| ())
 }
 
+/// `forge edit` of a Bitbucket pull request: `bkt pr edit <id> --title --description --reviewer
+/// --remove-reviewer`, `bkt pr publish <id> [--undo]` for the draft, and on Cloud the destination
+/// through the API.
+pub(super) async fn edit(
+    forge: &Forge,
+    number: &str,
+    asked: &ForgeCall,
+    title: Option<&str>,
+    body: Option<&str>,
+) -> Result<(), String> {
+    let context = Contexts::default().of(forge).await?;
+    let mut flags = Vec::new();
+    if let Some(title) = title {
+        flags.extend(["--title", title]);
+    }
+    if let Some(body) = body {
+        flags.extend(["--description", body]);
+    }
+    for name in asked.reviewers_add.iter().flatten() {
+        flags.extend(["--reviewer", name.as_str()]);
+    }
+    for name in asked.reviewers_remove.iter().flatten() {
+        flags.extend(["--remove-reviewer", name.as_str()]);
+    }
+    let mut done = Vec::new();
+    if !flags.is_empty() {
+        text(&command(forge, &context, &["pr", "edit", number], &flags)).await?;
+        done.push("bkt pr edit");
+    }
+    if let Some(draft) = asked.draft {
+        let flags: &[&str] = if draft { &["--undo"] } else { &[] };
+        text(&command(forge, &context, &["pr", "publish", number], flags))
+            .await
+            .map_err(|why| after(why, &done))?;
+        done.push("bkt pr publish");
+    }
+    if let Some(base) = &asked.base {
+        // Cloud's pull request page takes a new destination (assumed shape, `docs/forges.md`).
+        let path = cloud_page(forge, number);
+        let input = json!({"destination": {"branch": {"name": base}}}).to_string();
+        let args = [
+            "api",
+            &path,
+            "--context",
+            &context,
+            "--method",
+            "PUT",
+            "--input",
+            &input,
+        ];
+        text(&args).await.map_err(|why| after(why, &done))?;
+    }
+    Ok(())
+}
+
+/// Whether the branch `name` exists in a Bitbucket Cloud repository: an error saying `404` when
+/// it does not.
+pub(super) async fn branch_exists(forge: &Forge, name: &str) -> Result<(), String> {
+    let context = Contexts::default().of(forge).await?;
+    let path = format!("{}/refs/branches/{name}", cloud_repository(forge));
+    json(&["api", &path, "--context", &context])
+        .await
+        .map(|_| ())
+}
+
 /// `forge` `create`, `merge` and `checks` for a Bitbucket repository, once the gate let it
 /// through and the remote was found where the workspace was created: the same actions and the
 /// same checks as for GitHub, through `bkt`.
 pub(super) async fn write(
     (daemon, project, path): (&Daemon, &str, &str),
     forge: &Forge,
-    branch: &str,
-    base: &str,
+    (branch, base): (&str, &str),
     reviewers: &[String],
+    deletion: &Deletion,
     asked: ForgeCall,
 ) -> Outcome {
     let slug = forge.slug();
@@ -1384,7 +1450,7 @@ pub(super) async fn write(
                     "refused: create needs a title: say what the pull request does".into(),
                 );
             };
-            if asked.draft {
+            if asked.draft == Some(true) {
                 return Outcome::Refused(
                     "refused: bkt opens no draft pull request: open it without `draft`, and the \
                      user makes it a draft on Bitbucket"
@@ -1405,6 +1471,10 @@ pub(super) async fn write(
             for reviewer in reviewers {
                 flags.extend(["--reviewer", reviewer.as_str()]);
             }
+            let close_source = asked.delete_branch_on_merge == Some(true);
+            if close_source {
+                flags.push("--close-source");
+            }
             let args = command(forge, context, &["pr", "create"], &flags);
             let said = match text(&args).await {
                 Ok(said) => said,
@@ -1420,10 +1490,17 @@ pub(super) async fn write(
                         .collect::<String>()
                 })
                 .and_then(|digits| digits.parse::<u64>().ok());
-            if let (Some(number), false) = (number, body.trim().is_empty()) {
+            if let Some(number) = number {
                 let number = number.to_string();
                 let on = (project, "bitbucket", path, number.as_str());
-                crate::posts::record_body(daemon, on, &body);
+                if !body.trim().is_empty() {
+                    crate::posts::record_body(daemon, on, &body);
+                }
+                // The pull request's own "close source branch": a merge then says it again,
+                // since `bkt pr merge` sends its own with every merge.
+                if close_source {
+                    crate::posts::record_delete_branch(daemon, on, branch);
+                }
             }
             let url = match pulls(forge, context, "all").await {
                 Ok(listed) => listed
@@ -1503,7 +1580,12 @@ pub(super) async fn write(
                 }
             }
             // `bkt` closes the source branch unless told not to; `gh pr merge` leaves it.
-            let mut flags = vec!["--strategy", strategy, "--close-source=false"];
+            let kept = deletion.decide(daemon, (project, "bitbucket", path, number.as_str()));
+            let close = match kept {
+                Branch::Delete => "--close-source=true",
+                _ => "--close-source=false",
+            };
+            let mut flags = vec!["--strategy", strategy, close];
             if let Some(message) = &asked.message {
                 flags.extend(["--message", message.as_str()]);
             }
@@ -1511,7 +1593,8 @@ pub(super) async fn write(
             match text(&args).await {
                 Ok(_) => Outcome::Done(format!(
                     "The pull request #{number} of {branch} was merged by {method} into {base} \
-                     in {slug}."
+                     in {slug}{}.",
+                    kept.said(branch)
                 )),
                 // Refused by the server: when the repository forbids the method, say which ones
                 // it allows.
@@ -1608,7 +1691,17 @@ pub(super) async fn seen(forge: &Forge, number: u64) -> Result<Option<Seen>, Str
 /// `merged`, `declined` or `superseded`. None when it cannot be read (no context, no such page, a
 /// state not known), which `forge edit` takes for a pull request it may write to.
 pub(super) async fn state_now(forge: &Forge, number: u64) -> Option<&'static str> {
-    let context = Contexts::default().of(forge).await.ok()?;
+    page_now(forge, number).await.ok().map(|(state, _)| state)
+}
+
+/// The state of the pull request `number` from its own page, and the commit its source branch is
+/// at (Cloud `source.commit.hash`, Data Center `fromRef.latestCommit`) when the page says one. An
+/// error saying why when the page cannot be read or its state is not known.
+pub(super) async fn page_now(
+    forge: &Forge,
+    number: u64,
+) -> Result<(&'static str, Option<String>), String> {
+    let context = Contexts::default().of(forge).await?;
     let id = number.to_string();
     let path = if cloud(forge) {
         cloud_page(forge, &id)
@@ -1618,14 +1711,27 @@ pub(super) async fn state_now(forge: &Forge, number: u64) -> Option<&'static str
         };
         format!("/rest/api/1.0/projects/{owner}/repos/{name}/pull-requests/{id}")
     };
-    let page = json(&["api", &path, "--context", &context]).await.ok()?;
-    match page["state"].as_str()? {
-        "OPEN" => Some("open"),
-        "MERGED" => Some("merged"),
-        "DECLINED" => Some("declined"),
-        "SUPERSEDED" => Some("superseded"),
-        _ => None,
-    }
+    let page = json(&["api", &path, "--context", &context]).await?;
+    let state = match page["state"].as_str() {
+        Some("OPEN") => "open",
+        Some("MERGED") => "merged",
+        Some("DECLINED") => "declined",
+        Some("SUPERSEDED") => "superseded",
+        _ => {
+            return Err(format!(
+                "the state of its page is not one it knows: {}",
+                page["state"]
+            ));
+        }
+    };
+    let head = [
+        &page["source"]["commit"]["hash"],
+        &page["fromRef"]["latestCommit"],
+    ]
+    .into_iter()
+    .find_map(|hash| hash.as_str().filter(|hash| !hash.is_empty()))
+    .map(str::to_owned);
+    Ok((state, head))
 }
 
 /// `forge close` of a Bitbucket pull request: `bkt pr decline <id> [--comment T]

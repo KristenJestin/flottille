@@ -613,15 +613,17 @@ fn an_arrow_right_after_typing_scrolls_to_the_marked_row(cx: &mut TestAppContext
     draw(cx);
     cx.simulate_keystrokes(&"down ".repeat(40));
     draw(cx);
-    draw(cx);
+    // The rows that left fold away while the arrow scrolled, and how far depends on the time that
+    // passed: what is read is the place the rows come to at rest, never a place of a frame mixed
+    // with the scroll of another.
+    settle(cx);
     let last = marked(&shell, cx).expect("a result is marked");
-    // The row's place when laid out, and how far the results have scrolled since.
+    // The row as the last frame drew it, scroll included.
     let row = cx.update(|window, _| window.find(row_id(&last)).bounds());
-    let scroll = switcher(&shell, cx).read_with(cx, |switcher, _| switcher.scroll().clone());
-    let (viewport, by) = (scroll.bounds(), scroll.offset().y);
+    let viewport = switcher(&shell, cx).read_with(cx, |switcher, _| switcher.scroll().bounds());
     assert!(
-        row.top() + by >= viewport.top() && row.bottom() + by <= viewport.bottom(),
-        "the marked row {row:?} scrolled by {by:?} is in sight in {viewport:?}"
+        row.top() >= viewport.top() && row.bottom() <= viewport.bottom(),
+        "the marked row {row:?} is in sight in {viewport:?}"
     );
 }
 

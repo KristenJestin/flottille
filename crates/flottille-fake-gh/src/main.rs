@@ -47,9 +47,14 @@
 //! drafts included; `closed`, `merged`, `all`) and of `--head` when given, newest first, at most
 //! `--limit`; each with the fields `--json` asks that it has, `headRefName` being its branch.
 //!
+//! `step_fail` (`{"acme/app": {"ready": "HTTP 502: Bad Gateway"}}`) makes `pr comment`, `edit`,
+//! `close`, `reopen` or `ready` of that repository alone fail that way, as a write that ends
+//! half way does.
 //! `view_fail` (`{"acme/app": {"12": "HTTP 502: Bad Gateway"}}`) makes `pr view` and `issue view`
 //! of that number alone fail that way; `list_delay_ms` makes `pr list` wait that long first,
 //! `listing_delay_ms` a `pr list` of every branch alone (a round's, not a branch's `--head`),
+//! `listing_wait_for` (a path) the same list until that file exists, 20 s at most: a round held
+//! for as long as a test wants, whatever the machine's load,
 //! `view_delay_ms` `pr view`. `read_delay_ms` makes every `pr` and `issue` call wait that long
 //! before it answers or fails, as a network of seconds does.
 //!
@@ -68,6 +73,11 @@
 //! `…/issues/<n>/sub_issue` DELETE with `sub_issue_id`, `…/issues/<n>/dependencies/blocked_by`
 //! POST with `issue_id` and `…/blocked_by/<id>` DELETE, `…/issues/comments/<id>` PATCH with
 //! `body` and DELETE) end with 0 and print `{}`: the test reads them in the record.
+//!
+//! A review (#364, `docs/tools.md`, "The forge"): `api repos/<owner>/<name>/pulls/<n>/reviews
+//! --method POST --input <file>` answers `{"id": 1}` for a pull request the script holds (not found
+//! otherwise, `fail` as for the other calls); the record's `input` holds what the file held, as
+//! JSON, since the file is gone when the call ends.
 //!
 //! `events` gives, by repository and number, what `gh api repos/<owner>/<name>/issues/<number>/events`
 //! lists (`{"acme/app": {"7": [{"event": "merged", "actor": {"login": "bob"}, "created_at":
@@ -89,7 +99,8 @@
 //!
 //! `issue list` keeps the issues of `--state` (`open` by default), with a `--label` and an
 //! `--assignee` (`labels[].name`, `assignees[].login`) when given and, for `--search`, those whose
-//! title or body hold its words (a simplification of GitHub's search), newest first, at most
+//! title or body hold its words (a simplification of GitHub's search; an `in:title,body,comments`
+//! qualifier names where they are looked for instead), newest first, at most
 //! `--limit`. `issue create` prints the new issue's URL (numbered `created_issue`, 1 by default);
 //! `issue comment`, `edit`, `close` and `reopen` need an issue the script holds and print its
 //! URL (`issue comment`: the comment's, `…#issuecomment-<commented>`); `issue close --reason` takes `completed` or `not planned` only.
@@ -123,7 +134,13 @@ fn main() {
         .expect("the record");
     // One `write` of the whole line: `writeln!` on a `File` writes the JSON piece by piece, and
     // the pieces of two processes appending together would mix (#325).
-    let line = format!("{}\n", json!({"args": args, "env": env}));
+    // The file `--input` names is gone once the call ends: its content is kept in the record.
+    let input = args
+        .iter()
+        .position(|arg| arg == "--input")
+        .and_then(|at| std::fs::read_to_string(args.get(at + 1)?).ok())
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+    let line = format!("{}\n", json!({"args": args, "env": env, "input": input}));
     record.write_all(line.as_bytes()).expect("the record");
     let script: Value = std::fs::read_to_string(dir.join("script.json"))
         .ok()
@@ -257,6 +274,35 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             }
             0
         }
+        ["api", path, rest @ ..] if path.starts_with("repos/") && path.ends_with("/reviews") => {
+            let parts: Vec<&str> = path.split('/').collect();
+            let [_, owner, name, "pulls", number, "reviews"] = parts[..] else {
+                eprintln!("fake gh: api {path} is not a call Flottille makes");
+                return 2;
+            };
+            let repository = format!("{owner}/{name}");
+            if rest.windows(2).all(|pair| pair != ["--method", "POST"])
+                || !rest.contains(&"--input")
+            {
+                eprintln!("fake gh: a review is posted with --method POST --input");
+                return 2;
+            }
+            let held = script["pulls"][&repository]
+                .as_object()
+                .into_iter()
+                .flat_map(|branches| branches.values())
+                .any(|pull| number.parse().ok() == pull["number"].as_u64());
+            if !held {
+                eprintln!("gh: Not Found (HTTP 404)");
+                return 1;
+            }
+            if let Some(failure) = script["fail"][&repository].as_str() {
+                eprintln!("{failure}");
+                return 1;
+            }
+            println!("{}", json!({"id": 1, "state": "COMMENTED"}));
+            0
+        }
         ["api", path, rest @ ..]
             if path.starts_with("repos/")
                 && (path.contains("/comments/")
@@ -271,7 +317,11 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             println!("{{}}");
             0
         }
-        ["api", path] if path.starts_with("repos/") && path.matches('/').count() == 4 => {
+        ["api", path]
+            if path.starts_with("repos/")
+                && path.contains("/issues/")
+                && path.matches('/').count() == 4 =>
+        {
             let parts: Vec<&str> = path.split('/').collect();
             let [_, owner, name, "issues", number] = parts[..] else {
                 eprintln!("fake gh: api {path} is not a call Flottille makes");
@@ -321,6 +371,23 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             } else {
                 println!("{events}");
             }
+            0
+        }
+        ["api", path, ..] if path.starts_with("repos/") && path.contains("/branches/") => {
+            // `repos/<owner>/<name>/branches/<branch>`: a branch the script lists, else any when
+            // it lists none.
+            let (repository, branch) = path["repos/".len()..]
+                .split_once("/branches/")
+                .unwrap_or_default();
+            let known = match script["branches"][repository].as_array() {
+                Some(branches) => branches.iter().any(|b| b == branch),
+                None => true,
+            };
+            if !known {
+                eprintln!("gh: Not Found (HTTP 404)");
+                return 1;
+            }
+            println!("{branch}");
             0
         }
         ["api", "user", ..] => {
@@ -405,10 +472,30 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 .filter(|issue| updated_since(issue, option("--search")))
                 .filter(|issue| {
                     option("--search").is_none_or(|words| {
-                        let text = format!("{} {}", issue["title"], issue["body"]).to_lowercase();
+                        // `in:` names where the words are looked for; title and body without.
+                        let places = words
+                            .split_whitespace()
+                            .find_map(|word| word.strip_prefix("in:"))
+                            .unwrap_or("title,body");
+                        let mut text = String::new();
+                        for place in places.split(',') {
+                            match place {
+                                "comments" => {
+                                    for comment in
+                                        issue["comments"].as_array().into_iter().flatten()
+                                    {
+                                        text.push_str(&format!(" {}", comment["body"]));
+                                    }
+                                }
+                                place => text.push_str(&format!(" {}", issue[place])),
+                            }
+                        }
+                        let text = text.to_lowercase();
                         words
                             .split_whitespace()
-                            .filter(|word| !word.starts_with("updated:"))
+                            .filter(|word| {
+                                !word.starts_with("updated:") && !word.starts_with("in:")
+                            })
                             .all(|word| text.contains(&word.to_lowercase()))
                     })
                 })
@@ -462,12 +549,20 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             }
             0
         }
-        ["pr", "comment" | "edit" | "close" | "reopen", number, ..] => {
+        [
+            "pr",
+            "comment" | "edit" | "close" | "reopen" | "ready",
+            number,
+            ..,
+        ] => {
             let Some(repository) = repository else {
                 eprintln!("fake gh: no -R");
                 return 2;
             };
-            if let Some(failure) = script["fail"][repository].as_str() {
+            if let Some(failure) = script["fail"][repository]
+                .as_str()
+                .or(script["step_fail"][repository][words[1]].as_str())
+            {
                 eprintln!("{failure}");
                 return 1;
             }
@@ -498,7 +593,8 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                     .is_none_or(|methods| methods.iter().any(|m| m == method))
             };
             let all = json!({"mergeCommitAllowed": allows("merge"),
-                "rebaseMergeAllowed": allows("rebase"), "squashMergeAllowed": allows("squash")});
+                "rebaseMergeAllowed": allows("rebase"), "squashMergeAllowed": allows("squash"),
+                "deleteBranchOnMerge": script["delete_head_branches"][repository] == true});
             println!("{}", fields_of(&[&all], option("--json"), None)[0]);
             0
         }
@@ -655,6 +751,14 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 }
                 if let (Some(ms), None) = (script["listing_delay_ms"].as_u64(), option("--head")) {
                     std::thread::sleep(std::time::Duration::from_millis(ms));
+                }
+                if let (Some(path), None) = (script["listing_wait_for"].as_str(), option("--head"))
+                {
+                    let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                    while !std::path::Path::new(path).exists() && std::time::Instant::now() < until
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
                 }
                 let state = option("--state").unwrap_or("open");
                 let limit: usize = option("--limit").and_then(|n| n.parse().ok()).unwrap_or(30);

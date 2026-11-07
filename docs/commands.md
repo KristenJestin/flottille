@@ -237,11 +237,14 @@ opens them:
 [pull_requests]
 title = "type(TICKET): subject"     # the title's format, in the project's words; told to the agent
 reviewers = ["alice", "bob"]        # the forge's names, asked to review each pull request opened
+template = "## Why\n\n## How to verify\n"   # the description of one opened without body
 ```
 
 The title's format is told to the agent a command is sent to, which writes the titles; the reviewers are added by
 Flottille to every `forge` `create`, so that no agent forgets one. A reviewer is one name of the forge
-(no space, no comma, not starting with `-`). Both are read as the file is when they are used.
+(no space, no comma, not starting with `-`). The template is the body of a `forge` `create` that
+gives none (`docs/projects.md`, "Pull request template"). All are read as the file is when they
+are used.
 
 ## Templates
 
@@ -256,7 +259,7 @@ never a forge's command line, so they work on every forge Flottille writes to.
 
 | Template | What its agent does |
 |---|---|
-| `open-prs` | Reports each repository first (uncommitted work, commits on no remote, commits ahead of its base, its pull request) to the user with `ask_user`, and stops if one holds uncommitted work; then, for each repository with commits of its own and no open pull request, pushes its branch and opens its pull request, its title in the project's format. None for the others. It makes no commit. |
+| `open-prs` | Reports each repository first (uncommitted work, commits on no remote, commits ahead of its base, its pull request) to the user with `ask`, and stops if one holds uncommitted work; then, for each repository with commits of its own and no open pull request, pushes its branch and opens its pull request, its title in the project's format. None for the others. It makes no commit. |
 | `merge-stack` | Checks every pull request first (reviews, comments, checks) and sends the user what blocks; then merges by dependency levels, the repositories of one level together, rebasing a branch behind its base and pushing it with a lease, waiting between levels for what the project says follows a merge (its pipelines, a release), re-running a pipeline failed outside the change once. A merge the checks or a review block goes only when the user waives it. |
 | `close` | Audits each repository (uncommitted work, commits on no remote, commits of its own, its pull request): uncommitted or unpushed work, or a branch with commits whose pull request is not merged, stops it and is told to the user; otherwise it removes the workspace with `workspace` `remove`, held for the user, whose removal checks again, stops its commands in it and deletes its landed branches, and it goes on in `main`, then reports. |
 
@@ -265,7 +268,7 @@ card; in Auto, the judge allows what the user asked for and asks the rest. A pus
 (`merge-stack`) is base: it always comes to the user.
 
 An agent never waits inside a tool call: when a template's agent must wait for something outside
-(a pipeline, a release), it tells the user with `ask_user` what it waits for and ends its turn,
+(a pipeline, a release), it tells the user with `ask` what it waits for and ends its turn,
 and goes on when it is written to.
 
 The order of the levels is the project's `depends_on`: a repository that must be merged after

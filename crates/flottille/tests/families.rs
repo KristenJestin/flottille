@@ -1,5 +1,5 @@
 //! The complete families of the agents' tools (#141, `docs/tools.md`, "The forge", "The tickets",
-//! "Sessions for the user"): every read of `forge` and `tickets` answers at once, every write is
+//! "Sessions an agent starts"): every read of `forge` and `tickets` answers at once, every write is
 //! held for the user and done once they allow it, `tickets list` gives every open ticket in one
 //! call, Jira is written as GitHub is, and a root starts a session for the user that is the
 //! user's. The forge and the trackers are the fake `gh`, `bkt` and `acli`; the remotes are
@@ -1141,7 +1141,10 @@ fn tickets_search_finds_the_tickets_holding_its_words() {
         mcp.call("tickets", json!({"action": "search", "query": "login"})),
     );
 
-    assert!(found.contains("matching \"login\": 1"), "{found}");
+    assert!(
+        found.contains("matching \"login\" in the titles, descriptions and comments: 1"),
+        "{found}"
+    );
     assert!(found.contains("- #1 open: The login fails"), "{found}");
     assert!(issue_lists(&user)[0].contains("--search login"));
     let refused = mcp.call("tickets", json!({"action": "search"}));
@@ -1522,10 +1525,6 @@ fn tickets_arguments_that_are_github_s_are_refused_on_jira_before_anything_is_as
         (
             json!({"action": "close", "ticket": "ABC-1", "reason": "completed"}),
             "reason",
-        ),
-        (
-            json!({"action": "edit", "ticket": "ABC-1", "labels": ["bug"]}),
-            "labels",
         ),
         (
             json!({"action": "edit", "ticket": "ABC-1", "assignees": ["ana"]}),
@@ -1986,7 +1985,7 @@ fn the_card_of_a_ticket_write_says_the_assignee() {
     let removed = says(json!({"action": "edit", "ticket": "ABC-1", "assignee": null}));
 
     assert!(
-        assigned.to_string().contains("Its assignee: @me"),
+        assigned.to_string().contains("It assigns it to you"),
         "{assigned}"
     );
     assert!(
@@ -2028,6 +2027,691 @@ fn an_assignee_where_the_tracker_or_the_action_takes_none_is_refused_before_anyt
     }
     assert!(no_request(&jira) && no_request(&github));
     assert!(jira.acli_received().is_empty() && github.gh_received().is_empty());
+}
+
+/// The Jira tracker with its plans: ABC's board 7 with a closed, an active and a future sprint,
+/// ABC-4 in the active one (on the site's Sprint field, `customfield_10020`), assigned and under
+/// the epic ABC-10, and the one user `acli` knows besides the signed-in one.
+fn jira_planned(user: &User) {
+    jira_planned_with(user, |_| {});
+}
+
+/// [`jira_planned`], its script changed by `change` first.
+fn jira_planned_with(user: &User, change: impl FnOnce(&mut Value)) {
+    let site = "example.atlassian.net";
+    let todo = in_status(work_item("ABC-1", "The login fails", site), "To Do", "new");
+    let mut planned = work_item("ABC-4", "Remember the user", site);
+    planned["fields"]["assignee"] = json!({"displayName": "Anne Example"});
+    planned["fields"]["parent"] = json!({"key": "ABC-10", "fields": {"summary": "Sign-in"}});
+    planned["fields"]["customfield_10020"] = json!([
+        {"id": 41, "name": "Sprint 41", "state": "closed", "boardId": 7},
+        {"id": 42, "name": "Sprint 42", "state": "active", "boardId": 7}]);
+    let mut script = json!({
+        "items": {"ABC-1": todo, "ABC-4": planned,
+            "ABC-10": work_item("ABC-10", "Sign-in", site)},
+        "created": "ABC-11",
+        "users": ["ana@example.org"],
+        "boards": {"ABC": [{"id": 7, "name": "ABC board", "type": "scrum"}]},
+        "sprints": {"7": [
+            {"id": 41, "name": "Sprint 41", "state": "closed"},
+            {"id": 42, "name": "Sprint 42", "state": "active",
+                "endDate": "2026-11-20T10:00:00.000Z"},
+            {"id": 43, "name": "Sprint 43", "state": "future"}]},
+    });
+    change(&mut script);
+    user.acli_script(script);
+}
+
+#[test]
+fn a_jira_item_is_assigned_to_me() {
+    let (done, asked) = jira_written(
+        json!({"action": "edit", "ticket": "ABC-1", "assignee": "me"}),
+        "jira workitem edit",
+    );
+    assert!(done.contains("ABC-1 was changed."), "{done}");
+    assert_eq!(
+        asked,
+        ["jira workitem edit --key ABC-1 --assignee @me --yes"]
+    );
+}
+
+#[test]
+fn a_jira_item_gets_and_loses_labels() {
+    let (done, asked) = jira_written(
+        json!({"action": "edit", "ticket": "ABC-1", "labels": ["bug", "p1"],
+            "remove_labels": ["wontfix"]}),
+        "jira workitem edit",
+    );
+    assert!(done.contains("ABC-1 was changed."), "{done}");
+    // `--labels` adds, as measured on a real site: the labels the item had stay.
+    assert_eq!(
+        asked,
+        ["jira workitem edit --key ABC-1 --labels bug,p1 --remove-labels wontfix --yes"]
+    );
+}
+
+#[test]
+fn an_unknown_assignee_is_refused() {
+    let user = user();
+    on_jira(&user);
+    jira_planned(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    // A display name: acli takes none, so nothing is asked of anyone.
+    for action in ["create", "edit"] {
+        let refused = mcp.call(
+            "tickets",
+            json!({"action": action, "ticket": "ABC-1", "project": "ABC", "title": "Add a logout",
+                "assignee": "Kristen"}),
+        );
+        assert!(refused.error, "{}", refused.text);
+        assert!(
+            refused.text.contains(
+                "assignee is me, an email or an account id; a display name cannot be looked up \
+                 with acli"
+            ),
+            "{}",
+            refused.text
+        );
+    }
+    assert!(no_request(&user));
+    assert!(user.acli_received().is_empty());
+
+    // An email the site does not know: the tracker's words, and nothing was created.
+    let (created, calls) = jira_asked(
+        &user,
+        json!({"action": "create", "project": "ABC", "title": "Add a logout",
+            "assignee": "bob@example.org"}),
+    );
+    assert!(
+        created.contains("acli refused the creation assigned to \"bob@example.org\""),
+        "{created}"
+    );
+    assert!(
+        created.contains("User not found for email: bob@example.org"),
+        "{created}"
+    );
+    assert!(created.contains("nothing was created"), "{created}");
+    let creates = |calls: &[String]| {
+        calls
+            .iter()
+            .filter(|call| call.starts_with("jira workitem create"))
+            .count()
+    };
+    // Not tried again without its assignee.
+    assert_eq!(creates(&calls), 1, "{calls:?}");
+
+    // An edit: acli ends with 0 and says its failure, which is not a change.
+    let (edited, _) = jira_asked(
+        &user,
+        json!({"action": "edit", "ticket": "ABC-1", "assignee": "bob@example.org"}),
+    );
+    assert!(!edited.contains("ABC-1 was changed"), "{edited}");
+    assert!(edited.contains("can't be edited"), "{edited}");
+    assert!(edited.contains("bob@example.org"), "{edited}");
+}
+
+#[test]
+fn a_github_issue_is_assigned_and_labelled() {
+    let (done, asked) = ticket_written(
+        json!({"action": "edit", "ticket": "#2", "assignees": ["me"], "labels": ["bug"]}),
+        "issue edit",
+    );
+    assert!(done.contains("#2 of acme/app was changed."), "{done}");
+    assert_eq!(
+        asked,
+        ["issue edit 2 -R github.com/acme/app --add-label bug --add-assignee @me"]
+    );
+}
+
+/// The card the user is shown for the last request held.
+fn last_card(user: &User) -> String {
+    let requests = user.call("approval.list", json!({})).unwrap()["requests"].clone();
+    requests.as_array().unwrap().last().unwrap()["says"].to_string()
+}
+
+#[test]
+fn a_jira_item_is_created_assigned_under_a_parent_in_a_sprint() {
+    let user = user();
+    on_jira(&user);
+    jira_planned(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    let number = held(&mcp.call(
+        "tickets",
+        json!({"action": "create", "project": "ABC", "title": "Add a logout",
+            "body": "Users stay signed in", "type": "Story", "labels": ["auth"],
+            "assignee": "me", "parent": "abc-10", "sprint": "sprint 42"}),
+    ));
+    let card = last_card(&user);
+    assert!(card.contains("It assigns it to you"), "{card}");
+    // The sprint as the site names it, found before the user is asked.
+    assert!(
+        card.contains("It puts it in sprint \\\"Sprint 42\\\" (board \\\"ABC board\\\")"),
+        "{card}"
+    );
+    assert!(card.contains("It puts it under ABC-10"), "{card}");
+    let not_auth = |calls: Vec<String>| -> Vec<String> {
+        calls
+            .into_iter()
+            .filter(|call| call != "jira auth status")
+            .collect()
+    };
+    let before = not_auth(words(user.acli_received()));
+    assert_eq!(
+        before,
+        [
+            "jira board search --project ABC --json",
+            "jira board list-sprints --id 7 --state active,future --json",
+            "jira workitem search --jql project in (\"ABC\", \"DEF\") AND sprint is not EMPTY \
+             ORDER BY updated DESC --fields key,summary --json --limit 1",
+            "jira workitem view ABC-4 --json --fields *navigable",
+        ]
+    );
+    let done = allow(&user, number);
+
+    assert!(
+        done.contains(
+            "The ticket ABC-11 was opened in ABC, in sprint \"Sprint 42\", under ABC-10, \
+             assigned to you: https://example.atlassian.net/browse/ABC-11"
+        ),
+        "{done}"
+    );
+    let calls = not_auth(words(user.acli_received()));
+    let after = &calls[before.len()..];
+    // Read again once allowed (it may have closed since); the Sprint field is kept.
+    assert_eq!(
+        after[..2],
+        [
+            "jira board search --project ABC --json",
+            "jira board list-sprints --id 7 --state active,future --json",
+        ],
+        "{calls:?}"
+    );
+    assert!(
+        after[2].starts_with("jira workitem create --from-json "),
+        "{calls:?}"
+    );
+    // `@me` is acli's flag's and not its JSON's: the user is assigned right after, by its flag.
+    assert_eq!(
+        after[3],
+        "jira workitem edit --key ABC-11 --assignee @me --yes"
+    );
+    assert_eq!(after.len(), 4, "{calls:?}");
+    let created = user
+        .acli_received()
+        .into_iter()
+        .find(|call| call["args"][2] == "create")
+        .unwrap();
+    let item = &created["files"][0]["json"];
+    assert_eq!(item["projectKey"], "ABC");
+    assert_eq!(item["summary"], "Add a logout");
+    assert_eq!(item["type"], "Story");
+    assert_eq!(item["labels"], json!(["auth"]));
+    assert_eq!(item["parentIssueId"], "ABC-10");
+    assert_eq!(
+        item["additionalAttributes"],
+        json!({"customfield_10020": 42})
+    );
+    assert_eq!(item["description"]["type"], "doc");
+    assert!(item.get("assignee").is_none(), "{item}");
+    // The file is private, as a description's is.
+    assert_eq!(created["files"][0]["mode"], 0o600);
+
+    // Under a parent alone, acli's flags do it.
+    let (_, parented) = jira_written(
+        json!({"action": "create", "project": "def", "title": "Add a logout",
+            "parent": "DEF-2"}),
+        "jira workitem create",
+    );
+    assert_eq!(
+        parented,
+        ["jira workitem create --project DEF --summary Add a logout --parent DEF-2 --json"]
+    );
+}
+
+/// A `tickets` call refused before the user is asked: its refusal.
+fn refused_unasked(user: &User, mcp: &Mcp, args: Value) -> String {
+    let refused = mcp.call("tickets", args.clone());
+    assert!(refused.error, "{args}: {}", refused.text);
+    assert!(no_request(user), "{args}");
+    assert!(
+        !words(user.acli_received())
+            .iter()
+            .any(|call| call.starts_with("jira workitem create")
+                || call.starts_with("jira workitem edit")),
+        "{args}"
+    );
+    refused.text
+}
+
+#[test]
+fn a_sprint_that_is_not_open_on_the_project_s_boards_is_refused_naming_those_that_are() {
+    let user = user();
+    on_jira(&user);
+    jira_planned(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    let answer = refused_unasked(
+        &user,
+        &mcp,
+        json!({"action": "create", "project": "ABC", "title": "Add a logout", "type": "Task",
+            "sprint": "Sprint 41"}),
+    );
+
+    assert!(
+        answer.contains("\"Sprint 41\" is no open sprint of ABC"),
+        "{answer}"
+    );
+    assert!(
+        answer.contains("Sprint 42") && answer.contains("Sprint 43"),
+        "{answer}"
+    );
+    assert!(answer.contains("nothing was written"), "{answer}");
+}
+
+#[test]
+fn the_card_names_the_sprint_an_id_resolves_to_and_an_unknown_one_is_refused_unasked() {
+    let user = user();
+    on_jira(&user);
+    jira_planned(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    let unknown = refused_unasked(
+        &user,
+        &mcp,
+        json!({"action": "create", "project": "ABC", "title": "Add a logout", "type": "Task",
+            "sprint": "57"}),
+    );
+    held(&mcp.call(
+        "tickets",
+        json!({"action": "create", "project": "ABC", "title": "Add a logout", "type": "Task",
+            "sprint": "43"}),
+    ));
+    let card = last_card(&user);
+
+    assert!(
+        unknown.contains("\"57\" is no open sprint of ABC"),
+        "{unknown}"
+    );
+    assert!(
+        card.contains("It puts it in sprint \\\"Sprint 43\\\" (board \\\"ABC board\\\")"),
+        "{card}"
+    );
+    assert!(!card.contains("sprint \\\"43\\\""), "{card}");
+}
+
+#[test]
+fn a_sprint_two_boards_share_is_refused_unasked_asking_for_its_id() {
+    let user = user();
+    on_jira(&user);
+    jira_planned_with(&user, |script| {
+        script["boards"]["ABC"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id": 9, "name": "Ops board", "type": "scrum"}));
+        script["sprints"]["9"] = json!([{"id": 90, "name": "Sprint 42", "state": "active"}]);
+    });
+    let (_, mcp) = root_in(&user, None);
+
+    let answer = refused_unasked(
+        &user,
+        &mcp,
+        json!({"action": "create", "project": "ABC", "title": "Add a logout", "type": "Task",
+            "sprint": "Sprint 42"}),
+    );
+
+    assert!(
+        answer.contains("names several open sprints of ABC"),
+        "{answer}"
+    );
+    assert!(answer.contains("give its id as sprint"), "{answer}");
+}
+
+#[test]
+fn a_creation_in_a_sprint_on_a_site_whose_sprint_field_is_unknown_is_refused_unasked() {
+    let user = user();
+    on_jira(&user);
+    jira_planned_with(&user, |script| {
+        // No work item has been in a sprint: the field cannot be found.
+        script["items"]["ABC-4"]["fields"]
+            .as_object_mut()
+            .unwrap()
+            .remove("customfield_10020");
+    });
+    let (_, mcp) = root_in(&user, None);
+
+    let answer = refused_unasked(
+        &user,
+        &mcp,
+        json!({"action": "create", "project": "ABC", "title": "Add a logout", "type": "Task",
+            "sprint": "Sprint 42"}),
+    );
+
+    assert!(
+        answer.contains("the Sprint field of example.atlassian.net is not known"),
+        "{answer}"
+    );
+    assert!(answer.contains("nothing was written"), "{answer}");
+}
+
+#[test]
+fn a_creation_acli_answers_without_its_key_says_what_may_not_be_applied() {
+    let user = user();
+    on_jira(&user);
+    jira_planned_with(&user, |script| {
+        script["created_said"] = Value::from("✓ Work item created");
+    });
+
+    let (answer, calls) = jira_asked(
+        &user,
+        json!({"action": "create", "project": "ABC", "title": "Add a logout", "type": "Task",
+            "assignee": "me", "parent": "ABC-10", "sprint": "Sprint 42"}),
+    );
+
+    assert!(!answer.contains("The ticket was opened"), "{answer}");
+    assert!(
+        answer.contains("without the key of the new work item"),
+        "{answer}"
+    );
+    assert!(answer.contains("sprint \"Sprint 42\""), "{answer}");
+    assert!(answer.contains("parent ABC-10"), "{answer}");
+    assert!(answer.contains("not assigned to you"), "{answer}");
+    assert!(answer.contains("✓ Work item created"), "{answer}");
+    // No key, nothing to assign.
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.starts_with("jira workitem edit")),
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn a_created_item_acli_does_not_assign_is_said_opened_without_its_assignee() {
+    let user = user();
+    on_jira(&user);
+    jira_planned(&user);
+
+    let (answer, _) = jira_asked(
+        &user,
+        json!({"action": "create", "project": "ABC", "title": "Add a logout", "type": "Task",
+            "assignee": "bob@example.org", "sprint": "Sprint 42"}),
+    );
+
+    assert!(
+        answer.contains(
+            "The ticket ABC-11 was opened in ABC, in sprint \"Sprint 42\", without its assignee"
+        ),
+        "{answer}"
+    );
+    assert!(
+        answer.contains("acli did not assign it to \"bob@example.org\""),
+        "{answer}"
+    );
+    assert!(answer.contains("can't be edited"), "{answer}");
+    assert!(
+        answer.contains("https://example.atlassian.net/browse/ABC-11"),
+        "{answer}"
+    );
+}
+
+#[test]
+fn the_card_of_a_jira_edit_says_the_labels_added_and_removed() {
+    let user = user();
+    on_jira(&user);
+    jira_planned(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    held(&mcp.call(
+        "tickets",
+        json!({"action": "edit", "ticket": "ABC-1", "labels": ["bug", "p1"],
+            "remove_labels": ["wontfix"]}),
+    ));
+    let card = last_card(&user);
+
+    assert!(card.contains("It adds the labels bug, p1"), "{card}");
+    assert!(card.contains("It removes the labels wontfix"), "{card}");
+}
+
+#[test]
+fn a_label_holding_a_comma_is_refused_before_anything_is_asked() {
+    let user = user();
+    on_jira(&user);
+    jira_planned(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    for args in [
+        json!({"action": "edit", "ticket": "ABC-1", "labels": ["front,back"]}),
+        json!({"action": "edit", "ticket": "ABC-1", "remove_labels": ["a,b"]}),
+        json!({"action": "create", "project": "ABC", "title": "T", "labels": ["front,back"]}),
+    ] {
+        let refused = refused_unasked(&user, &mcp, args);
+        assert!(refused.contains("a label holds no comma"), "{refused}");
+    }
+}
+
+#[test]
+fn blank_labels_are_left_out_on_every_path() {
+    let (_, flags) = jira_written(
+        json!({"action": "create", "project": "def", "title": "Add a logout",
+            "labels": ["auth", " ", ""]}),
+        "jira workitem create",
+    );
+    assert_eq!(
+        flags,
+        ["jira workitem create --project DEF --summary Add a logout --label auth --json"]
+    );
+    let (_, edited) = jira_written(
+        json!({"action": "edit", "ticket": "ABC-1", "labels": [" ", "bug"],
+            "remove_labels": [""]}),
+        "jira workitem edit",
+    );
+    assert_eq!(
+        edited,
+        ["jira workitem edit --key ABC-1 --labels bug --yes"]
+    );
+
+    let user = user();
+    on_jira(&user);
+    jira_planned(&user);
+    let (_, calls) = jira_asked(
+        &user,
+        json!({"action": "create", "project": "ABC", "title": "Add a logout", "type": "Task",
+            "labels": ["auth", " "], "sprint": "Sprint 42"}),
+    );
+    assert!(
+        calls.iter().any(|c| c.starts_with("jira workitem create")),
+        "{calls:?}"
+    );
+    let created = user
+        .acli_received()
+        .into_iter()
+        .find(|call| call["args"][2] == "create")
+        .unwrap();
+    assert_eq!(created["files"][0]["json"]["labels"], json!(["auth"]));
+}
+
+#[test]
+fn board_is_refused_on_another_action_than_sprints() {
+    let user = user();
+    on_jira(&user);
+    jira_planned(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    for args in [
+        json!({"action": "show", "ticket": "ABC-1", "board": "ABC board"}),
+        json!({"action": "edit", "ticket": "ABC-1", "title": "T", "board": "ABC board"}),
+    ] {
+        let refused = mcp.call("tickets", args.clone());
+        assert!(refused.error, "{args}: {}", refused.text);
+        assert!(
+            refused.text.contains(&format!(
+                "tickets {} takes no board: board is for sprints",
+                args["action"].as_str().unwrap()
+            )),
+            "{args}: {}",
+            refused.text
+        );
+    }
+    assert!(no_request(&user));
+    assert!(user.acli_received().is_empty());
+}
+
+#[test]
+fn a_creation_in_a_sprint_without_its_type_is_refused_before_anything_is_asked() {
+    let user = user();
+    on_jira(&user);
+    jira_planned(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    let refused = mcp.call(
+        "tickets",
+        json!({"action": "create", "project": "ABC", "title": "Add a logout",
+            "sprint": "Sprint 42"}),
+    );
+
+    assert!(refused.error, "{}", refused.text);
+    assert!(refused.text.contains("needs type"), "{}", refused.text);
+    assert!(no_request(&user));
+    assert!(user.acli_received().is_empty());
+}
+
+#[test]
+fn the_sprints_of_the_project_s_board_are_listed() {
+    let user = user();
+    on_jira(&user);
+    jira_planned(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    let said = read(
+        &user,
+        mcp.call("tickets", json!({"action": "sprints", "project": "abc"})),
+    );
+
+    assert!(
+        said.contains("The open sprints of ABC on example.atlassian.net"),
+        "{said}"
+    );
+    assert!(said.contains("Board \"ABC board\" (7):"), "{said}");
+    assert!(
+        said.contains("- Sprint 42 [id 42], active, ends 2026-11-20"),
+        "{said}"
+    );
+    assert!(said.contains("- Sprint 43 [id 43], future"), "{said}");
+    assert!(!said.contains("Sprint 41"), "{said}");
+    let calls = words(user.acli_received());
+    assert!(
+        calls.contains(&"jira board list-sprints --id 7 --state active,future --json".to_owned()),
+        "{calls:?}"
+    );
+
+    // A project whose board has no sprint says so, in acli's words.
+    user.acli_script(
+        json!({"boards": {"ABC": [{"id": 1, "name": "ABC board", "type": "simple"}]}}),
+    );
+    let none = read(
+        &user,
+        mcp.call("tickets", json!({"action": "sprints", "project": "ABC"})),
+    );
+    assert!(none.contains("does not support sprints"), "{none}");
+}
+
+#[test]
+fn changing_the_parent_of_an_existing_item_is_refused_saying_why() {
+    let user = user();
+    on_jira(&user);
+    jira_planned(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    let refused = mcp.call(
+        "tickets",
+        json!({"action": "edit", "ticket": "ABC-1", "parent": "ABC-10"}),
+    );
+
+    assert!(refused.error, "{}", refused.text);
+    assert!(
+        refused.text.contains("acli's workitem edit has no parent"),
+        "{}",
+        refused.text
+    );
+    assert!(refused.text.contains("Jira's REST API"), "{}", refused.text);
+    assert!(
+        refused.text.contains("nothing was written"),
+        "{}",
+        refused.text
+    );
+    assert!(no_request(&user));
+    assert!(user.acli_received().is_empty());
+}
+
+#[test]
+fn moving_an_existing_item_to_a_sprint_is_refused_saying_why() {
+    let user = user();
+    on_jira(&user);
+    jira_planned(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    let refused = mcp.call(
+        "tickets",
+        json!({"action": "edit", "ticket": "ABC-1", "sprint": "Sprint 42"}),
+    );
+    // The action that was always refused is gone.
+    let gone = mcp.call(
+        "tickets",
+        json!({"action": "sprint", "ticket": "ABC-1", "sprint": "Sprint 42"}),
+    );
+
+    assert!(refused.error, "{}", refused.text);
+    assert!(
+        refused
+            .text
+            .contains("acli's workitem edit takes no sprint"),
+        "{}",
+        refused.text
+    );
+    assert!(refused.text.contains("on the board"), "{}", refused.text);
+    assert!(
+        refused.text.contains("nothing was written"),
+        "{}",
+        refused.text
+    );
+    assert!(gone.error, "{}", gone.text);
+    assert!(
+        gone.text.contains("tickets has no action \"sprint\""),
+        "{}",
+        gone.text
+    );
+    assert!(no_request(&user));
+    assert!(user.acli_received().is_empty());
+}
+
+#[test]
+fn show_says_the_assignee_parent_and_sprint() {
+    let user = user();
+    on_jira(&user);
+    jira_planned(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    let shown = read(
+        &user,
+        mcp.call("tickets", json!({"action": "show", "ticket": "ABC-4"})),
+    );
+    let unplanned = read(
+        &user,
+        mcp.call(
+            "tickets",
+            json!({"action": "show", "ticket": "ABC-10", "fresh": true}),
+        ),
+    );
+
+    assert!(shown.contains("Assignee: Anne Example"), "{shown}");
+    assert!(shown.contains("Parent: ABC-10 Sign-in"), "{shown}");
+    assert!(shown.contains("Sprint: Sprint 42 (active)"), "{shown}");
+    assert!(!shown.contains("Sprint 41"), "{shown}");
+    assert!(unplanned.contains("Assignee: Ana"), "{unplanned}");
+    assert!(!unplanned.contains("Parent:"), "{unplanned}");
+    assert!(!unplanned.contains("Sprint:"), "{unplanned}");
 }
 
 #[test]
@@ -2218,6 +2902,47 @@ fn a_jira_description_read_back_is_the_markdown_written() {
     assert!(
         shown.replace("\n    ", "\n").contains(EVERYTHING),
         "{shown}"
+    );
+}
+
+#[test]
+fn a_jira_work_item_shows_its_attachments_and_names_the_images_of_its_texts() {
+    let user = user();
+    on_jira(&user);
+    let mut item = in_status(
+        work_item("ABC-1", "The login fails", "example.atlassian.net"),
+        "To Do",
+        "new",
+    );
+    item["fields"]["description"] = json!({"type": "doc", "version": 1, "content": [
+        {"type": "mediaSingle", "content": [{"type": "media", "attrs": {
+            "alt": "image-20260101-120000.png", "type": "file",
+            "id": "00000000-0000-4000-8000-000000000001"}}]}]});
+    item["fields"]["attachment"] = json!([{"id": "10001", "filename": "image-20260101-120000.png",
+        "mimeType": "image/png", "size": 97717, "created": "2026-01-01T12:00:00.000+0100",
+        "author": {"displayName": "Ana Example"},
+        "content": "https://example.atlassian.net/rest/api/3/attachment/content/10001"}]);
+    user.acli_script(json!({"items": {"ABC-1": item}}));
+    let (_, mcp) = root_in(&user, None);
+
+    let shown = read(
+        &user,
+        mcp.call("tickets", json!({"action": "show", "ticket": "ABC-1"})),
+    );
+
+    for part in [
+        "[image: image-20260101-120000.png, not shown: ask the user to paste it if it matters]",
+        "Attachments (1)",
+        "- image-20260101-120000.png, image/png, 95.4 KiB, by Ana Example, 2026-01-01T12:00:00.000+0100",
+    ] {
+        assert!(shown.contains(part), "{part} in {shown}");
+    }
+    assert!(!shown.contains("attachment/content"), "{shown}");
+    assert!(
+        words(user.acli_received())
+            .contains(&"jira workitem view ABC-1 --json --fields summary,status,description,comment,issuelinks,attachment,assignee,parent,*navigable".to_owned()),
+        "{:?}",
+        user.acli_received()
     );
 }
 
@@ -2891,8 +3616,7 @@ fn a_root_session_started_by_an_agent_appears_and_is_the_user_s() {
 
     let answer = mcp.call(
         "agent_launch",
-        json!({"title": "Fix login", "brief": "The login fails: fix it.", "workspace": "login",
-            "follow": false, "root": true}),
+        json!({"title": "Fix login", "brief": "The login fails: fix it.", "workspace": "login", "kind": "handed"}),
     );
     let number = held(&answer);
     assert_eq!(
@@ -2904,8 +3628,9 @@ fn a_root_session_started_by_an_agent_appears_and_is_the_user_s() {
     assert_eq!(request["kind"], "action", "{request}");
     let says = request["says"].to_string();
     assert!(
-        says.contains("Start a session for the user in the workspace login: \\\"Fix login\\\"")
-            && says.contains("Its first message: The login fails: fix it."),
+        says.contains(
+            "Start a session for the user, handed over, in the workspace login: \\\"Fix login\\\""
+        ) && says.contains("Its first message: The login fails: fix it."),
         "{says}"
     );
     let done = allow(&user, number);
@@ -2924,7 +3649,7 @@ fn a_root_session_started_by_an_agent_appears_and_is_the_user_s() {
     assert_eq!(new.parent, None);
     assert_eq!(new.depth, 0);
     assert_eq!(new.workspace.as_deref(), Some("login"));
-    assert!(new.tools.iter().any(|t| t.ends_with("__ask_user")));
+    assert!(new.tools.iter().any(|t| t.ends_with("__ask")));
     assert!(new.tools.iter().any(|t| t.ends_with("__agent_launch")));
     // It takes the tree's mode, Ask here, never the Auto a new root has by default.
     assert_eq!(new.gate_mode, GateMode::Ask);
@@ -2965,7 +3690,7 @@ fn a_root_session_in_auto_is_judged_by_the_judge_and_stays_in_auto() {
 
     let answer = mcp.call(
         "agent_launch",
-        json!({"title": "Docs", "brief": "Write the docs.", "follow": false, "root": true}),
+        json!({"title": "Docs", "brief": "Write the docs.", "kind": "handed"}),
     );
 
     assert!(
@@ -2996,7 +3721,7 @@ fn a_child_cannot_start_a_root_session() {
     let opened = user.received_requests("session/new").len();
     let launched = lead.call(
         "agent_launch",
-        json!({"title": "worker", "brief": "Write the tests."}),
+        json!({"kind": "child", "title": "worker", "brief": "Write the tests."}),
     );
     assert!(!launched.error, "{}", launched.text);
     let (url, authorization) = server_of(&user, opened);
@@ -3005,7 +3730,7 @@ fn a_child_cannot_start_a_root_session() {
 
     let refused = child.call(
         "agent_launch",
-        json!({"title": "escape", "brief": "Work outside my tree.", "follow": false, "root": true}),
+        json!({"title": "escape", "brief": "Work outside my tree.", "kind": "handed"}),
     );
 
     assert!(refused.error, "{}", refused.text);
@@ -3058,6 +3783,16 @@ fn judge_prompts(user: &User) -> Vec<String> {
 /// A lead in `mode` starts a session for the user in `main` with `brief`, allowed by the judge
 /// in Auto or by the user in Ask: the new root's id and its MCP session.
 fn launched_root(user: &User, mode: &str, brief: &str) -> (String, String, Mcp) {
+    launched_root_of_kind(user, mode, brief, "handed")
+}
+
+/// The same, the session of `kind`: `handed`, or `led` by the lead.
+fn launched_root_of_kind(
+    user: &User,
+    mode: &str,
+    brief: &str,
+    kind: &str,
+) -> (String, String, Mcp) {
     on_github(user);
     many_issues(user);
     let (lead, mcp) = root_in(user, None);
@@ -3066,7 +3801,7 @@ fn launched_root(user: &User, mode: &str, brief: &str) -> (String, String, Mcp) 
     let opened = user.received_requests("session/new").len();
     let answer = mcp.call(
         "agent_launch",
-        json!({"title": "Second", "brief": brief, "follow": false, "root": true}),
+        json!({"title": "Second", "brief": brief, "kind": kind}),
     );
     if mode == "ask" {
         allow(user, held(&answer));
@@ -3128,7 +3863,110 @@ fn a_root_started_by_an_agent_cannot_start_one_without_the_user() {
 
     let answer = mcp.call(
         "agent_launch",
-        json!({"title": "Third", "brief": "And the tests.", "follow": false, "root": true}),
+        json!({"title": "Third", "brief": "And the tests.", "kind": "handed"}),
+    );
+
+    held(&answer);
+    assert_eq!(judge_prompts(&user).len(), judged, "the judge was asked");
+    let request = user.call("approval.list", json!({})).unwrap()["requests"][0].clone();
+    assert_eq!(request["class"], "base", "{request}");
+    assert!(
+        request["reasons"]
+            .to_string()
+            .contains("was itself started by an agent"),
+        "{request}"
+    );
+    assert_eq!(request["agent"], second.as_str());
+    assert!(!agents(&user).iter().any(|a| a["title"] == "Third"));
+}
+
+#[test]
+fn a_handed_session_keeps_the_chain_rule_until_detached() {
+    let user = User::with_fake_agent()
+        .with_fake_gh()
+        .with_fake_escalation()
+        .with_allowing_judge();
+    let (lead, second, mcp) = launched_root(&user, "auto", "Go on with the docs.");
+    let first = mcp.call(
+        "agent_launch",
+        json!({"title": "Third", "brief": "And the tests.", "kind": "handed"}),
+    );
+    held(&first);
+    assert_eq!(
+        user.call("approval.list", json!({})).unwrap()["requests"][0]["class"],
+        "base"
+    );
+    user.call("approval.deny", json!({"number": held(&first)}))
+        .unwrap();
+
+    user.call("agent.detach", json!({"agent": second})).unwrap();
+
+    // The user took it: what it starts is judged as any of the user's sessions' launches.
+    let judged = judge_prompts(&user).len();
+    let answer = mcp.call(
+        "agent_launch",
+        json!({"title": "Fourth", "brief": "And the docs.", "kind": "handed"}),
+    );
+    assert!(answer.text.contains("Started a session"), "{}", answer.text);
+    assert!(
+        judge_prompts(&user).len() > judged,
+        "the judge was not asked"
+    );
+    let fourth = agents(&user)
+        .into_iter()
+        .find(|a| a["title"] == "Fourth")
+        .unwrap();
+    assert_eq!(fourth["launched_by"], second.as_str());
+    let detached = user.call("agent.show", json!({"agent": second})).unwrap();
+    assert!(detached["agent"]["launched_by"].is_null(), "{detached}");
+    assert_eq!(detached["agent"]["detached_from"], lead.as_str());
+}
+
+#[test]
+fn a_detached_session_may_start_a_session_in_its_mode() {
+    let user = User::with_fake_agent()
+        .with_fake_gh()
+        .with_fake_escalation()
+        .with_allowing_judge();
+    let (_, second, mcp) = launched_root(&user, "auto", "Go on with the docs.");
+    user.call("agent.detach", json!({"agent": second})).unwrap();
+
+    let answer = mcp.call(
+        "agent_launch",
+        json!({"title": "Third", "brief": "And the tests.", "kind": "led"}),
+    );
+
+    // Auto lets the judge decide it, as for any session of the user's: no chain is left.
+    assert!(
+        answer.text.contains("Started a session led by you"),
+        "{}",
+        answer.text
+    );
+    assert!(
+        user.call("approval.list", json!({})).unwrap()["requests"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let third = agents(&user)
+        .into_iter()
+        .find(|a| a["title"] == "Third")
+        .unwrap();
+    assert_eq!(third["launched_by"], second.as_str());
+}
+
+#[test]
+fn a_led_session_s_own_led_launch_is_held_for_the_user() {
+    let user = User::with_fake_agent()
+        .with_fake_gh()
+        .with_fake_escalation()
+        .with_allowing_judge();
+    let (_, second, mcp) = launched_root_of_kind(&user, "auto", "Go on with the docs.", "led");
+    let judged = judge_prompts(&user).len();
+
+    let answer = mcp.call(
+        "agent_launch",
+        json!({"title": "Third", "brief": "And the tests.", "kind": "led"}),
     );
 
     held(&answer);
@@ -3154,7 +3992,7 @@ fn a_root_session_with_a_brief_longer_than_the_judge_sees_whole_is_refused() {
 
     let refused = mcp.call(
         "agent_launch",
-        json!({"title": "Long", "brief": "word ".repeat(2_000), "follow": false, "root": true}),
+        json!({"title": "Long", "brief": "word ".repeat(2_000), "kind": "handed"}),
     );
 
     assert!(refused.error, "{}", refused.text);
@@ -3182,8 +4020,7 @@ fn a_root_session_whose_brief_holds_a_secret_is_base() {
 
     let answer = mcp.call(
         "agent_launch",
-        json!({"title": "Deploy", "brief": "Use ghp_abcdefghijklmnopqrstuvwxyz0123456789 to deploy.",
-            "follow": false, "root": true}),
+        json!({"title": "Deploy", "brief": "Use ghp_abcdefghijklmnopqrstuvwxyz0123456789 to deploy.", "kind": "handed"}),
     );
 
     held(&answer);
@@ -3392,8 +4229,7 @@ fn a_session_in_a_new_workspace_with_a_brief_longer_than_the_judge_sees_whole_is
 
     let refused = lead.call(
         "agent_launch",
-        json!({"title": "Long", "brief": "word ".repeat(2_000), "new_workspace": "long",
-            "follow": false, "root": true}),
+        json!({"title": "Long", "brief": "word ".repeat(2_000), "new_workspace": "long", "kind": "handed"}),
     );
 
     assert!(refused.error, "{}", refused.text);
@@ -3559,7 +4395,7 @@ fn a_child_in_main_cannot_remove_a_workspace() {
     let opened = user.received_requests("session/new").len();
     let launched = lead.call(
         "agent_launch",
-        json!({"title": "worker", "brief": "Read the code."}),
+        json!({"kind": "child", "title": "worker", "brief": "Read the code."}),
     );
     assert!(!launched.error, "{}", launched.text);
     let (url, authorization) = server_of(&user, opened);
@@ -3834,7 +4670,7 @@ fn lead_and_session(user: &User) -> (String, Mcp, String, Mcp) {
     let opened = user.received_requests("session/new").len();
     let answer = mcp.call(
         "agent_launch",
-        json!({"title": "Login", "brief": "Fix the login.", "workspace": "login", "follow": false, "root": true}),
+        json!({"title": "Login", "brief": "Fix the login.", "workspace": "login", "kind": "handed"}),
     );
     assert!(answer.text.contains("Started a session"), "{}", answer.text);
     let (url, authorization) = server_of(user, opened);
@@ -3867,7 +4703,7 @@ fn delivered(user: &User, agent: &str, kind: &str) -> Vec<String> {
 }
 
 #[test]
-fn a_child_with_a_workspace_is_refused_naming_root_true() {
+fn a_child_with_a_workspace_is_refused_naming_led() {
     let user = user();
     on_github(&user);
     let (_, lead) = root_in(&user, None);
@@ -3878,7 +4714,8 @@ fn a_child_with_a_workspace_is_refused_naming_root_true() {
         json!({"new_workspace": "fresh"}),
         json!({"new_workspace": "fresh", "repositories": ["."]}),
     ] {
-        let mut call = json!({"title": "Fix login", "brief": "The login fails: fix it."});
+        let mut call =
+            json!({"kind": "child", "title": "Fix login", "brief": "The login fails: fix it."});
         call.as_object_mut()
             .unwrap()
             .extend(place.as_object().unwrap().clone());
@@ -3888,7 +4725,7 @@ fn a_child_with_a_workspace_is_refused_naming_root_true() {
             refused
                 .text
                 .starts_with("refused: a child works where you work")
-                && refused.text.contains("\"root\": true"),
+                && refused.text.contains("\"kind\": \"led\""),
             "{place}: {}",
             refused.text
         );
@@ -3906,7 +4743,7 @@ fn a_child_naming_its_parent_s_own_workspace_works_there() {
 
     let launched = lead.call(
         "agent_launch",
-        json!({"title": "worker", "brief": "Write the tests.", "workspace": "login"}),
+        json!({"kind": "child", "title": "worker", "brief": "Write the tests.", "workspace": "login"}),
     );
 
     assert!(!launched.error, "{}", launched.text);
@@ -3918,7 +4755,7 @@ fn a_child_naming_its_parent_s_own_workspace_works_there() {
 }
 
 #[test]
-fn agent_launch_leads_with_the_session_form_for_work_in_a_workspace() {
+fn agent_launch_names_each_kind_with_a_call_of_each() {
     let user = user();
     on_github(&user);
     let (_, lead) = root_in(&user, None);
@@ -3929,14 +4766,18 @@ fn agent_launch_leads_with_the_session_form_for_work_in_a_workspace() {
         .find(|tool| tool["name"] == "agent_launch")
         .unwrap();
     let description = launch["description"].as_str().unwrap();
-    assert!(
-        description.starts_with("Work that belongs in a workspace is a session"),
-        "{description}"
-    );
-    assert!(
-        description.contains("\"root\": true, \"workspace\": \"login\""),
-        "{description}"
-    );
+    assert!(description.starts_with("kind (required)"), "{description}");
+    for said in [
+        "child, a part of your own task",
+        "led, an autonomous job of its own that you pilot",
+        "handed, a session you start for the user and let go",
+        "{\"kind\": \"child\", \"title\": \"Write the tests\"",
+        "{\"kind\": \"led\", \"title\": \"Fix login\", \"brief\": \"...\", \"workspace\": \"login\"}",
+        "{\"kind\": \"handed\", \"title\": \"Add API\"",
+    ] {
+        assert!(description.contains(said), "{said}: {description}");
+    }
+    assert_eq!(launch["inputSchema"]["required"][0], "kind");
 }
 
 #[test]
@@ -4019,15 +4860,13 @@ fn session_send_from_the_starter_reaches_the_session_labelled_and_its_answer_com
 }
 
 #[test]
-fn session_send_to_any_other_session_is_refused() {
+fn session_send_to_a_child_or_to_itself_is_refused() {
     let user = judged_user();
     let (lead, mcp, session, second) = lead_and_session(&user);
-    // A session the user started, which neither of them started.
-    let (other, _) = root_in(&user, None);
     // A child of the lead's.
     let child = mcp.call(
         "agent_launch",
-        json!({"title": "worker", "brief": "Write the tests."}),
+        json!({"kind": "child", "title": "worker", "brief": "Write the tests."}),
     );
     assert!(!child.error, "{}", child.text);
     let child = agents(&user)
@@ -4039,28 +4878,23 @@ fn session_send_to_any_other_session_is_refused() {
         .to_owned();
     let judged = judge_prompts(&user).len();
 
-    for (from, to) in [
-        (&mcp, &other),
-        (&mcp, &child),
-        (&mcp, &lead),
-        (&second, &other),
-        (&second, &session),
+    for (from, to, said) in [
+        (&mcp, &child, "is one of your children"),
+        (&second, &child, "is a child of another session"),
+        (&mcp, &lead, "is your own session"),
+        (&second, &session, "is your own session"),
     ] {
         let refused = from.call("session_send", json!({"session": to, "text": "Hello."}));
         assert!(refused.error, "{to}: {}", refused.text);
         assert!(
-            refused.text.starts_with(&format!(
-                "refused: {to} is neither a session you started nor the agent that started you"
-            )),
+            refused.text.starts_with(&format!("refused: {to} {said}")),
             "{}",
             refused.text
         );
     }
     assert_eq!(judge_prompts(&user).len(), judged, "the judge was asked");
     assert!(no_request(&user));
-    for agent in [&other, &child] {
-        assert!(delivered(&user, agent, "session").is_empty());
-    }
+    assert!(delivered(&user, &child, "session").is_empty());
 }
 
 #[test]
@@ -4072,7 +4906,7 @@ fn session_send_in_ask_is_a_card_that_shows_the_message_whole() {
         .unwrap();
     let launched = mcp.call(
         "agent_launch",
-        json!({"title": "Login", "brief": "Fix the login.", "workspace": "login", "follow": false, "root": true}),
+        json!({"title": "Login", "brief": "Fix the login.", "workspace": "login", "kind": "handed"}),
     );
     allow(&user, held(&launched));
     let session = agents(&user)
@@ -4900,7 +5734,7 @@ fn a_root_in_a_workspace_starts_a_session_in_main() {
 
     let number = held(&mcp.call(
         "agent_launch",
-        json!({"title": "Study", "brief": "Read the code.", "workspace": "main", "root": true, "follow": false}),
+        json!({"title": "Study", "brief": "Read the code.", "workspace": "main", "kind": "handed"}),
     ));
     let done = allow(&user, number);
 
@@ -4928,12 +5762,14 @@ fn the_gate_is_told_the_session_starts_in_main() {
 
     held(&mcp.call(
         "agent_launch",
-        json!({"title": "Study", "brief": "Read the code.", "workspace": "main", "root": true, "follow": false}),
+        json!({"title": "Study", "brief": "Read the code.", "workspace": "main", "kind": "handed"}),
     ));
 
     let says = says_of_the_request(&user);
     assert!(
-        says.contains("Start a session for the user in main, the project folder: \\\"Study\\\""),
+        says.contains(
+            "Start a session for the user, handed over, in main, the project folder: \\\"Study\\\""
+        ),
         "{says}"
     );
     assert!(!says.contains("the workspace main"), "{says}");
@@ -4953,7 +5789,7 @@ fn a_workspace_cannot_be_named_main() {
         ("workspace", json!({"action": "create", "name": "main"})),
         (
             "agent_launch",
-            json!({"title": "Study", "brief": "Read.", "new_workspace": "main", "root": true, "follow": false}),
+            json!({"title": "Study", "brief": "Read.", "new_workspace": "main", "kind": "handed"}),
         ),
     ] {
         let refused = mcp.call(tool, call);
@@ -5001,7 +5837,7 @@ fn a_project_with_an_old_workspace_named_main_keeps_it() {
 
     let number = held(&mcp.call(
         "agent_launch",
-        json!({"title": "Study", "brief": "Read the code.", "workspace": "main", "root": true, "follow": false}),
+        json!({"title": "Study", "brief": "Read the code.", "workspace": "main", "kind": "handed"}),
     ));
 
     let says = says_of_the_request(&user);
@@ -5030,7 +5866,7 @@ fn a_child_still_cannot_be_launched_in_main_from_a_workspace() {
 
     let refused = lead.call(
         "agent_launch",
-        json!({"title": "worker", "brief": "Read the code.", "workspace": "main"}),
+        json!({"kind": "child", "title": "worker", "brief": "Read the code.", "workspace": "main"}),
     );
 
     assert!(refused.error, "{}", refused.text);

@@ -358,6 +358,30 @@ fn view_of(dir: &std::path::Path, fields: Option<&str>) -> Value {
 }
 
 #[test]
+fn a_view_gives_the_scripted_attachments_only_when_asked_for_them_and_a_comment_keeps_its_media() {
+    let attachment = json!({"id": "10001", "filename": "image-20260101-120000.png",
+        "mimeType": "image/png", "size": 97717, "created": "2026-01-01T12:00:00.000+0100",
+        "author": {"displayName": "Ana Example"},
+        "content": "https://example.atlassian.net/rest/api/3/attachment/content/10001"});
+    let media = json!({"type": "mediaSingle", "content": [{"type": "media", "attrs": {
+        "alt": "image-20260101-120000.png", "type": "file",
+        "id": "00000000-0000-4000-8000-000000000001"}}]});
+    let dir = scripted(json!({"items": {"ABC-1": {"key": "ABC-1", "fields": {
+        "attachment": [attachment.clone()],
+        "comment": {"comments": [{"body": {"type": "doc", "content": [media.clone()]}}]}}}}}));
+
+    let without = view_of(dir.path(), Some("comment"));
+    let with = view_of(dir.path(), Some("comment,attachment"));
+
+    assert_eq!(without["fields"].get("attachment"), None);
+    assert_eq!(with["fields"]["attachment"], json!([attachment]));
+    assert_eq!(
+        with["fields"]["comment"]["comments"][0]["body"]["content"],
+        json!([media])
+    );
+}
+
+#[test]
 fn a_view_shows_the_fields_it_was_asked_for_beside_its_key_and_self() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -452,4 +476,190 @@ fn a_project_view_gives_the_scripted_types_and_a_creation_of_another_type_ends_w
         Some(0),
         "no types scripted, none checked"
     );
+}
+
+#[test]
+fn a_project_s_boards_and_their_open_sprints_follow_the_script() {
+    let dir = scripted(json!({
+        "boards": {"ABC": [{"id": 7, "name": "ABC board", "type": "scrum"},
+            {"id": 8, "name": "ABC kanban", "type": "simple"}]},
+        "sprints": {"7": [{"id": 41, "name": "Sprint 41", "state": "closed"},
+            {"id": 42, "name": "Sprint 42", "state": "active"},
+            {"id": 43, "name": "Sprint 43", "state": "future"}]}}));
+    let run = |args: &[&str]| fake(dir.path()).args(args).output().unwrap();
+
+    let boards = run(&["jira", "board", "search", "--project", "ABC", "--json"]);
+    let none = run(&["jira", "board", "search", "--project", "XYZ", "--json"]);
+    let open = run(&[
+        "jira",
+        "board",
+        "list-sprints",
+        "--id",
+        "7",
+        "--state",
+        "active,future",
+        "--json",
+    ]);
+    let kanban = run(&["jira", "board", "list-sprints", "--id", "8", "--json"]);
+
+    let boards: Value = serde_json::from_slice(&boards.stdout).unwrap();
+    assert_eq!(boards["values"][0]["name"], "ABC board");
+    assert_eq!(boards["values"].as_array().unwrap().len(), 2);
+    let none: Value = serde_json::from_slice(&none.stdout).unwrap();
+    assert_eq!(none["values"], json!([]));
+    let open: Value = serde_json::from_slice(&open.stdout).unwrap();
+    let names: Vec<&str> = open["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["Sprint 42", "Sprint 43"]);
+    // As a real site answers for a board without sprints.
+    assert_eq!(kanban.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&kanban.stderr).contains("does not support sprints"));
+}
+
+#[test]
+fn an_assignee_the_site_does_not_know_is_refused_as_the_real_one_does() {
+    let dir = scripted(json!({"users": ["ana@example.org"]}));
+    let run = |args: &[&str]| {
+        let mut all = vec!["jira", "workitem"];
+        all.extend(args);
+        fake(dir.path()).args(all).output().unwrap()
+    };
+    let create = |who: &str| {
+        run(&[
+            "create",
+            "--project",
+            "ABC",
+            "--summary",
+            "S",
+            "--assignee",
+            who,
+            "--json",
+        ])
+    };
+
+    let known = create("ana@example.org");
+    let me = create("@me");
+    let unknown = create("bob@example.org");
+    let name = create("Kristen");
+    let edited = run(&[
+        "edit",
+        "--key",
+        "ABC-1",
+        "--assignee",
+        "bob@example.org",
+        "--yes",
+    ]);
+
+    assert!(known.status.success());
+    assert!(me.status.success());
+    assert_eq!(unknown.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&unknown.stderr)
+            .contains("User not found for email: bob@example.org")
+    );
+    assert_eq!(name.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&name.stderr).contains("invalid format for assignee email"));
+    // The real `edit` is a bulk command: it ends with 0 and says its failure on its output.
+    assert!(edited.status.success());
+    assert!(
+        String::from_utf8_lossy(&edited.stdout).starts_with("✗ Failure: ABC-1 can't be edited")
+    );
+}
+
+#[test]
+fn a_creation_from_json_is_recorded_and_needs_its_type() {
+    let dir = scripted(json!({"created": "ABC-11"}));
+    let file = dir.path().join("item.json");
+    let create = |item: Value| {
+        std::fs::write(&file, item.to_string()).unwrap();
+        fake(dir.path())
+            .args(["jira", "workitem", "create", "--from-json"])
+            .arg(&file)
+            .arg("--json")
+            .output()
+            .unwrap()
+    };
+
+    let made = create(json!({"projectKey": "ABC", "summary": "S", "type": "Task",
+        "additionalAttributes": {"customfield_10020": 42}}));
+    let untyped = create(json!({"projectKey": "ABC", "summary": "S"}));
+    let me =
+        create(json!({"projectKey": "ABC", "summary": "S", "type": "Task", "assignee": "@me"}));
+
+    assert_eq!(
+        serde_json::from_slice::<Value>(&made.stdout).unwrap()["key"],
+        "ABC-11"
+    );
+    assert_eq!(untyped.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&untyped.stderr)
+            .contains("no value given for required property type")
+    );
+    // As measured: `@me` is acli's flag's, not its JSON's.
+    assert_eq!(me.status.code(), Some(1));
+    let received = std::fs::read_to_string(dir.path().join("received.jsonl")).unwrap();
+    let first: Value = serde_json::from_str(received.lines().next().unwrap()).unwrap();
+    assert_eq!(
+        first["files"][0]["json"]["additionalAttributes"]["customfield_10020"],
+        42
+    );
+}
+
+#[test]
+fn a_view_asked_the_navigable_fields_gives_them_all() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("script.json"),
+        json!({"items": {"ABC-1": {"key": "ABC-1",
+            "fields": {"summary": "Log in", "customfield_10020": [{"id": 42}]}}}})
+        .to_string(),
+    )
+    .unwrap();
+
+    let all = view_of(dir.path(), Some("summary,*navigable"));
+
+    assert_eq!(all["fields"]["customfield_10020"][0]["id"], 42);
+}
+
+#[test]
+fn a_creation_the_script_says_answers_no_key_prints_what_the_script_says() {
+    let dir = scripted(json!({"created_said": "✓ Work item created"}));
+    let file = dir.path().join("item.json");
+    std::fs::write(
+        &file,
+        json!({"projectKey": "ABC", "summary": "S", "type": "Task"}).to_string(),
+    )
+    .unwrap();
+
+    let from_json = fake(dir.path())
+        .args(["jira", "workitem", "create", "--from-json"])
+        .arg(&file)
+        .arg("--json")
+        .output()
+        .unwrap();
+    let flags = fake(dir.path())
+        .args([
+            "jira",
+            "workitem",
+            "create",
+            "--project",
+            "ABC",
+            "--summary",
+            "S",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+
+    for output in [from_json, flags] {
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "✓ Work item created"
+        );
+    }
 }

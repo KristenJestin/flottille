@@ -4,6 +4,8 @@
 //! cleaned of what makes a log unreadable, and masked before it is kept.
 
 use super::bitbucket::{self, Contexts};
+use serde_json::Value;
+
 use super::{Forge, Job, Log, gh_text};
 
 /// The lines of a log that are given, counted from its end.
@@ -57,9 +59,9 @@ pub(super) async fn attach(forge: &Forge, jobs: &mut [Job]) {
                     None => "it is not a GitHub Actions job".into(),
                 })),
                 Some(_) if asked == JOBS => Plan::Said(Err(too_many())),
-                Some(id) => {
+                Some((run, job)) => {
                     asked += 1;
-                    Plan::Read(Source::GitHub(id))
+                    Plan::Read(Source::GitHub(run, job))
                 }
             },
         });
@@ -70,17 +72,18 @@ pub(super) async fn attach(forge: &Forge, jobs: &mut [Job]) {
             Plan::Read(Source::Bitbucket(context, build)) => {
                 Some(bitbucket::failed_step_log(forge, context, *build).await)
             }
-            Plan::Read(Source::GitHub(id)) => Some(
+            Plan::Read(Source::GitHub(_, job)) => Some(
                 gh_text(&[
                     "run",
                     "view",
                     "--job",
-                    &id.to_string(),
+                    &job.to_string(),
                     "--log-failed",
                     "-R",
                     &forge.gh_repository(),
                 ])
-                .await,
+                .await
+                .map(|log| (job.to_string(), log)),
             ),
         }
     }))
@@ -91,12 +94,15 @@ pub(super) async fn attach(forge: &Forge, jobs: &mut [Job]) {
         let log = match (plan, raw) {
             (Plan::Said(said), _) => said,
             (Plan::Read(_), _) if left == 0 => Err(too_many()),
-            (Plan::Read(Source::Bitbucket(..)), Some(raw)) => {
-                raw.and_then(|raw| tail_with(&raw, JOB_BYTES.min(left), plain, bitbucket_part))
-            }
-            (Plan::Read(Source::GitHub(_)), Some(raw)) => {
-                raw.and_then(|raw| tail_with(&raw, JOB_BYTES.min(left), clean, github_part))
-            }
+            (Plan::Read(source), Some(raw)) => raw.and_then(|(step, raw)| {
+                let (run, line_of, part_of): (_, fn(&str) -> String, PartOf) = match source {
+                    Source::Bitbucket(_, build) => (build, plain, bitbucket_part),
+                    Source::GitHub(run, _) => (run, clean, github_part),
+                };
+                let mut log = tail_with(&raw, JOB_BYTES.min(left), line_of, part_of)?;
+                log.whole = Some((run, step));
+                Ok(log)
+            }),
             (Plan::Read(_), None) => unreachable!("a log to read was read"),
         };
         if let Ok(log) = &log {
@@ -115,21 +121,23 @@ enum Plan {
 enum Source {
     /// The context to name and the build.
     Bitbucket(String, u64),
-    /// The job's id.
-    GitHub(u64),
+    /// The run and the job's id.
+    GitHub(u64, u64),
 }
+
+/// What finds the failing command's lines among a log's.
+type PartOf = fn(&[String]) -> Option<Vec<String>>;
 
 fn too_many() -> String {
     format!("at most {JOBS} logs and {TOTAL_BYTES} bytes are given")
 }
 
-/// The job a check's link names: `…/actions/runs/<run>/job/<job>`.
-fn actions_job(link: Option<&str>) -> Option<u64> {
+/// The run and the job a check's link names: `…/actions/runs/<run>/job/<job>`.
+fn actions_job(link: Option<&str>) -> Option<(u64, u64)> {
     let (_, rest) = link?.split_once("/actions/runs/")?;
     let (run, job) = rest.split_once("/job/")?;
-    run.bytes().all(|b| b.is_ascii_digit()).then_some(())?;
     let digits: String = job.chars().take_while(char::is_ascii_digit).collect();
-    digits.parse().ok()
+    Some((run.parse().ok()?, digits.parse().ok()?))
 }
 
 /// The end of `raw`, cleaned: at most `LINES` lines and `bytes` bytes of text, the oldest lines
@@ -140,7 +148,7 @@ fn tail_with(
     raw: &str,
     bytes: usize,
     line_of: fn(&str) -> String,
-    part_of: fn(&[String]) -> Option<Vec<String>>,
+    part_of: PartOf,
 ) -> Result<Log, String> {
     let mut lines: Vec<String> = raw.lines().map(line_of).collect();
     trim(&mut lines);
@@ -175,6 +183,7 @@ fn tail_with(
         shown: lines.len(),
         total,
         part: found,
+        whole: None,
         text: lines.join("\n"),
     })
 }
@@ -203,24 +212,39 @@ const ENVIRONMENT: [&str; 4] = ["env", "printenv", "export", "set"];
 const LISTING: usize = 3;
 
 /// The lines of the failing command in a Bitbucket Pipelines step log (`docs/forges.md`, "Why a
-/// check failed"): from the last command echoed (`+ <command>`) that is not an environment
-/// listing, to the teardown or to a command that lists the environment. The `NAME=value` listings
-/// in between are left out. None when no command is echoed.
+/// check failed"): the output of the first command echoed (`+ <command>`, an environment listing
+/// excepted) that printed an error-looking line, else of the last one, from the command line to
+/// the next command, the teardown or the end. The commands of an `after-script` are echoed after
+/// the failed one, so the last command is not the failing one; the log does not tell them apart.
+/// The `NAME=value` listings in between are left out. None when no command is echoed.
 fn bitbucket_part(lines: &[String]) -> Option<Vec<String>> {
     fn command(line: &str) -> Option<&str> {
         line.strip_prefix("+ ").map(str::trim)
     }
     let lists =
         |command: &str| ENVIRONMENT.contains(&command.split_whitespace().next().unwrap_or(""));
-    let from = lines
-        .iter()
-        .rposition(|line| command(line).is_some_and(|command| !lists(command)))?;
-    let to = lines[from + 1..]
-        .iter()
-        .position(|line| {
-            TEARDOWN.iter().any(|mark| line.starts_with(mark)) || command(line).is_some_and(lists)
+    // Each command and where its output ends.
+    let commands: Vec<(usize, usize)> = (0..lines.len())
+        .filter(|&at| command(&lines[at]).is_some_and(|command| !lists(command)))
+        .map(|from| {
+            let to = lines[from + 1..]
+                .iter()
+                .position(|line| {
+                    TEARDOWN.iter().any(|mark| line.starts_with(mark)) || command(line).is_some()
+                })
+                .map_or(lines.len(), |at| from + 1 + at);
+            (from, to)
         })
-        .map_or(lines.len(), |at| from + 1 + at);
+        .collect();
+    let (from, to) = commands
+        .iter()
+        .copied()
+        .find(|&(from, to)| {
+            lines[from + 1..to]
+                .iter()
+                .any(|line| looks_like_error(line))
+        })
+        .or(commands.last().copied())?;
     let part = &lines[from..to];
     let mut kept = Vec::with_capacity(part.len());
     let mut at = 0;
@@ -324,6 +348,30 @@ fn is_timestamp(word: &str) -> bool {
         && bytes[..4].iter().all(u8::is_ascii_digit)
 }
 
+/// Whether a line looks like the one that says why a command failed: the words `error`, `failed`
+/// or `panicked`, whole, in any case. Passing lines (`... ok`, `0 failed`, `thiserror`) and the
+/// runner's exit code, which says nothing of why, do not.
+fn looks_like_error(line: &str) -> bool {
+    let line = line.trim();
+    if line.ends_with("... ok") || line.starts_with("##[error]Process completed") {
+        return false;
+    }
+    let words: Vec<String> = line
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    words
+        .iter()
+        .enumerate()
+        .any(|(at, word)| match word.as_str() {
+            "error" | "panicked" => true,
+            // "0 failed" counts what did not fail.
+            "failed" => at == 0 || words[at - 1] != "0",
+            _ => false,
+        })
+}
+
 /// The line of `log` that says why its job failed, for a wake: the first that looks like an error
 /// (the words `error`, `failed` or `panicked`, whole, in any case), else the last line of the log.
 /// Passing lines are no candidate: `... ok`, `0 failed`, `thiserror`; nor is the runner's exit
@@ -334,28 +382,9 @@ pub(super) fn why(log: &Log) -> Option<String> {
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty());
-    let looks_like_error = |line: &&str| {
-        if line.ends_with("... ok") || line.starts_with("##[error]Process completed") {
-            return false;
-        }
-        let words: Vec<String> = line
-            .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .filter(|word| !word.is_empty())
-            .map(str::to_lowercase)
-            .collect();
-        words
-            .iter()
-            .enumerate()
-            .any(|(at, word)| match word.as_str() {
-                "error" | "panicked" => true,
-                // "0 failed" counts what did not fail.
-                "failed" => at == 0 || words[at - 1] != "0",
-                _ => false,
-            })
-    };
     lines
         .clone()
-        .find(looks_like_error)
+        .find(|line| looks_like_error(line))
         .or_else(|| lines.clone().next_back())
         .map(cut)
 }
@@ -369,9 +398,18 @@ fn cut(line: &str) -> String {
     }
 }
 
+/// How to read a job's whole log: the exact call, since the excerpt is only its end.
+pub(super) fn read_whole(repository: &str, (run, step): &(u64, String)) -> String {
+    format!(
+        "Read the whole log with forge {{\"action\": \"run_logs\", \"repository\": {}, \"run\": {run}, \"step\": {}}}.",
+        Value::from(repository),
+        Value::from(step.as_str())
+    )
+}
+
 /// The failed jobs of a pull request, as `forge show` says them: the end of each log, or why there
 /// is none. Nothing for a pull request with no failed job.
-pub(super) fn text(jobs: &[Job]) -> String {
+pub(super) fn text(jobs: &[Job], repository: &str) -> String {
     if jobs.is_empty() {
         return String::new();
     }
@@ -390,6 +428,9 @@ pub(super) fn text(jobs: &[Job]) -> String {
                 ));
                 for line in log.text.lines() {
                     text.push_str(&format!("    {line}\n"));
+                }
+                if let Some(whole) = &log.whole {
+                    text.push_str(&format!("    {}\n", read_whole(repository, whole)));
                 }
             }
             Some(Err(why)) => text.push_str(&format!("  - {}: no log: {why}\n", job.name)),
@@ -422,11 +463,11 @@ mod tests {
         for (link, job) in [
             (
                 "https://github.com/acme/api/actions/runs/900/job/456",
-                Some(456),
+                Some((900, 456)),
             ),
             (
                 "https://github.com/acme/api/actions/runs/900/job/456?pr=12",
-                Some(456),
+                Some((900, 456)),
             ),
             ("https://github.com/acme/api/actions/runs/900", None),
             ("https://ci.example.com/builds/5", None),
@@ -495,6 +536,44 @@ mod tests {
             ["+ cargo test", FAILURE[0], FAILURE[1], FAILURE[2]]
         );
         assert_eq!((log.shown, log.total, log.part), (4, 4, true));
+    }
+
+    #[test]
+    fn a_bitbucket_step_with_an_after_script_shows_the_failed_script_command() {
+        // The after-script runs once the script has failed: its commands are echoed after the
+        // failed one, and one of them prints a line that looks like an error too.
+        let output: Vec<&str> = FAILURE
+            .into_iter()
+            .chain([
+                "+ ./cleanup.sh",
+                "removing the scratch folder",
+                "+ curl -X POST https://hooks.example.com/notify",
+                "error: the notification was refused",
+            ])
+            .collect();
+
+        let log = tail_with(&bitbucket_log(&output), 4000, plain, bitbucket_part).unwrap();
+
+        assert_eq!(
+            log.text.lines().collect::<Vec<_>>(),
+            ["+ cargo test", FAILURE[0], FAILURE[1], FAILURE[2]]
+        );
+        assert!(log.part);
+    }
+
+    #[test]
+    fn a_bitbucket_step_without_an_after_script_is_read_as_before() {
+        // The failing command is the last one echoed, whether or not an earlier one said "error".
+        let log = tail_with(&bitbucket_log(&FAILURE), 4000, plain, bitbucket_part).unwrap();
+        assert_eq!(log.text.lines().next(), Some("+ cargo test"));
+        assert_eq!(log.shown, 4);
+
+        let quiet = ["exit status 2"];
+        let log = tail_with(&bitbucket_log(&quiet), 4000, plain, bitbucket_part).unwrap();
+        assert_eq!(
+            log.text.lines().collect::<Vec<_>>(),
+            ["+ cargo test", "exit status 2"]
+        );
     }
 
     #[test]
@@ -597,6 +676,7 @@ mod tests {
             shown: text.lines().count(),
             total: text.lines().count(),
             part: true,
+            whole: None,
         }
     }
 

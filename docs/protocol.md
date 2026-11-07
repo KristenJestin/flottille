@@ -289,6 +289,17 @@ own branches when it has no such remote), or a dependency is on the repository i
 project lacks or closes a cycle (`projects/app.toml: repositories[0].depends_on: cycle web -> api
 -> web; nothing was saved`).
 
+#### `project.set_conventions`
+
+`{"name", "branch_format"?, "pull_request_template"?}`. Writes the project's branch format (the
+top-level `branch_format`) and pull request template (`[pull_requests]`'s `template`) in its file,
+where they stand (`docs/projects.md`, "Branch format", "Pull request template"): each is kept when
+left out and removed when empty (a template of blanks is empty). Answers `{"name",
+"branch_format", "pull_request_template"}`, `null` for one that is off; `project.settings` gives
+them too. `refused`, nothing written, when the branch format is not a regular expression, with the
+reason (`the branch format ^(feat is not a regular expression (unclosed group); nothing was
+saved`). It is the user's alone: no tool of an agent writes them.
+
 #### `project.set_message_checks`
 
 `{"name", "checks"}`. Writes the project's message checks (`docs/projects.md`, "Message checks"),
@@ -345,6 +356,44 @@ calls never do) nor of what its answer may be (`allow` or `ask`).
 - `judge.reset` removes the file and answers as `judge.show`.
 
 Each emits `judge.changed`. The user's door alone reaches them: no tool of an agent does.
+
+### The compaction methods
+
+`compaction.show`, `compaction.set`, `compaction.set_guidance`, `compaction.reset_guidance` and
+`compaction.noticed` read and keep Flottille's own compaction (`docs/design.md` §5.8):
+`compaction.toml` of Flottille's configuration folder, and the compactor's guidance in
+`compaction.md` beside it, absent while Flottille's default (`crates/flottille/roles/compaction.md`)
+holds. The guidance sits inside a fixed text (`crates/flottille/roles/compactor-base.md`).
+
+- `compaction.show` answers `{"compactor", "summary", "automatic", "threshold", "maximum", "kept",
+  "guidance"}`: who writes the summary (`compactor`, the default, or `agent`: the agent's own
+  handoff, `docs/design.md` §5.8, 7), the compactor `{"provider", "model", "effort", "picked"}` (`model` and `effort`
+  only when chosen, `picked` only while the user has not seen the notice of a compactor Flottille
+  picked) or `null` for none, whether it compacts by itself (default `true`), the threshold in
+  percent of the context window (default 70), the maximum size in tokens (`null`, the default, is
+  no ceiling), the tokens kept word for word (default 20000), and the guidance as `judge.show`
+  gives the judge's (`{"text", "source", "error", "default"}`). A user who never chose gets a
+  compactor picked first, as the Auto judge is (`provider.set_judge`): the smallest model of the
+  first provider enabled, installed and signed in among those Flottille lists, written once with
+  `picked = true` and said once with `compaction.changed`. `invalid-config` when the file holds
+  an unknown key or a value out of its range. It also gives the two triggers around the prompt
+  cache's expiry (`docs/design.md` §5.8, 6): `before_expiry` (default `false`), `margin` in
+  minutes (default 5), `after_expiry` (default `true`), `minimum` in tokens (default 50000), and
+  `lifetimes`, each provider's cache lifetime in seconds, `null` where it is not established.
+- `compaction.set` takes any of `compactor` (`{"provider", "model", "effort"}`, or `"none"`),
+  `summary` (`"compactor"` or `"agent"`), `automatic` (a boolean), `threshold` (50 to 95), `maximum` (a number of tokens from 20000, or
+  `"none"`), `kept` (0 to 50000, and never more than a quarter of the size that compacts the
+  agent), `before_expiry` and `after_expiry` (booleans), `margin` (1 to 30 minutes) and `minimum`
+  (0 to 1000000 tokens); what is left out stays. It answers as `compaction.show`;
+  `invalid-params` for anything else, `not-found` for an unknown provider. `compactor = "none"`
+  is a choice: no compactor is ever picked again.
+- `compaction.set_guidance {text}` writes the guidance (`refused` above 4,000 characters; an
+  empty text resets it); `compaction.reset_guidance` removes it. Both answer as
+  `compaction.show`.
+- `compaction.noticed` drops `picked`: the user saw the notice.
+
+Each that changes something emits `compaction.changed` with what `compaction.show` answers. The
+user's door alone reaches them: no tool of an agent does.
 
 ### The developer methods
 
@@ -556,6 +605,27 @@ Only the workspaces made afterwards follow a change; none is moved. `workspaces_
 `workspaces_folder.changed` with `{"project"}` (`null` for the default). The user's door alone
 reaches them: no tool of an agent does.
 
+### The vault methods
+
+The user's secrets, kept by the keyring, that agents use and never see (`docs/vault.md`). No
+method answers a secret, and an error about a call that carried one never repeats it. The user's
+door alone reaches them: an agent's only part is the `vault` tool, which lists.
+
+- `vault.list {project?}` answers `{"entries": [{"name", "description", "url", "username",
+  "project"}]}`, by name; with `project`, the entries its agents see (its own and every project's).
+- `vault.set {name, secret, description?, url?, username?, project?}` keeps the secret in the
+  keyring and the rest in the store, in place of the entry of that name if there is one, and
+  answers the entry as listed. `invalid-params` for a secret that is not a text; `refused` for a
+  name that is not letters, digits, `.`, `_` and `-` (64 at most) or a secret under 6 characters;
+  `not-found` for an unknown project; `unavailable` when the keyring cannot be reached, with its
+  reason. An empty `description`, `url`, `username` or `project` is left out.
+- `vault.remove {name}` deletes the secret from the keyring, then the entry, and answers
+  `{"removed": <entry>}`; `not-found` when there is none; `unavailable` when the keyring refuses
+  (locked), the entry then left whole.
+
+Both writes emit `vault.changed`, and give the agents of every project the tools their roles have
+now (`vault` is listed to an agent whose project sees an entry).
+
 ### The skill methods
 
 A project's skills (`docs/skills.md`). The daemon edits the project's file in place, the rest of it
@@ -671,7 +741,9 @@ out, `branch` is `<branch prefix>/<name>` when left out (the name alone when the
 out rather than started (`docs/workspaces.md`), `bases` (`{"api": "main"}`) gives a repository it takes
 the branch it starts from in place of its base rule, `offline: true` fetches nothing, and `ticket` (`#123`, `123`
 or a Jira key) links the workspace to a ticket (`tickets.md`); the workspace's `ticket` says it, in
-every answer that shows a workspace, `null` when it has none.
+every answer that shows a workspace, `null` when it has none. A branch outside the project's
+branch format is `refused`, naming the pattern, unless every repository resumes it
+(`docs/projects.md`, "Branch format"); so is `workspace.rename_branch` to one.
 
 `refused`, with nothing written nor made, when the name is not one, the ticket is not one, a
 repository is not the project's, a base is chosen for a repository it does not take or is not a
@@ -783,6 +855,7 @@ checks. A Bitbucket pull request also has `reviewers`, each `{"name", "state"}` 
   "description": "Users cannot sign in.",
   "comments": [{"author": "alice", "at": "2026-10-01T10:00:00Z", "body": "I can reproduce"}],
   "older_comments": 0,
+  "attachments": [],
   "read_at": 1792843730808,
   "problem": null
 }
@@ -793,7 +866,9 @@ checks. A Bitbucket pull request also has `reviewers`, each `{"name", "state"}` 
 is in, `null` for Jira; `state` is `open` or `closed` for GitHub and Jira's own status name for
 Jira. When the ticket cannot be read (`gh` or `acli` missing, not signed in, no such ticket, a call
 that failed), `problem` says why and with what to do, and the fields of the ticket are absent. All
-the tracker's text is masked. Nothing is kept: every call reads again.
+the tracker's text is masked. `attachments` are the files of a Jira work item, `[{"name", "type",
+"bytes", "author", "at"}]`, named only (Flottille never fetches one), empty for GitHub. Nothing is
+kept: every call reads again.
 
 #### `workspace.link_ticket`
 
@@ -830,7 +905,8 @@ gone: `branches` says, for each repository that still had the workspace's local 
 was deleted because its work landed and why (`"it has no commit of its own"`, `"its pull request
 #12 is merged"`), or why it is kept (`"its pull request #12 is open, not merged"`, `"the forge
 cannot say whether it is merged: …"`); the remote branch is never deleted (`docs/workspaces.md`,
-"Removal"). `refused`, with nothing touched, while it is being prepared, or when a worktree holds a
+"Removal"). `refused`, with nothing touched, while it is being prepared or removed, while an agent
+not ended or a command run works in it (each named), or when a worktree holds a
 changed or untracked file or a commit on no remote, unless the forge says the branch's pull
 request merged it: the message names every one, and the branch that holds the commit.
 
@@ -916,7 +992,7 @@ matter's or the first line of its text).
 
 A project's tasks (`docs/projects.md`, "Tasks"), as its Settings edit them. A task in a result is
 `{"name", "line", "repository", "serve", "check", "read_only", "ask_before_running", "ready",
-"url"}`, `repository` `null` for the place's top, `ready` `null` or `{"line"}`, `{"url"}` or
+"url", "needs"}`, `repository` `null` for the place's top, `needs` the services it needs (none: `[]`), `ready` `null` or `{"line"}`, `{"url"}` or
 `{"command"}`, `url` `null`, an address or `{"command"}` (`docs/projects.md`, "Tasks"). Each write is checked as the file is, and written under
 `[tasks.<name>]` where it stands, what is around it kept, a flag that is off left out.
 `not-found` for a project or a task that does not exist, `refused` for a task the file would
@@ -933,13 +1009,13 @@ refuse, `invalid-config` when the project's file cannot be used.
 #### `task.add`
 
 `{"project", "name", "line", "repository"?, "serve"?, "check"?, "read_only"?,
-"ask_before_running"?, "ready"?, "url"?}`: the task. `refused` when the project has one of that
-name.
+"ask_before_running"?, "ready"?, "url"?, "needs"?}`: the task. `refused` when the project has one of that
+name, or `needs` names a service `services.toml` does not hold.
 
 #### `task.edit`
 
 `{"project", "name", "line"?, "repository"?, "serve"?, "check"?, "read_only"?,
-"ask_before_running"?, "ready"?, "url"?}`: what is given replaces what the task had
+"ask_before_running"?, "ready"?, "url"?, "needs"?}`: what is given replaces what the task had
 (`repository: null` puts it back at the top; `ready` or `url` `null` or `""` removes it). Answers
 the task.
 
@@ -952,7 +1028,87 @@ the task.
 `{"project", "name"}`: `{"project", "name", "run"}`, at once. The user runs the task in the
 project folder with the project's variables, as a run of no agent: no gate, no delivery
 (`docs/tools.md`, "Tasks and runs"). A task that keeps running (`serve`) and already runs for the
-user is joined: its run is answered. It is followed with the run methods.
+user is joined: its run is answered. It is followed with the run methods. The services the task
+needs are started first and waited for (`docs/projects.md`, "Services"): `refused` naming the
+service that failed, or was not ready in time, and why.
+
+### The service methods
+
+The services of the machine (`docs/projects.md`, "Services"), kept in `services.toml`. A service in
+a result:
+
+```json
+{
+  "name": "auth",
+  "folder": "/home/me/work/auth-api",
+  "line": "npm run start:dev",
+  "needs": ["mongo"],
+  "ready": {"url": "{url}"},
+  "url": "http://localhost:3001",
+  "ask_before_running": false,
+  "state": "ready",
+  "why": null,
+  "run": "5d2c0f1a9b3e",
+  "address": "http://localhost:3001",
+  "needs_stopped": [],
+  "needed_by": [{"project": "app", "tasks": ["api"]}]
+}
+```
+
+`folder` is where it runs, absolute (the home when the file names none); `ready` and `url` are
+as the file says them. `state` is `stopped`, `starting`, `ready`, `running` (it says no ready),
+`outside` (it answered before Flottille started it) or `failed`, `why` then the line that says why.
+`run` is its run, going on or the last one, read with the run methods' `run.output` too; a
+service's run has an empty `project` and is not listed by `run.list`. `address` is its run's
+address, or the file's. `needs_stopped` lists what it needs that does not run. `needed_by` lists
+the projects whose tasks need it, directly or through another service's `needs`, each with those
+tasks. `not-found` for a
+service the file does not hold, `invalid-config` when the file cannot be used, `refused` for a
+write the file would refuse (nothing is written).
+
+#### `service.list`
+
+`{}`: `{"services": [...]}`, by name.
+
+#### `service.show`
+
+`{"name"}`: the service.
+
+#### `service.add`
+
+`{"name", "line", "folder"?, "needs"?, "ready"?, "url"?, "ask_before_running"?}`: the service,
+written under `[services.<name>]`, what is around it kept. `refused` when there is one of that
+name. Emits `service.changed`.
+
+#### `service.edit`
+
+`{"name", "line"?, "folder"?, "needs"?, "ready"?, "url"?, "ask_before_running"?}`: what is given
+replaces what the service had (`folder`, `ready` or `url` `null` or `""` removes it). Answers the
+service. Emits `service.changed`.
+
+#### `service.remove`
+
+`{"name"}`: `{"removed": "<name>"}`. `refused` while another service or a project's task needs
+it, naming them. Emits `service.changed`.
+
+#### `service.start`
+
+`{"name"}`: `{"service": {...}, "started": [names]}`, once it started: what it needs first, each
+waited for until it is ready, then the service itself, not waited for. A service that runs is not
+started again (`started` is empty), nor one that answers already (its state is then `outside`).
+`refused` naming the service that failed and why. Emits `service.started` for each it starts.
+
+#### `service.stop`
+
+`{"name"}`: `{"service": {...}}`, once it ended: its whole process group, as `run.stop` does.
+What it needs and what needs it go on. `refused` when it is not running, or runs outside
+Flottille, which does not stop it.
+
+#### `service.output`
+
+`{"name", "tail"?}`: `{"service", "run", "output", "earlier"}`, the last `tail` lines (200 by
+default, 1 to 1000) of what its run wrote, masked, `earlier` whether lines before them were left
+out; `run` and an empty `output` when it never ran.
 
 ### The setup methods
 
@@ -1002,6 +1158,9 @@ there. An agent in a result:
   "title": null,
   "brief": null,
   "launched_by": null,
+  "led": false,
+  "led_by": null,
+  "detached_from": null,
   "reported_at": null,
   "quiet_turns": 0,
   "waiting_on_answer": false,
@@ -1043,9 +1202,13 @@ runs an older list than that. `parent` is the agent that
 launched it (`null` for a root), `depth` its depth in the tree, `epoch` the number of its session
 (each replacement adds one), `title` and `brief` a child's task, `launched_by` the id of the agent
 that started a root for the user (`null` for a root the user started, and for a child), whose
-`brief` is then that agent's first message, never the user's, `reported_at` when it reported,
+`brief` is then that agent's first message, never the user's, `led` whether that agent leads it
+(`led_by` its id, `null` for a session handed to the user, `docs/tools.md`, "Sessions an agent
+starts"), `detached_from` the agent the user detached it from (`agent.detach`; `launched_by` is
+then `null`), `reported_at` when it reported,
 `quiet_turns` its turns ended without a report in a row, `waiting_on_answer` whether a question of
-it waits for an answer: a child's from its parent, a root's from the user, until that one writes to
+it waits for an answer: a child's from its parent, a led session's from its pilot, any other
+root's from the user, until that one writes to
 it (`docs/agents.md`, "The tree"). `gate_mode` is its session's mode, `ask` or `auto`
 (`agent.mode`).
 
@@ -1053,9 +1216,16 @@ Each method answers `not-found` when the agent does not exist.
 
 #### `agent.start`
 
-`{"project", "workspace"?, "provider"?, "model"?, "effort"?, "mode"?, "role"?, "message"}`. Creates
-a root agent in the project folder or the workspace, and gives it its first message: `{"agent",
-"after"}`. `role` is `lead` (the default) or `worker`. `provider` is the project's, else the first
+`{"project", "workspace"?, "provider"?, "model"?, "effort"?, "mode"?, "role"?, "message", "images"?}`.
+Creates a root agent in the project folder or the workspace, and gives it its first message:
+`{"agent", "after"}`. `images` is as in `agent.send`, and goes with the first message; with
+images, the message may be empty (pictures alone are a first message). They are judged and stored
+before the agent exists, so that one refused, or one that cannot be stored, starts none, and a
+session replaced is given them again with its first message. A provider whose last agent that
+started said it takes no images (`images: false` in `provider.list`) is refused them (`refused`,
+"the agent of `<provider>` takes no images"); while none of its agents has said, they go with the
+message, and an agent that takes none says so in the text it keeps ("`[n images not sent: this
+agent takes no images]`"). `role` is `lead` (the default) or `worker`. `provider` is the project's, else the first
 one enabled, when left out; `model` the project's when the provider is the project's, else the
 provider's default; `model` and `effort` are values of the session's options, as the provider
 lists them (`provider.list`). `not-found` when the project or the workspace does not exist;
@@ -1072,7 +1242,7 @@ A message `/name rest`, where name is one of the project's commands, is sent as 
 
 #### `agent.send`
 
-`{"agent", "message", "images"?}`. Gives the agent a message (a `user` delivery), played after the turn that
+`{"agent", "message", "images"?, "compact"?}`. Gives the agent a message (a `user` delivery), played after the turn that
 runs if one does, starting its process again when it was released: `{"agent", "after",
 "delivery"}`. `delivery` is the id of the delivery stored for the message: its `delivery.queued`
 event (numbered after `after`), then `delivery.sent` when a prompt takes it (`docs/events.md`), name
@@ -1080,6 +1250,10 @@ it, so that a client follows the turn of its own message even when another clien
 agent at the same time.
 `refused` when the agent is in a final state, the message is empty, or the agent is a child: only
 its parent writes to it, and the sentence names its root.
+
+`compact` is the composer's **Compact before sending**: when the agent's prompt cache expired
+(`agent.cache_expired`), `true` compacts it before the turn the message starts and `false` sends it
+to the session as it is, whatever the setting `after_expiry`; left out, the setting decides.
 
 `images` is a list of `{"mime", "data"}`, `data` the image's bytes in base64: a pasted or dropped
 picture, sent as ACP image blocks after the message's text. With images, the message may be
@@ -1151,6 +1325,43 @@ whose session was forgotten (7 days after it ended), one whose workspace or proj
 `resumable` says, in short (`agent.tree`); and one whose last process is still stopping
 (`stopping`), with a sentence to try again in a moment.
 
+#### `agent.reload_tools`
+
+`{"agent"}`. Reloads a root's tools (`docs/tools.md`, "When the tools change"): `{"agent",
+"after_turn"}`. Its process is let go between turns, as after an idle release
+(`agent.released`, reason `reload`), and the next message starts the next one, which resumes or
+loads its session with the tools its role has now. A turn that runs is never cut: the process goes
+once it ended (`after_turn` true), the prompts waiting going to the next process. The next
+process's prompt carries a `tools` delivery: what changed since the last list the agent was given,
+by tool, else `Your tools were reloaded: nothing changed.`, whatever its agent does with
+`list_changed`. Until that process takes it, the reload waits: `tools_reload` of the agent
+(`agent.show`, `agent.tree`) is true, and `agent.tools_reload` says when it is asked and when it
+is taken (`docs/events.md`). Its children keep their processes. `refused` for a child (the
+sentence names its root) and an agent in a final state.
+
+#### `agent.compact`
+
+`{"agent"}`. Compacts the agent's conversation (`docs/design.md` §5.8): the compactor summarises
+it and the agent goes on in a new session from its brief, the summary and its latest messages.
+`{"agent", "after_turn"}`: it starts at once between turns, or once the turn that runs ended
+(`after_turn` true); asked again before it starts, nothing more happens; asked while the
+compactor works, `refused` (a compaction runs). Its prompts wait while the compactor works, and a
+turn that started before is never cut: the new session follows its end. A compaction by hand
+needs no threshold, no margin and no notice seen. `agent.compacted` says it is done, `agent.compaction_failed` why it failed, in
+which case nothing changed. `refused` when there is no compactor (none chosen, or none could be
+picked), and for an agent in a final state.
+
+#### `agent.detach`
+
+`{"agent"}`. Takes a session an agent started (`launched_by`, led or handed) away from that agent,
+at once (`docs/tools.md`, "Detach"): the agent's `session` subscription ends and it is told once
+(a `detached` delivery, `the user detached the session "<title>" …`); `launched_by` and `led_by`
+become `null` and `detached_from` keeps that agent's id; its questions go to the user; the two
+need the user's leave to write to each other; the chain rule no longer holds; the session is told
+by a `detached` delivery that it is the user's alone. Its first message stays the agent's words.
+`agent.detached` is emitted. Answers `{"agent": {...}}`. Refused, saying why, for an agent no
+agent started (a root of the user's, a child) and for one already detached. There is no undo.
+
 #### `agent.mode`
 
 `{"agent", "mode"}`, `mode` `ask`, `auto` or `full`. Puts the agent's tree in that mode
@@ -1183,20 +1394,26 @@ does it with `agent_send` (`docs/tools.md`).
 #### `agent.tree`
 
 `{"agent"}`. The whole tree of the agent's root, each agent before its children:
-`{"agents": [{"agent", "doing", "waiting_on", "needs_user", "context", "context_tokens", "queued"}]}`. `agent` is the agent in short
-(`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `launched_by`, `depth`, `epoch`, `state`,
+`{"agents": [{"agent", "doing", "waiting_on", "needs_user", "questions", "context", "context_tokens", "queued"}]}`. `agent` is the agent in short
+(`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `launched_by`, `led_by`, `detached_from`, `depth`, `epoch`, `state`,
 `state_reason`, `created_at`, `active_at`, `exchanged_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
 took at the last start of its process, else the one asked, `null` for the agent's default before it
 started; `effort`: the same for its effort; `pending`: `{"model", "effort"}` the user changed to and
 the session has not taken yet, `null` when nothing waits; `resumable`: whether `agent.resume` takes it once its last process is gone; `stopping`:
 whether the process of an agent that ended is still stopping; `images`: as in the agent's full
 form; `tools_outdated`: whether its running session runs an older list of tools than its role
-has, which a restart replaces, `docs/tools.md`, "When the tools change"); `doing` a sentence of what it does
+has, which a restart replaces, `docs/tools.md`, "When the tools change"; `tools_reload`: whether
+a reload of its tools waits for its next process, `agent.reload_tools`); `doing` a sentence of what it does
 (`working`, `idle`, `running \`cargo test\` for 12 min`, `waiting for approval #3`, `failed: …`);
-`waiting_on` `parent` for a child whose request or question waits for its parent, `user` for a
-root whose own does, `subscription` for an agent between turns that has an open subscription (`doing` then
+`waiting_on` `parent` for a child whose request or question waits for its parent, `pilot` for a
+led session whose question waits for its pilot, `user` for a root whose own does, `subscription` for an agent between turns that has an open subscription (`doing` then
 says `waiting for #12: checks`, `#12 of api` when the project has several repositories, `waiting for its wake in 20 min`), else `null`; `needs_user`, for the root, whether a request of its tree or its
-own question waits for the user; `context`, how much of its context the agent used at its last
+own question waits for the user; `questions`, for a root, its questions to the user that wait for
+the answer, the oldest first, each `{"seq", "at", "question"}` (the number of its `agent.asked`
+event, when it was asked, the question masked): each asked while the root waits that no message of
+the user written after it, and taken by the root, answered, and that no replacement or resume of
+its session came after (a message written before a question does not answer it), empty once it
+ended; `context`, how much of its context the agent used at its last
 report (`agent.usage`), in percent, `null` before one and while the window's size is not known;
 `context_tokens`, the tokens its context holds at that report, `null` before one; `queued`, for the root, the messages the
 user wrote to it that wait for it to read them between its turns, the oldest first, each
@@ -1220,9 +1437,9 @@ is stored. `agent_status` with `action: conversation`, of the agents' tools, giv
 #### `agent.status`
 
 `{"agent"}`. What one agent is and does, for a client that shows one agent: `{"agent", "name",
-"line", "doing", "waiting_on", "needs_user", "messages"}`. `agent` is the agent in short as in
-`agent.tree`, `line` a sentence of what it is and does with its last sign of activity and its
-context use, `doing`, `waiting_on` and `needs_user` as in `agent.tree`, and `messages` its last
+"line", "doing", "waiting_on", "needs_user", "questions", "messages"}`. `agent` is the agent in
+short as in `agent.tree`, `line` a sentence of what it is and does with its last sign of activity
+and its context use, `doing`, `waiting_on`, `needs_user` and `questions` as in `agent.tree`, and `messages` its last
 messages, the oldest first, each cut at 600 characters.
 
 #### `agent.list`
@@ -1349,7 +1566,9 @@ source's own (`forge`: `project`, `workspace`, `repository`, `number`; `tickets`
 `repository`, the tracker's, empty for Jira, and `key`, `5` or `ABC-1`; `timer`: `why`,
 `expires_at` being when it wakes; `session`: `session` and `title`, the session followed, with no
 end of its own), `from` is `anyone` or `people`, the times are in milliseconds since the Unix
-epoch. `paused` is true for a following paused because its two sessions wrote to each other
+epoch. A subscription with no deadline (one to a pull request or a ticket the agent gave no
+`minutes`, a following) has `expires_at` 9223372036854775807 (`i64::MAX`): it lasts until its
+target ends. `paused` is true for a following paused because its two sessions wrote to each other
 without the user (`docs/tools.md`, "Sessions that talk to each other"), false otherwise.
 
 #### `subscription.cancel`
@@ -1365,6 +1584,25 @@ user's to either session resumes it: its count starts again, its wakes and the `
 between the two come back, and `session.following_resumed` is emitted. The user's alone: no tool
 of an agent does it. `not-found` when it is no open following; `invalid-params` when it is not
 paused.
+
+### The leave methods
+
+The user's leaves for a session to write to another it did not start (`docs/tools.md`, "Sessions
+that talk to each other"), as the window lists them where a session's rights are shown and lets the
+user take one back. A leave is given only by allowing the first message of the pair
+(`approval.approve`).
+
+#### `leave.list`
+
+`{"session"}`. `{"leaves": [...]}`, the leaves that name that agent as the writer or as the session
+written to, the oldest first (`not-found` when it names no agent). Each is `{"writer", "session",
+"request", "granted_at"}`: `writer` and `session` are `{"id", "title", "state"}`, `request` the
+number of the request the user allowed it in, `granted_at` in milliseconds since the Unix epoch.
+
+#### `leave.withdraw`
+
+`{"writer", "session"}`. `{"leave": {...}}`: the writer's next message to that session asks the
+user's leave again, and `leave.withdrawn` is emitted. `not-found` when there is no such leave.
 
 ### `provider.list`
 
@@ -1388,7 +1626,8 @@ when they name none:
       "override": null,
       "models": [{"id": "sonnet", "name": "Sonnet", "efforts": ["low", "medium", "high"], "default": true},
                  {"id": "opus", "name": "Opus", "efforts": null}],
-      "models_outdated": false
+      "models_outdated": false,
+      "images": true
     },
     {"name": "opencode", "title": "OpenCode", "enabled": false, "ready": false,
      "why": "is not enabled (`enabled = true` under [opencode] in providers.toml enables it)", "…": "…",
@@ -1405,6 +1644,8 @@ when they name none:
 `why` is `null` when the provider's agents can run, else a clause after its name that says why
 not and what to do. `warnings` say what may stop its agents that the daemon cannot tell for
 sure: a version other than the one Flottille was checked against, no sign-in it can see.
+`images` says whether its agents take images in a prompt, as the last of them that started said
+(`null` before one did): the window's composer says "takes no images" for a `false` before a start.
 `login.api_key` is the name of the API key found set, never its value. `override` is the test
 program standing for the provider (`docs/agents.md`, "For tests and development"). `models` is
 `null` until the daemon read them from the provider's agent (as soon as it is enabled and ready, with

@@ -278,7 +278,7 @@ fn a_kept_agent_id_and_the_prompt_s_request_fill_a_later_call() {
         dir.path().join("script.json"),
         json!({"turns": [
             {"when": "launch", "do": [{"mcp": {"tool": "agent_launch",
-                "arguments": {"title": "t", "brief": "b"}, "keep": "w1"}}]},
+                "arguments": {"kind": "child", "title": "t", "brief": "b"}, "keep": "w1"}}]},
             {"when": "asks", "do": [{"mcp": {"tool": "approval_answer",
                 "arguments": {"request_id": "{prompt:request}", "about": "{prompt:agent}",
                     "to": "{kept:w1}"}}}]}

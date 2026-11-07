@@ -219,6 +219,9 @@ const LAUNCHERS: [&str; 20] = [
     "swaymsg",
     "i3-msg",
 ];
+/// Programs that open a link or a file on the user's desktop. A run has no graphical session, so
+/// nothing would show: `web show_link` hands the user the link, and only the window opens it.
+const OPENERS: [&str; 3] = ["xdg-open", "open", "start"];
 /// Programs whose words are text, never a file they write (`tr / _`).
 const TEXT: [&str; 4] = ["tr", "printf", "expr", "seq"];
 /// Password managers and keyrings: whatever they do, they read or write the user's logins.
@@ -350,7 +353,7 @@ pub fn decide(call: &Call) -> Verdict {
         // The task as the write leaves it: a line it already held runs in the folder the write
         // may move it to.
         let other_lines = match (call.tool, call.command) {
-            ("tasks", Some((_, task))) => task.other_lines(),
+            ("tasks" | "services", Some((_, task))) => task.other_lines(),
             _ => Vec::new(),
         };
         for line in other_lines {
@@ -371,7 +374,9 @@ pub fn decide(call: &Call) -> Verdict {
     match call.tool {
         "forge" => forge(call),
         "tickets" => tickets(call),
-        "agent_launch" if call.args["root"] == true => root_launch(call.grant, call.args),
+        "agent_launch" if crate::tree::starts_session(call.args) => {
+            root_launch(call.grant, call.args)
+        }
         "session_send" => session_send(call.grant, call.args),
         // Its own session (none named, or its id) is no other's conversation: the answer says the tree's mode.
         "session_read"
@@ -405,6 +410,13 @@ pub fn decide(call: &Call) -> Verdict {
             .verdict(Kind::Action)
         }
         "run" => run(call),
+        // A service is shared by every project: only the user stops it, in every mode.
+        "services" if call.args["action"] == "stop" => Found {
+            base: vec![crate::services::stop_reason(call.args)],
+            judge: Vec::new(),
+        }
+        .verdict(Kind::Action),
+        "services" if call.args["action"] == "start" => run(call),
         tool if FILES.contains(&tool) => files(call),
         // Reads, the tree's tools, the outputs of the agent's own runs.
         _ => Verdict::Allow,
@@ -478,6 +490,11 @@ pub fn root_launch(grant: &Grant, args: &Value) -> Verdict {
 pub const SESSION_SEND: &str = "it writes to another session, the user's, as this agent: what it \
     sends steers that session's work";
 
+/// Why the first message of a session to another it did not start comes to the user, in every
+/// mode: what the user allows with it is every later one of the pair.
+pub const LEAVE: &str = "this session has not written to that one before: the user lets it, \
+    once for the pair and one way, in every mode, Full included";
+
 /// Why the gate holds `session_read`: each read of another session is judged.
 pub const SESSION_READ: &str = "it reads another session's conversation: what the user said to \
     that session's agent, and what that agent answered, which this agent was not told";
@@ -491,6 +508,65 @@ fn session_send(grant: &Grant, args: &Value) -> Verdict {
         return refused;
     }
     found.verdict(Kind::Action)
+}
+
+/// What every reason of a verdict on a pull request ends with, whichever way it is given (the
+/// tool `forge`, a `gh` or a `bkt` line): `asks_review` finds it, and Full does not let it through.
+pub const REVIEW_VERDICT: &str = "only the user approves a pull request or asks for changes on \
+    it, in every mode, Full included";
+
+/// Whether a held call is a verdict on a pull request: held for the user in every mode, Full
+/// included, and never decided by the judge.
+pub fn asks_review(ask: &Ask) -> bool {
+    ask.reasons
+        .iter()
+        .any(|reason| reason.contains(REVIEW_VERDICT))
+}
+
+/// Whether a call of `forge` approves a pull request or requests changes on it.
+pub fn decides_a_review(tool: &str, args: &Value) -> bool {
+    tool == "forge"
+        && args["action"] == "review"
+        && matches!(
+            args["verdict"].as_str(),
+            Some("approve" | "request_changes")
+        )
+}
+
+/// The first `session_send` of a session to another it did not start: the user's leave, asked
+/// with the message, which never reaches the judge and which Full does not let through
+/// (`asks_leave`).
+pub fn session_leave(grant: &Grant, args: &Value) -> Verdict {
+    let mut found = Found::default();
+    found.base(LEAVE.into());
+    found.judge(SESSION_SEND.into());
+    if let Err(refused) = texts(grant, args, &["text"], &mut found) {
+        return refused;
+    }
+    found.verdict(Kind::Action)
+}
+
+/// Why `agent_stop` of a session that is not the caller's child comes to the user, every time:
+/// it ends the user's other conversation, and no leave is kept.
+pub const END_SESSION: &str = "it ends a session of the user's, not one of this agent's \
+    children: the user decides, every time, in every mode, Full included";
+
+/// `agent_stop` of a session that is not the caller's child: base, never judged, and held in
+/// Full (`asks_end`).
+pub fn end_session() -> Verdict {
+    let mut found = Found::default();
+    found.base(END_SESSION.into());
+    found.verdict(Kind::Action)
+}
+
+/// Whether a held call ends a session that is not the caller's child: only the user answers it.
+pub fn asks_end(ask: &Ask) -> bool {
+    ask.reasons.iter().any(|reason| reason == END_SESSION)
+}
+
+/// Whether a held call asks the user's leave for a pair of sessions: only the user answers it.
+pub fn asks_leave(ask: &Ask) -> bool {
+    ask.reasons.iter().any(|reason| reason == LEAVE)
 }
 
 /// The texts a write posts or sends, which the user's card and the judge show whole: one longer
@@ -575,7 +651,21 @@ fn forge(call: &Call) -> Verdict {
         | "run_logs" => return Verdict::Allow,
         "create" => "it opens a pull request on the forge",
         "comment" => "it comments on a pull request on the forge",
-        "edit" => "it changes the title or the description of a pull request on the forge",
+        "review" => match call.args["verdict"].as_str() {
+            Some(verdict) if crate::forge::REVIEW_VERDICTS.contains(&verdict) => {
+                "it posts a review on a pull request on the forge"
+            }
+            _ => {
+                return Verdict::Deny(format!(
+                    "refused: forge review needs verdict, one of {}",
+                    crate::forge::REVIEW_VERDICTS.join(", ")
+                ));
+            }
+        },
+        "edit" => {
+            "it changes a pull request on the forge: its title, its description, whether it is a \
+             draft, its reviewers, its labels or its base"
+        }
         "merge" => merged.as_str(),
         "checks" => "it re-runs the failed jobs of a pipeline on the forge",
         "close" => "it closes a pull request on the forge",
@@ -590,7 +680,7 @@ fn forge(call: &Call) -> Verdict {
         }
     };
     let none: &[&str] = match action {
-        "comment" => &["title", "comment", "message"],
+        "comment" | "review" => &["title", "comment", "message"],
         "merge" => &["title", "body", "comment"],
         "checks" | "run" | "stop" | "step" => &["title", "body", "comment", "message"],
         "close" | "reopen" => &["title", "body", "message"],
@@ -599,15 +689,14 @@ fn forge(call: &Call) -> Verdict {
     if let Err(refused) = untexted("forge", action, call.args, none) {
         return refused;
     }
-    if action != "close"
-        && call
-            .args
-            .get("delete_branch")
-            .is_some_and(|d| !d.is_null() && d != false)
-    {
-        return Verdict::Deny(format!(
-            "refused: forge {action} takes no delete_branch: delete_branch is for close"
-        ));
+    for (key, takers) in FORGE_ONLY {
+        let given = call.args.get(key).is_some_and(|value| !value.is_null());
+        if given && !takers.contains(&action) {
+            let takers = takers.join(" and ");
+            return Verdict::Deny(format!(
+                "refused: forge {action} takes no {key}: {key} is for {takers}"
+            ));
+        }
     }
     if by != methods[0] && call.args.get("message").is_some_and(|m| !m.is_null()) {
         return Verdict::Deny(format!(
@@ -617,6 +706,17 @@ fn forge(call: &Call) -> Verdict {
     }
     let mut found = Found::default();
     found.judge(said.into());
+    // What blocks or approves a pull request is the user's to decide, never a judge's.
+    match call.args["verdict"].as_str() {
+        Some("approve") => found.base(format!(
+            "it approves a pull request on the forge: {REVIEW_VERDICT}"
+        )),
+        Some("request_changes") => found.base(format!(
+            "it requests changes on a pull request on the forge, which blocks it: \
+             {REVIEW_VERDICT}"
+        )),
+        _ => {}
+    }
     if let Err(refused) = texts(
         call.grant,
         call.args,
@@ -624,6 +724,11 @@ fn forge(call: &Call) -> Verdict {
         &mut found,
     ) {
         return refused;
+    }
+    for inline in call.args["comments"].as_array().into_iter().flatten() {
+        if let Err(refused) = texts(call.grant, inline, &["body"], &mut found) {
+            return refused;
+        }
     }
     if let Some(waived) = call.args.get("waive").filter(|w| !w.is_null()) {
         if action != "merge" {
@@ -647,16 +752,35 @@ fn forge(call: &Call) -> Verdict {
     found.verdict(Kind::Call)
 }
 
+/// The arguments of `forge` that belong to some actions alone, and those.
+const FORGE_ONLY: [(&str, &[&str]); 12] = [
+    ("draft", &["create", "edit"]),
+    ("reviewers", &["create"]),
+    ("labels", &["create"]),
+    ("delete_branch_on_merge", &["create"]),
+    ("delete_branch", &["close", "merge"]),
+    ("reviewers_add", &["edit"]),
+    ("reviewers_remove", &["edit"]),
+    ("labels_add", &["edit"]),
+    ("labels_remove", &["edit"]),
+    ("base", &["edit"]),
+    ("verdict", &["review"]),
+    ("comments", &["review"]),
+];
+
 /// The actions of `forge`, as a refusal names them.
-pub const FORGE_ACTIONS: &str = "list, show, subscribe, unsubscribe, create, comment, edit, merge, checks, close, reopen, \
-     pipelines, runs, run_view, run_logs, run, stop and step";
+pub const FORGE_ACTIONS: &str = "list, show, subscribe, unsubscribe, create, comment, review, edit, merge, checks, close, \
+     reopen, pipelines, runs, run_view, run_logs, run, stop and step";
 /// The actions of `tickets`, as a refusal names them.
-pub const TICKET_ACTIONS: &str = "list, search, show, types, link_types, subscribe, unsubscribe, create, comment, edit, \
-     close, reopen, status, link, unlink, comment_edit, comment_delete and sprint";
+pub const TICKET_ACTIONS: &str = "list, search, show, types, link_types, sprints, subscribe, unsubscribe, create, comment, \
+     edit, close, reopen, status, link, unlink, comment_edit, comment_delete, log_time and \
+     time_spent";
 /// What `tickets close` closes for, as `gh issue close --reason` names it.
 pub const CLOSE_REASONS: [&str; 2] = ["completed", "not planned"];
 /// The arguments of `tickets` that belong to `edit` or `close` alone.
-const TICKET_ONLY: [(&str, &str); 4] = [
+const TICKET_ONLY: [(&str, &str); 6] = [
+    ("duration", "log_time"),
+    ("started", "log_time"),
     ("reason", "close"),
     ("remove_labels", "edit"),
     ("assignees", "edit"),
@@ -671,9 +795,19 @@ fn tickets(call: &Call) -> Verdict {
     // What the agent wrote, as the card shows it: masked.
     let shown = |key: &str| crate::mcp::masked(&words(key), &call.grant.place);
     let said = match action {
-        "list" | "search" | "show" | "types" | "link_types" | "subscribe" | "unsubscribe" => {
+        "list" | "search" | "show" | "types" | "link_types" | "sprints" | "subscribe"
+        | "unsubscribe" | "time_spent" => {
             return Verdict::Allow;
         }
+        "log_time" => format!(
+            "it logs {} on {} on the tracker, started {}",
+            shown("duration"),
+            shown("ticket"),
+            call.args["started"].as_str().map_or_else(
+                || "that long before it is logged".to_owned(),
+                |_| shown("started")
+            )
+        ),
         // The link as the ticket named reads it, so that the card says its direction.
         "link" => format!(
             "it links two tickets on the tracker: {} {} {}",
@@ -699,7 +833,6 @@ fn tickets(call: &Call) -> Verdict {
             shown("comment"),
             shown("ticket")
         ),
-        "sprint" => "it puts a ticket in a sprint on the tracker".into(),
         "create" => "it opens a ticket on the tracker".into(),
         "comment" => "it comments on a ticket on the tracker".into(),
         "edit" => {
@@ -717,10 +850,8 @@ fn tickets(call: &Call) -> Verdict {
         }
     };
     let none: &[&str] = match action {
-        "comment" | "comment_edit" => &["title"],
-        "close" | "reopen" | "status" | "link" | "unlink" | "comment_delete" | "sprint" => {
-            &["title", "body"]
-        }
+        "comment" | "comment_edit" | "log_time" => &["title"],
+        "close" | "reopen" | "status" | "link" | "unlink" | "comment_delete" => &["title", "body"],
         _ => &[],
     };
     if let Err(refused) = untexted("tickets", action, call.args, none) {
@@ -894,7 +1025,7 @@ fn run(call: &Call) -> Verdict {
     if let Some(why) = layers
         .iter()
         .filter_map(|layer| runs(layer))
-        .find_map(|program| launches(base(program)))
+        .find_map(|program| launches(base(program)).or_else(|| opens(base(program))))
     {
         return Verdict::Deny(why);
     }
@@ -1046,16 +1177,19 @@ fn run(call: &Call) -> Verdict {
         }
     }
     if let Some((name, command)) = call.command {
+        // A service runs in its own folder, never the project's.
+        let service = call.tool == "services";
+        let what = if service { "service" } else { "task" };
         if command.ask_before_running {
-            found.judge(format!("the task {name} is marked to ask before it runs"));
+            found.judge(format!("the {what} {name} is marked to ask before it runs"));
         }
         if let Some(shell) = call.words.first().filter(|w| SHELLS.contains(&base(w))) {
             found.judge(format!(
-                "the task {name} runs a shell ({}), whose line the gate does not read",
+                "the {what} {name} runs a shell ({}), whose line the gate does not read",
                 base(shell)
             ));
         }
-        if main {
+        if main && !service {
             found.judge(format!(
                 "the task {name} runs in the project folder (main), the user's own \
                  checkout, not in a workspace"
@@ -1273,7 +1407,7 @@ impl Line {
 fn refusal(layer: &[String]) -> Option<String> {
     let program = base(&layer[0]);
     let args = &layer[1..];
-    if let Some(why) = launches(program) {
+    if let Some(why) = launches(program).or_else(|| opens(program)) {
         return Some(why);
     }
     if KEYRINGS.contains(&program)
@@ -1451,6 +1585,12 @@ fn git_refusal(args: &[String]) -> Option<String> {
             "refused: git {command} reads or prints a login, and agents never see one, in any mode"
         ));
     }
+    // The wall rewrites the URL a push goes to; these connect to the URL they are given.
+    if ["send-pack", "http-push"].contains(&command) || command.starts_with("remote-") {
+        return Some(format!(
+            "refused: git {command} pushes past Flottille's wall; use git push"
+        ));
+    }
     if command == "config" && !config_reads(rest) {
         if let Some(scope) = rest
             .iter()
@@ -1480,17 +1620,7 @@ fn git_refusal(args: &[String]) -> Option<String> {
             ));
         }
     }
-    if [
-        "clone",
-        "fetch",
-        "pull",
-        "push",
-        "send-pack",
-        "ls-remote",
-        "archive",
-    ]
-    .contains(&command)
-    {
+    if ["clone", "fetch", "pull", "push", "ls-remote", "archive"].contains(&command) {
         let named = rest.iter().take_while(|w| *w != "--").find(|w| {
             abbreviates(w, "upload-pack", 3)
                 || abbreviates(w, "receive-pack", 4)
@@ -1611,6 +1741,18 @@ fn launches(program: &str) -> Option<String> {
     })
 }
 
+/// The refusal of a program that opens a link on the desktop, pointing to the tool that does.
+fn opens(program: &str) -> Option<String> {
+    OPENERS.contains(&program).then(|| {
+        format!(
+            "refused: {program} opens things on the user's desktop, which a run has no session \
+             of: nothing would show. To put a link in front of the user, call web with \
+             {{\"action\": \"show_link\", \"url\": \"https://…\"}} (or \"path\" for a file of \
+             your place): the window offers it with an Open button, and the user's click opens it"
+        )
+    })
+}
+
 /// Whether a forge's command line prints its login.
 fn prints_token(args: &[String]) -> bool {
     let words = forge_words(args);
@@ -1630,6 +1772,13 @@ fn program(call: &Call, layer: &[String]) -> Line {
     let any = |names: &[&str]| args.iter().any(|w| names.contains(&w.as_str()));
     let line = match program {
         "git" => git(call, layer),
+        "gh" if gh_verdict(args) => Line::Base(format!(
+            "{} gives a verdict on a pull request: {REVIEW_VERDICT}",
+            shown_words(layer)
+        )),
+        "bkt" if bkt_verdict(args) => Line::Base(format!(
+            "bkt gives a verdict on a pull request, signed in as the user: {REVIEW_VERDICT}"
+        )),
         "gh" | "glab" if forge_reads(program, args) => Line::Reads,
         "gh" | "glab" => Line::Judge(format!(
             "{} writes to the forge, or is not one of its reads",
@@ -2334,7 +2483,7 @@ fn command_line(call: &Call, layer: &[String], command: &str, rest: &[String]) -
         return Line::Reads;
     }
     match command {
-        "push" | "send-pack" | "http-push" => push(rest),
+        "push" => push(rest),
         "subtree" | "lfs" if any(&["push"]) => push(rest),
         "filter-branch" | "filter-repo" => Line::Base(format!(
             "git {command} rewrites the whole history of the repository"
@@ -2661,6 +2810,111 @@ fn forge_words(args: &[String]) -> Vec<&str> {
         }
     }
     words
+}
+
+/// Whether a `gh` line approves a pull request or requests changes on it: `gh pr review` with
+/// `--approve` or `--request-changes` (or `-a`, `-r`, alone or among other short flags), `gh api`
+/// posting a review whose `event` is one of them, a review given in a file (its event is not read
+/// here), or a GraphQL review mutation naming one.
+fn gh_verdict(args: &[String]) -> bool {
+    match forge_words(args).as_slice() {
+        ["pr", "review"] => args.iter().any(|word| {
+            word.starts_with("--approve")
+                || word.starts_with("--request-changes")
+                || (word.starts_with('-')
+                    && !word.starts_with("--")
+                    && word.chars().skip(1).any(|c| c == 'a' || c == 'r'))
+        }),
+        ["api", ..] if !api_reads(args) => {
+            let lower: Vec<String> = args.iter().map(|word| word.to_lowercase()).collect();
+            let verdict = |text: &str| text.contains("approve") || text.contains("request_changes");
+            let reviews = lower
+                .iter()
+                .any(|w| !w.starts_with('-') && w.contains("/pulls/") && w.contains("/reviews"));
+            let in_file = lower
+                .iter()
+                .any(|w| w == "--input" || w.starts_with("--input="));
+            let event = api_fields(args).iter().any(|field| {
+                field
+                    .split_once('=')
+                    .is_some_and(|(k, v)| k == "event" && verdict(&v.to_lowercase()))
+            });
+            let graphql = lower.iter().any(|w| w == "graphql")
+                && lower.iter().any(|w| w.contains("pullrequestreview"))
+                && lower.iter().any(|w| verdict(w));
+            (reviews && (event || in_file)) || graphql
+        }
+        _ => false,
+    }
+}
+
+/// The `key=value` fields a `gh api` line gives (`-f`, `-F`, `--field`, `--raw-field`).
+fn api_fields(args: &[String]) -> Vec<&str> {
+    let mut fields = Vec::new();
+    let mut at = 0;
+    while let Some(word) = args.get(at) {
+        at += 1;
+        match word.as_str() {
+            "-f" | "-F" | "--field" | "--raw-field" => {
+                fields.extend(args.get(at).map(String::as_str));
+                at += 1;
+            }
+            word => {
+                let long = ["--field=", "--raw-field="]
+                    .iter()
+                    .find_map(|prefix| word.strip_prefix(prefix));
+                let short = (!word.starts_with("--"))
+                    .then(|| word.strip_prefix("-f").or_else(|| word.strip_prefix("-F")))
+                    .flatten();
+                fields.extend(long.or(short));
+            }
+        }
+    }
+    fields
+}
+
+/// Whether a `bkt` line approves a pull request or requests changes on it, in any form: `pr
+/// approve`, a request-changes command or endpoint, an `approve` endpoint, or a participant's
+/// `NEEDS_WORK` or `APPROVED` status. The texts it posts (`--text` and the like) are not read.
+fn bkt_verdict(args: &[String]) -> bool {
+    let mut words = args.iter().map(|word| word.to_lowercase());
+    while let Some(word) = words.next() {
+        if [
+            "--text",
+            "--description",
+            "--title",
+            "--comment",
+            "--message",
+            "-m",
+        ]
+        .contains(&word.as_str())
+        {
+            words.next();
+            continue;
+        }
+        if [
+            "--text=",
+            "--description=",
+            "--title=",
+            "--comment=",
+            "--message=",
+        ]
+        .iter()
+        .any(|flag| word.starts_with(flag))
+        {
+            continue;
+        }
+        if word == "approve"
+            || word.ends_with("/approve")
+            || word.contains("request-changes")
+            || word.contains("request_changes")
+            || word.contains("needs_work")
+            || word.contains("\"approved\"")
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Whether a forge command line only reads.
@@ -3841,6 +4095,7 @@ mod tests {
                 read_only: false,
                 ask_before_running: false,
                 added_by: None,
+                needs: Box::default(),
                 ready: None,
                 url: None,
             };
@@ -4123,6 +4378,104 @@ mod tests {
     }
 
     #[test]
+    fn a_review_comment_is_judged_and_an_approval_or_a_change_request_is_base() {
+        let fixture = Fixture::workspace();
+        let review = |verdict: Value| {
+            let args = json!({"action": "review", "repository": ".", "number": 1,
+                "verdict": verdict, "body": "x",
+                "comments": [{"path": "a.rs", "line": 1, "body": "y"}]});
+            fixture.judge("forge", args, Some(&fixture.never))
+        };
+        assert!(to_judge(&review(json!("comment"))));
+        for verdict in ["approve", "request_changes"] {
+            let asked = review(json!(verdict));
+            assert!(base_class(&asked), "{verdict}: {asked:?}");
+            assert!(crate::gate::decides_a_review(
+                "forge",
+                &json!({"action": "review", "verdict": verdict})
+            ));
+        }
+        assert!(!crate::gate::decides_a_review(
+            "forge",
+            &json!({"action": "review", "verdict": "comment"})
+        ));
+        assert!(denied(&review(json!("lgtm"))));
+        assert!(denied(&review(Value::Null)));
+        // A verdict or inline comments on another action are refused: the card would show them.
+        for (action, key, value) in [
+            ("comment", "verdict", json!("approve")),
+            (
+                "edit",
+                "comments",
+                json!([{"path": "a", "line": 1, "body": "b"}]),
+            ),
+        ] {
+            let args = json!({"action": action, "repository": ".", "number": 1, key: value});
+            let verdict = fixture.judge("forge", args, Some(&fixture.never));
+            assert!(
+                matches!(&verdict, Verdict::Deny(why) if why.contains(key)),
+                "{action}: {verdict:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_verdict_run_by_a_command_line_is_held_for_the_user_like_forge_review() {
+        let fixture = Fixture::workspace();
+        for line in [
+            "gh pr review 12 --approve",
+            "gh pr review 12 --request-changes -b nope",
+            "gh pr review 12 -a",
+            "gh pr review 12 -r -b nope",
+            "gh pr review 12 -R github.com/acme/app --approve=true",
+            "gh api repos/acme/app/pulls/12/reviews -f event=APPROVE",
+            "gh api repos/acme/app/pulls/12/reviews -F event=REQUEST_CHANGES -f body=x",
+            "gh api -X POST /repos/acme/app/pulls/12/reviews --raw-field event=approve",
+            "gh api repos/acme/app/pulls/12/reviews --input review.json",
+            "gh api repos/acme/app/pulls/12/reviews/7/events -f event=APPROVE",
+            "gh api graphql -f query=mutation{addPullRequestReview(input:{event:APPROVE}){clientMutationId}}",
+            "bkt pr approve 12",
+            "bkt --context cloud pr approve 12 --repo app",
+            "bkt pr request-changes 12",
+            "bkt api /repositories/acme/app/pullrequests/12/request-changes --method POST",
+            "bkt api /repositories/acme/app/pullrequests/12/approve --method POST",
+            "env gh pr review 12 --approve",
+        ] {
+            match fixture.run(line) {
+                Verdict::Ask(ask) => assert!(
+                    ask.class == Class::Base && asks_review(&ask),
+                    "{line}: {ask:?}"
+                ),
+                other => panic!("{line}: {other:?}"),
+            }
+        }
+        // What only comments is not a verdict.
+        for line in [
+            "gh pr review 12 --comment -b hello",
+            "gh pr review 12 -R github.com/acme/app -c -b hello",
+            "gh api repos/acme/app/pulls/12/reviews -f event=COMMENT -f body=x",
+            "gh api repos/acme/app/pulls/12/comments -f body=approve",
+            "bkt pr comment 12 --text \"please approve this\"",
+        ] {
+            if let Verdict::Ask(ask) = fixture.run(line) {
+                assert!(!asks_review(&ask), "{line}: {ask:?}");
+            }
+        }
+        for (verdict, held) in [
+            ("approve", true),
+            ("request_changes", true),
+            ("comment", false),
+        ] {
+            let args = json!({"action": "review", "repository": ".", "number": 1,
+                "verdict": verdict, "body": "x"});
+            let Verdict::Ask(ask) = fixture.judge("forge", args, Some(&fixture.never)) else {
+                panic!("{verdict}: not held");
+            };
+            assert_eq!(asks_review(&ask), held, "{verdict}: {ask:?}");
+        }
+    }
+
+    #[test]
     fn a_comment_or_a_branch_deletion_on_the_wrong_forge_action_is_refused_before_anything_is_asked()
      {
         let fixture = Fixture::workspace();
@@ -4130,7 +4483,7 @@ mod tests {
             ("merge", json!({"comment": "x"})),
             ("create", json!({"comment": "x"})),
             ("reopen", json!({"delete_branch": true})),
-            ("merge", json!({"delete_branch": true})),
+            ("edit", json!({"delete_branch": true})),
             ("close", json!({"body": "x"})),
             ("close", json!({"title": "x"})),
         ] {
@@ -4147,6 +4500,13 @@ mod tests {
             Some(&fixture.never),
         );
         assert!(to_judge(&fine));
+        // A merge deletes the branch of its pull request too.
+        let merged = fixture.judge(
+            "forge",
+            json!({"action": "merge", "repository": ".", "delete_branch": true}),
+            Some(&fixture.never),
+        );
+        assert!(to_judge(&merged));
     }
 
     #[test]
@@ -4163,7 +4523,6 @@ mod tests {
             "unlink",
             "comment_edit",
             "comment_delete",
-            "sprint",
         ] {
             let verdict = fixture.judge(
                 "tickets",
@@ -4239,7 +4598,7 @@ mod tests {
         let fixture = Fixture::main();
         let verdict = fixture.judge(
             "agent_launch",
-            json!({"title": "t", "brief": "b", "root": true}),
+            json!({"title": "t", "brief": "b", "kind": "handed"}),
             Some(&fixture.never),
         );
         assert!(to_judge(&verdict), "{verdict:?}");
@@ -4251,7 +4610,7 @@ mod tests {
         // A child launched is the caller's own work, as before.
         let child = fixture.judge(
             "agent_launch",
-            json!({"title": "t", "brief": "b"}),
+            json!({"kind": "child", "title": "t", "brief": "b"}),
             Some(&fixture.never),
         );
         assert_eq!(child, Verdict::Allow);
@@ -4263,7 +4622,7 @@ mod tests {
         fixture.grant.launched = true;
         let verdict = fixture.judge(
             "agent_launch",
-            json!({"title": "t", "brief": "b", "root": true}),
+            json!({"title": "t", "brief": "b", "kind": "handed"}),
             Some(&fixture.never),
         );
         assert!(base_class(&verdict), "{verdict:?}");
@@ -4343,7 +4702,7 @@ mod tests {
             ("forge", json!({"action": "create", "title": token})),
             (
                 "agent_launch",
-                json!({"title": "t", "brief": token, "root": true}),
+                json!({"title": "t", "brief": token, "kind": "handed"}),
             ),
         ] {
             let verdict = fixture.judge(tool, args, Some(&fixture.never));
@@ -4360,7 +4719,7 @@ mod tests {
             ),
             (
                 "agent_launch",
-                json!({"title": "t", "brief": long, "root": true}),
+                json!({"title": "t", "brief": long, "kind": "handed"}),
             ),
         ] {
             assert!(
@@ -6151,6 +6510,33 @@ mod tests {
     }
 
     #[test]
+    fn a_push_past_the_wall_is_refused_naming_git_push() {
+        for fixture in [Fixture::main(), Fixture::workspace()] {
+            for (command, line) in [
+                ("send-pack", "git send-pack ../r HEAD:refs/heads/x"),
+                ("send-pack", "git -C . send-pack --all ../r"),
+                ("http-push", "git http-push https://example.com/r.git x"),
+                (
+                    "remote-https",
+                    "git remote-https origin https://example.com/r.git",
+                ),
+                ("remote-ext", "git remote-ext origin 'git-receive-pack r'"),
+                ("remote-fd", "git remote-fd 0"),
+            ] {
+                let verdict = fixture.run(line);
+                assert!(denied(&verdict), "{line}: {verdict:?}");
+                let said = format!("{verdict:?}");
+                assert!(
+                    said.contains(&format!(
+                        "refused: git {command} pushes past Flottille's wall; use git push"
+                    )),
+                    "{line}: {said}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn sudo_doas_and_pkexec_are_base_in_any_form() {
         let fixture = Fixture::workspace().command("deploy-local", "sudo make install", |_| {});
         for line in [
@@ -6547,6 +6933,40 @@ mod tests {
             "nice systemd-run --user true",
         ] {
             assert!(denied(&workspace.run(line)), "{line}");
+        }
+    }
+
+    #[test]
+    fn run_refuses_xdg_open_and_points_to_show_link() {
+        let fixture = Fixture::workspace().command("show", "xdg-open https://example.org", |_| {});
+        for line in [
+            "xdg-open https://example.org",
+            "/usr/bin/xdg-open https://example.org",
+            "open https://example.org",
+            "start https://example.org",
+            "nice xdg-open https://example.org",
+            "env A=b open https://example.org",
+            "timeout 5 xdg-open https://example.org",
+            "uv run xdg-open https://example.org",
+            "npm exec -- open https://example.org",
+            "cargo run -- xdg-open https://example.org",
+            "find . -exec xdg-open {} +",
+        ] {
+            match fixture.run(line) {
+                Verdict::Deny(why) => assert!(why.contains("show_link"), "{line}: {why}"),
+                other => panic!("{line}: {other:?}"),
+            }
+        }
+        // A task whose line opens a link is refused too, and so is a step that sets one.
+        assert!(denied(&fixture.task("show")));
+        // The name is refused only where a program runs, as the launchers are.
+        for line in [
+            "git commit -m open",
+            "cargo test open",
+            "grep -r xdg-open src",
+            "echo start",
+        ] {
+            assert!(!denied(&fixture.run(line)), "{line}");
         }
     }
 }

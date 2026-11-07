@@ -1,8 +1,11 @@
-//! A subscription (`docs/design.md` §5.6): an agent waits, once, for the next event of a target
-//! that a source watches. Stored, so that it survives a restart of the daemon.
+//! A subscription (`docs/design.md` §5.6): an agent is woken at the events of a target that a
+//! source watches, until the target ends. Stored, so that it survives a restart of the daemon.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// The time of a subscription with no deadline: far enough that the sweep never finds it due.
+pub const NO_DEADLINE: u64 = i64::MAX as u64;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Subscription {
@@ -22,5 +25,6 @@ pub struct Subscription {
     /// kept, a migration being worth nothing here.
     pub seen: Value,
     pub created_at: u64,
+    /// Its deadline; `NO_DEADLINE` when the agent gave none.
     pub expires_at: u64,
 }

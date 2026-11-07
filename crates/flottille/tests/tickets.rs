@@ -521,7 +521,7 @@ fn a_jira_work_item_is_read_through_acli_and_its_description_comes_as_plain_text
         asked,
         [
             "jira auth status",
-            "jira workitem view ABC-123 --json --fields summary,status,description,comment,issuelinks"
+            "jira workitem view ABC-123 --json --fields summary,status,description,comment,issuelinks,attachment,assignee,parent,*navigable"
         ],
         "one read, for the link and the page both"
     );
@@ -972,7 +972,7 @@ fn listed_issue(number: u64, title: &str, updated: &str) -> Value {
 }
 
 #[test]
-fn tickets_list_and_search_answer_from_the_store_with_its_age_and_show_reads_live() {
+fn tickets_list_answers_from_the_store_with_its_age_and_show_reads_live() {
     let user = User::with_fake_agent()
         .with_fake_gh()
         .with_env("FLOTTILLE_TEST_CLOCK", "1");
@@ -1004,11 +1004,6 @@ fn tickets_list_and_search_answer_from_the_store_with_its_age_and_show_reads_liv
     ] {
         assert!(listed.text.contains(part), "{part} in {}", listed.text);
     }
-    let found = mcp.call("tickets", json!({"action": "search", "query": "sign"}));
-    assert!(!found.error, "{}", found.text);
-    assert!(found.text.contains("#5 open"), "{}", found.text);
-    assert!(found.text.contains("in their titles"), "{}", found.text);
-    assert!(!found.text.contains("Dark mode"), "{}", found.text);
     assert_eq!(
         calls(user.gh_received()).len(),
         before,
@@ -1195,4 +1190,443 @@ fn a_comment_through_flottille_drops_the_cached_ticket() {
     assert!(!shown.error, "{}", shown.text);
     assert!(user.acli_received().len() > after_write);
     assert!(!shown.text.contains("as read"), "{}", shown.text);
+}
+
+/// The time `days` days before now, as GitHub and Jira write it.
+fn days_ago(days: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let at = now - days * 86_400;
+    let (day, time) = ((at / 86_400) as i64, at % 86_400);
+    // Howard Hinnant's `civil_from_days`.
+    let z = day + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        time / 3600,
+        time % 3600 / 60,
+        time % 60
+    )
+}
+
+/// Two work items of ABC: the word `isServicePoint` is in the description of ABC-1 and in a
+/// comment of ABC-2, never in a title; XYZ-1, of another project, says it in its title.
+fn jira_text(user: &User) {
+    let mut described = work_item("ABC-1", "Add the natures");
+    described["fields"]["description"] = document("The isServicePoint flag of a nature");
+    let mut commented = work_item("ABC-2", "Fix the form");
+    commented["fields"]["comment"]["comments"][0]["body"] =
+        document("Look at isServicePoint first");
+    let elsewhere = work_item("XYZ-1", "isServicePoint elsewhere");
+    jira(
+        user,
+        json!({"ABC-1": described, "ABC-2": commented, "XYZ-1": elsewhere}),
+    );
+}
+
+/// The JQL of every search of the fake `acli`.
+fn jqls(user: &User) -> Vec<String> {
+    user.acli_received()
+        .iter()
+        .filter(|call| call["args"][2] == "search")
+        .filter_map(|call| {
+            let args = call["args"].as_array()?;
+            let at = args.iter().position(|a| a == "--jql")?;
+            Some(args[at + 1].as_str()?.to_owned())
+        })
+        .collect()
+}
+
+#[test]
+fn a_search_finds_a_word_in_a_jira_description() {
+    let user = User::with_fake_agent().with_fake_acli();
+    fixture(&user);
+    jira_text(&user);
+    track(&user, jira_abc());
+    let mcp = agent_in(&user, None);
+
+    let found = mcp.call(
+        "tickets",
+        json!({"action": "search", "query": "isServicePoint"}),
+    );
+
+    assert!(!found.error, "{}", found.text);
+    assert!(found.text.contains("- ABC-1 "), "{}", found.text);
+    assert!(!found.text.contains("XYZ-1"), "{}", found.text);
+    assert!(
+        found
+            .text
+            .contains("in the titles, descriptions and comments"),
+        "{}",
+        found.text
+    );
+    assert!(
+        jqls(&user)
+            .iter()
+            .any(|jql| jql.contains("text ~ \"isServicePoint\"")),
+        "{:?}",
+        jqls(&user)
+    );
+}
+
+#[test]
+fn a_search_finds_a_word_in_a_jira_comment() {
+    let user = User::with_fake_agent().with_fake_acli();
+    fixture(&user);
+    jira_text(&user);
+    track(&user, jira_abc());
+    let mcp = agent_in(&user, None);
+
+    let found = mcp.call(
+        "tickets",
+        json!({"action": "search", "query": "isServicePoint first"}),
+    );
+
+    assert!(!found.error, "{}", found.text);
+    assert!(found.text.contains("- ABC-2 "), "{}", found.text);
+    assert!(!found.text.contains("- ABC-1 "), "{}", found.text);
+}
+
+#[test]
+fn a_search_finds_a_word_in_a_github_issue_body() {
+    let user = User::with_fake_agent().with_fake_gh();
+    fixture(&user);
+    track(&user, github_issues());
+    let mut natures = listed_issue(5, "Add the natures", "2026-10-01T10:00:00Z");
+    natures["body"] = json!("The isServicePoint flag of a nature");
+    issues(
+        &user,
+        json!({"5": natures, "6": listed_issue(6, "Dark mode", "2026-10-01T09:00:00Z")}),
+    );
+    let mcp = agent_in(&user, None);
+
+    let found = mcp.call(
+        "tickets",
+        json!({"action": "search", "query": "isServicePoint"}),
+    );
+
+    assert!(!found.error, "{}", found.text);
+    assert!(
+        found.text.contains("- #5 open: Add the natures"),
+        "{}",
+        found.text
+    );
+    assert!(!found.text.contains("Dark mode"), "{}", found.text);
+    assert!(
+        found
+            .text
+            .contains("in the titles, descriptions and comments"),
+        "{}",
+        found.text
+    );
+    let lists: Vec<String> = calls(user.gh_received())
+        .into_iter()
+        .filter(|call| call.starts_with("issue list"))
+        .collect();
+    assert!(
+        lists
+            .iter()
+            .any(|call| call.contains("--search isServicePoint in:title,body,comments")),
+        "{lists:?}"
+    );
+}
+
+#[test]
+fn a_search_after_a_round_still_asks_the_tracker_for_the_text() {
+    let user = User::with_fake_agent().with_fake_gh();
+    fixture(&user);
+    track(&user, github_issues());
+    let mut natures = listed_issue(5, "Add the natures", "2026-10-01T10:00:00Z");
+    natures["body"] = json!("The isServicePoint flag of a nature");
+    issues(
+        &user,
+        json!({"5": natures, "6": listed_issue(6, "Dark mode", "2026-10-01T09:00:00Z")}),
+    );
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
+    let mcp = agent_in(&user, None);
+    let before = calls(user.gh_received()).len();
+
+    let found = mcp.call(
+        "tickets",
+        json!({"action": "search", "query": "isServicePoint"}),
+    );
+    let again = mcp.call(
+        "tickets",
+        json!({"action": "search", "query": "isServicePoint"}),
+    );
+
+    assert!(!found.error, "{}", found.text);
+    assert!(
+        found.text.contains("- #5 open: Add the natures"),
+        "{}",
+        found.text
+    );
+    assert!(
+        !found.text.contains("not their descriptions"),
+        "{}",
+        found.text
+    );
+    let asked: Vec<String> = calls(user.gh_received())[before..]
+        .iter()
+        .filter(|call| call.starts_with("issue list"))
+        .cloned()
+        .collect();
+    // The same search within 30 s is given what the first read.
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(again.text, found.text);
+}
+
+#[test]
+fn updated_within_keeps_the_items_updated_in_those_days() {
+    // GitHub: `updated:>=` in the search.
+    let user = User::with_fake_agent().with_fake_gh();
+    fixture(&user);
+    track(&user, github_issues());
+    issues(
+        &user,
+        json!({"5": listed_issue(5, "Recent", &days_ago(3)),
+            "6": listed_issue(6, "Old", &days_ago(40))}),
+    );
+    let mcp = agent_in(&user, None);
+
+    let listed = mcp.call("tickets", json!({"action": "list", "updated_within": 15}));
+
+    assert!(!listed.error, "{}", listed.text);
+    assert!(listed.text.contains("- #5 open: Recent"), "{}", listed.text);
+    assert!(!listed.text.contains("Old"), "{}", listed.text);
+    assert!(
+        listed.text.contains("updated in the last 15 days"),
+        "{}",
+        listed.text
+    );
+    for days in [0, 366] {
+        let refused = mcp.call("tickets", json!({"action": "list", "updated_within": days}));
+        assert!(refused.error, "{days}: {}", refused.text);
+        assert!(refused.text.contains("1 to 365"), "{}", refused.text);
+    }
+
+    // Jira: `updated >= "-15d"` in the JQL, on a search as on a list.
+    let user = User::with_fake_agent().with_fake_acli();
+    fixture(&user);
+    let mut recent = work_item("ABC-1", "Recent");
+    recent["fields"]["updated"] = json!(days_ago(3));
+    let mut old = work_item("ABC-2", "Old");
+    old["fields"]["updated"] = json!(days_ago(40));
+    jira(&user, json!({"ABC-1": recent, "ABC-2": old}));
+    track(&user, jira_abc());
+    let mcp = agent_in(&user, None);
+
+    let found = mcp.call(
+        "tickets",
+        json!({"action": "search", "query": "users", "updated_within": 15}),
+    );
+
+    assert!(!found.error, "{}", found.text);
+    assert!(found.text.contains("- ABC-1 "), "{}", found.text);
+    assert!(!found.text.contains("- ABC-2 "), "{}", found.text);
+    assert!(
+        jqls(&user)
+            .iter()
+            .any(|jql| jql.contains("updated >= \"-15d\"")),
+        "{:?}",
+        jqls(&user)
+    );
+}
+
+#[test]
+fn in_comments_searches_the_comments_only() {
+    let user = User::with_fake_agent().with_fake_acli();
+    fixture(&user);
+    jira_text(&user);
+    track(&user, jira_abc());
+    let mcp = agent_in(&user, None);
+
+    let found = mcp.call(
+        "tickets",
+        json!({"action": "search", "in_comments": "isServicePoint"}),
+    );
+
+    assert!(!found.error, "{}", found.text);
+    assert!(found.text.contains("- ABC-2 "), "{}", found.text);
+    assert!(!found.text.contains("- ABC-1 "), "{}", found.text);
+    assert!(found.text.contains("in their comments"), "{}", found.text);
+    assert!(
+        jqls(&user)
+            .iter()
+            .any(|jql| jql.contains("comment ~ \"isServicePoint\"")),
+        "{:?}",
+        jqls(&user)
+    );
+}
+
+#[test]
+fn a_jql_search_stays_in_the_tracker_s_projects() {
+    let user = User::with_fake_agent().with_fake_acli();
+    fixture(&user);
+    jira_text(&user);
+    track(&user, jira_abc());
+    let mcp = agent_in(&user, None);
+
+    let found = mcp.call(
+        "tickets",
+        json!({"action": "search", "state": "all",
+            "jql": "summary ~ isServicePoint OR project = XYZ order by key ASC"}),
+    );
+
+    assert!(!found.error, "{}", found.text);
+    assert!(!found.text.contains("XYZ-1"), "{}", found.text);
+    assert_eq!(
+        jqls(&user).last().unwrap(),
+        "project in (\"ABC\") AND (summary ~ isServicePoint OR project = XYZ) ORDER BY key ASC"
+    );
+    // A query that would close the parentheses around it, or leave one open, is refused before
+    // acli is asked.
+    let before = jqls(&user).len();
+    for (jql, why) in [
+        ("priority = High) OR (project = XYZ", "closes a parenthesis"),
+        ("(priority = High", "leaves a parenthesis open"),
+        ("summary ~ \"open) OR (project = XYZ", "leaves a quote open"),
+        (
+            "priority = High order by key) OR (project = XYZ",
+            "field names without quotes (cf[N] for a custom field)",
+        ),
+        ("summary ~ a\\( OR x = 1) OR (project = XYZ", "backslash"),
+    ] {
+        let refused = mcp.call("tickets", json!({"action": "search", "jql": jql}));
+        assert!(refused.error, "{jql}: {}", refused.text);
+        assert!(refused.text.contains(why), "{jql}: {}", refused.text);
+    }
+    assert_eq!(jqls(&user).len(), before);
+    // A quoted parenthesis is text, not a parenthesis.
+    let quoted = mcp.call(
+        "tickets",
+        json!({"action": "search", "jql": "summary ~ \"a) b\""}),
+    );
+    assert!(!quoted.error, "{}", quoted.text);
+}
+
+#[test]
+fn a_jql_search_on_github_is_refused_naming_query() {
+    let user = User::with_fake_agent().with_fake_gh();
+    fixture(&user);
+    track(&user, github_issues());
+    issues(&user, json!({}));
+    let mcp = agent_in(&user, None);
+
+    let refused = mcp.call(
+        "tickets",
+        json!({"action": "search", "jql": "priority = High"}),
+    );
+
+    assert!(refused.error, "{}", refused.text);
+    assert!(
+        refused
+            .text
+            .contains("jql is Jira's: on GitHub, give the words in query"),
+        "{}",
+        refused.text
+    );
+    let refused = mcp.call(
+        "tickets",
+        json!({"action": "search", "in_comments": "natures"}),
+    );
+    assert!(
+        refused
+            .text
+            .contains("in_comments is Jira's: on GitHub, query looks in the comments too"),
+        "{}",
+        refused.text
+    );
+    assert!(
+        !calls(user.gh_received())
+            .iter()
+            .any(|call| call.starts_with("issue list")),
+        "{:?}",
+        calls(user.gh_received())
+    );
+}
+
+#[test]
+fn a_jql_acli_refuses_comes_back_with_its_words() {
+    let user = User::with_fake_agent().with_fake_acli();
+    fixture(&user);
+    user.acli_script(json!({"fail": {
+        "search": "✗ Error: Field 'nofield' does not exist or you do not have permission to view it."
+    }}));
+    track(&user, jira_abc());
+    let mcp = agent_in(&user, None);
+
+    let answer = mcp.call("tickets", json!({"action": "search", "jql": "nofield = 1"}));
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("Field 'nofield' does not exist or you do not have permission"),
+        "{}",
+        answer.text
+    );
+}
+
+#[test]
+fn a_list_given_jql_or_in_comments_is_refused_naming_search() {
+    let user = User::with_fake_agent().with_fake_acli();
+    fixture(&user);
+    jira_text(&user);
+    track(&user, jira_abc());
+    let mcp = agent_in(&user, None);
+
+    for (field, value) in [("jql", "assignee = currentUser()"), ("in_comments", "x")] {
+        let refused = mcp.call("tickets", json!({"action": "list", field: value}));
+
+        assert!(refused.error, "{field}: {}", refused.text);
+        assert!(
+            refused
+                .text
+                .contains(&format!("{field} is search's: ask a search")),
+            "{field}: {}",
+            refused.text
+        );
+    }
+    assert!(jqls(&user).is_empty(), "{:?}", jqls(&user));
+}
+
+#[test]
+fn a_work_item_of_another_project_answered_by_acli_is_left_out_and_counted() {
+    let user = User::with_fake_agent().with_fake_acli();
+    fixture(&user);
+    user.acli_script(json!({"search": [
+        work_item("ABC-1", "Add the natures"),
+        work_item("XYZ-1", "Other project's secret"),
+    ]}));
+    track(&user, jira_abc());
+    let mcp = agent_in(&user, None);
+
+    for action in [
+        json!({"action": "search", "query": "natures"}),
+        json!({"action": "list", "updated_within": 30}),
+    ] {
+        let found = mcp.call("tickets", action.clone());
+
+        assert!(!found.error, "{action}: {}", found.text);
+        assert!(found.text.contains("- ABC-1 "), "{action}: {}", found.text);
+        assert!(!found.text.contains("XYZ-1"), "{action}: {}", found.text);
+        assert!(
+            found.text.contains(
+                "(1 answered from another site or project than the tracker's are left out)"
+            ),
+            "{action}: {}",
+            found.text
+        );
+    }
 }

@@ -247,6 +247,24 @@ fn an_action_of_an_agent_is_to_judge_and_a_change_of_the_tracker_is_base() {
 }
 
 #[test]
+fn a_tracker_change_says_the_worklog_entry() {
+    let user = User::with_fake_agent();
+    project(&user);
+    let (_, mcp) = root(&user, None);
+    let jira = json!({"kind": "jira", "site": "acme.atlassian.net", "projects": ["ABC"],
+        "worklog_token": "other-token"});
+
+    let number = held(mcp.call(
+        "project",
+        json!({"action": "set_settings", "tracker": jira}),
+    ));
+    // The user approves what is swapped, not only the site.
+    let says = request(&user, number)["says"].to_string();
+    assert!(says.contains("other-token"), "{says}");
+    assert!(says.contains("vault entry"), "{says}");
+}
+
+#[test]
 fn a_settings_change_says_what_changes_and_keeps_the_file_s_comments() {
     let user = User::with_fake_agent();
     project(&user);
@@ -363,6 +381,26 @@ fn in_full_an_agent_s_base_branches_are_changed_at_once_and_checked_all_the_same
         "{}",
         file(&user)
     );
+}
+
+#[test]
+fn an_agent_cannot_set_the_delete_branch_on_merge_of_a_repository() {
+    // The setting is the user's (`docs/projects.md`): a call that carries it is refused as an
+    // unknown field, even in full mode, and the file is left as it was.
+    let user = User::with_fake_agent();
+    project(&user);
+    let (id, mcp) = root(&user, None);
+    cli(&user, &["agent", "mode", &id, "full"]).unwrap();
+    let before = file(&user);
+
+    let said = refused(mcp.call(
+        "project",
+        json!({"action": "set_settings",
+            "repositories": [{"path": ".", "delete_branch_on_merge": true}]}),
+    ));
+
+    assert!(said.contains("delete_branch_on_merge"), "{said}");
+    assert_eq!(file(&user), before);
 }
 
 #[test]

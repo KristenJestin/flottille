@@ -50,7 +50,11 @@ gpui_kit::assets::icon_assets!(
         CircleDot,
         Pencil,
         Maximize2,
-        RotateCw
+        RotateCw,
+        Server,
+        KeyRound,
+        ChevronLeft,
+        ChevronRight
     ]
 );
 
@@ -139,10 +143,18 @@ pub enum Icon {
     Restart,
     /// Back to the end of a conversation.
     ToEnd,
+    /// A service of the machine: the services page.
+    Service,
+    /// An entry of the vault: a secret of the user's.
+    Key,
+    /// Goes to the previous one: a picture of a message.
+    Previous,
+    /// Goes to the next one: a picture of a message.
+    Next,
 }
 
 impl Icon {
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 40] = [
         Self::Folder,
         Self::Branch,
         Self::Repository,
@@ -179,6 +191,10 @@ impl Icon {
         Self::Expand,
         Self::Restart,
         Self::ToEnd,
+        Self::Service,
+        Self::Key,
+        Self::Previous,
+        Self::Next,
     ];
 
     pub fn path(self) -> SharedString {
@@ -222,6 +238,10 @@ impl Icon {
             Self::Expand => IconName::Maximize2,
             Self::Restart => IconName::RotateCw,
             Self::ToEnd => IconName::ArrowDown,
+            Self::Service => IconName::Server,
+            Self::Key => IconName::KeyRound,
+            Self::Previous => IconName::ChevronLeft,
+            Self::Next => IconName::ChevronRight,
         }
         .path()
     }

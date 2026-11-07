@@ -4,6 +4,7 @@
 //! `provider.disable`), and the page follows what the daemon lists next. The Auto judge is
 //! chosen here too (`provider.set_judge`), and its guidance edited (`judge.set`). The window's
 //! appearance is chosen (`appearance.set`): the Omarchy theme or Flottille's own, light or dark.
+//! The vault's entries are added, replaced and removed (`vault.*`, `crate::vault`).
 //! Last, the developer mode is switched (`developer.set`), its log's path beside the switch. The
 //! page is tabs, one section shown at a time; the Judge tab holds two, the Auto judge and then
 //! its guidance.
@@ -22,20 +23,24 @@ use gpui_kit::{
     Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, TestSupportExt as _,
     Transformation, WeakEntity, Window, div, px, radians,
 };
+use serde_json::{Value, json};
 
 use crate::actions::Command;
 use crate::extensions::Registry;
 use crate::providers::{Provider, Providers};
 use crate::rules::RulesEditor;
 use crate::shell::Shell;
+use crate::vault::VaultSection;
 use crate::workspaces_folder::WorkspacesFolder;
 
 /// The sections of the page, in order: each index entry's key and label.
-pub const SECTIONS: [(&str, &str); 7] = [
+pub const SECTIONS: [(&str, &str); 9] = [
     ("judge", "Judge"),
     ("providers", "Providers"),
+    ("compaction", "Compaction"),
     ("rules", "Rules"),
     ("workspaces", "Workspaces"),
+    ("vault", "Vault"),
     ("sessions", "Sessions"),
     ("appearance", "Appearance"),
     ("developer", "Developer mode"),
@@ -44,6 +49,97 @@ pub const SECTIONS: [(&str, &str); 7] = [
 /// The blocks of the Judge tab, top to bottom: each one is a section of the page, entering on its
 /// own.
 const JUDGE_BLOCKS: [&str; 2] = ["judge", "guidance"];
+
+/// The compaction as the daemon says it (`compaction.show`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Compaction {
+    /// The compactor's provider, model and effort (`None` is the provider's or the model's
+    /// default); none when each CLI compacts on its own.
+    pub compactor: Option<(String, Option<String>, Option<String>)>,
+    /// Flottille picked it and the user has not seen the notice yet.
+    pub picked: bool,
+    /// The agents write their own handoff, not the compactor.
+    pub by_agent: bool,
+    pub automatic: bool,
+    /// Percent of the model's context window.
+    pub threshold: u64,
+    /// A ceiling in tokens; none is no ceiling.
+    pub maximum: Option<u64>,
+    /// Tokens kept word for word.
+    pub kept: u64,
+    /// An agent at rest is compacted `margin` minutes before its prompt cache expires.
+    pub before_expiry: bool,
+    pub margin: u64,
+    /// A message to an agent whose cache expired compacts it first.
+    pub after_expiry: bool,
+    /// Below this context, in tokens, neither of the two compacts.
+    pub minimum: u64,
+    /// Each provider's cache lifetime in seconds, in the daemon's order; none when unknown.
+    pub lifetimes: Vec<(String, Option<u64>)>,
+}
+
+impl Compaction {
+    pub fn of(value: &Value) -> Compaction {
+        let compactor = &value["compactor"];
+        let text = |key: &str| compactor[key].as_str().map(str::to_owned);
+        Compaction {
+            compactor: text("provider").map(|provider| (provider, text("model"), text("effort"))),
+            picked: compactor["picked"] == true,
+            by_agent: value["summary"] == "agent",
+            automatic: value["automatic"] != false,
+            threshold: value["threshold"].as_u64().unwrap_or(70),
+            maximum: value["maximum"].as_u64(),
+            kept: value["kept"].as_u64().unwrap_or(20_000),
+            before_expiry: value["before_expiry"] == true,
+            margin: value["margin"].as_u64().unwrap_or(5),
+            after_expiry: value["after_expiry"] != false,
+            minimum: value["minimum"].as_u64().unwrap_or(50_000),
+            lifetimes: value["lifetimes"]
+                .as_object()
+                .map(|lifetimes| {
+                    lifetimes
+                        .iter()
+                        .map(|(provider, seconds)| (provider.clone(), seconds.as_u64()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+}
+
+/// The thresholds the Compaction tab offers, in percent; the daemon takes 10 to 95.
+pub const THRESHOLDS: [u64; 5] = [50, 60, 70, 80, 90];
+/// The maximum sizes it offers, in tokens, after No ceiling.
+pub const MAXIMUMS: [u64; 4] = [100_000, 150_000, 200_000, 400_000];
+/// The margins before a cache's expiry it offers, in minutes; the daemon takes 1 to 30.
+pub const MARGINS: [u64; 4] = [2, 5, 10, 15];
+/// The minimum sizes of the compaction around the cache's expiry it offers, in tokens.
+pub const MINIMUMS: [u64; 4] = [20_000, 50_000, 100_000, 200_000];
+/// The sizes kept word for word it offers, in tokens.
+pub const KEPTS: [u64; 4] = [5_000, 10_000, 20_000, 40_000];
+
+/// A provider's name as the window shows it.
+fn provider_title(provider: &str) -> &str {
+    match provider {
+        "claude" => "Claude",
+        "codex" => "Codex",
+        "opencode" => "OpenCode",
+        other => other,
+    }
+}
+
+/// What the Compaction tab says under its title.
+const COMPACTION_SENTENCE: &str = "When an agent's context fills up, the compactor or the \
+     agent itself writes a summary of its conversation, and the agent goes on in a new session \
+     from its brief and the summary. With the compactor set to None, each agent's program \
+     compacts on its own.";
+
+/// What the compactor's picker calls no compactor.
+pub const NO_COMPACTOR: &str = "None (each program compacts on its own)";
+
+/// What the page says of the compactor's cost.
+pub const COMPACTOR_COST: &str =
+    "Each compaction is a turn of the compactor's model: it uses your quota on that provider.";
 
 /// Where Settings was opened at, from a warning or a notice that leads to a section.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +152,8 @@ pub enum Reveal {
     Guidance,
     /// The rules for every project (the link above a project's rules).
     Rules,
+    /// The compaction (the notice of the compactor picked).
+    Compaction,
 }
 
 impl Reveal {
@@ -65,6 +163,7 @@ impl Reveal {
             Reveal::Judge | Reveal::Guidance => "judge",
             Reveal::Providers => "providers",
             Reveal::Rules => "rules",
+            Reveal::Compaction => "compaction",
         };
         SECTIONS
             .iter()
@@ -124,8 +223,16 @@ pub struct SettingsPage {
     rules: Entity<RulesEditor>,
     /// The Auto judge's guidance, edited on this page.
     judge_guidance: Entity<RulesEditor>,
+    /// The compactor's guidance, edited on this page.
+    compaction_guidance: Entity<RulesEditor>,
+    /// The compaction, once the daemon said it.
+    compaction: Option<Compaction>,
+    /// A change asked, until the daemon answers.
+    compaction_pending: bool,
     /// Where the workspaces of every project go, chosen on this page.
     workspaces: Entity<WorkspacesFolder>,
+    /// The vault's entries, set and removed on this page.
+    vault: Entity<VaultSection>,
     /// The judge's picker whose list is open.
     judge_menu: Option<JudgeMenu>,
     /// A judge chosen, until the daemon lists it.
@@ -167,7 +274,8 @@ pub enum JudgeMenu {
     Model,
 }
 
-/// A judge as the daemon lists it: its provider and its model, the provider's default when none.
+/// A judge, or a compactor, as the daemon lists it: its provider and its model, the provider's
+/// default when none.
 pub type Judge = (String, Option<String>);
 
 /// Auto, in two lines, beside the judge's pickers.
@@ -189,12 +297,18 @@ impl SettingsPage {
         shell: WeakEntity<Shell>,
         rules: Entity<RulesEditor>,
         judge_guidance: Entity<RulesEditor>,
+        compaction_guidance: Entity<RulesEditor>,
         workspaces: Entity<WorkspacesFolder>,
+        vault: Entity<VaultSection>,
     ) -> Self {
         Self {
             rules,
             judge_guidance,
+            compaction_guidance,
+            compaction: None,
+            compaction_pending: false,
             workspaces,
+            vault,
             shell,
             providers: Providers::default(),
             pending: HashMap::new(),
@@ -266,7 +380,7 @@ impl SettingsPage {
                     .expect("a block of the Judge tab");
                 self.scroll.scroll_to_top_of_item(at);
             }
-            Reveal::Judge => self.scroll.set_offset(Point::default()),
+            Reveal::Judge | Reveal::Compaction => self.scroll.set_offset(Point::default()),
             Reveal::Providers | Reveal::Rules => {}
         }
         cx.notify();
@@ -280,8 +394,459 @@ impl SettingsPage {
         &self.judge_guidance
     }
 
+    pub fn compaction_guidance(&self) -> &Entity<RulesEditor> {
+        &self.compaction_guidance
+    }
+
+    /// The compaction as the daemon last said it.
+    pub fn compaction(&self) -> Option<&Compaction> {
+        self.compaction.as_ref()
+    }
+
+    /// Asks the daemon to change the compaction's settings: the fields of `params` only.
+    pub fn set_compaction(&mut self, params: Value, cx: &mut Context<Self>) {
+        if self.compaction_pending || self.compaction.is_none() {
+            return;
+        }
+        self.compaction_pending = true;
+        self.shell
+            .update(cx, |shell, _| {
+                shell.perform(Command::CompactionSet { params })
+            })
+            .ok();
+        cx.notify();
+    }
+
+    /// The daemon's answer to a read or a change: a change refused stays as it was, and a toast
+    /// says why.
+    pub fn compaction_answered(
+        &mut self,
+        shown: Result<Compaction, String>,
+        written: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if written {
+            self.compaction_pending = false;
+        }
+        match shown {
+            Ok(shown) => {
+                if written {
+                    toast(
+                        Toast::success("Compaction saved")
+                            .detail("It applies at the next end of a turn."),
+                        cx,
+                    );
+                }
+                self.compaction = Some(shown);
+            }
+            Err(why) if written => toast(
+                Toast::failure("The compaction was not changed").detail(why),
+                cx,
+            ),
+            Err(_) => {}
+        }
+        cx.notify();
+    }
+
+    /// What the compactor's picker offers: `(key, label, the compactor it chooses)`, None first,
+    /// then each enabled provider's default model and each model it lists.
+    pub fn compactor_entries(&self) -> Vec<(String, String, Option<Judge>)> {
+        let mut entries = vec![("none".to_owned(), NO_COMPACTOR.to_owned(), None)];
+        for provider in self.providers.list.iter().filter(|p| p.enabled) {
+            entries.push((
+                format!("{}-default", provider.name),
+                format!(
+                    "{} · {}",
+                    provider.title,
+                    self.providers
+                        .model_said(&provider.name, None)
+                        .unwrap_or_else(|| "Model not known yet".to_owned())
+                ),
+                Some((provider.name.clone(), None)),
+            ));
+            for model in provider.models.iter().flatten() {
+                entries.push((
+                    format!("{}-{}", provider.name, model.id),
+                    format!(
+                        "{} · {}",
+                        provider.title,
+                        model.name.as_deref().unwrap_or(&model.id)
+                    ),
+                    Some((provider.name.clone(), Some(model.id.clone()))),
+                ));
+            }
+        }
+        // A compactor the providers do not list (a model written by hand, or picked before its
+        // provider's models were read) is still shown.
+        if let Some(Some((provider, model, _))) =
+            self.compaction.as_ref().map(|c| c.compactor.clone())
+            && !entries
+                .iter()
+                .any(|(_, _, chosen)| chosen.as_ref() == Some(&(provider.clone(), model.clone())))
+        {
+            let title = self
+                .providers
+                .get(&provider)
+                .map_or(provider.clone(), |p| p.title.clone());
+            let label = match &model {
+                Some(model) => format!("{title} · {model}"),
+                None => format!(
+                    "{title} · {}",
+                    self.providers
+                        .model_said(&provider, None)
+                        .unwrap_or_else(|| "Model not known yet".to_owned())
+                ),
+            };
+            entries.push((format!("{provider}-own"), label, Some((provider, model))));
+        }
+        entries
+    }
+
+    /// The efforts the chosen compactor's model offers.
+    fn compactor_efforts(&self) -> Vec<String> {
+        let Some(Some((provider, model, _))) =
+            self.compaction.as_ref().map(|c| c.compactor.clone())
+        else {
+            return Vec::new();
+        };
+        let Some(provider) = self.providers.get(&provider) else {
+            return Vec::new();
+        };
+        provider
+            .models
+            .iter()
+            .flatten()
+            .find(|m| match &model {
+                Some(model) => &m.id == model,
+                None => m.default,
+            })
+            .and_then(|m| m.efforts.clone())
+            .unwrap_or_default()
+    }
+
+    fn compaction_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let shown = self.compaction.clone().unwrap_or(Compaction {
+            compactor: None,
+            picked: false,
+            by_agent: false,
+            automatic: true,
+            threshold: 70,
+            maximum: None,
+            kept: 20_000,
+            before_expiry: false,
+            margin: 5,
+            after_expiry: true,
+            minimum: 50_000,
+            lifetimes: Vec::new(),
+        });
+        let off = self.compaction.is_none() || self.compaction_pending;
+        let this = cx.entity().downgrade();
+        let entries = self.compactor_entries();
+        let chosen = entries
+            .iter()
+            .position(|(_, _, choice)| {
+                choice.as_ref()
+                    == shown
+                        .compactor
+                        .as_ref()
+                        .map(|(provider, model, _)| (provider.clone(), model.clone()))
+                        .as_ref()
+            })
+            .unwrap_or(0);
+        let choices: Vec<Option<Judge>> = entries.iter().map(|e| e.2.clone()).collect();
+        let options = entries.iter().map(|(key, label, choice)| {
+            let option = SelectOption::new(
+                SharedString::from(key.clone()),
+                SharedString::from(label.clone()),
+            );
+            match choice {
+                None => option
+                    .line("Flottille never compacts: each agent's program does, as it chooses."),
+                Some(_) => option,
+            }
+        });
+        let picker = Select::new("compactor-model", options, chosen)
+            .disabled(off)
+            .on_choose({
+                let this = this.clone();
+                move |index, _, cx| {
+                    let compactor = match &choices[index] {
+                        None => json!("none"),
+                        Some((provider, model)) => json!({"provider": provider, "model": model}),
+                    };
+                    this.update(cx, |this, cx| {
+                        this.set_compaction(json!({"compactor": compactor}), cx)
+                    })
+                    .ok();
+                }
+            });
+        let efforts = self.compactor_efforts();
+        let chosen_effort = shown
+            .compactor
+            .as_ref()
+            .and_then(|(_, _, effort)| effort.clone());
+        let mut levels: Vec<Option<String>> = vec![None];
+        levels.extend(efforts.iter().cloned().map(Some));
+        if let Some(own) = &chosen_effort
+            && !efforts.contains(own)
+        {
+            levels.push(Some(own.clone()));
+        }
+        let effort_at = levels.iter().position(|l| *l == chosen_effort).unwrap_or(0);
+        let effort_options = levels.iter().map(|level| match level {
+            None => SelectOption::new("default", "The model's default"),
+            Some(level) => SelectOption::new(
+                SharedString::from(level.clone()),
+                SharedString::from(level.clone()),
+            ),
+        });
+        let compactor_now = shown.compactor.clone();
+        let effort_picker = Select::new("compactor-effort", effort_options, effort_at)
+            .disabled(off)
+            .on_choose({
+                let this = this.clone();
+                let levels = levels.clone();
+                move |index, _, cx| {
+                    let Some((provider, model, _)) = compactor_now.clone() else {
+                        return;
+                    };
+                    let compactor =
+                        json!({"provider": provider, "model": model, "effort": levels[index]});
+                    this.update(cx, |this, cx| {
+                        this.set_compaction(json!({"compactor": compactor}), cx)
+                    })
+                    .ok();
+                }
+            });
+        let some = shown.compactor.is_some() || shown.by_agent;
+        let summary = Select::new(
+            "compaction-summary",
+            [
+                SelectOption::new("compactor", "The compactor")
+                    .line("A model of your choice summarises the conversation."),
+                SelectOption::new("agent", "The agent itself")
+                    .line("Flottille asks the agent for its handoff, and turns its program's own compaction off where it can."),
+            ],
+            usize::from(shown.by_agent),
+        )
+        .disabled(off)
+        .on_choose({
+            let this = this.clone();
+            move |index, _, cx| {
+                let source = if index == 1 { "agent" } else { "compactor" };
+                this.update(cx, |this, cx| {
+                    this.set_compaction(json!({"summary": source}), cx)
+                })
+                .ok();
+            }
+        });
+        let automatic = Switch::new("compaction-automatic", shown.automatic, "Compact automatically")
+            .hint("On, an agent is compacted at the end of a turn once its context passes the threshold or the maximum size. Off, only when you ask, from a session's menu.")
+            .disabled(off)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let on = this.compaction.as_ref().is_some_and(|c| c.automatic);
+                this.set_compaction(json!({"automatic": !on}), cx)
+            }));
+        let select_of = |id: &'static str,
+                         values: Vec<Option<u64>>,
+                         now: Option<u64>,
+                         label: fn(Option<u64>) -> String,
+                         key: &'static str,
+                         this: WeakEntity<Self>| {
+            let mut values = values;
+            if !values.contains(&now) {
+                values.push(now);
+                values.sort();
+            }
+            let at = values.iter().position(|v| *v == now).unwrap_or(0);
+            let options = values.iter().map(|v| {
+                SelectOption::new(
+                    SharedString::from(v.map_or("none".to_owned(), |v| v.to_string())),
+                    SharedString::from(label(*v)),
+                )
+            });
+            let picked = values.clone();
+            Select::new(id, options, at)
+                .disabled(off)
+                .on_choose(move |index, _, cx| {
+                    let value = picked[index].map_or(json!("none"), |v| json!(v));
+                    this.update(cx, |this, cx| this.set_compaction(json!({key: value}), cx))
+                        .ok();
+                })
+        };
+        let threshold = select_of(
+            "compaction-threshold",
+            THRESHOLDS.iter().map(|v| Some(*v)).collect(),
+            Some(shown.threshold),
+            |v| format!("{} % of the context window", v.unwrap_or(0)),
+            "threshold",
+            this.clone(),
+        );
+        let mut maximums: Vec<Option<u64>> = vec![None];
+        maximums.extend(MAXIMUMS.iter().map(|v| Some(*v)));
+        let maximum = select_of(
+            "compaction-maximum",
+            maximums,
+            shown.maximum,
+            |v| match v {
+                None => "No ceiling".to_owned(),
+                Some(v) => format!("{} tokens", grouped(v as usize)),
+            },
+            "maximum",
+            this.clone(),
+        );
+        let kept = select_of(
+            "compaction-kept",
+            KEPTS.iter().map(|v| Some(*v)).collect(),
+            Some(shown.kept),
+            |v| format!("{} tokens", grouped(v.unwrap_or(0) as usize)),
+            "kept",
+            this.clone(),
+        );
+        let before_expiry = Switch::new(
+            "compaction-before-expiry",
+            shown.before_expiry,
+            "Compact before the cache expires",
+        )
+        .hint("An agent at rest is compacted the margin before its prompt cache expires, so that its next turn reads a short history.")
+        .disabled(off)
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let on = this.compaction.as_ref().is_some_and(|c| c.before_expiry);
+            this.set_compaction(json!({"before_expiry": !on}), cx)
+        }));
+        let margin = select_of(
+            "compaction-margin",
+            MARGINS.iter().map(|v| Some(*v)).collect(),
+            Some(shown.margin),
+            |v| format!("{} minutes before", v.unwrap_or(0)),
+            "margin",
+            this.clone(),
+        );
+        let after_expiry = Switch::new(
+            "compaction-after-expiry",
+            shown.after_expiry,
+            "Compact a session resumed after its cache expired",
+        )
+        .hint("A message to an agent whose prompt cache expired compacts it first, then goes to the new session. The composer lets you choose for each message.")
+        .disabled(off)
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let on = this.compaction.as_ref().is_some_and(|c| c.after_expiry);
+            this.set_compaction(json!({"after_expiry": !on}), cx)
+        }));
+        let minimum = select_of(
+            "compaction-minimum",
+            MINIMUMS.iter().map(|v| Some(*v)).collect(),
+            Some(shown.minimum),
+            |v| format!("{} tokens", grouped(v.unwrap_or(0) as usize)),
+            "minimum",
+            this,
+        );
+        let lifetimes = shown
+            .lifetimes
+            .iter()
+            .map(|(provider, seconds)| {
+                let title = provider_title(provider);
+                match seconds {
+                    Some(seconds) if seconds % 3_600 == 0 => {
+                        format!("{title}: {} hour", seconds / 3_600).replace(" 1 hour", " an hour")
+                    }
+                    Some(seconds) => format!("{title}: {} minutes", seconds / 60),
+                    None => format!("{title}: unknown, neither compacts"),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let settings = div()
+            .flex()
+            .flex_col()
+            .gap(space::MD)
+            .child(Field::new(
+                "compactor-effort-field",
+                "Effort",
+                effort_picker,
+            ))
+            .child(automatic)
+            .child(Field::new(
+                "compaction-threshold-field",
+                "Threshold",
+                threshold,
+            ))
+            .child(
+                Field::new("compaction-maximum-field", "Maximum size", maximum)
+                    .hint("Compact there even when the window is larger."),
+            )
+            .child(
+                Field::new("compaction-kept-field", "Kept word for word", kept)
+                    .hint("The latest messages given again as they are, after the summary."),
+            )
+            .child(before_expiry)
+            .child(
+                Field::new("compaction-margin-field", "Margin", margin)
+                    .hint("How long before the cache expires an agent at rest is compacted."),
+            )
+            .child(after_expiry)
+            .child(
+                Field::new("compaction-minimum-field", "Minimum size", minimum)
+                    .hint("Below it, neither compacts around the cache's expiry: a small session costs little to read again."),
+            )
+            .child(
+                div()
+                    .id("compaction-lifetimes")
+                    .text_size(px(12.))
+                    .text_color(p.faint)
+                    .aria_label(SharedString::from(format!(
+                        "Prompt cache lifetimes. {lifetimes}"
+                    )))
+                    .child(format!("Prompt cache lifetimes. {lifetimes}"))
+                    .test_support(),
+            )
+            .child(
+                div()
+                    .id("compactor-cost")
+                    .text_size(px(12.))
+                    .text_color(p.faint)
+                    .child(COMPACTOR_COST)
+                    .test_support(),
+            );
+        let card = div()
+            .id("compaction")
+            .p(space::LG)
+            .flex()
+            .flex_col()
+            .rounded(px(12.))
+            .bg(p.card)
+            .border_1()
+            .border_color(p.line)
+            .child(
+                Field::new("compaction-summary-field", "Summary written by", summary)
+                    .hint("The compactor, or the agent itself in a handoff of a fixed shape."),
+            )
+            .child(
+                div()
+                    .pt(space::MD)
+                    .child(Field::new("compactor-field", "Compactor", picker)),
+            )
+            .child(
+                presence(
+                    "compaction-settings-block",
+                    some,
+                    div().pt(space::MD).child(settings),
+                )
+                .gap(space::MD),
+            )
+            .test_support();
+        Section::new("compaction", "Compaction")
+            .sentence(COMPACTION_SENTENCE)
+            .child(card)
+    }
+
     pub fn workspaces_folder(&self) -> &Entity<WorkspacesFolder> {
         &self.workspaces
+    }
+
+    pub fn vault(&self) -> &Entity<VaultSection> {
+        &self.vault
     }
 
     pub fn providers(&self) -> &Providers {
@@ -1266,8 +1831,16 @@ impl Render for SettingsPage {
                     self.tool_results_section(cx).into_any_element(),
                 ),
             ],
+            vec![
+                ("compaction", self.compaction_section(cx).into_any_element()),
+                (
+                    "compaction-guidance",
+                    self.compaction_guidance.clone().into_any_element(),
+                ),
+            ],
             vec![("rules", self.rules.clone().into_any_element())],
             vec![("workspaces", self.workspaces.clone().into_any_element())],
+            vec![("vault", self.vault.clone().into_any_element())],
             vec![("sessions", self.sessions_section(cx).into_any_element())],
             vec![("appearance", self.appearance_section(cx).into_any_element())],
             vec![("developer", self.developer_section(cx).into_any_element())],
@@ -1307,6 +1880,7 @@ impl Render for SettingsPage {
                     .collect(),
             ),
         };
+        let vault = self.vault.read(cx).entries().map(<[_]>::len);
         let this = cx.entity().downgrade();
         let chooses = order.clone();
         let tabs = order
@@ -1328,6 +1902,9 @@ impl Render for SettingsPage {
                             // The count shows once the daemon listed them, so it does not jump.
                             "providers" if self.providers.known => {
                                 tabs.counted(key, label, count.to_string())
+                            }
+                            "vault" if let Some(entries) = vault => {
+                                tabs.counted(key, label, entries.to_string())
                             }
                             _ => tabs.tab(key, label),
                         }

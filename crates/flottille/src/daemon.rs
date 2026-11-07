@@ -22,6 +22,7 @@ use tokio::task::JoinSet;
 use crate::VERSION;
 use crate::agents::{self, Live};
 use crate::approvals;
+use crate::children;
 use crate::commands;
 use crate::deliveries;
 use crate::developer;
@@ -58,6 +59,8 @@ const SOCKET_CHECK: Duration = Duration::from_secs(2);
 /// What a client an agent started is answered, whatever it asks.
 const REFUSED_CLIENT: &str =
     "refused: this client was started by an agent; agents act only through their tools";
+/// How long the start waits for the vault's values to be read (`vault::load`).
+const VAULT_LOAD: Duration = Duration::from_secs(5);
 /// How long a refused client is answered before it is let go.
 const REFUSED_FOR: Duration = Duration::from_secs(10);
 
@@ -148,6 +151,9 @@ pub struct Daemon {
     pub projects: Mutex<Projects>,
     /// The workspaces being prepared or removed: one at a time for each.
     pub preparing: Mutex<HashSet<i64>>,
+    /// Those of `preparing` held by a removal: nothing starts in them until they are gone, and a
+    /// refusal says they are being removed.
+    pub removing_workspaces: Mutex<HashSet<i64>>,
     /// The agents removing their own workspace, with its name and how many removals of it are
     /// under way: meanwhile they start nothing in it (`workspaces::being_removed`).
     pub removing: Mutex<HashMap<String, (String, usize)>>,
@@ -158,6 +164,8 @@ pub struct Daemon {
     pub agents: Live,
     /// The agents' MCP server: its tokens, and what its tools keep (reads, runs).
     pub mcp: mcp::Server,
+    /// The services of the machine: their runs, and one start of each at a time.
+    pub services: crate::services::Live,
     /// The deliveries pinned as notes on agents' next tool results.
     pub notes: deliveries::Notes,
     /// The agents waiting on their provider (overloaded, rate-limited): not stuck.
@@ -165,6 +173,8 @@ pub struct Daemon {
     /// Whether the last `provider.judge_changed` chose no judge, once read from the store: kept
     /// with each one said since (`providers::judge_changed`).
     pub judge_chose_none: Mutex<Option<bool>>,
+    /// Where each agent's compaction by Flottille stands.
+    pub compactions: crate::compaction::Live,
     /// The slots launches took in each project's children cap, before their child exists.
     pub launching: Mutex<HashMap<String, usize>>,
     /// What the forges said of each workspace, and who watches them.
@@ -172,12 +182,16 @@ pub struct Daemon {
     /// The tickets read in the last 30 s, for the next `tickets show` and the window's session
     /// link (`reads`).
     pub kept_tickets: crate::reads::Kept<crate::tickets::Ticket>,
+    /// The searches of the tracker made in the last 30 s, by what they asked.
+    pub kept_searches: crate::reads::Kept<crate::tickets::Found>,
     /// The rounds of the items, the windows connected (`docs/items.md`).
     pub items: items::Items,
     /// The developer mode's log (`docs/developer.md`).
     pub developer: developer::Log,
     /// When the inactive sessions were last looked for (`inactive::check`); 0 before the first.
     pub inactive_checked: AtomicU64,
+    /// Where the vault's secrets are (`docs/vault.md`).
+    pub vault: crate::vault::Keyring,
     /// Becomes true when the daemon stops.
     stopping: watch::Sender<bool>,
 }
@@ -195,6 +209,42 @@ struct Subscription {
 }
 
 impl Daemon {
+    /// A daemon over its store and projects, its tools served on `port`.
+    pub fn new(
+        paths: &Paths,
+        store: Store,
+        projects: Projects,
+        port: u16,
+        bus: Option<broadcast::Sender<Event>>,
+    ) -> Daemon {
+        Daemon {
+            paths: paths.clone(),
+            started: Instant::now(),
+            events: Mutex::new(Events { store, bus }),
+            projects: Mutex::new(projects),
+            preparing: Mutex::new(HashSet::new()),
+            removing_workspaces: Mutex::new(HashSet::new()),
+            removing: Mutex::new(HashMap::new()),
+            step_outputs: Mutex::new(HashMap::new()),
+            agents: Live::default(),
+            mcp: mcp::Server::new(port),
+            services: crate::services::Live::default(),
+            notes: deliveries::Notes::default(),
+            waiting_provider: Mutex::new(HashSet::new()),
+            judge_chose_none: Mutex::new(None),
+            compactions: crate::compaction::Live::default(),
+            launching: Mutex::new(HashMap::new()),
+            forges: forge::Forges::default(),
+            kept_tickets: crate::reads::Kept::default(),
+            kept_searches: crate::reads::Kept::default(),
+            items: items::Items::default(),
+            developer: developer::Log::open(paths),
+            inactive_checked: AtomicU64::new(0),
+            vault: crate::vault::Keyring::open(paths),
+            stopping: watch::Sender::new(false),
+        }
+    }
+
     /// Stores the event and hands it to the subscribers under one lock, so that they see the
     /// events in the order of their numbers.
     pub fn emit(&self, name: &str, data: Value) -> Result<Event> {
@@ -330,30 +380,13 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     // This machine only, on a port of the system's choosing.
     let tools = TcpListener::bind(("127.0.0.1", 0)).await?;
     let (bus, _) = broadcast::channel(1024);
-    let daemon = Arc::new(Daemon {
-        paths: paths.clone(),
-        started: Instant::now(),
-        events: Mutex::new(Events {
-            store,
-            bus: Some(bus),
-        }),
-        projects: Mutex::new(projects),
-        preparing: Mutex::new(HashSet::new()),
-        removing: Mutex::new(HashMap::new()),
-        step_outputs: Mutex::new(HashMap::new()),
-        agents: Live::default(),
-        mcp: mcp::Server::new(tools.local_addr()?.port()),
-        notes: deliveries::Notes::default(),
-        waiting_provider: Mutex::new(HashSet::new()),
-        judge_chose_none: Mutex::new(None),
-        launching: Mutex::new(HashMap::new()),
-        forges: forge::Forges::default(),
-        kept_tickets: crate::reads::Kept::default(),
-        items: items::Items::default(),
-        developer: developer::Log::open(paths),
-        inactive_checked: AtomicU64::new(0),
-        stopping: watch::Sender::new(false),
-    });
+    let daemon = Arc::new(Daemon::new(
+        paths,
+        store,
+        projects,
+        tools.local_addr()?.port(),
+        Some(bus),
+    ));
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut child_ended = signal(SignalKind::child())?;
@@ -370,11 +403,16 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         "flottille daemon {VERSION} listening on {}",
         socket.display()
     );
+    // The vault's values are masked before an agent can say one; a keyring that waits for the
+    // user to unlock it holds the start back a little, then goes on on its own.
+    let loading = daemon.clone();
+    let loading = tokio::spawn(async move { crate::vault::load(&loading).await });
+    let _ = tokio::time::timeout(VAULT_LOAD, loading).await;
     workspaces::resume_at_start(&daemon);
     agents::settle_at_start(&daemon);
     tree::brief_at_start(&daemon);
     crate::subscriptions::resume_at_start(&daemon);
-    runs::settle_at_start(&daemon);
+    runs::settle_at_start(&daemon).await;
     approvals::settle_at_start(&daemon);
     projects::migrate_files(&daemon);
     let picking = daemon.clone();
@@ -408,13 +446,13 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
             },
             Some(_) = connections.join_next(), if !connections.is_empty() => {}
             _ = stop_requested.wait_for(|stopping| *stopping) => break "request",
-            _ = child_ended.recv() => reap_strays(),
+            _ = child_ended.recv() => children::reap_strays(),
             _ = socket_check.tick() => {
                 if judge(socket_identity(&socket), ours) == Socket::Gone {
                     break "socket";
                 }
                 // `/proc`'s list of children may miss one that changed while it was read.
-                reap_strays();
+                children::reap_strays();
             }
             _ = terminate.recv() => break "signal",
             _ = interrupt.recv() => break "signal",
@@ -441,10 +479,7 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
 
 /// The fields of `/proc/<pid>/stat` the daemon reads.
 struct Stat {
-    state: char,
     parent: u32,
-    group: u32,
-    session: u32,
     /// In clock ticks after boot.
     started: u64,
 }
@@ -454,10 +489,7 @@ fn stat(pid: u32) -> Option<Stat> {
     // The command name, field 2, is in parentheses and may hold spaces.
     let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
     Some(Stat {
-        state: fields.first()?.chars().next()?,
         parent: fields.get(1)?.parse().ok()?,
-        group: fields.get(2)?.parse().ok()?,
-        session: fields.get(3)?.parse().ok()?,
         started: fields.get(19)?.parse().ok()?,
     })
 }
@@ -525,40 +557,6 @@ async fn refuse(stream: UnixStream) {
     .await;
 }
 
-/// Waits for the processes the daemon took in as their subreaper and that ended, which nobody
-/// else waits for. The children the daemon started are waited for by whoever started them
-/// (tokio, `std::process`), by their pid: waiting for one of them here would take its status
-/// away. Each of those leads its own process group (agents, runs, git, the forges' command lines)
-/// or stays in the daemon's (a provider's `--version`), in the daemon's session; a process taken
-/// in is in another session (it detached), or in a group led by another (the group of the command
-/// it came from). One that made a group of its own in the daemon's session is not told apart, and
-/// stays a zombie until the daemon exits.
-fn reap_strays() {
-    let daemon = std::process::id();
-    let Some(own) = stat(daemon) else { return };
-    let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
-        return;
-    };
-    for task in tasks.flatten() {
-        let Ok(children) = std::fs::read_to_string(task.path().join("children")) else {
-            continue;
-        };
-        for pid in children
-            .split_whitespace()
-            .filter_map(|pid| pid.parse().ok())
-        {
-            if let Some(child) = stat(pid)
-                && child.state == 'Z'
-                && (child.session != own.session
-                    || (child.group != pid && child.group != own.group))
-            {
-                // SAFETY: waitpid has no memory precondition with a null status.
-                unsafe { libc::waitpid(pid as libc::pid_t, std::ptr::null_mut(), libc::WNOHANG) };
-            }
-        }
-    }
-}
-
 async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
     let (read, mut write) = stream.into_split();
     let (out, mut outgoing) = mpsc::channel::<Message>(256);
@@ -620,7 +618,9 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
             "test.",
             "provider.",
             "run.",
+            "service.",
             "items.",
+            "vault.",
         ]
         .iter()
         .any(|prefix| request.method.starts_with(prefix))
@@ -646,6 +646,10 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     approvals::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("run.") {
                     run_methods::call(daemon, &request.method, request.params).await
+                } else if request.method.starts_with("service.") {
+                    crate::services::call(daemon, &request.method, request.params).await
+                } else if request.method.starts_with("vault.") {
+                    crate::vault::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("items.") {
                     items::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("provider.") {
@@ -703,7 +707,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
     let _ = writer.await;
 }
 
-fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) {
+fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscription>) {
     let id = request.id;
     match request.method.as_str() {
         "daemon.status" => (
@@ -741,6 +745,13 @@ fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) 
         }
         method if method.starts_with("subscription.") => (
             match crate::subscriptions::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+            },
+            None,
+        ),
+        method if method.starts_with("leave.") => (
+            match crate::leaves::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => Message::error(Some(id), failure.code, failure.message),
             },
@@ -788,6 +799,13 @@ fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) 
             },
             None,
         ),
+        method if method.starts_with("compaction.") => (
+            match crate::compaction::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+            },
+            None,
+        ),
         method if method.starts_with("judge.") => (
             match judge::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
@@ -797,6 +815,13 @@ fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) 
         ),
         method if method.starts_with("rules.") => (
             match rules::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+            },
+            None,
+        ),
+        "project.set_conventions" => (
+            match projects::set_conventions(daemon, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => Message::error(Some(id), failure.code, failure.message),
             },

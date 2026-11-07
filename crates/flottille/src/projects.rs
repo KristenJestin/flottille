@@ -10,7 +10,7 @@ use flottille_core::detect;
 use flottille_core::paths::Paths;
 use flottille_core::project::{Project, slug, valid_name};
 use flottille_core::protocol::{
-    MessageChecks, ProjectFolder, ProjectName, ProjectRepository, ProjectSettings,
+    Conventions, MessageChecks, ProjectFolder, ProjectName, ProjectRepository, ProjectSettings,
 };
 use flottille_core::registry::Registry;
 use flottille_core::{Error, Result};
@@ -258,6 +258,7 @@ async fn settings_of(project: &Project) -> Value {
             "remote": repository.remote,
             "base": repository.base,
             "depends_on": repository.depends_on,
+            "delete_branch_on_merge": repository.delete_branch_on_merge,
             "url": url,
             "forge": repository.forge,
             "proposal": proposal,
@@ -271,6 +272,8 @@ async fn settings_of(project: &Project) -> Value {
         "tracker": project.tracker,
         "message_checks": project.message_checks,
         "branch_prefix": project.branch_prefix,
+        "branch_format": project.branch_format,
+        "pull_request_template": project.pull_requests.template,
         "obsolete": project.obsolete,
     })
 }
@@ -454,6 +457,15 @@ pub async fn set_settings(
                         toml_edit::value(base.iter().collect::<toml_edit::Array>()),
                     );
                 }
+                match setting.delete_branch_on_merge {
+                    Some(true) => {
+                        entry.insert("delete_branch_on_merge", toml_edit::value(true));
+                    }
+                    Some(false) => {
+                        entry.remove("delete_branch_on_merge");
+                    }
+                    None => {}
+                }
                 match &setting.depends_on {
                     Some(paths) if !paths.is_empty() => {
                         entry.insert(
@@ -531,6 +543,62 @@ pub fn set_message_checks(daemon: &Daemon, params: Value) -> std::result::Result
         Ok(())
     })?;
     Ok(json!({"name": saved.name, "message_checks": saved.message_checks}))
+}
+
+/// `project.set_conventions`: the project's branch format and pull request template, the user's
+/// alone (an agent's `project` tool never writes them); a pattern that is no regular expression
+/// is refused with its reason, nothing written.
+pub fn set_conventions(daemon: &Daemon, params: Value) -> std::result::Result<Value, Failure> {
+    let asked: Conventions = serde_json::from_value(params)?;
+    let format = asked.branch_format.as_deref().map(str::trim);
+    if let Some(format) = format.filter(|format| !format.is_empty()) {
+        flottille_core::project::check_branch_format(format).map_err(|why| {
+            Failure::refused(format!("the branch format {why}; nothing was saved"))
+        })?;
+    }
+    let saved = rewrite(daemon, &asked.name, |_, document| {
+        match format {
+            Some("") => {
+                document.remove("branch_format");
+            }
+            Some(format) => {
+                document.insert("branch_format", toml_edit::value(format));
+            }
+            None => {}
+        }
+        if let Some(template) = &asked.pull_request_template {
+            let table = document
+                .entry("pull_requests")
+                .or_insert_with(toml_edit::table)
+                .as_table_like_mut()
+                .ok_or_else(|| {
+                    Failure::new(
+                        "invalid-config",
+                        format!(
+                            "projects/{}.toml: pull_requests: must be a table",
+                            asked.name
+                        ),
+                    )
+                })?;
+            match template.trim().is_empty() {
+                true => {
+                    table.remove("template");
+                }
+                false => {
+                    table.insert("template", toml_edit::value(template.as_str()));
+                }
+            }
+            if table.is_empty() {
+                document.remove("pull_requests");
+            }
+        }
+        Ok(())
+    })?;
+    Ok(json!({
+        "name": saved.name,
+        "branch_format": saved.branch_format,
+        "pull_request_template": saved.pull_requests.template,
+    }))
 }
 
 /// `project.repositories`: each repository of the project as its checkout stands (found or not,

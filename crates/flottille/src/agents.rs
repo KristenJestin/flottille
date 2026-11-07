@@ -5,7 +5,7 @@
 //! and replaces its session then. The methods only write the store and hand the task its orders:
 //! none of them waits on the agent. Every prompt an agent gets is a delivery (`deliveries`).
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -84,6 +84,8 @@ pub enum Order {
     Stop,
     /// Its session is let go and a new one replaces it, for this reason. The parent was told.
     Replace(String),
+    /// Its conversation was summarised (`compaction`): a new session goes on from the summary.
+    Compact(Box<crate::compaction::Compacted>),
 }
 
 /// The prompt taken for the agent, kept across its processes, and whether one is being played.
@@ -102,6 +104,9 @@ pub struct Live {
     /// The processes this daemon started that have not ended, with their start times: the only
     /// ones it kills when it stops, whatever the shared table holds.
     processes: Mutex<HashMap<u32, u64>>,
+    /// The agents whose tools the user reloads: their process goes between turns, and the next
+    /// one says what changed (`mcp::mint`).
+    reloads: Mutex<HashSet<String>>,
 }
 
 /// Answers an `agent.*` request.
@@ -109,7 +114,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
     let daemon = &daemon;
     match method {
         // `agent.run` is the name it had before the pilot door; both stay.
-        "agent.start" | "agent.run" => start(daemon, serde_json::from_value(params)?),
+        "agent.start" | "agent.run" => start(daemon, serde_json::from_value(params)?).await,
         "agent.send" => {
             let asked: AgentSend = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
@@ -135,6 +140,10 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                     .await
                     .map_err(|e| Failure::new("unavailable", format!("images not kept: {e}")))??
             };
+            // Before the delivery wakes the agent: the turn it starts takes the choice.
+            if let Some(compact) = asked.compact {
+                crate::compaction::choose(daemon, &agent.id, compact);
+            }
             let delivery = deliveries::deliver_message(
                 daemon,
                 &agent.id,
@@ -179,6 +188,26 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let agent = find(daemon, &agent.id)?;
             Ok(json!({"agent": agent.to_json()}))
         }
+        "agent.reload_tools" => {
+            let asked: AgentName = serde_json::from_value(params)?;
+            let agent = find(daemon, &asked.agent)?;
+            refuse_child(daemon, &agent, "reloads its tools")?;
+            refuse_final(&agent)?;
+            let asked = daemon
+                .agents
+                .reloads
+                .lock()
+                .unwrap()
+                .insert(agent.id.clone());
+            if asked {
+                say_reload(daemon, &agent.id, true);
+            }
+            // Its session loop looks between turns: woken as by a delivery, it lets its process
+            // go at once, or once the turn that runs ended.
+            tell(daemon, &agent.id, Order::Ring);
+            let after_turn = agent.state == AgentState::Working;
+            Ok(json!({"agent": agent.to_json(), "after_turn": after_turn}))
+        }
         "agent.resume" => {
             let asked: AgentName = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
@@ -204,6 +233,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 )));
             }
             let ended_at = agent.ended_at.unwrap_or(agent.updated_at);
+            let waited = agent.waiting_on_answer;
             let resumed = daemon.write(|store| match store.resume_agent(&agent.id)? {
                 Some((agent, event)) => Ok((Some(agent), Some(event))),
                 None => Ok((None, None)),
@@ -211,8 +241,19 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let agent = resumed.ok_or_else(|| {
                 Failure::refused(format!("agent {} was resumed already", agent.id))
             })?;
+            if waited {
+                crate::tree::answered(daemon, &agent.id, "resumed");
+            }
             tell_resumed(daemon, &agent, ended_at);
             Ok(json!({"agent": agent.to_json()}))
+        }
+        "agent.detach" => {
+            let asked: AgentName = serde_json::from_value(params)?;
+            let mut agent = tree::detach(daemon, &asked.agent)?;
+            agent.gate_mode = crate::judge::mode(daemon, &agent.id);
+            let mut shown = agent.to_json();
+            shown["led_by"] = Value::Null;
+            Ok(json!({"agent": shown}))
         }
         "agent.mode" => {
             #[derive(serde::Deserialize)]
@@ -309,6 +350,13 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let agent = find(daemon, &asked.agent)?;
             Ok(tree::status_of(daemon, &agent)?)
         }
+        "agent.compact" => {
+            let asked: AgentName = serde_json::from_value(params)?;
+            let agent = find(daemon, &asked.agent)?;
+            refuse_final(&agent)?;
+            let after_turn = crate::compaction::ask(daemon, &agent)?;
+            Ok(json!({"agent": agent.to_json(), "after_turn": after_turn}))
+        }
         "agent.cancel" => {
             let asked: AgentName = serde_json::from_value(params)?;
             let agent = find(daemon, &asked.agent)?;
@@ -341,6 +389,8 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             events.truncate(PAGE);
             let mut shown = agent.to_json();
             shown["tools_outdated"] = daemon.mcp.outdated(&agent.id).into();
+            shown["tools_reload"] = reloading(daemon, &agent.id).into();
+            shown["led_by"] = json!(agent.launched_by.as_ref().filter(|_| agent.led));
             Ok(json!({"agent": shown, "events": events, "more": more}))
         }
         method => Err(Failure::new(
@@ -399,7 +449,6 @@ fn keep_images(
     agent: &Agent,
     images: &[ImageUpload],
 ) -> Result<Vec<String>, Failure> {
-    use base64::Engine as _;
     if images.is_empty() {
         return Ok(Vec::new());
     }
@@ -409,6 +458,14 @@ fn keep_images(
             agent.id
         )));
     }
+    store_images(daemon, &agent.id, check_images(images)?)
+}
+
+/// The images of a message, judged and scaled: with the extension of their file.
+type Checked = Vec<(&'static str, Vec<u8>)>;
+
+fn check_images(images: &[ImageUpload]) -> Result<Checked, Failure> {
+    use base64::Engine as _;
     if images.len() > MAX_IMAGES {
         return Err(Failure::refused(format!(
             "a message carries {MAX_IMAGES} images at most"
@@ -443,9 +500,17 @@ fn keep_images(
         }
         // Scaled before it is stored, so that more of them fit under the byte caps of a prompt.
         let bytes = flottille_core::images::scaled_down(&image.mime, bytes);
-        checked.push((extension, bytes));
+        checked.push((*extension, bytes));
     }
-    let folder = daemon.paths.images(&agent.id);
+    Ok(checked)
+}
+
+/// Writes images judged by [`check_images`] to the agent's folder: the names of the files.
+fn store_images(daemon: &Daemon, agent: &str, checked: Checked) -> Result<Vec<String>, Failure> {
+    if checked.is_empty() {
+        return Ok(Vec::new());
+    }
+    let folder = daemon.paths.images(agent);
     ensure_private_dir(&folder).map_err(|e| Failure::new("unavailable", e.to_string()))?;
     // Without a stamp two messages could share their names: none is better than a collision.
     let stamp = new_id().map_err(|e| Failure::new("unavailable", format!("no stamp: {e}")))?;
@@ -453,7 +518,7 @@ fn keep_images(
     for (at, (extension, bytes)) in checked.into_iter().enumerate() {
         let name = format!("{stamp}-{at}.{extension}");
         if let Err(error) = std::fs::write(folder.join(&name), bytes) {
-            deliveries::discard_images(&daemon.paths, &agent.id, &names);
+            deliveries::discard_images(&daemon.paths, agent, &names);
             return Err(Failure::new(
                 "unavailable",
                 format!("an image cannot be stored: {error}"),
@@ -471,9 +536,12 @@ fn refuse_empty(message: &str) -> Result<(), Failure> {
     Ok(())
 }
 
-fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
+async fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
     let project = projects::load_project(daemon, &asked.project)?;
-    refuse_empty(&asked.message)?;
+    // Pictures alone are a first message, as they are a later one.
+    if asked.images.is_empty() {
+        refuse_empty(&asked.message)?;
+    }
     // An agent's own permission modes decide which of its calls run unasked: in bare mode every
     // call goes through Flottille's gate, which no mode may loosen.
     if let Some(mode) = &asked.mode {
@@ -489,6 +557,41 @@ fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
             roles::ROLES.map(|role| role.name).join(", ")
         ))
     })?;
+    // A provider whose last agent said it takes no images is not given any: said now, as a later
+    // message to such an agent is. Not yet known, they go, and the agent says what it did with them.
+    if !asked.images.is_empty() {
+        let (provider, _) = providers::choose(
+            daemon,
+            &project,
+            providers::Asked {
+                provider: asked.provider.clone(),
+                model: asked.model.clone(),
+                effort: asked.effort.clone(),
+            },
+        )?;
+        if providers::takes_images(daemon, provider.name) == Some(false) {
+            return Err(Failure::refused(format!(
+                "the agent of {} takes no images",
+                provider.name
+            )));
+        }
+    }
+    // The pictures are judged, and written to the folder of the agent-to-be, before the agent
+    // exists: a refusal or a failure leaves nothing, not a session to start again. Off the
+    // runtime's threads, like a later message's.
+    let id = new_id().map_err(|e| Failure::new("unavailable", e.to_string()))?;
+    let images = {
+        let (daemon, id, uploads) = (daemon.clone(), id.clone(), asked.images);
+        tokio::task::spawn_blocking(move || {
+            let stored = store_images(&daemon, &id, check_images(&uploads)?);
+            if stored.is_err() {
+                deliveries::forget_images(&daemon.paths, &id);
+            }
+            stored
+        })
+        .await
+        .map_err(|e| Failure::new("unavailable", format!("images not kept: {e}")))??
+    };
     let after = daemon.read(Store::last_seq)?;
     // `/name` starts the session with the project's command of that name.
     let message = crate::commands::message_for(
@@ -496,11 +599,13 @@ fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
         &project.name,
         asked.workspace.as_deref(),
         &asked.message,
-    )?;
+    )
+    .inspect_err(|_| deliveries::forget_images(&daemon.paths, &id))?;
     let agent = create(
         daemon,
         &project,
         New {
+            id: Some(id.clone()),
             workspace: asked.workspace,
             preparing: false,
             role,
@@ -512,24 +617,32 @@ fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
             effort: asked.effort,
             gate_mode: None,
             launched_by: None,
+            led: false,
         },
-    )?;
+    )
+    .inspect_err(|_| deliveries::forget_images(&daemon.paths, &id))?;
     // The root's brief is its first message: a replacement supersedes it by its id, as any
-    // brief, and delivers the brief again.
-    deliveries::deliver_message(
+    // brief, and delivers the brief again, with its pictures.
+    if deliveries::deliver_message(
         daemon,
         &agent.id,
         "user",
         Some(format!("brief-{}-0", agent.id)),
         &message,
         approval::BETWEEN_TURNS,
-        Vec::new(),
-    );
+        images.clone(),
+    )
+    .is_none()
+    {
+        deliveries::forget_images(&daemon.paths, &agent.id);
+    }
     Ok(json!({"agent": agent.to_json(), "after": after}))
 }
 
 /// What a new agent is made of.
 pub struct New {
+    /// Its id, when the caller made it first (the folder of its pictures is named by it).
+    pub id: Option<String>,
     pub workspace: Option<String>,
     /// Its workspace may still be preparing: the agent is sent nothing until it is ready.
     pub preparing: bool,
@@ -548,6 +661,8 @@ pub struct New {
     pub gate_mode: Option<GateMode>,
     /// The agent that starts this root for the user; `None` for a child or the user's own root.
     pub launched_by: Option<String>,
+    /// That agent leads it (`led`) rather than handing it over.
+    pub led: bool,
 }
 
 /// Writes a new agent, its instructions and tools frozen in it; nothing is sent to it yet.
@@ -596,6 +711,13 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
                     project.name
                 )));
             }
+            // A removal, a resume or a preparation holds it; only an agent that waits for its
+            // own preparation starts in it meanwhile.
+            if daemon.preparing.lock().unwrap().contains(&workspace.id)
+                && !(new.preparing && workspace.state() == State::Preparing)
+            {
+                return Err(crate::workspaces::held(daemon, &workspace));
+            }
             let repositories: Vec<_> = workspace
                 .repositories
                 .iter()
@@ -626,6 +748,7 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
         project,
         new.parent.is_none(),
         depth,
+        crate::vault::seen_by(daemon, &project.name),
     );
     let files = roles::project_files(&project.folder, &repositories);
     let skills: Vec<(String, String)> = project
@@ -648,7 +771,10 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
         &files,
     );
     let agent = Agent {
-        id: new_id().map_err(|e| Failure::new("unavailable", e.to_string()))?,
+        id: match new.id {
+            Some(id) => id,
+            None => new_id().map_err(|e| Failure::new("unavailable", e.to_string()))?,
+        },
         provider: provider.name.into(),
         role: new.role.name.into(),
         project: project.name.clone(),
@@ -680,6 +806,8 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
         images: None,
         gate_mode: new.gate_mode.unwrap_or_default(),
         launched_by: new.launched_by,
+        led: new.led,
+        detached_from: None,
     };
     Ok(agent)
 }
@@ -799,6 +927,31 @@ pub fn stopping(daemon: &Daemon, id: &str) -> bool {
         .is_some_and(|(sender, _)| !sender.is_closed())
 }
 
+/// Whether the user asked to reload the agent's tools since its process was given them.
+pub fn reloading(daemon: &Daemon, id: &str) -> bool {
+    daemon.agents.reloads.lock().unwrap().contains(id)
+}
+
+/// Takes the agent's reload, its new process being given its tools: whether one was asked.
+pub fn take_reload(daemon: &Daemon, id: &str) -> bool {
+    let taken = daemon.agents.reloads.lock().unwrap().remove(id);
+    if taken {
+        say_reload(daemon, id, false);
+    }
+    taken
+}
+
+/// Says that a reload of the agent's tools waits for its next process, or no longer.
+fn say_reload(daemon: &Daemon, id: &str, pending: bool) {
+    record(
+        daemon,
+        id,
+        "agent.tools_reload",
+        json!({"pending": pending}),
+        false,
+    );
+}
+
 /// What a resumed root reads first in its next prompt, without being woken for it: that the user
 /// stopped it, and which of its requests were cancelled then, never to be executed.
 fn tell_resumed(daemon: &Arc<Daemon>, agent: &Agent, ended_at: u64) {
@@ -884,6 +1037,8 @@ fn idle_release() -> Duration {
 /// root that can be resumed on it.
 async fn agent_task(daemon: Arc<Daemon>, id: String, orders: mpsc::UnboundedReceiver<Order>) {
     agent_life(daemon.clone(), id.clone(), orders).await;
+    // A reload asked of an agent that ended is over: a resumed one starts on the tools of then.
+    take_reload(&daemon, &id);
     let Ok(Some(agent)) = daemon.read(|store| store.agent(&id)) else {
         return;
     };
@@ -948,19 +1103,22 @@ pub fn forget_kept_sessions(daemon: &Daemon) {
 }
 
 /// The tools of an agent of `project`, a root or a child at `depth`, as its provider names them:
-/// what its role has in the project as it is now, and what the extensions active there give it.
+/// what its role has in the project as it is now, whether the project sees an entry of the vault,
+/// and what the extensions active there give it.
 pub fn tools_of(
     paths: &Paths,
     provider: &Provider,
     project: &Project,
     root: bool,
     depth: u32,
+    vault: bool,
 ) -> Vec<String> {
     let mut tools = provider.tools(
         root,
         depth >= DEPTH_LIMIT,
         project.repositories.iter().any(|r| r.forge.is_some()),
         project.tracker.is_some(),
+        vault,
     );
     tools.extend(
         crate::extensions::tools_for(paths, project, root)
@@ -978,6 +1136,7 @@ async fn agent_life(daemon: Arc<Daemon>, id: String, mut orders: mpsc::Unbounded
     };
     loop {
         if turns.queued.is_empty() {
+            crate::compaction::before_turn(&daemon, &id);
             match deliveries::pump(&daemon, &id) {
                 Some(prompt) => turns.queued.push_back(prompt),
                 None => match orders.recv().await {
@@ -989,6 +1148,12 @@ async fn agent_life(daemon: Arc<Daemon>, id: String, mut orders: mpsc::Unbounded
                     Some(Order::Ring) => continue,
                     Some(Order::Replace(reason)) => {
                         if !replace(&daemon, &id, &reason, true, false) {
+                            return;
+                        }
+                        continue;
+                    }
+                    Some(Order::Compact(compacted)) => {
+                        if !compacted_session(&daemon, &id, *compacted) {
                             return;
                         }
                         continue;
@@ -1066,8 +1231,7 @@ async fn process(
         // children go together.
         .process_group(0)
         .kill_on_drop(true);
-    let spawned = command
-        .spawn()
+    let spawned = crate::children::spawn(&mut command)
         .map_err(|e| format!("cannot start {}: {e}", launch.program.display()))
         .and_then(|child| match child.id() {
             Some(pid) => Ok((child, pid)),
@@ -1134,6 +1298,17 @@ async fn process(
             );
             Ok(true)
         }
+        Ok(Exit::Reload) => {
+            stop(&mut child, pid).await;
+            change(
+                daemon,
+                &agent.id,
+                AgentState::Idle,
+                None,
+                Some(("agent.released", json!({"reason": "reload"}))),
+            );
+            Ok(true)
+        }
         Ok(Exit::Stopped) => {
             stop(&mut child, pid).await;
             Ok(false)
@@ -1151,6 +1326,13 @@ async fn process(
             turns.running = false;
             turns.queued.clear();
             Ok(replace(daemon, &agent.id, &reason, true, false))
+        }
+        Ok(Exit::Compact(compacted)) => {
+            stop(&mut child, pid).await;
+            mcp::retire(daemon, &agent.id);
+            turns.running = false;
+            turns.queued.clear();
+            Ok(compacted_session(daemon, &agent.id, *compacted))
         }
         Err(reason) => {
             stop(&mut child, pid).await;
@@ -1189,6 +1371,12 @@ fn died(daemon: &Arc<Daemon>, id: &str, status: ExitStatus, turns: &mut Turns) -
         json!({"code": status.code(), "signal": status.signal(), "during_turn": during_turn}),
         false,
     );
+    // Asked for its handoff: the new session starts without it, as a compacted one does.
+    if let Some(compacted) =
+        crate::compaction::handoff_failed(daemon, id, &format!("{reason} during its handoff"))
+    {
+        return compacted_session(daemon, id, compacted);
+    }
     replace(daemon, id, &reason, true, true)
 }
 
@@ -1197,6 +1385,52 @@ fn died(daemon: &Arc<Daemon>, id: &str, status: ExitStatus, turns: &mut Turns) -
 /// parent is told when `tell` (a stuck agent's was told already). Past the replacement limit it
 /// fails instead. Whether it goes on.
 pub fn replace(daemon: &Arc<Daemon>, id: &str, reason: &str, counted: bool, tell: bool) -> bool {
+    renew(daemon, id, reason, counted, tell, None)
+}
+
+/// The agent's conversation was summarised (`compaction`): its session is let go and a new one,
+/// not counted as a replacement nor told to its parent, goes on from its brief, the summary and
+/// its latest messages. Whether it goes on.
+fn compacted_session(
+    daemon: &Arc<Daemon>,
+    id: &str,
+    compacted: crate::compaction::Compacted,
+) -> bool {
+    let kept = crate::compaction::settings(daemon)
+        .map(|settings| crate::compaction::kept_now(daemon, id, &settings))
+        .unwrap_or(crate::compaction::KEPT);
+    // Read before the new session starts: what the old one said is what is kept.
+    let (resume, after) = crate::compaction::resumed(daemon, id, &compacted, kept);
+    let goes_on = renew(
+        daemon,
+        id,
+        "its conversation was compacted",
+        false,
+        false,
+        Some(resume),
+    );
+    if goes_on {
+        let mut data = json!({"by": "flottille", "before": compacted.before, "after": after,
+            "summary": compacted.summary,
+            "source": if compacted.by_agent { "agent" } else { "compactor" }});
+        if compacted.summary.is_none() {
+            data["missing"] = true.into();
+        }
+        record(daemon, id, "agent.compacted", data, false);
+    }
+    crate::compaction::finish(daemon, id);
+    goes_on
+}
+
+/// `replace`, the new session sent `resume` in place of the word on why it starts again.
+fn renew(
+    daemon: &Arc<Daemon>,
+    id: &str,
+    reason: &str,
+    counted: bool,
+    tell: bool,
+    resume: Option<String>,
+) -> bool {
     let reason = secrets::mask(reason, &std::env::vars_os().collect());
     let since = now_ms().saturating_sub(REPLACEMENT_WINDOW_MS);
     let replaced = daemon
@@ -1216,7 +1450,14 @@ pub fn replace(daemon: &Arc<Daemon>, id: &str, reason: &str, counted: bool, tell
     let _ = daemon.write(|store| {
         Ok((
             (),
-            store.supersede_like(id, &[&format!("brief-{id}-"), &format!("resume-{id}-")])?,
+            store.supersede_like(
+                id,
+                &[
+                    &format!("brief-{id}-"),
+                    &format!("resume-{id}-"),
+                    &format!("{}-{id}-", crate::compaction::HANDOFF_KIND),
+                ],
+            )?,
         ))
     });
     let replaced = daemon
@@ -1224,8 +1465,18 @@ pub fn replace(daemon: &Arc<Daemon>, id: &str, reason: &str, counted: bool, tell
         .ok()
         .flatten()
         .and_then(|agent| Some((providers::of(&agent).ok()?, agent.native_id?)));
+    let waited = daemon
+        .read(|store| store.agent(id))
+        .ok()
+        .flatten()
+        .is_some_and(|agent| agent.waiting_on_answer);
     let agent = match daemon.write(|store| store.replace_agent(id, &reason, counted)) {
-        Ok(agent) if !agent.state.is_final() => agent,
+        Ok(agent) if !agent.state.is_final() => {
+            if waited {
+                crate::tree::answered(daemon, id, "replaced");
+            }
+            agent
+        }
         Ok(_) => return false,
         Err(error) => {
             eprintln!("flottille daemon: agent {id}: {error}");
@@ -1238,13 +1489,22 @@ pub fn replace(daemon: &Arc<Daemon>, id: &str, reason: &str, counted: bool, tell
     }
     if agent.brief.is_some() {
         let (kind, brief) = crate::tree::first_message(daemon, &agent);
-        deliveries::deliver(
+        // The pictures of the user's first message are given again with it: their files stay
+        // in the agent's folder as long as the agent does.
+        let images = daemon
+            .read(|store| store.delivery(&format!("brief-{id}-0")))
+            .ok()
+            .flatten()
+            .map(|first| first.images)
+            .unwrap_or_default();
+        deliveries::deliver_message(
             daemon,
             id,
             kind,
             Some(format!("brief-{id}-{}", agent.epoch)),
-            &brief,
+            &crate::commands::Message::plain(&brief),
             approval::BETWEEN_TURNS,
+            images,
         );
     }
     deliveries::deliver(
@@ -1252,10 +1512,12 @@ pub fn replace(daemon: &Arc<Daemon>, id: &str, reason: &str, counted: bool, tell
         id,
         "resume",
         Some(format!("resume-{id}-{}", agent.epoch)),
-        &format!(
-            "A previous session of yours stopped: {reason}. You start again from your brief: \
-             check the real state of your place first, what it did may be there already."
-        ),
+        &resume.unwrap_or_else(|| {
+            format!(
+                "A previous session of yours stopped: {reason}. You start again from your brief: \
+                 check the real state of your place first, what it did may be there already."
+            )
+        }),
         approval::BETWEEN_TURNS,
     );
     if tell {
@@ -1564,6 +1826,11 @@ impl acp::Events for Recorder {
         // Bookkeeping between two pieces of a message does not end it: it is kept after the
         // message, which stays one. Anything else the agent does (a tool call, a compaction…)
         // ends it.
+        if name == "agent.usage"
+            && let Some(used) = data["used"].as_u64()
+        {
+            crate::compaction::reported(&self.daemon, &self.agent, used, data["size"].as_u64());
+        }
         if BOOKKEEPING.contains(&name) {
             match self.speech.keep(name, data, activity) {
                 Ok(()) => return,
@@ -1659,7 +1926,12 @@ impl acp::Events for Recorder {
     }
 
     fn pump(&self) -> Option<deliveries::Prompt> {
+        crate::compaction::before_turn(&self.daemon, &self.agent);
         deliveries::pump(&self.daemon, &self.agent)
+    }
+
+    fn reloading(&self) -> bool {
+        reloading(&self.daemon, &self.agent)
     }
 
     fn image(&self, name: &str) -> Option<(&'static str, String)> {
@@ -1702,9 +1974,9 @@ impl acp::Events for Recorder {
         }
     }
 
-    fn turn_started(&self, text: &str, images: &[String], typed: &Value) {
+    fn turn_started(&self, text: &str, images: &[String], typed: &Value, deliveries: &[String]) {
         *self.started_at.lock().unwrap() = Some(now_ms());
-        let mut data = json!({"text": text});
+        let mut data = json!({"text": text, "deliveries": deliveries});
         if !images.is_empty() {
             data["images"] = json!(images);
         }
@@ -1737,6 +2009,8 @@ impl acp::Events for Recorder {
             )),
         );
         tree::after_turn(&self.daemon, &self.agent, stop_reason);
+        // Past its threshold, or asked during the turn: summarised before its next prompt.
+        crate::compaction::turn_ended(&self.daemon, &self.agent);
     }
 }
 
@@ -1776,7 +2050,8 @@ async fn stop(child: &mut Child, pid: u32) {
 }
 
 pub fn signal_group(pid: u32, signal: i32) {
-    // SAFETY: killpg has no memory precondition; the group is the process's own (`process_group(0)`).
+    // SAFETY: killpg has no memory precondition; the group is the process's own (`process_group(0)`,
+    // or the session it leads).
     unsafe {
         libc::killpg(pid as i32, signal);
     }

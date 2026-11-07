@@ -119,6 +119,18 @@ pub struct MessageChecks {
     pub checks: Vec<String>,
 }
 
+/// The parameters of `project.set_conventions`: the project's branch format and pull request
+/// template, each kept when left out and removed when empty.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Conventions {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request_template: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RepositorySetting {
@@ -132,6 +144,9 @@ pub struct RepositorySetting {
     /// out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depends_on: Option<Vec<String>>,
+    /// "Delete the branch on merge"; what the file has when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delete_branch_on_merge: Option<bool>,
 }
 
 /// The parameters of `workspace.create`.
@@ -233,6 +248,9 @@ pub struct AgentRun {
     pub role: Option<String>,
     /// Its first message.
     pub message: String,
+    /// Pasted or dropped images, sent with the first message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageUpload>,
 }
 
 /// The parameters of `agent.send`.
@@ -244,6 +262,10 @@ pub struct AgentSend {
     /// Pasted or dropped images, sent with the message.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageUpload>,
+    /// When the agent's cache expired: compact it first (true) or send to its session as it is
+    /// (false), whatever the setting; the setting decides when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact: Option<bool>,
 }
 
 /// An image sent with a message: its MIME type and its bytes in base64.

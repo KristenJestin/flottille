@@ -62,6 +62,9 @@ pub static PROVIDER: Provider = Provider {
     takes_new_tools: false,
     // It keeps the list it first read: `notifications/tools/list_changed` is not taken by default.
     lists_tools_again: false,
+    // OpenAI keeps a prompt's prefix "5 to 10 minutes of inactivity, up to an hour off-peak": no
+    // lifetime to count on (`docs/agents.md`).
+    cache_lifetime: || None,
     unready,
     forget_process,
     forget_session,

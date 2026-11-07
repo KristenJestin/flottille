@@ -185,7 +185,7 @@ fn a_child_has_no_spec_tool() {
     let opened = user.received_requests("session/new").len();
     done(lead.call(
         "agent_launch",
-        json!({"title": "reader", "brief": "read the code"}),
+        json!({"title": "reader", "brief": "read the code", "kind": "child"}),
     ));
     let (url, authorization) = server_of(&user, opened);
     let child = Mcp::initialize(&url, &authorization);

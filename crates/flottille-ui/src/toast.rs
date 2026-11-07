@@ -8,6 +8,7 @@
 //! A result is never a line appended under a form (a scan of the window's sources refuses it); a
 //! form's own validation stays under its field ([`Field`](crate::Field)).
 
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::{
@@ -16,11 +17,14 @@ use gpui_kit::{
     WeakEntity, Window, anchored, deferred, div, point, px,
 };
 
+use crate::button::Button;
 use crate::color::mix;
 use crate::icons::{Icon, icon};
 use crate::interact::hoverable;
 use crate::layer;
 use crate::listing::{Item, Listing};
+use crate::reveal::changing;
+use crate::space;
 use crate::theme::palette;
 use crate::typography::Type;
 
@@ -39,13 +43,51 @@ pub enum ToastKind {
     Failure,
 }
 
-/// One result: its kind, its line and an optional second line.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// One result: its kind, its line, an optional second line and an optional action.
+#[derive(Clone)]
 pub struct Toast {
     kind: ToastKind,
     title: SharedString,
     detail: Option<SharedString>,
+    action: Option<Action>,
+    key: Option<SharedString>,
 }
+
+type Run = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// A button in a toast (`Open`): its click runs `run` and the toast leaves.
+#[derive(Clone)]
+struct Action {
+    label: SharedString,
+    run: Run,
+}
+
+impl std::fmt::Debug for Toast {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Toast")
+            .field("kind", &self.kind)
+            .field("title", &self.title)
+            .field("detail", &self.detail)
+            .field("action", &self.action.as_ref().map(|a| &a.label))
+            .finish()
+    }
+}
+
+impl PartialEq for Toast {
+    fn eq(&self, other: &Toast) -> bool {
+        self.kind == other.kind
+            && self.title == other.title
+            && self.detail == other.detail
+            && self.key == other.key
+            && match (&self.action, &other.action) {
+                (Some(a), Some(b)) => a.label == b.label && Rc::ptr_eq(&a.run, &b.run),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+impl Eq for Toast {}
 
 impl Toast {
     /// Something done: "Task test saved".
@@ -54,6 +96,8 @@ impl Toast {
             kind: ToastKind::Success,
             title: title.into(),
             detail: None,
+            action: None,
+            key: None,
         }
     }
 
@@ -68,6 +112,27 @@ impl Toast {
     /// The second line: what follows from it, or why it failed.
     pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
         self.detail = Some(detail.into());
+        self
+    }
+
+    /// A button under the lines, `toast-<n>-action`: its click runs `run`, then the toast leaves.
+    pub fn action(
+        mut self,
+        label: impl Into<SharedString>,
+        run: impl Fn(&mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.action = Some(Action {
+            label: label.into(),
+            run: Rc::new(run),
+        });
+        self
+    }
+
+    /// Names what the toast says, so that it is said once: while a toast of the same key is on
+    /// screen, pushing another replaces its lines (and its button), stays where it is and stays a
+    /// while longer, instead of adding a second one. [`shown`] says whether one is.
+    pub fn keyed(mut self, key: impl Into<SharedString>) -> Self {
+        self.key = Some(key.into());
         self
     }
 
@@ -101,6 +166,18 @@ pub fn toast(toast: Toast, cx: &mut App) {
     stack.update(cx, |stack, cx| stack.push(toast, cx)).ok();
 }
 
+/// Whether a toast with this key is on screen.
+pub fn shown(key: &str, cx: &App) -> bool {
+    let Some(stack) = cx.try_global::<Stack>().and_then(|s| s.0.upgrade()) else {
+        return false;
+    };
+    stack
+        .read(cx)
+        .live
+        .iter()
+        .any(|live| live.toast.key.as_deref() == Some(key))
+}
+
 struct Live {
     number: usize,
     toast: Toast,
@@ -129,6 +206,22 @@ impl ToastStack {
     }
 
     pub fn push(&mut self, toast: Toast, cx: &mut Context<Self>) {
+        // A toast said again replaces the one on screen under its key.
+        if let Some(key) = toast.key.clone()
+            && let Some(at) = self
+                .live
+                .iter()
+                .position(|live| live.toast.key.as_ref() == Some(&key))
+        {
+            let number = self.live[at].number;
+            let leaving =
+                (toast.kind == ToastKind::Success).then(|| self.leave_after(number, STAYS, cx));
+            let live = &mut self.live[at];
+            live.toast = toast;
+            live.leaving = leaving;
+            cx.notify();
+            return;
+        }
         self.next += 1;
         let number = self.next;
         let leaving =
@@ -204,15 +297,20 @@ impl ToastStack {
             .min_w_0()
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .id(ElementId::Name(format!("toast-{number}-title").into()))
-                    .text_size(px(13.))
-                    .line_height(px(19.5))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(toast.title.clone())
-                    .test_support(),
-            )
+            .child(changing(
+                ElementId::Name(format!("toast-{number}-title-line").into()),
+                toast.title.clone(),
+                move |title| {
+                    div()
+                        .id(ElementId::Name(format!("toast-{number}-title").into()))
+                        .text_size(px(13.))
+                        .line_height(px(19.5))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(title)
+                        .test_support()
+                        .into_any_element()
+                },
+            ))
             .children(toast.detail.clone().map(|detail| {
                 div()
                     .id(ElementId::Name(format!("toast-{number}-detail").into()))
@@ -221,6 +319,19 @@ impl ToastStack {
                     .text_color(p.mute)
                     .child(detail)
                     .test_support()
+            }))
+            .children(toast.action.clone().map(|action| {
+                let this = cx.entity().downgrade();
+                div().mt(space::SM).flex().child(
+                    Button::secondary(
+                        ElementId::Name(format!("toast-{number}-action").into()),
+                        action.label,
+                    )
+                    .on_click(move |_, window, cx| {
+                        (action.run)(window, cx);
+                        this.update(cx, |this, cx| this.dismiss(number, cx)).ok();
+                    }),
+                )
             }));
         let dismiss = div()
             .id(ElementId::Name(format!("toast-{number}-dismiss").into()))

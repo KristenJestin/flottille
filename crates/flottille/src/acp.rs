@@ -63,6 +63,11 @@ pub enum Exit {
     Died(ExitStatus),
     /// Its session is to be replaced, for this reason.
     Replace(String),
+    /// Its conversation was summarised: a new session goes on from the summary.
+    Compact(Box<crate::compaction::Compacted>),
+    /// The user reloads its tools: let go between turns, to be started again on its session with
+    /// the tools its role has now.
+    Reload,
 }
 
 /// What the session loop tells the agent's owner as it goes.
@@ -99,10 +104,12 @@ pub trait Events: Send + Sync + 'static {
     );
     /// The next prompt, taken from what was delivered, when there is one.
     fn pump(&self) -> Option<Prompt>;
+    /// The user asked to reload the agent's tools since this process was given them.
+    fn reloading(&self) -> bool;
     /// An image a prompt carries, as its MIME type and its bytes in base64.
     fn image(&self, name: &str) -> Option<(&'static str, String)>;
     /// `typed`: the prompt's `Prompt::typed`.
-    fn turn_started(&self, text: &str, images: &[String], typed: &Value);
+    fn turn_started(&self, text: &str, images: &[String], typed: &Value, deliveries: &[String]);
     /// The end of a turn, with what it used, one entry per model.
     fn turn_ended(&self, stop_reason: &str, usage: Value, used: Vec<Used>);
     /// The agent's tools as they are now: its role may have gained some since the session began
@@ -383,7 +390,19 @@ async fn drive(
     );
 
     let mut turn: Option<Turn> = None;
+    // A compaction that came while a turn ran: its new session starts once the turn ended.
+    let mut compacting: Option<Box<crate::compaction::Compacted>> = None;
     loop {
+        if turn.is_none()
+            && let Some(compacted) = compacting.take()
+        {
+            return Ok(Exit::Compact(compacted));
+        }
+        // A reload never cuts a turn: the process goes once it ended, before the next prompt,
+        // which the next process plays.
+        if turn.is_none() && events.reloading() {
+            return Ok(Exit::Reload);
+        }
         // Between turns only: what was chosen during one is set once it ended, before the next
         // prompt goes. A change the agent could not answer is tried again only then.
         if turn.is_none()
@@ -428,7 +447,7 @@ async fn drive(
                 text.push_str(&note);
             }
             let names: Vec<String> = sent.iter().map(|(name, ..)| name.clone()).collect();
-            events.turn_started(&text, &names, &prompt.typed);
+            events.turn_started(&text, &names, &prompt.typed, &prompt.deliveries);
             turns.running = true;
             let mut blocks = vec![ContentBlock::Text(TextContent::new(text))];
             blocks.extend(
@@ -463,6 +482,12 @@ async fn drive(
             order = orders.recv() => match order {
                 None | Some(Order::Stop) => return Ok(Exit::Stopped),
                 Some(Order::Replace(reason)) => return Ok(Exit::Replace(reason)),
+                // The agent's prompts wait while it is summarised, so no turn should run; one that
+                // started before is never cut.
+                Some(Order::Compact(compacted)) if turn.is_none() => {
+                    return Ok(Exit::Compact(compacted));
+                }
+                Some(Order::Compact(compacted)) => compacting = Some(compacted),
                 // What was delivered is pumped at the top of the loop, once no turn runs.
                 Some(Order::Ring) => {}
                 Some(Order::Cancel(answer)) => {

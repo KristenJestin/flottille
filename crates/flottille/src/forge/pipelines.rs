@@ -9,9 +9,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use serde_norway::Value as Yaml;
 
+use super::followed::{self, Started};
 use super::{
     Forge, ForgeCall, NO_FORGE, bitbucket, chosen, ci, declared_forge, events, gh_json, gh_text,
-    logs, place_checkouts, signed_in,
+    logs, place_checkouts, signed_in, yaml,
 };
 use crate::daemon::Daemon;
 use crate::git::{self, Class};
@@ -47,22 +48,42 @@ pub(crate) struct Variable {
     pub secured: bool,
 }
 
+/// The shortest secured value that is hidden wherever it appears in an answer or a record. A
+/// shorter one (`4`, `ab`) would garble them (`#43`, `table`): it is hidden only where it is
+/// echoed as a variable's value.
+pub(crate) const HIDDEN_EVERYWHERE: usize = 3;
+/// The largest file of the CI `pipelines` reads, in bytes: a real one is a few kilobytes.
+const FILE_LIMIT: u64 = 1024 * 1024;
+/// `FILE_LIMIT`, as the refusal says it.
+const LIMIT_SAID: &str = "1 MiB";
+
+/// A text with the secured variables' values hidden: each one everywhere from
+/// `HIDDEN_EVERYWHERE` characters, a shorter one where the text echoes it as `KEY=value` (a
+/// command line's, the forge's) or as `"value": "…"` (a JSON body's).
+fn hidden(text: String, variables: &[Variable]) -> String {
+    variables
+        .iter()
+        .filter(|v| v.secured && !v.value.is_empty())
+        .fold(text, |text, v| {
+            if v.value.chars().count() >= HIDDEN_EVERYWHERE {
+                return text.replace(v.value.as_str(), "[masked]");
+            }
+            let json = Value::from(v.value.as_str()).to_string();
+            text.replace(
+                &format!("{}={}", v.key, v.value),
+                &format!("{}=[masked]", v.key),
+            )
+            .replace(&format!("\"value\":{json}"), "\"value\":\"[masked]\"")
+            .replace(&format!("\"value\": {json}"), "\"value\": \"[masked]\"")
+        })
+}
+
 /// One action of the family, once the gate let it through. A secured variable's value is said in
 /// no answer, whatever the forge echoed of it.
-pub(super) async fn call(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
-    let secured: Vec<String> = asked
-        .variables
-        .iter()
-        .flatten()
-        .filter(|v| v.secured && !v.value.is_empty())
-        .map(|v| v.value.clone())
-        .collect();
-    let hide = |text: String| {
-        secured
-            .iter()
-            .fold(text, |text, value| text.replace(value.as_str(), "[masked]"))
-    };
-    match acted(daemon, place, asked).await {
+pub(super) async fn call(daemon: &Daemon, agent: &str, place: &Place, asked: ForgeCall) -> Outcome {
+    let variables = asked.variables.clone().unwrap_or_default();
+    let hide = |text: String| hidden(text, &variables);
+    match acted(daemon, agent, place, asked).await {
         Outcome::Done(text) => Outcome::Done(hide(text)),
         Outcome::Refused(text) => Outcome::Refused(hide(text)),
         Outcome::Failed(text) => Outcome::Failed(hide(text)),
@@ -70,7 +91,40 @@ pub(super) async fn call(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Ou
     }
 }
 
-async fn acted(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
+/// Why a variable's name is refused for a Bitbucket pipeline, which takes letters, digits and
+/// underscores and none starting with a digit; GitHub's inputs may also hold a `-`.
+pub(crate) fn bitbucket_key(key: &str) -> Option<String> {
+    let fine = !key.is_empty()
+        && !key.starts_with(|c: char| c.is_ascii_digit())
+        && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    (!fine).then(|| {
+        format!(
+            "refused: {key:?} is no name of a Bitbucket variable: letters, digits and underscores, \
+             not starting with a digit"
+        )
+    })
+}
+
+/// The branch a `run` that names none will run on, put in the call before the gate sees it, so
+/// that the card and the judge say where a pipeline runs. A branch that cannot be told is left
+/// out: the call refuses it itself.
+pub(crate) async fn with_branch(daemon: &Daemon, place: &Place, mut args: Value) -> Value {
+    if args["action"] != "run" || args.get("branch").is_some_and(|b| !b.is_null()) {
+        return args;
+    }
+    let checkout = place_checkouts(daemon, place)
+        .ok()
+        .and_then(|all| chosen(all, args["repository"].as_str(), "run", true).ok())
+        .and_then(|mut checkouts| checkouts.pop());
+    if let Some(checkout) = checkout
+        && let Ok(branch) = branch_of(daemon, place, &checkout, None).await
+    {
+        args["branch"] = branch.into();
+    }
+    args
+}
+
+async fn acted(daemon: &Daemon, agent: &str, place: &Place, asked: ForgeCall) -> Outcome {
     let action = asked.action.as_str();
     if let Some(refusal) = malformed(&asked) {
         return Outcome::Refused(refusal);
@@ -97,6 +151,15 @@ async fn acted(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
             "refused: Bitbucket Data Center has no pipelines bkt can read or run, and {slug} is \
              on a Data Center host: its builds are another tool's; nothing was asked of the forge"
         ));
+    }
+    if matches!(forge, Forge::Bitbucket { .. })
+        && let Some(refusal) = asked
+            .variables
+            .iter()
+            .flatten()
+            .find_map(|v| bitbucket_key(&v.key))
+    {
+        return Outcome::Refused(refusal);
     }
     if let ("step", Forge::Bitbucket { owner, name, .. }) = (action, &forge) {
         return Outcome::Refused(format!(
@@ -131,6 +194,13 @@ async fn acted(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
     };
     let run = asked.run.unwrap_or_default();
     let step = asked.step.as_deref().unwrap_or_default();
+    // A run started is followed unless the agent said no.
+    let follow = |(outcome, started): (Outcome, Option<Started>)| match outcome {
+        Outcome::Done(text) if asked.follow != Some(false) => {
+            Outcome::Done(text + &followed::follow(daemon, agent, place, &path, &forge, started))
+        }
+        outcome => outcome,
+    };
     match (&forge, action) {
         (_, "pipelines") => listed(&checkout, &forge, &path, &branch.unwrap_or_default()).await,
         (Forge::Bitbucket { .. }, action) => {
@@ -147,7 +217,7 @@ async fn acted(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
                     let pipeline = asked.pipeline.as_deref().unwrap_or_default();
                     let variables = asked.variables.unwrap_or_default();
                     let branch = branch.unwrap_or_default();
-                    bitbucket_run(&forge, context, pipeline, &branch, &variables).await
+                    follow(bitbucket_run(&forge, context, pipeline, &branch, &variables).await)
                 }
                 _ => bitbucket_stop(&forge, context, run).await,
             }
@@ -158,7 +228,7 @@ async fn acted(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
         (Forge::GitHub { .. }, "run") => {
             let pipeline = asked.pipeline.as_deref().unwrap_or_default();
             let variables = asked.variables.unwrap_or_default();
-            github_run(&forge, pipeline, &branch.unwrap_or_default(), &variables).await
+            follow(github_run(&forge, pipeline, &branch.unwrap_or_default(), &variables).await)
         }
         (Forge::GitHub { .. }, "stop") => {
             let id = run.to_string();
@@ -352,6 +422,8 @@ enum Unread {
     Missing,
     Git(String),
     Yaml(String),
+    /// Its size in bytes, past `FILE_LIMIT`.
+    Large(u64),
 }
 
 impl Unread {
@@ -361,6 +433,7 @@ impl Unread {
             Unread::Missing => "is not in the commit".to_owned(),
             Unread::Git(why) => format!("cannot be read by git: {why}"),
             Unread::Yaml(why) => format!("cannot be parsed: {why}"),
+            Unread::Large(size) => format!("is {size} bytes, past the limit of {LIMIT_SAID}"),
         }
     }
 
@@ -380,16 +453,34 @@ impl Unread {
                  {why}; fix the file, or name the pipeline to forge run, which does not need this \
                  list"
             ),
+            Unread::Large(size) => format!(
+                "refused: {BITBUCKET_FILE} of {branch} of {slug} is {size} bytes, {how}: the \
+                 limit is {LIMIT_SAID}; name the pipeline to forge run, which does not need this \
+                 list"
+            ),
         }
     }
 }
 
-/// A file at a commit, parsed, merge keys (`<<: *anchor`) applied: why not when it cannot be read.
+/// A file at a commit, parsed, a repeated key read as the forge reads it (the last one kept, said
+/// in the notes), merge keys (`<<: *anchor`) applied: why not when it cannot be read.
 async fn yaml_at(
     checkout: &super::Checkout,
     reference: &str,
     path: &str,
 ) -> Result<Parsed, Unread> {
+    // Its size first: `git show` reads the whole of it into memory.
+    let size = git::output(
+        &checkout.folder,
+        &["cat-file", "-s", &format!("{reference}:{path}")],
+        Class::Read,
+    )
+    .await
+    .ok()
+    .and_then(|size| size.trim().parse::<u64>().ok());
+    if let Some(size) = size.filter(|size| *size > FILE_LIMIT) {
+        return Err(Unread::Large(size));
+    }
     let shown = git::run(
         &checkout.folder,
         &["show", &format!("{reference}:{path}")],
@@ -414,8 +505,8 @@ async fn yaml_at(
         }
         Err(why) => return Err(Unread::Git(why)),
     };
-    let mut yaml: Yaml = serde_norway::from_str(&text).map_err(|e| Unread::Yaml(e.to_string()))?;
-    let mut notes = Vec::new();
+    let (mut yaml, mut notes) =
+        yaml::parse(&text, path).map_err(|e| Unread::Yaml(e.to_string()))?;
     // `Value` keeps `<<` as a key of its own: the anchors it names are merged in, or the file is
     // used as written and the note says so.
     let mut merged = yaml.clone();
@@ -430,7 +521,7 @@ async fn yaml_at(
 }
 
 /// A YAML scalar as words.
-fn scalar(value: &Yaml) -> Option<String> {
+pub(super) fn scalar(value: &Yaml) -> Option<String> {
     match value {
         Yaml::String(text) => Some(text.clone()),
         Yaml::Number(number) => Some(number.to_string()),
@@ -685,10 +776,13 @@ fn pipeline_named(pipeline: &Value) -> String {
 async fn bitbucket_runs(forge: &Forge, context: &str, branch: Option<&str>) -> Outcome {
     let slug = forge.slug();
     let path = format!("{}/pipelines/", bitbucket::cloud_repository(forge));
+    // The branch is asked of the API: the repository's newest 50 hold none of a quiet branch's
+    // older runs.
+    let named = branch.map(|branch| format!("target.ref_name={branch}"));
+    let mut params = vec!["sort=-created_on"];
+    params.extend(named.as_deref());
     let pipelines =
-        match bitbucket::cloud_values_with(context, &path, bitbucket::PAGE, &["sort=-created_on"])
-            .await
-        {
+        match bitbucket::cloud_values_with(context, &path, bitbucket::PAGE, &params).await {
             Ok((pipelines, _)) => pipelines,
             Err(why) => return Outcome::Failed(why),
         };
@@ -724,7 +818,10 @@ async fn bitbucket_runs(forge: &Forge, context: &str, branch: Option<&str>) -> O
         &slug,
         branch,
         lines,
-        "the newest 50 pipelines of the repository",
+        match branch {
+            Some(_) => "the newest 50 pipelines of the branch",
+            None => "the newest 50 pipelines of the repository",
+        },
     )
 }
 
@@ -745,7 +842,11 @@ fn runs_text(slug: &str, branch: Option<&str>, lines: Vec<String>, among: &str) 
 }
 
 /// `bkt pipeline view <run> --json`: the run and its steps.
-async fn bitbucket_seen(forge: &Forge, context: &str, run: u64) -> Result<Value, String> {
+pub(super) async fn bitbucket_seen(
+    forge: &Forge,
+    context: &str,
+    run: u64,
+) -> Result<Value, String> {
     let run = run.to_string();
     bitbucket::json(&bitbucket::command(
         forge,
@@ -855,14 +956,14 @@ async fn bitbucket_log(forge: &Forge, context: &str, run: u64, step: &str) -> Ou
 
 /// `run` on Bitbucket: `bkt pipeline run` when no variable is given; with variables, the API's own
 /// call through `bkt api`, since `bkt`'s `--var` splits a value at its commas and has no secured
-/// variable.
+/// variable. The run started, when the forge said its number.
 async fn bitbucket_run(
     forge: &Forge,
     context: &str,
     pipeline: &str,
     branch: &str,
     variables: &[Variable],
-) -> Outcome {
+) -> (Outcome, Option<Started>) {
     let slug = forge.slug();
     let pipeline = pipeline.trim();
     let selector = match pipeline.split_once(':') {
@@ -875,11 +976,14 @@ async fn bitbucket_run(
             || pattern.is_empty()
             || pattern.starts_with('-'))
     {
-        return Outcome::Refused(format!(
-            "refused: {pipeline:?} is no pipeline of Bitbucket: default, custom: <name>, \
-             branches: <pattern>, tags: <pattern> or pull-requests: <pattern>, as forge pipelines \
-             lists them"
-        ));
+        return (
+            Outcome::Refused(format!(
+                "refused: {pipeline:?} is no pipeline of Bitbucket: default, custom: <name>, \
+                 branches: <pattern>, tags: <pattern> or pull-requests: <pattern>, as forge \
+                 pipelines lists them"
+            )),
+            None,
+        );
     }
     let named = match selector {
         None => "default".to_owned(),
@@ -893,7 +997,7 @@ async fn bitbucket_run(
         let args = bitbucket::command(forge, context, &["pipeline", "run"], &flags);
         match bitbucket::text(&args).await {
             // It may say the run's number (`#43`); the API's answer always does.
-            Ok(said) => said
+            Ok(said) => match said
                 .split('#')
                 .nth(1)
                 .map(|rest| {
@@ -901,8 +1005,12 @@ async fn bitbucket_run(
                         .take_while(char::is_ascii_digit)
                         .collect::<String>()
                 })
-                .and_then(|digits| digits.parse::<u64>().ok()),
-            Err(why) => return Outcome::Failed(why),
+                .and_then(|digits| digits.parse::<u64>().ok())
+            {
+                Some(number) => Some(number),
+                None => number_of(forge, context, &said).await,
+            },
+            Err(why) => return (Outcome::Failed(why), None),
         }
     } else {
         let mut target = json!({"type": "pipeline_ref_target", "ref_type": "branch",
@@ -928,21 +1036,47 @@ async fn bitbucket_run(
         ];
         match bitbucket::json(&args).await {
             Ok(created) => created["build_number"].as_u64(),
-            Err(why) => return Outcome::Failed(why),
+            Err(why) => return (Outcome::Failed(why), None),
         }
     };
     let Forge::Bitbucket { owner, name, .. } = forge else {
         unreachable!("a Bitbucket repository")
     };
+    let link =
+        |number: u64| format!("https://bitbucket.org/{owner}/{name}/pipelines/results/{number}");
     let said = match number {
-        Some(number) => {
-            format!("#{number}, https://bitbucket.org/{owner}/{name}/pipelines/results/{number}")
-        }
+        Some(number) => format!("#{number}, {}", link(number)),
         None => "forge runs lists it".to_owned(),
     };
-    Outcome::Done(format!(
-        "The pipeline {named} was started on {branch} in {slug}: {said}."
-    ))
+    let started = number.map(|number| Started {
+        number,
+        pipeline: named.clone(),
+        branch: branch.to_owned(),
+        link: link(number),
+    });
+    (
+        Outcome::Done(format!(
+            "The pipeline {named} was started on {branch} in {slug}: {said}."
+        )),
+        started,
+    )
+}
+
+/// The number of the run `bkt pipeline run` named by its uuid (`{…}`) alone, read from the API;
+/// none when it named neither, or the read failed.
+async fn number_of(forge: &Forge, context: &str, said: &str) -> Option<u64> {
+    let uuid = said
+        .split_whitespace()
+        .find(|word| word.starts_with('{') && word.ends_with('}') && word.len() > 2)
+        .filter(|uuid| {
+            uuid.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "{}-".contains(c))
+        })?;
+    let path = format!("{}/pipelines/{uuid}", bitbucket::cloud_repository(forge));
+    bitbucket::json(&["api", &path, "--context", context])
+        .await
+        .ok()?["build_number"]
+        .as_u64()
 }
 
 /// `stop` on Bitbucket: the run's uuid, from `bkt pipeline view`, then the API's `stopPipeline`.
@@ -1132,7 +1266,7 @@ async fn github_run(
     workflow: &str,
     branch: &str,
     variables: &[Variable],
-) -> Outcome {
+) -> (Outcome, Option<Started>) {
     let repo = forge.gh_repository();
     let workflow = workflow.trim();
     let fields: Vec<String> = variables
@@ -1149,13 +1283,24 @@ async fn github_run(
             let link = said
                 .split_whitespace()
                 .find(|word| word.starts_with("https://") && word.contains("/actions/runs/"));
-            Outcome::Done(format!(
-                "The workflow {workflow} was started on {branch} in {}: {}.",
-                forge.slug(),
-                link.unwrap_or("forge runs lists it")
-            ))
+            let started = link.and_then(|link| {
+                Some(Started {
+                    number: link.rsplit('/').next()?.parse().ok()?,
+                    pipeline: workflow.to_owned(),
+                    branch: branch.to_owned(),
+                    link: link.to_owned(),
+                })
+            });
+            (
+                Outcome::Done(format!(
+                    "The workflow {workflow} was started on {branch} in {}: {}.",
+                    forge.slug(),
+                    link.unwrap_or("forge runs lists it")
+                )),
+                started,
+            )
         }
-        Err(why) => Outcome::Failed(why),
+        Err(why) => (Outcome::Failed(why), None),
     }
 }
 
@@ -1173,5 +1318,51 @@ async fn github_rerun(forge: &Forge, run: u64, step: &str) -> Outcome {
             forge.slug()
         )),
         Err(why) => Outcome::Failed(why),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn secured(key: &str, value: &str) -> Variable {
+        Variable {
+            key: key.into(),
+            value: value.into(),
+            secured: true,
+        }
+    }
+
+    #[test]
+    fn a_short_secured_value_is_masked_only_where_it_is_echoed() {
+        let echoed = "PREVIEW_TOKEN=4 refused; {\"key\":\"PREVIEW_TOKEN\",\"value\":\"4\"} in #43";
+        assert_eq!(
+            hidden(echoed.into(), &[secured("PREVIEW_TOKEN", "4")]),
+            "PREVIEW_TOKEN=[masked] refused; {\"key\":\"PREVIEW_TOKEN\",\"value\":\"[masked]\"} in #43"
+        );
+    }
+
+    #[test]
+    fn a_secured_value_of_three_characters_or_more_is_masked_everywhere() {
+        let said = hidden("token abc, then abc".into(), &[secured("T", "abc")]);
+        assert_eq!(said, "token [masked], then [masked]");
+    }
+
+    #[test]
+    fn an_unsecured_value_is_left_alone() {
+        let plain = Variable {
+            key: "T".into(),
+            value: "4".into(),
+            secured: false,
+        };
+        assert_eq!(hidden("T=4 #43".into(), &[plain]), "T=4 #43");
+    }
+
+    #[test]
+    fn bitbucket_takes_letters_digits_and_underscores_in_a_name() {
+        assert!(bitbucket_key("PREVIEW_SEED_2").is_none());
+        for key in ["PREVIEW-SEED", "1SEED", "", "A B"] {
+            assert!(bitbucket_key(key).is_some(), "{key:?}");
+        }
     }
 }

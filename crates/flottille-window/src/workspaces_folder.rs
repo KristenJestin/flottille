@@ -6,8 +6,8 @@
 //! Only the workspaces made after a change follow it: the section says so.
 
 use flottille_ui::{
-    Button, Field, RadioChoices, Section, Toast, Type as _, changing, palette, presence,
-    presence_of, space, toast,
+    Button, Field, RadioChoices, Section, Toast, Type as _, changing, follow_theme, palette,
+    presence, presence_of, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
@@ -18,7 +18,7 @@ use gpui_kit::{
 use serde_json::Value;
 
 use crate::actions::Command;
-use crate::commands::{editor_style, perform_later};
+use crate::commands::perform_later;
 use crate::shell::Shell;
 
 /// What the section says of which workspaces a change reaches.
@@ -289,7 +289,7 @@ impl WorkspacesFolder {
     fn make_field(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
         let field = cx.new(|cx| {
             let mut field = InputState::new(window, cx).placeholder("~/Worktrees/<project>");
-            field.set_editor_style(editor_style(cx));
+            follow_theme(&mut field, cx);
             field
         });
         self._subscriptions.push(cx.subscribe_in(

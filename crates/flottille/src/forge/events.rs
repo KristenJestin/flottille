@@ -3,21 +3,22 @@
 //! to the subscriptions to it, as the events they name. A subscription reads nothing of its own:
 //! a state already stored when it subscribed is no event, since the rounds emit only changes.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use flottille_core::item::Item;
 use flottille_core::subscription::Subscription;
-use flottille_core::workspace::Workspace;
 use serde_json::{Value, json};
 
-use super::{BY_AGENT, Forge, Job, Pull, logs};
+use super::{BY_AGENT, Forge, Job, Log, Pull, logs};
 use crate::daemon::Daemon;
 use crate::session_read::form;
 use crate::subscriptions::{self, By, Event};
 
 /// The events a pull request has, as a subscription names them.
-pub const EVENTS: [&str; 5] = ["checks", "review", "comment", "merged", "closed"];
+pub const EVENTS: [&str; 6] = [
+    "checks", "review", "approved", "comment", "merged", "closed",
+];
 
 /// Who wrote a comment or a review an `item.*` event says (`items::Said`).
 fn by(said: &Value) -> Option<By> {
@@ -46,6 +47,22 @@ fn checks_ended(item: &Item) -> String {
     }
     text.push('.');
     text
+}
+
+/// The checks of `item` in one line, as an `approved` delivery says them: a failure first, then
+/// a check that still runs.
+fn checks_line(item: &Item) -> String {
+    let count = |state: &str| item.checks.iter().filter(|c| c.state == state).count();
+    match (count("failing"), count("pending"), item.checks.len()) {
+        (0, 0, 0) => "no checks".to_owned(),
+        (0, 0, _) => match (count("passing"), count("skipped")) {
+            (passed, 0) => format!("checks: {passed} passed"),
+            (0, skipped) => format!("checks: {skipped} skipped"),
+            (passed, skipped) => format!("checks: {passed} passed, {skipped} skipped"),
+        },
+        (0, _, _) => "checks still running".to_owned(),
+        (failed, _, _) => format!("checks: {failed} failed"),
+    }
 }
 
 /// What the events of one pull request say, as its subscriptions name them, and the one that
@@ -96,6 +113,22 @@ fn events_of(
                         ),
                     });
                 }
+            }
+            "item.approved" => {
+                let by: Vec<&str> = said(data, "by").filter_map(Value::as_str).collect();
+                let by = match by.is_empty() {
+                    true => String::new(),
+                    false => format!(" by {}", by.join(", ")),
+                };
+                let checks = item
+                    .map(|item| format!("; {}", checks_line(item)))
+                    .unwrap_or_default();
+                found.push(Event {
+                    kind: "approved",
+                    // The review as a whole, not one person's: `from` leaves it alone.
+                    by: None,
+                    text: format!("The {named} is approved{by}{checks}"),
+                });
             }
             "item.commented" => {
                 for comment in said(data, "comments") {
@@ -180,7 +213,7 @@ pub(super) fn lasted(seconds: u64) -> String {
 /// What a wake says of the checks that ended: `head`, then for each failed job its name, how long
 /// it took and the line that says why it failed, the others counted, and where the end of
 /// every log is. The wake weighs the agent's context at every turn; `forge show` holds the logs.
-fn summary(head: &str, jobs: &[(Job, Option<u64>)], more: usize) -> String {
+fn summary(head: &str, jobs: &[(Job, Option<u64>)], more: usize, repository: &str) -> String {
     let mut text = head.to_owned();
     for (job, took) in jobs {
         let took = took
@@ -194,6 +227,12 @@ fn summary(head: &str, jobs: &[(Job, Option<u64>)], more: usize) -> String {
         text.push_str(&format!("\n- {}{took}", job.name));
         if let Some(why) = why {
             text.push_str(&format!(": {why}"));
+        }
+        if let Some(Ok(Log {
+            whole: Some(whole), ..
+        })) = &job.log
+        {
+            text.push_str(&format!("\n  {}", logs::read_whole(repository, whole)));
         }
     }
     if more > 0 {
@@ -215,20 +254,24 @@ fn forge_of(daemon: &Daemon, project: &str, repository: &str) -> Option<Forge> {
     Some(Forge::from(declared))
 }
 
-/// The subscriptions told their checks ended, while the logs of the failed jobs are read: that
-/// delivery ends them, so what comes after for them is for nobody.
-static READING: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+/// What a read found for a subscription: its events, and the one that ends it.
+type Found = (Vec<Event>, Option<Event>);
+
+/// The subscriptions told their checks ended, while the logs of the failed jobs are read, with
+/// what came for them meanwhile: delivered with the checks, after them.
+static READING: Mutex<BTreeMap<String, Vec<Found>>> = Mutex::new(BTreeMap::new());
 
 /// Offers what the items stored to a subscription to a pull request, when some of the events are
-/// of its pull request. The logs of the failed jobs are read only when it is told the checks
-/// ended, after the round, which does not wait for them; the events after those are not offered
-/// to it meanwhile, so that it is delivered the first.
+/// of its pull request; whether a delivery was queued, for the caller to ring the agent. The logs
+/// of the failed jobs are read only when it is told the checks ended, after the round, which does
+/// not wait for them: that delivery rings the agent itself, and the events that come for it
+/// meanwhile are kept and delivered with it, after the checks.
 pub(crate) fn offer(
     daemon: &Arc<Daemon>,
     subscription: &Subscription,
     items: &[Item],
     events: &[(&'static str, Value)],
-) {
+) -> bool {
     let target = &subscription.target;
     let project = target["project"].as_str().unwrap_or_default();
     let repository = target["repository"].as_str().unwrap_or_default();
@@ -248,26 +291,33 @@ pub(crate) fn offer(
             )
         })
         .collect();
-    if mine.is_empty() || READING.lock().unwrap().contains(&subscription.id) {
-        return;
+    if mine.is_empty() {
+        return false;
     }
     let item = items
         .iter()
         .find(|i| of(&i.project, &i.kind, &i.repository, &i.key));
     let named = pull_named(project, repository, key.parse().unwrap_or_default());
     let (found, ends) = events_of(&named, item, &mine);
+    if let Some(kept) = READING.lock().unwrap().get_mut(&subscription.id) {
+        kept.push((found, ends));
+        return false;
+    }
     let named = target_named(target);
     let (jobs, more) = item.map(jobs_of).unwrap_or_default();
     let told_checks = subscription.events.iter().any(|e| e == "checks")
         && found.iter().any(|e| e.kind == "checks");
     let forge = forge_of(daemon, project, repository);
     let (Some(forge), true, false) = (forge, told_checks, jobs.is_empty()) else {
-        subscriptions::offer(daemon, subscription, &named, &found, ends.as_ref());
-        return;
+        return subscriptions::offer(daemon, subscription, &named, &found, ends.as_ref(), false);
     };
     let (jobs, took): (Vec<Job>, Vec<Option<u64>>) = jobs.into_iter().unzip();
     let (daemon, subscription) = (daemon.clone(), subscription.clone());
-    READING.lock().unwrap().insert(subscription.id.clone());
+    let repository = repository.to_owned();
+    READING
+        .lock()
+        .unwrap()
+        .insert(subscription.id.clone(), Vec::new());
     tokio::spawn(async move {
         let mut pull = Pull {
             number: 0,
@@ -292,18 +342,27 @@ pub(crate) fn offer(
         };
         logs::attach(&forge, &mut pull.jobs).await;
         let jobs: Vec<(Job, Option<u64>)> = pull.jobs.into_iter().zip(took).collect();
-        let found: Vec<Event> = found
+        let mut found: Vec<Event> = found
             .into_iter()
             .map(|mut event| {
                 if event.kind == "checks" {
-                    event.text = summary(&event.text, &jobs, more);
+                    event.text = summary(&event.text, &jobs, more, &repository);
                 }
                 event
             })
             .collect();
-        subscriptions::offer(&daemon, &subscription, &named, &found, ends.as_ref());
-        READING.lock().unwrap().remove(&subscription.id);
+        let mut ends = ends;
+        // Held until the delivery is queued: what a round finds meanwhile waits for it, and comes
+        // after it, never between the entry's removal and the delivery.
+        let mut reading = READING.lock().unwrap();
+        for (later, ended) in reading.remove(&subscription.id).unwrap_or_default() {
+            found.extend(later);
+            ends = ends.or(ended);
+        }
+        subscriptions::offer(&daemon, &subscription, &named, &found, ends.as_ref(), true);
+        drop(reading);
     });
+    false
 }
 
 /// A repository that is the project's folder is named by the project, as the window does.
@@ -316,23 +375,40 @@ fn pull_named(project: &str, repository: &str, number: u64) -> String {
     format!("pull request #{number} of {repository}")
 }
 
-/// What a subscription of the forge watches: a pull request of a workspace's repository.
-pub(super) fn target(workspace: &Workspace, repository: &str, number: u64) -> Value {
-    json!({"project": workspace.project, "workspace": workspace.name, "repository": repository,
-        "number": number})
+/// What a subscription of the forge watches: a pull request of a repository, found by a
+/// workspace's branch, or by its number alone.
+pub(super) fn target(
+    project: &str,
+    workspace: Option<&str>,
+    repository: &str,
+    number: u64,
+) -> Value {
+    let mut target = json!({"project": project, "repository": repository, "number": number});
+    if let Some(workspace) = workspace {
+        target["workspace"] = workspace.into();
+    }
+    target
+}
+
+/// Whether two targets are the same pull request, whichever way each was found.
+pub(super) fn same_pull(one: &Value, other: &Value) -> bool {
+    ["project", "repository", "number"]
+        .iter()
+        .all(|key| one[key] == other[key])
+        && one["number"].is_u64()
 }
 
 /// A subscription's target, as a delivery and `forge show` say it.
 pub fn target_named(target: &Value) -> String {
-    format!(
-        "{}, workspace {}",
-        pull_named(
-            target["project"].as_str().unwrap_or_default(),
-            target["repository"].as_str().unwrap_or_default(),
-            target["number"].as_u64().unwrap_or_default()
-        ),
-        target["workspace"].as_str().unwrap_or_default()
-    )
+    let pull = pull_named(
+        target["project"].as_str().unwrap_or_default(),
+        target["repository"].as_str().unwrap_or_default(),
+        target["number"].as_u64().unwrap_or_default(),
+    );
+    match target["workspace"].as_str() {
+        Some(workspace) => format!("{pull}, workspace {workspace}"),
+        None => pull,
+    }
 }
 
 #[cfg(test)]
@@ -380,6 +456,54 @@ mod tests {
     }
 
     #[test]
+    fn an_approval_says_who_approved_and_the_checks_in_one_line() {
+        let check = |state: &str| flottille_core::item::Check {
+            name: "test".into(),
+            state: state.into(),
+            started_at: None,
+            ended_at: None,
+            link: None,
+        };
+        let item = |states: &[&str]| Item {
+            project: "app".into(),
+            kind: "pull".into(),
+            source: "github".into(),
+            repository: "api".into(),
+            key: "12".into(),
+            title: String::new(),
+            state: "open".into(),
+            author: None,
+            assignees: Vec::new(),
+            labels: Vec::new(),
+            url: None,
+            updated_at: None,
+            seen_at: 1,
+            mine: false,
+            details: json!({}),
+            checks: states.iter().map(|s| check(s)).collect(),
+        };
+        let events = [event("item.approved", json!({"by": ["bob", "carol"]}))];
+        let events: Vec<&(&'static str, Value)> = events.iter().collect();
+        for (checks, said) in [
+            (vec!["passing"; 12], "checks: 12 passed"),
+            (vec!["passing", "pending"], "checks still running"),
+            (vec!["failing", "failing", "passing"], "checks: 2 failed"),
+            (vec!["passing", "skipped"], "checks: 1 passed, 1 skipped"),
+            (vec!["skipped", "skipped"], "checks: 2 skipped"),
+            (vec![], "no checks"),
+        ] {
+            let item = item(&checks);
+            let (found, ends) = events_of("pull request #12 of api", Some(&item), &events);
+            assert_eq!(
+                found[0].text,
+                format!("The pull request #12 of api is approved by bob, carol; {said}")
+            );
+            assert_eq!(found[0].kind, "approved");
+            assert!(found[0].by.is_none() && ends.is_none());
+        }
+    }
+
+    #[test]
     fn details_changed_alone_are_no_event_of_a_pull_request() {
         let events = [event(
             "item.changed",
@@ -405,6 +529,30 @@ mod tests {
     }
 
     #[test]
+    fn the_failed_check_wake_says_how_to_read_the_whole_log() {
+        let job = Job {
+            name: "test".into(),
+            details: None,
+            log: Some(Ok(Log {
+                text: "error: test failed".into(),
+                shown: 1,
+                total: 80,
+                part: true,
+                whole: Some((900, "456".into())),
+            })),
+        };
+
+        let text = summary("The checks ended.", &[(job, None)], 0, "api");
+
+        assert!(
+            text.contains(
+                "- test: error: test failed\n  Read the whole log with forge {\"action\": \"run_logs\", \"repository\": \"api\", \"run\": 900, \"step\": \"456\"}."
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn a_job_with_no_log_says_why_whole() {
         let why = format!(
             "it is not a GitHub Actions job, see https://ci.example.com/{}",
@@ -416,7 +564,7 @@ mod tests {
             log: Some(Err(why.clone())),
         };
 
-        let text = summary("The checks ended.", &[(job, Some(14))], 0);
+        let text = summary("The checks ended.", &[(job, Some(14))], 0, "api");
 
         assert!(
             text.contains(&format!("- lint (14 s): no log: {why}")),

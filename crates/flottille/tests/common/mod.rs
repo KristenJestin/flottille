@@ -28,7 +28,7 @@ const GIT_ENV: [(&str, &str); 6] = [
 
 /// What a test names that would reach the machine outside the test's folders if it ran: faked by
 /// `User::with_fake_launchers`.
-const LAUNCHERS: [&str; 37] = [
+const LAUNCHERS: [&str; 40] = [
     "systemd-run",
     "systemctl",
     "loginctl",
@@ -66,6 +66,9 @@ const LAUNCHERS: [&str; 37] = [
     "bw",
     "uv",
     "ionice",
+    "xdg-open",
+    "open",
+    "start",
 ];
 
 /// The variables and folders the providers take a sign-in from.
@@ -83,13 +86,17 @@ const SIGN_INS: [&str; 7] = [
 /// listing counts (`names_in`).
 const HARNESS_FILE: &str = "tool-results.toml";
 
+/// The other file `User::new` writes there: the vault's keyring is the daemon's memory, never the
+/// user's own keyring (`docs/vault.md`).
+const KEYRING_FILE: &str = "keyring.toml";
+
 /// The names in a folder, without the file the harness itself wrote there: what a test asks is
 /// what the daemon left, not what `User::new` put.
 pub fn names_in(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|name| name != HARNESS_FILE)
+        .filter(|name| name != HARNESS_FILE && name != KEYRING_FILE)
         .collect();
     names.sort();
     names
@@ -133,6 +140,7 @@ impl User {
             .create(&file)
             .unwrap();
         std::fs::write(file.join(HARNESS_FILE), "limit = \"off\"\n").unwrap();
+        std::fs::write(file.join(KEYRING_FILE), "backend = \"memory\"\n").unwrap();
         user
     }
 
@@ -216,6 +224,47 @@ impl User {
         }
         self.write_providers(&format!("{before}\n[judge]\nprovider = \"opencode\"\n"));
         self.with_env("FLOTTILLE_AGENT_COMMAND_OPENCODE", agent.to_str().unwrap())
+    }
+
+    /// A user whose compactor is OpenCode standing on a fake ACP agent of its own, in the folder
+    /// `fake-compactor`, every prompt of which plays `steps`; `settings` is the rest of
+    /// `compaction.toml`. OpenCode is enabled.
+    pub fn with_compactor(self, steps: Value, settings: &str) -> User {
+        let dir = self.path("fake-compactor");
+        std::fs::create_dir(&dir).unwrap();
+        let agent = dir.join("agent");
+        std::fs::write(
+            &agent,
+            format!(
+                "#!/bin/sh\nFLOTTILLE_FAKE_AGENT_DIR='{}' exec '{}' \"$@\"\n",
+                dir.display(),
+                fake_agent().display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&agent, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        std::fs::write(
+            dir.join("script.json"),
+            json!({"turns": [{"when": "", "do": steps}]}).to_string(),
+        )
+        .unwrap();
+        let file = self.path("config/flottille/providers.toml");
+        let before = std::fs::read_to_string(&file).unwrap_or_default();
+        if !before.contains("[opencode]") {
+            self.write_providers(&format!("{before}\n[opencode]\nenabled = true\n"));
+        }
+        std::fs::write(
+            self.path("config/flottille/compaction.toml"),
+            format!("{settings}\n[compactor]\nprovider = \"opencode\"\n"),
+        )
+        .unwrap();
+        self.with_env("FLOTTILLE_AGENT_COMMAND_OPENCODE", agent.to_str().unwrap())
+    }
+
+    /// What the fake compactor was asked, every message of every compaction.
+    pub fn compactor_received(&self) -> Vec<Value> {
+        records(&self.path("fake-compactor/received.jsonl"))
     }
 
     /// `with_judge`, the judge allowing every call it is asked about.
@@ -920,6 +969,18 @@ pub fn fake_bkt() -> PathBuf {
     assert!(
         path.exists(),
         "{} is missing: run the tests from the workspace's root, or `cargo build -p flottille-fake-bkt` first",
+        path.display()
+    );
+    path
+}
+
+/// The fake pnpm launcher's binary (`crates/flottille-fake-pnpm`), built beside Flottille's as
+/// the fake agent is.
+pub fn fake_pnpm() -> PathBuf {
+    let path = Path::new(env!("CARGO_BIN_EXE_flottille")).with_file_name("flottille-fake-pnpm");
+    assert!(
+        path.exists(),
+        "{} is missing: run the tests from the workspace's root, or `cargo build -p flottille-fake-pnpm` first",
         path.display()
     );
     path

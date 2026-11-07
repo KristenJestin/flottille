@@ -20,10 +20,13 @@ pub mod provider;
 pub mod registry;
 pub mod run;
 pub mod secrets;
+pub mod service;
+pub mod shown;
 pub mod store;
 pub mod subscription;
 pub mod ticket;
 pub mod variables;
+pub mod vault;
 pub mod workspace;
 
 pub use error::{Error, Result};

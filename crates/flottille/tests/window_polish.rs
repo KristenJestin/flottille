@@ -595,13 +595,13 @@ fn a_send_removes_the_thumbnails_it_sent_and_not_those_changed_meanwhile(cx: &mu
     let (_shell, reply, cx) = open_session(&user, &lead, cx);
     let other: Vec<u8> = png().into_iter().rev().collect();
 
-    // Sent with picture A; while the daemon answers, A is removed and B is added.
+    // Sent with picture A; while the daemon answers, B is added.
     reply.update_in(cx, |reply, window, cx| {
         reply.attach(Image::from_bytes(ImageFormat::Png, png()), cx);
         reply.send(window, cx);
-        reply.detach(0, cx);
         reply.attach(Image::from_bytes(ImageFormat::Png, other.clone()), cx);
-        reply.replied(None, window, cx);
+        let key = reply.pending()[0].key;
+        reply.replied(key, Ok(accepted()), cx);
     });
 
     let left = reply.read_with(cx, |r, _| {
@@ -829,32 +829,44 @@ fn a_file_that_cannot_be_read_is_a_toast_and_the_composer_keeps_its_height(
     assert_eq!(composer_height(cx), before);
 }
 
+/// What the daemon says when it takes a message, made up.
+fn accepted() -> flottille_window::session::Accepted {
+    flottille_window::session::Accepted {
+        delivery: "d-made-up".into(),
+        after: 0,
+    }
+}
+
 #[gpui_kit::test]
-fn a_refused_send_is_a_toast_and_the_composer_keeps_its_height_and_its_text(
+fn a_refused_send_is_said_on_the_message_and_the_composer_keeps_its_height_and_its_text(
     cx: &mut TestAppContext,
 ) {
     let user = user(true);
     project(&user, "atlas");
     let lead = start(&user, "atlas", "hello");
     let (shell, reply, cx) = open_session(&user, &lead, cx);
+    reply.update_in(cx, |reply, window, cx| {
+        reply
+            .field()
+            .update(cx, |field, cx| field.set_value("the first one", window, cx));
+        reply.send(window, cx);
+    });
     cx.update(|window, cx| window.click("reply-field", cx));
     cx.simulate_input("keep this text");
     settle(cx);
     let before = composer_height(cx);
 
-    cx.update(|window, cx| {
-        reply.update(cx, |r, cx| {
-            r.replied(Some("refused: made-up reason".to_owned()), window, cx)
-        })
+    let key = reply.read_with(cx, |r, _| r.pending()[0].key);
+    reply.update(cx, |r, cx| {
+        r.replied(key, Err("refused: made-up reason".to_owned()), cx)
     });
     settle(cx);
 
+    // Said once, on the message that was refused: no toast.
+    assert_eq!(toasts(&shell, cx), []);
     assert_eq!(
-        toasts(&shell, cx),
-        [(
-            "The message was not sent".to_owned(),
-            "refused: made-up reason".to_owned()
-        )]
+        reply.read_with(cx, |r, _| r.pending()[0].refused.clone()),
+        Some("refused: made-up reason".to_owned())
     );
     assert_eq!(composer_height(cx), before);
     assert_eq!(
@@ -1004,6 +1016,15 @@ fn an_attached_image_unfolds_and_folds_away(cx: &mut TestAppContext) {
         "still unfolding after a frame: {first} of {full}"
     );
     cx.update(|window, _| assert!(window.try_find("attachment-0").is_some()));
+    // The id the final check looks for is the strip's: it is drawn, with room, while it is there.
+    cx.update(|window, _| {
+        assert!(
+            window
+                .try_find("attachments")
+                .is_some_and(|a| a.bounds().size.height > px(1.)),
+            "the strip is drawn under the id the fold check looks for"
+        )
+    });
 
     // It folds away: still drawn a frame after, gone once it has.
     cx.update(|window, cx| window.click("attachment-remove-0", cx));
@@ -1019,7 +1040,7 @@ fn an_attached_image_unfolds_and_folds_away(cx: &mut TestAppContext) {
     cx.update(|window, _| {
         assert!(
             window
-                .try_find("reply-attachments")
+                .try_find("attachments")
                 .is_none_or(|a| a.bounds().size.height <= px(1.))
         )
     });

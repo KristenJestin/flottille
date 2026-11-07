@@ -2,9 +2,29 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::sync::RwLock;
 
 /// What a secret is replaced by.
 pub const MASK: &str = "[masked]";
+
+/// The values of the vault's entries (`docs/vault.md`): masked by every `Secrets` of this
+/// process, whatever else it masks, so that no text the daemon stores or shows holds one.
+static VAULT: RwLock<Vec<String>> = RwLock::new(Vec::new());
+
+/// The shortest secret the vault keeps: a shorter one is too likely to be an ordinary word, and
+/// masking it would mask that word everywhere.
+pub const VAULT_SHORTEST: usize = 6;
+
+/// Masks `value` from now on, in every text of this process. A value is never forgotten: one
+/// replaced or removed stays masked until the daemon restarts, and another entry may hold it.
+pub fn add_vault_value(value: &str) {
+    let mut values = VAULT
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !values.iter().any(|known| known == value) {
+        values.push(value.to_owned());
+    }
+}
 
 /// Parts of a variable's name that say its value is a secret (`PASS` covers `PASSWORD` and
 /// `PASSWD`, `KEY` covers `API_KEY` and `PRIVATE_KEY`).
@@ -43,7 +63,8 @@ pub fn mask_also(text: &str, env: &BTreeMap<OsString, OsString>, values: &[Strin
 
 /// The secret values `mask_also` knows, found once for all the texts masked with them.
 pub struct Secrets {
-    /// The longest first: a secret holding a shorter one is masked whole.
+    /// The longest first: a secret holding a shorter one is masked whole. The vault's are not
+    /// among them: they are read at each use (`all`), so that one set later is masked too.
     values: Vec<String>,
 }
 
@@ -52,7 +73,21 @@ pub struct Secrets {
 const HELD_WORD: usize = 4096;
 
 impl Secrets {
-    /// The values of the variables of `env` named like secrets, and `values`.
+    /// Its own values and the vault's as they are now, the longest first.
+    fn all(&self) -> Vec<String> {
+        let vault = VAULT
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if vault.is_empty() {
+            return self.values.clone();
+        }
+        let mut all: Vec<String> = self.values.iter().chain(vault.iter()).cloned().collect();
+        all.sort_by_key(|value| std::cmp::Reverse(value.len()));
+        all
+    }
+
+    /// The values of the variables of `env` named like secrets, and `values`; the vault's values
+    /// are read each time it masks.
     pub fn new(env: &BTreeMap<OsString, OsString>, values: &[String]) -> Self {
         let mut values: Vec<String> = values
             .iter()
@@ -79,7 +114,7 @@ impl Secrets {
     /// `text` with the secrets it holds replaced by `[masked]`, as `mask_also` does.
     pub fn mask(&self, text: &str) -> String {
         let mut masked = text.to_owned();
-        for value in &self.values {
+        for value in &self.all() {
             masked = masked.replace(value.as_str(), MASK);
         }
         mask_tokens(&mask_private_keys(&masked))
@@ -90,7 +125,8 @@ impl Secrets {
     /// a secret the next pieces complete: the last word, as long as the longest value known at
     /// least, and a private key block until its end line.
     pub fn settled(&self, text: &str) -> usize {
-        let longest = self.values.first().map_or(0, String::len);
+        let values = self.all();
+        let longest = values.first().map_or(0, String::len);
         let floor = |at: usize| {
             (0..=at)
                 .rev()
@@ -109,7 +145,7 @@ impl Secrets {
         let tokens = tokens(text);
         loop {
             let before = cut;
-            for value in &self.values {
+            for value in &values {
                 for (at, _) in text.match_indices(value.as_str()) {
                     if at < cut && cut < at + value.len() {
                         cut = at;
