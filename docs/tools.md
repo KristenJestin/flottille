@@ -276,6 +276,11 @@ the agent, in the store (`session_files`), so it holds across restarts; the text
   the version read is no longer kept;
 - removed since: `refused: X was removed since this session read it; nothing was written`.
 
+The check and the write of a file are one step: `fs_write` and `fs_edit` hold the file (its real
+path, whoever the agent) from the check to the end of the write, so that two calls at once on the
+same file run one after the other, and the second sees the first one's change and is refused as
+changed since it was read. Files that differ do not wait on each other.
+
 A write goes to a temporary file `.<name>.<id>.flottille` beside the file, with the file's mode,
 renamed over it: a link is replaced, never written through. Its folder is the one the gate
 checked, opened without following a link (above): a folder swapped for a link meanwhile is
