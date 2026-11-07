@@ -276,6 +276,11 @@ the agent, in the store (`session_files`), so it holds across restarts; the text
   the version read is no longer kept;
 - removed since: `refused: X was removed since this session read it; nothing was written`.
 
+The check and the write of a file are one step: `fs_write` and `fs_edit` hold the file (its real
+path, whoever the agent) from the check to the end of the write, so that two calls at once on the
+same file run one after the other, and the second sees the first one's change and is refused as
+changed since it was read. Files that differ do not wait on each other.
+
 A write goes to a temporary file `.<name>.<id>.flottille` beside the file, with the file's mode,
 renamed over it: a link is replaced, never written through. Its folder is the one the gate
 checked, opened without following a link (above): a folder swapped for a link meanwhile is
@@ -521,9 +526,11 @@ pending requests.
   `show` ends with the agent's subscriptions, when it has some (`Your subscriptions:` then `- pull
   request #12 of api, workspace login: checks, review, until it is merged or closed`, or `for 52
   min more` with a deadline).
-- **`subscribe {workspace?, repository?, events, from?, minutes?}`**: each of `events`
+- **`subscribe {workspace?, repository?, number?, events, from?, minutes?}`**: each of `events`
   (`checks`, `review`, `approved`, `comment`, `merged`, `closed`) of the pull request of a workspace's branch
-  wakes the agent, as a `subscription` delivery (`docs/design.md` §5.6), until the pull request is
+  (or, with `number`, the pull request of that number of `repository`: one the agent did not open from its
+  workspace, a colleague's, another repository's; `workspace` is refused with it, and `repository` is needed
+  when the place has several) wakes the agent, as a `subscription` delivery (`docs/design.md` §5.6), until the pull request is
   merged or closed: the agent subscribes once (the answer says `it wakes you at each of these
   events until it is merged or closed; no need to subscribe again`). The events of one round are
   one delivery, and the deliveries of a round one wake; those that come while the agent is in a
@@ -553,9 +560,11 @@ pending requests.
   no review decision) adds one line to the answer: `This repository asks for no review, so
   approved will not come; subscribe to review.` A merged or closed pull request ends any subscription, said; so does its
   deadline, said, its agent's end, and `unsubscribe` or the user's Cancel. Subscribing again to the same pull request replaces the agent's
-  subscription: its events, `from` and deadline. A pull request merged or closed, a repository with no forge or no pull request,
-  and `number` are refused. **`unsubscribe {workspace?, repository?}`** cancels the agent's
-  subscriptions to them (the runs it follows there with them), every one when it names none;
+  subscription: its events, `from` and deadline. A pull request merged or closed, a repository with no forge, no pull request (or no pull request of that
+  number) are refused. A subscription by number is the same subscription as one found by the workspace's
+  branch, and the one replaces the other when it is the same pull request. **`unsubscribe {workspace?, repository?, number?}`** cancels the agent's
+  subscriptions to them (the runs it follows there with them, unless `number` is given: it names a pull
+  request, never a run), every one when it names none;
   **`unsubscribe {run, repository?}`** stops following a run it started (`repository` needed
   when the project has several); **`unsubscribe
   {session}`** stops following a
