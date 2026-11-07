@@ -456,6 +456,7 @@ activity.
 | `outcome` | `ok`, `refused`, `failed`, or `held` for a call the gate held (`docs/tools.md`, "The gate"). |
 | `duration_ms` | How long it took. |
 | `request` | For a call the user allowed, performed once they did: the request's number; else `null`. |
+| `link` | Only for a `forge` `run` that was done and whose answer gave the run's link: that link. |
 | `cut` | Only when the result was cut at the source (`docs/tools.md`, "Long results"): `{"result", "chars", "left_out"}`, the id the whole text is read by, its length and how many characters the agent was not shown. |
 
 #### `agent.link_shown`

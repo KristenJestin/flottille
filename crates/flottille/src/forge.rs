@@ -62,6 +62,7 @@ const FIELDS: &str = "number,title,state,isDraft,headRefName,headRefOid,baseRefN
     mergeable,reviewDecision,statusCheckRollup,comments,reviews,body,mergedBy,mergedAt";
 /// The ways `forge` `merge` merges a pull request, the first by default.
 pub const MERGE_METHODS: [&str; 3] = ["squash", "merge", "rebase"];
+pub(crate) use pipelines::{HIDDEN_EVERYWHERE, bitbucket_key, with_branch};
 /// What `forge review` posts: a comment, an approval or a request for changes.
 pub use review::VERDICTS as REVIEW_VERDICTS;
 pub(crate) use review::head_of as review_head;

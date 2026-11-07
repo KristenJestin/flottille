@@ -366,6 +366,32 @@ pub async fn prepared(
         {
             return Err(Outcome::Refused(why));
         }
+        // A Bitbucket variable's name is refused as it is, before the user is asked.
+        if args["action"] == "run"
+            && let Some((_, path)) = write_target(
+                daemon,
+                &grant.place,
+                args["workspace"].as_str(),
+                args["repository"].as_str(),
+            )
+            && let Ok(project) = projects::load_project(daemon, &grant.place.project)
+            && let Some(repository) = project.repositories.iter().find(|r| r.path == path)
+            && matches!(
+                repository.forge,
+                Some(
+                    RepositoryForge::BitbucketCloud { .. }
+                        | RepositoryForge::BitbucketDataCenter { .. }
+                )
+            )
+            && let Some(why) = args["variables"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|variable| variable["key"].as_str())
+                .find_map(crate::forge::bitbucket_key)
+        {
+            return Err(Outcome::Refused(why));
+        }
         let mut says = posted_says(args);
         // Without a body, the forge shows the project's template: the card says it whole.
         if args["action"] == "create"
