@@ -685,7 +685,7 @@ The agent asked a question with `ask` (or `ask_user`, `ask_parent`, its old name
 parent, a led session of its pilot, any other root of the user. A question to the user:
 `flottille inbox` lists it, and a pilot sees it with `events_since`. A question to a led
 session's pilot is shown in the session, and its pilot is woken at the turn's end. When the pilot
-no longer reads the session (it stops following it, or it ends),
+no longer reads the session (it stops following it, it ends, or the user detaches the session),
 each question still open to it is written again, to the user, with `moved_from`: the pilot's are
 closed by it.
 

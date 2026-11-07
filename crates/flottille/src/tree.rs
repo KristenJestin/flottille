@@ -1451,10 +1451,19 @@ pub fn detach(daemon: &Arc<Daemon>, id: &str) -> Result<Agent, Failure> {
         };
         return Err(Failure::new("invalid-params", why));
     };
-    for following in crate::subscriptions::following(daemon, &starter, Some(&session.id)) {
-        crate::subscriptions::end(daemon, &following, "detached");
-    }
-    daemon.write(|store| {
+    let followings = crate::subscriptions::following(daemon, &starter, Some(&session.id));
+    // One write: no reader sees the followings ended while the session is still led.
+    daemon.write_all(|store| {
+        let mut events = Vec::new();
+        for following in &followings {
+            if store.unsubscribe(&following.id)? {
+                events.push(store.append_event(
+                    "subscription.ended",
+                    json!({"agent": following.agent, "subscription": following.id,
+                        "why": "detached"}),
+                )?);
+            }
+        }
         let (_, event) = store.change_agent(
             &session.id,
             AgentChange {
@@ -1466,9 +1475,11 @@ pub fn detach(daemon: &Arc<Daemon>, id: &str) -> Result<Agent, Failure> {
                 json!({"agent": session.id, "from": starter}),
             )),
         )?;
-        Ok(((), event))
+        events.extend(event);
+        Ok(((), events))
     })?;
     daemon.mcp.detached(&session.id);
+    let moved = questions_to_user(daemon, &session, &starter);
     let title = session.title.clone().unwrap_or_else(|| session.id.clone());
     let starter_alive = daemon
         .read(|store| store.agent(&starter))
@@ -1498,7 +1509,8 @@ pub fn detach(daemon: &Arc<Daemon>, id: &str) -> Result<Agent, Failure> {
             &format!(
                 "The user detached this session from agent {starter}: it is now the user's alone. \
                  What you need answered goes through ask to the user, and writing to agent \
-                 {starter} now asks the user's leave."
+                 {starter} now asks the user's leave.{}",
+                moved_said(moved)
             ),
             approval::BETWEEN_TURNS,
         );

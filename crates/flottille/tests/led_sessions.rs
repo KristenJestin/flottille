@@ -517,6 +517,23 @@ fn a_pilot_that_ends_with_a_question_open_hands_it_to_the_user() {
 }
 
 #[test]
+fn detaching_a_session_hands_its_open_question_to_the_user() {
+    let user = User::with_fake_agent();
+    let (_, _, session) = asked_its_pilot(&user);
+
+    user.call("agent.detach", json!({"agent": session}))
+        .unwrap();
+
+    reached_the_user(&user, &session);
+    eventually("the session told", || {
+        !delivered(&user, &session, "detached").is_empty()
+    });
+    let told = delivered(&user, &session, "detached");
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(told[0].contains("went to the user"), "{}", told[0]);
+}
+
+#[test]
 fn the_user_cancelling_the_following_hands_the_question_to_the_user() {
     let user = User::with_fake_agent();
     let (lead, _, session) = asked_its_pilot(&user);
