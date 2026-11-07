@@ -495,7 +495,7 @@ fn a_child_s_service_write_is_refused() {
     let opened = user.received_requests("session/new").len();
     let launched = lead.call(
         "agent_launch",
-        json!({"title": "worker", "brief": "Write the tests."}),
+        json!({"kind": "child", "title": "worker", "brief": "Write the tests."}),
     );
     assert!(!launched.error, "{}", launched.text);
     let (url, authorization) = server_of(&user, opened);
@@ -506,7 +506,11 @@ fn a_child_s_service_write_is_refused() {
     let write = child.call("services", json!({"action": "remove", "name": "db"}));
 
     assert!(write.error, "not refused: {}", write.text);
-    assert!(write.text.contains("ask_parent"), "{}", write.text);
+    assert!(
+        write.text.contains("ask your parent (ask)"),
+        "{}",
+        write.text
+    );
     assert!(
         user.call("approval.list", json!({})).unwrap()["requests"]
             .as_array()

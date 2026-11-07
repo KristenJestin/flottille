@@ -694,7 +694,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
     let _ = writer.await;
 }
 
-fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) {
+fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscription>) {
     let id = request.id;
     match request.method.as_str() {
         "daemon.status" => (

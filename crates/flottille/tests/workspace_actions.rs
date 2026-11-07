@@ -359,7 +359,7 @@ fn a_child_reads_the_workspaces_and_is_refused_the_root_s_writes() {
     let opened = user.received_requests("session/new").len();
     let launched = lead.call(
         "agent_launch",
-        json!({"title": "worker", "brief": "Write the tests."}),
+        json!({"kind": "child", "title": "worker", "brief": "Write the tests."}),
     );
     assert!(!launched.error, "{}", launched.text);
     let (url, authorization) = server_of(&user, opened);
@@ -374,7 +374,7 @@ fn a_child_reads_the_workspaces_and_is_refused_the_root_s_writes() {
             "workspace",
             json!({"action": action, "name": "x", "ticket": "#1"}),
         ));
-        assert!(text.contains("ask_parent"), "{text}");
+        assert!(text.contains("ask your parent (ask)"), "{text}");
     }
     assert!(no_request(&user));
 }
@@ -389,8 +389,7 @@ fn agent_launch_with_new_workspace_is_judged_the_same() {
     let created = held(mcp.call("workspace", json!({"action": "create", "name": "a"})));
     let launched = held(mcp.call(
         "agent_launch",
-        json!({"title": "worker", "brief": "Write the tests.", "new_workspace": "a",
-            "follow": false, "root": true}),
+        json!({"title": "worker", "brief": "Write the tests.", "new_workspace": "a", "kind": "handed"}),
     ));
     let (created, launched) = (request(&user, created), request(&user, launched));
     assert_eq!(launched["class"], "base", "{launched}");
@@ -645,7 +644,7 @@ fn a_child_still_removes_no_workspace() {
     let opened = user.received_requests("session/new").len();
     let launched = lead.call(
         "agent_launch",
-        json!({"title": "worker", "brief": "Write the tests."}),
+        json!({"kind": "child", "title": "worker", "brief": "Write the tests."}),
     );
     assert!(!launched.error, "{}", launched.text);
     let (url, authorization) = server_of(&user, opened);
@@ -658,7 +657,7 @@ fn a_child_still_removes_no_workspace() {
         .to_owned();
 
     let text = refused(child.call("workspace", json!({"action": "remove"})));
-    assert!(text.contains("ask_parent"), "{text}");
+    assert!(text.contains("ask your parent (ask)"), "{text}");
     assert!(no_request(&user));
 
     // Its root's removal waits for it: nothing is touched while it works there.
@@ -999,8 +998,8 @@ fn a_rename_that_cannot_be_done_is_refused_before_anything_is_asked() {
 
 /// A session for the user in the new workspace `login`, with `more` arguments.
 fn launch_in_login(mcp: &Mcp, more: Value) -> Answer {
-    let mut asked = json!({"title": "Pickup dashboard", "brief": "Build it.", "root": true,
-        "follow": false, "new_workspace": "login"});
+    let mut asked = json!({"title": "Pickup dashboard", "brief": "Build it.", "kind": "handed",
+        "new_workspace": "login"});
     asked
         .as_object_mut()
         .unwrap()
@@ -1038,7 +1037,7 @@ fn agent_launch_with_new_workspace_makes_the_branch_named() {
         json!({"branch": "fix/ABC-9-x"}),
         json!({"base": {".": "main"}}),
     ] {
-        let mut asked = json!({"title": "t", "brief": "b", "root": true, "follow": false,
+        let mut asked = json!({"title": "t", "brief": "b", "kind": "handed",
             "workspace": "login"});
         asked
             .as_object_mut()
@@ -1074,7 +1073,7 @@ fn the_launch_card_shows_the_branch_that_will_be_made() {
     // Without branch, the card says the default, and that is the branch made.
     let number = held(mcp.call(
         "agent_launch",
-        json!({"title": "Other", "brief": "Build it.", "root": true, "follow": false,
+        json!({"title": "Other", "brief": "Build it.", "kind": "handed",
             "new_workspace": "other"}),
     ));
     let says = request(&user, number)["says"].to_string();

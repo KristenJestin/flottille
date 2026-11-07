@@ -224,6 +224,8 @@ pub struct Opened {
     /// The agent that started the session for the user, by the name it goes by; `None` for a
     /// session the user started. The header says it, not the left tree.
     pub started_by: Option<String>,
+    /// The agent that leads it, by the name it goes by; `None` for a session no agent leads.
+    pub led_by: Option<String>,
 }
 
 pub struct SessionPage {
@@ -274,6 +276,9 @@ pub struct SessionPage {
     ending: bool,
     /// What the daemon said when it refused to end the session.
     end_error: Option<SharedString>,
+    /// What the header said last of who started or leads it, and the element id it said it in,
+    /// kept while it fades out once the session is detached.
+    by_said: (SharedString, &'static str),
     /// A resume was asked and not answered yet.
     resuming: bool,
     /// What the daemon said when it refused to resume the session.
@@ -385,6 +390,7 @@ impl SessionPage {
             needs_you,
             ending: false,
             end_error: None,
+            by_said: (SharedString::default(), "session-started-by"),
             resuming: false,
             resume_error: None,
             reloading: false,
@@ -768,6 +774,26 @@ impl SessionPage {
     pub fn reloads_after_turn(&self) -> bool {
         self.root()
             .is_some_and(|root| root.tools_reload && root.state == "working")
+    }
+
+    /// Whether it says these of who started and who leads the session already.
+    pub fn says_by(&self, started_by: &Option<String>, led_by: &Option<String>) -> bool {
+        &self.opened.started_by == started_by && &self.opened.led_by == led_by
+    }
+
+    /// Who started and who leads the session, as the daemon says now: the header's line folds
+    /// away once the user detached it.
+    pub fn set_by(
+        &mut self,
+        started_by: Option<String>,
+        led_by: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.says_by(&started_by, &led_by) {
+            self.opened.started_by = started_by;
+            self.opened.led_by = led_by;
+            cx.notify();
+        }
     }
 
     pub fn set_title(&mut self, title: &str, cx: &mut Context<Self>) {
@@ -1771,24 +1797,7 @@ impl Render for SessionPage {
                     )
                     .test_support(),
             )
-            .children(self.opened.started_by.clone().map(|by| {
-                let said = SharedString::from(format!("started by {by}"));
-                tipped_when_cut(
-                    div()
-                        .id("session-started-by")
-                        .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .text_size(px(12.))
-                        .text_color(p.faint)
-                        .aria_label(said.clone())
-                        .child(said.clone()),
-                    said,
-                    window,
-                    cx,
-                )
-            }))
+            .child(self.by_line(window, cx))
             .child(div().flex_1())
             .children(self.end_error.clone().map(|error| {
                 div()
@@ -1848,6 +1857,27 @@ impl Render for SessionPage {
                                     reloader.update(cx, |page, cx| page.reload_tools(cx)).ok();
                                 }),
                         )
+                        .into_any_element()
+                },
+            ))
+            // A led session: the user's messages reach it, not its pilot. It folds away once the
+            // user detached it.
+            .child(presence_of(
+                "session-led-note-line",
+                self.opened
+                    .led_by
+                    .as_ref()
+                    .filter(|_| root)
+                    .map(|by| format!("{LED_NOTE}; {by} is not asked.").into()),
+                move |said| {
+                    div()
+                        .id("session-led-note")
+                        .pb(space::SM)
+                        .text_size(px(12.5))
+                        .text_color(p.faint)
+                        .aria_label(said.clone())
+                        .child(said)
+                        .test_support()
                         .into_any_element()
                 },
             ))
@@ -4061,7 +4091,8 @@ impl Row {
         if let Block::Text { text }
         | Block::Thought { text, .. }
         | Block::Report { text, .. }
-        | Block::Question { text, .. } = &block
+        | Block::Question { text, .. }
+        | Block::Asked { text } = &block
         {
             let muted = matches!(block, Block::Thought { .. });
             self.set_markdown(text, muted, false, cx);
@@ -5606,6 +5637,7 @@ impl Render for Row {
             }
             Block::Approval { number } => self.render_card(*number, window, cx).into_any_element(),
             Block::Question { seq, .. } => self.render_question(*seq, window, cx),
+            Block::Asked { .. } => self.render_asked(),
             Block::Answered { .. } => div().into_any_element(),
             // One line; a click opens the output in the panel the rail opens.
             Block::Command(result) => {
@@ -5729,6 +5761,28 @@ impl Row {
 }
 
 impl Row {
+    /// A question the led session asked its pilot: a card that says so, with no answer box, the
+    /// pilot's to answer.
+    fn render_asked(&self) -> AnyElement {
+        let id = |part: &str| ElementId::Name(format!("row-{}-{part}", self.at).into());
+        Card::new()
+            .title(SharedString::from(format!("{} asks its pilot", self.me)))
+            .meta(self.when.map(clock).unwrap_or_default())
+            .child(
+                div()
+                    .id(id("asked-text"))
+                    .px(space::LG)
+                    .py(space::MD)
+                    .child(markdown_view(
+                        id("asked-region"),
+                        &self.markdown,
+                        self.scope,
+                    ))
+                    .test_support(),
+            )
+            .into_any_element()
+    }
+
     /// A question the agent asked the user, in full, with the field that answers it: it unfolds
     /// where it was asked while the daemon says it waits, and folds away once the answer is
     /// taken.
@@ -5776,6 +5830,51 @@ impl Row {
             .id(id("question"))
             .child(presence(id("question-open"), self.asking, card))
             .test_support()
+            .into_any_element()
+    }
+}
+
+/// What a led session's page says above its composer, before its pilot's name.
+pub const LED_NOTE: &str = "Your messages reach this session directly";
+
+impl SessionPage {
+    /// Who leads the session (`led by …`) or started it (`started by …`), small, beside its
+    /// place; it fades and narrows away when the session is detached.
+    fn by_line(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let said = match (&self.opened.led_by, &self.opened.started_by) {
+            (Some(by), _) => Some((format!("led by {by}"), "session-led-by")),
+            (None, Some(by)) => Some((format!("started by {by}"), "session-started-by")),
+            (None, None) => None,
+        };
+        if let Some((said, id)) = &said {
+            self.by_said = (SharedString::from(said.clone()), id);
+        }
+        let t = fade("session-by-line", said.is_some(), PANEL, window, cx);
+        if t <= 0.0 {
+            return div().into_any_element();
+        }
+        let (said, id) = self.by_said.clone();
+        let p = palette(cx);
+        div()
+            .min_w_0()
+            .overflow_hidden()
+            .opacity(t)
+            .when(t < 1.0, |d| d.max_w(px(320. * t)))
+            .child(tipped_when_cut(
+                div()
+                    .id(id)
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(px(12.))
+                    .text_color(p.faint)
+                    .aria_label(said.clone())
+                    .child(said.clone()),
+                said,
+                window,
+                cx,
+            ))
             .into_any_element()
     }
 }

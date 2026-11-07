@@ -394,7 +394,7 @@ fn a_child_or_another_project_s_session_is_still_refused() {
     let (elsewhere, _) = root(&user, "other");
     let launched = x_mcp.call(
         "agent_launch",
-        json!({"title": "worker", "brief": "Write the tests."}),
+        json!({"kind": "child", "title": "worker", "brief": "Write the tests."}),
     );
     assert!(!launched.error, "{}", launched.text);
     let child = store(&user)
@@ -439,7 +439,7 @@ fn a_started_session_needs_no_leave() {
     let opened = user.received_requests("session/new").len();
     let launched = mcp.call(
         "agent_launch",
-        json!({"title": "Login", "brief": "Fix the login.", "root": true, "follow": false}),
+        json!({"title": "Login", "brief": "Fix the login.", "kind": "handed"}),
     );
     assert!(
         launched.text.contains("Started a session"),

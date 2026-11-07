@@ -674,7 +674,7 @@ fn a_paused_following_says_so_in_the_rail_and_resume_resumes_it(cx: &mut TestApp
     let opened = user.received_requests("session/new").len();
     let launched = mcp.call(
         "agent_launch",
-        json!({"title": "Docs", "brief": "Write the docs.", "root": true, "follow": true}),
+        json!({"title": "Docs", "brief": "Write the docs.", "kind": "led"}),
     );
     assert!(!launched.error, "{}", launched.text);
     let (url, authorization) = server_of(&user, opened);
