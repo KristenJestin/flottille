@@ -959,7 +959,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   files not committed and setup steps played, its pull request, its ticket; one sentence for the
   repositories with no forge; its actions in a "⋯" menu, the same as the workspace's card, with
   Link a ticket…, Unlink the ticket and, for a session in a workspace, Remove workspace…, which
-  asks as the card does and names the sessions living there; while it runs the section says it is
+  asks as the card does, the dialog refusing it, with the sessions named, while sessions not ended work there; while it runs the section says it is
   being removed, and once removed it folds away, the page staying) and facts, its runs, then, pinned at the very bottom and
   folding away when nothing waits, "Waiting for you", the one place of the page that says the user
   is needed (each request that reached the user is a compact card: the whole call, wrapping over

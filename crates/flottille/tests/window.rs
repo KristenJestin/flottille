@@ -3152,6 +3152,15 @@ fn a_session_whose_workspace_is_removed_keeps_its_page_without_its_facts_and_rea
                 .is_some_and(|place| !place.repositories.is_empty())
         })
     });
+    // A workspace is removed once nothing works in it: the lead ends first.
+    user.call("agent.stop", json!({"agent": lead})).unwrap();
+    until(&shell, cx, "the session ended", |cx| {
+        shell.read_with(cx, |s, _| {
+            s.snapshot()
+                .session(&lead)
+                .is_some_and(|session| session.ended)
+        })
+    });
     let rows = row_ids(&page, cx);
     assert_eq!(page.read_with(cx, |p, _| p.histories()), 1);
 
@@ -3159,11 +3168,6 @@ fn a_session_whose_workspace_is_removed_keeps_its_page_without_its_facts_and_rea
         .unwrap();
     until(&shell, cx, "the facts are gone", |cx| {
         page.read_with(cx, |p, cx| p.rail().read(cx).place().is_none())
-    });
-    // A turn ending reads the place again: the daemon does not know it any more.
-    send(&user, &lead, "still there?");
-    until(&shell, cx, "the lead answered", |cx| {
-        blocks(&page, cx).len() == rows.len() + 2
     });
     let deadline = Instant::now() + Duration::from_secs(1);
     until(&shell, cx, "a second has passed", |_| {
@@ -11511,6 +11515,48 @@ fn remove_opens_a_confirmation_disabled_with_its_reason_when_work_would_be_lost(
         last_toast(cx).is_some_and(|t| t.starts_with("Workspace clean removed")),
         "{:?}",
         last_toast(cx)
+    );
+}
+
+#[gpui_kit::test]
+fn the_card_refuses_the_removal_while_sessions_work_there_and_names_them(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    workspace(&user, "atlas", "busy");
+    user.call(
+        "agent.run",
+        json!({"project": "atlas", "workspace": "busy", "message": "work a while"}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(1400.)));
+    open_project(&shell, "atlas", cx);
+    until(&shell, cx, "the card lists the session", |cx| {
+        card_of(&shell, Some("busy"), cx)
+            .is_some_and(|card| card.read_with(cx, |c, _| !c.data().sessions.is_empty()))
+    });
+    let title = card_of(&shell, Some("busy"), cx)
+        .unwrap()
+        .read_with(cx, |c, _| c.data().sessions[0].title.clone());
+    settle(cx);
+
+    cx.update(|window, cx| window.click("workspace-menu-busy", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("remove-workspace", cx));
+    settle(cx);
+    let why = text_of("workspace-removal-busy-refused", cx).unwrap_or_default();
+    assert!(why.contains(&format!("“{title}”")), "{why}");
+    assert!(why.contains("End them first"), "{why}");
+    cx.update(|window, cx| window.click("workspace-removal-busy-action", cx));
+    settle(cx);
+    assert_eq!(
+        user.call("workspace.list", json!({"project": "atlas"}))
+            .unwrap()["workspaces"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "nothing was removed"
     );
 }
 

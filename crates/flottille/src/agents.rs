@@ -699,6 +699,13 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
                     project.name
                 )));
             }
+            // A removal, a resume or a preparation holds it; only an agent that waits for its
+            // own preparation starts in it meanwhile.
+            if daemon.preparing.lock().unwrap().contains(&workspace.id)
+                && !(new.preparing && workspace.state() == State::Preparing)
+            {
+                return Err(crate::workspaces::held(daemon, &workspace));
+            }
             let repositories: Vec<_> = workspace
                 .repositories
                 .iter()
