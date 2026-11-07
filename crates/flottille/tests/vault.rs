@@ -266,7 +266,6 @@ fn a_secret_value_is_masked_in_what_is_stored() {
     assert!(!events.contains(SECRET), "{events}");
     assert!(files_holding(&user.path("state"), SECRET).is_empty());
 
-    // A removed entry's value is no longer the vault's to mask.
     user.call("vault.remove", json!({"name": "jira"})).unwrap();
     assert_eq!(
         user.call("vault.list", json!({})).unwrap()["entries"],

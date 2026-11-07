@@ -166,7 +166,6 @@ pub async fn call(
         }
         "vault.remove" => {
             let Remove { name } = serde_json::from_value(params)?;
-            let old = daemon.vault.read(&name).await.ok().flatten();
             let removed = daemon.write(|store| store.remove_vault_entry(&name))?;
             let Some(removed) = removed else {
                 return Err(Failure::new(
@@ -175,9 +174,6 @@ pub async fn call(
                 ));
             };
             daemon.vault.delete(&name).await.map_err(unavailable)?;
-            if let Some(old) = old {
-                secrets::forget_vault_value(&old);
-            }
             retool(&daemon);
             Ok(json!({"removed": removed.to_json()}))
         }
@@ -221,7 +217,6 @@ async fn set(daemon: &Daemon, params: Value) -> Result<Value, Failure> {
         project: given(asked.project),
         updated_at: now_ms(),
     };
-    let old = daemon.vault.read(&entry.name).await.ok().flatten();
     // Masked before it is kept anywhere, so that nothing written after can hold it.
     secrets::add_vault_value(&asked.secret);
     daemon
@@ -229,9 +224,6 @@ async fn set(daemon: &Daemon, params: Value) -> Result<Value, Failure> {
         .store(&entry.name, &asked.secret)
         .await
         .map_err(unavailable)?;
-    if let Some(old) = old.filter(|old| *old != asked.secret) {
-        secrets::forget_vault_value(&old);
-    }
     daemon.write(|store| store.put_vault_entry(&entry))?;
     retool(daemon);
     Ok(entry.to_json())

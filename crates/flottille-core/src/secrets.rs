@@ -15,7 +15,8 @@ static VAULT: RwLock<Vec<String>> = RwLock::new(Vec::new());
 /// masking it would mask that word everywhere.
 pub const VAULT_SHORTEST: usize = 6;
 
-/// Masks `value` from now on, in every text of this process.
+/// Masks `value` from now on, in every text of this process. A value is never forgotten: one
+/// replaced or removed stays masked until the daemon restarts, and another entry may hold it.
 pub fn add_vault_value(value: &str) {
     let mut values = VAULT
         .write()
@@ -23,14 +24,6 @@ pub fn add_vault_value(value: &str) {
     if !values.iter().any(|known| known == value) {
         values.push(value.to_owned());
     }
-}
-
-/// Stops masking `value` for the vault: its entry was replaced or removed.
-pub fn forget_vault_value(value: &str) {
-    VAULT
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .retain(|known| known != value);
 }
 
 /// Parts of a variable's name that say its value is a secret (`PASS` covers `PASSWORD` and
