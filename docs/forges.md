@@ -548,12 +548,14 @@ for every forge write (Full runs it, Ask holds it for the user, Auto asks the ju
 (re-run the failed) stays as it is. The repository is one of the place's, its declared forge
 checked against its remote, as for `comment` and `edit`. The branch is the one named (`branch`,
 which git must take for a branch's name), else the one the workspace's repository is on now, else,
-in `main`, the one the project's checkout is on.
+in `main`, the one the project's checkout is on. A `run` that names no branch has it worked out
+**before the gate**, and put in the call: the card and the judge say where the pipeline will run
+(`branch` in its arguments), and what the user allows is exactly what is run.
 
 | Action | GitHub (`gh`) | Bitbucket Cloud (`bkt`) |
 |---|---|---|
 | `pipelines {repository?, branch?}` (read) | the workflows of `.github/workflows/` that accept `workflow_dispatch`: name, file, inputs (required, type, options, default, description) | the pipelines of `bitbucket-pipelines.yml`: `default`, each of `branches`, `tags` and `pull-requests` by its pattern, each `custom` by its name with the variables it declares (default, allowed values, description) |
-| `runs {repository?, branch?}` (read) | `gh run list -R … [--branch <b>] --limit 20 --json databaseId,workflowName,status,conclusion,event,headBranch,createdAt,startedAt,updatedAt,url` | `bkt api /repositories/W/R/pipelines/ --param pagelen=50 --param sort=-created_on`, the branch's (`target.ref_name`, or `target.source` of a pull request's): `build_number`, the selector, `state`, `trigger.name`, `created_on`, `duration_in_seconds` |
+| `runs {repository?, branch?}` (read) | `gh run list -R … [--branch <b>] --limit 20 --json databaseId,workflowName,status,conclusion,event,headBranch,createdAt,startedAt,updatedAt,url` | `bkt api /repositories/W/R/pipelines/ --param pagelen=50 --param sort=-created_on [--param target.ref_name=<b>]`, the API giving the branch's runs (the newest 50 of the branch, so a quiet branch's older runs are found): `build_number`, the selector, `state`, `trigger.name`, `created_on`, `duration_in_seconds` |
 | `run_view {repository?, run}` (read) | `gh run view <run> -R … --json databaseId,workflowName,status,conclusion,url,jobs` | `bkt pipeline view <run> --json`: `steps[]` (`name`, `uuid`, `state.name`, `state.result.name`) |
 | `run_logs {repository?, run, step}` (read) | `gh run view --job <id> -R … --log`, the job found by its name or id among the run's | `bkt pipeline logs <run> --step <uuid>`, the step found by its name or uuid |
 | `run {repository?, pipeline, branch?, variables?, follow?}` (write) | `gh workflow run <file> -R … --ref <b> -f k=v…`; the answer is the run's link when `gh` prints it | without variables `bkt pipeline run --ref <b> [--selector-type <t> --selector-pattern <p>]`, the run's number read by its uuid (`bkt api …/pipelines/{uuid}`) when it prints no `#N`; with variables the REST call through `bkt api` (table above); the answer is the run's number and link |
@@ -572,18 +574,26 @@ in `main`, the one the project's checkout is on.
   beside the list: `bitbucket-pipelines.yml: pipelines.custom.check-all is defined twice (lines
   12 and 18); the last one is listed`, the lines being the file's (a file that also has a syntax
   error is still refused, with that error's line and column); a GitHub workflow that cannot be
-  parsed is named under `Not read:` and never hides the others. GitHub runs a workflow by `workflow_dispatch`
+  parsed is named under `Not read:` and never hides the others. **A file past 1 MiB is not read**: its
+  size is asked first (`git cat-file -s`) and `pipelines` refuses past the limit, saying the size
+  and the limit (a Bitbucket file refuses the call; a workflow is named under `Not read:`); `run`
+  needs no file. GitHub runs a workflow by `workflow_dispatch`
   only when the file is also on the default branch: that is GitHub's own refusal, passed on.
 - **A pipeline is named as `pipelines` lists it**: Bitbucket `default`, `custom: <name>` (a bare
   name is a custom one), `branches: <pattern>`, `tags: <pattern>`, `pull-requests: <pattern>`;
   GitHub the workflow's file (`e2e.yml`), or anything `gh workflow run` takes.
 - **Variables** are `[{key, value, secured?}]`: a Bitbucket pipeline's variables, a GitHub
-  workflow's inputs. A key is letters, digits, `_` and `-`. On Bitbucket a run with variables goes
+  workflow's inputs. A key is letters, digits, `_` and `-` on GitHub; **on Bitbucket letters, digits
+  and `_`, not starting with a digit**, and any other is refused before the user is asked, saying
+  the rule (Bitbucket refuses it itself). On Bitbucket a run with variables goes
   through the REST call, not `bkt pipeline run --var`: `--var` is a list flag that splits a value
   at its commas (`PREVIEW_JOBS=api,web` would be two), and has no secured variable.
 - **A secured variable** is sent as Bitbucket's `secured: true`, and its value is in no record of
   the call (`[masked]` in the arguments stored, shown to the user and given to the judge), nor in
-  any answer, whatever the forge echoed. GitHub has no secured input: the value is still masked
+  any answer, whatever the forge echoed. **A value of fewer than 3 characters** (`4`, `ab`) would
+  garble every answer and record it appears in (`#43`, `table`): it is hidden only where it is
+  echoed as the variable's value (`KEY=value`, `"value": "…"`), never elsewhere; a value of 3
+  characters or more is hidden wherever it appears, as before. GitHub has no secured input: the value is still masked
   the same way in Flottille, and sent as an input.
 - **Steps.** Bitbucket Cloud's REST API has no call that starts a manual step nor runs one step
   again: its steps are read only (`GET …/steps/`, `…/log`), and only a whole pipeline is run or
@@ -601,9 +611,11 @@ in `main`, the one the project's checkout is on.
   that `bkt pipeline view --json` gives the run's `pipeline.uuid`; whether `bkt pipeline run`
   prints the run's number (when it does not, the answer says `forge runs lists it`).
 
-The window says a run an agent started like its other forge writes: `Ran a pipeline` with the
-pipeline's name, in the session's list of what was written, and the tool's step with the run's
-link in its answer.
+The window says what an agent did to a run like its other forge writes, in the session's list of
+what was written: `Ran a pipeline` with the pipeline's name and **the link of the run** (the
+`link` of the call's `agent.tool_served`, `docs/events.md`, which the daemon takes from the answer
+when the forge gave one), `Stopped a pipeline` with the run's number and `Ran a job again` with
+the run's number and the job's name. A call that was refused or held is none of them.
 
 ### Following a run
 

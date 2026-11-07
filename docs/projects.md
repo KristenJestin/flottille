@@ -252,7 +252,9 @@ repository"). It is one of:
 `[tracker]` says where the project's tickets are (`docs/tickets.md`): `kind = "github"` with
 `repository`, the path of one of the project's repositories whose forge is GitHub (its issues), or
 `kind = "jira"` with `site` (the Jira Cloud site, `acme.atlassian.net`) and `projects`, the keys of
-its Jira projects (at least one). A project with no `[tracker]` takes no ticket.
+its Jira projects (at least one), and optionally `worklog_token`, the name of the vault entry that
+logs time on Jira (`docs/tickets.md`, "Logging time"). A project with no `[tracker]` takes no
+ticket.
 
 The forges and the tracker are set in the project's **Settings** in the window (the project page's
 header): each repository's forge is pre-filled from its remote's address, nothing is active until

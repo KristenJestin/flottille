@@ -122,6 +122,12 @@ The user chose the window's appearance (`appearance.set`): every window takes it
 | `theme` | `omarchy` or `flottille`. |
 | `shade` | `light` or `dark`. |
 
+### `compaction.changed`
+
+The compaction's settings or guidance changed, or Flottille picked a compactor for a user who
+never chose one (`docs/protocol.md`, "The compaction methods"): its data is what
+`compaction.show` answers.
+
 ### `tool_results.changed`
 
 The user chose the limit above which a tool result is cut (`tool_results.set`,
@@ -404,11 +410,27 @@ A tool call the agent makes, or a change of one (`update`).
 
 #### `agent.compacted`
 
-The agent compacted its context.
+The agent's context was compacted: by its own CLI, or by Flottille (`docs/design.md` §5.8), whose
+compactor summarised it before the agent went on in a new session.
 
 | Field | |
 |---|---|
 | `agent`, `replay` | |
+| `by` | `flottille` when Flottille compacted it; absent for the CLI's own compaction. |
+| `before` | Flottille's only: the tokens of the context in use before, as the last `agent.usage` said. |
+| `after` | Flottille's only: the tokens of what the new session starts with (the brief, the summary and the messages kept), counted as 4 characters a token. |
+| `summary` | Flottille's only: the summary the compactor wrote. |
+
+#### `agent.compaction_failed`
+
+Flottille's compaction of the agent failed, and changed nothing: the agent goes on in its
+session, and its CLI's own compaction stays.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `used` | The tokens of the context in use when it started, as the last `agent.usage` said: Flottille compacts by itself again only past this size plus a tenth of the window. |
+| `reason` | Why: the compactor failed or was silent, its summary was cut off by its length, tried to call a tool, or was not smaller than what it replaces. |
 
 #### `agent.plan`, `agent.usage`, `agent.mode_changed`, `agent.options_changed`
 
@@ -456,6 +478,7 @@ activity.
 | `outcome` | `ok`, `refused`, `failed`, or `held` for a call the gate held (`docs/tools.md`, "The gate"). |
 | `duration_ms` | How long it took. |
 | `request` | For a call the user allowed, performed once they did: the request's number; else `null`. |
+| `link` | Only for a `forge` `run` that was done and whose answer gave the run's link: that link. |
 | `cut` | Only when the result was cut at the source (`docs/tools.md`, "Long results"): `{"result", "chars", "left_out"}`, the id the whole text is read by, its length and how many characters the agent was not shown. |
 
 #### `agent.link_shown`

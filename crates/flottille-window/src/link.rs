@@ -51,6 +51,8 @@ pub enum Update {
     AppearanceChanged,
     /// The limit of tool results was chosen, from any client: the settings page reads it again.
     ToolResultsChanged,
+    /// The compaction's settings or guidance changed, or a compactor was picked.
+    CompactionChanged,
     /// After how many days an inactive session is ended was chosen, from any client: the settings
     /// page reads it again.
     SessionsChanged,
@@ -92,6 +94,9 @@ pub struct Seen {
     pub events: AtomicU64,
     pub gaps: AtomicU64,
     pub connections: AtomicU64,
+    /// The reads of the shell sent to the window: the first one says the link follows the events,
+    /// which it subscribes to before it reads.
+    pub snapshots: AtomicU64,
     /// The `project.changed` events seen.
     pub project_changes: AtomicU64,
 }
@@ -200,6 +205,9 @@ fn follow(
         if event.name == "sessions.changed" {
             let _ = updates.unbounded_send(Update::SessionsChanged);
         }
+        if event.name == "compaction.changed" {
+            let _ = updates.unbounded_send(Update::CompactionChanged);
+        }
         if event.name == "tool_results.changed" {
             let _ = updates.unbounded_send(Update::ToolResultsChanged);
         }
@@ -236,6 +244,7 @@ fn follow(
                     if updates.unbounded_send(Update::Snapshot(snapshot)).is_err() {
                         return Ok(());
                     }
+                    seen.snapshots.fetch_add(1, Ordering::Relaxed);
                 }
                 if providers.take().is_some() {
                     reads.start(connect, updates);

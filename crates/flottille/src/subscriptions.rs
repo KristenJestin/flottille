@@ -829,7 +829,7 @@ struct Cancel {
 }
 
 /// A subscription as the user's clients read it (`docs/protocol.md`, "The subscription methods").
-fn listed(subscription: &Subscription) -> Value {
+pub(crate) fn listed(subscription: &Subscription) -> Value {
     json!({"id": subscription.id, "agent": subscription.agent, "source": subscription.source,
         "named": named(subscription), "target": subscription.target,
         "events": subscription.events, "from": subscription.from,

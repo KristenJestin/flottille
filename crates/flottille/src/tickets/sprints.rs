@@ -158,7 +158,7 @@ pub(super) async fn listed(project: &Project, asked: &TicketsCall) -> Outcome {
                     .into(),
             );
         }
-        Some(tracker @ ProjectTracker::Jira { site, projects }) => (tracker, site, projects),
+        Some(tracker @ ProjectTracker::Jira { site, projects, .. }) => (tracker, site, projects),
     };
     let in_project = match created_in(tracker, projects, asked.project.as_deref()) {
         Ok(project) => project,

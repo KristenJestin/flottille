@@ -389,15 +389,16 @@ const SERVED: [Definition; 31] = [
         name: "tickets",
         title: "Tickets",
         description: "The tracker's tickets (GitHub #123, Jira ABC-123), via the user's gh or acli \
-            (never run them). list: tickets by state (default open), label, assignee, updated_within, \
-            as last read; search asks the tracker: {\"action\": \"search\", \"query\": \"x\"}, \
+            (never run them). list: by state (default open), label, assignee, updated_within; search asks the tracker: {\"action\": \"search\", \"query\": \"x\"}, \
             on Jira also in_comments, jql; show: a workspace's ticket (in \
-            main, name workspace) or ticket, read now, with its links; detail full adds the comments, \
-            with the id of yours; Jira images and files are named, not shown (the user can paste one); \
-            types: a Jira project's work item types (a guess is refused); link_types: link kinds. \
+            main, name workspace) or ticket, with its links; detail full adds the comments, \
+            with the id of yours; Jira images and files are named, not shown; \
+            types: a Jira project's work item types (never guess); link_types. \
             Writes, judged, answered at once, the result maybe later: create, comment, edit, close, \
             reopen, status, link and unlink (ticket kind other: ABC-2 blocks ABC-1), comment_edit and \
-            comment_delete (yours only). Assign only when asked (assignee \"me\": the user; \
+            comment_delete (yours only); log_time (Jira: ticket, duration, started?, body?; \
+            time_spent: this session's work time, to propose). \
+            Assign only when asked (assignee \"me\": the user; \
             GitHub: assignees). Jira create: parent, sprint (sprints lists them). \
             subscribe: a ticket's events wake you until it is closed; unsubscribe.",
         read_only: false,
@@ -405,8 +406,10 @@ const SERVED: [Definition; 31] = [
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "search", "show", "types", "link_types", "sprints", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete"]},
+                "action": {"type": "string", "enum": ["list", "search", "show", "types", "link_types", "sprints", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "log_time", "time_spent"]},
                 "ticket": {"type": "string", "description": "#123 or ABC-123; the workspace's when left out."},
+                "duration": {"type": "string", "description": "log_time (Jira): the time spent, in Jira's form: 2h 30m, 1d, 45m (weeks, days, hours, minutes)."},
+                "started": {"type": "string", "description": "log_time: when the work started, RFC 3339 with its offset (2026-11-06T09:00:00+01:00); the duration before now when left out."},
                 "workspace": {"type": "string"},
                 "query": {"type": "string", "description": "search: words."},
                 "updated_within": {"type": "integer", "minimum": 1, "maximum": 365, "description": "list, search: updated in the last that many days."},
@@ -418,7 +421,7 @@ const SERVED: [Definition; 31] = [
                 "detail": {"type": "string", "enum": ["short", "full"]},
                 "fresh": {"type": "boolean", "description": "show: read the ticket again; one read in the last 30 s is given again otherwise (detail full always reads)."},
                 "title": {"type": "string"},
-                "body": {"type": "string", "description": "create, edit: description; comment, comment_edit: the comment. Markdown, converted for Jira."},
+                "body": {"type": "string", "description": "create, edit: description; comment, comment_edit, log_time: the comment. Markdown, converted for Jira."},
                 "labels": {"type": "array", "items": {"type": "string"}, "description": "create, edit: labels to add."},
                 "reason": {"enum": ["completed", "not planned"], "description": "close: completed or not planned (GitHub)."},
                 "remove_labels": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to remove."},
@@ -715,10 +718,12 @@ const SERVED: [Definition; 31] = [
     },
     Definition {
         name: "agent_stop",
-        title: "Stop a child",
+        title: "Stop a child or end a session",
         description: "Stops one of your children with its own children, deepest first; what was \
             queued for them is dropped. Use it once its report is acted on, or to end a child \
-            going in circles. Its workspace stays.",
+            going in circles. It also asks to end any session of your project (one you started \
+            for the user, or another): the user decides every time, the result comes later. \
+            Workspaces stay.",
         read_only: false,
         idempotent: true,
         destructive: true,
@@ -2127,6 +2132,13 @@ async fn played_in(
         tool => tool,
     };
     let reads = Reads::default();
+    // A run that names no branch says the one it will run on, to the card and the judge.
+    let args = match tool {
+        "forge" if !replaced && removed.is_none() => {
+            crate::forge::with_branch(daemon, &grant.place, args).await
+        }
+        _ => args,
+    };
     let recorded = record_of(&args, &grant.place);
     let reads_a_result = reads_a_result(tool, &args);
     let mut verdict = None;
@@ -2202,6 +2214,7 @@ async fn played_in(
                             _ if mode == GateMode::Full
                                 && !removes_own_workspace(grant, tool, &args)
                                 && !gate::asks_leave(&ask)
+                                && !gate::asks_end(&ask)
                                 && !crate::services::stops(tool, &args)
                                 && !gate::asks_review(&ask) =>
                             {
@@ -2416,6 +2429,9 @@ fn verdict_of(
             Ok(true) => return gate::session_leave(grant, args),
             Ok(false) => {}
         }
+    }
+    if tool == "agent_stop" && crate::tree::ends_session(daemon, grant, args) {
+        return gate::end_session();
     }
     // A new workspace's launch is classified by its steps below, but its brief is held to the
     // judge's limit like any other launch's.
@@ -2864,6 +2880,17 @@ fn record(
     if let Some(cut) = cut {
         data["cut"] = cut.to_json();
     }
+    // The link of the run a pipeline was started as, for the window to carry.
+    if tool == "forge"
+        && recorded["action"] == "run"
+        && let Outcome::Done(text) = outcome
+        && let Some(link) = text.split_whitespace().find(|word| {
+            word.starts_with("https://")
+                && (word.contains("/actions/runs/") || word.contains("/pipelines/results/"))
+        })
+    {
+        data["link"] = link.trim_end_matches([',', '.']).into();
+    }
     if let Err(error) = daemon.write(|store| {
         let event = store.append_agent_event(&grant.agent, "agent.tool_served", data, true)?;
         Ok(((), Some(event)))
@@ -3028,7 +3055,8 @@ pub fn record_of(args: &Value, place: &Place) -> Value {
             .flatten()
             .filter(|variable| variable["secured"] == true)
             .filter_map(|variable| variable["value"].as_str())
-            .filter(|value| !value.is_empty())
+            // A shorter one would garble the record; the variable's own value is hidden below.
+            .filter(|value| value.chars().count() >= crate::forge::HIDDEN_EVERYWHERE)
             .map(str::to_owned),
     );
     let mut recorded = walk(args, &|text| secrets::mask_also(text, &env, &values));
@@ -3113,7 +3141,7 @@ mod tests {
         assert!(
             tickets
                 .description
-                .contains("Jira images and files are named, not shown (the user can paste one)")
+                .contains("Jira images and files are named, not shown")
         );
     }
 
