@@ -2063,11 +2063,7 @@ async fn played_in(
     cancelled: CancellationToken,
 ) -> (String, bool) {
     let started = Instant::now();
-    let replaced = daemon
-        .read(|store| store.agent(&grant.agent))
-        .ok()
-        .flatten()
-        .is_some_and(|agent| agent.epoch != grant.epoch);
+    let replaced = is_replaced(daemon, grant);
     let removed = crate::workspaces::being_removed(daemon, &grant.agent, tool);
     // A line that only prints part of a file is the read it is, served and recorded as such, once
     // nothing refuses the call as the run it was sent as.
@@ -2110,9 +2106,13 @@ async fn played_in(
                 let (decided, first) = judged(daemon, grant, tool, &args);
                 verdict = Some(decided.word());
                 match decided {
-                    gate::Verdict::Allow => {
-                        perform(daemon, grant, tool, args, cancelled, None, &first, &reads).await
-                    }
+                    gate::Verdict::Allow => match stale(daemon, grant, tool) {
+                        Some(refused) => refused,
+                        None => {
+                            perform(daemon, grant, tool, args, cancelled, None, &first, &reads)
+                                .await
+                        }
+                    },
                     gate::Verdict::Deny(why) => Outcome::Refused(why),
                     gate::Verdict::Ask(ask) => {
                         if logging {
@@ -2163,7 +2163,9 @@ async fn played_in(
                                 && !gate::asks_review(&ask) =>
                             {
                                 verdict = Some("full");
-                                if removes_a_workspace(tool, &args) {
+                                if let Some(refused) = stale(daemon, grant, tool) {
+                                    refused
+                                } else if removes_a_workspace(tool, &args) {
                                     crate::actions::remove_losing(daemon, grant, args).await
                                 } else {
                                     let approved = Some(ask.class);
@@ -2179,9 +2181,10 @@ async fn played_in(
                                 // or a session ended, stops the message it was judging.
                                 let lost = (tool == "session_send")
                                     .then(|| crate::tree::needs_leave(daemon, grant, &args));
-                                match lost {
-                                    Some(Err(why)) => Outcome::Refused(why),
-                                    Some(Ok(true)) => Outcome::Refused(LEAVE_WITHDRAWN.into()),
+                                match (lost, stale(daemon, grant, tool)) {
+                                    (_, Some(refused)) => refused,
+                                    (Some(Err(why)), _) => Outcome::Refused(why),
+                                    (Some(Ok(true)), _) => Outcome::Refused(LEAVE_WITHDRAWN.into()),
                                     _ => {
                                         verdict = Some("judged");
                                         let approved = Some(gate::Class::Judge);
@@ -2240,7 +2243,8 @@ async fn played_in(
     );
     let error = matches!(outcome, Outcome::Refused(_) | Outcome::Failed(_));
     let (text, limit) = shown(outcome, &grant.place);
-    let notes = if replaced {
+    // Notes left for the session that replaced this one are its own, not this late call's.
+    let notes = if is_replaced(daemon, grant) {
         Vec::new()
     } else {
         deliveries::take_notes(
@@ -2250,6 +2254,25 @@ async fn played_in(
         )
     };
     (with_notes(text, &notes), error)
+}
+
+/// Whether a newer session of the grant's agent took over (`docs/design.md` §5.5).
+fn is_replaced(daemon: &Daemon, grant: &Grant) -> bool {
+    daemon
+        .read(|store| store.agent(&grant.agent))
+        .ok()
+        .flatten()
+        .is_some_and(|agent| agent.epoch != grant.epoch)
+}
+
+/// Why a call that waited (a read, a preparation, the judge) can no longer be performed: its
+/// session was replaced or its workspace is being removed meanwhile. Asked right before it is.
+fn stale(daemon: &Daemon, grant: &Grant, tool: &str) -> Option<Outcome> {
+    if is_replaced(daemon, grant) {
+        return Some(Outcome::Refused(REPLACED.into()));
+    }
+    crate::workspaces::being_removed(daemon, &grant.agent, tool)
+        .map(|why| Outcome::Refused(format!("refused: {why}")))
 }
 
 /// The developer log's line for a call (`docs/developer.md`, "call"): what the gate decided and

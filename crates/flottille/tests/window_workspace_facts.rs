@@ -342,3 +342,252 @@ fn the_project_page_s_workspace_card_lists_the_ticket_above_the_pull_request(
         "{ticket:?} above {pull:?}"
     );
 }
+
+// ── Removing the workspace from the session's rail (#384) ────────────────────────────────────
+
+/// The session `id` open, its rail drawn with the Workspace section's facts.
+fn open_session<'a>(
+    user: &User,
+    id: &str,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    let (shell, cx) = window(user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(id)).is_some())
+    });
+    cx.update(|window, cx| window.click(session_id(id), cx));
+    until(&shell, cx, "the rail's facts", |cx| {
+        let _ = session_page(&shell, cx);
+        present(cx, "rail-fact-Machine")
+    });
+    settle(cx);
+    (shell, cx)
+}
+
+/// Another session of the project `app`, started in the workspace `login` or, without one, in
+/// the project's folder: its id.
+fn another_session(user: &User, workspace: Option<&str>, message: &str) -> String {
+    let mut params = json!({"project": "app", "message": message});
+    if let Some(workspace) = workspace {
+        params["workspace"] = json!(workspace);
+    }
+    user.call("agent.run", params).unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn labelled(cx: &mut VisualTestContext, id: &str) -> Option<String> {
+    cx.update(|window, _| {
+        window
+            .try_find(id.to_owned())
+            .and_then(|found| found.label().map(str::to_owned))
+    })
+}
+
+/// The toasts on screen, newest first, each as its title and detail.
+fn toast_lines(cx: &mut VisualTestContext) -> Vec<String> {
+    (1..20)
+        .rev()
+        .filter_map(|n| labelled(cx, &format!("toast-{n}")))
+        .collect()
+}
+
+fn workspaces_of_app(user: &User) -> usize {
+    user.call("workspace.list", json!({"project": "app"}))
+        .unwrap()["workspaces"]
+        .as_array()
+        .unwrap()
+        .len()
+}
+
+#[gpui_kit::test]
+fn the_rail_s_workspace_menu_offers_removal(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, _) = lead(&user);
+    let (_shell, cx) = open_session(&user, &lead, cx);
+
+    cx.update(|window, cx| window.click("workspace-menu", cx));
+    settle(cx);
+    assert!(present(cx, "open-in-editor"), "the menu is open");
+    assert!(
+        present(cx, "remove-workspace"),
+        "Remove workspace… is in the rail's menu too"
+    );
+}
+
+#[gpui_kit::test]
+fn removing_from_the_rail_asks_and_names_the_sessions_living_there(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, _) = lead(&user);
+    another_session(&user, Some("login"), "Add the logout button");
+    let (shell, cx) = open_session(&user, &lead, cx);
+
+    cx.update(|window, cx| window.click("workspace-menu", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("remove-workspace", cx));
+    settle(cx);
+    assert!(cx.update(|window, _| window.find("rail-workspace-removal").visible()));
+    let said = labelled(cx, "rail-workspace-removal-sentence").unwrap_or_default();
+    let own = shell.read_with(cx, |s, _| {
+        s.snapshot().session(&lead).unwrap().title.clone()
+    });
+    assert!(said.contains(&own), "this session is named ({own}): {said}");
+    assert!(
+        said.contains("Add the logout button"),
+        "the other one too: {said}"
+    );
+    assert!(
+        said.contains("this one included") && said.contains("without a place"),
+        "{said}"
+    );
+    assert_eq!(workspaces_of_app(&user), 1, "asking removes nothing");
+
+    // Cancelling leaves it all as it was.
+    cx.update(|window, cx| window.click("rail-workspace-removal-cancel", cx));
+    settle(cx);
+    assert!(!present(cx, "rail-workspace-removal"));
+    assert_eq!(workspaces_of_app(&user), 1);
+
+    // Confirming runs `workspace.remove`: the section says so while it runs, then folds away,
+    // a toast says it, and the session's page stays open.
+    cx.update(|window, cx| window.click("workspace-menu", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("remove-workspace", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("rail-workspace-removal-action", cx));
+    settle(cx);
+    assert!(
+        present(cx, "rail-removing"),
+        "the section shows it is being removed"
+    );
+    until(&shell, cx, "the daemon removed it", |_| {
+        workspaces_of_app(&user) == 0
+    });
+    until(&shell, cx, "a toast says it", |cx| {
+        toast_lines(cx)
+            .iter()
+            .any(|line| line.starts_with("Workspace login removed"))
+    });
+    let before = rect(cx, "rail-workspace").size.height;
+    for _ in 0..4 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+    }
+    let folding = if present(cx, "rail-workspace") {
+        rect(cx, "rail-workspace").size.height
+    } else {
+        px(0.)
+    };
+    assert!(
+        folding < before,
+        "it folds away: {before:?} then {folding:?}"
+    );
+    settle(cx);
+    assert!(
+        !present(cx, "rail-workspace"),
+        "the section is gone once folded"
+    );
+    let _ = session_page(&shell, cx);
+    assert!(
+        present(cx, "session-header"),
+        "the session's page stays open"
+    );
+    assert!(!present(cx, "rail-removing"));
+}
+
+#[gpui_kit::test]
+fn a_session_in_the_main_checkout_offers_no_removal(cx: &mut TestAppContext) {
+    let user = user();
+    lead(&user);
+    let main = another_session(&user, None, "Tidy the notes");
+    let (_shell, cx) = open_session(&user, &main, cx);
+
+    cx.update(|window, cx| window.click("workspace-menu", cx));
+    settle(cx);
+    assert!(present(cx, "open-in-editor"), "the menu is open");
+    assert!(
+        !present(cx, "remove-workspace"),
+        "a session in the project's folder has no workspace to remove"
+    );
+}
+
+#[gpui_kit::test]
+fn a_refused_removal_from_the_rail_shows_why(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, _) = lead(&user);
+    // A commit on no remote: the daemon refuses it, the dialog could not tell.
+    let folder = std::path::PathBuf::from(
+        user.call("workspace.show", json!({"project": "app", "name": "login"}))
+            .unwrap()["folder"]
+            .as_str()
+            .unwrap(),
+    )
+    .join("api");
+    std::fs::write(folder.join("login.rs"), "fn login() {}\n").unwrap();
+    user.git(&folder, &["add", "."]);
+    user.git(&folder, &["commit", "--quiet", "-m", "add the login"]);
+    let (shell, cx) = open_session(&user, &lead, cx);
+
+    cx.update(|window, cx| window.click("workspace-menu", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("remove-workspace", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("rail-workspace-removal-action", cx));
+    until(&shell, cx, "a toast says it was not removed", |cx| {
+        toast_lines(cx)
+            .iter()
+            .any(|line| line.starts_with("Workspace login was not removed"))
+    });
+    let said = toast_lines(cx).join(" | ");
+    assert!(said.contains("commits on no remote"), "the why: {said}");
+    assert_eq!(workspaces_of_app(&user), 1, "nothing was removed");
+    settle(cx);
+    assert!(
+        present(cx, "rail-workspace"),
+        "the section stays when the removal was refused"
+    );
+    assert!(
+        !present(cx, "rail-removing"),
+        "it is no longer being removed"
+    );
+    assert!(!present(cx, "rail-workspace-removal"), "the dialog is shut");
+}
+
+#[gpui_kit::test]
+fn a_file_not_committed_disables_the_rail_s_removal_with_its_reason(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, _) = lead(&user);
+    let folder = std::path::PathBuf::from(
+        user.call("workspace.show", json!({"project": "app", "name": "login"}))
+            .unwrap()["folder"]
+            .as_str()
+            .unwrap(),
+    )
+    .join("api");
+    std::fs::write(folder.join("NOTES.md"), "not committed\n").unwrap();
+    let (shell, cx) = open_session(&user, &lead, cx);
+    until(&shell, cx, "the rail knows what is not committed", |cx| {
+        session_page(&shell, cx).read_with(cx, |page, cx| {
+            page.rail()
+                .read(cx)
+                .place()
+                .is_some_and(|place| place.statuses.iter().any(|s| s.uncommitted == Some(1)))
+        })
+    });
+
+    cx.update(|window, cx| window.click("workspace-menu", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("remove-workspace", cx));
+    settle(cx);
+    let why = labelled(cx, "rail-workspace-removal-refused").unwrap_or_default();
+    assert!(why.contains("1 file is not committed in api"), "{why}");
+    cx.update(|window, cx| window.click("rail-workspace-removal-action", cx));
+    settle(cx);
+    assert_eq!(
+        workspaces_of_app(&user),
+        1,
+        "the disabled button does nothing"
+    );
+}
