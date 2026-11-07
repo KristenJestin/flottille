@@ -94,6 +94,13 @@ pub enum SpecAction {
     Ready { spec: u64 },
     /// Send a ready spec back to Draft, so that it can be written again
     Draft { spec: u64 },
+    /// Launch the development of a ready spec: a session for you in a new workspace linked to
+    /// its ticket, its first message the spec
+    Develop {
+        spec: u64,
+        #[arg(long)]
+        json: bool,
+    },
     /// A ticket changed since Flottille last read it, in the mode ticket: take the change into
     /// the spec (it goes back to Draft and its session is told), or overwrite the ticket with it
     Ticket {
@@ -207,6 +214,21 @@ pub fn run(paths: &Paths, action: SpecAction) -> Result<ExitCode> {
         ),
         SpecAction::Ready { spec } => (client.request("spec.ready", json!({"spec": spec}))?, false),
         SpecAction::Draft { spec } => (client.request("spec.draft", json!({"spec": spec}))?, false),
+        SpecAction::Develop { spec, json } => {
+            let answer = client.request("spec.develop", json!({"spec": spec}))?;
+            if json {
+                println!("{answer}");
+            } else {
+                let agent = answer["agent"].as_str().unwrap_or_default();
+                println!(
+                    "{}\nSession {agent} develops it in workspace {}: follow it with `flottille \
+                     agent show {agent}`.",
+                    line(&answer["spec"]),
+                    answer["workspace"].as_str().unwrap_or_default(),
+                );
+            }
+            return Ok(ExitCode::SUCCESS);
+        }
         SpecAction::Ticket { spec, choice } => (
             client.request("spec.ticket", json!({"spec": spec, "choice": choice}))?,
             false,

@@ -97,6 +97,19 @@ pub const EXTENSION: Extension = Extension {
     -- a spec's tickets is not made again on those it reached.
     ALTER TABLE ext_specs_tickets ADD COLUMN departures_posted_at INTEGER;
     ",
+        "
+    -- A development of the spec: the session started for the user to build it, in the workspace
+    -- made for it, on its branch. Whether it runs is the session's state, and its pull requests
+    -- are those of its branch: neither is kept here.
+    CREATE TABLE ext_specs_developments (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        spec       INTEGER NOT NULL REFERENCES ext_specs_specs (id),
+        agent      TEXT NOT NULL,
+        workspace  TEXT NOT NULL,
+        branch     TEXT NOT NULL,
+        started_at INTEGER NOT NULL
+    ) STRICT;
+    ",
     ],
     methods: Methods {
         prefix: "spec",
@@ -110,32 +123,68 @@ pub const EXTENSION: Extension = Extension {
         "draft",
         "ticket",
         "departures",
+        "develop",
     ],
     tools: &[TOOL],
-    started: writes_a_spec,
+    started: its_session,
     heard: &[
         ("item.changed", ticket_changed),
         ("item.commented", ticket_changed),
         ("item.closed", ticket_changed),
+        ("item.opened", pull_moved),
+        ("item.changed", pull_moved),
+        ("item.merged", pull_moved),
+        ("item.closed", pull_moved),
+        ("agent.ended", development_ended),
+        ("agent.failed", development_ended),
     ],
+    fact: spec_of_session,
 };
 
-/// Whether the agent is the session that writes a spec.
-fn writes_a_spec(daemon: &Daemon, agent: &str) -> bool {
+/// What a session started by Specs does: it writes the spec, or develops it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Work {
+    Writing,
+    Developing,
+}
+
+/// The spec a session writes or develops, if it is one Specs started.
+fn session_of(daemon: &Daemon, agent: &str) -> Option<(u64, Work)> {
     daemon
         .write(|store| {
             let space = store.space(EXTENSION.name)?;
             let found = space
                 .tables()
                 .query_row(
-                    "SELECT 1 FROM ext_specs_specs WHERE writer = ?1",
+                    "SELECT id, 'writing' FROM ext_specs_specs WHERE writer = ?1 UNION ALL \
+                     SELECT spec, 'developing' FROM ext_specs_developments WHERE agent = ?1",
                     params![agent],
-                    |_| Ok(()),
+                    |row| Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?)),
                 )
                 .optional()?;
-            Ok((found.is_some(), None::<Event>))
+            let found = found.map(|(id, work)| match work.as_str() {
+                "writing" => (id, Work::Writing),
+                _ => (id, Work::Developing),
+            });
+            Ok((found, None::<Event>))
         })
-        .unwrap_or(false)
+        .ok()
+        .flatten()
+}
+
+/// Whether the agent is a session Specs started.
+fn its_session(daemon: &Daemon, agent: &str) -> bool {
+    session_of(daemon, agent).is_some()
+}
+
+/// The fact `agent.tree` gives of a session Specs started, while Specs is active in its project:
+/// the spec it writes or develops.
+fn spec_of_session(daemon: &Daemon, agent: &str) -> Option<Value> {
+    let (id, work) = session_of(daemon, agent)?;
+    let spec = read(daemon, id).ok().flatten()?;
+    super::active(daemon, &EXTENSION, &spec.project).ok()?;
+    Some(json!({"spec": id, "title": spec.title, "status": spec.status, "work": work}))
 }
 
 /// What a root of a project where Specs is active may do with its specs; no action makes a spec
@@ -1012,6 +1061,10 @@ fn call(daemon: Arc<Daemon>, method: String, params: Value) -> super::Answered {
             }
             "spec.ticket" => ticket_choice(daemon, serde_json::from_value(params)?).await,
             "spec.departures" => departures(daemon, serde_json::from_value(params)?).await,
+            "spec.develop" => {
+                let Named { spec } = serde_json::from_value(params)?;
+                develop(daemon, spec).await
+            }
             method => answer_now(&daemon, method, params),
         }
     })
@@ -1305,7 +1358,7 @@ fn start_writing(
     // A title, maybe a ticket's, is shown as a session's name: masked, on one line, cut.
     let masked = secrets::mask(&spec.title, &std::env::vars_os().collect());
     let title = format!("Spec {}: {}", spec.id, title_of(&masked));
-    let agent = super::start_session(daemon, project, &title, message, |agent| {
+    let agent = super::start_session(daemon, project, None, &title, message, |agent| {
         daemon.write(|store| {
             let space = store.space(EXTENSION.name)?;
             space.tables().execute(
@@ -2208,6 +2261,331 @@ fn tool_call(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcome {
             "refused: spec takes the actions {}, not {action}",
             ACTIONS.join(", ")
         )),
+    }
+}
+
+/// A development of a spec, as the store keeps it.
+struct Development {
+    agent: String,
+    branch: String,
+}
+
+fn developments_of(space: &Space, id: u64) -> Result<Vec<Development>> {
+    let mut statement = space
+        .tables()
+        .prepare("SELECT agent, branch FROM ext_specs_developments WHERE spec = ?1 ORDER BY id")?;
+    let developments = statement
+        .query_map([id], |row| {
+            Ok(Development {
+                agent: row.get(0)?,
+                branch: row.get(1)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(developments)
+}
+
+/// The session of the spec's development that runs, if one does.
+fn running(daemon: &Daemon, developments: &[Development]) -> Option<String> {
+    developments
+        .iter()
+        .find(|development| {
+            daemon
+                .read(|store| store.agent(&development.agent))
+                .is_ok_and(|agent| agent.is_some_and(|agent| !agent.state.is_final()))
+        })
+        .map(|development| development.agent.clone())
+}
+
+/// Held while a development of the spec is launched: a second launch meanwhile is refused.
+static LAUNCHING: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+
+struct Launching(u64);
+
+impl Launching {
+    fn take(id: u64) -> std::result::Result<Launching, Failure> {
+        let mut launching = LAUNCHING.lock().unwrap();
+        if launching.contains(&id) {
+            return Err(Failure::refused(format!(
+                "spec {id} is being launched already: one development of a spec at a time"
+            )));
+        }
+        launching.push(id);
+        Ok(Launching(id))
+    }
+}
+
+impl Drop for Launching {
+    fn drop(&mut self) {
+        LAUNCHING.lock().unwrap().retain(|id| *id != self.0);
+    }
+}
+
+/// Why the spec cannot be developed now, if it cannot: only a Ready spec is, one development at
+/// a time.
+fn undevelopable(spec: &Spec, running: Option<&str>) -> Option<String> {
+    let id = spec.id;
+    if let Some(agent) = running {
+        return Some(format!(
+            "spec {id} is in development: session {agent} develops it; one development of a spec \
+             at a time"
+        ));
+    }
+    match spec.status {
+        Status::Ready => None,
+        Status::Draft => Some(format!(
+            "spec {id} is a Draft: only a Ready spec is developed; make it Ready first (`flottille \
+             spec ready {id}`)"
+        )),
+        Status::InProgress | Status::Review => Some(format!(
+            "spec {id} is {}: its development goes on; one development of a spec at a time",
+            spec.status.title()
+        )),
+        Status::Done => Some(format!("spec {id} is Done: its pull requests are merged")),
+    }
+}
+
+/// `spec.develop`, "Launch development": a session for the user in a new workspace linked to the
+/// spec's first ticket (a workspace has one), its first message the spec. The user's gesture
+/// only: nothing launches it on its own at Ready.
+async fn develop(daemon: Arc<Daemon>, id: u64) -> std::result::Result<Value, Failure> {
+    let (spec, project) = active_spec(&daemon, id)?;
+    let developments = daemon.write(|store| {
+        let space = store.space(EXTENSION.name)?;
+        Ok((developments_of(&space, id)?, None::<Event>))
+    })?;
+    if let Some(why) = undevelopable(&spec, running(&daemon, &developments).as_deref()) {
+        return Err(Failure::refused(why));
+    }
+    let _launching = Launching::take(id)?;
+    let name = match developments.len() {
+        0 => format!("spec-{id}"),
+        n => format!("spec-{id}-{}", n + 1),
+    };
+    let created = crate::workspaces::call(
+        daemon.clone(),
+        "workspace.create",
+        json!({"project": project.name, "name": name, "ticket": spec.tickets.first()}),
+    )
+    .await
+    .map_err(|failure| {
+        Failure::new(
+            failure.code,
+            format!(
+                "spec {id} is not developed: its workspace cannot be made: {}",
+                failure.message
+            ),
+        )
+    })?;
+    let workspace = created["name"].as_str().unwrap_or(&name).to_owned();
+    let branch = created["branch"].as_str().unwrap_or_default().to_owned();
+    let message = development_message(&daemon, &spec, &workspace);
+    let masked = secrets::mask(&spec.title, &std::env::vars_os().collect());
+    let title = format!("Develop spec {id}: {}", title_of(&masked));
+    let agent = super::start_session(
+        &daemon,
+        &project,
+        Some(&workspace),
+        &title,
+        &message,
+        |agent| {
+            daemon.write(|store| {
+                let space = store.space(EXTENSION.name)?;
+                let spec =
+                    spec_of(&space, id)?.ok_or_else(|| Error::Refused(format!("no spec {id}")))?;
+                if let Some(why) = undevelopable(&spec, None) {
+                    return Err(Error::Refused(why));
+                }
+                let at = now_ms();
+                space.tables().execute(
+                    "INSERT INTO ext_specs_developments (spec, agent, workspace, branch, \
+                     started_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![id, agent.id, workspace, branch, at],
+                )?;
+                space.tables().execute(
+                    "UPDATE ext_specs_specs SET status = ?2, updated_at = ?3 WHERE id = ?1",
+                    params![id, word(Status::InProgress), at],
+                )?;
+                let event = space.append_event(
+                    "spec.status_changed",
+                    json!({"spec": id, "project": spec.project, "status": Status::InProgress,
+                        "was": spec.status, "agent": agent.id}),
+                )?;
+                space.commit()?;
+                Ok(((), event))
+            })?;
+            Ok(())
+        },
+    )
+    .map_err(|failure| {
+        Failure::new(
+            failure.code,
+            format!(
+                "spec {id} is not developed: its workspace {workspace} is made, and its session \
+                 could not start: {}",
+                failure.message
+            ),
+        )
+    })?;
+    let spec = read(&daemon, id)?.ok_or_else(|| not_found(id))?;
+    Ok(
+        json!({"spec": spec.to_json(), "agent": agent.id, "workspace": workspace,
+        "branch": branch}),
+    )
+}
+
+/// Where the pull request's description links to the spec: its ticket's page when the spec is
+/// written to its ticket, else its number and its title.
+fn spec_link(daemon: &Daemon, spec: &Spec) -> String {
+    let named = format!("spec {}, \"{}\"", spec.id, spec.title);
+    let Some(ticket) = spec.tickets.first().filter(|_| spec.mode == Mode::Ticket) else {
+        return named;
+    };
+    let filter = flottille_core::item::Filter {
+        kind: Some("ticket".to_owned()),
+        ..Default::default()
+    };
+    let url = daemon
+        .read(|store| store.items(&spec.project, &filter))
+        .unwrap_or_default()
+        .into_iter()
+        .find(|item| item.key == ticket.trim_start_matches('#'))
+        .and_then(|item| item.url);
+    match url {
+        Some(url) => format!("{url} (the ticket {ticket}, which is the spec)"),
+        None => format!("the ticket {ticket}, which is the spec"),
+    }
+}
+
+/// The first message of a development session: Flottille's, saying so, the spec as it is,
+/// labelled, then what Flottille asks of the work.
+fn development_message(daemon: &Daemon, spec: &Spec, workspace: &str) -> String {
+    let id = spec.id;
+    let tickets = match spec.tickets.as_slice() {
+        [] => String::new(),
+        tickets => format!(" It covers the tickets {}.", tickets.join(", ")),
+    };
+    format!(
+        "This first message is Flottille's, not the user's: Specs started this session to build \
+         spec {id} of project {project}, in the workspace {workspace} made for it.{tickets} The \
+         user follows this session and may write to you here at any time.\n\n\
+         The spec {id}, as the user made it Ready:\n\n{markdown}\n\n\
+         What Flottille asks of the work:\n\
+         - Build what the spec says: each expected behaviour (C) met as its verification says, \
+         each decision (D) applied, nothing that is out of scope.\n\
+         - The spec is the user's and no agent writes it: when something cannot be built as it \
+         says, ask the user.\n\
+         - Once the work is done, open its pull request. Its description holds the Problem, the \
+         list of the C with how each is verified, and a link to the spec: {link}.\n",
+        project = spec.project,
+        markdown = markdown(spec),
+        link = spec_link(daemon, spec),
+    )
+}
+
+/// The status of a spec under development, read from what Flottille sees: Done once its pull
+/// requests are merged, Review while one is open, In progress while its session runs, else
+/// Ready. A Draft is the user's and stays one.
+fn settle(daemon: &Daemon, id: u64) -> std::result::Result<(), Failure> {
+    let Some(spec) = read(daemon, id)? else {
+        return Ok(());
+    };
+    let developments = daemon.write(|store| {
+        let space = store.space(EXTENSION.name)?;
+        Ok((developments_of(&space, id)?, None::<Event>))
+    })?;
+    if spec.status == Status::Draft || developments.is_empty() {
+        return Ok(());
+    }
+    let filter = flottille_core::item::Filter {
+        kind: Some("pull".to_owned()),
+        ..Default::default()
+    };
+    let pulls: Vec<String> = daemon
+        .read(|store| store.items(&spec.project, &filter))?
+        .into_iter()
+        .filter(|pull| pull.state != "closed")
+        .filter(|pull| {
+            developments
+                .iter()
+                .any(|development| pull.details["head"] == development.branch.as_str())
+        })
+        .map(|pull| pull.state)
+        .collect();
+    let to = if !pulls.is_empty() && pulls.iter().all(|state| state == "merged") {
+        Status::Done
+    } else if pulls.iter().any(|state| state != "merged") {
+        Status::Review
+    } else if running(daemon, &developments).is_some() {
+        Status::InProgress
+    } else {
+        Status::Ready
+    };
+    daemon.write(|store| {
+        let space = store.space(EXTENSION.name)?;
+        let Some(spec) = spec_of(&space, id)? else {
+            return Ok(((), None));
+        };
+        if spec.status == to || spec.status == Status::Draft {
+            return Ok(((), None));
+        }
+        space.tables().execute(
+            "UPDATE ext_specs_specs SET status = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, word(to), now_ms()],
+        )?;
+        let event = space.append_event(
+            "spec.status_changed",
+            json!({"spec": id, "project": spec.project, "status": to, "was": spec.status}),
+        )?;
+        space.commit()?;
+        Ok(((), Some(event)))
+    })?;
+    Ok(())
+}
+
+/// The Core event trigger on an agent that ended or failed: the spec it developed reads its
+/// status again.
+fn development_ended(daemon: &Arc<Daemon>, data: &Value) {
+    let Some(agent) = data["agent"].as_str() else {
+        return;
+    };
+    let Some((id, Work::Developing)) = session_of(daemon, agent) else {
+        return;
+    };
+    if active_spec(daemon, id).is_ok()
+        && let Err(failure) = settle(daemon, id)
+    {
+        eprintln!("flottille daemon: spec {id}: {}", failure.message);
+    }
+}
+
+/// The Core event trigger on a pull request opened, changed (reopened), merged or closed: the
+/// specs of its project under development read their status again.
+fn pull_moved(daemon: &Arc<Daemon>, data: &Value) {
+    if data["kind"] != "pull" {
+        return;
+    }
+    let Some(project) = data["project"].as_str() else {
+        return;
+    };
+    if super::active(daemon, &EXTENSION, project).is_err() {
+        return;
+    }
+    let developed = daemon.write(|store| {
+        let space = store.space(EXTENSION.name)?;
+        let mut statement = space.tables().prepare(
+            "SELECT DISTINCT d.spec FROM ext_specs_developments d \
+             JOIN ext_specs_specs s ON s.id = d.spec WHERE s.project = ?1",
+        )?;
+        let ids = statement
+            .query_map([project], |row| row.get::<_, u64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok((ids, None::<Event>))
+    });
+    for id in developed.unwrap_or_default() {
+        if let Err(failure) = settle(daemon, id) {
+            eprintln!("flottille daemon: spec {id}: {}", failure.message);
+        }
     }
 }
 
