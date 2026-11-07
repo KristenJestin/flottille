@@ -1114,7 +1114,7 @@ impl SessionPage {
     }
 
     /// The titles of the sessions that live in the place this one does and have not ended, this
-    /// one included: what removing its workspace leaves without a place.
+    /// one included: its workspace is not removed while they work in it.
     fn living_here(&self, cx: &App) -> Vec<String> {
         let Some(shell) = self.shell.upgrade() else {
             return Vec::new();
@@ -6420,26 +6420,6 @@ impl SessionRail {
         cx.notify();
     }
 
-    /// What the confirmation says besides the card's sentence: which sessions live in the
-    /// workspace, and that they go on without a place.
-    fn removal_sentence(&self, cx: &App) -> String {
-        let mut said = "Its folder goes, and each repository's branch that holds no commit of its \
-                        own. Flottille removes it only once all its work is committed and pushed."
-            .to_owned();
-        let living = self
-            .page
-            .read_with(cx, |page, cx| page.living_here(cx))
-            .unwrap_or_default();
-        if !living.is_empty() {
-            let titles: Vec<String> = living.iter().map(|title| format!("“{title}”")).collect();
-            said.push_str(&format!(
-                " Sessions living in it, this one included: {}. They keep going without a place.",
-                titles.join(", ")
-            ));
-        }
-        said
-    }
-
     /// The field a ticket is typed in.
     pub fn ticket_field(&self) -> Option<&Entity<InputState>> {
         self.ticket_field.as_ref()
@@ -7558,13 +7538,19 @@ impl Render for SessionRail {
                 "rail-workspace-removal",
                 format!("Remove the workspace {name}?"),
             )
-            .sentence(self.removal_sentence(cx))
-            .action("Remove workspace")
-            .refused(
-                self.place
-                    .as_ref()
-                    .and_then(|place| removal_refused(&self.project, &place.statuses)),
+            .sentence(
+                "Its folder goes, and each repository's branch that holds no commit of its own. \
+                 Flottille removes it only once all its work is committed and pushed.",
             )
+            .action("Remove workspace")
+            .refused({
+                let living = self
+                    .page
+                    .read_with(cx, |page, cx| page.living_here(cx))
+                    .unwrap_or_default();
+                let statuses = self.place.as_ref().map(|place| &place.statuses[..]);
+                removal_refused(&self.project, statuses.unwrap_or_default(), &living)
+            })
             .open(self.confirming)
             .on_confirm(move |_, cx| {
                 this.update(cx, |rail, cx| rail.remove_workspace(cx)).ok();
