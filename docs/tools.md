@@ -1073,6 +1073,29 @@ of it unless the session writes to it with `session_send`. A pilot relays to the
 follow-up, not a wait. The descriptions of `ask`, `report` and `session_send` say so, under the
 2,048 characters their limit asks.
 
+#### Detach
+
+A led or handed session can be **detached** from the agent that started it, by the user, at any
+time: `Detach from <pilot>` in the window's session menu, `flottille agent detach <agent>`, or
+`agent.detach`. Asked of a session no agent started, or already detached, it is refused, saying
+why. What it does, at once:
+
+- the agent's subscription ends, and it is told once: `the user detached the session "<title>"
+  …`;
+- the session leaves its pilot's rows and goes back under its workspace;
+- `ask` now reaches the user;
+- the two need the user's leave to write to each other, as any two sessions do;
+- the session becomes a plain session of the user: it may start sessions as its mode allows, and
+  "No chain without the user" no longer applies, since the user took it;
+- its first message stays in the conversation, still marked as the agent's words (and the judge
+  still shows it as written by that agent);
+- the session is told by a delivery (`detached`) that it is now the user's alone;
+- `agent.detached` is emitted; `agent.show` and the tree give `detached_from` (kept for the
+  record) instead of `launched_by`.
+
+There is no undo: no re-attach. A handed session keeps `launched_by`, so the chain rule holds and
+the window shows `started by`, until the user detaches it.
+
 #### Sessions that talk to each other
 
 `session_send {session, text}` (a root's tool) writes to another live root of the caller's

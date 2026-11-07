@@ -706,6 +706,21 @@ $ flottille agent resume bd7ed8152969
 Resumed agent bd7ed8152969 on its own session; it is idle now. Its next message starts it.
 ```
 
+### `flottille agent detach <agent>`
+
+Takes a session an agent started (led or handed) away from that agent (`agent.detach`,
+`docs/protocol.md`; the window's session menu has `Detach from <pilot>`): it becomes the user's
+alone, at once. The agent's subscription ends and it is told once; the session's questions come to
+the user, the two need the user's leave to write to each other, and the session may start
+sessions as its mode allows. There is no undo. `--json` prints `{"agent": {...}}`, with
+`detached_from`. Refused, saying why, for a session no agent started and for one already
+detached.
+
+```
+$ flottille agent detach bd7ed8152969
+Detached agent bd7ed8152969 from agent 3f9a1c0b7d2e: it is yours alone now, and its questions come to you.
+```
+
 ### `flottille agent options <agent> [--model M] [--effort E]`
 
 Changes a session's model and effort between turns (`agent.options`, `docs/protocol.md`; the

@@ -985,6 +985,7 @@ there. An agent in a result:
   "launched_by": null,
   "led": false,
   "led_by": null,
+  "detached_from": null,
   "reported_at": null,
   "quiet_turns": 0,
   "waiting_on_answer": false,
@@ -1028,7 +1029,8 @@ launched it (`null` for a root), `depth` its depth in the tree, `epoch` the numb
 that started a root for the user (`null` for a root the user started, and for a child), whose
 `brief` is then that agent's first message, never the user's, `led` whether that agent leads it
 (`led_by` its id, `null` for a session handed to the user, `docs/tools.md`, "Sessions an agent
-starts"), `reported_at` when it reported,
+starts"), `detached_from` the agent the user detached it from (`agent.detach`; `launched_by` is
+then `null`), `reported_at` when it reported,
 `quiet_turns` its turns ended without a report in a row, `waiting_on_answer` whether a question of
 it waits for an answer: a child's from its parent, a led session's from its pilot, any other
 root's from the user, until that one writes to
@@ -1158,6 +1160,17 @@ by tool, else `Your tools were reloaded: nothing changed.`, whatever its agent d
 is taken (`docs/events.md`). Its children keep their processes. `refused` for a child (the
 sentence names its root) and an agent in a final state.
 
+#### `agent.detach`
+
+`{"agent"}`. Takes a session an agent started (`launched_by`, led or handed) away from that agent,
+at once (`docs/tools.md`, "Detach"): the agent's `session` subscription ends and it is told once
+(a `detached` delivery, `the user detached the session "<title>" …`); `launched_by` and `led_by`
+become `null` and `detached_from` keeps that agent's id; its questions go to the user; the two
+need the user's leave to write to each other; the chain rule no longer holds; the session is told
+by a `detached` delivery that it is the user's alone. Its first message stays the agent's words.
+`agent.detached` is emitted. Answers `{"agent": {...}}`. Refused, saying why, for an agent no
+agent started (a root of the user's, a child) and for one already detached. There is no undo.
+
 #### `agent.mode`
 
 `{"agent", "mode"}`, `mode` `ask`, `auto` or `full`. Puts the agent's tree in that mode
@@ -1191,7 +1204,7 @@ does it with `agent_send` (`docs/tools.md`).
 
 `{"agent"}`. The whole tree of the agent's root, each agent before its children:
 `{"agents": [{"agent", "doing", "waiting_on", "needs_user", "questions", "context", "context_tokens", "queued"}]}`. `agent` is the agent in short
-(`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `launched_by`, `led_by`, `depth`, `epoch`, `state`,
+(`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `launched_by`, `led_by`, `detached_from`, `depth`, `epoch`, `state`,
 `state_reason`, `created_at`, `active_at`, `exchanged_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
 took at the last start of its process, else the one asked, `null` for the agent's default before it
 started; `effort`: the same for its effort; `pending`: `{"model", "effort"}` the user changed to and

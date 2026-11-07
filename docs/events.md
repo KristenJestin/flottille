@@ -693,6 +693,16 @@ session's pilot is shown in the session, and its pilot is woken at the turn's en
 | `to` | `user`, `parent` or `pilot`. |
 | `pilot` | With `to` `pilot`: the pilot's id; `null` otherwise. |
 
+#### `agent.detached`
+
+The user detached a session from the agent that started it (`agent.detach`): `launched_by` is
+`null` from then on and `detached_from` keeps that agent. There is no undo.
+
+| Field | |
+|---|---|
+| `agent` | The session. |
+| `from` | The agent it was detached from. |
+
 #### `agent.handed`
 
 A led session's pilot ended: the session goes on, handed to the user (`led_by` is `null` from then
