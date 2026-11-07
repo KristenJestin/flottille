@@ -1,0 +1,315 @@
+{
+  "models": [
+    "sonnet",
+    "opus",
+    "haiku"
+  ],
+  "efforts": [
+    "medium",
+    "high",
+    "low"
+  ],
+  "turns": [
+    {
+      "when": "newest",
+      "do": [
+        {
+          "say": "{\"verdict\": \"ask\", \"reason\": \"The api worker asked to start a database container for its tests: it binds a port on this machine and keeps running, so the user should see it.\"}"
+        }
+      ]
+    },
+    {
+      "when": "Split it between workers",
+      "do": [
+        {
+          "think": "The work spans both repositories: the api needs an endpoint that merges the ingredients of the chosen recipes, and the web app needs a page that shows the result. Quantities in different units have to be merged, so I should look at how units are handled first."
+        },
+        {
+          "mcp": {
+            "tool": "skill_read",
+            "arguments": {
+              "name": "api-conventions"
+            }
+          }
+        },
+        {
+          "mcp": {
+            "tool": "search",
+            "arguments": {
+              "pattern": "ingredient"
+            }
+          }
+        },
+        {
+          "mcp": {
+            "tool": "fs_read",
+            "arguments": {
+              "path": "api/src/recipes/service.ts"
+            }
+          }
+        },
+        {
+          "usage": {
+            "used": 41200,
+            "size": 200000
+          }
+        },
+        {
+          "say": "Here is the plan:\n\n1. **api**: `GET /shopping-list?recipes=1,2,3` merges the ingredients, summing quantities that share a unit and converting grams to kilograms past 1000.\n2. **web**: a *Shopping list* page that lists the merged ingredients and lets you tick them off.\n\nThe two parts share only the shape of the response, so they can run side by side. I am handing each part to a worker."
+        },
+        {
+          "mcp": {
+            "tool": "agent_launch",
+            "arguments": {
+              "title": "api: shopping list endpoint",
+              "brief": "# api-list: GET /shopping-list\n\nYou do the endpoint, and only it. Merge ingredients by name and unit, 400 for an unknown recipe id. Tests beside the route. Run the task test. End with report.",
+              "model": "sonnet"
+            },
+            "keep": "w1"
+          }
+        },
+        {
+          "mcp": {
+            "tool": "agent_launch",
+            "arguments": {
+              "title": "web: shopping list page",
+              "brief": "# web-list: the Shopping list page\n\nYou do the page src/pages/ShoppingListPage.tsx, and only it. Use the Checklist component; items are ticked off locally. End with report.",
+              "model": "haiku"
+            },
+            "keep": "w2"
+          }
+        },
+        {
+          "say": "Both workers are running. The api worker's tests need the database, so I am asking to start it."
+        },
+        {
+          "mcp": {
+            "tool": "run",
+            "arguments": {
+              "line": "docker compose up -d db",
+              "repository": "api",
+              "why": "the api worker's tests need the database"
+            }
+          }
+        },
+        {
+          "say": "The request is waiting for you; I will pick the workers' reports up when they arrive."
+        }
+      ]
+    },
+    {
+      "when": "api-list",
+      "do": [
+        {
+          "think": "Read the recipes service first, then the units helper, then write the handler and its tests."
+        },
+        {
+          "mcp": {
+            "tool": "fs_read",
+            "arguments": {
+              "path": "api/src/recipes/service.ts"
+            }
+          }
+        },
+        {
+          "mcp": {
+            "tool": "fs_read",
+            "arguments": {
+              "path": "api/src/shopping/units.ts"
+            }
+          }
+        },
+        {
+          "usage": {
+            "used": 23800,
+            "size": 200000
+          }
+        },
+        {
+          "mcp": {
+            "tool": "fs_write",
+            "arguments": {
+              "path": "api/src/shopping/list.route.ts",
+              "content": "import { mergeIngredients } from './merge';\n\nexport async function getShoppingList(req, res) {\n  const ids = String(req.query.recipes ?? '').split(',').filter(Boolean);\n  const recipes = await recipesService.findMany(ids);\n  if (recipes.length !== ids.length) {\n    return res.status(400).json({ error: 'unknown recipe' });\n  }\n  res.json({ items: mergeIngredients(recipes) });\n}\n",
+              "why": "the handler of GET /shopping-list"
+            }
+          }
+        },
+        {
+          "say": "The route and its unit tests are written:\n\n- `src/shopping/list.route.ts`: `GET /shopping-list?recipes=1,2,3`, 400 for an unknown recipe id.\n- Ingredients that share a name and a unit are summed; grams become kilograms past 1000.\n- `npm test` passes for the unit tests (94 passed).\n\nThe integration tests need the database: the lead asked the user to start it, so I am waiting for it."
+        },
+        {
+          "mcp": {
+            "tool": "run",
+            "arguments": {
+              "task": "test"
+            }
+          }
+        },
+        {
+          "mcp": {
+            "tool": "fs_read",
+            "arguments": {
+              "path": "api/src/shopping/list.route.ts"
+            }
+          }
+        },
+        {
+          "wait": 3600000
+        }
+      ]
+    },
+    {
+      "when": "web-list",
+      "do": [
+        {
+          "think": "The page can reuse the Checklist component. Fetch the merged list, render one row per ingredient, keep the ticks in local state."
+        },
+        {
+          "mcp": {
+            "tool": "fs_read",
+            "arguments": {
+              "path": "web/src/pages/RecipePage.tsx"
+            }
+          }
+        },
+        {
+          "mcp": {
+            "tool": "fs_write",
+            "arguments": {
+              "path": "web/src/pages/ShoppingListPage.tsx",
+              "content": "import { Checklist } from '../components/Checklist';\nimport { useShoppingList } from '../hooks/useShoppingList';\n\nexport function ShoppingListPage({ recipeIds }) {\n  const { items, tick } = useShoppingList(recipeIds);\n  return (\n    <Checklist\n      title=\"Shopping list\"\n      items={items.map((i) => ({ id: i.name, label: `${i.quantity} ${i.unit} ${i.name}`, done: i.done }))}\n      onTick={tick}\n    />\n  );\n}\n",
+              "why": "the page, in its own component"
+            }
+          }
+        },
+        {
+          "usage": {
+            "used": 18400,
+            "size": 200000
+          }
+        },
+        {
+          "mcp": {
+            "tool": "report",
+            "arguments": {
+              "text": "The Shopping list page is in place.\n\n- `web/src/pages/ShoppingListPage.tsx`: a Checklist of the merged ingredients, ticks kept in local state.\n- Not done: the route entry in the router waits for the endpoint's final path.\n- Not verified: the page against the real endpoint."
+            }
+          }
+        }
+      ]
+    },
+    {
+      "when": "Shopping list page is in place",
+      "do": [
+        {
+          "think": "The web worker is done; its page calls the path the api worker is building. Adding the route is one line, I can do it once the endpoint lands."
+        },
+        {
+          "say": "The **web** part is done: the page exists in its own component and reads the merged list. I will add its route once the endpoint is merged. The **api** worker is still running its tests."
+        }
+      ]
+    },
+    {
+      "when": "nightly",
+      "do": [
+        {
+          "think": "Compare the durations of the last runs before guessing."
+        },
+        {
+          "mcp": {
+            "tool": "search",
+            "arguments": {
+              "pattern": "timeout"
+            }
+          }
+        },
+        {
+          "usage": {
+            "used": 96500,
+            "size": 200000
+          }
+        },
+        {
+          "say": "The slowdown comes from `recipes/search.test.ts`: since the import of 2,000 sample recipes landed, each case reloads the whole fixture instead of sharing one. Sharing it brings the file from 41 s back to 3 s. Do you want me to change it in a workspace?"
+        }
+      ]
+    },
+    {
+      "when": "Add metric units",
+      "do": [
+        {
+          "think": "The conversion table lives in api/src/shopping/units.ts; add millilitres and litres, with tests for the boundary at 1000."
+        },
+        {
+          "mcp": {
+            "tool": "fs_read",
+            "arguments": {
+              "path": "api/src/shopping/units.ts"
+            }
+          }
+        },
+        {
+          "usage": {
+            "used": 64000,
+            "size": 200000
+          }
+        },
+        {
+          "mcp": {
+            "tool": "fs_write",
+            "arguments": {
+              "path": "api/src/shopping/units.ts",
+              "content": "export const TO_BASE = {\n  g: 1,\n  kg: 1000,\n  ml: 1,\n  l: 1000,\n} as const;\n\nexport function format(quantity: number, unit: 'g' | 'ml') {\n  if (quantity >= 1000) return `${quantity / 1000} ${unit === 'g' ? 'kg' : 'l'}`;\n  return `${quantity} ${unit}`;\n}\n",
+              "why": "ml and l, converted past 1000"
+            }
+          }
+        },
+        {
+          "mcp": {
+            "tool": "run",
+            "arguments": {
+              "task": "test"
+            }
+          }
+        },
+        {
+          "say": "Metric units added and 12 conversion cases tested; all tests pass."
+        },
+        {
+          "mcp": {
+            "tool": "report",
+            "arguments": {
+              "text": "ml and l conversions in api/src/shopping/units.ts, 12 boundary tests, all green."
+            }
+          }
+        }
+      ]
+    },
+    {
+      "when": "tide chart",
+      "do": [
+        {
+          "think": "The fetch lives in src/main.rs; add an exponential backoff with jitter, capped."
+        },
+        {
+          "mcp": {
+            "tool": "fs_read",
+            "arguments": {
+              "path": "src/main.rs"
+            }
+          }
+        },
+        {
+          "usage": {
+            "used": 30500,
+            "size": 200000
+          }
+        },
+        {
+          "say": "I am adding a retry with exponential backoff (250 ms, doubling, at most 5 tries, with jitter) around the station request. The retry is capped so a dead station cannot hold the chart for more than about 8 seconds. Tests for the timeout path are next."
+        }
+      ]
+    }
+  ]
+}

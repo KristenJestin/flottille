@@ -1,0 +1,15 @@
+#!/bin/sh
+# A stand-in npm for captures: prints what a real run would look like.
+G='\033[32m'; R='\033[31m'; Y='\033[33m'; D='\033[2m'; B='\033[1m'; N='\033[0m'
+case "$1" in
+install) sleep 1; echo "added 312 packages, and audited 313 packages in 4s"; echo "found 0 vulnerabilities";;
+test)
+  printf "${B} RUN ${N} v2.1.4 ${D}~/code/pantry/api${N}\n\n"
+  for t in "shopping/list.test.ts (14) 212" "recipes/service.test.ts (22) 348" "shopping/merge.test.ts (9) 611" "units.test.ts (31) 27" "shopping/export.test.ts (18) 143"; do
+    ms=${t##* }; name=${t% *}; sleep 0.3; printf " ${G}✓${N} src/%s ${D}%sms${N}\n" "$name" "$ms"; done
+  printf "\n ${B}Test Files${N}  ${G}5 passed${N} (5)\n      ${B}Tests${N}  ${G}94 passed${N} (94)\n   ${B}Start at${N}  $(date +%H:%M:%S)\n   ${B}Duration${N}  2.31s\n";;
+run)
+  printf "\n> pantry-%s@0.9.2 dev\n> tsx watch src/main.ts\n\n" "$(basename $(pwd))"
+  printf "${G}[ready]${N} listening on http://localhost:%s\n" 3000; sleep 3600;;
+*) echo "npm $*";;
+esac
