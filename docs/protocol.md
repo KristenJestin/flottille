@@ -752,7 +752,8 @@ gone: `branches` says, for each repository that still had the workspace's local 
 was deleted because its work landed and why (`"it has no commit of its own"`, `"its pull request
 #12 is merged"`), or why it is kept (`"its pull request #12 is open, not merged"`, `"the forge
 cannot say whether it is merged: …"`); the remote branch is never deleted (`docs/workspaces.md`,
-"Removal"). `refused`, with nothing touched, while it is being prepared, or when a worktree holds a
+"Removal"). `refused`, with nothing touched, while it is being prepared or removed, while an agent
+not ended or a command run works in it (each named), or when a worktree holds a
 changed or untracked file or a commit on no remote, unless the forge says the branch's pull
 request merged it: the message names every one, and the branch that holds the commit.
 
