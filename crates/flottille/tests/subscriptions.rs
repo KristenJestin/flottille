@@ -1477,25 +1477,30 @@ fn a_subscription_during_a_slow_round_answers_at_once_and_is_delivered_the_round
             .count()
     };
     let before = listings(&user);
-    // A round reads the checks ended, its list slowly, as the first round of a big project does.
-    // Slower than the 6 s a subscription is given, so one that waited for the round fails; yet
-    // well within the 10 s the client waits for `items.refresh`, which answers after the round.
+    // A round reads the checks ended, its list held until the test lets it go, as the first round
+    // of a big project is held by a slow network: as long as the subscription needs, never as
+    // long as the client waits for `items.refresh`, whatever the machine's load.
+    let release = user.path("release-the-listing");
     user.gh_script(json!({
         "pulls": {"acme/api": {"app/login": changed(ended(pull()))}},
         "logs": {"acme/api": {"456": "test\tRun cargo test\t2026-01-01T00:00:00.0000000Z failed\n"}},
-        "listing_delay_ms": 8_000
+        "listing_wait_for": release
     }));
     std::thread::scope(|scope| {
         let round = scope.spawn(|| a_round(&user));
         eventually("the round's list", || listings(&user) > before);
 
+        // Answered while the round still waits for its list: one that waited for the round would
+        // not answer before the fake lets the round go, 20 s later.
         let asked = Instant::now();
         subscribe(&mcp, json!({"events": ["checks"]}));
         assert!(
-            asked.elapsed() < Duration::from_secs(6),
+            asked.elapsed() < Duration::from_secs(10),
             "answered after {:?}",
             asked.elapsed()
         );
+        assert!(!round.is_finished(), "the round is still held");
+        std::fs::write(&release, "").unwrap();
         round.join().unwrap();
     });
     let delivery = the_delivery(&user);
