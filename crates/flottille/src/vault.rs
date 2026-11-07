@@ -185,6 +185,8 @@ struct AskSet {
     ask: u64,
     secret: String,
     username: Option<String>,
+    /// Another name than the one asked, for an entry whose name another project uses.
+    name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -237,7 +239,7 @@ pub async fn call(
         "vault.ask_dismiss" => {
             let AskDismiss { ask } = serde_json::from_value(params)?;
             let request = open_ask(&daemon, ask)?;
-            answered(&daemon, &request, "dismissed");
+            answered(&daemon, &request, "dismissed", &request.name);
             Ok(json!({"dismissed": request.to_json()}))
         }
         "vault.remove" => {
@@ -314,34 +316,64 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
     if let Ok(state) = daemon.read(asks) {
         for request in state.open.iter().filter(|r| entry.name == r.name) {
             if entry.seen_by(&request.project) {
-                answered(daemon, request, "set");
+                answered(daemon, request, "set", &entry.name);
             }
         }
     }
     Ok(entry.to_json())
 }
 
+/// Why the entry `name` cannot be set for `project` from a request: an entry of that name exists
+/// and is not the project's. A request never changes an existing entry's project, so the user
+/// chooses another name.
+fn taken(entries: &[Entry], project: &str, name: &str) -> Option<String> {
+    let entry = entries.iter().find(|entry| entry.name == name)?;
+    match entry.project.as_deref() {
+        Some(own) if own == project => None,
+        Some(other) => Some(format!(
+            "`{name}` is used by the project {other}: choose another name"
+        )),
+        None => Some(format!(
+            "`{name}` is used by every project: choose another name"
+        )),
+    }
+}
+
 /// `vault.ask_set`: the entry of an open request set with the secret the user typed, and what
-/// Flottille prefilled; the same checks as `vault.set`.
+/// Flottille prefilled; the same checks as `vault.set`, and never an entry of another project.
 async fn ask_set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Failure> {
     let AskSet {
         ask,
         secret,
         username,
+        name,
     } = serde_json::from_value(params)?;
     let request = open_ask(daemon, ask)?;
+    let name = name
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| request.name.clone());
+    let entries = daemon.read(|store| store.vault_entries())?;
+    if let Some(why) = taken(&entries, &request.project, &name) {
+        return Err(Failure::refused(why));
+    }
     if request.takes_username && username.as_deref().is_none_or(|u| u.trim().is_empty()) {
         return Err(Failure::refused(format!(
             "the entry {} needs a username: {}",
             request.name, request.description
         )));
     }
-    set(
+    let set = set(
         daemon,
-        json!({"name": request.name, "secret": secret, "description": request.description,
+        json!({"name": name, "secret": secret, "description": request.description,
             "username": username, "project": request.project}),
     )
-    .await
+    .await?;
+    // Under the name asked, `set` answered the request; under another, nothing named it.
+    if name != request.name {
+        answered(daemon, &request, "set", &name);
+    }
+    Ok(set)
 }
 
 fn unavailable(why: String) -> Failure {
@@ -443,6 +475,8 @@ struct Ask {
     why: String,
     description: String,
     takes_username: bool,
+    /// Why the name cannot be set for the project, when another project uses it.
+    taken: Option<String>,
     /// The agents whose ask joined it while it was open.
     joined: Vec<String>,
 }
@@ -451,7 +485,7 @@ impl Ask {
     fn to_json(&self) -> Value {
         json!({"ask": self.number, "at": self.at, "agent": self.agent, "project": self.project,
             "name": self.name, "why": self.why, "description": self.description,
-            "takes_username": self.takes_username, "joined": self.joined})
+            "takes_username": self.takes_username, "taken": self.taken, "joined": self.joined})
     }
 }
 
@@ -499,6 +533,7 @@ fn asks(store: &Store) -> flottille_core::Result<Asks> {
                 why: text(data, "why"),
                 description: text(data, "description"),
                 takes_username: data["takes_username"] == true,
+                taken: data["taken"].as_str().map(str::to_owned),
                 joined: Vec::new(),
             }),
             "vault.ask_joined" => {
@@ -539,9 +574,10 @@ fn open_ask(daemon: &Daemon, number: u64) -> Result<Ask, Failure> {
 
 /// The request is answered: its card folds away, and each agent that asked is told what the user
 /// did, never the secret.
-fn answered(daemon: &std::sync::Arc<Daemon>, request: &Ask, outcome: &str) {
+/// `entry` is the entry the user set, under the name asked or another.
+fn answered(daemon: &std::sync::Arc<Daemon>, request: &Ask, outcome: &str, entry: &str) {
     let data = json!({"agent": request.agent, "ask": request.number, "project": request.project,
-        "name": request.name, "outcome": outcome});
+        "name": request.name, "entry": entry, "outcome": outcome});
     let written = daemon.write(|store| {
         let event = store.append_agent_event(&request.agent, "vault.ask_answered", data, false)?;
         Ok(((), event))
@@ -554,6 +590,11 @@ fn answered(daemon: &std::sync::Arc<Daemon>, request: &Ask, outcome: &str) {
         return;
     }
     let body = match outcome {
+        "set" if entry != request.name => format!(
+            "the user set the vault entry `{entry}` instead of `{}`, whose name was taken: the \
+             project's setting still names `{}` until it is changed to `{entry}`; tell the user",
+            request.name, request.name
+        ),
         "set" => format!(
             "the user set the vault entry `{}`: give its name to the tool that needs it",
             request.name
@@ -730,7 +771,8 @@ fn ask(daemon: &Daemon, grant: &Grant, asked: Asked) -> Outcome {
                     "vault.asked",
                     json!({"agent": grant.agent, "project": project.name, "name": name,
                         "why": why, "description": need.description,
-                        "takes_username": need.takes_username}),
+                        "takes_username": need.takes_username,
+                        "taken": taken(&store.vault_entries()?, &project.name, &name)}),
                     false,
                 )?,
                 false,
@@ -780,6 +822,25 @@ mod tests {
             )])),
             file: file.to_owned(),
         }
+    }
+
+    #[test]
+    fn a_name_is_taken_by_every_entry_that_is_not_the_asking_projects() {
+        let entries = [
+            entry("mine", Some("app")),
+            entry("theirs", Some("other")),
+            entry("shared", None),
+        ];
+        assert_eq!(taken(&entries, "app", "mine"), None);
+        assert_eq!(taken(&entries, "app", "free"), None);
+        assert_eq!(
+            taken(&entries, "app", "theirs").as_deref(),
+            Some("`theirs` is used by the project other: choose another name")
+        );
+        assert_eq!(
+            taken(&entries, "app", "shared").as_deref(),
+            Some("`shared` is used by every project: choose another name")
+        );
     }
 
     #[tokio::test]

@@ -511,12 +511,17 @@ set answers the open requests for that entry whose project now sees it (`set`).
 The requests agents made for a missing entry (`docs/vault.md`, "Asking the user for an entry"):
 
 - `vault.asks` answers `{"asks": [{"ask", "at", "agent", "project", "name", "why", "description",
-  "takes_username", "joined"}]}`, the open requests, oldest first; `ask` is the number of its
-  `vault.asked` event, `joined` the agents whose ask joined it.
-- `vault.ask_set {ask, secret, username?}` sets the entry as `vault.set` does, with the name, the
-  description and the project the request holds; `refused` without a username when
-  `takes_username`, and as `vault.set`; `not-found` when no such request is open. Each agent that
-  asked is handed a `vault` delivery, `the user set the vault entry <name>`.
+  "takes_username", "taken", "joined"}]}`, the open requests, oldest first; `ask` is the number of
+  its `vault.asked` event, `taken` why its name cannot be set for the project (another project
+  uses it), `null` otherwise, `joined` the agents whose ask joined it.
+- `vault.ask_set {ask, secret, username?, name?}` sets the entry as `vault.set` does, with the
+  description and the project the request holds, under `name` when given, else the name it
+  holds; `refused` without a username when `takes_username`, and as `vault.set`; `refused` with
+  `` `<name>` is used by the project <other>: choose another name`` (`every project` for a global
+  entry) when an entry of that name exists and is not the project's: a request never changes an
+  existing entry's project; `not-found` when no such request is open. Each agent that asked is
+  handed a `vault` delivery, `the user set the vault entry <name>`, which says the project's
+  setting still names the entry asked when the user chose another name.
 - `vault.ask_dismiss {ask}` closes it, answers `{"dismissed": <request>}`, and hands each agent
   `the user dismissed the request …`. The entry is not asked for again by this project until the
   project's settings change (`project.changed`) or the entry is set (`vault.changed`).

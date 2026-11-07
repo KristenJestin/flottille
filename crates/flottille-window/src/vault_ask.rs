@@ -3,7 +3,9 @@
 //! Flottille prefilled the entry's name, what it is for and its project; the user types the
 //! secret in a masked field (and the username when the entry takes one), then Set or Dismiss. The
 //! secret goes to the daemon (`vault.ask_set`) and leaves the field at once; the card folds away
-//! once the daemon says the request was answered.
+//! once the daemon says the request was answered. When another project uses the name, the card
+//! says so on its name line and Set waits for another name: a request never takes an entry from
+//! another project.
 
 use flottille_ui::{Button, Card, Field, Toast, palette, presence, space, toast};
 use gpui_kit::base::input::{Input, InputEvent, InputState};
@@ -32,6 +34,7 @@ pub struct VaultAskBox {
     shell: WeakEntity<Shell>,
     secret: Entity<InputState>,
     username: Entity<InputState>,
+    name: Entity<InputState>,
     sending: bool,
     _subscriptions: Vec<Subscription>,
 }
@@ -51,8 +54,11 @@ impl VaultAskBox {
             field
         });
         let username = line_field("me@example.com", window, cx);
+        let name = line_field("another-name", window, cx);
+        let asked = ask.name.clone();
+        name.update(cx, |field, cx| field.set_value(asked, window, cx));
         let mut subscriptions = Vec::new();
-        for field in [&secret, &username] {
+        for field in [&secret, &username, &name] {
             subscriptions.push(cx.subscribe_in(
                 field,
                 window,
@@ -70,6 +76,7 @@ impl VaultAskBox {
             shell,
             secret,
             username,
+            name,
             sending: false,
             _subscriptions: subscriptions,
         }
@@ -83,8 +90,20 @@ impl VaultAskBox {
         &self.username
     }
 
+    pub fn name(&self) -> &Entity<InputState> {
+        &self.name
+    }
+
+    /// The other name the user typed, when the one asked is used by another project; none when
+    /// the name is free, or when it is still the one asked.
+    fn other_name(&self, cx: &gpui_kit::App) -> Option<String> {
+        let typed = self.name.read(cx).value().trim().to_owned();
+        (self.ask.taken.is_some() && typed != self.ask.name).then_some(typed)
+    }
+
     fn ready(&self, cx: &gpui_kit::App) -> bool {
         !self.sending
+            && (self.ask.taken.is_none() || self.other_name(cx).is_some_and(|n| !n.is_empty()))
             && !self.secret.read(cx).value().is_empty()
             && (!self.ask.takes_username || !self.username.read(cx).value().trim().is_empty())
     }
@@ -99,7 +118,15 @@ impl VaultAskBox {
         let username = self.username.read(cx).value().trim().to_owned();
         self.secret
             .update(cx, |field, cx| field.set_value("", window, cx));
-        self.answer(VaultAnswer::Set { secret, username }, cx);
+        let name = self.other_name(cx);
+        self.answer(
+            VaultAnswer::Set {
+                secret,
+                username,
+                name,
+            },
+            cx,
+        );
     }
 
     pub fn dismiss(&mut self, cx: &mut Context<Self>) {
@@ -143,6 +170,15 @@ impl Render for VaultAskBox {
             boxed(id("vault-ask-username"), Input::new(&self.username), cx),
         )
         .hint("The account that goes with the secret.");
+        let name = Field::new(
+            id("vault-ask-new-name-field"),
+            "Name",
+            boxed(id("vault-ask-new-name"), Input::new(&self.name), cx),
+        )
+        .hint(SharedString::from(format!(
+            "The project's setting still names `{}`: change it to the new name.",
+            self.ask.name
+        )));
         let secret = Field::new(
             id("vault-ask-secret-field"),
             "Secret",
@@ -167,6 +203,7 @@ impl Render for VaultAskBox {
             .flex()
             .flex_col()
             .gap(space::MD)
+            .when_some(self.ask.taken.is_some().then_some(name), |d, n| d.child(n))
             .when_some(self.ask.takes_username.then_some(username), |d, u| {
                 d.child(u)
             })
@@ -213,7 +250,11 @@ pub fn card(
                 .flex()
                 .flex_col()
                 .gap(space::XS)
-                .child(line("vault-ask-name", "Entry", &ask.name))
+                .child(line(
+                    "vault-ask-name",
+                    "Entry",
+                    ask.taken.as_deref().unwrap_or(&ask.name),
+                ))
                 .child(line("vault-ask-what", "For", &ask.description))
                 .child(line("vault-ask-project", "Project", &ask.project))
                 .child(line("vault-ask-why", "Why", &ask.why)),

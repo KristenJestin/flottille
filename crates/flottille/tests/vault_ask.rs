@@ -291,3 +291,90 @@ fn a_dismissed_entry_is_not_offered_again_until_its_setting_changes() {
     assert!(!again.error, "{}", again.text);
     assert_eq!(asks(&user).len(), 1);
 }
+
+/// A second project `other` over its own throwaway repository.
+fn other_project(user: &User) {
+    let folder = user.path("work/other");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "other\n").unwrap();
+    user.git(&folder, &["add", "."]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    user.call("project.add", json!({"folder": folder, "name": "other"}))
+        .unwrap();
+}
+
+fn entry(user: &User, name: &str) -> Value {
+    user.call("vault.list", json!({})).unwrap()["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == name)
+        .unwrap_or_else(|| panic!("no entry {name}"))
+        .clone()
+}
+
+#[test]
+fn a_set_from_an_ask_never_moves_another_project_s_entry() {
+    let user = User::with_fake_agent().with_fake_acli();
+    project(&user, "jira-time");
+    other_project(&user);
+    user.call(
+        "vault.set",
+        json!({"name": "jira-time", "secret": "the-other-projects-secret", "project": "other"}),
+    )
+    .unwrap();
+    let (mcp, _) = root_in(&user);
+
+    // The name belongs to another project: `app` sees no such entry, so it is still a need.
+    assert!(!ask(&mcp, "jira-time", "to log time").error);
+    let open = asks(&user);
+    assert_eq!(open.len(), 1, "{open:?}");
+    let sentence = "`jira-time` is used by the project other: choose another name";
+    assert_eq!(open[0]["taken"], sentence, "the card says it: {}", open[0]);
+    let number = open[0]["ask"].as_u64().unwrap();
+
+    // Set is refused with that sentence, however it is asked, and moves nothing.
+    for params in [
+        json!({"ask": number, "secret": SECRET, "username": ACCOUNT}),
+        json!({"ask": number, "secret": SECRET, "username": ACCOUNT, "name": "jira-time"}),
+    ] {
+        let (_, refused) = user.call("vault.ask_set", params).unwrap_err();
+        assert!(refused.contains(sentence), "{refused}");
+        assert!(!refused.contains(SECRET), "{refused}");
+        assert_eq!(entry(&user, "jira-time")["project"], "other");
+        assert_eq!(asks(&user).len(), 1, "still open");
+    }
+}
+
+#[test]
+fn a_set_from_an_ask_under_another_name_keeps_the_other_entry_and_tells_the_agent() {
+    let user = User::with_fake_agent().with_fake_acli();
+    project(&user, "jira-time");
+    other_project(&user);
+    user.call(
+        "vault.set",
+        json!({"name": "jira-time", "secret": "the-other-projects-secret", "project": "other"}),
+    )
+    .unwrap();
+    let (mcp, agent) = root_in(&user);
+    assert!(!ask(&mcp, "jira-time", "to log time").error);
+    let number = asks(&user)[0]["ask"].as_u64().unwrap();
+
+    user.call(
+        "vault.ask_set",
+        json!({"ask": number, "secret": SECRET, "username": ACCOUNT, "name": "app-jira-time"}),
+    )
+    .unwrap();
+
+    assert_eq!(entry(&user, "jira-time")["project"], "other");
+    let mine = entry(&user, "app-jira-time");
+    assert_eq!(mine["project"], "app");
+    assert_eq!(mine["username"], ACCOUNT);
+    assert!(asks(&user).is_empty(), "answered, not open");
+    // The setting that names the entry is not the card's to change.
+    let body = told(&user, number, &agent);
+    for said in ["`app-jira-time`", "instead of `jira-time`", "setting"] {
+        assert!(body.contains(said), "{said} is not said: {body}");
+    }
+    assert!(!body.contains(SECRET), "{body}");
+}

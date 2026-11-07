@@ -80,9 +80,12 @@ no free-form ask**.
   entry is open, another ask for it joins it. A dismissed entry is not offered again, nor asked
   for, until the project's settings change or the entry is set from Settings, Vault.
 - **Set** stores the entry as Settings, Vault does, with the same checks, for the project that
-  asked. Each agent that asked is handed a delivery, `the user set the vault entry <name>`, never
-  the secret; or `the user dismissed …`. An entry set from Settings answers its open requests the
-  same way.
+  asked. It never changes an existing entry's project: when another project uses the name (or it
+  is global), the card says so on its name line, `<name> is used by the project <other>: choose
+  another name`, and Set waits for another name. The card does not change the setting that names
+  the entry: it says that setting must name the new one, and so does the delivery. Each agent
+  that asked is handed a delivery, `the user set the vault entry <name>`, never the secret; or
+  `the user dismissed …`. An entry set from Settings answers its open requests the same way.
 
 The secret goes from the card's field to the keyring as any secret set from the window: it never
 reaches the agent, an event, a log or an error.

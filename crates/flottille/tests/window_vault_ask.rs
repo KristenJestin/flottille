@@ -47,6 +47,26 @@ fn eventually(what: &str, check: impl Fn() -> bool) {
 /// A session of `app`, whose Jira tracker names the missing entry `jira-time`, told to log time:
 /// its turn holds until the test releases it, so the card stays in sight while it is answered.
 fn session(user: &User) -> String {
+    session_with(user, false)
+}
+
+/// As `session`; `taken` has another project `other` own the entry `jira-time` first.
+fn session_with(user: &User, taken: bool) -> String {
+    if taken {
+        let folder = user.path("work/other");
+        user.git_init(&folder);
+        std::fs::write(folder.join("README.md"), "other\n").unwrap();
+        user.git(&folder, &["add", "."]);
+        user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+        user.call("project.add", json!({"folder": folder, "name": "other"}))
+            .unwrap();
+        user.call(
+            "vault.set",
+            json!({"name": "jira-time", "secret": "the-other-projects-secret",
+                "project": "other"}),
+        )
+        .unwrap();
+    }
     let folder = user.path("work/app");
     user.git_init(&folder);
     std::fs::write(folder.join("README.md"), "app\n").unwrap();
@@ -262,4 +282,79 @@ fn the_card_of_a_vault_ask_is_prefilled_masked_and_folds_once_set(cx: &mut TestA
         0,
         "nothing moves at rest"
     );
+}
+
+#[gpui_kit::test]
+fn the_card_refuses_a_name_another_project_uses_until_it_is_edited(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session_with(&user, true);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        has(session_id(&id), cx)
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    until(&shell, cx, "the card", |cx| {
+        let page = session_page(&shell, cx);
+        ask_row(&page, cx).is_some_and(|at| has(format!("row-{at}-vault-ask-secret"), cx))
+    });
+    let page = session_page(&shell, cx);
+    let at = ask_row(&page, cx).unwrap();
+    settle(cx);
+
+    // The name line says it, with the sentence the daemon refuses with.
+    assert_eq!(
+        label(format!("row-{at}-vault-ask-name"), cx).as_deref(),
+        Some("Entry: `jira-time` is used by the project other: choose another name")
+    );
+    assert!(
+        has(format!("row-{at}-vault-ask-new-name"), cx),
+        "a name to edit"
+    );
+
+    let fields = page
+        .read_with(cx, |page, cx| {
+            page.conversation().read(cx).rows()[at]
+                .read(cx)
+                .vault_ask()
+                .cloned()
+        })
+        .expect("the card's fields");
+    let (secret, username, name) = fields.read_with(cx, |f, _| {
+        (f.secret().clone(), f.username().clone(), f.name().clone())
+    });
+    secret.update_in(cx, |field, window, cx| field.set_value(SECRET, window, cx));
+    username.update_in(cx, |field, window, cx| {
+        field.set_value("dev@example.com", window, cx)
+    });
+
+    // Unedited, Set does nothing: the secret stays in its field and nothing reached the vault.
+    fields.update_in(cx, |fields, window, cx| fields.set(window, cx));
+    assert_eq!(secret.read_with(cx, |s, _| s.value().to_string()), SECRET);
+    let entries = user.call("vault.list", json!({})).unwrap();
+    assert_eq!(entries["entries"].as_array().unwrap().len(), 1, "{entries}");
+    assert_eq!(entries["entries"][0]["project"], "other");
+
+    // Edited, it sets the entry under the new name and leaves the other project's alone.
+    name.update_in(cx, |field, window, cx| {
+        field.set_value("app-jira-time", window, cx)
+    });
+    fields.update_in(cx, |fields, window, cx| fields.set(window, cx));
+    until(&shell, cx, "the card folds away", |cx| {
+        settle(cx);
+        !has(format!("row-{at}-vault-ask-secret"), cx)
+    });
+    let entries = user.call("vault.list", json!({})).unwrap();
+    let find = |name: &str| {
+        entries["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == name)
+            .unwrap_or_else(|| panic!("no {name}: {entries}"))
+            .clone()
+    };
+    assert_eq!(find("jira-time")["project"], "other");
+    assert_eq!(find("app-jira-time")["project"], "app");
+    std::fs::write(user.path("fake/release"), "").unwrap();
 }

@@ -127,6 +127,9 @@ pub struct VaultAsk {
     pub project: String,
     pub description: String,
     pub takes_username: bool,
+    /// Why the name cannot be set for the project, as the daemon refuses with it: another
+    /// project uses it.
+    pub taken: Option<String>,
     pub why: String,
     pub open: bool,
 }
@@ -898,6 +901,7 @@ impl Conversation {
                     project: text("project"),
                     description: text("description"),
                     takes_username: data["takes_username"] == true,
+                    taken: data["taken"].as_str().map(str::to_owned),
                     why: text("why"),
                     open: true,
                 })));

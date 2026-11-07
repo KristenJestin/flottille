@@ -568,10 +568,12 @@ pub enum VaultWrite {
 /// The answer a card gives to a request for a vault entry.
 #[derive(Clone, PartialEq)]
 pub enum VaultAnswer {
-    /// The secret typed, and the username when the entry takes one.
+    /// The secret typed, the username when the entry takes one, and another name for the entry
+    /// when the one asked is used by another project.
     Set {
         secret: String,
         username: String,
+        name: Option<String>,
     },
     Dismiss,
 }
@@ -1720,9 +1722,13 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             answer,
         } => {
             let (method, params) = match answer {
-                VaultAnswer::Set { secret, username } => (
+                VaultAnswer::Set {
+                    secret,
+                    username,
+                    name,
+                } => (
                     "vault.ask_set",
-                    json!({"ask": ask, "secret": secret, "username": username}),
+                    json!({"ask": ask, "secret": secret, "username": username, "name": name}),
                 ),
                 VaultAnswer::Dismiss => ("vault.ask_dismiss", json!({"ask": ask})),
             };
