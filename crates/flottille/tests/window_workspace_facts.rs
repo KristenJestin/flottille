@@ -416,8 +416,20 @@ fn the_rail_s_workspace_menu_offers_removal(cx: &mut TestAppContext) {
     );
 }
 
+/// Stops the agent, and waits until the window knows its session ended.
+fn ended(user: &User, agent: &str, shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    user.call("agent.stop", json!({"agent": agent})).unwrap();
+    until(shell, cx, "the session ended", |cx| {
+        shell.read_with(cx, |s, _| {
+            s.snapshot()
+                .session(agent)
+                .is_some_and(|session| session.ended)
+        })
+    });
+}
+
 #[gpui_kit::test]
-fn removing_from_the_rail_asks_and_names_the_sessions_living_there(cx: &mut TestAppContext) {
+fn the_rail_refuses_the_removal_while_sessions_work_there_and_names_them(cx: &mut TestAppContext) {
     let user = user();
     let (lead, _) = lead(&user);
     another_session(&user, Some("login"), "Add the logout button");
@@ -428,19 +440,40 @@ fn removing_from_the_rail_asks_and_names_the_sessions_living_there(cx: &mut Test
     cx.update(|window, cx| window.click("remove-workspace", cx));
     settle(cx);
     assert!(cx.update(|window, _| window.find("rail-workspace-removal").visible()));
-    let said = labelled(cx, "rail-workspace-removal-sentence").unwrap_or_default();
+    let why = labelled(cx, "rail-workspace-removal-refused").unwrap_or_default();
     let own = shell.read_with(cx, |s, _| {
         s.snapshot().session(&lead).unwrap().title.clone()
     });
-    assert!(said.contains(&own), "this session is named ({own}): {said}");
+    assert!(why.contains(&own), "this session is named ({own}): {why}");
     assert!(
-        said.contains("Add the logout button"),
-        "the other one too: {said}"
+        why.contains("Add the logout button"),
+        "the other one too: {why}"
     );
+    assert!(why.contains("End them first"), "{why}");
+    let said = labelled(cx, "rail-workspace-removal-sentence").unwrap_or_default();
+    assert!(!said.contains("without a place"), "{said}");
+    cx.update(|window, cx| window.click("rail-workspace-removal-action", cx));
+    settle(cx);
     assert!(
-        said.contains("this one included") && said.contains("without a place"),
-        "{said}"
+        !present(cx, "rail-removing"),
+        "the disabled button does nothing"
     );
+    assert_eq!(workspaces_of_app(&user), 1, "nothing was removed");
+}
+
+#[gpui_kit::test]
+fn removing_from_the_rail_once_its_sessions_ended(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, _) = lead(&user);
+    let (shell, cx) = open_session(&user, &lead, cx);
+    ended(&user, &lead, &shell, cx);
+
+    cx.update(|window, cx| window.click("workspace-menu", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("remove-workspace", cx));
+    settle(cx);
+    assert!(cx.update(|window, _| window.find("rail-workspace-removal").visible()));
+    assert!(labelled(cx, "rail-workspace-removal-refused").is_none());
     assert_eq!(workspaces_of_app(&user), 1, "asking removes nothing");
 
     // Cancelling leaves it all as it was.
@@ -529,6 +562,7 @@ fn a_refused_removal_from_the_rail_shows_why(cx: &mut TestAppContext) {
     user.git(&folder, &["add", "."]);
     user.git(&folder, &["commit", "--quiet", "-m", "add the login"]);
     let (shell, cx) = open_session(&user, &lead, cx);
+    ended(&user, &lead, &shell, cx);
 
     cx.update(|window, cx| window.click("workspace-menu", cx));
     settle(cx);
