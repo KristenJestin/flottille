@@ -767,7 +767,17 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   page, and one with no session is not in the sidebar. A session is titled by the first line of
   its first message that says what the work is (a greeting or a single word does not: the session
   is `agent <id>` until a later message of the user does); a session an agent started says it in
-  its page's header, "started by <agent>", not in the sidebar. Each session takes **two lines**:
+  its page's header, "started by <agent>", not in the sidebar. A session an agent leads (`led`)
+  is the one exception to the flat list: its row sits right under its pilot's session's row,
+  indented, starting with a mark whose tooltip says "led by <pilot>"; the pilot's row gains a
+  chevron that folds its led rows away with it, and each led row keeps its own mark, unread dot
+  and draft pencil. Its page's header says "led by <pilot>", and a line above its composer says
+  that the user's messages reach it directly and the pilot is not asked. The row's "⋯" menu of a
+  session an agent started offers "Detach from <agent>" (`agent.detach`, a toast says the
+  result): the row slides back among the project's sessions, its indent and mark fade, and the
+  header's line and the note fold away. A question a led session asks its pilot shows in its
+  conversation as a card, "<session> asks its pilot", with no answer box. Each session takes
+  **two lines**:
   the first is its title and, at the right, **one mark**, chosen in this order: its state
   (running, needs the user, waiting) when it has one, else a small dot when something new was
   written in it since it was last opened (an agent's message, a report, a delivery that woke it, a
