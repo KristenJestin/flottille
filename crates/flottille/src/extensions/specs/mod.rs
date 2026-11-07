@@ -135,8 +135,9 @@ pub const EXTENSION: Extension = Extension {
         ("item.changed", pull_moved),
         ("item.merged", pull_moved),
         ("item.closed", pull_moved),
-        ("agent.ended", development_ended),
-        ("agent.failed", development_ended),
+        ("agent.ended", development_changed),
+        ("agent.failed", development_changed),
+        ("agent.resumed", development_changed),
     ],
     fact: spec_of_session,
 };
@@ -601,6 +602,19 @@ fn active_spec(daemon: &Daemon, id: u64) -> std::result::Result<(Spec, Project),
     Ok((spec, project))
 }
 
+/// The spec as Flottille sees it now, once Specs is active in its project: a development that
+/// ended or whose pull requests moved while Specs was off is read again before the spec is shown.
+fn current_spec(daemon: &Daemon, id: u64) -> std::result::Result<(Spec, Project), Failure> {
+    let (spec, project) = active_spec(daemon, id)?;
+    if matches!(spec.status, Status::Draft | Status::Done) {
+        return Ok((spec, project));
+    }
+    if let Err(failure) = settle(daemon, id) {
+        eprintln!("flottille daemon: spec {id}: {}", failure.message);
+    }
+    active_spec(daemon, id)
+}
+
 /// The ticket that a spec of this project already covers: the spec that has it.
 fn holder(space: &Space, project: &str, ticket: &str) -> Result<Option<(u64, String)>> {
     Ok(space
@@ -647,7 +661,7 @@ fn write_draft(
     id: u64,
     change: impl FnOnce(&Space, &mut Spec) -> Result<&'static str>,
 ) -> std::result::Result<Value, Failure> {
-    active_spec(daemon, id)?;
+    current_spec(daemon, id)?;
     let spec = daemon.write(|store| {
         let space = store.space(EXTENSION.name)?;
         let mut spec =
@@ -686,7 +700,7 @@ fn write_draft(
 
 /// The user's gestures: Ready from Draft, Draft from Ready.
 fn set_status(daemon: &Daemon, id: u64, to: Status) -> std::result::Result<Value, Failure> {
-    active_spec(daemon, id)?;
+    current_spec(daemon, id)?;
     let spec = daemon.write(|store| {
         let space = store.space(EXTENSION.name)?;
         let mut spec =
@@ -1091,6 +1105,9 @@ fn answer_now(
                         .collect()
                 }
             };
+            for project in &projects {
+                settle_developed(daemon, project);
+            }
             let specs = daemon.write(|store| {
                 let space = store.space(EXTENSION.name)?;
                 Ok((specs_where(&space, "", &[])?, None::<Event>))
@@ -1105,7 +1122,7 @@ fn answer_now(
         }
         "spec.show" => {
             let Named { spec } = serde_json::from_value(params)?;
-            Ok(active_spec(daemon, spec)?.0.to_json())
+            Ok(current_spec(daemon, spec)?.0.to_json())
         }
         "spec.write" => {
             let asked: Write = serde_json::from_value(params)?;
@@ -2345,11 +2362,29 @@ fn undevelopable(spec: &Spec, running: Option<&str>) -> Option<String> {
     }
 }
 
+/// The first workspace name of the project's that is free for a development of the spec:
+/// `spec-<n>`, then `spec-<n>-2`, `spec-<n>-3`. Counting the developments would name again a
+/// workspace a failed start left behind, or one the user named so.
+fn free_workspace(daemon: &Daemon, project: &str, id: u64) -> std::result::Result<String, Failure> {
+    let taken: Vec<String> = daemon
+        .read(|store| store.workspaces(Some(project)))?
+        .into_iter()
+        .map(|workspace| workspace.name)
+        .collect();
+    let first = format!("spec-{id}");
+    Ok(std::iter::once(first.clone())
+        .chain((2..).map(|k| format!("{first}-{k}")))
+        .find(|name| !taken.contains(name))
+        .expect("an endless run of names has a free one"))
+}
+
 /// `spec.develop`, "Launch development": a session for the user in a new workspace linked to the
 /// spec's first ticket (a workspace has one), its first message the spec. The user's gesture
 /// only: nothing launches it on its own at Ready.
 async fn develop(daemon: Arc<Daemon>, id: u64) -> std::result::Result<Value, Failure> {
-    let (spec, project) = active_spec(&daemon, id)?;
+    let (_, project) = active_spec(&daemon, id)?;
+    let _launching = Launching::take(id)?;
+    let (spec, _) = current_spec(&daemon, id)?;
     let developments = daemon.write(|store| {
         let space = store.space(EXTENSION.name)?;
         Ok((developments_of(&space, id)?, None::<Event>))
@@ -2357,11 +2392,7 @@ async fn develop(daemon: Arc<Daemon>, id: u64) -> std::result::Result<Value, Fai
     if let Some(why) = undevelopable(&spec, running(&daemon, &developments).as_deref()) {
         return Err(Failure::refused(why));
     }
-    let _launching = Launching::take(id)?;
-    let name = match developments.len() {
-        0 => format!("spec-{id}"),
-        n => format!("spec-{id}-{}", n + 1),
-    };
+    let name = free_workspace(&daemon, &project.name, id)?;
     let created = crate::workspaces::call(
         daemon.clone(),
         "workspace.create",
@@ -2494,7 +2525,9 @@ fn settle(daemon: &Daemon, id: u64) -> std::result::Result<(), Failure> {
         let space = store.space(EXTENSION.name)?;
         Ok((developments_of(&space, id)?, None::<Event>))
     })?;
-    if spec.status == Status::Draft || developments.is_empty() {
+    // Done is terminal: a forge or a tracker changed in the settings forgets the pull requests
+    // that made it, and the spec stays what they made it.
+    if matches!(spec.status, Status::Draft | Status::Done) || developments.is_empty() {
         return Ok(());
     }
     let filter = flottille_core::item::Filter {
@@ -2526,7 +2559,7 @@ fn settle(daemon: &Daemon, id: u64) -> std::result::Result<(), Failure> {
         let Some(spec) = spec_of(&space, id)? else {
             return Ok(((), None));
         };
-        if spec.status == to || spec.status == Status::Draft {
+        if spec.status == to || matches!(spec.status, Status::Draft | Status::Done) {
             return Ok(((), None));
         }
         space.tables().execute(
@@ -2543,9 +2576,10 @@ fn settle(daemon: &Daemon, id: u64) -> std::result::Result<(), Failure> {
     Ok(())
 }
 
-/// The Core event trigger on an agent that ended or failed: the spec it developed reads its
-/// status again.
-fn development_ended(daemon: &Arc<Daemon>, data: &Value) {
+/// The Core event trigger on an agent that ended, failed or was resumed: the spec it developed
+/// reads its status again. Off, Specs reads nothing here: the spec is read again once it is on
+/// (`current_spec`, `settle_developed`).
+fn development_changed(daemon: &Arc<Daemon>, data: &Value) {
     let Some(agent) = data["agent"].as_str() else {
         return;
     };
@@ -2571,11 +2605,18 @@ fn pull_moved(daemon: &Arc<Daemon>, data: &Value) {
     if super::active(daemon, &EXTENSION, project).is_err() {
         return;
     }
+    settle_developed(daemon, project);
+}
+
+/// The specs of the project that have a development read their status again, but those the user
+/// keeps (a Draft) or that are over (Done).
+fn settle_developed(daemon: &Daemon, project: &str) {
     let developed = daemon.write(|store| {
         let space = store.space(EXTENSION.name)?;
         let mut statement = space.tables().prepare(
             "SELECT DISTINCT d.spec FROM ext_specs_developments d \
-             JOIN ext_specs_specs s ON s.id = d.spec WHERE s.project = ?1",
+             JOIN ext_specs_specs s ON s.id = d.spec \
+             WHERE s.project = ?1 AND s.status NOT IN ('draft', 'done')",
         )?;
         let ids = statement
             .query_map([project], |row| row.get::<_, u64>(0))?

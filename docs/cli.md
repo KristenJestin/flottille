@@ -338,7 +338,9 @@ session for you in it whose first message is the spec, labelled, with what Flott
 pull request (the Problem, the `C` list with their verification, a link to the spec). Prints the
 spec, the session and the workspace. Refused unless the spec is Ready, and while another
 development of it runs. The spec is then In progress, Review once the session's pull request is
-open, Done once its pull requests are merged, and Ready again if the session ends with none open.
+open, Done once its pull requests are merged, and Ready again if the session ends with none open (In progress again if it is resumed). Done
+stays Done. Each development has a workspace of its own: `spec-<n>`, then `spec-<n>-2`, the first
+name that is free.
 
 ### `flottille spec draft <spec>`
 

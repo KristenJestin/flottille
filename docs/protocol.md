@@ -513,15 +513,18 @@ and `departures_posted_at` when the user posted it, `null` before.
   "offered" (Done, and something to post), "posted_at", "tickets"}`. With `post`, posts them on each
   of its tickets as a comment through the tracker's own write, once: `refused` before Done, when
   empty or already posted, and for a spec of another mode; `unavailable` when the tracker refuses.
-- `spec.develop {spec}`, "Launch development": makes a workspace `spec-<n>` (`spec-<n>-<k>` for
-  its k-th development) linked to the spec's first ticket (a workspace has one), then starts a
+- `spec.develop {spec}`, "Launch development": makes a workspace `spec-<n>` (`spec-<n>-<k>` when
+  that name is taken, `k` from 2: the first free name, whoever made the others) linked to the spec's first ticket (a workspace has one), then starts a
   `lead` session for the user in it, a root neither led nor handed, whose first message, sent once
   the workspace is prepared, is the spec as it is, labelled, and what Flottille asks of the work
   (its pull request's description holds the Problem, the `C` list with their verification, and a
   link to the spec: its ticket's page in the mode `ticket`, else its number and title). Answers
   `{"spec", "agent", "workspace", "branch"}`, the spec In progress. `refused` unless the spec is
   Ready, and while a development of it runs (one at a time); a workspace that cannot be made
-  starts nothing. Nothing calls it on its own at Ready.
+  starts nothing, and a session that cannot start once the workspace is made leaves it, named in
+  the error, without blocking a later launch. The spec's status is read again when its session
+  ends, fails or is resumed, when a pull request of its branch moves, and when it is read
+  (`spec.show`, `spec.list`) after Specs was off. Done is terminal. Nothing calls it on its own at Ready.
 
 **The statuses read from what Flottille sees.** A spec under development is **In progress** while
 its development session runs, **Review** while a pull request of a development's branch is open,

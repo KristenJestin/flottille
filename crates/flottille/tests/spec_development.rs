@@ -20,7 +20,8 @@ fn user() -> User {
     let user = User::with_fake_agent()
         .with_fake_gh()
         .with_fetcher()
-        .with_env("GIT_SSH_COMMAND", "false");
+        .with_env("GIT_SSH_COMMAND", "false")
+        .with_env("FLOTTILLE_TEST_CLOCK", "1");
     project(&user);
     user.call("extension.set", json!({"name": "specs", "enabled": true}))
         .unwrap();
@@ -379,4 +380,185 @@ fn nothing_launches_a_development_on_its_own_at_ready() {
         .call("workspace.list", json!({"project": "app"}))
         .unwrap();
     assert_eq!(workspaces["workspaces"], json!([]), "{workspaces}");
+}
+
+/// The spec's workspaces, by name.
+fn workspaces(user: &User) -> Vec<String> {
+    user.call("workspace.list", json!({"project": "app"}))
+        .unwrap()["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|workspace| workspace["name"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_resumed_development_puts_the_spec_back_in_progress() {
+    let user = user();
+    let spec = ready_spec(&user);
+    let answer = develop(&user, spec);
+    let agent = answer["agent"].as_str().unwrap();
+    user.call("agent.stop", json!({"agent": agent})).unwrap();
+    eventually("the spec back to ready", || status(&user, spec) == "ready");
+
+    user.call("agent.resume", json!({"agent": agent})).unwrap();
+
+    eventually("the spec in progress again", || {
+        status(&user, spec) == "in_progress"
+    });
+    // Its session ending again brings it back, as the first time.
+    user.call("agent.stop", json!({"agent": agent})).unwrap();
+    eventually("the spec back to ready", || status(&user, spec) == "ready");
+}
+
+#[test]
+fn a_development_that_ended_while_specs_was_off_does_not_leave_the_spec_in_progress() {
+    let user = user();
+    let spec = ready_spec(&user);
+    let answer = develop(&user, spec);
+    let agent = answer["agent"].as_str().unwrap();
+    user.call("extension.set", json!({"name": "specs", "enabled": false}))
+        .unwrap();
+    user.call("agent.stop", json!({"agent": agent})).unwrap();
+
+    user.call("extension.set", json!({"name": "specs", "enabled": true}))
+        .unwrap();
+
+    // The spec is read as what Flottille sees: no session runs behind it.
+    assert_eq!(status(&user, spec), "ready");
+    let listed = user.call("spec.list", json!({"project": "app"})).unwrap();
+    assert_eq!(listed["specs"][0]["status"], "ready", "{listed}");
+}
+
+#[test]
+fn a_done_spec_stays_done() {
+    let user = user();
+    let spec = ready_spec(&user);
+    let answer = develop(&user, spec);
+    let branch = answer["branch"].as_str().unwrap().to_owned();
+    let agent = answer["agent"].as_str().unwrap();
+    pulls(&user, json!({branch.as_str(): pull(4, &branch, "OPEN")}));
+    refresh(&user);
+    eventually("the spec in review", || status(&user, spec) == "review");
+    let mut merged = pull(4, &branch, "MERGED");
+    merged["updatedAt"] = json!("2999-01-02T00:00:00Z");
+    pulls(&user, json!({branch.as_str(): merged}));
+    refresh(&user);
+    eventually("the spec done", || status(&user, spec) == "done");
+
+    // A forge unset deletes the items of the project at the next round, the merged pull request
+    // with them.
+    user.call(
+        "project.set_settings",
+        json!({"name": "app",
+            "repositories": [{"path": ".", "forge": null}], "tracker": null}),
+    )
+    .unwrap();
+    user.call("test.advance", json!({"ms": 0})).unwrap();
+    eventually("the merged pull request forgotten", || {
+        let listed = user
+            .call("items.list", json!({"project": "app", "kind": "pull"}))
+            .unwrap();
+        listed["items"] == json!([])
+    });
+    user.call("agent.stop", json!({"agent": agent})).unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+
+    assert_eq!(status(&user, spec), "done");
+}
+
+#[test]
+fn a_draft_spec_is_untouched_by_pull_requests_and_by_sessions_ending() {
+    let user = user();
+    let spec = ready_spec(&user);
+    let answer = develop(&user, spec);
+    let branch = answer["branch"].as_str().unwrap().to_owned();
+    let agent = answer["agent"].as_str().unwrap();
+    user.call("agent.stop", json!({"agent": agent})).unwrap();
+    eventually("the spec back to ready", || status(&user, spec) == "ready");
+    user.call("spec.draft", json!({"spec": spec})).unwrap();
+
+    // Its branch gets a pull request.
+    pulls(&user, json!({branch.as_str(): pull(4, &branch, "OPEN")}));
+    refresh(&user);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(status(&user, spec), "draft");
+
+    // Its session starts again and ends again.
+    user.call("agent.resume", json!({"agent": agent})).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(status(&user, spec), "draft");
+    user.call("agent.stop", json!({"agent": agent})).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(status(&user, spec), "draft");
+}
+
+#[test]
+fn two_launches_at_the_same_moment_start_one_development() {
+    let user = user();
+    let spec = ready_spec(&user);
+
+    let answers: Vec<_> = std::thread::scope(|scope| {
+        let launches: Vec<_> = (0..2)
+            .map(|_| scope.spawn(|| user.call("spec.develop", json!({"spec": spec}))))
+            .collect();
+        launches
+            .into_iter()
+            .map(|launch| launch.join().unwrap())
+            .collect()
+    });
+
+    assert_eq!(
+        answers.iter().filter(|answer| answer.is_ok()).count(),
+        1,
+        "{answers:?}"
+    );
+    let refused = answers.iter().find_map(|answer| answer.as_ref().err());
+    assert_eq!(refused.unwrap().0, "refused", "{answers:?}");
+    let agents = user.call("agent.list", json!({"project": "app"})).unwrap();
+    assert_eq!(agents["agents"].as_array().unwrap().len(), 1, "{agents}");
+    // No workspace is left behind by the launch that was refused.
+    assert_eq!(workspaces(&user), [format!("spec-{spec}")]);
+}
+
+#[test]
+fn a_workspace_named_like_the_spec_does_not_block_its_development() {
+    let user = user();
+    let spec = ready_spec(&user);
+    user.call(
+        "workspace.create",
+        json!({"project": "app", "name": format!("spec-{spec}")}),
+    )
+    .unwrap();
+
+    let answer = develop(&user, spec);
+
+    assert_eq!(answer["workspace"], format!("spec-{spec}-2"), "{answer}");
+}
+
+#[test]
+fn a_failed_start_leaves_a_workspace_that_the_error_names_and_blocks_no_later_launch() {
+    let user = user();
+    let spec = ready_spec(&user);
+    // Every provider turned off: the session cannot start once the workspace is made.
+    std::fs::create_dir_all(user.path("config/flottille")).unwrap();
+    std::fs::write(
+        user.path("config/flottille/providers.toml"),
+        "[claude]\nenabled = false\n\n[opencode]\nenabled = false\n\n[codex]\nenabled = false\n",
+    )
+    .unwrap();
+
+    let (code, message) = user
+        .call("spec.develop", json!({"spec": spec}))
+        .unwrap_err();
+
+    assert_eq!(code, "refused", "{message}");
+    assert!(message.contains(&format!("spec-{spec}")), "{message}");
+    assert_eq!(workspaces(&user), [format!("spec-{spec}")]);
+    assert_eq!(status(&user, spec), "ready");
+
+    std::fs::remove_file(user.path("config/flottille/providers.toml")).unwrap();
+    let answer = develop(&user, spec);
+    assert_eq!(answer["workspace"], format!("spec-{spec}-2"), "{answer}");
 }
