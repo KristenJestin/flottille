@@ -264,6 +264,10 @@ impl Forged {
             .as_u64()
             .map(|n| format!("#{n}"))
             .unwrap_or_default();
+        let run = arguments["run"]
+            .as_u64()
+            .map(|n| format!("run {n}"))
+            .unwrap_or_default();
         let ticket = match field("ticket") {
             "" => "its ticket",
             key => key,
@@ -281,6 +285,10 @@ impl Forged {
             ("forge", "create") => ("Opened a pull request", field("title").to_owned()),
             ("forge", "merge") => ("Merged a pull request", field("repository").to_owned()),
             ("forge", "run") => ("Ran a pipeline", field("pipeline").to_owned()),
+            ("forge", "stop") => ("Stopped a pipeline", on(&run, &[field("repository")])),
+            ("forge", "step") if field("do") == "rerun" => {
+                ("Ran a job again", on(&run, &[field("step")]))
+            }
             ("forge", "comment") => ("Commented on a pull request", on(&number, &[field("body")])),
             ("forge", "edit") => (
                 "Edited a pull request",
@@ -300,6 +308,12 @@ impl Forged {
         let excerpt = excerpt.split_whitespace().collect::<Vec<_>>().join(" ");
         let excerpt = match excerpt.char_indices().nth(EXCERPT) {
             Some((cut, _)) => format!("{}…", &excerpt[..cut]),
+            None => excerpt,
+        };
+        // A pipeline's run is told with its link, which the daemon puts in the event when the
+        // forge gave it; it is added after the cut, which would lose its end.
+        let excerpt = match data["link"].as_str().filter(|_| said == "Ran a pipeline") {
+            Some(link) => format!("{excerpt} {link}"),
             None => excerpt,
         };
         Some(Forged {
@@ -977,6 +991,38 @@ mod tests {
         assert!(
             excerpt.ends_with('…') && excerpt.chars().count() == 121,
             "{excerpt}"
+        );
+    }
+
+    #[test]
+    fn the_window_links_a_pipeline_run_and_shows_stop_and_step() {
+        let mut ran = served(
+            "forge",
+            json!({"action": "run", "pipeline": "custom: deploy-preview"}),
+            "ok",
+        );
+        ran.data["link"] = json!("https://bitbucket.org/acme/api/pipelines/results/43");
+        let ran = Forged::of(&ran).unwrap();
+        assert_eq!(ran.said, "Ran a pipeline");
+        assert_eq!(
+            ran.excerpt,
+            "custom: deploy-preview https://bitbucket.org/acme/api/pipelines/results/43"
+        );
+        let said = |arguments: Value| {
+            Forged::of(&served("forge", arguments, "ok")).map(|f| (f.said, f.excerpt, f.ticket))
+        };
+        assert_eq!(
+            said(json!({"action": "stop", "repository": "api", "run": 7})),
+            Some(("Stopped a pipeline".into(), "run 7: api".into(), false))
+        );
+        assert_eq!(
+            said(json!({"action": "step", "run": 77, "step": "e2e", "do": "rerun"})),
+            Some(("Ran a job again".into(), "run 77: e2e".into(), false))
+        );
+        // A step that waits is started by nobody: that call is refused, and says nothing.
+        assert_eq!(
+            said(json!({"action": "step", "run": 77, "step": "e2e", "do": "start"})),
+            None
         );
     }
 
