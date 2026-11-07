@@ -181,6 +181,8 @@ pub struct Shell {
     compaction_noticed: bool,
     /// The compactor's provider and model, as `compaction.show` last said them.
     compactor_shown: Option<(String, Option<String>)>,
+    /// The last texts of the judge's and the compactor's notices, drawn while they fold away.
+    notices: [Option<String>; 2],
     /// The number of the latest request about the appearance (see [`Shell::ask_appearance`]).
     appearance_asked: u64,
     /// The open project's settings page; made again for another project.
@@ -341,6 +343,7 @@ impl Shell {
             compaction_picked: false,
             compaction_noticed: false,
             compactor_shown: None,
+            notices: [None, None],
             appearance_asked: 0,
             project_settings: None,
             add_project,
@@ -2058,7 +2061,14 @@ impl Shell {
 
     /// A notice of what Flottille chose for the user, bottom right: the Auto judge (`judge`), or
     /// the compactor. Its keys start with `judge-notice` or `compaction-notice`.
-    fn notice_card(&self, judge: bool, text: String, cx: &mut Context<Self>) -> impl IntoElement {
+    /// `present` false, it folds away and fades out with its last text.
+    fn notice_card(
+        &self,
+        judge: bool,
+        present: bool,
+        text: String,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let key = if judge {
             "judge-notice"
         } else {
@@ -2109,12 +2119,8 @@ impl Shell {
                     .test_support(),
             )
             .child(buttons);
-        div()
+        let card = div()
             .id(SharedString::from(key))
-            .absolute()
-            .bottom(px(16.))
-            .right(px(16.))
-            .w(px(380.))
             .child(enter(
                 part("-enter"),
                 0,
@@ -2126,7 +2132,13 @@ impl Shell {
                     })
                     .child(body),
             ))
-            .test_support()
+            .test_support();
+        div()
+            .absolute()
+            .bottom(px(16.))
+            .right(px(16.))
+            .w(px(380.))
+            .child(presence(part("-presence"), present, card))
     }
 
     /// Opens a project's settings at a repository's row or at its tasks, from its page.
@@ -2393,6 +2405,16 @@ impl Shell {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A notice keeps its last text while it folds away.
+        let (judge_notice, compaction_notice) = (self.judge_notice(), self.compaction_notice());
+        for (at, text) in [&judge_notice, &compaction_notice].into_iter().enumerate() {
+            if let Some(text) = text {
+                self.notices[at] = Some(text.clone());
+            }
+        }
+        let notices = self.notices.clone();
+        let (judge_notice, compaction_notice) =
+            (judge_notice.is_some(), compaction_notice.is_some());
         let p = palette(cx);
         let now = cx.background_executor().now();
         if self.bell_shown.is_running(now) {
@@ -2487,11 +2509,11 @@ impl Render for Shell {
             }))
             .child(self.top.clone())
             .child(body)
-            .when_some(self.judge_notice(), |d, text| {
-                d.child(self.notice_card(true, text, cx))
+            .when_some(notices[0].clone(), |d, text| {
+                d.child(self.notice_card(true, judge_notice, text, cx))
             })
-            .when_some(self.compaction_notice(), |d, text| {
-                d.child(self.notice_card(false, text, cx))
+            .when_some(notices[1].clone(), |d, text| {
+                d.child(self.notice_card(false, compaction_notice, text, cx))
             })
             .child(self.add_project.clone())
             .child(self.switcher.clone())

@@ -225,6 +225,8 @@ fn a_compactor_flottille_picked_is_said_once_in_a_notice_that_opens_settings(
             })
         })
     });
+    one_frame(cx);
+    assert!(present(cx, "compaction-notice"), "folding away");
     until(&shell, cx, "the daemon dropped the notice", |_| {
         shown(&user)["compactor"] == json!({"provider": "claude", "model": "haiku"})
     });

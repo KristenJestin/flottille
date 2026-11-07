@@ -2800,8 +2800,13 @@ fn a_judge_flottille_picked_is_said_once_in_a_notice_that_opens_settings(cx: &mu
     until(&shell, cx, "the notice is gone", |cx| {
         shell.read_with(cx, |s, _| s.judge_notice().is_none())
     });
-    cx.update(|window, _| assert!(window.try_find("judge-notice").is_none()));
+    // It folds away and fades out: still drawn a frame after, gone once settled.
+    cx.executor().advance_clock(Duration::from_millis(16));
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    cx.update(|window, _| assert!(window.try_find("judge-notice").is_some(), "folding away"));
     settle(cx);
+    cx.update(|window, _| assert!(window.try_find("judge-notice").is_none()));
     assert_eq!(
         settings_shown(cx),
         ["judge", "guidance"],
