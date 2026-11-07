@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="packaging/linux/icons/hicolor/256x256/apps/flottille.png" width="96" height="96" alt="Flottille's logo">
+  <img src="assets/brand/png/social-preview.png" alt="Flottille: coding agents on your own machine, with the window's session, its sub-agents and the Agents rail" width="100%">
 </p>
 
 # Flottille
