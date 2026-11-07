@@ -186,6 +186,9 @@ pub struct Shell {
     notices: [Option<String>; 2],
     /// The number of the latest request about the appearance (see [`Shell::ask_appearance`]).
     appearance_asked: u64,
+    /// Whether the texts the pages edit are to be read again when the link next reads the shell:
+    /// an edit made elsewhere while the link did not listen is no event of its.
+    texts_due: bool,
     /// The open project's settings page; made again for another project.
     project_settings: Option<Entity<ProjectSettingsPage>>,
     /// The form that adds a project, one for the window's life.
@@ -348,6 +351,7 @@ impl Shell {
             compactor_shown: None,
             notices: [None, None],
             appearance_asked: 0,
+            texts_due: true,
             project_settings: None,
             add_project,
             switcher,
@@ -743,10 +747,18 @@ impl Shell {
 
     fn apply(&mut self, update: Update, window: &mut Window, cx: &mut Context<Self>) {
         match update {
-            Update::Disconnected(_) => self.set_online(false, cx),
+            Update::Disconnected(_) => {
+                self.set_online(false, cx);
+                self.texts_due = true;
+            }
+            // The link subscribed to the events before it read: an edit made before that is in
+            // what the pages read, not in the events, so they read it again.
             Update::Snapshot(snapshot) => {
                 self.set_online(true, cx);
                 self.show(snapshot, window, cx);
+                if std::mem::take(&mut self.texts_due) {
+                    self.read_texts(cx);
+                }
             }
             Update::Done(outcome) => self.done(outcome, window, cx),
             Update::Providers(read, providers) => self.set_providers(read, providers, cx),
@@ -1735,6 +1747,42 @@ impl Shell {
         self.details_asked
     }
 
+    /// Asks the daemon for what the settings page edits.
+    fn read_settings(&mut self) {
+        self.actions.send(Command::RulesRead { project: None });
+        self.actions.send(Command::JudgeRead);
+        self.actions.send(Command::CompactionRead);
+        self.actions.send(Command::DeveloperRead);
+        self.actions.send(Command::ToolResultsRead);
+        self.actions.send(Command::SessionsRead);
+        self.actions
+            .send(Command::WorkspacesFolderRead { project: None });
+        self.actions.send(Command::Vault);
+        self.ask_appearance(None);
+    }
+
+    /// Reads again what the window shows of the daemon's settings, once the link listens to the
+    /// events: a page opened later reads for itself.
+    fn read_texts(&mut self, cx: &mut Context<Self>) {
+        if self.selected == Some(Selection::Settings) {
+            self.read_settings();
+        } else {
+            self.ask_appearance(None);
+        }
+        if let Some(name) = self
+            .project_settings
+            .as_ref()
+            .map(|page| page.read(cx).name().to_owned())
+        {
+            self.actions.send(Command::RulesRead {
+                project: Some(name.clone()),
+            });
+            self.actions.send(Command::WorkspacesFolderRead {
+                project: Some(name),
+            });
+        }
+    }
+
     fn set_online(&mut self, online: bool, cx: &mut Context<Self>) {
         if self.top.read(cx).online != online {
             self.top.update(cx, |top, cx| top.set_online(online, cx));
@@ -2335,16 +2383,7 @@ impl Shell {
             // A page opened afresh starts on its first tab; a link then chooses its own.
             self.settings.update(cx, |page, cx| page.choose(0, cx));
             self.actions.send(Command::ReadProviders);
-            self.actions.send(Command::RulesRead { project: None });
-            self.actions.send(Command::JudgeRead);
-            self.actions.send(Command::CompactionRead);
-            self.actions.send(Command::DeveloperRead);
-            self.actions.send(Command::ToolResultsRead);
-            self.actions.send(Command::SessionsRead);
-            self.actions
-                .send(Command::WorkspacesFolderRead { project: None });
-            self.actions.send(Command::Vault);
-            self.ask_appearance(None);
+            self.read_settings();
         }
         // Left, the services page stops reading the output it shows: nothing is in sight.
         if self.selected == Some(Selection::Services) && selection != Selection::Services {
