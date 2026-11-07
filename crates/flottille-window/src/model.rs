@@ -216,6 +216,11 @@ pub struct Session {
     /// The agent that started it for the user, by the name it goes by: `None` for a session the
     /// user started. Its title stays the first line of its brief.
     pub started_by: Option<String>,
+    /// The agent that leads it, by the name it goes by: `None` for a session no agent leads (one
+    /// handed to the user, or detached from its pilot).
+    pub led_by: Option<String>,
+    /// The session of the agent that leads it, whose row it sits under.
+    pub pilot: Option<String>,
 }
 
 /// One thing that waits for the user. Choosing it opens its session.
@@ -726,6 +731,10 @@ impl Snapshot {
                     created_at: number(agent, "created_at"),
                     commands: commands_of("root", &id),
                     started_by: agent["launched_by"].as_str().map(name_of),
+                    led_by: agent["led_by"].as_str().map(name_of),
+                    pilot: agent["led_by"]
+                        .as_str()
+                        .map(|pilot| root_of(&parents, pilot).to_owned()),
                     id,
                 }
             })

@@ -80,7 +80,7 @@ fn user() -> User {
             {"mcp": {"tool": "run", "arguments": {"task": "server"}}}]},
         {"when": "launch the builder", "do": [
             {"mcp": {"tool": "agent_launch",
-                "arguments": {"title": "builder", "brief": "build quietly"}}}]},
+                "arguments": {"kind": "child", "title": "builder", "brief": "build quietly"}}}]},
         {"when": "build quietly", "do": [{"say": "Building."}]}
     ]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();

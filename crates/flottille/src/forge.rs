@@ -1742,7 +1742,12 @@ fn remember(daemon: &Arc<Daemon>, project: &str, path: &str, forge: &Forge, pull
 
 /// `forge unsubscribe`: the agent's subscriptions to the workspace and repository it names, every
 /// one when it names none.
-fn forge_unsubscribe(daemon: &Daemon, agent: &str, place: &Place, asked: ForgeCall) -> Outcome {
+fn forge_unsubscribe(
+    daemon: &Arc<Daemon>,
+    agent: &str,
+    place: &Place,
+    asked: ForgeCall,
+) -> Outcome {
     if let Some(session) = &asked.session {
         if asked.workspace.is_some() || asked.repository.is_some() || asked.number.is_some() {
             return Outcome::Refused(
@@ -1758,7 +1763,9 @@ fn forge_unsubscribe(daemon: &Daemon, agent: &str, place: &Place, asked: ForgeCa
             ));
         }
         for subscription in &followed {
-            crate::subscriptions::end(daemon, subscription, "cancelled");
+            if crate::subscriptions::end(daemon, subscription, "cancelled") {
+                crate::tree::unfollowed(daemon, subscription);
+            }
         }
         return Outcome::Done(format!("You no longer follow {session}."));
     }

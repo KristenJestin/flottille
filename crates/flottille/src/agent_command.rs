@@ -90,6 +90,13 @@ pub enum AgentAction {
         #[arg(long)]
         json: bool,
     },
+    /// Take a session an agent started away from that agent: it becomes yours alone, its
+    /// questions come to you, and there is no undo
+    Detach {
+        agent: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Reload a root agent's tools: its process restarts on its conversation with the tools its
     /// role has now, once its turn ended, and it is told what changed
     ReloadTools {
@@ -322,6 +329,23 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                     "Resumed agent {} on its own session; it is {} now. Its next message starts it.",
                     text(&resumed["agent"], "id"),
                     text(&resumed["agent"], "state")
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        AgentAction::Detach { agent, json } => {
+            let detached = Client::connect_or_start(paths)?.request(
+                "agent.detach",
+                serde_json::to_value(AgentName { agent, after: None })?,
+            )?;
+            if json {
+                println!("{detached}");
+            } else {
+                println!(
+                    "Detached agent {} from agent {}: it is yours alone now, and its questions \
+                     come to you.",
+                    text(&detached["agent"], "id"),
+                    text(&detached["agent"], "detached_from")
                 );
             }
             Ok(ExitCode::SUCCESS)

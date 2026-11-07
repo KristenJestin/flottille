@@ -39,7 +39,7 @@ fn script() -> Value {
         .collect();
     json!({"turns": [
         {"when": "LEAD-LAUNCHES", "do": [
-            {"mcp": {"tool": "agent_launch", "arguments": {"title": "worker one",
+            {"mcp": {"tool": "agent_launch", "arguments": {"kind": "child", "title": "worker one",
                 "brief": "HANG while the pilot looks", "workspace": "w"}, "keep": "w1"}},
             {"say": "launched the worker"}]},
         {"when": "HANG", "do": [{"hang": true}]},
