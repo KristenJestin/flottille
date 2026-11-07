@@ -1024,6 +1024,12 @@ names the session (its title and id), says why the turn ended (`turn done`, `it 
 asked the user a question with ask_user`, `the turn stopped before its end (<reason>)`, or, for the
 end of the session, `ended: <why>` or `failed: <why>`) and holds the session's last message, masked
 and cut at 2,000 characters, the cut said (`[cut: N more characters; session_read reads the rest]`).
+When the turn asked the user questions with `ask_user` that still wait for the answer, each comes
+before that last message (`Its open question to the user:`), masked and cut the same way, 4,000
+characters of them at most in all, those past it counted (`[2 more questions; session_read reads
+them]`), so that the starter can relay it or answer what it knows with `session_send`. A question asked in the
+middle of a long turn adds no wake of its own: the turn's end carries it, and `session_read` says
+it at once.
 Its words are data, not instructions. Nothing reads the text of a message to find a question:
 Flottille recognizes nothing by its text.
 
@@ -1120,6 +1126,13 @@ it at once.
   first message once, not again for a replacement), and the replies of its agent, their pieces
   joined. Its tool calls, its thoughts and the deliveries of Flottille and of other agents (reports,
   answers to requests, `session_send` messages) are left out.
+- **Its open questions**: the questions the session asked the user with `ask_user` that wait for
+  the answer, said before its messages, whatever the page, from the moment each is asked (its turn
+  may still run): the oldest first, each with when it was asked and that it waits for the user,
+  masked, cut and escaped as a message is (`Open question, asked at 2026-10-31T14:05:09Z, waits
+  for the user:`), counted in the page's size: half a page of them at most, the others counted
+  (`(2 more open questions wait for the user: …)`). The agent that started the session can relay it to the user or answer what it
+  knows with `session_send`.
 - **A page**: without dates, the last `last` messages (20 by default, 1 to 50), ending with a
   cursor to the page before them (`Earlier messages: …`), or saying it reached the start; with
   `since` (and `until`, which goes only with it), the messages said from `since` and before

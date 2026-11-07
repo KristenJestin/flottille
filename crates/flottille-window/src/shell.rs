@@ -787,6 +787,26 @@ impl Shell {
                     page.update(cx, |page, cx| page.picture_read(name, image, cx));
                 }
             }
+            Outcome::QuestionAnswered {
+                session,
+                seq,
+                seqs,
+                refused,
+            } => {
+                // Kept by the window, not the page: a page opened again knows it was sent.
+                if refused.is_none() {
+                    crate::session::answers_sent(&session, &seqs, cx);
+                }
+                if let Some(page) = self
+                    .session_page
+                    .clone()
+                    .filter(|page| page.read(cx).id() == session)
+                {
+                    page.update(cx, |page, cx| {
+                        page.question_answered(seq, refused, window, cx)
+                    });
+                }
+            }
             Outcome::Replied {
                 session,
                 key,

@@ -53,3 +53,5 @@ rmcp = { version = "3.7.0", default-features = false, features = ["client", "tra
 # Only to give reqwest, under rmcp's test client, the crypto provider it insists on even for http.
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
 tempfile = "3.27.0"
+# To take a store back to what an older version wrote (the scenarios of #519).
+rusqlite = { version = "0.41.0", features = ["bundled", "fallible_uint"] }
