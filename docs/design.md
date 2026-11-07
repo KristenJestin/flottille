@@ -499,6 +499,25 @@ agent wrote is data.
    expired, the composer shows **Compact before sending**, ticked from the setting: unticked, the
    message goes to the session as it is; ticked, it compacts first even with the setting off. A
    message from Flottille itself (a child's news, a delivery) follows the setting.
+7. **The agent's own handoff**: **Summary written by** (`summary` in `compaction.toml`) is the
+   compactor (the default, all of the above) or **the agent itself**. Then, at the same moments
+   (the threshold at the end of a turn, or asked by hand) and with no compactor needed, Flottille
+   sends the agent a message of its own, shown as Flottille's and never as the user's, that asks
+   for its handoff in a fixed shape: its task, the decisions and why, the files touched, what is
+   done, what is left, what it was about to do. Its prompts wait meanwhile. A turn that goes on
+   past the threshold and reaches it plus 5 points (98 % at most) is cut to ask for it, and the
+   new session is told to go on from what it was about to do. The new session of the same agent
+   (same id, place in the tree, workspace, mode, model and effort) is sent its brief, the handoff
+   (`<your_handoff>`) and what Flottille holds of it (`<flottille_state>`: its place and branch,
+   its children, its subscriptions, its runs still running, the messages waiting), not the
+   latest messages. A handoff that fails (the agent errs, writes nothing, does not end its turn
+   within the compactor's time, or its process dies) still starts the new session, from
+   Flottille's state and the user's last message, and the line says the handoff is missing. While
+   the agents write their own handoff and **Automatic** is on, each CLI's own compaction is
+   turned off where it can be (`docs/agents.md`, "Compaction"). The threshold is the one above
+   (70 % by default, 50 % to 95 %): #405 asked for its own, at 90 %, and was built on this one
+   rather than add a second. The triggers around the cache's expiry stay the compactor's, when
+   one is chosen: a handoff would read the whole history again at full price.
 
 ## 6. Projects and workspaces
 
@@ -1084,8 +1103,8 @@ The plan is cut into GitHub milestones; each ends on something the user can use.
    daemon, in [`items.md`](items.md).
 5. **Remote**: network transport, phone, other machines.
 
-Flottille's own features beyond its core (the Auto judge, the compaction, built in today (§7.1,
-§5.8), later specs, review and a handbook) are proposed to become extensions, declared and turned on by the user: a proposal,
+Flottille's own features beyond its core (the Auto judge, the compaction, the agent's own handoff
+included, built in today (§7.1, §5.8), later specs, review and a handbook) are proposed to become extensions, declared and turned on by the user: a proposal,
 nothing built, in [`extensions.md`](extensions.md).
 
 ## 14. Defaults taken, to confirm

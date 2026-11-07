@@ -201,20 +201,29 @@ fn command() -> Result<Program, String> {
     Ok((program, vec!["bridge".into(), "claude".into()]))
 }
 
-/// The bare mode is in the session's options. With a compactor chosen, Claude Code compacts as
-/// late as it allows (`docs/agents.md`, "Compaction"): its override can only bring its threshold
-/// down, and 100 % leaves it at its default, whatever the user's environment says.
+/// The bare mode is in the session's options. While the agents write their own handoff, Claude
+/// Code's compaction is off; with a compactor chosen, it compacts as late as it allows
+/// (`docs/agents.md`, "Compaction"): its override can only bring its threshold down, and 100 %
+/// leaves it at its default, whatever the user's environment says.
 fn env(paths: &Paths, _agent: &Agent) -> Result<Env, String> {
-    Ok(late_compaction(crate::compaction::chosen(paths)))
+    Ok(compaction_env(
+        crate::compaction::hands_off(paths),
+        crate::compaction::chosen(paths),
+    ))
 }
 
-/// The variables that make Claude Code compact as late as it allows, when Flottille compacts.
-fn late_compaction(compactor: bool) -> Env {
-    match compactor {
-        true => vec![(COMPACT_AT.into(), "100".into())],
-        false => Vec::new(),
+/// The variables of Claude Code's own compaction: off (`off`), as late as it allows
+/// (`compactor`), or its own.
+fn compaction_env(off: bool, compactor: bool) -> Env {
+    match (off, compactor) {
+        (true, _) => vec![(COMPACT_OFF.into(), "1".into())],
+        (false, true) => vec![(COMPACT_AT.into(), "100".into())],
+        (false, false) => Vec::new(),
     }
 }
+
+/// Turns off Claude Code's automatic compaction, its compaction while idle and `/compact`.
+const COMPACT_OFF: &str = "DISABLE_COMPACT";
 
 /// Claude Code's auto-compact threshold, a percent of its window, which can only lower its default.
 const COMPACT_AT: &str = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE";
@@ -293,11 +302,18 @@ mod tests {
 
     #[test]
     fn none_leaves_claude_to_compact_on_its_own_and_a_compactor_makes_it_compact_late() {
-        assert!(late_compaction(false).is_empty());
+        assert!(compaction_env(false, false).is_empty());
         assert_eq!(
-            late_compaction(true),
+            compaction_env(false, true),
             vec![(COMPACT_AT.into(), "100".into())]
         );
+        // The agents writing their own handoff: off, whatever the compactor.
+        for compactor in [false, true] {
+            assert_eq!(
+                compaction_env(true, compactor),
+                vec![(COMPACT_OFF.into(), "1".into())]
+            );
+        }
         // The user's own value reaches the agent while Flottille does not compact.
         assert!(!withheld(COMPACT_AT));
     }
