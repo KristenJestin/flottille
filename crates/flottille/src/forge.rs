@@ -339,6 +339,9 @@ pub struct Log {
     pub total: usize,
     /// The lines are the failing command's, found by the forge's markers, not the log's end.
     pub part: bool,
+    /// The run and the step (a Bitbucket step's uuid, a GitHub job's id) whose whole log
+    /// `forge run_logs` reads.
+    pub whole: Option<(u64, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2026,6 +2029,7 @@ fn shown_pull(
     pull_text(
         &mut text,
         &format!("{} ({})", checkout.path, forge.slug()),
+        &checkout.path,
         pull,
         full,
         &again,
@@ -3066,7 +3070,15 @@ fn read_text(workspace: &Workspace, read: &Read, full: bool, asked: Option<&str>
             ));
             continue;
         };
-        pull_text(&mut text, &named, pull, full, &again, None);
+        pull_text(
+            &mut text,
+            &named,
+            &repository.path,
+            pull,
+            full,
+            &again,
+            None,
+        );
     }
     text
 }
@@ -3088,6 +3100,7 @@ fn comment_body(comment: &Comment) -> (String, bool) {
 fn pull_text(
     text: &mut String,
     named: &str,
+    repository: &str,
     pull: &Pull,
     full: bool,
     again: &str,
@@ -3142,7 +3155,7 @@ fn pull_text(
             text.push_str(&format!("  checks: {mark} ({})\n", each.join(", ")));
         }
     }
-    text.push_str(&logs::text(&pull.jobs));
+    text.push_str(&logs::text(&pull.jobs, repository));
     if let Some(ci) = &pull.ci {
         text.push_str(&format!("  {}\n", ci.line()));
     }

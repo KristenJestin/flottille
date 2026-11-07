@@ -11,7 +11,7 @@ use flottille_core::subscription::Subscription;
 use flottille_core::workspace::Workspace;
 use serde_json::{Value, json};
 
-use super::{BY_AGENT, Forge, Job, Pull, logs};
+use super::{BY_AGENT, Forge, Job, Log, Pull, logs};
 use crate::daemon::Daemon;
 use crate::session_read::form;
 use crate::subscriptions::{self, By, Event};
@@ -214,7 +214,7 @@ pub(super) fn lasted(seconds: u64) -> String {
 /// What a wake says of the checks that ended: `head`, then for each failed job its name, how long
 /// it took and the line that says why it failed, the others counted, and where the end of
 /// every log is. The wake weighs the agent's context at every turn; `forge show` holds the logs.
-fn summary(head: &str, jobs: &[(Job, Option<u64>)], more: usize) -> String {
+fn summary(head: &str, jobs: &[(Job, Option<u64>)], more: usize, repository: &str) -> String {
     let mut text = head.to_owned();
     for (job, took) in jobs {
         let took = took
@@ -228,6 +228,12 @@ fn summary(head: &str, jobs: &[(Job, Option<u64>)], more: usize) -> String {
         text.push_str(&format!("\n- {}{took}", job.name));
         if let Some(why) = why {
             text.push_str(&format!(": {why}"));
+        }
+        if let Some(Ok(Log {
+            whole: Some(whole), ..
+        })) = &job.log
+        {
+            text.push_str(&format!("\n  {}", logs::read_whole(repository, whole)));
         }
     }
     if more > 0 {
@@ -308,6 +314,7 @@ pub(crate) fn offer(
     };
     let (jobs, took): (Vec<Job>, Vec<Option<u64>>) = jobs.into_iter().unzip();
     let (daemon, subscription) = (daemon.clone(), subscription.clone());
+    let repository = repository.to_owned();
     READING
         .lock()
         .unwrap()
@@ -340,7 +347,7 @@ pub(crate) fn offer(
             .into_iter()
             .map(|mut event| {
                 if event.kind == "checks" {
-                    event.text = summary(&event.text, &jobs, more);
+                    event.text = summary(&event.text, &jobs, more, &repository);
                 }
                 event
             })
@@ -506,6 +513,30 @@ mod tests {
     }
 
     #[test]
+    fn the_failed_check_wake_says_how_to_read_the_whole_log() {
+        let job = Job {
+            name: "test".into(),
+            details: None,
+            log: Some(Ok(Log {
+                text: "error: test failed".into(),
+                shown: 1,
+                total: 80,
+                part: true,
+                whole: Some((900, "456".into())),
+            })),
+        };
+
+        let text = summary("The checks ended.", &[(job, None)], 0, "api");
+
+        assert!(
+            text.contains(
+                "- test: error: test failed\n  Read the whole log with forge {\"action\": \"run_logs\", \"repository\": \"api\", \"run\": 900, \"step\": \"456\"}."
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn a_job_with_no_log_says_why_whole() {
         let why = format!(
             "it is not a GitHub Actions job, see https://ci.example.com/{}",
@@ -517,7 +548,7 @@ mod tests {
             log: Some(Err(why.clone())),
         };
 
-        let text = summary("The checks ended.", &[(job, Some(14))], 0);
+        let text = summary("The checks ended.", &[(job, Some(14))], 0, "api");
 
         assert!(
             text.contains(&format!("- lint (14 s): no log: {why}")),
