@@ -116,7 +116,7 @@ fn mcp_session(user: &User, which: impl Fn(&str) -> bool) -> Mcp {
 fn launch(lead: &Mcp, what: &str, title: &str) -> String {
     let answer = lead.call(
         "agent_launch",
-        json!({"title": title, "brief": format!("{what} and {title}"), "workspace": "w"}),
+        json!({"kind": "child", "title": title, "brief": format!("{what} and {title}"), "workspace": "w"}),
     );
     assert!(!answer.error, "{}", answer.text);
     answer

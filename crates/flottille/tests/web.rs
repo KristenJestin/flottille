@@ -686,7 +686,7 @@ fn a_child_and_its_parent_share_one_budget_of_link_reads() {
     let opened = user.received_requests("session/new").len();
     let launched = lead.call(
         "agent_launch",
-        json!({"title": "reader", "brief": "Read the letters."}),
+        json!({"kind": "child", "title": "reader", "brief": "Read the letters."}),
     );
     assert!(!launched.error, "{}", launched.text);
     let (url, authorization) = server_of(&user, opened);

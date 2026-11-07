@@ -50,6 +50,16 @@ pub fn session_resume_id(id: &str) -> ElementId {
     ElementId::Name(format!("session-row-resume-{id}").into())
 }
 
+/// The element id of "Detach from …" in the row menu of a session an agent started.
+pub fn session_detach_id(id: &str) -> ElementId {
+    ElementId::Name(format!("session-row-detach-{id}").into())
+}
+
+/// The element id of the mark a led session's row starts with, whose tooltip names its pilot.
+pub fn session_led_id(id: &str) -> ElementId {
+    ElementId::Name(format!("session-led-{id}").into())
+}
+
 /// The element id of a session's row.
 pub fn session_id(id: &str) -> ElementId {
     ElementId::Name(format!("session-{id}").into())
@@ -543,6 +553,14 @@ impl ProjectNode {
         self.show_mark(cx);
     }
 
+    /// Its sessions' rows alone, as a fold under a session's row changed them.
+    pub fn set_rows(&mut self, sessions: Vec<Entity<SessionRow>>, cx: &mut Context<Self>) {
+        if self.sessions.read(cx).rows != sessions {
+            self.sessions
+                .update(cx, |level, cx| level.set(sessions, cx));
+        }
+    }
+
     fn show_mark(&mut self, cx: &mut Context<Self>) {
         let shown = self.held.filter(|_| !self.open);
         if self.mark.set(shown, cx) {
@@ -742,7 +760,17 @@ pub struct SessionRow {
     pull_shown: Option<PullRequest>,
     /// What its "⋯" menu offers: End session while it lives, Resume when it ended and can.
     actions: Actions,
+    /// The agent that started it, while it is not detached: its menu offers "Detach from …".
+    detach: Option<SharedString>,
     menu: Option<(Entity<Menu>, Subscription)>,
+    /// The agent that leads it, while its row sits under its pilot's: the row is indented, and a
+    /// mark before its title says who leads it.
+    led_by: Option<SharedString>,
+    /// What the mark said last, kept while it fades out.
+    led_said: SharedString,
+    /// How many led sessions sit under its row, and whether they are unfolded.
+    leads: usize,
+    open: bool,
     shell: WeakEntity<Shell>,
 }
 
@@ -775,9 +803,57 @@ impl SessionRow {
             pull: None,
             pull_shown: None,
             actions: Actions::None,
+            detach: None,
             menu: None,
+            led_by: None,
+            led_said: SharedString::default(),
+            leads: 0,
+            open: true,
             shell,
         }
+    }
+
+    /// The agent that leads it, while its row sits under its pilot's.
+    pub fn led_by(&self) -> Option<&str> {
+        self.led_by.as_deref()
+    }
+
+    pub fn set_led_by(&mut self, led_by: Option<&str>, cx: &mut Context<Self>) {
+        if self.led_by() != led_by {
+            self.led_by = led_by.map(|by| SharedString::from(by.to_owned()));
+            if let Some(by) = &self.led_by {
+                self.led_said = format!("led by {by}").into();
+            }
+            cx.notify();
+        }
+    }
+
+    /// How many led sessions sit under its row.
+    pub fn leads(&self) -> usize {
+        self.leads
+    }
+
+    pub fn set_leads(&mut self, leads: usize, cx: &mut Context<Self>) {
+        if self.leads != leads {
+            self.leads = leads;
+            cx.notify();
+        }
+    }
+
+    /// Whether the led sessions under its row are unfolded.
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
+    /// Folds or unfolds the led sessions under its row: the tree draws its level again.
+    pub fn toggle(&mut self, cx: &mut Context<Self>) {
+        self.open = !self.open;
+        cx.notify();
+        // The level reads this row: it is drawn again once this update is over.
+        let (shell, id) = (self.shell.clone(), self.id.clone());
+        cx.defer(move |cx| {
+            shell.update(cx, |shell, cx| shell.relist(&id, cx)).ok();
+        });
     }
 
     /// Says its project in its meta (the "Ended" group), or stops.
@@ -815,24 +891,46 @@ impl SessionRow {
         }
     }
 
-    /// What the row's menu offers: End session for a session that lives, Resume for an ended one
-    /// whose agent can resume, nothing else.
-    pub fn set_actions(&mut self, ended: bool, resumable: bool, cx: &mut Context<Self>) {
+    /// What the row's menu offers: End session for a session that lives, and "Detach from …"
+    /// while an agent that started it (`detach`) still has it; Resume for an ended one whose
+    /// agent can resume; nothing else.
+    pub fn set_actions(
+        &mut self,
+        ended: bool,
+        resumable: bool,
+        detach: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
         let actions = match (ended, resumable) {
             (false, _) => Actions::End,
             (true, true) => Actions::Resume,
             (true, false) => Actions::None,
         };
-        if self.actions == actions {
+        let detach = detach.filter(|_| actions == Actions::End);
+        if self.actions == actions && self.detach.as_deref() == detach {
             return;
         }
         self.actions = actions;
+        self.detach = detach.map(|by| SharedString::from(by.to_owned()));
+        let detach = self.detach.clone();
         self.menu = match actions {
             Actions::None => None,
             offered => {
                 let (shell, id) = (self.shell.clone(), self.id.clone());
                 let menu = cx.new(|cx| {
-                    let menu = Menu::new(session_menu_id(&id), "Session actions", cx);
+                    let mut menu = Menu::new(session_menu_id(&id), "Session actions", cx);
+                    if let Some(by) = detach {
+                        let (shell, id) = (shell.clone(), id.clone());
+                        menu = menu.entry(
+                            session_detach_id(&id),
+                            format!("Detach from {by}"),
+                            None,
+                            move |_, cx| {
+                                let id = id.clone();
+                                shell.update(cx, |shell, cx| shell.detach_of(&id, cx)).ok();
+                            },
+                        );
+                    }
                     match offered {
                         Actions::End => menu.entry(
                             session_end_id(&id),
@@ -1011,7 +1109,48 @@ impl Render for SessionRow {
             })
             .when_some(self.menu.as_ref(), |row, (menu, _)| {
                 row.actions(menu.clone(), menu.read(cx).is_open())
+            })
+            .when(self.leads > 0, |row| {
+                row.expanded(self.open)
+                    .on_toggle(cx.listener(|this, _, _, cx| this.toggle(cx)))
             });
+        // A led row is indented under its pilot's and starts with a mark that names it; both
+        // move over PANEL as the row comes under its pilot or leaves it.
+        let led = fade(
+            ElementId::Name(format!("session-led-fade-{}", self.id).into()),
+            self.led_by.is_some(),
+            PANEL,
+            window,
+            cx,
+        );
+        if led > 0.0 {
+            let p = palette(cx);
+            let mark = tipped(
+                div()
+                    .id(session_led_id(&self.id))
+                    .flex()
+                    .items_center()
+                    .h(px(MARK))
+                    .aria_label(self.led_said.clone())
+                    .child(
+                        flottille_ui::icon(Icon::Agents)
+                            .size(px(12.))
+                            .text_color(p.faint),
+                    ),
+                self.led_said.clone(),
+                MARK,
+                window,
+                cx,
+            );
+            row = row.leading(
+                div()
+                    .flex_none()
+                    .w(px(LED_MARK * led))
+                    .overflow_hidden()
+                    .opacity(led)
+                    .child(mark),
+            );
+        }
         let when = match &self.scope {
             Some(scope) => SharedString::from(format!("{scope} · {}", self.ago)),
             None => self.ago.clone(),
@@ -1076,9 +1215,14 @@ impl Render for SessionRow {
         if self.scope.is_none() {
             row = row.second(self.second_line(window, cx));
         }
-        row.trailing(trailing(id, self.commands, last, cx))
+        div()
+            .pl(space::LG * led)
+            .child(row.trailing(trailing(id, self.commands, last, cx)))
     }
 }
+
+/// The width of the mark a led session's row starts with.
+const LED_MARK: f32 = 14.;
 
 /// The words the pencil of a draft says.
 const DRAFT_SAID: &str = "Draft not sent";

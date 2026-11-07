@@ -100,6 +100,11 @@ pub enum Block {
         seq: u64,
         text: String,
     },
+    /// A question a led session asked its pilot with `ask`: the pilot answers it; the card only
+    /// shows the user what was asked.
+    Asked {
+        text: String,
+    },
     /// A command's result.
     Command(CommandCard),
     /// A request whose answer came as a card below: the line that told it was asked and decided
@@ -832,6 +837,13 @@ impl Conversation {
                 }));
                 changes
             }
+            "agent.asked" if data["to"] == "pilot" => {
+                let mut changes = self.close(Some(event.at));
+                changes.extend(self.push(Block::Asked {
+                    text: text("question"),
+                }));
+                changes
+            }
             "approval.requested" if data["held_by"] == "user" => {
                 let number = data["number"].as_u64().unwrap_or(0);
                 self.add_approval(number)
@@ -860,9 +872,10 @@ impl Conversation {
     }
 
     /// An `agent_launch` call, with its arguments when they came: a child of the agent, whose
-    /// list follows the calls, or a session for the user (`root`), which is not one.
+    /// list follows the calls, or a session (`led` or `handed`, `root` in a call made before
+    /// `kind`), which is not one.
     fn launch(&mut self, id: String, input: &Value) {
-        if input["root"] == true {
+        if input["root"] == true || matches!(input["kind"].as_str(), Some("led" | "handed")) {
             let title = input["title"].as_str().unwrap_or_default().to_owned();
             self.sessions.insert(id.clone(), title);
             if self.child_launches.remove(&id) && self.child_launches.is_empty() {
@@ -1524,9 +1537,15 @@ fn shown_args(value: &Value) -> String {
 /// A call's arguments as its line shows them: a page read or a search says its URL or its words,
 /// which are what it asks.
 fn args_of(tool: &str, input: &Value) -> String {
-    if let ("ask_user", Some(question)) = (tool, input["question"].as_str()) {
+    // `ask` goes where the daemon says for its caller, its parent, its pilot or the user: its
+    // line does not say who.
+    if let (tool @ ("ask_user" | "ask"), Some(question)) = (tool, input["question"].as_str()) {
         let first = question.lines().find(|line| !line.trim().is_empty());
-        return cut_args(format!("asked you: {}", first.unwrap_or_default().trim()));
+        let asked = match tool {
+            "ask" => "asks",
+            _ => "asked you",
+        };
+        return cut_args(format!("{asked}: {}", first.unwrap_or_default().trim()));
     }
     match (tool, input["url"].as_str().or(input["query"].as_str())) {
         ("web", Some(asked)) => cut_args(asked.to_owned()),
@@ -2007,6 +2026,35 @@ mod tests {
                 images: Vec::new(),
                 commands: None,
             }]
+        );
+    }
+
+    #[test]
+    fn a_led_session_s_question_to_its_pilot_is_shown_as_asked_of_it() {
+        let mut c = root();
+        c.apply(&event(
+            1,
+            "agent.asked",
+            json!({"agent": "r", "question": "Cover the logout too?", "to": "pilot",
+                "pilot": "0123456789ab"}),
+        ));
+        c.apply(&event(
+            2,
+            "agent.asked",
+            json!({"agent": "r", "question": "Cover the logout too?", "to": "user",
+                "moved_from": "0123456789ab"}),
+        ));
+        assert_eq!(
+            c.blocks(),
+            [
+                Block::Asked {
+                    text: "Cover the logout too?".into()
+                },
+                Block::Question {
+                    seq: 2,
+                    text: "Cover the logout too?".into()
+                }
+            ]
         );
     }
 

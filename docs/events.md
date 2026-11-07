@@ -692,15 +692,41 @@ lists it (`docs/cli.md`), and a pilot sees it with `events_since`.
 
 #### `agent.asked`
 
-The agent asked a question: a root of the user (`ask_user`), a child of its parent
-(`ask_parent`). A root's question is for the user: `flottille inbox` lists it, and a pilot sees it
-with `events_since`.
+The agent asked a question with `ask` (or `ask_user`, `ask_parent`, its old names): a child of its
+parent, a led session of its pilot, any other root of the user. A question to the user:
+`flottille inbox` lists it, and a pilot sees it with `events_since`. A question to a led
+session's pilot is shown in the session, and its pilot is woken at the turn's end. When the pilot
+no longer reads the session (it stops following it, it ends, or the user detaches the session),
+each question still open to it is written again, to the user, with `moved_from`: the pilot's are
+closed by it.
 
 | Field | |
 |---|---|
 | `agent` | |
 | `question` | Masked. |
-| `to` | `user` or `parent`. |
+| `to` | `user`, `parent` or `pilot`. |
+| `pilot` | With `to` `pilot`: the pilot's id; `null` otherwise. |
+| `moved_from` | Present on a question to the pilot moved to the user: the pilot's id. |
+
+#### `agent.detached`
+
+The user detached a session from the agent that started it (`agent.detach`): `launched_by` is
+`null` from then on and `detached_from` keeps that agent. There is no undo.
+
+| Field | |
+|---|---|
+| `agent` | The session. |
+| `from` | The agent it was detached from. |
+
+#### `agent.handed`
+
+A led session's pilot ended: the session goes on, handed to the user (`led_by` is `null` from then
+on), and it is told so once by a `handed` delivery.
+
+| Field | |
+|---|---|
+| `agent` | The session. |
+| `from` | Its pilot, which ended. |
 
 #### `agent.answered`
 
