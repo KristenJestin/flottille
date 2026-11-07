@@ -160,6 +160,31 @@ fn until(
     }
 }
 
+/// [`until`] for what the window reads on a timer of its own (the page's runs, each second): the
+/// test clock does not follow real time while the window is drawn, so the time that passes in
+/// each wait passes on it too, as it would in a real window.
+fn until_time_passes(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+    what: &str,
+    check: impl Fn(&mut VisualTestContext) -> bool,
+) {
+    const STEP: Duration = Duration::from_millis(25);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        if check(cx) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "{what} never happened");
+        std::thread::sleep(STEP);
+        cx.executor().advance_clock(STEP);
+    }
+}
+
 /// A fresh read of what the shell shows, on a connection of its own.
 fn fresh(user: &User) -> flottille_window::model::Snapshot {
     link::read_once((user.connector())().unwrap()).unwrap()
@@ -10552,7 +10577,7 @@ fn run_on_a_task_of_the_project_page_lists_its_run_and_opens_its_output(cx: &mut
     settle(cx);
 
     cx.update(|window, cx| window.click("run-task-say", cx));
-    until(&shell, cx, "its run ended and is listed", |cx| {
+    until_time_passes(&shell, cx, "its run ended and is listed", |cx| {
         tasks.read_with(cx, |t, cx| {
             t.commands()
                 .read(cx)
@@ -11430,7 +11455,7 @@ fn a_run_row_opens_the_run_drawer_and_escape_closes_it(cx: &mut TestAppContext) 
     });
     settle(cx);
     cx.update(|window, cx| window.click("run-task-say", cx));
-    until(&shell, cx, "its run ended and is listed", |cx| {
+    until_time_passes(&shell, cx, "its run ended and is listed", |cx| {
         tasks.read_with(cx, |t, cx| {
             t.commands()
                 .read(cx)
@@ -11473,6 +11498,46 @@ fn a_run_row_opens_the_run_drawer_and_escape_closes_it(cx: &mut TestAppContext) 
     assert!(tasks.read_with(cx, |t, cx| t.panel().read(cx).run().is_none()));
     // Gone, it asks for no frame: nothing is drawn at rest.
     assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 0);
+}
+
+#[gpui_kit::test]
+fn a_run_listed_while_running_is_listed_again_once_it_ended(cx: &mut TestAppContext) {
+    let user = user().with_fake_escalation();
+    let folder = project(&user, "atlas");
+    let hold = folder.join("hold.sh");
+    std::fs::write(&hold, "#!/bin/sh\nwhile [ ! -e go ]; do sleep 0.05; done\n").unwrap();
+    std::fs::set_permissions(&hold, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    user.call(
+        "task.add",
+        json!({"project": "atlas", "name": "hold", "line": "./hold.sh"}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    open_project(&shell, "atlas", cx);
+    let tasks = page_of(&shell, cx).read_with(cx, |page, _| page.tasks().clone());
+    until(&shell, cx, "the task is shown", |cx| {
+        tasks.read_with(cx, |t, _| t.tasks().is_some_and(|t| !t.is_empty()))
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("run-task-hold", cx));
+    until(&shell, cx, "its run is listed running", |cx| {
+        tasks.read_with(cx, |t, cx| {
+            t.commands().read(cx).rows().iter().any(|row| row.running())
+        })
+    });
+
+    std::fs::write(folder.join("go"), "").unwrap();
+
+    until_time_passes(&shell, cx, "its run ended and is listed", |cx| {
+        tasks.read_with(cx, |t, cx| {
+            t.commands()
+                .read(cx)
+                .rows()
+                .iter()
+                .all(|row| !row.running())
+        })
+    });
 }
 
 #[gpui_kit::test]
