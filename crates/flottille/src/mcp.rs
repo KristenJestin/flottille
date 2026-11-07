@@ -3077,10 +3077,10 @@ mod tests {
             let name = format!("mcp__flottille__{}", definition.name);
             assert!(
                 claude::PROVIDER
-                    .tools(true, false, true, true, false)
+                    .tools(true, false, true, true, true)
                     .contains(&name)
                     || claude::PROVIDER
-                        .tools(false, false, true, true, false)
+                        .tools(false, false, true, true, true)
                         .contains(&name),
                 "{} is a tool agents get",
                 definition.name
