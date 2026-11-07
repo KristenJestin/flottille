@@ -1888,8 +1888,14 @@ async fn workspace_says(
                 "show" => Ok(Vec::new()),
                 "prepare" => {
                     if daemon.preparing.lock().unwrap().contains(&workspace.id) {
+                        let removing = daemon
+                            .removing_workspaces
+                            .lock()
+                            .unwrap()
+                            .contains(&workspace.id);
+                        let doing = if removing { "removed" } else { "prepared" };
                         return Err(Outcome::Refused(format!(
-                            "refused: workspace {name} is being prepared: workspace show follows \
+                            "refused: workspace {name} is being {doing}: workspace show follows \
                              it"
                         )));
                     }
