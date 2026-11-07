@@ -308,3 +308,166 @@ fn vault_set_reads_stdin_not_an_argument() {
         json!([])
     );
 }
+
+#[test]
+fn a_secret_set_while_an_agent_runs_is_masked_in_what_it_says() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "tell", "do": [
+            {"wait": 3000},
+            {"say": format!("the jira token is {SECRET}, keep it")}
+        ]}
+    ]}));
+    project(&user, "app");
+    let answer = user
+        .call("agent.run", json!({"project": "app", "message": "tell"}))
+        .unwrap();
+    let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+    let after = answer["after"].as_u64().unwrap();
+
+    // The agent's process runs, its masking already made: the secret comes after it.
+    let of = id.clone();
+    user.watch(&["--after", &after.to_string()])
+        .until(|e| e["data"]["agent"] == of.as_str() && e["name"] == "agent.prompted");
+    set_jira(&user);
+    let of = id.clone();
+    user.watch(&["--after", &after.to_string()])
+        .until(|e| e["data"]["agent"] == of.as_str() && e["name"] == "agent.turn_ended");
+
+    let page = user
+        .call("agent.read", json!({"agent": id, "after": 0}))
+        .unwrap()
+        .to_string();
+    assert!(!page.contains(SECRET), "{page}");
+    assert!(
+        page.contains("the jira token is [masked], keep it"),
+        "{page}"
+    );
+    let events = user.watch(&["--after", "0"]).within(Duration::from_secs(1));
+    let changed = events
+        .iter()
+        .position(|e| e["name"] == "vault.changed")
+        .unwrap();
+    let said = events
+        .iter()
+        .rposition(|e| e["name"] == "agent.message")
+        .unwrap();
+    assert!(
+        changed < said,
+        "the secret was set before it was said: {events:?}"
+    );
+    let events = serde_json::to_string(&events).unwrap();
+    assert!(!events.contains(SECRET), "{events}");
+    assert!(files_holding(&user.path("state"), SECRET).is_empty());
+}
+
+#[test]
+fn a_remove_the_locked_keyring_refuses_keeps_the_entry_to_try_again() {
+    let user = User::new();
+    set_jira(&user);
+    let keyring = user.path("config/flottille/keyring.toml");
+    std::fs::write(&keyring, "backend = \"memory\"\nlocked = true\n").unwrap();
+
+    // The daemon says once, at its start, that its keyring is its memory.
+    let log = std::fs::read_to_string(user.path("state/flottille/daemon.log")).unwrap();
+    assert_eq!(
+        log.matches("the vault's keyring is the daemon's memory")
+            .count(),
+        1,
+        "{log}"
+    );
+
+    let (code, message) = user
+        .call("vault.remove", json!({"name": "jira"}))
+        .unwrap_err();
+    assert_eq!(code, "unavailable");
+    assert!(message.contains("locked"), "{message}");
+    assert_eq!(
+        listed_names(&user),
+        ["jira"],
+        "the entry stays, to be removed once the keyring is unlocked"
+    );
+
+    std::fs::write(&keyring, "backend = \"memory\"\n").unwrap();
+    user.call("vault.remove", json!({"name": "jira"})).unwrap();
+    assert!(listed_names(&user).is_empty());
+}
+
+fn listed_names(user: &User) -> Vec<String> {
+    user.call("vault.list", json!({})).unwrap()["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["name"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn ctrl_c_at_the_secret_s_prompt_gives_the_terminal_its_echo_back() {
+    use std::io::Read;
+    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+
+    let user = User::new();
+    let (mut master, mut slave) = (0, 0);
+    // SAFETY: openpty fills the two descriptors it opens.
+    let opened = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    assert_eq!(opened, 0);
+    // SAFETY: both were just opened and are owned here alone.
+    let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+    let echoes = || {
+        // SAFETY: tcgetattr only reads the terminal's flags.
+        let mut flags: libc::termios = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::tcgetattr(slave_raw(&slave), &mut flags) }, 0);
+        flags.c_lflag & libc::ECHO != 0
+    };
+    fn slave_raw(fd: &OwnedFd) -> i32 {
+        use std::os::fd::AsRawFd;
+        fd.as_raw_fd()
+    }
+    assert!(echoes());
+
+    let mut command = user.command(&["vault", "set", "jira"]);
+    command
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    // SAFETY: setsid and ioctl are async-signal-safe: the pty becomes the child's terminal, so
+    // that ^C sends it SIGINT as a shell's terminal would.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 || libc::ioctl(0, libc::TIOCSCTTY, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let mut prompt = Vec::new();
+    let mut byte = [0u8; 1];
+    while !prompt.ends_with(b": ") {
+        assert_eq!(stderr.read(&mut byte).unwrap(), 1, "the prompt");
+        prompt.push(byte[0]);
+    }
+    eventually("the echo is off at the prompt", || !echoes());
+
+    let mut master = std::fs::File::from(master);
+    std::io::Write::write_all(&mut master, b"\x03").unwrap();
+    let status = child.wait().unwrap();
+
+    assert!(!status.success(), "{status:?}");
+    assert!(
+        echoes(),
+        "the terminal echoes again once the command is interrupted"
+    );
+}

@@ -5,6 +5,7 @@
 //! the daemon stores and shows (`secrets::add_vault_value`).
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use flottille_core::paths::Paths;
@@ -33,29 +34,53 @@ const ENTRY: &str = "flottille-entry";
 pub enum Keyring {
     /// The Secret Service of the session (`oo7`).
     Os,
-    /// The daemon's memory: lost when it stops.
-    Memory(Mutex<HashMap<String, String>>),
+    /// The daemon's memory: lost when it stops. Its file is read again at each use: `locked =
+    /// true` there plays a locked keyring, for the tests.
+    Memory {
+        kept: Mutex<HashMap<String, String>>,
+        file: PathBuf,
+    },
 }
+
+/// What a locked keyring answers: nothing waits for the user to unlock it.
+pub const LOCKED: &str = "the keyring is locked: the user must unlock it in their session, then \
+                          try again";
 
 impl Keyring {
     /// The keyring the configuration chooses: the system's unless the tests' file says otherwise.
     pub fn open(paths: &Paths) -> Keyring {
-        let chosen = std::fs::read_to_string(paths.config.join(CHOICE))
-            .ok()
-            .and_then(|text| text.parse::<toml_edit::DocumentMut>().ok())
-            .and_then(|document| document["backend"].as_str().map(str::to_owned));
-        match chosen.as_deref() {
-            Some("memory") => Keyring::Memory(Mutex::new(HashMap::new())),
+        let file = paths.config.join(CHOICE);
+        match setting(&file, "backend").as_deref() {
+            Some("memory") => {
+                eprintln!(
+                    "flottille daemon: the vault's keyring is the daemon's memory ({}): its \
+                     secrets are lost when it stops",
+                    file.display()
+                );
+                Keyring::Memory {
+                    kept: Mutex::new(HashMap::new()),
+                    file,
+                }
+            }
             _ => Keyring::Os,
         }
     }
 
+    /// The memory's map, or `LOCKED` when its file says so.
+    fn memory<'a>(
+        kept: &'a Mutex<HashMap<String, String>>,
+        file: &Path,
+    ) -> Result<std::sync::MutexGuard<'a, HashMap<String, String>>, String> {
+        if setting(file, "locked").as_deref() == Some("true") {
+            return Err(LOCKED.to_owned());
+        }
+        Ok(kept.lock().unwrap())
+    }
+
     async fn store(&self, name: &str, secret: &str) -> Result<(), String> {
         match self {
-            Keyring::Memory(kept) => {
-                kept.lock()
-                    .unwrap()
-                    .insert(name.to_owned(), secret.to_owned());
+            Keyring::Memory { kept, file } => {
+                Self::memory(kept, file)?.insert(name.to_owned(), secret.to_owned());
                 Ok(())
             }
             Keyring::Os => {
@@ -73,9 +98,11 @@ impl Keyring {
         }
     }
 
+    /// The secret of `name`, or `LOCKED` at once: a locked item is never read, which would ask
+    /// the user to unlock it and wait.
     async fn read(&self, name: &str) -> Result<Option<String>, String> {
         match self {
-            Keyring::Memory(kept) => Ok(kept.lock().unwrap().get(name).cloned()),
+            Keyring::Memory { kept, file } => Ok(Self::memory(kept, file)?.get(name).cloned()),
             Keyring::Os => {
                 let keyring = os().await?;
                 let items = keyring
@@ -85,6 +112,9 @@ impl Keyring {
                 let Some(item) = items.first() else {
                     return Ok(None);
                 };
+                if item.is_locked().await.map_err(said)? {
+                    return Err(LOCKED.to_owned());
+                }
                 let secret = item.secret().await.map_err(said)?;
                 String::from_utf8(secret.as_bytes().to_vec())
                     .map(Some)
@@ -95,8 +125,8 @@ impl Keyring {
 
     async fn delete(&self, name: &str) -> Result<(), String> {
         match self {
-            Keyring::Memory(kept) => {
-                kept.lock().unwrap().remove(name);
+            Keyring::Memory { kept, file } => {
+                Self::memory(kept, file)?.remove(name);
                 Ok(())
             }
             Keyring::Os => os()
@@ -106,6 +136,18 @@ impl Keyring {
                 .map_err(said),
         }
     }
+}
+
+/// A key of the keyring's file, as text.
+fn setting(file: &Path, key: &str) -> Option<String> {
+    let document = std::fs::read_to_string(file)
+        .ok()?
+        .parse::<toml_edit::DocumentMut>()
+        .ok()?;
+    let item = document.get(key)?;
+    item.as_str()
+        .map(str::to_owned)
+        .or_else(|| item.as_bool().map(|on| on.to_string()))
 }
 
 async fn os() -> Result<oo7::Keyring, String> {
@@ -166,14 +208,22 @@ pub async fn call(
         }
         "vault.remove" => {
             let Remove { name } = serde_json::from_value(params)?;
-            let removed = daemon.write(|store| store.remove_vault_entry(&name))?;
-            let Some(removed) = removed else {
+            let entries = daemon.read(|store| store.vault_entries())?;
+            if !entries.iter().any(|entry| entry.name == name) {
+                return Err(Failure::new(
+                    "not-found",
+                    format!("the vault has no entry {name}"),
+                ));
+            }
+            // The secret first: a keyring that refuses (locked) leaves the entry whole, to be
+            // removed again once it is unlocked.
+            daemon.vault.delete(&name).await.map_err(unavailable)?;
+            let Some(removed) = daemon.write(|store| store.remove_vault_entry(&name))? else {
                 return Err(Failure::new(
                     "not-found",
                     format!("the vault has no entry {name}"),
                 ));
             };
-            daemon.vault.delete(&name).await.map_err(unavailable)?;
             retool(&daemon);
             Ok(json!({"removed": removed.to_json()}))
         }
@@ -277,6 +327,10 @@ pub async fn load(daemon: &Daemon) {
     }
 }
 
+/// How long a tool's use of a secret waits for the keyring: no tool call waits for a human, and a
+/// keyring that asks to be unlocked is answered `LOCKED` at once.
+const SECRET_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// The secret of the entry `name`, for a tool of Flottille's to put where it goes (an HTTP header,
 /// a command's standard input) on behalf of an agent of `project`: never to be returned, logged
 /// or shown. An entry of another project is no entry for it.
@@ -288,16 +342,25 @@ pub async fn secret(daemon: &Daemon, project: &str, name: &str) -> Result<String
     let entries = daemon
         .read(|store| store.vault_entries())
         .map_err(|error| error.to_string())?;
+    given(&entries, &daemon.vault, project, name).await
+}
+
+/// `secret`, with the entries and the keyring at hand.
+async fn given(
+    entries: &[Entry],
+    keyring: &Keyring,
+    project: &str,
+    name: &str,
+) -> Result<String, String> {
     if !entries
         .iter()
         .any(|entry| entry.name == name && entry.seen_by(project))
     {
         return Err(format!("the vault has no entry {name} for this project"));
     }
-    daemon
-        .vault
-        .read(name)
-        .await?
+    tokio::time::timeout(SECRET_WAIT, keyring.read(name))
+        .await
+        .map_err(|_| format!("the keyring did not answer in time: {LOCKED}"))??
         .ok_or_else(|| format!("the keyring no longer holds the secret of {name}"))
 }
 
@@ -347,4 +410,64 @@ pub fn tool(daemon: &Daemon, grant: &Grant, args: Value) -> Outcome {
     Outcome::Done(format!(
         "The vault's entries (give a name to the tool that needs its secret):\n{text}"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(name: &str, project: Option<&str>) -> Entry {
+        Entry {
+            name: name.into(),
+            description: None,
+            url: None,
+            username: None,
+            project: project.map(str::to_owned),
+            updated_at: 0,
+        }
+    }
+
+    fn memory(file: &Path) -> Keyring {
+        Keyring::Memory {
+            kept: Mutex::new(HashMap::from([(
+                "deploy".to_owned(),
+                "dep10y-key".to_owned(),
+            )])),
+            file: file.to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn another_project_s_entry_is_not_given_to_a_tool() {
+        let dir = tempfile::tempdir().unwrap();
+        let keyring = memory(&dir.path().join("keyring.toml"));
+        let entries = [entry("deploy", Some("app"))];
+
+        let refused = given(&entries, &keyring, "other", "deploy")
+            .await
+            .unwrap_err();
+        assert!(refused.contains("no entry deploy"), "{refused}");
+        assert!(!refused.contains("dep10y-key"), "{refused}");
+        assert_eq!(
+            given(&entries, &keyring, "app", "deploy").await.unwrap(),
+            "dep10y-key"
+        );
+        assert!(given(&entries, &keyring, "app", "unknown").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_locked_keyring_is_answered_at_once_never_waited_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("keyring.toml");
+        std::fs::write(&file, "backend = \"memory\"\nlocked = true\n").unwrap();
+        let keyring = memory(&file);
+        let entries = [entry("deploy", None)];
+
+        let asked = std::time::Instant::now();
+        let refused = given(&entries, &keyring, "app", "deploy")
+            .await
+            .unwrap_err();
+        assert!(asked.elapsed() < SECRET_WAIT, "answered at once");
+        assert_eq!(refused, LOCKED);
+    }
 }
