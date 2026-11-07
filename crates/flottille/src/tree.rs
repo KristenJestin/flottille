@@ -14,6 +14,7 @@ use flottille_core::approval::{self, Decision, Request};
 use flottille_core::protocol::AgentTrees;
 use flottille_core::secrets;
 use flottille_core::store::{AgentChange, Store, now_ms};
+use flottille_core::subscription::Subscription;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -1419,11 +1420,13 @@ fn ask(daemon: &Arc<Daemon>, caller: &Agent, tool: &str, args: Value) -> Done {
 }
 
 /// The agent that leads `agent`'s session and still follows it: where its questions go
-/// (`docs/tools.md`, "Where a question goes"). A pilot that ended its subscription is no longer
-/// woken, so the session's questions go to the user.
+/// (`docs/tools.md`, "Where a question goes"). A pilot that ended its subscription, or whose
+/// following is paused, is not woken, so the session's questions go to the user.
 pub fn pilot_of(daemon: &Daemon, agent: &Agent) -> Option<String> {
     let pilot = agent.launched_by.as_ref().filter(|_| agent.led)?;
-    (!crate::subscriptions::following(daemon, pilot, Some(&agent.id)).is_empty())
+    crate::subscriptions::following(daemon, pilot, Some(&agent.id))
+        .iter()
+        .any(|following| following.seen["paused"] != true)
         .then(|| pilot.clone())
 }
 
@@ -1505,6 +1508,76 @@ pub fn detach(daemon: &Arc<Daemon>, id: &str) -> Result<Agent, Failure> {
         .ok_or_else(|| Failure::new("not-found", format!("there is no agent {id}")))
 }
 
+/// The pilot no longer reads `session` (it stopped following it, it ended, or the user detached
+/// the session): the questions still open to it are asked again of the user (`agent.asked` to
+/// the user, `moved_from` the pilot), which closes the pilot's, so that the session waits on the
+/// user and the inbox shows them. How many went.
+pub fn questions_to_user(daemon: &Daemon, session: &Agent, pilot: &str) -> usize {
+    if session.parent.is_some() || !session.waiting_on_answer || session.state.is_final() {
+        return 0;
+    }
+    let open = unanswered_to(daemon, &session.id, "pilot").unwrap_or_default();
+    for question in &open {
+        let _ = daemon.write(|store| {
+            let (_, event) = store.change_agent(
+                &session.id,
+                AgentChange::default(),
+                Some((
+                    "agent.asked",
+                    json!({"agent": session.id, "question": question["question"], "to": "user",
+                        "pilot": null, "moved_from": pilot}),
+                )),
+            )?;
+            Ok(((), event))
+        });
+    }
+    open.len()
+}
+
+/// What a session its pilot no longer reads is told of its questions that went to the user.
+pub fn moved_said(moved: usize) -> String {
+    match moved {
+        0 => String::new(),
+        1 => " Your question still open went to the user.".into(),
+        n => format!(" Your {n} questions still open went to the user."),
+    }
+}
+
+/// The pilot stopped following the session it leads (`forge unsubscribe`, or the user's Cancel):
+/// the session stays led, but its questions now go to the user, those still open to the pilot
+/// too, and it is told once.
+pub fn unfollowed(daemon: &Arc<Daemon>, following: &Subscription) {
+    let Some(id) = following.target["session"].as_str() else {
+        return;
+    };
+    let Ok(Some(session)) = daemon.read(|store| store.agent(id)) else {
+        return;
+    };
+    if session.state.is_final()
+        || !session.led
+        || session.launched_by.as_deref() != Some(following.agent.as_str())
+    {
+        return;
+    }
+    let moved = questions_to_user(daemon, &session, &following.agent);
+    let name = match daemon.read(|store| store.agent(&following.agent)) {
+        Ok(Some(pilot)) => named(&pilot),
+        _ => format!("agent {}", following.agent),
+    };
+    deliveries::deliver(
+        daemon,
+        &session.id,
+        "unfollowed",
+        Some(format!("unfollowed-{}-{}", session.id, following.id)),
+        &format!(
+            "{name}, which leads this session, no longer follows it: what you need answered now \
+             goes through ask to the user.{}",
+            moved_said(moved)
+        ),
+        approval::BETWEEN_TURNS,
+    );
+}
+
 /// The pilot ended: the sessions it led go on, handed to the user, each told once.
 fn hand_over(daemon: &Arc<Daemon>, pilot: &Agent) {
     let Ok(agents) = daemon.read(|store| store.agents()) else {
@@ -1531,6 +1604,7 @@ fn hand_over(daemon: &Arc<Daemon>, pilot: &Agent) {
         if session.state.is_final() {
             continue;
         }
+        let moved = questions_to_user(daemon, &session, &pilot.id);
         deliveries::deliver(
             daemon,
             &session.id,
@@ -1539,8 +1613,9 @@ fn hand_over(daemon: &Arc<Daemon>, pilot: &Agent) {
             &format!(
                 "{}, which led this session, ended. The session goes on, handed to the user: what \
                  you need answered now goes through ask to the user, and that agent no longer \
-                 reads you.",
-                named(pilot)
+                 reads you.{}",
+                named(pilot),
+                moved_said(moved)
             ),
             approval::BETWEEN_TURNS,
         );
@@ -2143,19 +2218,40 @@ pub fn unanswered_to(daemon: &Daemon, id: &str, to: &str) -> Result<Vec<Value>, 
         })
     };
     let limit = last("agent.replaced")?.max(last("agent.resumed")?);
-    // When the newest message of the user the root took was written.
-    let answered = daemon
+    let taken: Vec<_> = daemon
         .read(|store| store.last_deliveries_of(id, answers, 64))?
         .into_iter()
         .filter(|delivery| matches!(delivery.state.as_str(), "sending" | "sent"))
-        .map(|delivery| delivery.created_at)
-        .max();
+        .collect();
+    // When the newest answer the root took was written: a message of the user's, or for a
+    // question to its pilot, a `session_send` of that pilot, whose key names it.
+    let answered = |pilot: Option<&str>| {
+        taken
+            .iter()
+            .filter(|delivery| {
+                to != "pilot"
+                    || pilot
+                        .is_some_and(|pilot| delivery.id.starts_with(&format!("session-{pilot}-")))
+            })
+            .map(|delivery| delivery.created_at)
+            .max()
+    };
     let mut asked = daemon.read(|store| store.last_agent_events(id, "agent.asked", 50))?;
     asked.reverse();
+    // The questions moved to the user were asked of them again: the pilot's are closed.
+    let moved = asked
+        .iter()
+        .filter(|event| !event.data["moved_from"].is_null())
+        .map(|event| event.seq)
+        .max()
+        .unwrap_or(0);
     Ok(asked
         .into_iter()
         .filter(|event| event.seq > limit && event.data["to"] == to)
-        .filter(|event| answered.is_none_or(|written| written <= event.at))
+        .filter(|event| to != "pilot" || event.seq > moved)
+        .filter(|event| {
+            answered(event.data["pilot"].as_str()).is_none_or(|written| written <= event.at)
+        })
         .map(|event| json!({"seq": event.seq, "at": event.at, "question": event.data["question"]}))
         .collect())
 }

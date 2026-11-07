@@ -1069,7 +1069,12 @@ window does not show) says it for that session: a led session's questions go thr
 pilot, who answers with `session_send`, and the user may also write to it directly; a handed
 session's go through `ask` to the user's inbox, and the agent that started it hears nothing more
 of it unless the session writes to it with `session_send`. A pilot relays to the user, with its own
-`ask`, what only the user can decide. A question left in a report or in a last message is a
+`ask`, what only the user can decide. Only the pilot's `session_send` answers a question asked of
+it; another session's message does not. While the following is paused, or once it ended, a led
+session's questions go to the user. When the pilot stops reading the session (`forge unsubscribe`,
+the user's Cancel, or its end), the questions still open to it go to the user's
+inbox at once, the session no longer waits on its pilot, and it is told once (an `unfollowed`
+delivery, or the `handed` one, saying how many went). A question left in a report or in a last message is a
 follow-up, not a wait. The descriptions of `ask`, `report` and `session_send` say so, under the
 2,048 characters their limit asks.
 

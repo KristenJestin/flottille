@@ -3783,6 +3783,16 @@ fn judge_prompts(user: &User) -> Vec<String> {
 /// A lead in `mode` starts a session for the user in `main` with `brief`, allowed by the judge
 /// in Auto or by the user in Ask: the new root's id and its MCP session.
 fn launched_root(user: &User, mode: &str, brief: &str) -> (String, String, Mcp) {
+    launched_root_of_kind(user, mode, brief, "handed")
+}
+
+/// The same, the session of `kind`: `handed`, or `led` by the lead.
+fn launched_root_of_kind(
+    user: &User,
+    mode: &str,
+    brief: &str,
+    kind: &str,
+) -> (String, String, Mcp) {
     on_github(user);
     many_issues(user);
     let (lead, mcp) = root_in(user, None);
@@ -3791,7 +3801,7 @@ fn launched_root(user: &User, mode: &str, brief: &str) -> (String, String, Mcp) 
     let opened = user.received_requests("session/new").len();
     let answer = mcp.call(
         "agent_launch",
-        json!({"title": "Second", "brief": brief, "kind": "handed"}),
+        json!({"title": "Second", "brief": brief, "kind": kind}),
     );
     if mode == "ask" {
         allow(user, held(&answer));
@@ -3943,6 +3953,34 @@ fn a_detached_session_may_start_a_session_in_its_mode() {
         .find(|a| a["title"] == "Third")
         .unwrap();
     assert_eq!(third["launched_by"], second.as_str());
+}
+
+#[test]
+fn a_led_session_s_own_led_launch_is_held_for_the_user() {
+    let user = User::with_fake_agent()
+        .with_fake_gh()
+        .with_fake_escalation()
+        .with_allowing_judge();
+    let (_, second, mcp) = launched_root_of_kind(&user, "auto", "Go on with the docs.", "led");
+    let judged = judge_prompts(&user).len();
+
+    let answer = mcp.call(
+        "agent_launch",
+        json!({"title": "Third", "brief": "And the tests.", "kind": "led"}),
+    );
+
+    held(&answer);
+    assert_eq!(judge_prompts(&user).len(), judged, "the judge was asked");
+    let request = user.call("approval.list", json!({})).unwrap()["requests"][0].clone();
+    assert_eq!(request["class"], "base", "{request}");
+    assert!(
+        request["reasons"]
+            .to_string()
+            .contains("was itself started by an agent"),
+        "{request}"
+    );
+    assert_eq!(request["agent"], second.as_str());
+    assert!(!agents(&user).iter().any(|a| a["title"] == "Third"));
 }
 
 #[test]

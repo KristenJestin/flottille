@@ -840,7 +840,7 @@ fn listed(subscription: &Subscription) -> Value {
 /// `subscription.list`, `subscription.cancel` and `subscription.resume`: what the window shows of
 /// what the agents wait for, the user's way to end it, the same as the agent's `forge
 /// unsubscribe`, and to resume a paused following, as a message of theirs does.
-pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failure> {
+pub fn call(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Value, Failure> {
     let params = if params.is_null() { json!({}) } else { params };
     match method {
         "subscription.list" => {
@@ -875,7 +875,9 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
                     format!("there is no open subscription {subscription}"),
                 ));
             };
-            end(daemon, &found, "cancelled");
+            if end(daemon, &found, "cancelled") && found.source == SESSION {
+                crate::tree::unfollowed(daemon, &found);
+            }
             Ok(json!({"subscription": listed(&found)}))
         }
         "subscription.resume" => {

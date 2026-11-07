@@ -317,6 +317,37 @@ fn the_following_shows_in_the_starters_subscriptions_and_in_show() {
 }
 
 #[test]
+fn a_pilot_that_unsubscribes_with_a_question_open_hands_it_to_the_user() {
+    let user = User::with_fake_agent().with_fake_gh();
+    user.fake_script(asking());
+    pulls(&user);
+    let (_, mcp, session, _) = followed(&user, "Fix the login.");
+    let questions = || -> Vec<Value> {
+        inbox(&user)
+            .into_iter()
+            .filter(|e| e["kind"] == "question" && e["agent"] == session.as_str())
+            .collect()
+    };
+    assert!(questions().is_empty());
+
+    let ended = mcp.call(
+        "forge",
+        json!({"action": "unsubscribe", "session": session}),
+    );
+
+    assert!(!ended.error, "{}", ended.text);
+    eventually("the question in the inbox", || questions().len() == 1);
+    assert_eq!(questions()[0]["text"], "Which scope?");
+    eventually("the session told", || {
+        !delivered(&user, &session, "unfollowed").is_empty()
+    });
+    settle();
+    let told = delivered(&user, &session, "unfollowed");
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(told[0].contains("went to the user"), "{}", told[0]);
+}
+
+#[test]
 fn unsubscribe_ends_the_following() {
     let user = User::with_fake_agent().with_fake_gh();
     user.fake_script(asking());
