@@ -700,6 +700,16 @@ It is the agent's own bookkeeping: the gate allows it in every mode, never held.
 pull request's subscription: its description says `For a time the user asked: never poll CI, forge
 run follows its run and forge subscribe a pull request's checks.`
 
+## The vault
+
+**`vault {action: "list"}`** lists the entries of the user's vault the agent's project sees
+(`docs/vault.md`): each name with what it is for, its URL and its username, one field a line. It is
+listed to an agent whose project sees at least one entry (a tool that could only say the vault is
+empty is not listed), and the agents of every project get or lose it when an entry is set or
+removed. No action returns a secret: any other action is refused, saying that a secret is never
+shown and that its name is given to the tool that needs it, which puts the secret where it goes
+itself. A read: the gate allows it in every mode.
+
 ## The workspace
 
 | Tool | |
