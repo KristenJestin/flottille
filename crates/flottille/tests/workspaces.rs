@@ -3317,3 +3317,146 @@ fn an_own_default_without_project_is_refused() {
         "path: must hold <project>, or every project would share one folder"
     );
 }
+
+// The project's branch format (#466): a branch a workspace starts or renames to must match it; a
+// branch the workspace resumed was named before, and is never refused for its name.
+
+/// The format of the branches of the tests: a type, a ticket's key, a slug.
+const FORMAT: &str = "^(feat|fix|chore)/[A-Z]+-[0-9]+-[a-z0-9-]+$";
+
+impl Fixture {
+    /// Puts the branch format at the top of the project's file, as the Settings would.
+    fn with_branch_format(&self) {
+        let file = self.user.project_file("app");
+        let text = std::fs::read_to_string(&file).unwrap();
+        std::fs::write(file, format!("branch_format = '{FORMAT}'\n{text}")).unwrap();
+    }
+}
+
+#[test]
+fn a_branch_that_does_not_match_the_format_is_refused_naming_the_pattern() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    fixture.with_branch_format();
+
+    // The default `<branch prefix>/<name>` as a branch named.
+    for (asked, branch) in [
+        (json!({"repositories": ["web"]}), "app/login"),
+        (
+            json!({"repositories": ["web"], "branch": "feature/login"}),
+            "feature/login",
+        ),
+    ] {
+        let (code, message) = fixture.create(asked).unwrap_err();
+        assert_eq!(code, "refused", "{message}");
+        assert!(message.contains(FORMAT), "{message}");
+        assert!(message.contains(branch), "{message}");
+    }
+    assert!(!fixture.workspace("login").exists());
+    assert!(!fixture.has_local_branch("web", "app/login"));
+    assert!(!fixture.has_local_branch("web", "feature/login"));
+
+    // A rename to a branch outside the format is refused too, nothing renamed.
+    fixture
+        .create(json!({"repositories": ["web"], "branch": "fix/ABC-12-login"}))
+        .unwrap();
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    let (code, message) = fixture
+        .rename_branch(json!({"branch": "login-again"}))
+        .unwrap_err();
+    assert_eq!(code, "refused");
+    assert!(message.contains(FORMAT), "{message}");
+    assert!(message.contains("login-again"), "{message}");
+    assert_eq!(fixture.branch_of("web"), "fix/ABC-12-login");
+}
+
+#[test]
+fn a_matching_branch_is_created() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    fixture.with_branch_format();
+
+    let created = fixture
+        .create(json!({"repositories": ["web"], "branch": "feat/ABC-8-pickup-dashboard"}))
+        .unwrap();
+
+    assert_eq!(created["branch"], "feat/ABC-8-pickup-dashboard");
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    assert_eq!(fixture.branch_of("web"), "feat/ABC-8-pickup-dashboard");
+    // A rename within the format goes through.
+    let renamed = fixture
+        .rename_branch(json!({"branch": "fix/ABC-8-pickup-dashboard"}))
+        .unwrap();
+    assert_eq!(renamed["branch"], "fix/ABC-8-pickup-dashboard", "{renamed}");
+}
+
+#[test]
+fn a_resumed_branch_is_never_refused_for_its_name() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    fixture.with_branch_format();
+    let web = fixture.folder.join("web");
+    // The user's own branch, made before the format: the workspace takes it as it is.
+    fixture
+        .user
+        .git(&web, &["branch", "--quiet", "legacy-work", "develop"]);
+
+    let created = fixture
+        .create(json!({"repositories": ["web"], "branch": "legacy-work"}))
+        .unwrap();
+
+    assert_eq!(created["branch"], "legacy-work");
+    assert_eq!(created["repositories"][0]["resumed"], true, "{created}");
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    assert_eq!(fixture.branch_of("web"), "legacy-work");
+
+    // One the remote alone has is resumed the same.
+    fixture.remove("login").unwrap();
+    fixture.user.git(
+        &web,
+        &["push", "--quiet", "origin", "legacy-work:old/remote-only"],
+    );
+    let created = fixture
+        .create(json!({"repositories": ["web"], "branch": "old/remote-only", "name": "other"}))
+        .unwrap();
+    assert_eq!(created["branch"], "old/remote-only");
+}
+
+#[test]
+fn a_named_branch_outside_the_format_that_exists_nowhere_is_refused_before_any_fetch() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    fixture.with_branch_format();
+    let web = fixture.folder.join("web");
+    let tracking = || fixture.git(&web, &["rev-parse", "refs/remotes/origin/develop"]);
+    let before = tracking();
+    // develop moves on the remote: a fetch would bring it into the tracking ref.
+    let other = fixture.user.path("other-web");
+    fixture.user.git(
+        &fixture.user.path(""),
+        &[
+            "clone",
+            "--quiet",
+            "--branch",
+            "develop",
+            fixture.remote("web").to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(other.join("MOVED.md"), "moved\n").unwrap();
+    fixture.user.git(&other, &["add", "."]);
+    fixture
+        .user
+        .git(&other, &["commit", "--quiet", "-m", "moved"]);
+    fixture
+        .user
+        .git(&other, &["push", "--quiet", "origin", "develop"]);
+
+    let (code, message) = fixture
+        .create(json!({"repositories": ["web"], "branch": "feature/login"}))
+        .unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert!(message.contains(FORMAT), "{message}");
+    assert_eq!(tracking(), before, "fetched before the refusal");
+}

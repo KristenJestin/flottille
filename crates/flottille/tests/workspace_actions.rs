@@ -993,3 +993,150 @@ fn a_rename_that_cannot_be_done_is_refused_before_anything_is_asked() {
     assert_eq!(branch_of(&user), "app/login");
     assert!(folder.exists());
 }
+
+// A session's new workspace on the branch the launch names (#466): the card says the branch, and
+// that is the branch made.
+
+/// A session for the user in the new workspace `login`, with `more` arguments.
+fn launch_in_login(mcp: &Mcp, more: Value) -> Answer {
+    let mut asked = json!({"title": "Pickup dashboard", "brief": "Build it.", "root": true,
+        "follow": false, "new_workspace": "login"});
+    asked
+        .as_object_mut()
+        .unwrap()
+        .extend(more.as_object().unwrap().clone());
+    mcp.call("agent_launch", asked)
+}
+
+#[test]
+fn agent_launch_with_new_workspace_makes_the_branch_named() {
+    let user = judged_user();
+    project(&user);
+    let (_, mcp) = root(&user);
+
+    let text = done(launch_in_login(
+        &mcp,
+        json!({"branch": "feat/ABC-8-pickup-dashboard", "base": {".": "main"}}),
+    ));
+
+    assert!(text.contains("login"), "{text}");
+    let made = workspace(&user, "login").unwrap();
+    assert_eq!(made["branch"], "feat/ABC-8-pickup-dashboard", "{made}");
+    assert_eq!(made["repositories"][0]["base"]["branch"], "main", "{made}");
+    eventually("the setup's end", || {
+        workspace(&user, "login").unwrap()["state"] == "ready"
+    });
+    let folder = PathBuf::from(made["folder"].as_str().unwrap());
+    assert_eq!(
+        user.git_output(&folder, &["branch", "--show-current"])
+            .trim(),
+        "feat/ABC-8-pickup-dashboard"
+    );
+
+    // A branch or a base without new_workspace is refused, naming the field to use.
+    for more in [
+        json!({"branch": "fix/ABC-9-x"}),
+        json!({"base": {".": "main"}}),
+    ] {
+        let mut asked = json!({"title": "t", "brief": "b", "root": true, "follow": false,
+            "workspace": "login"});
+        asked
+            .as_object_mut()
+            .unwrap()
+            .extend(more.as_object().unwrap().clone());
+        let text = refused(mcp.call("agent_launch", asked));
+        assert!(text.contains("new_workspace"), "{text}");
+    }
+}
+
+#[test]
+fn the_launch_card_shows_the_branch_that_will_be_made() {
+    let user = user();
+    project(&user);
+    let (_, mcp) = root(&user);
+
+    let number = held(launch_in_login(
+        &mcp,
+        json!({"branch": "feat/ABC-8-pickup-dashboard"}),
+    ));
+    let says = request(&user, number)["says"].to_string();
+    assert!(
+        says.contains("Create the workspace login on the branch feat/ABC-8-pickup-dashboard"),
+        "{says}"
+    );
+    let body = answer(&user, "approve", number).body;
+    assert!(body.contains("has now done it"), "{body}");
+    assert_eq!(
+        workspace(&user, "login").unwrap()["branch"],
+        "feat/ABC-8-pickup-dashboard"
+    );
+
+    // Without branch, the card says the default, and that is the branch made.
+    let number = held(mcp.call(
+        "agent_launch",
+        json!({"title": "Other", "brief": "Build it.", "root": true, "follow": false,
+            "new_workspace": "other"}),
+    ));
+    let says = request(&user, number)["says"].to_string();
+    assert!(
+        says.contains("Create the workspace other on the branch app/other"),
+        "{says}"
+    );
+    answer(&user, "approve", number);
+    assert_eq!(workspace(&user, "other").unwrap()["branch"], "app/other");
+}
+
+#[test]
+fn agent_launch_refuses_a_branch_outside_the_format_naming_the_pattern() {
+    let user = user();
+    project(&user);
+    let format = "^(feat|fix)/[A-Z]+-[0-9]+-[a-z0-9-]+$";
+    user.call(
+        "project.set_conventions",
+        json!({"name": "app", "branch_format": format}),
+    )
+    .unwrap();
+    let (_, mcp) = root(&user);
+
+    // Named, or the default app/login: refused before the user is asked.
+    for more in [json!({"branch": "feature/login"}), json!({})] {
+        let text = refused(launch_in_login(&mcp, more));
+        assert!(text.contains(format), "{text}");
+    }
+    assert!(no_request(&user));
+    assert!(workspace(&user, "login").is_err());
+
+    // Within the format, the user is asked.
+    held(launch_in_login(&mcp, json!({"branch": "fix/ABC-12-login"})));
+}
+
+#[test]
+fn the_launch_card_shows_the_base_chosen_and_refuses_one_the_workspace_cannot_use() {
+    let user = user();
+    project(&user);
+    let (_, mcp) = root(&user);
+
+    let number = held(launch_in_login(&mcp, json!({"base": {".": "main"}})));
+    let says = request(&user, number)["says"].to_string();
+    assert!(
+        says.contains("The repository . starts from main, in place of its base rule"),
+        "{says}"
+    );
+    answer(&user, "deny", number);
+
+    // A repository the workspace does not take, or a name git refuses: before the user is asked.
+    for (base, why) in [
+        (
+            json!({"api": "main"}),
+            "api is not a repository of project app",
+        ),
+        (
+            json!({".": "main..x"}),
+            "main..x is not a branch name git accepts",
+        ),
+    ] {
+        let text = refused(launch_in_login(&mcp, json!({"base": base})));
+        assert!(text.contains(why), "{text}");
+    }
+    assert!(no_request(&user));
+}

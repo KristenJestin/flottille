@@ -11,6 +11,8 @@ repository.workspace = true
 # GIF and WebP, to read the size of a picture and make its thumbnail.
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 libc = "0.2.191"
+# Already built for the window (GPUI): the project's branch format is a regular expression.
+regex = "1.13.1"
 rusqlite = { version = "0.41.0", features = ["bundled", "fallible_uint"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde-saphyr = "1.3.0"

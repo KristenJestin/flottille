@@ -37,6 +37,35 @@ with `branch` (`docs/workspaces.md`). Only a space is refused (`branch_prefix: m
 spaces`). The project's Settings, Setup tab, "Branch prefix", edits it, an empty field included
 (`project.set_settings`, `branch_prefix`); the workspaces that exist keep their branch.
 
+**The branch format** is a regular expression a branch must match, off by default
+(`branch_format = '^(feat|fix|chore)/[A-Z]+-[0-9]+-[a-z0-9-]+$'`; it is not anchored unless it
+says `^` and `$`). With one, a workspace refuses to start a branch that does not match it, the
+default `<branch prefix>/<name>` as a branch named (`docs/workspaces.md`), a workspace's
+`rename_branch` refuses one, and an agent's `git push` that would make a branch outside it on a
+remote is refused before anything goes (git's own dry run says which branches it makes, read once
+with the message checks'); each refusal names the pattern (`the branch feature/x does
+not match the project's branch format ^(feat|fix)/…$: give a branch that does`). A branch a
+workspace **resumed** was named before the format and is never refused for its name, nor is a push
+to a branch the remote has already. The name resumed is the one recorded when the workspace was made
+(each repository's `resumed_branch`), never the branch it is on now: a branch an agent makes later
+with `git switch -c` in that workspace is held to the format at its push. A branch an agent makes in
+the main checkout before `workspace create` names it counts as resumed, as any branch that exists. An agent's `workspace create` and `agent_launch` refuse a
+branch outside the format before the user is asked, unless a repository has it already (its own
+or as last fetched): the creation then decides, once it knows which repositories resume it. The
+creation refuses a branch named outside the format that no repository has, nor its remote (listed,
+not fetched), before it fetches any base. A
+pattern that is not a regular expression is refused when the file is read and when it is saved,
+with the reason. The project's Settings, Setup tab, "Branch format", under the setup,
+edits it (`project.set_conventions`, `docs/protocol.md`); empty turns it off. Agents read it with
+`project settings`.
+
+**The pull request template** (`[pull_requests]`'s `template`, Markdown, off by default) is the
+description of a pull request an agent opens without one: `forge` `create` without `body` gives the
+forge the template, its card saying it whole; with `body`, the body is used as it is. The
+description of `forge` says so, and `project settings` shows the template, so that an agent fills
+it in `body` rather than replace it. The project's Settings, Rules tab, "Pull request template",
+under the message checks, edits it (`project.set_conventions`); empty turns it off.
+
 A click on a repository's row in the project's Settings opens its dialog: its base branches (a list
 in order of preference, moved, removed and added there), the other repositories it depends on (one
 switch each) and its forge. The remote is git's, shown read-only. Saving asks `project.set_settings`,
@@ -123,6 +152,7 @@ rest.
 # The name is the file's name: this is projects/app.toml. A `name` key is allowed if it says the same.
 folder = "/work/app"                  # absolute
 branch_prefix = "app"                 # default: a slug of the name; "" for none: the branch is the workspace's name
+branch_format = '^(feat|fix)/[A-Z]+-[0-9]+-[a-z0-9-]+$'   # a branch must match it ("Branch format"); none by default
 workspaces_root = "/work/app-work"    # absolute (`~` and `<project>` allowed); default: the user's, see "Where the workspaces go"
 default_repositories = "all"          # "all", or a list of the repositories a workspace takes
 max_children = 12                     # children running at once, 1 to 12
@@ -180,6 +210,11 @@ message_checks = ["pnpm commitlint --edit {message}"]   # run on an agent's mess
 [pull_requests]                       # how its pull requests are opened (docs/commands.md)
 title = "type(TICKET): subject"       # the title's format, told to the agent that writes it
 reviewers = ["alice", "bob"]          # asked to review each pull request Flottille opens
+template = """                        # the description of one opened without body ("Pull request template")
+## Why
+
+## How to verify
+"""
 ```
 
 **Delete the branch on merge** is a switch of each repository, in the project's Settings page and in

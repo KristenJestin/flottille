@@ -237,11 +237,14 @@ opens them:
 [pull_requests]
 title = "type(TICKET): subject"     # the title's format, in the project's words; told to the agent
 reviewers = ["alice", "bob"]        # the forge's names, asked to review each pull request opened
+template = "## Why\n\n## How to verify\n"   # the description of one opened without body
 ```
 
 The title's format is told to the agent a command is sent to, which writes the titles; the reviewers are added by
 Flottille to every `forge` `create`, so that no agent forgets one. A reviewer is one name of the forge
-(no space, no comma, not starting with `-`). Both are read as the file is when they are used.
+(no space, no comma, not starting with `-`). The template is the body of a `forge` `create` that
+gives none (`docs/projects.md`, "Pull request template"). All are read as the file is when they
+are used.
 
 ## Templates
 

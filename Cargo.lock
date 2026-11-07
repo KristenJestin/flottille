@@ -2189,6 +2189,7 @@ version = "0.1.0"
 dependencies = [
  "image",
  "libc",
+ "regex",
  "rusqlite",
  "serde",
  "serde-saphyr",

@@ -174,28 +174,57 @@ async fn unaliased(mut git: Vec<String>, folder: &Path, env: &Env) -> Result<Vec
 /// The environment of a run.
 type Env = BTreeMap<OsString, OsString>;
 
-/// Runs the project's checks on each commit the push `words` sends from `folder`, with `env`,
-/// the environment of its run: the refusal of the first that fails, naming it, or of a push
-/// whose commits cannot be known. Nothing when the project declares none.
-pub async fn pushed(at: &Where<'_>, words: &[String], env: &Env) -> Result<(), String> {
-    let checks = declared(at.daemon, at.place, Checked::Pushed)?;
-    if checks.is_empty() {
+/// What a push is checked against before it goes, as the project's file says it now: its message
+/// checks, run on each commit it sends, and its branch format, which each branch it makes on a
+/// remote must match (`docs/projects.md`). Git's dry run is read once for both. The refusal of the
+/// first that fails, naming it, or of a push that cannot be read; nothing when the project
+/// declares neither.
+pub async fn push(at: &Where<'_>, words: &[String], env: &Env) -> Result<(), String> {
+    let nothing = Checked::Pushed.nothing();
+    let project = crate::projects::load_project(at.daemon, &at.place.project).map_err(|failure| {
+        format!(
+            "refused: the project's file cannot be read, so what it checks of a push cannot run \
+             ({}); {nothing}",
+            failure.message
+        )
+    })?;
+    let checks = project.message_checks.clone();
+    if checks.is_empty() && project.branch_format.is_none() {
         return Ok(());
     }
+    // The message checks' words when they are declared, which the format's refusals share.
+    let reader = match checks.is_empty() {
+        true => "the project's branch format reads each branch a push makes",
+        false => "the project's message checks read each commit a push sends",
+    };
     let unknown = |why: String| {
         let why = secrets::mask_also(&why, env, &at.place.secret_values());
-        format!(
-            "refused: the project's message checks read each commit a push sends before it \
-             goes, and {why}; {}",
-            Checked::Pushed.nothing()
-        )
+        format!("refused: {reader} before it goes, and {why}; {nothing}")
     };
     let at_push = gate::git_globals(&words[1..]).0 + 1;
     let git = &words[..at_push];
-    for sha in sent(git, &words[at_push + 1..], at.folder, env)
+    let rest = &words[at_push + 1..];
+    // Last among its options, so that none of the line's turns them off.
+    let end = rest
+        .iter()
+        .position(|word| word == "--" || word == "--end-of-options")
+        .unwrap_or(rest.len());
+    // Read before any dry run: an option given `--dry-run` as its value would make it the push.
+    let said = read(&rest[..end], &PUSH)
+        .map_err(|why| unknown(format!("its options cannot be read: {why}")))?;
+    if !checks.is_empty() {
+        recursion(git, said.submodules, at.folder, env)
+            .await
+            .map_err(unknown)?;
+    }
+    let tried = dry_run(git, rest, end, at.folder, env)
         .await
-        .map_err(unknown)?
-    {
+        .map_err(unknown)?;
+    format_kept(at, &project, &tried)?;
+    if checks.is_empty() {
+        return Ok(());
+    }
+    for sha in sent(git, &tried, at.folder, env).await.map_err(unknown)? {
         let object = read_git(git, &["cat-file", "commit", &sha], at.folder, env, None)
             .await
             .map_err(unknown)?;
@@ -212,25 +241,15 @@ pub async fn pushed(at: &Where<'_>, words: &[String], env: &Env) -> Result<(), S
     Ok(())
 }
 
-/// The commits a push sends to branches and tags, oldest first: those its refs lead to that no
-/// ref of the remote has. Git says which refs the push sends, as it reads the line and the
-/// configuration (`--dry-run`); the remote says which it has (`ls-remote`): its remote-tracking
-/// refs are the agent's to write. Notes and other refs are no message of the project's history.
-async fn sent(
+/// Refuses a push that would also push the commits of submodules, which no check reads.
+async fn recursion(
     git: &[String],
-    rest: &[String],
+    asked: Option<String>,
     folder: &Path,
     env: &Env,
-) -> Result<Vec<String>, String> {
-    // Last among its options, so that none of the line's turns them off.
-    let end = rest
-        .iter()
-        .position(|word| word == "--" || word == "--end-of-options")
-        .unwrap_or(rest.len());
-    let said =
-        read(&rest[..end], &PUSH).map_err(|why| format!("its options cannot be read: {why}"))?;
+) -> Result<(), String> {
     let recursing = |value: &str| ["on-demand", "only"].contains(&value);
-    let recursing = match said.submodules {
+    let recursing = match asked {
         Some(said) => recursing(&said),
         // Git takes whichever of the two keys it reads last; submodule.recurse true is on-demand.
         None => {
@@ -242,34 +261,50 @@ async fn sent(
                     .is_some_and(|value| value == "true")
         }
     };
-    if recursing {
-        return Err(
+    match recursing {
+        true => Err(
             "it would push the commits of submodules too (--recurse-submodules, \
              push.recurseSubmodules or submodule.recurse), which no check reads: push each \
              submodule from its own folder"
                 .into(),
-        );
+        ),
+        false => Ok(()),
     }
+}
+
+/// A ref a push sends, as git's dry run says it: its flag (`*` a new one), its source and its
+/// destination.
+type Pushed = (String, String, String);
+
+/// What the push would do, as git says it without doing it (`--dry-run --porcelain`): for each URL
+/// it goes to, each ref with its flag (`*` a new one), its source and its destination.
+async fn dry_run(
+    git: &[String],
+    rest: &[String],
+    end: usize,
+    folder: &Path,
+    env: &Env,
+) -> Result<Vec<(String, Vec<Pushed>)>, String> {
     let mut dry: Vec<String> = git.to_vec();
     dry.push("push".into());
     dry.extend_from_slice(&rest[..end]);
     dry.extend(["--dry-run", "--porcelain", "--no-quiet"].map(String::from));
     dry.extend_from_slice(&rest[end..]);
     let tried = crate::git::run_in(folder, &dry, env, None).await?;
-    let mut remotes: Vec<(&str, Vec<&str>)> = Vec::new();
+    let mut remotes: Vec<(String, Vec<Pushed>)> = Vec::new();
     for line in tried.stdout.lines() {
         if let Some(url) = line.strip_prefix("To ") {
-            remotes.push((url, Vec::new()));
-        } else if let (Some((_, sources)), [flag, refs, _]) = (
+            remotes.push((url.to_owned(), Vec::new()));
+        } else if let (Some((_, refs)), [flag, pushed, _]) = (
             remotes.last_mut(),
             line.splitn(3, '\t').collect::<Vec<_>>().as_slice(),
-        ) && [" ", "+", "*"].contains(flag)
-            && let Some((source, destination)) = refs.rsplit_once(':')
-            && ["refs/heads/", "refs/tags/"]
-                .iter()
-                .any(|kind| destination.starts_with(kind))
+        ) && let Some((source, destination)) = pushed.rsplit_once(':')
         {
-            sources.push(source);
+            refs.push((
+                (*flag).to_owned(),
+                source.to_owned(),
+                destination.to_owned(),
+            ));
         }
     }
     // A URL that did not answer has no block, and may answer at the real push.
@@ -279,8 +314,82 @@ async fn sent(
             tried.stderr.trim()
         ));
     }
+    Ok(remotes)
+}
+
+/// Refuses a push that makes a branch outside the project's branch format on a remote, naming the
+/// pattern (`docs/projects.md`, "Branch format"): a branch the remote has already, or the one the
+/// workspace resumed in this repository (its name when it was made, never the branch it is on
+/// now, which follows a `git switch`), was named before, and goes.
+fn format_kept(
+    at: &Where<'_>,
+    project: &flottille_core::project::Project,
+    tried: &[(String, Vec<Pushed>)],
+) -> Result<(), String> {
+    if project.branch_format.is_none() {
+        return Ok(());
+    }
+    let resumed = at
+        .place
+        .workspace
+        .as_deref()
+        .and_then(|name| {
+            at.daemon
+                .read(|store| store.workspace(&at.place.project, name))
+                .ok()
+                .flatten()
+        })
+        .and_then(|workspace| {
+            workspace
+                .repositories
+                .into_iter()
+                .find(|w| w.path == at.repository)
+                .and_then(|w| w.resumed_branch)
+        });
+    for (_, refs) in tried {
+        for (flag, _, destination) in refs {
+            let Some(branch) = destination.strip_prefix("refs/heads/") else {
+                continue;
+            };
+            if flag != "*" || resumed.as_deref() == Some(branch) {
+                continue;
+            }
+            if let Some(why) = project.branch_refusal(branch) {
+                return Err(format!(
+                    "refused: {why}: push to a branch that does (git push origin \
+                     HEAD:<branch>), or rename it (workspace rename_branch); {}",
+                    Checked::Pushed.nothing()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The commits a push sends to branches and tags, oldest first: those its refs lead to that no
+/// ref of the remote has. Git said which refs the push sends, as it reads the line and the
+/// configuration (`tried`, its dry run); the remote says which it has (`ls-remote`): its
+/// remote-tracking refs are the agent's to write. Notes and other refs are no message of the
+/// project's history.
+async fn sent(
+    git: &[String],
+    tried: &[(String, Vec<Pushed>)],
+    folder: &Path,
+    env: &Env,
+) -> Result<Vec<String>, String> {
     let mut commits: Vec<String> = Vec::new();
-    for (url, sources) in remotes {
+    for (url, refs) in tried {
+        let sources: Vec<&str> = refs
+            .iter()
+            .filter(|(flag, _, destination)| {
+                [" ", "+", "*"].contains(&flag.as_str())
+                    && ["refs/heads/", "refs/tags/"]
+                        .iter()
+                        .any(|kind| destination.starts_with(kind))
+            })
+            .map(|(_, source, _)| source.as_str())
+            .collect();
+        let url = url.as_str();
         if sources.is_empty() {
             continue;
         }

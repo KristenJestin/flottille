@@ -482,11 +482,12 @@ pub async fn run(
         Ok(env) => env,
         Err(why) => return Outcome::Failed(why),
     };
-    // The project's checks of each commit the push sends, before it goes: however the commits
-    // were made, through a command the checks at commit time read or not.
+    // The project's checks of each commit the push sends, and its branch format on each branch
+    // it makes, before it goes: however the commits were made, through a command the checks at
+    // commit time read or not.
     if lift {
         tokio::select! {
-            checked = crate::message_checks::pushed(&at, &words, &env) => {
+            checked = crate::message_checks::push(&at, &words, &env) => {
                 if let Err(refusal) = checked {
                     return Outcome::Refused(refusal);
                 }

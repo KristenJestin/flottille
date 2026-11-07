@@ -28,6 +28,11 @@ const PASSES: &str = "#!/bin/sh\necho ran >> \"$(dirname \"$0\")/passed\"\n";
 /// A project `app` over a throwaway repository pushed to a throwaway remote, `prepare` given its
 /// folder before the workspace `login` is made (offline: nothing is fetched). The folder.
 fn prepared(user: &User, prepare: impl FnOnce(&Path)) -> PathBuf {
+    prepared_on(user, prepare, json!({}))
+}
+
+/// `prepared`, the workspace made with the parameters `more` too (a branch to resume).
+fn prepared_on(user: &User, prepare: impl FnOnce(&Path), more: Value) -> PathBuf {
     let folder = user.path("work/app");
     user.git_init(&folder);
     std::fs::write(folder.join("README.md"), "app\n").unwrap();
@@ -46,12 +51,12 @@ fn prepared(user: &User, prepare: impl FnOnce(&Path)) -> PathBuf {
     prepare(&folder);
     user.call("project.add", json!({"folder": folder, "name": "app"}))
         .unwrap();
-    let workspace = user
-        .call(
-            "workspace.create",
-            json!({"project": "app", "name": "login", "offline": true}),
-        )
-        .unwrap();
+    let mut asked = json!({"project": "app", "name": "login", "offline": true});
+    asked
+        .as_object_mut()
+        .unwrap()
+        .extend(more.as_object().unwrap().clone());
+    let workspace = user.call("workspace.create", asked).unwrap();
     assert_eq!(workspace["state"], "ready", "{workspace}");
     folder
 }
@@ -1426,5 +1431,176 @@ fn a_forge_check_runs_in_the_place_of_the_workspace_it_writes_for() {
     assert_eq!(
         std::fs::read_to_string(user.path("checks/where")).unwrap(),
         "signup\n"
+    );
+}
+
+// The project's branch format at the push (#466): a branch outside it is not sent.
+
+#[test]
+fn a_push_of_a_branch_outside_the_format_is_refused() {
+    let user = User::with_fake_agent();
+    prepared(&user, |_| {});
+    let format = "^(feat|fix)/[A-Z]+-[0-9]+-[a-z0-9-]+$";
+    // Set once the workspace is made on app/login, which the format does not take.
+    user.call(
+        "project.set_conventions",
+        json!({"name": "app", "branch_format": format}),
+    )
+    .unwrap();
+    let mcp = agent(&user);
+    committed_outside(&user, "good.txt", "fix: a good change");
+
+    let answer = line(&user, &mcp, "git push origin HEAD");
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains(format), "{}", answer.text);
+    assert!(answer.text.contains("app/login"), "{}", answer.text);
+    assert!(
+        answer.text.contains("nothing was pushed"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(remote_head(&user, "app/login"), None);
+
+    // To a branch within the format, it goes.
+    let answer = line(&user, &mcp, "git push origin HEAD:fix/ABC-12-login");
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(remote_head(&user, "fix/ABC-12-login"), Some(head(&user)));
+}
+
+/// The format of the push tests' branches.
+const FORMAT: &str = "^(feat|fix)/[A-Z]+-[0-9]+-[a-z0-9-]+$";
+
+/// Sets the project's branch format, as its Settings does.
+fn branch_format(user: &User) {
+    user.call(
+        "project.set_conventions",
+        json!({"name": "app", "branch_format": FORMAT}),
+    )
+    .unwrap();
+}
+
+/// A workspace `login` that resumed the user's own branch `legacy-work`, which the format does not
+/// take and the remote does not have, the format set after.
+fn resumed_legacy_work(user: &User) {
+    prepared_on(
+        user,
+        |folder| user.git(folder, &["branch", "--quiet", "legacy-work"]),
+        json!({"branch": "legacy-work"}),
+    );
+    branch_format(user);
+}
+
+#[test]
+fn the_push_of_a_resumed_branch_is_allowed() {
+    let user = User::with_fake_agent();
+    resumed_legacy_work(&user);
+    let mcp = agent(&user);
+    committed_outside(&user, "good.txt", "fix: a good change");
+
+    let answer = line(&user, &mcp, "git push -u origin HEAD");
+
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(remote_head(&user, "legacy-work"), Some(head(&user)));
+}
+
+#[test]
+fn a_new_branch_switched_to_in_a_resumed_workspace_is_refused_at_the_push() {
+    let user = User::with_fake_agent();
+    resumed_legacy_work(&user);
+    let mcp = agent(&user);
+    let switched = line(&user, &mcp, "git switch -c whatever");
+    assert!(!switched.error, "{}", switched.text);
+    // The workspace follows the branch its worktree is on now.
+    let shown = user
+        .call("workspace.show", json!({"project": "app", "name": "login"}))
+        .unwrap();
+    assert_eq!(shown["branch"], "whatever", "{shown}");
+    committed_outside(&user, "good.txt", "fix: a good change");
+
+    let answer = line(&user, &mcp, "git push -u origin whatever");
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains(FORMAT), "{}", answer.text);
+    assert!(answer.text.contains("whatever"), "{}", answer.text);
+    assert_eq!(remote_head(&user, "whatever"), None);
+}
+
+#[test]
+fn a_push_to_a_full_ref_outside_the_format_is_refused() {
+    let user = User::with_fake_agent();
+    prepared(&user, |_| {});
+    branch_format(&user);
+    let mcp = agent(&user);
+    committed_outside(&user, "good.txt", "fix: a good change");
+
+    let answer = line(&user, &mcp, "git push origin HEAD:refs/heads/x");
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains(FORMAT), "{}", answer.text);
+    assert_eq!(remote_head(&user, "x"), None);
+}
+
+#[test]
+fn a_push_of_all_branches_with_a_new_one_outside_the_format_is_refused() {
+    let user = User::with_fake_agent();
+    prepared(&user, |_| {});
+    branch_format(&user);
+    let mcp = agent(&user);
+    committed_outside(&user, "good.txt", "fix: a good change");
+
+    let answer = line(&user, &mcp, "git push --all origin");
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains(FORMAT), "{}", answer.text);
+    assert!(answer.text.contains("app/login"), "{}", answer.text);
+    assert_eq!(remote_head(&user, "app/login"), None);
+}
+
+#[test]
+fn a_push_to_a_branch_the_remote_already_has_is_allowed() {
+    let user = User::with_fake_agent();
+    prepared(&user, |_| {});
+    // Pushed by the user before the format: it was named before.
+    user.git(&worktree(&user), &["push", "--quiet", "origin", "HEAD"]);
+    branch_format(&user);
+    let mcp = agent(&user);
+    committed_outside(&user, "good.txt", "fix: a good change");
+
+    let answer = line(&user, &mcp, "git push origin HEAD");
+
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(remote_head(&user, "app/login"), Some(head(&user)));
+}
+
+#[test]
+fn a_push_whose_dry_run_fails_is_refused_by_the_format_saying_why() {
+    let user = User::with_fake_agent();
+    prepared(&user, |_| {});
+    branch_format(&user);
+    let mcp = agent(&user);
+    let nowhere = user.path("remotes/nowhere.git");
+
+    let answer = line(
+        &user,
+        &mcp,
+        &format!("git push {} HEAD:fix/ABC-1-x", nowhere.display()),
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("the project's branch format"),
+        "{}",
+        answer.text
+    );
+    assert!(
+        answer.text.contains("git could not say what it sends"),
+        "{}",
+        answer.text
+    );
+    assert!(
+        answer.text.contains("nothing was pushed"),
+        "{}",
+        answer.text
     );
 }
