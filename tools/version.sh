@@ -7,8 +7,9 @@
 #   tools/version.sh alpha [--branch <name>] [--at <rev>] X.Y.Z-alpha.<branch>.N
 #   tools/version.sh base [--at <rev>]                    <tag> <commit> the versions count from
 # `--at` is the commit to compute for, HEAD by default. The last release is the highest stable
-# tag `vX.Y.Z`, wherever it is, and the versions count from its mark `released/vX.Y.Z`, the head
-# of dev it released (the tag's own commit when it has no mark). `feat` bumps the minor from 1.0
+# tag `vX.Y.Z`, wherever it is, and the versions count from its own commit, the commit of dev it
+# released; the two releases made by squash (0.1.0, 0.1.1) count from their mark
+# `released/vX.Y.Z`, the head of dev they squashed. `feat` bumps the minor from 1.0
 # on and the patch before it, `fix` and `perf` the patch, `!` or a `BREAKING CHANGE:` footer the
 # major (the minor before 1.0), and nothing that bumps is the next patch. A `Release-As: X.Y.Z`
 # footer in a commit of the line sets the next version when it is above the computed one, and is
@@ -66,8 +67,8 @@ SEMVER='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
 FOOTER=$'(^|\n)BREAKING[ -]CHANGE: '
 FEATURE='^feat(\([a-z0-9-]+\))?: '
 FIX='^(fix|perf)(\([a-z0-9-]+\))?: '
-# First parents only: the release squash a record on dev reaches through its second parent is
-# main's, not dev's (docs/releases.md).
+# First parents only: a release squash that a record of the releases made by squash reaches
+# through its second parent is main's, not dev's (docs/releases.md).
 # 3 a breaking change, 2 a feature, 1 a fix, 0 nothing that bumps.
 bump=0
 declare -a requested=() requested_by=()

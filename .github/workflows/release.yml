@@ -1,0 +1,78 @@
+# A release (docs/releases.md): main moves forward to a commit of dev, never a squash nor a merge
+# of its own, then ci.yml builds and publishes it as the stable release.
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: The commit of dev to release, its full SHA, or dev for its head
+        required: true
+        default: dev
+
+permissions: {}
+
+# Two releases at once would race for main.
+concurrency:
+  group: release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      # To move main.
+      contents: write
+      # To start ci.yml on main: a ref moved with this token starts no push run, a
+      # workflow_dispatch started with it does.
+      actions: write
+    # This job holds a token that writes main: no checkout, no git, no code of any branch. Only
+    # `gh`, through GitHub's API, and the input reaches the script through its environment only.
+    steps:
+      - name: Move main forward to the commit, then build it
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          # The workflow of dev is the one that releases: another branch's copy may say anything.
+          if [ "$GITHUB_REF" != refs/heads/dev ]; then
+            echo "::error::The release is started from dev, not $GITHUB_REF: nothing was released."
+            exit 1
+          fi
+          # A full SHA or dev, nothing else reaches a command.
+          if [ "$COMMIT" != dev ] && ! [[ $COMMIT =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The commit to release is a full SHA of dev, or dev for its head: nothing was released."
+            exit 1
+          fi
+          dev=$(gh api "repos/$GH_REPO/git/ref/heads/dev" --jq .object.sha)
+          main=$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq .object.sha)
+          commit=$COMMIT
+          if [ "$commit" = dev ]; then commit=$dev; fi
+          # On dev: dev is the commit, or ahead of it.
+          if ! status=$(gh api "repos/$GH_REPO/compare/$commit...$dev" --jq .status); then
+            echo "::error::$commit is not a commit of $GH_REPO: nothing was released."
+            exit 1
+          fi
+          case "$status" in
+            identical | ahead) ;;
+            *)
+              echo "::error::$commit is not a commit of dev: nothing was released."
+              exit 1
+              ;;
+          esac
+          status=$(gh api "repos/$GH_REPO/compare/$main...$commit" --jq .status)
+          case "$status" in
+            ahead)
+              # Not forced: GitHub refuses anything but a fast-forward, so nothing is overwritten.
+              gh api -X PATCH "repos/$GH_REPO/git/refs/heads/main" -f sha="$commit" -F force=false > /dev/null
+              echo "::notice::main moved forward to $commit."
+              ;;
+            # Run again after a build that did not start: main is there already.
+            identical) echo "::notice::main is $commit already: it is built again." ;;
+            *)
+              echo "::error::main ($main) is not an ancestor of $commit: main cannot move forward to it, nothing was released."
+              exit 1
+              ;;
+          esac
+          gh workflow run ci.yml --ref main
