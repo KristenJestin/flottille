@@ -1445,6 +1445,11 @@ impl Shell {
             && let Some(card) = page.read(cx).card(&Some(name.to_owned()), cx)
         {
             card.update(cx, |card, cx| card.answered(refused, cx));
+        } else if let Some(page) = self.session_page.clone() {
+            // A removal asked from the session's rail.
+            page.update(cx, |page, cx| {
+                page.removal_answered(project, name, refused, cx)
+            });
         }
     }
 
