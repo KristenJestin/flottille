@@ -29,7 +29,7 @@ use crate::items::ProjectItems;
 use crate::model::{Place, Preparation, SetupLine, ago};
 use crate::project_settings::Reveal;
 use crate::repositories::ProjectRepositories;
-use crate::session::{WorkspaceActions, seconds, workspace_menu};
+use crate::session::{WorkspaceActions, removal_toast, seconds, workspace_menu};
 use crate::session_link::{PullRequest, TicketFacts};
 use crate::shell::{Selection, Shell, now_ms};
 use crate::tasks::ProjectTasks;
@@ -568,6 +568,36 @@ fn step_time(step: &SetupLine, now: u64) -> Option<String> {
     }
 }
 
+/// Why removing a workspace now would lose work, when it would: files not committed. Flottille
+/// never forces; the daemon refuses the rest (commits not pushed) and says why. The card and the
+/// session's rail ask the same.
+pub(crate) fn removal_refused(
+    project: &str,
+    statuses: &[RepositoryStatus],
+) -> Option<SharedString> {
+    let dirty: Vec<(String, u64)> = statuses
+        .iter()
+        .filter_map(|status| {
+            let files = status.uncommitted.filter(|files| *files > 0)?;
+            Some((repository_label(project, &status.path), files))
+        })
+        .collect();
+    if dirty.is_empty() {
+        return None;
+    }
+    let files: u64 = dirty.iter().map(|(_, files)| files).sum();
+    let places: Vec<String> = dirty.into_iter().map(|(label, _)| label).collect();
+    let (count, verb) = match files {
+        1 => ("1 file".to_owned(), "is"),
+        files => (format!("{files} files"), "are"),
+    };
+    Some(SharedString::from(format!(
+        "{count} {verb} not committed in {}. Flottille never forces: commit or discard them \
+         first.",
+        places.join(", ")
+    )))
+}
+
 /// A place's card: its head (name, where it started from, the lines changed, its "⋯"), its
 /// labelled lines (each repository, its pull request, its ticket), its setup while it is
 /// prepared, its sessions, and "New session in …". A line is drawn between two blocks that exist.
@@ -771,11 +801,7 @@ impl PlaceCard {
     pub fn answered(&mut self, refused: Option<&str>, cx: &mut Context<Self>) {
         let name = place_name(&self.data.place).to_owned();
         let said = match (self.busy.take(), refused) {
-            (Some(Busy::Removing), None) => Toast::success(format!("Workspace {name} removed"))
-                .detail("Its folder is gone; a branch with commits of its own stays."),
-            (Some(Busy::Removing), Some(why)) => {
-                Toast::failure(format!("Workspace {name} was not removed")).detail(why.to_owned())
-            }
+            (Some(Busy::Removing), refused) => removal_toast(&name, refused),
             (_, None) => Toast::success(format!("Preparing {name} again"))
                 .detail("Its card lists the steps."),
             (_, Some(why)) => {
@@ -874,32 +900,8 @@ impl PlaceCard {
         cx.notify();
     }
 
-    /// Why removing it now would lose work, when it would: files not committed. Flottille never
-    /// forces; the daemon refuses the rest (commits not pushed) and says why.
     fn removal_refused(&self) -> Option<SharedString> {
-        let dirty: Vec<(String, u64)> = self
-            .facts
-            .statuses
-            .iter()
-            .filter_map(|status| {
-                let files = status.uncommitted.filter(|files| *files > 0)?;
-                Some((repository_label(&self.project, &status.path), files))
-            })
-            .collect();
-        if dirty.is_empty() {
-            return None;
-        }
-        let files: u64 = dirty.iter().map(|(_, files)| files).sum();
-        let places: Vec<String> = dirty.into_iter().map(|(label, _)| label).collect();
-        let (count, verb) = match files {
-            1 => ("1 file".to_owned(), "is"),
-            files => (format!("{files} files"), "are"),
-        };
-        Some(SharedString::from(format!(
-            "{count} {verb} not committed in {}. Flottille never forces: commit or discard \
-             them first.",
-            places.join(", ")
-        )))
+        removal_refused(&self.project, &self.facts.statuses)
     }
 
     /// The labelled lines that have something to say, each in its frame: a line that comes
