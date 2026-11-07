@@ -495,6 +495,7 @@ pub fn start_session(
         daemon,
         project,
         crate::agents::New {
+            id: None,
             workspace: None,
             preparing: false,
             role,
@@ -506,6 +507,7 @@ pub fn start_session(
             effort: None,
             gate_mode: None,
             launched_by: None,
+            led: false,
         },
     )?;
     before(&agent)?;
