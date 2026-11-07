@@ -761,7 +761,10 @@ it, after the checks.
   to checks is over.`).
 
 `forge subscribe` reads the pull request once and stores it before the subscription opens: what
-is already so is no event. A round that fails changes nothing. A subscription hears as often as
+is already so is no event. It finds the pull request by the workspace's branch, or by `number` and
+`repository` (a pull request of the project's repository that no workspace of the agent holds): the
+events, the wake and the end are the same, and the subscription says `pull request #12 of api` with no
+workspace. A round that fails changes nothing. A subscription hears as often as
 the rounds come: every minute while a window is connected, every five otherwise. **A bot**, for `from: people`, is a GitHub author whose
 login starts with `app/` (as `gh` says an app) or ends with `[bot]`, or that `gh` says `is_bot`;
 this is assumed from `gh`'s output, and the maintainer checks it on a real pull request. A
