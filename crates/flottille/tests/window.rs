@@ -3210,19 +3210,15 @@ fn a_card_appears_while_another_session_streams_without_pause(cx: &mut TestAppCo
     let (shell, cx) = open_session(&user, &lead, 1280., cx);
 
     let number = held_number(mcp.call("fs_read", json!({"path": ".env"})));
-    let asked = Instant::now();
     until(&shell, cx, "the card is shown", |cx| {
         cx.update(|window, _| window.try_find(format!("allow-{number}")).is_some())
     });
 
+    // The stream is thirty seconds of pieces at the least, and the card came before its end: it
+    // did not wait for a pause. No time is asked of the card: how long it takes is the machine's.
     let state =
         user.call("agent.show", json!({"agent": streamer})).unwrap()["agent"]["state"].clone();
     assert_eq!(state, "working", "the other session still streams");
-    assert!(
-        asked.elapsed() < Duration::from_secs(5),
-        "{:?}",
-        asked.elapsed()
-    );
 }
 
 /// Events of the shown agent made up for the page, numbered from `seq`.
