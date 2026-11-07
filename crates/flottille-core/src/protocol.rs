@@ -262,6 +262,10 @@ pub struct AgentSend {
     /// Pasted or dropped images, sent with the message.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageUpload>,
+    /// When the agent's cache expired: compact it first (true) or send to its session as it is
+    /// (false), whatever the setting; the setting decides when left out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact: Option<bool>,
 }
 
 /// An image sent with a message: its MIME type and its bytes in base64.

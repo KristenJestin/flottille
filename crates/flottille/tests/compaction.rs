@@ -600,3 +600,512 @@ fn a_secret_in_the_summary_is_masked() {
     });
     assert!(!prompts(&user).iter().any(|p| p.contains(SECRET)));
 }
+
+// The compaction around the expiry of the prompt cache (`docs/design.md` §5.8, "Around the
+// cache's expiry"). The agents stand for Claude, signed in without an API key here: their cache
+// lives an hour. The daemon's clock is moved ahead (`test.advance`).
+
+const MINUTE: u64 = 60_000;
+
+/// `user_with` a scripted summary, the threshold left out of the way and the daemon's clock moved
+/// by the test.
+fn clocked(settings: &str) -> User {
+    user_with(
+        json!([{"say": SUMMARY}]),
+        &format!("automatic = false\n{settings}"),
+    )
+    .with_env("FLOTTILLE_TEST_CLOCK", "1")
+}
+
+/// An agent whose first turn (`HALF`, 60k tokens of context) ended: its id.
+fn at_rest(user: &User) -> String {
+    let agent = session(user, "add the login page HALF");
+    eventually("the first turn's end", || turns_ended(user, &agent) == 1);
+    agent
+}
+
+fn advance(user: &User, ms: u64) {
+    user.call("test.advance", json!({"ms": ms})).unwrap();
+}
+
+#[test]
+fn an_agent_at_rest_is_compacted_the_margin_before_its_cache_expires() {
+    let user = clocked("before_expiry = true");
+    let agent = at_rest(&user);
+
+    advance(&user, 54 * MINUTE);
+    quiet(&user, &agent);
+    advance(&user, MINUTE);
+    eventually("the compaction", || !compacted(&user, &agent).is_empty());
+    assert_eq!(compacted(&user, &agent)[0]["before"], 60_000);
+    // Once: its new session is not compacted again while nothing grew.
+    eventually("the new session's first turn", || {
+        prompts(&user).iter().any(|p| p.contains(SUMMARY))
+    });
+    advance(&user, 61 * MINUTE);
+    std::thread::sleep(Duration::from_millis(1_500));
+    assert_eq!(compacted(&user, &agent).len(), 1);
+}
+
+#[test]
+fn an_agent_with_a_turn_running_is_not_compacted_before_expiry() {
+    let user = clocked("before_expiry = true");
+    let agent = at_rest(&user);
+
+    advance(&user, 54 * MINUTE);
+    send(&user, &agent, "hold on HANG");
+    eventually("the turn that runs", || {
+        prompts(&user).iter().any(|p| p.contains("hold on"))
+    });
+    advance(&user, 2 * MINUTE);
+    quiet(&user, &agent);
+}
+
+#[test]
+fn a_message_to_an_agent_whose_cache_expired_compacts_first() {
+    let user = clocked("");
+    let agent = at_rest(&user);
+
+    advance(&user, 61 * MINUTE);
+    // Said once, for the composer's toggle, ticked from the setting.
+    advance(&user, MINUTE);
+    let expired = events(&user, &agent, "agent.cache_expired");
+    assert_eq!(expired.len(), 1, "{expired:?}");
+    assert_eq!(expired[0]["compact"], true);
+    send(&user, &agent, "go on AFTER");
+    eventually("the compaction", || !compacted(&user, &agent).is_empty());
+    eventually("the message in the new session", || {
+        prompts(&user).iter().any(|p| p.contains("go on AFTER"))
+    });
+    assert_eq!(user.received_requests("session/new").len(), 2);
+    let given = prompts(&user);
+    let summary = given.iter().position(|p| p.contains(SUMMARY)).unwrap();
+    let message = given
+        .iter()
+        .position(|p| p.contains("go on AFTER"))
+        .unwrap();
+    assert!(summary <= message, "{given:#?}");
+}
+
+#[test]
+fn a_message_before_the_expiry_is_sent_as_it_is() {
+    let user = clocked("");
+    let agent = at_rest(&user);
+
+    advance(&user, 59 * MINUTE);
+    send(&user, &agent, "go on AFTER");
+    eventually("the next turn", || turns_ended(&user, &agent) == 2);
+    quiet(&user, &agent);
+    assert_eq!(user.received_requests("session/new").len(), 1);
+}
+
+#[test]
+fn below_the_minimum_size_neither_trigger_compacts() {
+    let user = clocked("before_expiry = true\nminimum = 100000");
+    let agent = at_rest(&user);
+
+    advance(&user, 61 * MINUTE);
+    quiet(&user, &agent);
+    send(&user, &agent, "go on AFTER");
+    eventually("the next turn", || turns_ended(&user, &agent) == 2);
+    quiet(&user, &agent);
+}
+
+#[test]
+fn unticking_the_toggle_sends_without_compacting() {
+    let user = clocked("");
+    let agent = at_rest(&user);
+
+    advance(&user, 61 * MINUTE);
+    user.call(
+        "agent.send",
+        json!({"agent": agent, "message": "go on AFTER", "compact": false}),
+    )
+    .unwrap();
+    eventually("the next turn", || turns_ended(&user, &agent) == 2);
+    quiet(&user, &agent);
+}
+
+#[test]
+fn ticking_the_toggle_compacts_even_with_the_setting_off() {
+    let user = clocked("after_expiry = false");
+    let agent = at_rest(&user);
+
+    advance(&user, 61 * MINUTE);
+    user.call(
+        "agent.send",
+        json!({"agent": agent, "message": "go on AFTER", "compact": true}),
+    )
+    .unwrap();
+    eventually("the compaction", || !compacted(&user, &agent).is_empty());
+}
+
+#[test]
+fn a_parent_woken_by_its_child_follows_the_setting() {
+    let user = clocked("");
+    let (agent, mcp) = session_with_mcp(&user, "lead the work HALF");
+    eventually("the first turn's end", || turns_ended(&user, &agent) == 1);
+
+    advance(&user, 61 * MINUTE);
+    // The child ends two turns without a report: its parent is told, by Flottille.
+    let launched = mcp.call(
+        "agent_launch",
+        json!({"kind": "child", "title": "tests", "brief": "write the tests", "workspace": "w"}),
+    );
+    assert!(!launched.error, "{}", launched.text);
+    eventually("the compaction", || !compacted(&user, &agent).is_empty());
+}
+
+#[test]
+fn without_a_compactor_neither_trigger_runs() {
+    let user = clocked("");
+    std::fs::write(
+        user.path("config/flottille/compaction.toml"),
+        "compactor = \"none\"\nautomatic = false\nbefore_expiry = true\n",
+    )
+    .unwrap();
+    let agent = at_rest(&user);
+
+    advance(&user, 61 * MINUTE);
+    quiet(&user, &agent);
+    send(&user, &agent, "go on AFTER");
+    eventually("the next turn", || turns_ended(&user, &agent) == 2);
+    quiet(&user, &agent);
+}
+
+#[test]
+fn the_expiry_settings_and_the_lifetimes_are_shown_and_kept() {
+    let user = user();
+    let shown = user.call("compaction.show", json!({})).unwrap();
+    assert_eq!(shown["before_expiry"], false, "{shown}");
+    assert_eq!(shown["margin"], 5, "{shown}");
+    assert_eq!(shown["after_expiry"], true, "{shown}");
+    assert_eq!(shown["minimum"], 50_000, "{shown}");
+    assert_eq!(shown["lifetimes"]["claude"], 3_600, "{shown}");
+    assert_eq!(shown["lifetimes"]["codex"], Value::Null, "{shown}");
+    assert_eq!(shown["lifetimes"]["opencode"], Value::Null, "{shown}");
+
+    let set = user
+        .call(
+            "compaction.set",
+            json!({"before_expiry": true, "margin": 10, "after_expiry": false, "minimum": 80_000}),
+        )
+        .unwrap();
+    assert_eq!(set["before_expiry"], true, "{set}");
+    assert_eq!(set["margin"], 10, "{set}");
+    assert_eq!(set["after_expiry"], false, "{set}");
+    assert_eq!(set["minimum"], 80_000, "{set}");
+    let refused = user
+        .call("compaction.set", json!({"margin": 0}))
+        .unwrap_err();
+    assert!(refused.1.contains("margin"), "{refused:?}");
+}
+
+// The summary written by the agent itself (#405): `summary = "agent"` in `compaction.toml`, no
+// compactor needed. Flottille asks the agent for its handoff in a message of its own, then starts
+// it again in a new session from its brief, the handoff and what Flottille holds of it.
+
+/// What the scripted agent writes when Flottille asks for its handoff.
+const HANDOFF: &str = "## Task\nAdd the login page.\n## About to do\nWire the form to /api/login.";
+
+/// The agent's turns: the handoff, `FULL` past the threshold (72 % of the window, under the
+/// threshold + 5), `RUSH` far past it (80 %) and still running, and the new session's first turn,
+/// with the handoff or without it. `handoff` is what the agent does when asked for it.
+fn handoff_script(handoff: Value) -> Value {
+    json!({"models": ["fake-small"], "turns": [
+        {"when": "flottille:handoff", "do": handoff},
+        {"when": "FULL", "times": 1, "do": [{"say": "I edited src/login.rs."},
+            {"usage": {"used": 144_000, "size": 200_000}}]},
+        {"when": "RUSH", "times": 1, "do": [{"say": "Working on it."},
+            {"usage": {"used": 160_000, "size": 200_000}}, {"hold": "release"}]},
+        {"when": "your_handoff", "do": [{"say": "Picking up."}, {"usage": {"used": 9_000, "size": 200_000}}]},
+        {"when": "handoff is missing", "do": [{"say": "Starting again."}, {"usage": {"used": 9_000, "size": 200_000}}]}
+    ]})
+}
+
+/// A user whose agents are the fake agent playing `handoff_script(handoff)` and whose summaries
+/// the agents write themselves.
+fn handing_user(handoff: Value) -> User {
+    let user = User::with_fake_agent();
+    user.fake_script(handoff_script(handoff));
+    std::fs::create_dir_all(user.path("config/flottille")).unwrap();
+    std::fs::write(
+        user.path("config/flottille/compaction.toml"),
+        "summary = \"agent\"\n",
+    )
+    .unwrap();
+    user
+}
+
+#[test]
+fn the_claude_process_starts_with_its_compaction_off() {
+    let user = User::with_fake_claude();
+    std::fs::create_dir_all(user.path("config/flottille")).unwrap();
+    std::fs::write(
+        user.path("config/flottille/compaction.toml"),
+        "summary = \"agent\"\ncompactor = \"none\"\n",
+    )
+    .unwrap();
+    session(&user, "hello");
+    eventually("claude's start", || !user.claude_starts().is_empty());
+    let env = &user.claude_starts()[0]["env"];
+    assert_eq!(env["DISABLE_COMPACT"], "1", "{env}");
+    assert!(
+        env.get("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE").is_none(),
+        "{env}"
+    );
+    // Flottille's compaction off (automatic off): Claude compacts on its own again.
+    user.call("compaction.set", json!({"automatic": false}))
+        .unwrap();
+    let again = session_in(&user, "hello again");
+    eventually("claude's second start", || user.claude_starts().len() == 2);
+    let env = &user.claude_starts()[1]["env"];
+    assert!(env.get("DISABLE_COMPACT").is_none(), "{again}: {env}");
+}
+
+/// A second root agent in the workspace `w` of `session`.
+fn session_in(user: &User, message: &str) -> String {
+    let answer = user
+        .call(
+            "agent.run",
+            json!({"project": "app", "workspace": "w", "message": message}),
+        )
+        .unwrap();
+    answer["agent"]["id"].as_str().unwrap().to_owned()
+}
+
+#[test]
+fn an_agent_past_the_threshold_hands_off_at_the_end_of_its_turn() {
+    let user = handing_user(json!([{"say": HANDOFF}]));
+    let agent = session(&user, "add the login page FULL");
+
+    eventually("the handoff", || !compacted(&user, &agent).is_empty());
+    let event = &compacted(&user, &agent)[0];
+    assert_eq!(event["by"], "flottille", "{event}");
+    assert_eq!(event["source"], "agent", "{event}");
+    assert_eq!(event["before"], 144_000, "{event}");
+    assert_eq!(event["summary"], HANDOFF, "{event}");
+    // Asked at the end of the turn, never in it, in a message of Flottille's.
+    let given = prompts(&user);
+    assert!(given.len() >= 2, "{given:#?}");
+    assert!(
+        given[1].starts_with("[flottille:handoff]\n"),
+        "{}",
+        given[1]
+    );
+    for section in [
+        "Task",
+        "Decisions",
+        "Files touched",
+        "Done",
+        "Left",
+        "About to do",
+    ] {
+        assert!(given[1].contains(section), "{section}: {}", given[1]);
+    }
+    assert_eq!(
+        events(&user, &agent, "agent.turn_ended")[0]["stop_reason"],
+        "end_turn"
+    );
+    // No compactor was asked: there is none.
+    assert_eq!(
+        user.call("compaction.show", json!({})).unwrap()["compactor"],
+        Value::Null
+    );
+    eventually("the new session", || {
+        user.received_requests("session/new").len() == 2
+    });
+}
+
+#[test]
+fn a_turn_far_past_the_threshold_is_interrupted_for_the_handoff() {
+    let user = handing_user(json!([{"say": HANDOFF}]));
+    let agent = session(&user, "add the login page RUSH");
+
+    eventually("the handoff", || !compacted(&user, &agent).is_empty());
+    // The turn was cut (its hold never released), then the handoff asked, saying so.
+    let ended = events(&user, &agent, "agent.turn_ended");
+    assert_eq!(ended[0]["stop_reason"], "cancelled", "{ended:?}");
+    let asked = prompts(&user)
+        .into_iter()
+        .find(|p| p.starts_with("[flottille:handoff]"))
+        .unwrap();
+    assert!(asked.contains("interrupted"), "{asked}");
+    // The new session goes on from what it was about to do.
+    eventually("the new session's first prompt", || {
+        prompts(&user).iter().any(|p| p.contains("your_handoff"))
+    });
+    let first = prompts(&user)
+        .into_iter()
+        .find(|p| p.contains("your_handoff"))
+        .unwrap();
+    assert!(first.contains("about to do"), "{first}");
+}
+
+#[test]
+fn the_new_process_gets_the_brief_the_summary_and_the_state_of_the_store() {
+    let user = handing_user(json!([{"say": HANDOFF}]));
+    let (agent, mcp) = session_with_mcp(&user, "lead the work");
+    eventually("the first turn's end", || turns_ended(&user, &agent) == 1);
+    let woken: Answer = mcp.call("wake", json!({"minutes": 30, "why": "look at the build"}));
+    assert!(!woken.error, "{}", woken.text);
+
+    send(&user, &agent, "go on FULL");
+    eventually("the new session's first prompt", || {
+        prompts(&user).iter().any(|p| p.contains("your_handoff"))
+    });
+    let first = prompts(&user)
+        .into_iter()
+        .find(|p| p.contains("your_handoff"))
+        .unwrap();
+    let brief = first.find("lead the work").expect("the brief");
+    let handoff = first.find(HANDOFF).expect("the handoff");
+    let state = first.find("<flottille_state>").expect("the state");
+    assert!(brief < handoff && handoff < state, "{first}");
+    assert!(
+        first.contains("look at the build"),
+        "the subscription: {first}"
+    );
+    assert!(first.contains("Workspace branch"), "the workspace: {first}");
+}
+
+#[test]
+fn the_agent_keeps_its_id_its_place_in_the_tree_and_its_workspace() {
+    let user = handing_user(json!([{"say": HANDOFF}]));
+    let (agent, mcp) = session_with_mcp(&user, "lead the work");
+    eventually("the first turn's end", || turns_ended(&user, &agent) == 1);
+    let launched = mcp.call(
+        "agent_launch",
+        json!({"kind": "child", "title": "tests", "brief": "write the tests HANG", "workspace": "w"}),
+    );
+    assert!(!launched.error, "{}", launched.text);
+    let before = user.call("agent.show", json!({"agent": agent})).unwrap()["agent"].clone();
+
+    send(&user, &agent, "go on FULL");
+    eventually("the handoff", || !compacted(&user, &agent).is_empty());
+
+    let after = user.call("agent.show", json!({"agent": agent})).unwrap()["agent"].clone();
+    assert_eq!(after["id"], agent.as_str());
+    for key in ["workspace", "folder", "parent", "provider", "model"] {
+        assert_eq!(after[key], before[key], "{key}");
+    }
+    let tree = user.call("agent.tree", json!({"agent": agent})).unwrap();
+    assert!(tree.to_string().contains("tests"), "{tree}");
+    // Not a replacement: neither counted nor told.
+    assert!(
+        events(&user, &agent, "agent.replaced")
+            .iter()
+            .all(|e| e["counted"] != true)
+    );
+}
+
+#[test]
+fn a_failed_handoff_starts_from_the_store_and_says_the_summary_is_missing() {
+    // Asked for its handoff, the agent answers nothing.
+    let user = handing_user(json!([]));
+    let agent = session(&user, "start the work");
+    eventually("the first turn's end", || turns_ended(&user, &agent) == 1);
+    send(&user, &agent, "go on FULL");
+
+    eventually("the new session", || {
+        prompts(&user)
+            .iter()
+            .any(|p| p.contains("handoff is missing"))
+    });
+    let first = prompts(&user)
+        .into_iter()
+        .find(|p| p.contains("handoff is missing"))
+        .unwrap();
+    assert!(first.contains("<flottille_state>"), "{first}");
+    assert!(
+        first.contains("go on FULL"),
+        "the last user message: {first}"
+    );
+    let event = &compacted(&user, &agent)[0];
+    assert_eq!(event["missing"], true, "{event}");
+    assert_eq!(event["summary"], Value::Null, "{event}");
+    assert!(!failed(&user, &agent).is_empty());
+}
+
+#[test]
+fn the_threshold_is_read_from_settings_and_refused_outside_50_to_95() {
+    let user = handing_user(json!([{"say": HANDOFF}]));
+    let shown = user.call("compaction.show", json!({})).unwrap();
+    assert_eq!(shown["summary"], "agent", "{shown}");
+    assert_eq!(shown["threshold"], 70, "{shown}");
+    let shown = user
+        .call(
+            "compaction.set",
+            json!({"threshold": 80, "summary": "compactor"}),
+        )
+        .unwrap();
+    assert_eq!(shown["threshold"], 80);
+    assert_eq!(shown["summary"], "compactor");
+    for wrong in [
+        json!({"threshold": 49}),
+        json!({"threshold": 96}),
+        json!({"summary": "someone"}),
+    ] {
+        let refused = user.call("compaction.set", wrong.clone()).unwrap_err();
+        assert_eq!(refused.0, "invalid-params", "{wrong}: {refused:?}");
+    }
+    // At 80 %, a context at 72 % is no handoff.
+    user.call("compaction.set", json!({"summary": "agent"}))
+        .unwrap();
+    let agent = session(&user, "add the login page FULL");
+    eventually("the turn's end", || turns_ended(&user, &agent) == 1);
+    std::thread::sleep(Duration::from_millis(1_000));
+    assert!(compacted(&user, &agent).is_empty());
+    assert_eq!(prompts(&user).len(), 1);
+    // The file says it too, and refuses what is out of range.
+    std::fs::write(
+        user.path("config/flottille/compaction.toml"),
+        "summary = \"agent\"\nthreshold = 99\n",
+    )
+    .unwrap();
+    let refused = user.call("compaction.show", json!({})).unwrap_err();
+    assert!(refused.1.contains("threshold"), "{refused:?}");
+}
+
+#[test]
+fn a_codex_agent_and_an_opencode_agent_hand_off_the_same_way() {
+    let user = User::with_fake_providers();
+    user.write_providers("[opencode]\nenabled = true\n[codex]\nenabled = true\n");
+    std::fs::create_dir_all(user.path("config/flottille")).unwrap();
+    std::fs::write(
+        user.path("config/flottille/compaction.toml"),
+        "summary = \"agent\"\n",
+    )
+    .unwrap();
+    for provider in ["codex", "opencode"] {
+        user.provider_script(provider, handoff_script(json!([{"say": HANDOFF}])));
+    }
+    let folder = user.path("work/app");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "app\n").unwrap();
+    user.git(&folder, &["add", "README.md"]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    user.call("project.add", json!({"folder": folder, "name": "app"}))
+        .unwrap();
+    for provider in ["codex", "opencode"] {
+        let agent = user
+            .call(
+                "agent.run",
+                json!({"project": "app", "message": "add the login page FULL", "provider": provider}),
+            )
+            .unwrap()["agent"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        eventually("the handoff", || !compacted(&user, &agent).is_empty());
+        let event = &compacted(&user, &agent)[0];
+        assert_eq!(event["source"], "agent", "{provider}: {event}");
+        assert_eq!(event["summary"], HANDOFF, "{provider}: {event}");
+        eventually("the new session's first prompt", || {
+            user.provider_received(provider).iter().any(|r| {
+                r["received"]["method"] == "session/prompt"
+                    && r.to_string().contains("your_handoff")
+            })
+        });
+    }
+}

@@ -365,8 +365,9 @@ Each emits `judge.changed`. The user's door alone reaches them: no tool of an ag
 `compaction.md` beside it, absent while Flottille's default (`crates/flottille/roles/compaction.md`)
 holds. The guidance sits inside a fixed text (`crates/flottille/roles/compactor-base.md`).
 
-- `compaction.show` answers `{"compactor", "automatic", "threshold", "maximum", "kept",
-  "guidance"}`: the compactor `{"provider", "model", "effort", "picked"}` (`model` and `effort`
+- `compaction.show` answers `{"compactor", "summary", "automatic", "threshold", "maximum", "kept",
+  "guidance"}`: who writes the summary (`compactor`, the default, or `agent`: the agent's own
+  handoff, `docs/design.md` §5.8, 7), the compactor `{"provider", "model", "effort", "picked"}` (`model` and `effort`
   only when chosen, `picked` only while the user has not seen the notice of a compactor Flottille
   picked) or `null` for none, whether it compacts by itself (default `true`), the threshold in
   percent of the context window (default 70), the maximum size in tokens (`null`, the default, is
@@ -375,11 +376,15 @@ holds. The guidance sits inside a fixed text (`crates/flottille/roles/compactor-
   compactor picked first, as the Auto judge is (`provider.set_judge`): the smallest model of the
   first provider enabled, installed and signed in among those Flottille lists, written once with
   `picked = true` and said once with `compaction.changed`. `invalid-config` when the file holds
-  an unknown key or a value out of its range.
+  an unknown key or a value out of its range. It also gives the two triggers around the prompt
+  cache's expiry (`docs/design.md` §5.8, 6): `before_expiry` (default `false`), `margin` in
+  minutes (default 5), `after_expiry` (default `true`), `minimum` in tokens (default 50000), and
+  `lifetimes`, each provider's cache lifetime in seconds, `null` where it is not established.
 - `compaction.set` takes any of `compactor` (`{"provider", "model", "effort"}`, or `"none"`),
-  `automatic` (a boolean), `threshold` (50 to 95), `maximum` (a number of tokens from 20000, or
-  `"none"`) and `kept` (0 to 50000, and never more than a quarter of the size that compacts the
-  agent); what is left out stays. It answers as `compaction.show`;
+  `summary` (`"compactor"` or `"agent"`), `automatic` (a boolean), `threshold` (50 to 95), `maximum` (a number of tokens from 20000, or
+  `"none"`), `kept` (0 to 50000, and never more than a quarter of the size that compacts the
+  agent), `before_expiry` and `after_expiry` (booleans), `margin` (1 to 30 minutes) and `minimum`
+  (0 to 1000000 tokens); what is left out stays. It answers as `compaction.show`;
   `invalid-params` for anything else, `not-found` for an unknown provider. `compactor = "none"`
   is a choice: no compactor is ever picked again.
 - `compaction.set_guidance {text}` writes the guidance (`refused` above 4,000 characters; an
@@ -1121,7 +1126,7 @@ A message `/name rest`, where name is one of the project's commands, is sent as 
 
 #### `agent.send`
 
-`{"agent", "message", "images"?}`. Gives the agent a message (a `user` delivery), played after the turn that
+`{"agent", "message", "images"?, "compact"?}`. Gives the agent a message (a `user` delivery), played after the turn that
 runs if one does, starting its process again when it was released: `{"agent", "after",
 "delivery"}`. `delivery` is the id of the delivery stored for the message: its `delivery.queued`
 event (numbered after `after`), then `delivery.sent` when a prompt takes it (`docs/events.md`), name
@@ -1129,6 +1134,10 @@ it, so that a client follows the turn of its own message even when another clien
 agent at the same time.
 `refused` when the agent is in a final state, the message is empty, or the agent is a child: only
 its parent writes to it, and the sentence names its root.
+
+`compact` is the composer's **Compact before sending**: when the agent's prompt cache expired
+(`agent.cache_expired`), `true` compacts it before the turn the message starts and `false` sends it
+to the session as it is, whatever the setting `after_expiry`; left out, the setting decides.
 
 `images` is a list of `{"mime", "data"}`, `data` the image's bytes in base64: a pasted or dropped
 picture, sent as ACP image blocks after the message's text. With images, the message may be

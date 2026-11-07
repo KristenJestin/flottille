@@ -419,12 +419,27 @@ compactor summarised it before the agent went on in a new session.
 | `by` | `flottille` when Flottille compacted it; absent for the CLI's own compaction. |
 | `before` | Flottille's only: the tokens of the context in use before, as the last `agent.usage` said. |
 | `after` | Flottille's only: the tokens of what the new session starts with (the brief, the summary and the messages kept), counted as 4 characters a token. |
-| `summary` | Flottille's only: the summary the compactor wrote. |
+| `summary` | Flottille's only: the summary the compactor wrote, or the handoff the agent wrote; `null` when the agent's handoff is missing. |
+| `source` | Flottille's only: `compactor`, or `agent` when the agent wrote its own handoff (`summary = "agent"`). |
+| `missing` | `true` when the agent was asked for its handoff and it failed: the new session started from Flottille's state and the user's last message. Absent otherwise. |
+
+#### `agent.cache_expired`
+
+The prompt cache of the agent, at rest, expired, and its context is past the minimum size of the
+compaction around the expiry (`docs/design.md` §5.8, 6): the composer shows **Compact before
+sending** until the agent's next turn or compaction. Said once per expiry.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `compact` | The setting `after_expiry` when it was said: whether the toggle starts ticked. |
 
 #### `agent.compaction_failed`
 
 Flottille's compaction of the agent failed, and changed nothing: the agent goes on in its
-session, and its CLI's own compaction stays.
+session, and its CLI's own compaction stays. A failed handoff of an agent that writes its own
+(`source` `agent`) is said the same way, and its new session starts all the same, without it
+(`agent.compacted` with `missing`).
 
 | Field | |
 |---|---|
