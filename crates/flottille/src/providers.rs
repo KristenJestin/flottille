@@ -156,7 +156,7 @@ impl Provider {
         }
         names.push("wake");
         names.push("report");
-        names.push(if root { "ask_user" } else { "ask_parent" });
+        names.push("ask");
         // Only a root starts a session or is one: the sessions it writes to are those.
         if root {
             names.push("session_send");
@@ -1443,7 +1443,7 @@ mod tests {
     }
 
     #[test]
-    fn a_root_agent_gets_ask_user_the_agent_tools_and_approval_answer() {
+    fn a_root_agent_gets_ask_the_agent_tools_and_approval_answer() {
         let tools = short(claude::PROVIDER.tools(true, false, false, false, false));
         assert_eq!(
             tools,
@@ -1470,7 +1470,7 @@ mod tests {
                 "project",
                 "wake",
                 "report",
-                "ask_user",
+                "ask",
                 "session_send",
                 "session_read",
                 "approval_answer",
@@ -1482,17 +1482,17 @@ mod tests {
     fn the_tools_follow_what_the_agent_can_do() {
         let leaf = short(claude::PROVIDER.tools(false, true, false, false, false));
         assert_eq!(leaf.len(), 15);
-        assert!(leaf.contains(&"ask_parent".to_owned()));
+        assert!(leaf.contains(&"ask".to_owned()));
         assert!(
             !leaf
                 .iter()
-                .any(|t| t.starts_with("agent_") || t == "ask_user")
+                .any(|t| t.starts_with("agent_") || t == "session_send")
         );
         assert!(!leaf.contains(&"approval_answer".to_owned()));
         let lead_child = short(claude::PROVIDER.tools(false, false, false, false, false));
-        assert!(lead_child.contains(&"ask_parent".to_owned()));
+        assert!(lead_child.contains(&"ask".to_owned()));
         assert!(lead_child.contains(&"approval_answer".to_owned()));
-        assert!(!lead_child.contains(&"ask_user".to_owned()));
+        assert!(!lead_child.contains(&"session_send".to_owned()));
         // A child does its brief: the project's skills, commands, setup and settings are the
         // root's. It reads the tasks it runs and changes none of them, and reads the workspaces
         // and removes its own (the gate and the family refuse the rest).

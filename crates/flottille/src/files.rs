@@ -1837,6 +1837,8 @@ mod at_once {
             images: None,
             gate_mode: GateMode::Auto,
             launched_by: None,
+            led: false,
+            detached_from: None,
         }
     }
 

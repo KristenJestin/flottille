@@ -1651,7 +1651,7 @@ fn worker(user: &User, lead: &Mcp, title: &str) -> (String, Mcp) {
 fn worker_doing(lead: &Mcp, what: &str, title: &str) -> String {
     let answer = lead.call(
         "agent_launch",
-        json!({"title": title, "brief": format!("{what} and {title}"), "workspace": "w"}),
+        json!({"kind": "child", "title": title, "brief": format!("{what} and {title}"), "workspace": "w"}),
     );
     assert!(!answer.error, "{}", answer.text);
     answer
@@ -1811,7 +1811,7 @@ fn a_root_agent_s_reply_has_no_label_while_a_child_s_has_its_name(cx: &mut TestA
     let (lead, mcp, _) = lead_in_w(&user);
     let answer = mcp.call(
         "agent_launch",
-        json!({"title": "draft the notes", "brief": "draft the notes", "workspace": "w"}),
+        json!({"kind": "child", "title": "draft the notes", "brief": "draft the notes", "workspace": "w"}),
     );
     assert!(!answer.error, "{}", answer.text);
     let child = answer
@@ -3649,7 +3649,7 @@ fn providers_user() -> User {
     user.provider_script(
         "opencode",
         json!({"models": ["open/small", "open/medium"], "efforts": ["low", "high"], "turns": [
-            {"when": "launch a helper", "do": [{"mcp": {"tool": "agent_launch", "arguments": {
+            {"when": "launch a helper", "do": [{"mcp": {"tool": "agent_launch", "arguments": {"kind": "child",
                 "title": "helper", "brief": "check the docs", "provider": "claude",
                 "model": "fake-large"}}}]}
         ]}),

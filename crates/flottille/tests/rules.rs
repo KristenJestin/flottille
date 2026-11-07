@@ -573,7 +573,10 @@ fn a_child_has_the_rules_in_its_instructions_but_no_tool_to_change_them() {
     .unwrap();
     let (_, mcp) = root(&user, None);
     let opened = user.received_requests("session/new").len();
-    let launched = mcp.call("agent_launch", json!({"title": "t", "brief": "Do it."}));
+    let launched = mcp.call(
+        "agent_launch",
+        json!({"kind": "child", "title": "t", "brief": "Do it."}),
+    );
     assert!(!launched.error, "{}", launched.text);
     let id = launched
         .text

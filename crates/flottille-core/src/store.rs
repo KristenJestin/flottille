@@ -673,6 +673,23 @@ const MIGRATIONS: &[&str] = &[
         updated_at  INTEGER NOT NULL
     ) STRICT;
 ",
+    "
+    -- A session an agent started is led by it or handed to the user (`docs/tools.md`, \"Sessions
+    -- an agent starts\"): one its starter still followed is led, the others handed. A following,
+    -- which woke its starter at each turn end, now wakes a pilot when its session asks, reports
+    -- or ends.
+    ALTER TABLE agents ADD COLUMN led INTEGER NOT NULL DEFAULT 0;
+    UPDATE agents SET led = 1 WHERE launched_by IS NOT NULL AND EXISTS (
+        SELECT 1 FROM subscriptions WHERE source = 'session' AND agent = agents.launched_by
+            AND json_extract(target, '$.session') = agents.id);
+    UPDATE subscriptions SET events = '[\"asked\",\"reported\",\"ended\"]'
+        WHERE source = 'session';
+",
+    "
+    -- The agent a session was detached from by the user (`docs/tools.md`, \"Detach\"): kept for
+    -- the record once `launched_by` is cleared, and to keep its first message the agent's.
+    ALTER TABLE agents ADD COLUMN detached_from TEXT REFERENCES agents (id);
+",
 ];
 
 const REQUEST_COLUMNS: &str = "number, agent, call_key, tool, arguments, shown, reasons, sensitive, \
@@ -685,7 +702,7 @@ const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, sta
     created_at, updated_at, active_at, ended_at, chosen_model, chosen_effort, chosen_mode, \
     taken_model, taken_effort, taken_mode, native_id, agent_version, instructions, tools, parent, \
     depth, epoch, title, brief, reported_at, quiet_turns, waiting_on_answer, reopens, images, gate_mode, \
-    launched_by, pending_model, pending_effort, exchanged_at";
+    launched_by, pending_model, pending_effort, exchanged_at, led, detached_from";
 
 const DELIVERY_COLUMNS: &str =
     "id, agent, kind, body, urgency, state, created_at, sent_at, images, typed, commands";
@@ -711,6 +728,10 @@ pub struct AgentChange {
     pub reported_at: Option<Option<u64>>,
     pub quiet_turns: Option<u32>,
     pub waiting_on_answer: Option<bool>,
+    pub led: Option<bool>,
+    /// The user detached the session from the agent that started it: `launched_by` is cleared,
+    /// `detached_from` keeps that agent (`docs/tools.md`, "Detach").
+    pub detached_from: Option<String>,
 }
 
 /// How many cut tool results of one agent keep their whole text (`docs/tools.md`, "Long
@@ -1112,7 +1133,7 @@ impl Store {
             &format!(
                 "INSERT INTO agents ({AGENT_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, \
                  ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, \
-                 ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37)"
+                 ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39)"
             ),
             params![
                 agent.id,
@@ -1152,6 +1173,8 @@ impl Store {
                 agent.pending.model,
                 agent.pending.effort,
                 agent.exchanged_at,
+                agent.led,
+                agent.detached_from,
             ],
         )?;
         let event = append_agent_event(&transaction, &agent.id, event.0, event.1)?;
@@ -1272,6 +1295,15 @@ impl Store {
                 "UPDATE agents SET quiet_turns = ?2 WHERE id = ?1",
                 params![id, quiet_turns],
             )?;
+        }
+        if let Some(from) = change.detached_from {
+            transaction.execute(
+                "UPDATE agents SET detached_from = ?2, launched_by = NULL, led = 0 WHERE id = ?1",
+                params![id, from],
+            )?;
+        }
+        if let Some(led) = change.led {
+            transaction.execute("UPDATE agents SET led = ?2 WHERE id = ?1", params![id, led])?;
         }
         if let Some(waiting) = change.waiting_on_answer {
             transaction.execute(
@@ -3329,6 +3361,8 @@ fn agent_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Agent>> {
             mode: None,
         },
         exchanged_at: row.get(36)?,
+        led: row.get(37)?,
+        detached_from: text(38)?,
     }))
 }
 
@@ -4036,6 +4070,8 @@ mod tests {
             images: None,
             gate_mode: GateMode::Auto,
             launched_by: None,
+            led: false,
+            detached_from: None,
         }
     }
 
@@ -4489,6 +4525,67 @@ mod tests {
         let run = store.run("r1").unwrap().unwrap();
         assert_eq!(run.agent.as_deref(), Some(agent.id.as_str()));
         assert_eq!(run.project, "app");
+    }
+
+    #[test]
+    fn sessions_launched_before_keep_their_relation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let old = Connection::open(&path).unwrap();
+        let previous = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("ADD COLUMN led INTEGER"))
+            .unwrap();
+        for migration in &MIGRATIONS[..previous] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.pragma_update(None, "user_version", previous).unwrap();
+        // A starter, a session it still follows, one it does not, and a root of the user's.
+        for (id, launched_by) in [
+            ("000000000001", None),
+            ("000000000002", Some("000000000001")),
+            ("000000000003", Some("000000000001")),
+            ("000000000004", None),
+        ] {
+            old.execute(
+                "INSERT INTO agents (id, provider, role, project, workspace, folder, state, \
+                 created_at, updated_at, instructions, tools, launched_by) VALUES (?1, 'claude', \
+                 'lead', 'app', NULL, '/work/app', 'idle', 1, 1, 'text', '[]', ?2)",
+                params![id, launched_by],
+            )
+            .unwrap();
+        }
+        old.execute(
+            "INSERT INTO subscriptions (id, agent, source, target, events, from_whom, seen, \
+             created_at, expires_at) VALUES ('s1', '000000000001', 'session', \
+             '{\"session\":\"000000000002\",\"title\":\"Login\"}', '[\"turn-ended\"]', \
+             'anyone', '{}', 1, 9)",
+            [],
+        )
+        .unwrap();
+        drop(old);
+
+        let store = Store::open(&path).unwrap();
+
+        let led = |id: &str| store.agent(id).unwrap().unwrap().led;
+        assert!(led("000000000002"), "a followed session is led");
+        assert!(!led("000000000003"), "an unfollowed one is handed");
+        assert!(!led("000000000004"));
+        for id in ["000000000002", "000000000003"] {
+            assert_eq!(
+                store.agent(id).unwrap().unwrap().launched_by.as_deref(),
+                Some("000000000001")
+            );
+        }
+        let events: String = store
+            .connection
+            .query_row(
+                "SELECT events FROM subscriptions WHERE id = 's1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(events, r#"["asked","reported","ended"]"#);
     }
 
     #[test]

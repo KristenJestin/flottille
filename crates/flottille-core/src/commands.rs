@@ -186,7 +186,7 @@ none for the others. You change no file and make no commit.
    - commits on no remote: `git log --oneline HEAD --not --remotes`;
    - commits ahead of its base: `git log --oneline <remote>/<base>..HEAD`;
    - its pull request, if it has one already: `forge` `show`.
-   Send the report to the user with `ask_user`: one short block per repository, then the exact
+   Send the report to the user with `ask`: one short block per repository, then the exact
    list of what you will do: which branch you push where, which pull request you open, with its
    title.
 2. If a repository holds uncommitted work, stop there and change nothing: name the files, and say
@@ -212,7 +212,7 @@ follows its merges is done. The repositories of one level are merged together.
    its pull request (`forge` `show`): its review, its comments and reviews, its checks. Each of these
    blocks the stack: no pull request, no check at all, checks failing or still running, a review
    asking for changes, a comment or a review left unanswered. Send the user the state of every
-   pull request in one `ask_user`, what blocks first. While anything blocks, stop there, unless the
+   pull request in one `ask`, what blocks first. While anything blocks, stop there, unless the
    user waives it in their answer: pass their words as `waive` to that merge, and Flottille holds
    the waived merge for their approval. Flottille refuses to merge a pull request no check ran on
    or whose checks were all skipped, whose checks fail or run, or whose review asks for changes,
@@ -229,7 +229,7 @@ follows its merges is done. The repositories of one level are merged together.
      re-run once with `forge` `checks`; one that fails again, or fails because of the
      change, stops the stack.
    Nothing waits inside a tool call. When you must wait for something outside (a pipeline, a
-   release), tell the user with `ask_user` what you wait for and where to see it, and end your
+   release), tell the user with `ask` what you wait for and where to see it, and end your
    turn; go on when you are written to.
 3. Never merge with `git merge`, never merge a level before those it depends on. If something goes
    wrong halfway, stop: say what is merged, what is not, and what the user should look at.
@@ -250,7 +250,7 @@ Close this workspace: check that nothing in it would be lost, then remove it.
    - no commit of its own: its branch is empty, and Flottille deletes it with the workspace;
    - commits of its own: its pull request must be merged; open, closed or missing, the closing
      stops.
-3. If the closing stops, change nothing: send the user (`ask_user`) the audit, what keeps the
+3. If the closing stops, change nothing: send the user (`ask`) the audit, what keeps the
    workspace open and what they can do (commit and push, merge the pull request, or open it
    first), then `report`.
 4. Otherwise the workspace can go: remove it (`workspace` `remove`). The user is asked; once they

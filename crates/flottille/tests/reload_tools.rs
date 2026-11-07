@@ -386,7 +386,7 @@ fn a_reload_of_a_child_is_refused() {
     let user = User::with_fake_agent();
     user.fake_script(json!({"turns": [
         {"when": "LAUNCH", "do": [
-            {"mcp": {"tool": "agent_launch", "arguments": {"title": "worker one",
+            {"mcp": {"tool": "agent_launch", "arguments": {"kind": "child", "title": "worker one",
                 "brief": "HANG here", "workspace": "w"}}}]},
         {"when": "HANG", "do": [{"hang": true}]}
     ]}));
