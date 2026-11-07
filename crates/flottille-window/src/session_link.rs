@@ -69,6 +69,8 @@ pub struct TreeAgent {
     pub tools_outdated: bool,
     /// A reload of its tools waits for its next process (`agent.reload_tools`).
     pub tools_reload: bool,
+    /// What the parts of Flottille the user can turn off say of it, each under its name.
+    pub extensions: Value,
 }
 
 /// A change of model and effort waiting for the end of the turn.
@@ -153,6 +155,7 @@ impl TreeAgent {
                 .collect(),
             tools_outdated: agent["tools_outdated"] == true,
             tools_reload: agent["tools_reload"] == true,
+            extensions: entry["extensions"].clone(),
         }
     }
 }

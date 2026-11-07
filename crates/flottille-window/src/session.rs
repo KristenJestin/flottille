@@ -1503,6 +1503,7 @@ impl SessionPage {
                     doing: agent.doing.clone(),
                     waits_on_subscription: agent.waiting_on.as_deref() == Some("subscription"),
                     status,
+                    extensions: agent.extensions.clone(),
                 })
             })
             .collect();
@@ -6210,6 +6211,8 @@ pub struct RailAgent {
     /// It waits between turns for what happens outside (`doing` says what).
     pub waits_on_subscription: bool,
     pub status: Entity<Status>,
+    /// What the parts of Flottille the user can turn off say of it (`agent.tree`).
+    pub extensions: serde_json::Value,
 }
 
 /// A row of the rail: an agent, or the folded row that gathers the ended children of `parent`.
@@ -6338,6 +6341,8 @@ pub struct SessionRail {
     ticket_error: Option<SharedString>,
     /// The last ticket the place had, drawn while its line folds away after an unlink.
     last_ticket: Option<TicketFacts>,
+    /// The last spec the session was said to write or develop, drawn while its line folds away.
+    last_spec: Option<crate::extensions::specs::OfSession>,
     _ticket_subscription: Option<Subscription>,
     /// "Remove workspace…" was chosen: the confirmation is open.
     confirming: bool,
@@ -6443,6 +6448,7 @@ impl SessionRail {
             linking: false,
             ticket_error: None,
             last_ticket: None,
+            last_spec: None,
             _ticket_subscription: None,
             confirming: false,
             removing: false,
@@ -7461,6 +7467,34 @@ impl Render for SessionRail {
                 ticket_content.unwrap_or_else(|| div().into_any_element()),
             ),
         );
+        // The spec the session writes or develops: its line opens the spec's page.
+        let of_spec = self
+            .agents
+            .iter()
+            .find(|agent| agent.parent.is_none())
+            .and_then(|root| crate::extensions::specs::OfSession::of(&root.extensions));
+        if of_spec.is_some() {
+            self.last_spec = of_spec.clone();
+        }
+        let shell = self.page.upgrade().map(|page| page.read(cx).shell.clone());
+        let spec_content = self.last_spec.clone().zip(shell).map(|(of, shell)| {
+            let said = of.said();
+            let row = crate::extensions::specs::session_value(shell, &self.project, &of, cx);
+            fact_line(
+                "rail-line-spec".to_owned(),
+                Some(Icon::File),
+                "Spec",
+                said,
+                row,
+                p,
+            )
+            .into_any_element()
+        });
+        let spec_line = presence(
+            "rail-spec-block",
+            of_spec.is_some(),
+            spec_content.unwrap_or_else(|| div().into_any_element()),
+        );
         let ticket_field = self
             .ticket_field
             .clone()
@@ -7512,6 +7546,7 @@ impl Render for SessionRail {
                             .test_support(),
                     ))
                     .child(ticket_line)
+                    .child(spec_line)
                     .children(lines)
                     .child(presence(
                         "rail-no-forge-block",
@@ -9105,6 +9140,7 @@ mod tests {
             queued: Vec::new(),
             tools_outdated: false,
             tools_reload: false,
+            extensions: serde_json::Value::Null,
         }
     }
 

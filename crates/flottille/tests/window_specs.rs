@@ -15,6 +15,7 @@ use flottille_ui::omarchy::Environment;
 use flottille_window::Shell;
 use flottille_window::extensions::specs::SpecPage;
 use flottille_window::shell::Selection;
+use flottille_window::tree::session_id;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
@@ -30,6 +31,8 @@ fn user() -> User {
         .with_fake_gh()
         .with_fetcher()
         .with_env("FLOTTILLE_TEST_CLOCK", "1")
+        // A development's workspace fetches from `origin`: it reaches no server.
+        .with_env("GIT_SSH_COMMAND", "false")
 }
 
 /// What the fake `gh` answers of an issue of `acme/app`.
@@ -924,4 +927,104 @@ fn the_ready_toast_follows_what_became_of_the_ticket(cx: &mut TestAppContext) {
             },
         );
     }
+}
+
+/// A spec of ticket #5, complete and made Ready.
+fn ready_spec(user: &User) -> u64 {
+    let spec = user
+        .call(
+            "spec.new",
+            json!({"project": "app", "title": "Magic link", "tickets": ["#5"]}),
+        )
+        .unwrap()["spec"]
+        .as_u64()
+        .unwrap();
+    complete(user, spec);
+    user.call("spec.ready", json!({"spec": spec})).unwrap();
+    spec
+}
+
+#[gpui_kit::test]
+fn launch_development_on_the_spec_page_puts_it_in_progress_and_says_so(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    turn(&user, true, None);
+    let spec = ready_spec(&user);
+    let (shell, cx) = window(&user, cx);
+    open_spec(&shell, cx, spec);
+    until(&shell, cx, "Launch development is offered", |cx| {
+        found(cx, "spec-develop")
+    });
+
+    click(cx, "spec-develop");
+
+    until(&shell, cx, "the spec is in progress", |_| {
+        show(&user, spec)["status"] == "in_progress"
+    });
+    until(&shell, cx, "the launch is said", |cx| {
+        toasts(&shell, cx)
+            .iter()
+            .any(|(failed, title, _)| !failed && title == "Development launched")
+    });
+    // Once it is In progress, the button folds away: one development at a time.
+    until(&shell, cx, "Launch development folds away", |cx| {
+        !found(cx, "spec-develop")
+    });
+    assert_eq!(label(cx, "spec-status").as_deref(), Some("In progress"));
+}
+
+#[gpui_kit::test]
+fn the_specs_tab_menu_launches_a_development(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    turn(&user, true, None);
+    let spec = ready_spec(&user);
+    let (shell, cx) = window(&user, cx);
+    open_project(&shell, cx);
+    until(&shell, cx, "the Specs tab counts it", |cx| {
+        label(cx, "project-items-tabs-specs-count").as_deref() == Some("1")
+    });
+    click(cx, "project-items-tabs-specs");
+    let more = format!("specs-more-spec-{spec}");
+    until(&shell, cx, "the row's menu", |cx| found(cx, &more));
+
+    settle(cx);
+    click(cx, &more);
+    let entry = format!("spec-{spec}-develop");
+    until(&shell, cx, "the menu opens", |cx| found(cx, &entry));
+    click(cx, &entry);
+
+    until(&shell, cx, "the spec is in progress", |_| {
+        show(&user, spec)["status"] == "in_progress"
+    });
+}
+
+#[gpui_kit::test]
+fn the_session_page_shows_the_spec_its_session_develops(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user);
+    turn(&user, true, None);
+    let spec = ready_spec(&user);
+    let agent = user.call("spec.develop", json!({"spec": spec})).unwrap()["agent"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&agent)).is_some())
+    });
+
+    cx.update(|window, cx| window.click(session_id(&agent), cx));
+
+    until(&shell, cx, "the session's Spec line", |cx| {
+        label(cx, "rail-line-spec").is_some_and(|said| {
+            said.contains(&format!(
+                "Spec {spec} Magic link, developed by this session"
+            ))
+        })
+    });
+    click(cx, "rail-spec");
+    until(&shell, cx, "the spec's page opens", |cx| {
+        spec_page(&shell, cx).is_some_and(|page| page.read_with(cx, |p, _| p.spec() == spec))
+    });
 }

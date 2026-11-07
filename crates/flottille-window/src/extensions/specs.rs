@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use flottille_ui::{
-    Button, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Modal, PageHeader,
+    Button, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, PageHeader,
     RadioChoices, Section, Toast, changing, color, enter, hoverable, icon, palette, presence,
     presence_of, space, toast,
 };
@@ -67,6 +67,10 @@ pub enum Then {
     Departures {
         spec: u64,
     },
+    /// "Launch development".
+    Develop {
+        spec: u64,
+    },
 }
 
 impl Then {
@@ -78,7 +82,8 @@ impl Then {
             | Then::Ready { spec }
             | Then::Draft { spec }
             | Then::Ticket { spec, .. }
-            | Then::Departures { spec } => Some(*spec),
+            | Then::Departures { spec }
+            | Then::Develop { spec } => Some(*spec),
             Then::Listed { .. } | Then::New | Then::FromTicket { .. } => None,
         }
     }
@@ -259,6 +264,7 @@ pub(super) fn answered(
             ),
             Err(why) => toast(Toast::failure("The spec was not started").detail(why), cx),
         },
+        Then::Develop { .. } => developed(&answer, cx),
         // The page's own, when it is no longer open.
         Then::Shown { .. }
         | Then::Answer { .. }
@@ -271,6 +277,94 @@ pub(super) fn answered(
             }
         }
     }
+}
+
+/// "Launch development" of a Ready spec: the user's gesture alone.
+fn launch(shell: &WeakEntity<Shell>, spec: u64, cx: &mut App) {
+    let then = Then::Develop { spec };
+    ask(shell, "spec.develop", json!({"spec": spec}), then, cx);
+}
+
+/// The toast of a development launched, or why it was not.
+fn developed(answer: &Result<Value, String>, cx: &mut App) {
+    match answer {
+        Ok(started) => toast(
+            Toast::success("Development launched").detail(format!(
+                "A session builds the spec in the workspace {} made for it; its first message \
+                 is the spec.",
+                started["workspace"].as_str().unwrap_or_default()
+            )),
+            cx,
+        ),
+        Err(why) => toast(
+            Toast::failure("The development was not launched").detail(why.clone()),
+            cx,
+        ),
+    }
+}
+
+/// The spec a session writes or develops, as `agent.tree`'s `extensions.specs` says it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OfSession {
+    pub spec: u64,
+    pub title: String,
+    /// The session develops the spec, rather than writing it.
+    pub developing: bool,
+}
+
+impl OfSession {
+    pub fn of(extensions: &Value) -> Option<Self> {
+        let fact = extensions.get(NAME)?;
+        Some(Self {
+            spec: fact["spec"].as_u64()?,
+            title: fact["title"].as_str().unwrap_or_default().to_owned(),
+            developing: fact["work"] == "developing",
+        })
+    }
+
+    /// What a reader hears of its line.
+    pub fn said(&self) -> String {
+        let work = match self.developing {
+            true => "developed by this session",
+            false => "written by this session",
+        };
+        format!("{} {}, {work}", self.spec, self.title)
+    }
+}
+
+/// The value of a session's Spec line: the spec's number and title, which open its page.
+pub fn session_value(
+    shell: WeakEntity<Shell>,
+    project: &str,
+    of: &OfSession,
+    cx: &App,
+) -> AnyElement {
+    let p = palette(cx);
+    let (project, spec) = (project.to_owned(), of.spec);
+    let row = div()
+        .id("rail-spec")
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(space::XS)
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .cursor_pointer()
+        .aria_label(SharedString::from(of.said()))
+        .child(
+            div()
+                .flex_none()
+                .child(SharedString::from(spec.to_string())),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .child(SharedString::from(of.title.clone())),
+        )
+        .on_click(move |_, window, cx| open_spec(&shell, &project, spec, window, cx));
+    hoverable(row, move |d, t| d.text_color(color::mix(p.mute, p.text, t))).into_any_element()
 }
 
 /// The registry of the shell, while it is there.
@@ -346,6 +440,8 @@ pub struct SpecsTab {
     /// "New spec" is open.
     new_open: bool,
     idea: Entity<InputState>,
+    /// The "⋯" menu of each spec's row, by its key.
+    menus: HashMap<String, Entity<Menu>>,
 }
 
 impl SpecsTab {
@@ -363,7 +459,26 @@ impl SpecsTab {
             list: Listing::default(),
             new_open: false,
             idea,
+            menus: HashMap::new(),
         }
+    }
+
+    /// A row's "⋯" menu: open the spec, or launch its development, which the daemon refuses
+    /// with its reason unless the spec is Ready.
+    fn menu(&mut self, key: &str, summary: &Summary, cx: &mut Context<Self>) -> Entity<Menu> {
+        let (open, launching) = (self.shell.clone(), self.shell.clone());
+        let (project, spec) = (summary.project.clone(), summary.spec);
+        crate::commands::menu_of(&mut self.menus, "specs", key, cx, move |key, menu| {
+            menu.entry(format!("{key}-open"), "Open", None, move |window, cx| {
+                open_spec(&open, &project, spec, window, cx)
+            })
+            .entry(
+                format!("{key}-develop"),
+                "Launch development",
+                None,
+                move |_, cx| launch(&launching, spec, cx),
+            )
+        })
     }
 
     pub fn open_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -443,9 +558,13 @@ impl Render for SpecsTab {
             .rows()
             .map(|row| (row.key.to_owned(), row.value.clone(), row.placement))
             .collect();
-        let card = rows.into_iter().fold(
+        let menus: Vec<Entity<Menu>> = rows
+            .iter()
+            .map(|(key, summary, _)| self.menu(key, summary, cx))
+            .collect();
+        let card = rows.into_iter().zip(menus).fold(
             ListCard::new("project-specs-list"),
-            |card, (key, summary, placement)| {
+            |card, ((key, summary, placement), menu)| {
                 let p = palette(cx);
                 let facts = facts_line(format!("{key}-facts"), summary.facts(), cx);
                 let (shell, project, spec) =
@@ -453,6 +572,7 @@ impl Render for SpecsTab {
                 let row = ListRow::new(ElementId::Name(key.clone().into()), summary.title.clone())
                     .leading(icon(Icon::File).size(px(14.)).text_color(p.faint))
                     .below(facts)
+                    .more(menu)
                     .on_click(move |_, window, cx| open_spec(&shell, &project, spec, window, cx));
                 card.item(
                     ElementId::Name(format!("{key}-item").into()),
@@ -831,6 +951,8 @@ pub struct SpecPage {
     overwriting: bool,
     /// A choice on the ticket, or the departures' post, was asked, until the daemon answers.
     writing: bool,
+    /// "Launch development" was asked, until the daemon answers.
+    launching: bool,
     narrow: bool,
 }
 
@@ -851,6 +973,7 @@ impl SpecPage {
             confirming: false,
             overwriting: false,
             writing: false,
+            launching: false,
             narrow: false,
         }
     }
@@ -1025,8 +1148,27 @@ impl SpecPage {
                 }
                 cx.notify();
             }
+            Then::Develop { .. } => {
+                self.launching = false;
+                developed(&answer, cx);
+                if let Ok(started) = answer {
+                    self.shown = Some(Ok(Spec::of(&started["spec"])));
+                }
+                cx.notify();
+            }
             Then::Listed { .. } | Then::New | Then::FromTicket { .. } => {}
         }
+    }
+
+    /// "Launch development": a session for the user, in a new workspace, builds the spec.
+    pub fn develop(&mut self, cx: &mut Context<Self>) {
+        let ready = self.shown().is_some_and(|spec| spec.status == "ready");
+        if !ready || self.launching {
+            return;
+        }
+        self.launching = true;
+        launch(&self.shell, self.spec, cx);
+        cx.notify();
     }
 
     /// Takes the ticket's change into the spec, or (after its confirmation) writes over it.
@@ -1435,6 +1577,15 @@ impl Render for SpecPage {
                     this.update(cx, |this, cx| this.ready(cx)).ok();
                 }
             });
+        let developable = spec.as_ref().is_some_and(|spec| spec.status == "ready");
+        let develop = Button::primary("spec-develop", "Launch development")
+            .disabled(self.launching)
+            .on_click({
+                let this = this.clone();
+                move |_, _, cx| {
+                    this.update(cx, |this, cx| this.develop(cx)).ok();
+                }
+            });
         let back = Button::secondary("spec-draft", "Back to draft")
             .disabled(self.moving)
             .on_click({
@@ -1452,6 +1603,7 @@ impl Render for SpecPage {
                     .items_center()
                     .gap(space::SM)
                     .child(presence("spec-ready-block", draft, ready))
+                    .child(presence("spec-develop-block", developable, develop))
                     .child(presence("spec-draft-block", sendable, back)),
             )
             .child(
