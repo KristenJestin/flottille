@@ -382,7 +382,13 @@ impl SettingsPage {
         for provider in self.providers.list.iter().filter(|p| p.enabled) {
             entries.push((
                 format!("{}-default", provider.name),
-                format!("{} · its default model", provider.title),
+                format!(
+                    "{} · {}",
+                    provider.title,
+                    self.providers
+                        .model_said(&provider.name, None)
+                        .unwrap_or_else(|| "Model not known yet".to_owned())
+                ),
                 Some((provider.name.clone(), None)),
             ));
             for model in provider.models.iter().flatten() {
@@ -411,7 +417,12 @@ impl SettingsPage {
                 .map_or(provider.clone(), |p| p.title.clone());
             let label = match &model {
                 Some(model) => format!("{title} · {model}"),
-                None => format!("{title} · its default model"),
+                None => format!(
+                    "{title} · {}",
+                    self.providers
+                        .model_said(&provider, None)
+                        .unwrap_or_else(|| "Model not known yet".to_owned())
+                ),
             };
             entries.push((format!("{provider}-own"), label, Some((provider, model))));
         }
