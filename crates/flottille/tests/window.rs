@@ -3731,7 +3731,7 @@ fn opening_settings_shows_the_judge_and_its_guidance_alone(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
-fn settings_has_seven_tabs_in_order(cx: &mut TestAppContext) {
+fn settings_has_eight_tabs_in_order(cx: &mut TestAppContext) {
     assert_eq!(
         flottille_window::settings::SECTIONS[..],
         [
@@ -3739,6 +3739,7 @@ fn settings_has_seven_tabs_in_order(cx: &mut TestAppContext) {
             ("providers", "Providers"),
             ("rules", "Rules"),
             ("workspaces", "Workspaces"),
+            ("vault", "Vault"),
             ("sessions", "Sessions"),
             ("appearance", "Appearance"),
             ("developer", "Developer mode"),

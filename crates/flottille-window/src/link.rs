@@ -54,6 +54,9 @@ pub enum Update {
     /// A service of the machine started, became ready, ended or was changed, or a project's tasks
     /// changed what needs one: the services page reads them again.
     ServicesChanged,
+    /// An entry of the vault was set or removed, from any client: the settings page reads the
+    /// list again.
+    VaultChanged,
     /// Where workspaces go was chosen (a project's own when it names one, the default of every
     /// project when `None`), from any client: the sections read it again.
     WorkspacesFolderChanged { project: Option<String> },
@@ -187,6 +190,9 @@ fn follow(
             let _ = updates.unbounded_send(Update::WorkspacesFolderChanged {
                 project: event.data["project"].as_str().map(str::to_owned),
             });
+        }
+        if event.name == "vault.changed" {
+            let _ = updates.unbounded_send(Update::VaultChanged);
         }
         if event.name == "sessions.changed" {
             let _ = updates.unbounded_send(Update::SessionsChanged);
