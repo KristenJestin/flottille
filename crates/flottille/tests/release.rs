@@ -1793,6 +1793,20 @@ fn a_push_to_main_that_is_not_a_commit_of_dev_publishes_nothing_and_fails() {
 }
 
 #[test]
+fn every_release_title_has_a_v_before_its_version() {
+    // `Flottille v0.1.2-beta.98`, of every channel: the one title the publish job writes, made
+    // and edited with it.
+    let script = step_script(".github/workflows/ci.yml", "publish");
+    assert!(script.contains("title=\"Flottille v$VERSION\""), "{script}");
+    assert_eq!(script.matches("title=").count(), 1, "{script}");
+    assert_eq!(
+        script.matches("--title \"$title\"").count(),
+        script.matches("--title").count(),
+        "{script}"
+    );
+}
+
+#[test]
 fn the_branch_name_is_sanitised_the_same_way_everywhere() {
     // Each byte but ASCII letters, digits and dashes is a dash: `é` is two.
     let branch = "feat/é_x";

@@ -191,6 +191,7 @@ jobs:
           name: release
           path: release
       - name: Publish
+        id: publish
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -207,7 +208,7 @@ jobs:
           else
             cat "$RUNNER_TEMP/tip.err" >&2; exit 1
           fi
-          title="Flottille $VERSION"
+          title="Flottille v$VERSION"
           # A release run again: published, it stays (stable, beta) or is replaced in place
           # (alpha); a draft left by a failed upload is made again.
           state=missing
