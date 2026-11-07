@@ -3731,12 +3731,13 @@ fn opening_settings_shows_the_judge_and_its_guidance_alone(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
-fn settings_has_seven_tabs_in_order(cx: &mut TestAppContext) {
+fn settings_has_eight_tabs_in_order(cx: &mut TestAppContext) {
     assert_eq!(
         flottille_window::settings::SECTIONS[..],
         [
             ("judge", "Judge"),
             ("providers", "Providers"),
+            ("compaction", "Compaction"),
             ("rules", "Rules"),
             ("workspaces", "Workspaces"),
             ("sessions", "Sessions"),
@@ -3756,7 +3757,7 @@ fn settings_has_seven_tabs_in_order(cx: &mut TestAppContext) {
             .iter()
             .map(|key| window.find(format!("settings-tabs-{key}")).bounds().left())
             .collect();
-        assert_eq!(lefts.len(), 7);
+        assert_eq!(lefts.len(), 8);
         assert!(lefts.windows(2).all(|pair| pair[0] < pair[1]), "{lefts:?}");
         assert!(
             window.try_find("settings-tabs-guidance").is_none(),

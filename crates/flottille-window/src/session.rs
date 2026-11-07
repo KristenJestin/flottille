@@ -51,8 +51,8 @@ use crate::actions::{Answer, Command, Picture, RepositoryStatus, RunAct, RunAnsw
 use crate::attachments::{Attachments, STILL_SCALING};
 use crate::commands::CommandInfo;
 use crate::conversation::{
-    Activity, Block, Call, CallState, Change, Conversation, DiffLine, Ending, STARTED_SESSION_KIND,
-    Summary, USER, WOKEN_BY_KIND, asks_the_user, in_sight, is_hidden,
+    Activity, Block, COMPACTED_KIND, Call, CallState, Change, Conversation, DiffLine, Ending,
+    STARTED_SESSION_KIND, Summary, USER, WOKEN_BY_KIND, asks_the_user, in_sight, is_hidden,
 };
 use crate::leaves::LeaveList;
 use crate::link::{Connect, Update};
@@ -309,6 +309,12 @@ pub const RELOADS_AFTER_TURN: &str = "Reloads after this turn";
 /// The toast of a reload asked between turns: the tools come with the next message, which
 /// starts the next process.
 pub const RELOADED: &str = "Tools reload at its next message";
+
+/// The entry of the session's menu that compacts its conversation now, or once its turn ends.
+pub const COMPACT: &str = "Compact conversation";
+
+/// The toast of a compaction the daemon refused.
+pub const NOT_COMPACTED: &str = "The conversation was not compacted";
 
 /// The toast of a reload the daemon refused.
 pub const NOT_RELOADED: &str = "The tools were not reloaded";
@@ -735,6 +741,35 @@ impl SessionPage {
         self.reloading = true;
         let session = self.opened.id.clone();
         self.perform(Command::ReloadTools { session }, cx);
+        cx.notify();
+    }
+
+    /// Compacts the root's conversation: the compactor summarises it and the root goes on in a
+    /// new session, now or once the turn that runs ended. Nothing happens for a session that
+    /// ended.
+    pub fn compact(&mut self, cx: &mut Context<Self>) {
+        if !self.endable() {
+            return;
+        }
+        let session = self.opened.id.clone();
+        self.perform(Command::Compact { session }, cx);
+    }
+
+    /// What the daemon answered to a compaction asked: a toast says when it happens, or why not.
+    pub fn compacting(
+        &mut self,
+        after_turn: bool,
+        refused: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let said = match refused {
+            Some(why) => Toast::failure(NOT_COMPACTED).detail(why),
+            None if after_turn => Toast::success("Compacts after this turn")
+                .detail("The conversation shows a line when its new session is ready."),
+            None => Toast::success("Compacting the conversation")
+                .detail("The conversation shows a line when its new session is ready."),
+        };
+        toast(said, cx);
         cx.notify();
     }
 
@@ -5316,7 +5351,8 @@ impl Render for Row {
             // it until a click opens it; what woke the agent is its own line, the forge's text
             // folded under it.
             Block::Notice { kind, text } => {
-                let (first, rest) = match (kind == WOKEN_BY_KIND, text.split_once('\n')) {
+                let whole_first = kind == WOKEN_BY_KIND || kind == COMPACTED_KIND;
+                let (first, rest) = match (whole_first, text.split_once('\n')) {
                     (true, Some((first, rest))) => (first.trim().to_owned(), rest.trim()),
                     (true, None) => (text.trim().to_owned(), ""),
                     (false, _) => (
@@ -5829,6 +5865,7 @@ impl SessionRail {
         let editor = page.clone();
         let ender = page.clone();
         let reloader = page.clone();
+        let compactor = page.clone();
         let agent_menu = cx.new(|cx| {
             Menu::new("rail-agent-menu", "Session actions", cx)
                 .entry(
@@ -5837,6 +5874,14 @@ impl SessionRail {
                     Some(Icon::Restart),
                     move |_, cx| {
                         reloader.update(cx, |page, cx| page.reload_tools(cx)).ok();
+                    },
+                )
+                .entry(
+                    "rail-agent-compact",
+                    COMPACT,
+                    Some(Icon::Restart),
+                    move |_, cx| {
+                        compactor.update(cx, |page, cx| page.compact(cx)).ok();
                     },
                 )
                 .entry(

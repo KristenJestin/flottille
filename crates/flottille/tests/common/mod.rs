@@ -221,6 +221,47 @@ impl User {
         self.with_env("FLOTTILLE_AGENT_COMMAND_OPENCODE", agent.to_str().unwrap())
     }
 
+    /// A user whose compactor is OpenCode standing on a fake ACP agent of its own, in the folder
+    /// `fake-compactor`, every prompt of which plays `steps`; `settings` is the rest of
+    /// `compaction.toml`. OpenCode is enabled.
+    pub fn with_compactor(self, steps: Value, settings: &str) -> User {
+        let dir = self.path("fake-compactor");
+        std::fs::create_dir(&dir).unwrap();
+        let agent = dir.join("agent");
+        std::fs::write(
+            &agent,
+            format!(
+                "#!/bin/sh\nFLOTTILLE_FAKE_AGENT_DIR='{}' exec '{}' \"$@\"\n",
+                dir.display(),
+                fake_agent().display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&agent, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        std::fs::write(
+            dir.join("script.json"),
+            json!({"turns": [{"when": "", "do": steps}]}).to_string(),
+        )
+        .unwrap();
+        let file = self.path("config/flottille/providers.toml");
+        let before = std::fs::read_to_string(&file).unwrap_or_default();
+        if !before.contains("[opencode]") {
+            self.write_providers(&format!("{before}\n[opencode]\nenabled = true\n"));
+        }
+        std::fs::write(
+            self.path("config/flottille/compaction.toml"),
+            format!("{settings}\n[compactor]\nprovider = \"opencode\"\n"),
+        )
+        .unwrap();
+        self.with_env("FLOTTILLE_AGENT_COMMAND_OPENCODE", agent.to_str().unwrap())
+    }
+
+    /// What the fake compactor was asked, every message of every compaction.
+    pub fn compactor_received(&self) -> Vec<Value> {
+        records(&self.path("fake-compactor/received.jsonl"))
+    }
+
     /// `with_judge`, the judge allowing every call it is asked about.
     pub fn with_allowing_judge(self) -> User {
         self.with_judge(
@@ -759,7 +800,7 @@ impl User {
 
 /// The records of a fake agent, one per line. A line it is still writing is left for the next
 /// read.
-pub fn records(file: &Path) -> Vec<Value> {
+fn records(file: &Path) -> Vec<Value> {
     match std::fs::read_to_string(file) {
         Ok(text) => text
             .split_inclusive('\n')

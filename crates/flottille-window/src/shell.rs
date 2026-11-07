@@ -175,6 +175,12 @@ pub struct Shell {
     /// The notice of the Auto judge Flottille picked was dismissed here, before the daemon says
     /// it was seen.
     judge_noticed: bool,
+    /// The compactor Flottille picked has not been seen yet (`compaction.show`).
+    compaction_picked: bool,
+    /// The user saw the notice of the compactor picked.
+    compaction_noticed: bool,
+    /// The compactor's provider and model, as `compaction.show` last said them.
+    compactor_shown: Option<(String, Option<String>)>,
     /// The number of the latest request about the appearance (see [`Shell::ask_appearance`]).
     appearance_asked: u64,
     /// The open project's settings page; made again for another project.
@@ -253,12 +259,14 @@ impl Shell {
         let sidebar = cx.new(|_| Sidebar::new(this.clone()));
         let rules = cx.new(|_| RulesEditor::new(this.clone(), None));
         let judge_guidance = cx.new(|_| RulesEditor::judge(this.clone()));
+        let compaction_guidance = cx.new(|_| RulesEditor::compaction(this.clone()));
         let workspaces = cx.new(|_| WorkspacesFolder::new(this.clone(), None));
         let settings = cx.new(|_| {
             SettingsPage::new(
                 this.clone(),
                 rules.clone(),
                 judge_guidance.clone(),
+                compaction_guidance.clone(),
                 workspaces.clone(),
             )
         });
@@ -330,6 +338,9 @@ impl Shell {
             services,
             rules,
             judge_noticed: false,
+            compaction_picked: false,
+            compaction_noticed: false,
+            compactor_shown: None,
             appearance_asked: 0,
             project_settings: None,
             add_project,
@@ -694,6 +705,7 @@ impl Shell {
             Update::TextChanged { judge: true, .. } => self.actions.send(Command::JudgeRead),
             Update::DeveloperChanged => self.actions.send(Command::DeveloperRead),
             Update::ToolResultsChanged => self.actions.send(Command::ToolResultsRead),
+            Update::CompactionChanged => self.actions.send(Command::CompactionRead),
             Update::SessionsChanged => self.actions.send(Command::SessionsRead),
             Update::ServicesChanged => {
                 if self.main.read(cx).services_page().is_some() {
@@ -1153,6 +1165,53 @@ impl Shell {
                 self.settings
                     .update(cx, |page, cx| page.appearance_answered(shown, written, cx));
             }
+            Outcome::Compaction {
+                written,
+                guidance,
+                shown,
+            } => {
+                let compaction = shown
+                    .as_ref()
+                    .map(crate::settings::Compaction::of)
+                    .map_err(Clone::clone);
+                if let Ok(shown) = &compaction {
+                    self.compaction_picked = shown.picked;
+                    self.compactor_shown = shown
+                        .compactor
+                        .clone()
+                        .map(|(provider, model, _)| (provider, model));
+                }
+                if guidance || !written {
+                    let editor = self.settings.read(cx).compaction_guidance().clone();
+                    let said = shown
+                        .as_ref()
+                        .map(|shown| crate::rules::Shown::of(&shown["guidance"]))
+                        .map_err(Clone::clone);
+                    editor.update(cx, |editor, cx| editor.answered(said, guidance, window, cx));
+                }
+                if !guidance {
+                    self.settings.update(cx, |page, cx| {
+                        page.compaction_answered(compaction, written, cx)
+                    });
+                }
+                cx.notify();
+            }
+            Outcome::Compacting {
+                session,
+                after_turn,
+                refused,
+            } => {
+                if let Some(page) = self.session_page.clone()
+                    && page.read(cx).id() == session
+                {
+                    page.update(cx, |page, cx| page.compacting(after_turn, refused, cx));
+                } else if let Some(why) = refused {
+                    flottille_ui::toast(
+                        flottille_ui::Toast::failure(crate::session::NOT_COMPACTED).detail(why),
+                        cx,
+                    );
+                }
+            }
             Outcome::JudgeGuidance { written, shown } => {
                 let editor = self.settings.read(cx).judge_guidance().clone();
                 editor.update(cx, |editor, cx| editor.answered(shown, written, window, cx));
@@ -1547,6 +1606,8 @@ impl Shell {
         self.providers_read = read;
         self.settings
             .update(cx, |page, cx| page.set_providers(&providers, cx));
+        // A provider ready since may be the compactor Flottille picks: the daemon says it.
+        self.actions.send(Command::CompactionRead);
         let chosen = providers.judge.is_some();
         for reply in self.replies.values() {
             let mode = reply.read(cx).mode.clone();
@@ -1955,6 +2016,37 @@ impl Shell {
         ))
     }
 
+    /// The sentence of the notice that says which compactor Flottille picked, while the user has
+    /// not seen it. One notice at a time: the judge's first.
+    pub fn compaction_notice(&self) -> Option<String> {
+        if self.compaction_noticed || !self.compaction_picked || self.judge_notice().is_some() {
+            return None;
+        }
+        let (name, model) = self.compactor_shown.as_ref()?;
+        let title = self
+            .providers
+            .get(name)
+            .map_or(name.as_str(), |p| p.title.as_str());
+        let model = self
+            .providers
+            .model_said(name, model.as_deref())
+            .map_or_else(String::new, |model| format!(" {model}"));
+        Some(format!(
+            "Flottille chose {title}{model} as your compactor: when an agent's context fills up, it \
+             summarises the conversation and the agent goes on from the summary, on your quota. \
+             Change it, or choose none, in Settings."
+        ))
+    }
+
+    /// The notice of the compactor was seen: it goes, and the daemon is told.
+    pub fn dismiss_compaction_notice(&mut self, cx: &mut Context<Self>) {
+        if !self.compaction_noticed {
+            self.compaction_noticed = true;
+            self.actions.send(Command::CompactionNoticed);
+            cx.notify();
+        }
+    }
+
     /// The notice was seen: it goes, and the daemon is told, so that it never comes back.
     pub fn dismiss_judge_notice(&mut self, cx: &mut Context<Self>) {
         if !self.judge_noticed {
@@ -1964,7 +2056,15 @@ impl Shell {
         }
     }
 
-    fn judge_notice_card(&self, text: String, cx: &mut Context<Self>) -> impl IntoElement {
+    /// A notice of what Flottille chose for the user, bottom right: the Auto judge (`judge`), or
+    /// the compactor. Its keys start with `judge-notice` or `compaction-notice`.
+    fn notice_card(&self, judge: bool, text: String, cx: &mut Context<Self>) -> impl IntoElement {
+        let key = if judge {
+            "judge-notice"
+        } else {
+            "compaction-notice"
+        };
+        let part = |part: &str| SharedString::from(format!("{key}{part}"));
         let p = palette(cx);
         let buttons = div()
             .flex()
@@ -1972,14 +2072,24 @@ impl Shell {
             .gap(space::SM)
             .child(div().flex_1())
             .child(
-                Button::secondary("judge-notice-dismiss", "Dismiss")
-                    .on_click(cx.listener(|this, _, _, cx| this.dismiss_judge_notice(cx))),
+                Button::secondary(part("-dismiss"), "Dismiss").on_click(cx.listener(
+                    move |this, _, _, cx| match judge {
+                        true => this.dismiss_judge_notice(cx),
+                        false => this.dismiss_compaction_notice(cx),
+                    },
+                )),
             )
             .child(
-                Button::primary("judge-notice-open", "Open Settings").on_click(cx.listener(
-                    |this, _, window, cx| {
-                        this.dismiss_judge_notice(cx);
-                        this.open_settings_at(Reveal::Judge, window, cx);
+                Button::primary(part("-open"), "Open Settings").on_click(cx.listener(
+                    move |this, _, window, cx| match judge {
+                        true => {
+                            this.dismiss_judge_notice(cx);
+                            this.open_settings_at(Reveal::Judge, window, cx);
+                        }
+                        false => {
+                            this.dismiss_compaction_notice(cx);
+                            this.open_settings_at(Reveal::Compaction, window, cx);
+                        }
                     },
                 )),
             );
@@ -1991,7 +2101,7 @@ impl Shell {
             .gap(space::MD)
             .child(
                 div()
-                    .id("judge-notice-text")
+                    .id(part("-text"))
                     .aria_label(SharedString::from(text.clone()))
                     .text_size(px(12.5))
                     .text_color(p.mute)
@@ -2000,15 +2110,21 @@ impl Shell {
             )
             .child(buttons);
         div()
-            .id("judge-notice")
+            .id(SharedString::from(key))
             .absolute()
             .bottom(px(16.))
             .right(px(16.))
             .w(px(380.))
             .child(enter(
-                "judge-notice-enter",
+                part("-enter"),
                 0,
-                Card::new().title("Auto judge chosen").child(body),
+                Card::new()
+                    .title(if judge {
+                        "Auto judge chosen"
+                    } else {
+                        "Compactor chosen"
+                    })
+                    .child(body),
             ))
             .test_support()
     }
@@ -2105,6 +2221,7 @@ impl Shell {
             self.actions.send(Command::ReadProviders);
             self.actions.send(Command::RulesRead { project: None });
             self.actions.send(Command::JudgeRead);
+            self.actions.send(Command::CompactionRead);
             self.actions.send(Command::DeveloperRead);
             self.actions.send(Command::ToolResultsRead);
             self.actions.send(Command::SessionsRead);
@@ -2371,7 +2488,10 @@ impl Render for Shell {
             .child(self.top.clone())
             .child(body)
             .when_some(self.judge_notice(), |d, text| {
-                d.child(self.judge_notice_card(text, cx))
+                d.child(self.notice_card(true, text, cx))
+            })
+            .when_some(self.compaction_notice(), |d, text| {
+                d.child(self.notice_card(false, text, cx))
             })
             .child(self.add_project.clone())
             .child(self.switcher.clone())

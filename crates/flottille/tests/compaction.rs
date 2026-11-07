@@ -40,31 +40,7 @@ fn script() -> Value {
 fn user_with(steps: Value, settings: &str) -> User {
     let user = User::with_fake_agent();
     user.fake_script(script());
-    let dir = user.path("fake-compactor");
-    std::fs::create_dir(&dir).unwrap();
-    let agent = dir.join("agent");
-    std::fs::write(
-        &agent,
-        format!(
-            "#!/bin/sh\nFLOTTILLE_FAKE_AGENT_DIR='{}' exec '{}' \"$@\"\n",
-            dir.display(),
-            common::fake_agent().display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&agent, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    std::fs::write(
-        dir.join("script.json"),
-        json!({"turns": [{"when": "", "do": steps}]}).to_string(),
-    )
-    .unwrap();
-    user.write_providers("[opencode]\nenabled = true\n");
-    std::fs::write(
-        user.path("config/flottille/compaction.toml"),
-        format!("{settings}\n[compactor]\nprovider = \"opencode\"\n"),
-    )
-    .unwrap();
-    user.with_env("FLOTTILLE_AGENT_COMMAND_OPENCODE", agent.to_str().unwrap())
+    user.with_compactor(steps, settings)
 }
 
 fn user() -> User {
@@ -162,7 +138,7 @@ fn prompts(user: &User) -> Vec<String> {
 
 /// The prompts the compactor was given, in order.
 fn compactor_prompts(user: &User) -> Vec<String> {
-    common::records(&user.path("fake-compactor/received.jsonl"))
+    user.compactor_received()
         .iter()
         .filter(|e| e["received"]["method"] == "session/prompt")
         .map(|e| {
