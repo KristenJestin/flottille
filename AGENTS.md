@@ -171,8 +171,11 @@ the components of `flottille-ui` that hold them, never its own.
   `commit-msg` hook and CI run it).
 - Scopes: `core`, `store`, `git`, `workspace`, `acp`, `agents`, `mcp`, `tools`, `gate`,
   `sessions`, `daemon`, `cli`, `gui`, `repo`, `ci`.
-- **Pull requests are merged by squash only.** The title is a plain Angular subject. The
-  description is written in the first person as the maintainer and ends with `Closes #<n>`.
+- **Pull requests into `dev` are merged by squash only.** The title is a plain Angular subject.
+  The description is written in the first person as the maintainer and ends with `Closes #<n>`.
+- **`main` gets no squash and no merge commit**: the release pull request `dev → main` is opened
+  for review, and the `Release` workflow, not the merge button, closes it by moving `main`
+  forward to a commit of `dev` (`docs/releases.md`, "Releasing").
 
 ## Security and privacy
 
