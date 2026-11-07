@@ -399,6 +399,147 @@ fn a_led_session_s_report_and_end_wake_its_pilot() {
     assert!(woken.contains("ended"), "{woken}");
 }
 
+/// The user allows the launch `answer` held, when it was: the started agent's id and MCP session.
+fn allowed_launch(user: &User, answer: Answer, title: &str, opened: usize) -> (String, Mcp) {
+    assert!(!answer.error, "{}", answer.text);
+    if let Some(number) = answer
+        .text
+        .strip_prefix("Waiting for the user's approval, request #")
+        .and_then(|rest| rest.split_once('.'))
+        .map(|(number, _)| number.parse::<u64>().unwrap())
+    {
+        user.call("approval.approve", json!({"number": number}))
+            .unwrap();
+    }
+    eventually("the launched session", || {
+        agents(user).iter().any(|a| a["title"] == title)
+    });
+    let (url, authorization) = server_of(user, opened);
+    let id = agent(user, |a| a["title"] == title)["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    (id, Mcp::initialize(&url, &authorization))
+}
+
+/// The lead's session asked its pilot "Cover the logout too?", and the pilot was woken with it:
+/// the lead, its MCP session and the session's id.
+fn asked_its_pilot(user: &User) -> (String, Mcp, String) {
+    user.fake_script(json!({"turns": [
+        {"when": "Fix the login.", "do": [asks("Cover the logout too?"), {"say": "I asked."}]}
+    ]}));
+    let (lead, mcp) = lead(user);
+    let (session, _) = led(user, &mcp, "Fix the login.");
+    eventually("the pilot woken", || wakes(user, &lead).len() == 1);
+    assert_eq!(entry(user, &session)["waiting_on"], "pilot");
+    assert!(questions_in_inbox(user, &session).is_empty());
+    (lead, mcp, session)
+}
+
+/// The question the session asked its pilot reached the user, and the session waits on nobody
+/// but them.
+fn reached_the_user(user: &User, session: &str) {
+    eventually("the question in the inbox", || {
+        questions_in_inbox(user, session) == ["Cover the logout too?"]
+    });
+    let waiting = entry(user, session);
+    assert_ne!(waiting["waiting_on"], "pilot", "{waiting}");
+    assert_eq!(waiting["needs_user"], true, "{waiting}");
+}
+
+#[test]
+fn a_paused_following_sends_the_question_to_the_user() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "Ask now", "do": [asks("Ship it?"), {"say": "Asked."}]}
+    ]}));
+    let (lead, mcp) = lead(&user);
+    let (session, _) = led(&user, &mcp, "Fix the login.");
+    eventually("its first turn", || turns(&user, &session) == 1);
+
+    // The fifth message between them pauses the following; its turn asks.
+    for text in ["Go on.", "Go on.", "Go on.", "Go on.", "Ask now"] {
+        let sent = mcp.call("session_send", json!({"session": session, "text": text}));
+        assert!(!sent.error, "{}", sent.text);
+    }
+
+    eventually("the question in the inbox", || {
+        questions_in_inbox(&user, &session) == ["Ship it?"]
+    });
+    let asked = store(&user)
+        .last_agent_events(&session, "agent.asked", 1)
+        .unwrap();
+    assert_eq!(asked[0].data["to"], "user");
+    let _ = lead;
+}
+
+#[test]
+fn a_pilot_that_ends_with_a_question_open_hands_it_to_the_user() {
+    let user = User::with_fake_agent();
+    let (lead, _, session) = asked_its_pilot(&user);
+
+    user.call("agent.stop", json!({"agent": lead})).unwrap();
+
+    reached_the_user(&user, &session);
+    eventually("the session told", || {
+        !delivered(&user, &session, "handed").is_empty()
+    });
+    let told = delivered(&user, &session, "handed");
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(told[0].contains("went to the user"), "{}", told[0]);
+}
+
+#[test]
+fn the_user_cancelling_the_following_hands_the_question_to_the_user() {
+    let user = User::with_fake_agent();
+    let (lead, _, session) = asked_its_pilot(&user);
+    let following = user.call("subscription.list", json!({})).unwrap()["subscriptions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["agent"] == lead.as_str())
+        .unwrap()["id"]
+        .clone();
+
+    user.call("subscription.cancel", json!({"subscription": following}))
+        .unwrap();
+
+    reached_the_user(&user, &session);
+    eventually("the session told", || {
+        delivered(&user, &session, "unfollowed").len() == 1
+    });
+}
+
+#[test]
+fn only_its_pilot_answers_a_question_asked_of_it() {
+    let user = User::with_fake_agent();
+    let (_, _, session) = asked_its_pilot(&user);
+    // The session starts a session of its own, which writes to it.
+    let (url, authorization) = server_of(&user, 1);
+    let session_mcp = Mcp::initialize(&url, &authorization);
+    let opened = user.received_requests("session/new").len();
+    let answer = session_mcp.call(
+        "agent_launch",
+        json!({"kind": "handed", "title": "Docs", "brief": "Write the docs."}),
+    );
+    let (_, third) = allowed_launch(&user, answer, "Docs", opened);
+
+    let sent = third.call(
+        "session_send",
+        json!({"session": session, "text": "Not your pilot speaking."}),
+    );
+
+    assert!(!sent.error, "{}", sent.text);
+    eventually("the session took it", || {
+        delivered(&user, &session, "session")
+            .iter()
+            .any(|body| body.contains("Not your pilot speaking."))
+    });
+    settle();
+    let waiting = entry(&user, &session);
+    assert_eq!(waiting["waiting_on"], "pilot", "{waiting}");
+}
+
 #[test]
 fn the_user_talks_to_a_led_session_directly() {
     let user = User::with_fake_agent();

@@ -684,7 +684,10 @@ lists it (`docs/cli.md`), and a pilot sees it with `events_since`.
 The agent asked a question with `ask` (or `ask_user`, `ask_parent`, its old names): a child of its
 parent, a led session of its pilot, any other root of the user. A question to the user:
 `flottille inbox` lists it, and a pilot sees it with `events_since`. A question to a led
-session's pilot is shown in the session, and its pilot is woken at the turn's end.
+session's pilot is shown in the session, and its pilot is woken at the turn's end. When the pilot
+no longer reads the session (it stops following it, or it ends),
+each question still open to it is written again, to the user, with `moved_from`: the pilot's are
+closed by it.
 
 | Field | |
 |---|---|
@@ -692,6 +695,7 @@ session's pilot is shown in the session, and its pilot is woken at the turn's en
 | `question` | Masked. |
 | `to` | `user`, `parent` or `pilot`. |
 | `pilot` | With `to` `pilot`: the pilot's id; `null` otherwise. |
+| `moved_from` | Present on a question to the pilot moved to the user: the pilot's id. |
 
 #### `agent.handed`
 
