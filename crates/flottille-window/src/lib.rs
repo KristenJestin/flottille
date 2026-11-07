@@ -43,6 +43,7 @@ pub mod tasks;
 pub mod to_end;
 pub mod tree;
 pub mod vault;
+pub mod vault_ask;
 pub mod waiting;
 pub mod workspaces_folder;
 

@@ -52,7 +52,7 @@ use crate::attachments::{Attachments, STILL_SCALING};
 use crate::commands::CommandInfo;
 use crate::conversation::{
     Activity, Block, COMPACTED_KIND, Call, CallState, Change, Conversation, DiffLine, Ending,
-    STARTED_SESSION_KIND, Summary, USER, WOKEN_BY_KIND, in_sight, is_hidden,
+    STARTED_SESSION_KIND, Summary, USER, VaultAsk, WOKEN_BY_KIND, in_sight, is_hidden,
 };
 use crate::leaves::LeaveList;
 use crate::link::{Connect, Update};
@@ -1593,6 +1593,26 @@ impl SessionPage {
         });
         if let Some(answer) = answer {
             answer.update(cx, |answer, cx| answer.answered(refused, window, cx));
+        }
+    }
+
+    /// What the daemon answered to the answer of the request `ask` for a vault entry.
+    pub fn vault_answered(
+        &mut self,
+        ask: u64,
+        refused: Option<String>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let rows = self.conversation.read(cx).rows.clone();
+        let fields = rows.iter().find_map(|row| {
+            let row = row.read(cx);
+            matches!(&*row.block, Block::VaultAsk(a) if a.seq == ask)
+                .then(|| row.vault_ask.clone())
+                .flatten()
+        });
+        if let Some(fields) = fields {
+            fields.update(cx, |fields, cx| fields.answered(refused, cx));
         }
     }
 
@@ -3223,6 +3243,7 @@ impl ConversationView {
                 .is_some_and(|card| card.decision.is_none()),
             Block::Command(card) => card.ending == Ending::Running,
             Block::Question { .. } => self.rows[at].read(cx).asking,
+            Block::VaultAsk(ask) => ask.open,
             _ => false,
         }
     }
@@ -3710,6 +3731,8 @@ pub struct Row {
     asking: bool,
     /// The field that answers its question, made when the card first shows.
     answer: Option<Entity<AnswerBox>>,
+    /// The fields of its request for a vault entry, made when the card first shows.
+    vault_ask: Option<Entity<crate::vault_ask::VaultAskBox>>,
     /// It is a message the user sent from the composer: being sent, refused, or recorded since.
     sent: Option<Sent>,
     /// The lines of a card of links, and the pictures among them.
@@ -3786,6 +3809,7 @@ impl Row {
                 pills: HashMap::new(),
                 asking,
                 answer: None,
+                vault_ask: None,
                 sent: None,
                 links: LinksCard::default(),
                 renders: 0,
@@ -5674,6 +5698,7 @@ impl Render for Row {
             Block::Approval { number } => self.render_card(*number, window, cx).into_any_element(),
             Block::Question { seq, .. } => self.render_question(*seq, window, cx),
             Block::Asked { .. } => self.render_asked(),
+            Block::VaultAsk(ask) => self.render_vault_ask(ask.clone(), window, cx),
             Block::Answered { .. } => div().into_any_element(),
             // One line; a click opens the output in the panel the rail opens.
             Block::Command(result) => {
@@ -5817,6 +5842,41 @@ impl Row {
                     .test_support(),
             )
             .into_any_element()
+    }
+
+    /// The agent's request for a vault entry: what Flottille prefilled, the agent's reason, and
+    /// the masked field of the secret; it folds away once answered.
+    fn render_vault_ask(
+        &mut self,
+        ask: VaultAsk,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let fields = match &self.vault_ask {
+            Some(fields) => fields.clone(),
+            None => {
+                let Some((session, shell)) = self.page.upgrade().map(|page| {
+                    let page = page.read(cx);
+                    (page.id().to_owned(), page.shell.clone())
+                }) else {
+                    return div().into_any_element();
+                };
+                let at = self.at;
+                let made = ask.clone();
+                let fields = cx.new(|cx| {
+                    crate::vault_ask::VaultAskBox::new(at, made, session, shell, window, cx)
+                });
+                self.vault_ask = Some(fields.clone());
+                fields
+            }
+        };
+        let when = SharedString::from(self.when.map(clock).unwrap_or_default());
+        crate::vault_ask::card(self.at, &self.me, when, &ask, fields, cx)
+    }
+
+    /// The fields of its request for a vault entry, once its card showed.
+    pub fn vault_ask(&self) -> Option<&Entity<crate::vault_ask::VaultAskBox>> {
+        self.vault_ask.as_ref()
     }
 
     /// A question the agent asked the user, in full, with the field that answers it: it unfolds
