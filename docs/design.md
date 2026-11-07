@@ -869,7 +869,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   about ten and then scrolls, and takes pictures (pasted from the clipboard, dropped from a file or
   picked with Attach: thumbnails with a remove button, sent with the message as ACP image blocks,
   stored in Flottille's data folder so the conversation shows them again; said in one sentence and
-  left out when the session's agent takes none); what the root does while a turn runs (`Thinking…`,
+  left out when the session's agent takes none). A click on a picture, in a message or in the
+  composer, opens it in the large modal: at its own size, scaled down to fit the window and never
+  up, with the arrows (keys and buttons, "2 of 3") through the message's pictures; what the root does while a turn runs (`Thinking…`,
   `Writing…`, `Running <tool>…`) is said in the same bar, where the words cross-fade as they change,
   and goes with the turn. A running agent is
   drawn by its icon alone, in the tree and in the rail: no text badge, nothing in the header. In the
