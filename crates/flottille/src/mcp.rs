@@ -2126,12 +2126,12 @@ async fn played_in(
                             // refuses was refused above.
                             // Its own workspace is removed only with the user's word, and so is
                             // a session written to for the first time; so are a service stopped
-                            // and a pull request approved or blocked.
+                            // and a pull request approved or blocked, by `forge` or by a line.
                             _ if mode == GateMode::Full
                                 && !removes_own_workspace(grant, tool, &args)
                                 && !gate::asks_leave(&ask)
                                 && !crate::services::stops(tool, &args)
-                                && !gate::decides_a_review(tool, &args) =>
+                                && !gate::asks_review(&ask) =>
                             {
                                 verdict = Some("full");
                                 if removes_a_workspace(tool, &args) {
