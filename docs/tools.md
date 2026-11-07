@@ -751,6 +751,17 @@ removed. No action returns a secret: any other action is refused, saying that a 
 shown and that its name is given to the tool that needs it, which puts the secret where it goes
 itself. A read: the gate allows it in every mode.
 
+**`vault {action: "ask", name, why}`** asks the user for an entry a feature of Flottille names and
+that the project does not see (`docs/vault.md`, "Asking the user for an entry"): the refusal that
+met the missing entry offers it (`tickets log_time`: `… or ask the user for it, who types only the
+secret: vault {action: "ask", name: "jira-time", why: "<what you need it for>"} …`). It answers at
+once; the user's Set or Dismiss comes later as a `vault` delivery that never holds the secret. Any
+other name is refused (`refused: nothing of Flottille's needs a vault entry <name> for this
+project …`), as is an entry the user dismissed until its setting changes; a second ask while one
+is open joins it. The schema has no field for a secret, and an argument it does not know is
+refused. The tool is listed to an agent whose project sees an entry or misses one a feature
+names.
+
 ## The workspace
 
 | Tool | |

@@ -58,6 +58,35 @@ vault"): `vault {action: "list"}` gives the name, the description, the URL and t
 entry the agent's project sees, so that it knows what exists and what it is for. No action returns
 a secret. An entry of another project is not listed, and is no entry for a tool of the agent's.
 
+## Asking the user for an entry
+
+An agent often finds out it needs a secret when it reaches for it: a tool refuses because the entry
+a feature names is missing. It may then ask the user for that entry, and only that one: **there is
+no free-form ask**.
+
+- **Only a known need.** An entry may be asked for only when a feature of Flottille names it for
+  the agent's project and the project does not see it: today the tracker's `worklog_token`
+  (`docs/tickets.md`, "Logging time"). The daemon knows the entry's name and what it is for; the
+  agent gives only its reason. `vault {action: "ask", name, why}` for any other name is refused.
+  The `vault` tool is listed to an agent whose project misses such an entry, even when it sees
+  none.
+- **Offered with the refusal.** The call that needed it is refused as before, and the refusal
+  says the entry may be asked for, with the call to make. The ask answers at once: nothing waits
+  for the user.
+- **One request, never twice.** The user sees one card in the session of the agent that asked
+  (and an inbox entry): the entry's name, its description and its project, prefilled by Flottille,
+  the agent's reason, a username field when the entry needs one (Jira's API takes the account's
+  e-mail), and one empty masked field for the secret, with Set and Dismiss. While a request for an
+  entry is open, another ask for it joins it. A dismissed entry is not offered again, nor asked
+  for, until the project's settings change or the entry is set from Settings, Vault.
+- **Set** stores the entry as Settings, Vault does, with the same checks, for the project that
+  asked. Each agent that asked is handed a delivery, `the user set the vault entry <name>`, never
+  the secret; or `the user dismissed …`. An entry set from Settings answers its open requests the
+  same way.
+
+The secret goes from the card's field to the keyring as any secret set from the window: it never
+reaches the agent, an event, a log or an error.
+
 ## How a secret is used
 
 Through Flottille's own tools: a tool that needs a secret takes the entry's **name**, and the

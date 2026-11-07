@@ -605,13 +605,18 @@ const SERVED: [Definition; 31] = [
         description: "The secrets the user keeps for agents (a tracker's token, a test \
             account's login): list gives each entry's name, what it is for, its URL and its \
             username. A secret is never shown: a tool of Flottille's that needs one takes the \
-            entry's name and puts the secret where it goes itself. {\"action\": \"list\"}.",
+            entry's name and puts the secret where it goes itself. {\"action\": \"list\"}. \
+            ask: only when a refusal says an entry is missing and may be asked for, the user is \
+            asked to set it (answered at once, the user's answer later as a delivery). \
+            {\"action\": \"ask\", \"name\": \"jira-time\", \"why\": \"to log 2h on ABC-1\"}.",
         read_only: true,
         idempotent: true,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list"]}
+                "action": {"type": "string", "enum": ["list", "ask"]},
+                "name": {"type": "string", "description": "ask: the entry a refusal said is missing."},
+                "why": {"type": "string", "description": "ask: what you need it for, for the user."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -1467,7 +1472,7 @@ pub fn with_tools_now(daemon: &Daemon, agent: &Agent, project: &Project) -> Opti
         project,
         agent.parent.is_none(),
         agent.depth,
-        crate::vault::seen_by(daemon, &project.name),
+        crate::vault::listed_to(daemon, project),
     );
     // The same tools in another order are the same list: a new order would only cost the
     // session its prompt cache.

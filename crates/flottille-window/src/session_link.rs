@@ -543,6 +543,9 @@ const TREE_EVENTS: &[&str] = &[
     "agent.asked",
     // A question answered: its card folds away.
     "agent.answered",
+    // A request for a vault entry, and its answer, which folds its card away.
+    "vault.asked",
+    "vault.ask_answered",
     // The rail's gauge of each agent's context.
     "agent.usage",
     // The line that says the session runs an older list of tools.
