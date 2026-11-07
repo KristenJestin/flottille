@@ -2130,6 +2130,13 @@ async fn played_in(
         tool => tool,
     };
     let reads = Reads::default();
+    // A run that names no branch says the one it will run on, to the card and the judge.
+    let args = match tool {
+        "forge" if !replaced && removed.is_none() => {
+            crate::forge::with_branch(daemon, &grant.place, args).await
+        }
+        _ => args,
+    };
     let recorded = record_of(&args, &grant.place);
     let reads_a_result = reads_a_result(tool, &args);
     let mut verdict = None;
@@ -2867,6 +2874,17 @@ fn record(
     if let Some(cut) = cut {
         data["cut"] = cut.to_json();
     }
+    // The link of the run a pipeline was started as, for the window to carry.
+    if tool == "forge"
+        && recorded["action"] == "run"
+        && let Outcome::Done(text) = outcome
+        && let Some(link) = text.split_whitespace().find(|word| {
+            word.starts_with("https://")
+                && (word.contains("/actions/runs/") || word.contains("/pipelines/results/"))
+        })
+    {
+        data["link"] = link.trim_end_matches([',', '.']).into();
+    }
     if let Err(error) = daemon.write(|store| {
         let event = store.append_agent_event(&grant.agent, "agent.tool_served", data, true)?;
         Ok(((), Some(event)))
@@ -3031,7 +3049,8 @@ pub fn record_of(args: &Value, place: &Place) -> Value {
             .flatten()
             .filter(|variable| variable["secured"] == true)
             .filter_map(|variable| variable["value"].as_str())
-            .filter(|value| !value.is_empty())
+            // A shorter one would garble the record; the variable's own value is hidden below.
+            .filter(|value| value.chars().count() >= crate::forge::HIDDEN_EVERYWHERE)
             .map(str::to_owned),
     );
     let mut recorded = walk(args, &|text| secrets::mask_also(text, &env, &values));

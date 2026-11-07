@@ -85,8 +85,9 @@
 //! that says its own `next` or `isLastPage` is passed through as it is.
 //!
 //! A Cloud `api` `--param q=updated_on>="<time>"` keeps the `values` whose `updated_on` is that
-//! time or later (compared as the RFC 3339 texts they are), as Bitbucket's filter does; the fake
-//! reads no other filter.
+//! time or later (compared as the RFC 3339 texts they are), as Bitbucket's filter does; and
+//! `--param target.ref_name=<branch>` keeps the pipelines whose `target.ref_name` is that branch,
+//! as the pipelines endpoint's query does. The fake reads no other filter.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -488,6 +489,18 @@ fn api(
         let kept: Vec<Value> = values
             .iter()
             .filter(|value| value["updated_on"].as_str().is_some_and(|at| at >= since))
+            .cloned()
+            .collect();
+        body["values"] = Value::from(kept);
+    }
+    // The pipelines of one branch, as `target.ref_name` asks them.
+    let named = params
+        .iter()
+        .find_map(|(key, value)| (*key == "target.ref_name").then_some(*value));
+    if let (Some(named), Some(values)) = (named, body["values"].as_array()) {
+        let kept: Vec<Value> = values
+            .iter()
+            .filter(|value| value["target"]["ref_name"] == named)
             .cloned()
             .collect();
         body["values"] = Value::from(kept);
