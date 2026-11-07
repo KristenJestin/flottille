@@ -389,15 +389,16 @@ const SERVED: [Definition; 31] = [
         name: "tickets",
         title: "Tickets",
         description: "The tracker's tickets (GitHub #123, Jira ABC-123), via the user's gh or acli \
-            (never run them). list: tickets by state (default open), label, assignee, updated_within, \
-            as last read; search asks the tracker: {\"action\": \"search\", \"query\": \"x\"}, \
+            (never run them). list: by state (default open), label, assignee, updated_within; search asks the tracker: {\"action\": \"search\", \"query\": \"x\"}, \
             on Jira also in_comments, jql; show: a workspace's ticket (in \
-            main, name workspace) or ticket, read now, with its links; detail full adds the comments, \
-            with the id of yours; Jira images and files are named, not shown (the user can paste one); \
-            types: a Jira project's work item types (a guess is refused); link_types: link kinds. \
+            main, name workspace) or ticket, with its links; detail full adds the comments, \
+            with the id of yours; Jira images and files are named, not shown; \
+            types: a Jira project's work item types (never guess); link_types. \
             Writes, judged, answered at once, the result maybe later: create, comment, edit, close, \
             reopen, status, link and unlink (ticket kind other: ABC-2 blocks ABC-1), comment_edit and \
-            comment_delete (yours only). Assign only when asked (assignee \"me\": the user; \
+            comment_delete (yours only); log_time (Jira: ticket, duration, started?, body?; \
+            time_spent: this session's work time, to propose). \
+            Assign only when asked (assignee \"me\": the user; \
             GitHub: assignees). Jira create: parent, sprint (sprints lists them). \
             subscribe: a ticket's events wake you until it is closed; unsubscribe.",
         read_only: false,
@@ -405,8 +406,10 @@ const SERVED: [Definition; 31] = [
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "search", "show", "types", "link_types", "sprints", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete"]},
+                "action": {"type": "string", "enum": ["list", "search", "show", "types", "link_types", "sprints", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "log_time", "time_spent"]},
                 "ticket": {"type": "string", "description": "#123 or ABC-123; the workspace's when left out."},
+                "duration": {"type": "string", "description": "log_time (Jira): the time spent, in Jira's form: 2h 30m, 1d, 45m (weeks, days, hours, minutes)."},
+                "started": {"type": "string", "description": "log_time: when the work started, RFC 3339 with its offset (2026-11-06T09:00:00+01:00); the duration before now when left out."},
                 "workspace": {"type": "string"},
                 "query": {"type": "string", "description": "search: words."},
                 "updated_within": {"type": "integer", "minimum": 1, "maximum": 365, "description": "list, search: updated in the last that many days."},
@@ -418,7 +421,7 @@ const SERVED: [Definition; 31] = [
                 "detail": {"type": "string", "enum": ["short", "full"]},
                 "fresh": {"type": "boolean", "description": "show: read the ticket again; one read in the last 30 s is given again otherwise (detail full always reads)."},
                 "title": {"type": "string"},
-                "body": {"type": "string", "description": "create, edit: description; comment, comment_edit: the comment. Markdown, converted for Jira."},
+                "body": {"type": "string", "description": "create, edit: description; comment, comment_edit, log_time: the comment. Markdown, converted for Jira."},
                 "labels": {"type": "array", "items": {"type": "string"}, "description": "create, edit: labels to add."},
                 "reason": {"enum": ["completed", "not planned"], "description": "close: completed or not planned (GitHub)."},
                 "remove_labels": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to remove."},
@@ -3113,7 +3116,7 @@ mod tests {
         assert!(
             tickets
                 .description
-                .contains("Jira images and files are named, not shown (the user can paste one)")
+                .contains("Jira images and files are named, not shown")
         );
     }
 

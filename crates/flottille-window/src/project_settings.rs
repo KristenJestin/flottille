@@ -1090,7 +1090,9 @@ impl ProjectSettingsPage {
     /// A click on the tracker's row: its dialog, on what the file declares.
     pub fn open_tracker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (site, keys) = match &self.tracker {
-            Some(ProjectTracker::Jira { site, projects }) => (site.clone(), projects.join(", ")),
+            Some(ProjectTracker::Jira { site, projects, .. }) => {
+                (site.clone(), projects.join(", "))
+            }
             _ => (String::new(), String::new()),
         };
         let fields = self.fields(window, cx);
@@ -1218,6 +1220,14 @@ impl ProjectSettingsPage {
                             .filter(|key| !key.is_empty())
                             .map(str::to_owned)
                             .collect(),
+                        // Not a field of this dialog: the project's file names it, and a save
+                        // keeps it.
+                        worklog_token: match &self.tracker {
+                            Some(ProjectTracker::Jira { worklog_token, .. }) => {
+                                worklog_token.clone()
+                            }
+                            _ => None,
+                        },
                     }),
                 };
                 let settings = self.params(None, None, Some(tracker));
@@ -1656,7 +1666,7 @@ impl ProjectSettingsPage {
                 "of {} · a ticket is #123",
                 repository_label(&self.name, repository)
             ),
-            Some(ProjectTracker::Jira { site, projects }) => {
+            Some(ProjectTracker::Jira { site, projects, .. }) => {
                 let key = projects.first().map_or("ABC", String::as_str);
                 format!("{site} · {} · a ticket is {key}-123", projects.join(", "))
             }

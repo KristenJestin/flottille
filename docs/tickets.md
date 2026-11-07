@@ -276,7 +276,7 @@ or why the ticket is not taken, before anything is created.
 
 `tickets {action, …}` (`docs/tools.md`, "The tickets"): `list` every ticket of a state in one call
 (by label, assignee and `updated_within`), `search` with words, `in_comments` or `jql`, `show` the workspace's ticket or another of the
-project's tracker by its key, `types` the work item types of a Jira project, `sprints` the open sprints of its boards; `create` (on Jira also under a parent and in a sprint), `comment`, `edit` (labels on both; on GitHub assignees, on Jira the assignee), `close` (on
+project's tracker by its key, `types` the work item types of a Jira project, `sprints` the open sprints of its boards; `create` (on Jira also under a parent and in a sprint), `comment`, `log_time` (Jira, "Logging time" below) and `time_spent`, `edit` (labels on both; on GitHub assignees, on Jira the assignee), `close` (on
 GitHub, completed or not planned), `reopen` and `status` (on GitHub, the Status of the issue on its
 Projects board, `docs/tools.md`), each to judge, held in Ask and allowed in Full as the other writes are. A key the
 tracker does not take, or a creation in a Jira project that is not one of the tracker's, is
@@ -606,6 +606,49 @@ follow-up. A search prints only the fields asked (`key` alone prints `null` per 
 round after the first searches `updated >= "-<minutes>m"` since its last, so **a work item it lists
 changed**: a followed one is then read for its comments, and a followed one the window does not
 list is not read at all. No search is sent for the followed items alone, and none asks `updated`. The maintainer checks the Tickets tab of a Jira project on their machine.
+
+### Logging time
+
+`acli` has no worklog command, so the daemon calls Jira's REST API itself, once the gate let the
+call through: `POST https://<site>/rest/api/3/issue/<KEY>/worklog`, with the daemon's own HTTP
+client (TLS with the system's certificates, a redirect never followed, since the credentials would
+go with it, a call cut after 30 s).
+
+```
+tickets {action: "log_time", ticket: "ABC-123", duration: "2h 30m", started: "2026-11-06T09:00:00+01:00", body: "…"}
+```
+
+- **`duration`** is Jira's form: whole numbers of weeks, days, hours and minutes, each once and the
+  biggest first (`1w 2d`, `2h 30m`, `45m`). It is sent as written and Jira applies the site's own
+  working time; only for a start left out is it counted in Jira's default (a day is 8 hours, a
+  week 5 days). **`started`** is an RFC 3339 time with its offset, sent in UTC; left out, it is the
+  duration before the moment the worklog is logged (the card says so, since the user may take a
+  while to allow it). **`body`**, optional, is the worklog's comment, Markdown converted to ADF as
+  every Jira text is. **`ticket` is required**: the workspace's ticket is never taken for it, so that the card names the work item the user allows.
+- **The token is a vault entry the project names** (`docs/vault.md`): `worklog_token = "<entry>"`
+  in `[tracker]` (`kind = "jira"` only), the entry's secret being a Jira API token and its
+  username the account's e-mail; the request is `Basic` over `username:secret`. The daemon reads
+  the secret with `vault::secret` for this one request. No entry named, an entry the project does
+  not see, or one with no username is refused before anyone is asked, with a sentence that says
+  how to set one up. The token is in no card, result, log, event nor the store: what Jira
+  answers is masked of it, and so is every error.
+- **A change of the tracker says its entry**: the card of `project set_settings` reads `Set the tracker to Jira on <site> (ABC), logging time with the vault entry `<name>``, so that the user sees which credentials a worklog would use.
+- **GitHub is refused with a sentence** (`GitHub issues have no time tracking`), and so are a
+  duration or a start that is wrong, before anyone is asked.
+- **It is a ticket write**, judged like `comment`: held in Ask, allowed in Full, and the card says
+  the ticket, the duration and the start (`It logs 2h 30m on ABC-1, started
+  2026-11-06T09:00:00Z`). The result says the worklog's id.
+- `time_spent {}` (a read, never held) says how long the agents of the caller's session actually
+  worked: **the sum of their turns** (`turn_usage`, each turn once whatever the models it used),
+  the agents that worked at the same time each counted, never the time between the first and the
+  last message. The agent proposes it to the user, who confirms or changes it; it never logs it
+  alone. A turn whose agent reported no usage is not on record and not counted.
+- The tests send the call to a fake HTTP server of this machine (`FLOTTILLE_TEST_JIRA_BASE`, read
+  by a debug build only), with the daemon's in-memory keyring.
+
+**The maintainer checks it on their Jira site**: one worklog logged on a real work item, with an
+API token of their own: Jira Cloud's answer to a worklog written as above is not something this was
+written against.
 
 ## Tests
 

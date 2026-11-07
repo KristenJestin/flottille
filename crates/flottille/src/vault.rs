@@ -334,10 +334,6 @@ const SECRET_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 /// The secret of the entry `name`, for a tool of Flottille's to put where it goes (an HTTP header,
 /// a command's standard input) on behalf of an agent of `project`: never to be returned, logged
 /// or shown. An entry of another project is no entry for it.
-#[allow(
-    dead_code,
-    reason = "the tools that use a secret come with their own issues (#383)"
-)]
 pub async fn secret(daemon: &Daemon, project: &str, name: &str) -> Result<String, String> {
     let entries = daemon
         .read(|store| store.vault_entries())

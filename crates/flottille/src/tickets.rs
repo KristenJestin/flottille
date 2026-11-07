@@ -36,9 +36,11 @@ use crate::reads::{self, Reads};
 mod events;
 mod links;
 mod sprints;
+mod worklog;
 
 pub use events::{EVENTS, offer, reference_of, target_named};
 pub use links::checked as checked_links;
+pub use worklog::says as worklog_says;
 
 /// A call of `acli` is cut after this.
 const ACLI_TIME: Duration = Duration::from_secs(30);
@@ -891,6 +893,10 @@ struct TicketsCall {
     parent: Option<String>,
     /// `sprints`: the board whose sprints are listed, by its name or its id.
     board: Option<String>,
+    /// `log_time`: the time spent, in Jira's form (`2h 30m`), and when it started (RFC 3339 with
+    /// its offset; the duration before now when left out).
+    duration: Option<String>,
+    started: Option<String>,
 }
 
 /// A field that is there even when it is `null`: `Some(None)` for `null`, `None` when left out.
@@ -969,7 +975,8 @@ fn assignable(who: &str) -> bool {
 }
 
 /// The writes of `tickets`.
-const WRITES: [&str; 10] = [
+const WRITES: [&str; 11] = [
+    "log_time",
     "create",
     "comment",
     "edit",
@@ -1017,6 +1024,9 @@ pub fn unwritable(project: &Project, args: &Value) -> Option<String> {
     }
     if let Some(why) = unplannable(project, tracker, action, args) {
         return Some(why);
+    }
+    if action == "log_time" {
+        return worklog::unwritable(tracker, args);
     }
     let named = args["status"]
         .as_str()
@@ -1124,7 +1134,7 @@ fn unplannable(
 /// its board, found before the user is asked, with the site's Sprint field; refused when the
 /// sprint is not open, names several, or the field is not known. Nothing for another call.
 pub async fn sprint_says(project: &Project, args: &Value) -> Result<Vec<String>, String> {
-    let (Some("create"), Some(named), Some(tracker @ ProjectTracker::Jira { site, projects })) = (
+    let (Some("create"), Some(named), Some(tracker @ ProjectTracker::Jira { site, projects, .. })) = (
         args["action"].as_str(),
         args["sprint"].as_str().filter(|s| !s.trim().is_empty()),
         &project.tracker,
@@ -1232,7 +1242,7 @@ async fn types(project: &Project, asked: &TicketsCall) -> Outcome {
         Some(ProjectTracker::Github { .. }) => Outcome::Done(
             "GitHub issues have no type: use labels (create, edit) to classify one".into(),
         ),
-        Some(tracker @ ProjectTracker::Jira { site, projects }) => {
+        Some(tracker @ ProjectTracker::Jira { site, projects, .. }) => {
             let in_project = match created_in(tracker, projects, asked.project.as_deref()) {
                 Ok(project) => project,
                 Err(why) => return Outcome::Refused(format!("refused: {why}")),
@@ -1302,6 +1312,7 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
         "sprints" => sprints::listed(&project, &asked).await,
         "subscribe" => events::subscribe(daemon, agent, place, &project, &asked).await,
         "unsubscribe" => events::unsubscribe(daemon, agent, &project, &asked),
+        "time_spent" => worklog::time_spent(daemon, agent),
         "create" => {
             let created = create(daemon, &project, &asked).await;
             daemon.kept_tickets.drop_all();
@@ -1309,13 +1320,14 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
             created
         }
         "comment" | "edit" | "close" | "reopen" | "status" | "link" | "unlink" | "comment_edit"
-        | "comment_delete" => {
+        | "comment_delete" | "log_time" => {
             let key = match key_of(daemon, place, &project, &asked) {
                 Ok(key) => key,
                 Err(refusal) => return refusal,
             };
             let written = match asked.action.as_str() {
                 "status" => status(daemon, &project, &asked, &key).await,
+                "log_time" => worklog::log_time(daemon, &project, &asked, &key).await,
                 "link" | "unlink" => links::link(&project, &asked, &key).await,
                 "comment_edit" | "comment_delete" => {
                     links::comment(daemon, &project, &asked, &key).await
@@ -1622,7 +1634,7 @@ async fn asked_tracker(
             let (tickets, left_out) = list_issues(&forge, filters).await?;
             Ok(Found(tickets, left_out, 0))
         }
-        ProjectTracker::Jira { site, projects } => list_work_items(site, projects, filters)
+        ProjectTracker::Jira { site, projects, .. } => list_work_items(site, projects, filters)
             .await
             .map(|(tickets, left_out, nulls)| Found(tickets, left_out, nulls)),
     }
@@ -2036,7 +2048,7 @@ async fn create(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
     let Some(title) = asked.title.as_deref().filter(|t| !t.trim().is_empty()) else {
         return Outcome::Refused("refused: tickets create needs title".into());
     };
-    if let Some(tracker @ ProjectTracker::Jira { site, projects }) = &project.tracker {
+    if let Some(tracker @ ProjectTracker::Jira { site, projects, .. }) = &project.tracker {
         return create_work_item(
             daemon,
             (&project.name, tracker),
@@ -3048,7 +3060,7 @@ impl Tickets {
                     repository: repository.clone(),
                 })
             }
-            ProjectTracker::Jira { site, projects } => {
+            ProjectTracker::Jira { site, projects, .. } => {
                 jira_site(site, "read").await?;
                 Ok(Tickets::Jira {
                     site: site.clone(),

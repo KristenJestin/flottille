@@ -871,6 +871,11 @@ reasons.
   the title and the body whole, and a long one or one holding a secret is refused or base, as
   for the forge's writes ("The forge"). Locks, a project or a tracker kept read only, are
   planned as their own feature.
+- **Logging time**: `log_time {ticket, duration, started?, body?}` posts a worklog on a Jira work
+  item, with the vault entry the project's `[tracker] worklog_token` names; a write like `comment`,
+  its card saying the ticket, the duration and the start; refused on GitHub. `time_spent` (a read)
+  says how long the session's agents worked, the sum of their turns, to propose as the duration
+  (`docs/tickets.md`, "Logging time").
 - **Links and comments**: `link_types` (a read, never held) lists the kinds of link the tracker has;
   `link {ticket, kind, other}` and `unlink {ticket, kind, other}` make and remove a link;
   `comment_edit {ticket, comment, body}` and `comment_delete {ticket, comment}` change or delete a
