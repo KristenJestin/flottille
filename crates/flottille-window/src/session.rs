@@ -26,10 +26,10 @@ use flottille_ui::card::Block as CardBlock;
 use flottille_ui::color::mix;
 use flottille_ui::motion::{HOVER, Motion, PANEL};
 use flottille_ui::{
-    AgentState, Badge, Button, Card, Drawer, Field, Icon, ListRow, Listing, Menu, Modal, Palette,
-    Pill, PulsingLabel, Side, Skeleton, StateIcon, Status, Toast, Type, awaiting, changing, enter,
-    fade, fold_frame, follow_theme, hoverable, icon, palette, path_line, presence, presence_of,
-    section_label, selectable, space, text_region, tipped_when_cut, toast, turning,
+    AgentState, Badge, Button, Card, Confirm, Drawer, Field, Icon, ListRow, Listing, Menu, Modal,
+    Palette, Pill, PulsingLabel, Side, Skeleton, StateIcon, Status, Toast, Type, awaiting,
+    changing, enter, fade, fold_frame, follow_theme, hoverable, icon, palette, path_line, presence,
+    presence_of, section_label, selectable, space, text_region, tipped_when_cut, toast, turning,
 };
 use futures::channel::mpsc::UnboundedSender;
 use gpui_kit::base::input::{
@@ -60,6 +60,7 @@ use crate::links_card::{LinksCard, Open};
 use crate::mode::ModeSwitch;
 use crate::model::Place;
 use crate::open::Opener;
+use crate::project::removal_refused;
 use crate::providers::Providers;
 use crate::queued::QueuedMessages;
 use crate::runs::{self, CommandList, CommandPanel, EndedFold, ended_row, rail_label};
@@ -222,6 +223,8 @@ pub struct Opened {
     /// The agent that started the session for the user, by the name it goes by; `None` for a
     /// session the user started. The header says it, not the left tree.
     pub started_by: Option<String>,
+    /// The agent that leads it, by the name it goes by; `None` for a session no agent leads.
+    pub led_by: Option<String>,
 }
 
 pub struct SessionPage {
@@ -270,6 +273,9 @@ pub struct SessionPage {
     ending: bool,
     /// What the daemon said when it refused to end the session.
     end_error: Option<SharedString>,
+    /// What the header said last of who started or leads it, and the element id it said it in,
+    /// kept while it fades out once the session is detached.
+    by_said: (SharedString, &'static str),
     /// A resume was asked and not answered yet.
     resuming: bool,
     /// What the daemon said when it refused to resume the session.
@@ -386,6 +392,7 @@ impl SessionPage {
             needs_you,
             ending: false,
             end_error: None,
+            by_said: (SharedString::default(), "session-started-by"),
             resuming: false,
             resume_error: None,
             reloading: false,
@@ -800,6 +807,26 @@ impl SessionPage {
             .is_some_and(|root| root.tools_reload && root.state == "working")
     }
 
+    /// Whether it says these of who started and who leads the session already.
+    pub fn says_by(&self, started_by: &Option<String>, led_by: &Option<String>) -> bool {
+        &self.opened.started_by == started_by && &self.opened.led_by == led_by
+    }
+
+    /// Who started and who leads the session, as the daemon says now: the header's line folds
+    /// away once the user detached it.
+    pub fn set_by(
+        &mut self,
+        started_by: Option<String>,
+        led_by: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.says_by(&started_by, &led_by) {
+            self.opened.started_by = started_by;
+            self.opened.led_by = led_by;
+            cx.notify();
+        }
+    }
+
     pub fn set_title(&mut self, title: &str, cx: &mut Context<Self>) {
         if self.opened.title != title {
             self.opened.title = title.to_owned();
@@ -1114,6 +1141,36 @@ impl SessionPage {
         if self.opened.project == project && self.opened.place.as_deref() == Some(name) {
             self.rail
                 .update(cx, |rail, cx| rail.ticket_answered(refused, window, cx));
+        }
+    }
+
+    /// The titles of the sessions that live in the place this one does and have not ended, this
+    /// one included: what removing its workspace leaves without a place.
+    fn living_here(&self, cx: &App) -> Vec<String> {
+        let Some(shell) = self.shell.upgrade() else {
+            return Vec::new();
+        };
+        shell
+            .read(cx)
+            .snapshot()
+            .sessions_in(&self.opened.project, &self.opened.place)
+            .filter(|session| !session.ended)
+            .map(|session| session.title.clone())
+            .collect()
+    }
+
+    /// What the daemon answered to a workspace's removal: the rail says it when the workspace is
+    /// this session's.
+    pub fn removal_answered(
+        &mut self,
+        project: &str,
+        name: &str,
+        refused: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.opened.project == project && self.opened.place.as_deref() == Some(name) {
+            self.rail
+                .update(cx, |rail, cx| rail.removal_answered(refused, cx));
         }
     }
 
@@ -1771,24 +1828,7 @@ impl Render for SessionPage {
                     )
                     .test_support(),
             )
-            .children(self.opened.started_by.clone().map(|by| {
-                let said = SharedString::from(format!("started by {by}"));
-                tipped_when_cut(
-                    div()
-                        .id("session-started-by")
-                        .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .text_size(px(12.))
-                        .text_color(p.faint)
-                        .aria_label(said.clone())
-                        .child(said.clone()),
-                    said,
-                    window,
-                    cx,
-                )
-            }))
+            .child(self.by_line(window, cx))
             .child(div().flex_1())
             .children(self.end_error.clone().map(|error| {
                 div()
@@ -1848,6 +1888,27 @@ impl Render for SessionPage {
                                     reloader.update(cx, |page, cx| page.reload_tools(cx)).ok();
                                 }),
                         )
+                        .into_any_element()
+                },
+            ))
+            // A led session: the user's messages reach it, not its pilot. It folds away once the
+            // user detached it.
+            .child(presence_of(
+                "session-led-note-line",
+                self.opened
+                    .led_by
+                    .as_ref()
+                    .filter(|_| root)
+                    .map(|by| format!("{LED_NOTE}; {by} is not asked.").into()),
+                move |said| {
+                    div()
+                        .id("session-led-note")
+                        .pb(space::SM)
+                        .text_size(px(12.5))
+                        .text_color(p.faint)
+                        .aria_label(said.clone())
+                        .child(said)
+                        .test_support()
                         .into_any_element()
                 },
             ))
@@ -4060,7 +4121,8 @@ impl Row {
         if let Block::Text { text }
         | Block::Thought { text, .. }
         | Block::Report { text, .. }
-        | Block::Question { text, .. } = &block
+        | Block::Question { text, .. }
+        | Block::Asked { text } = &block
         {
             let muted = matches!(block, Block::Thought { .. });
             self.set_markdown(text, muted, false, cx);
@@ -5590,6 +5652,7 @@ impl Render for Row {
             }
             Block::Approval { number } => self.render_card(*number, window, cx).into_any_element(),
             Block::Question { seq, .. } => self.render_question(*seq, window, cx),
+            Block::Asked { .. } => self.render_asked(),
             Block::Answered { .. } => div().into_any_element(),
             // One line; a click opens the output in the panel the rail opens.
             Block::Command(result) => {
@@ -5713,6 +5776,28 @@ impl Row {
 }
 
 impl Row {
+    /// A question the led session asked its pilot: a card that says so, with no answer box, the
+    /// pilot's to answer.
+    fn render_asked(&self) -> AnyElement {
+        let id = |part: &str| ElementId::Name(format!("row-{}-{part}", self.at).into());
+        Card::new()
+            .title(SharedString::from(format!("{} asks its pilot", self.me)))
+            .meta(self.when.map(clock).unwrap_or_default())
+            .child(
+                div()
+                    .id(id("asked-text"))
+                    .px(space::LG)
+                    .py(space::MD)
+                    .child(markdown_view(
+                        id("asked-region"),
+                        &self.markdown,
+                        self.scope,
+                    ))
+                    .test_support(),
+            )
+            .into_any_element()
+    }
+
     /// A question the agent asked the user, in full, with the field that answers it: it unfolds
     /// where it was asked while the daemon says it waits, and folds away once the answer is
     /// taken.
@@ -5760,6 +5845,51 @@ impl Row {
             .id(id("question"))
             .child(presence(id("question-open"), self.asking, card))
             .test_support()
+            .into_any_element()
+    }
+}
+
+/// What a led session's page says above its composer, before its pilot's name.
+pub const LED_NOTE: &str = "Your messages reach this session directly";
+
+impl SessionPage {
+    /// Who leads the session (`led by …`) or started it (`started by …`), small, beside its
+    /// place; it fades and narrows away when the session is detached.
+    fn by_line(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let said = match (&self.opened.led_by, &self.opened.started_by) {
+            (Some(by), _) => Some((format!("led by {by}"), "session-led-by")),
+            (None, Some(by)) => Some((format!("started by {by}"), "session-started-by")),
+            (None, None) => None,
+        };
+        if let Some((said, id)) = &said {
+            self.by_said = (SharedString::from(said.clone()), id);
+        }
+        let t = fade("session-by-line", said.is_some(), PANEL, window, cx);
+        if t <= 0.0 {
+            return div().into_any_element();
+        }
+        let (said, id) = self.by_said.clone();
+        let p = palette(cx);
+        div()
+            .min_w_0()
+            .overflow_hidden()
+            .opacity(t)
+            .when(t < 1.0, |d| d.max_w(px(320. * t)))
+            .child(tipped_when_cut(
+                div()
+                    .id(id)
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .text_size(px(12.))
+                    .text_color(p.faint)
+                    .aria_label(said.clone())
+                    .child(said.clone()),
+                said,
+                window,
+                cx,
+            ))
             .into_any_element()
     }
 }
@@ -6164,6 +6294,12 @@ pub struct SessionRail {
     /// The last ticket the place had, drawn while its line folds away after an unlink.
     last_ticket: Option<TicketFacts>,
     _ticket_subscription: Option<Subscription>,
+    /// "Remove workspace…" was chosen: the confirmation is open.
+    confirming: bool,
+    /// The daemon is removing the workspace: the section says so until it answers.
+    removing: bool,
+    /// The workspace is gone: the section folds away and the page stays.
+    removed: bool,
     renders: usize,
 }
 
@@ -6207,6 +6343,8 @@ impl SessionRail {
         });
         let rail = cx.entity().downgrade();
         let unlinks = rail.clone();
+        let removes = rail.clone();
+        let removable = opened.place.is_some();
         let menu = cx.new(|cx| {
             workspace_menu(
                 "workspace-menu",
@@ -6222,7 +6360,12 @@ impl SessionRail {
                             .update(cx, |rail, cx| rail.link_ticket(None, cx))
                             .ok();
                     })),
-                    remove: None,
+                    // A session in the project's folder has no workspace to remove.
+                    remove: removable.then(|| -> WorkspaceAction {
+                        Box::new(move |cx| {
+                            removes.update(cx, |rail, cx| rail.ask_removal(cx)).ok();
+                        })
+                    }),
                 },
                 cx,
             )
@@ -6256,8 +6399,69 @@ impl SessionRail {
             ticket_error: None,
             last_ticket: None,
             _ticket_subscription: None,
+            confirming: false,
+            removing: false,
+            removed: false,
             renders: 0,
         }
+    }
+
+    /// "Remove workspace…": the confirmation opens, unless the workspace is already going.
+    fn ask_removal(&mut self, cx: &mut Context<Self>) {
+        if self.removing || self.removed {
+            return;
+        }
+        self.confirming = true;
+        cx.notify();
+    }
+
+    /// The confirmation's "Remove workspace": the same command the project page's card sends.
+    fn remove_workspace(&mut self, cx: &mut Context<Self>) {
+        self.confirming = false;
+        let Some(name) = self.workspace.clone() else {
+            return;
+        };
+        self.removing = true;
+        let command = Command::RemoveWorkspace {
+            project: self.project.clone(),
+            name,
+        };
+        self.page
+            .update(cx, |page, cx| page.perform(command, cx))
+            .ok();
+        cx.notify();
+    }
+
+    /// What the daemon answered to the removal: a toast says it; once removed, the section folds
+    /// away, and the page stays.
+    fn removal_answered(&mut self, refused: Option<&str>, cx: &mut Context<Self>) {
+        if !std::mem::take(&mut self.removing) {
+            return;
+        }
+        let name = self.workspace.clone().unwrap_or_default();
+        toast(removal_toast(&name, refused), cx);
+        self.removed = refused.is_none();
+        cx.notify();
+    }
+
+    /// What the confirmation says besides the card's sentence: which sessions live in the
+    /// workspace, and that they go on without a place.
+    fn removal_sentence(&self, cx: &App) -> String {
+        let mut said = "Its folder goes, and each repository's branch that holds no commit of its \
+                        own. Flottille removes it only once all its work is committed and pushed."
+            .to_owned();
+        let living = self
+            .page
+            .read_with(cx, |page, cx| page.living_here(cx))
+            .unwrap_or_default();
+        if !living.is_empty() {
+            let titles: Vec<String> = living.iter().map(|title| format!("“{title}”")).collect();
+            said.push_str(&format!(
+                " Sessions living in it, this one included: {}. They keep going without a place.",
+                titles.join(", ")
+            ));
+        }
+        said
     }
 
     /// The field a ticket is typed in.
@@ -7269,6 +7473,19 @@ impl Render for SessionRail {
                 div()
                     .flex()
                     .flex_col()
+                    .child(presence(
+                        "rail-removing-block",
+                        self.removing,
+                        div()
+                            .id("rail-removing")
+                            .px(space::XS)
+                            .py(space::XS)
+                            .text_size(px(11.5))
+                            .text_color(p.faint)
+                            .child("Removing the workspace…")
+                            .aria_label("Removing the workspace…")
+                            .test_support(),
+                    ))
                     .child(ticket_line)
                     .children(lines)
                     .child(presence(
@@ -7357,11 +7574,40 @@ impl Render for SessionRail {
                     ),
             ))
             .test_support();
+        // Removed, the whole section folds away; the page and the rest of the rail stay.
+        let workspace = presence("rail-workspace-block", !self.removed, workspace);
+        let confirm = self.workspace.clone().map(|name| {
+            let (this, again) = (cx.entity().downgrade(), cx.entity().downgrade());
+            Confirm::new(
+                "rail-workspace-removal",
+                format!("Remove the workspace {name}?"),
+            )
+            .sentence(self.removal_sentence(cx))
+            .action("Remove workspace")
+            .refused(
+                self.place
+                    .as_ref()
+                    .and_then(|place| removal_refused(&self.project, &place.statuses)),
+            )
+            .open(self.confirming)
+            .on_confirm(move |_, cx| {
+                this.update(cx, |rail, cx| rail.remove_workspace(cx)).ok();
+            })
+            .on_cancel(move |_, cx| {
+                again
+                    .update(cx, |rail, cx| {
+                        rail.confirming = false;
+                        cx.notify();
+                    })
+                    .ok();
+            })
+        });
         div()
             .id("rail")
             .size_full()
             .flex()
             .flex_col()
+            .children(confirm)
             .child(
                 div()
                     .id("rail-scroll")
@@ -7495,6 +7741,18 @@ pub struct WorkspaceActions {
 }
 
 pub type WorkspaceAction = Box<dyn Fn(&mut App)>;
+
+/// What a toast says of a workspace's removal, from the project page's card or the session's
+/// rail: removed, or not removed with the refusal's detail.
+pub(crate) fn removal_toast(name: &str, refused: Option<&str>) -> Toast {
+    match refused {
+        None => Toast::success(format!("Workspace {name} removed"))
+            .detail("Its folder is gone; a branch with commits of its own stays."),
+        Some(why) => {
+            Toast::failure(format!("Workspace {name} was not removed")).detail(why.to_owned())
+        }
+    }
+}
 
 /// A workspace's "⋯" menu.
 pub fn workspace_menu(id: &str, actions: WorkspaceActions, cx: &mut Context<Menu>) -> Menu {

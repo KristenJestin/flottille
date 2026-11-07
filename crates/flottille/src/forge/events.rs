@@ -8,7 +8,6 @@ use std::sync::{Arc, Mutex};
 
 use flottille_core::item::Item;
 use flottille_core::subscription::Subscription;
-use flottille_core::workspace::Workspace;
 use serde_json::{Value, json};
 
 use super::{BY_AGENT, Forge, Job, Log, Pull, logs};
@@ -376,23 +375,40 @@ fn pull_named(project: &str, repository: &str, number: u64) -> String {
     format!("pull request #{number} of {repository}")
 }
 
-/// What a subscription of the forge watches: a pull request of a workspace's repository.
-pub(super) fn target(workspace: &Workspace, repository: &str, number: u64) -> Value {
-    json!({"project": workspace.project, "workspace": workspace.name, "repository": repository,
-        "number": number})
+/// What a subscription of the forge watches: a pull request of a repository, found by a
+/// workspace's branch, or by its number alone.
+pub(super) fn target(
+    project: &str,
+    workspace: Option<&str>,
+    repository: &str,
+    number: u64,
+) -> Value {
+    let mut target = json!({"project": project, "repository": repository, "number": number});
+    if let Some(workspace) = workspace {
+        target["workspace"] = workspace.into();
+    }
+    target
+}
+
+/// Whether two targets are the same pull request, whichever way each was found.
+pub(super) fn same_pull(one: &Value, other: &Value) -> bool {
+    ["project", "repository", "number"]
+        .iter()
+        .all(|key| one[key] == other[key])
+        && one["number"].is_u64()
 }
 
 /// A subscription's target, as a delivery and `forge show` say it.
 pub fn target_named(target: &Value) -> String {
-    format!(
-        "{}, workspace {}",
-        pull_named(
-            target["project"].as_str().unwrap_or_default(),
-            target["repository"].as_str().unwrap_or_default(),
-            target["number"].as_u64().unwrap_or_default()
-        ),
-        target["workspace"].as_str().unwrap_or_default()
-    )
+    let pull = pull_named(
+        target["project"].as_str().unwrap_or_default(),
+        target["repository"].as_str().unwrap_or_default(),
+        target["number"].as_u64().unwrap_or_default(),
+    );
+    match target["workspace"].as_str() {
+        Some(workspace) => format!("{pull}, workspace {workspace}"),
+        None => pull,
+    }
 }
 
 #[cfg(test)]

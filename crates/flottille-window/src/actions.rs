@@ -439,6 +439,11 @@ pub enum Command {
     Resume {
         session: String,
     },
+    /// Detaches a session from the agent that started it, named `from`.
+    Detach {
+        session: String,
+        from: String,
+    },
     /// Reloads the tools of the session's root: its process restarts on its conversation, once
     /// the turn that runs ended.
     ReloadTools {
@@ -1006,6 +1011,11 @@ pub enum Outcome {
     /// The session's root was resumed, or the daemon refused with why.
     Resumed {
         session: String,
+        refused: Option<String>,
+    },
+    /// The session was detached from `from`, or the daemon refused with why.
+    Detached {
+        from: String,
         refused: Option<String>,
     },
     /// The session's tools reload, now or once its turn ends (`after_turn`), or the daemon
@@ -2180,6 +2190,18 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 after_turn,
                 refused,
             }
+        }
+        Command::Detach { session, from } => {
+            let refused = match ask_alone(
+                connect,
+                "agent.detach",
+                json!({"agent": session}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::Detached { from, refused }
         }
         Command::ReloadTools { session } => {
             let answer = ask_alone(

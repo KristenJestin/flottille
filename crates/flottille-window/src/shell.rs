@@ -2,7 +2,7 @@
 //! showing the open page. It follows the daemon through the [`link`](crate::link) and draws
 //! again only the parts a change touches.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -534,7 +534,11 @@ impl Shell {
             return Some(open);
         }
         let session = self.snapshot.session(id)?;
-        let (project, started_by) = (session.project.clone(), session.started_by.clone());
+        let (project, started_by, led_by) = (
+            session.project.clone(),
+            session.started_by.clone(),
+            session.led_by.clone(),
+        );
         let folder = match place {
             None => self
                 .snapshot
@@ -556,6 +560,7 @@ impl Shell {
             place: place.clone(),
             folder: folder.map(Into::into),
             started_by,
+            led_by,
         };
         let this = cx.entity().downgrade();
         let reply = match self.replies.get(id) {
@@ -626,6 +631,43 @@ impl Shell {
         let (id, count) = (found.id.clone(), found.live);
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.ask_end(id, count, cx));
+    }
+
+    /// "Detach from …" in the row of a session an agent started: the session becomes the
+    /// user's alone, and the result is a toast.
+    pub fn detach_of(&mut self, session: &str, cx: &mut Context<Self>) {
+        let Some(from) = self
+            .snapshot
+            .session(session)
+            .and_then(|found| found.started_by.clone())
+        else {
+            return;
+        };
+        self.perform(Command::Detach {
+            session: session.to_owned(),
+            from,
+        });
+        cx.notify();
+    }
+
+    /// A row folded or unfolded the led sessions under it: its project's level is drawn again,
+    /// from what the daemon last said.
+    pub fn relist(&mut self, session: &str, cx: &mut Context<Self>) {
+        let Some(project) = self.snapshot.session(session).map(|s| s.project.clone()) else {
+            return;
+        };
+        let live = self.snapshot.live_sessions_of(&project);
+        let rows: Vec<Entity<SessionRow>> = live
+            .iter()
+            .filter_map(|s| self.sessions.get(&s.id).cloned())
+            .collect();
+        if rows.len() != live.len() {
+            return;
+        }
+        let rows = nested(&live, &rows, cx);
+        if let Some(node) = self.projects.get(&project).cloned() {
+            node.update(cx, |node, cx| node.set_rows(rows, cx));
+        }
     }
 
     /// "Resume" in an ended session's row.
@@ -908,6 +950,14 @@ impl Shell {
                     page.update(cx, |page, cx| page.resumed(refused, cx));
                 }
             }
+            Outcome::Detached { from, refused } => flottille_ui::toast(
+                match refused {
+                    None => flottille_ui::Toast::success(format!("Detached from {from}")),
+                    Some(why) => flottille_ui::Toast::failure(format!("Not detached from {from}"))
+                        .detail(why),
+                },
+                cx,
+            ),
             Outcome::ToolsReloaded {
                 session,
                 after_turn,
@@ -1519,6 +1569,11 @@ impl Shell {
             && let Some(card) = page.read(cx).card(&Some(name.to_owned()), cx)
         {
             card.update(cx, |card, cx| card.answered(refused, cx));
+        } else if let Some(page) = self.session_page.clone() {
+            // A removal asked from the session's rail.
+            page.update(cx, |page, cx| {
+                page.removal_answered(project, name, refused, cx)
+            });
         }
     }
 
@@ -1766,7 +1821,15 @@ impl Shell {
                 row.set_scope(scope, cx);
                 row.set_place(&session.place, cx);
                 row.set_pull(pull.as_ref(), cx);
-                row.set_actions(session.ended, session.resumable, cx)
+                row.set_actions(
+                    session.ended,
+                    session.resumable,
+                    session.started_by.as_deref(),
+                    cx,
+                );
+                if session.ended {
+                    row.set_led_by(None, cx);
+                }
             });
             marks.extend(session.mark);
             shown.push(row.clone());
@@ -1789,7 +1852,8 @@ impl Shell {
         for project in &snapshot.projects {
             let mut marks = Vec::new();
             let live = snapshot.live_sessions_of(&project.name);
-            let rows = self.session_rows(live.into_iter(), &mut sessions, &mut marks, now, cx);
+            let rows = self.session_rows(live.iter().copied(), &mut sessions, &mut marks, now, cx);
+            let rows = nested(&live, &rows, cx);
             let node = self.projects.remove(&project.name).unwrap_or_else(|| {
                 let name = project.name.clone();
                 let this = this.clone();
@@ -1833,6 +1897,14 @@ impl Shell {
             .retain(|id, _| snapshot.sessions.iter().any(|s| &s.id == id));
         let edited = snapshot.project_changes != self.snapshot.project_changes;
         self.snapshot = snapshot;
+        // A session detached from its pilot: its open page stops saying who led it.
+        if let Some(page) = self.session_page.clone()
+            && let Some(found) = self.snapshot.session(page.read(cx).id())
+            && !page.read(cx).says_by(&found.started_by, &found.led_by)
+        {
+            let (started_by, led_by) = (found.started_by.clone(), found.led_by.clone());
+            page.update(cx, |page, cx| page.set_by(started_by, led_by, cx));
+        }
         self.switcher
             .update(cx, |switcher, cx| switcher.set_snapshot(&self.snapshot, cx));
         self.ring(cx);
@@ -2929,4 +3001,52 @@ fn logo(color: gpui_kit::Hsla) -> gpui_kit::Canvas<()> {
             }
         },
     )
+}
+
+/// The rows of a project's live sessions as the tree draws them: a session led by another of
+/// them sits right under its pilot's row, indented, while that row is unfolded; the others keep
+/// their order. Each row learns who leads it and how many it leads.
+fn nested(
+    live: &[&crate::model::Session],
+    rows: &[Entity<SessionRow>],
+    cx: &mut Context<Shell>,
+) -> Vec<Entity<SessionRow>> {
+    // The place of each session's pilot among them, when it is one of them.
+    let pilots: Vec<Option<usize>> = live
+        .iter()
+        .map(|session| {
+            let pilot = session.pilot.as_deref().filter(|p| *p != session.id)?;
+            live.iter().position(|other| other.id == pilot)
+        })
+        .collect();
+    let mut out = Vec::new();
+    let mut placed = HashSet::new();
+    // Depth first from each session no other leads; `shown` is false under a folded row.
+    let mut stack: Vec<(usize, bool)> = (0..live.len())
+        .rev()
+        .filter(|&at| pilots[at].is_none())
+        .map(|at| (at, true))
+        .collect();
+    while let Some((at, shown)) = stack.pop() {
+        if !placed.insert(at) {
+            continue;
+        }
+        let row = &rows[at];
+        let led_by = pilots[at].and(live[at].led_by.as_deref());
+        if row.read(cx).led_by() != led_by {
+            row.update(cx, |row, cx| row.set_led_by(led_by, cx));
+        }
+        let led: Vec<usize> = (0..live.len())
+            .filter(|&other| pilots[other] == Some(at))
+            .collect();
+        if row.read(cx).leads() != led.len() {
+            row.update(cx, |row, cx| row.set_leads(led.len(), cx));
+        }
+        if shown {
+            out.push(row.clone());
+        }
+        let open = shown && row.read(cx).is_open();
+        stack.extend(led.into_iter().rev().map(|other| (other, open)));
+    }
+    out
 }

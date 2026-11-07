@@ -1039,19 +1039,13 @@ fn state(daemon: &Daemon, agent: &flottille_core::agent::Agent) -> String {
             lines.push(format!("Children:\n{}", children.join("\n")));
         }
     }
-    if let Ok(listed) =
-        crate::subscriptions::call(daemon, "subscription.list", json!({"tree": agent.id}))
-    {
-        let mine: Vec<String> = listed["subscriptions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|s| s["agent"] == agent.id.as_str())
-            .map(|s| format!("- {s}"))
-            .collect();
-        if !mine.is_empty() {
-            lines.push(format!("Subscriptions:\n{}", mine.join("\n")));
-        }
+    let mine: Vec<String> = crate::subscriptions::all(daemon)
+        .iter()
+        .filter(|s| s.agent == agent.id)
+        .map(|s| format!("- {}", crate::subscriptions::listed(s)))
+        .collect();
+    if !mine.is_empty() {
+        lines.push(format!("Subscriptions:\n{}", mine.join("\n")));
     }
     if let Ok(queued) = daemon.read(|store| store.deliveries(&agent.id, "queued")) {
         let waiting: Vec<String> = queued

@@ -1090,3 +1090,74 @@ fn an_edited_comment_keeps_one_record() {
         .unwrap_or_else(|| panic!("{shown}"));
     assert!(line.contains("[comment 10100]"), "{shown}");
 }
+
+#[test]
+fn a_call_prepared_while_its_agent_is_replaced_is_refused() {
+    let user = user();
+    on_github(&user);
+    // The root dies once the test creates `die-now`; its replacement plays nothing.
+    user.fake_script(json!({"turns": [
+        {"when": "hello", "times": 1, "do": [{"hold": "die-now"}, {"die": 3}]}
+    ]}));
+    user.gh_script(json!({"issues": {"acme/app": {"1": {
+        "number": 1, "title": "The login fails", "state": "OPEN", "body": "", "comments": []
+    }}}, "commented": 501}));
+    let opened = user.received_requests("session/new").len();
+    let id = user
+        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (url, authorization) = server_of(&user, opened);
+    // In Full, the edit is performed as soon as it is prepared: no judge, no card.
+    let mode = user.run(&["agent", "mode", &id, "full"]);
+    assert!(mode.status.success(), "{mode:?}");
+    let mcp = Mcp::initialize(&url, &authorization);
+    let posted = mcp.call(
+        "tickets",
+        json!({"action": "comment", "ticket": "#1", "body": "Fixed on app/login"}),
+    );
+    assert!(!posted.error, "{}", posted.text);
+    // Preparing the edit reads the issue, which takes seconds.
+    user.gh_script(json!({"issues": {"acme/app": {"1": {
+        "number": 1, "title": "The login fails", "state": "OPEN", "body": "", "comments": [
+            {"author": {"login": "someone"}, "createdAt": "2099-10-01T10:00:00Z",
+             "body": "Fixed on app/login", "url": "https://github.com/acme/app/issues/1#issuecomment-501"}
+        ]}}}, "read_delay_ms": 4000}));
+    let before = gh_calls(&user).len();
+    let call = std::thread::spawn(move || {
+        Mcp::initialize(&url, &authorization).call(
+            "tickets",
+            json!({"action": "comment_edit", "ticket": "#1", "comment": "issuecomment-501",
+                "body": "the old session's"}),
+        )
+    });
+    eventually("the edit being prepared", || {
+        gh_calls(&user)[before..]
+            .iter()
+            .any(|call| call.starts_with("issue view"))
+    });
+
+    std::fs::write(user.path("fake/die-now"), "").unwrap();
+    eventually("the replacement", || {
+        user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["epoch"] == 1
+    });
+    assert!(
+        !call.is_finished(),
+        "the edit was prepared before the replacement"
+    );
+
+    let answer = call.join().unwrap();
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("this session has been replaced"),
+        "{}",
+        answer.text
+    );
+    let calls = gh_calls(&user);
+    assert!(
+        !calls.iter().any(|call| call.contains("--method PATCH")),
+        "{calls:?}"
+    );
+}

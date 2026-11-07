@@ -203,6 +203,41 @@ struct Subscription {
 }
 
 impl Daemon {
+    /// A daemon over its store and projects, its tools served on `port`.
+    pub fn new(
+        paths: &Paths,
+        store: Store,
+        projects: Projects,
+        port: u16,
+        bus: Option<broadcast::Sender<Event>>,
+    ) -> Daemon {
+        Daemon {
+            paths: paths.clone(),
+            started: Instant::now(),
+            events: Mutex::new(Events { store, bus }),
+            projects: Mutex::new(projects),
+            preparing: Mutex::new(HashSet::new()),
+            removing: Mutex::new(HashMap::new()),
+            step_outputs: Mutex::new(HashMap::new()),
+            agents: Live::default(),
+            mcp: mcp::Server::new(port),
+            services: crate::services::Live::default(),
+            notes: deliveries::Notes::default(),
+            waiting_provider: Mutex::new(HashSet::new()),
+            judge_chose_none: Mutex::new(None),
+            compactions: crate::compaction::Live::default(),
+            launching: Mutex::new(HashMap::new()),
+            forges: forge::Forges::default(),
+            kept_tickets: crate::reads::Kept::default(),
+            kept_searches: crate::reads::Kept::default(),
+            items: items::Items::default(),
+            developer: developer::Log::open(paths),
+            inactive_checked: AtomicU64::new(0),
+            vault: crate::vault::Keyring::open(paths),
+            stopping: watch::Sender::new(false),
+        }
+    }
+
     /// Stores the event and hands it to the subscribers under one lock, so that they see the
     /// events in the order of their numbers.
     pub fn emit(&self, name: &str, data: Value) -> Result<Event> {
@@ -338,34 +373,13 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     // This machine only, on a port of the system's choosing.
     let tools = TcpListener::bind(("127.0.0.1", 0)).await?;
     let (bus, _) = broadcast::channel(1024);
-    let daemon = Arc::new(Daemon {
-        paths: paths.clone(),
-        started: Instant::now(),
-        events: Mutex::new(Events {
-            store,
-            bus: Some(bus),
-        }),
-        projects: Mutex::new(projects),
-        preparing: Mutex::new(HashSet::new()),
-        removing: Mutex::new(HashMap::new()),
-        step_outputs: Mutex::new(HashMap::new()),
-        agents: Live::default(),
-        mcp: mcp::Server::new(tools.local_addr()?.port()),
-        services: crate::services::Live::default(),
-        notes: deliveries::Notes::default(),
-        waiting_provider: Mutex::new(HashSet::new()),
-        judge_chose_none: Mutex::new(None),
-        compactions: crate::compaction::Live::default(),
-        launching: Mutex::new(HashMap::new()),
-        forges: forge::Forges::default(),
-        kept_tickets: crate::reads::Kept::default(),
-        kept_searches: crate::reads::Kept::default(),
-        items: items::Items::default(),
-        developer: developer::Log::open(paths),
-        inactive_checked: AtomicU64::new(0),
-        vault: crate::vault::Keyring::open(paths),
-        stopping: watch::Sender::new(false),
-    });
+    let daemon = Arc::new(Daemon::new(
+        paths,
+        store,
+        projects,
+        tools.local_addr()?.port(),
+        Some(bus),
+    ));
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut child_ended = signal(SignalKind::child())?;
@@ -683,7 +697,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
     let _ = writer.await;
 }
 
-fn handle(daemon: &Daemon, request: Request) -> (Message, Option<Subscription>) {
+fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscription>) {
     let id = request.id;
     match request.method.as_str() {
         "daemon.status" => (

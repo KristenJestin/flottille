@@ -279,11 +279,11 @@ bridge sets on `claude` ("The Claude bridge", below):
   `fs_list`, `search`, `fs_write`, `fs_edit`, `tasks`, `run`, `run_status`
   and `report`; a root, which alone has children, also
   `agent_launch`, `agent_send`, `agent_status`, `agent_stop` and
-  `approval_answer`; a root `ask_user`, a child `ask_parent`. Every agent has
+  `approval_answer`; every agent `ask`. Every agent has
   `workspace`; one of a project whose repositories declare a forge also has `forge`, and one of
   a project that declares a tracker `tickets`, in `main` as in a workspace. A root of a project
   with neither gets, in this order, the first eight, `skill_read`, `workspace`, the four
-  `agent_*`, `skills`, `commands`, `setup`, `project`, `report`, `ask_user`, `approval_answer`
+  `agent_*`, `skills`, `commands`, `setup`, `project`, `report`, `ask`, `approval_answer`
   (21). The list is
   kept with the agent and changes only when its role's does (the prompt cache depends on it):
   a forge or a tracker declared or gone, a new version (`docs/tools.md`, "When the tools
@@ -789,9 +789,11 @@ An agent launches children with `agent_launch` (`docs/tools.md`): each is an age
 with a parent, a depth (a root is at 0), a title and a brief, which is all it knows of its task.
 The user writes to and stops roots only: `agent.send` and `agent.stop` on a child are refused,
 naming its root. The tree is one project's: a child works in its parent's place, always. Work that
-belongs in another workspace is a session for the user (`agent_launch` with `root`, `docs/tools.md`
-"Sessions for the user"), in an existing workspace or a new one, made and prepared before it
-starts; the agent that started it and the session write to each other with `session_send`.
+belongs in another workspace is a session (`agent_launch` with `kind` `led` or `handed`,
+`docs/tools.md` "Sessions an agent starts"), in an existing workspace or a new one, made and
+prepared before it starts; the agent that started it and the session write to each other with
+`session_send`. A led session asks its pilot its questions and wakes it when it asks, reports or
+ends; a handed one is the user's.
 
 - **Caps**: at most `max_children` children of a project run at once (`docs/projects.md`, 1 to
   12, 12 by default), and a tree is 1 deep: a child, whatever its role, has no `agent_*` tool nor
@@ -833,7 +835,8 @@ Everything Flottille hands to an agent is a delivery: the user's messages (`user
 (`brief`), the first message of a session an agent started for the user (`launched`, under a first
 line naming that agent: it is the agent's words, never the user's), a message another session
 wrote with `session_send` (`session`, under a first line naming its sender, never the user's), the end of a turn of a session
-the agent follows (`session-turn-ended`, `docs/tools.md`, "Sessions for the user"), a
+the agent leads, when it asked or reported (`session-turn-ended`, `docs/tools.md`, "Following a
+session"), a led session's pilot that ended (`handed`), a
 parent's message (`parent`), what happens to a child (`child-report`,
 `child-question`, `child-asks`, `child-failed`, `child-stuck`, `child-idle`, `child-replaced`,
 `children-status`), an approval's answer (`approval`), a reminder (`reminder`), a session's
@@ -871,8 +874,9 @@ A child that ends a turn without reporting, with nothing to wait for (no request
 held), is reminded once (`reminder`); after a second such turn its parent is told it went idle
 (`child-idle`). A delivery other than a reminder starts the count again.
 
-A question waits for its answer from the call (`ask_parent`, or a root's `ask_user`) until the one
-asked writes to the agent: a child then waits on its parent, a root on the user, who sees it in
+A question waits for its answer from the call (`ask`) until the one asked writes to the agent: a
+child then waits on its parent, a led session on its pilot (`session_send`), any other root on the
+user, who sees it in
 `flottille status` and under the window's bell (`waiting_on_answer`, `docs/protocol.md`).
 
 ### Replacement
