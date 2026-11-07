@@ -185,7 +185,7 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
 - files: `fs_read`, `fs_list`, `search`, `fs_write`, `fs_edit` (read-before-write fingerprints,
   temp file + rename, all-or-nothing edits);
 - tasks and runs: `tasks` (the project's tasks, written by a root only), `run` (a task or one
-  line, **never a shell**), `run_status` (a run's output, or its stop);
+  line, **never a shell**), `run_status` (a run's output, or its stop; the list of the agent's runs with no run);
 - the services of the machine (every agent): `services`, which lists them with their state and
   starts one, judged as a run of its line in its folder; its stop is always held for the user,
   in every mode, and a root's writes are judged as a task's (`tools.md`, "Services");

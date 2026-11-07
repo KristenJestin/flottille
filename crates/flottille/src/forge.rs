@@ -1479,53 +1479,19 @@ async fn forge_subscribe(
             "refused: minutes is a deadline of 1 min or more; leave it out for none".into(),
         );
     }
-    if asked.number.is_some() {
-        return Outcome::Refused(
-            "refused: forge subscribe takes no number: it waits on the pull request of a \
-             workspace's branch (workspace, repository)"
-                .into(),
-        );
-    }
-    let name = match workspace_named(daemon, place, asked.workspace.as_deref(), "forge") {
-        Ok(name) => name,
+    let found = match asked.number {
+        Some(number) => read_numbered(daemon, place, &asked, number).await,
+        None => read_of_branch(daemon, place, &asked).await,
+    };
+    let Followed {
+        path,
+        forge,
+        pull,
+        target,
+        before,
+    } = match found {
+        Ok(found) => found,
         Err(refusal) => return refusal,
-    };
-    let workspace = match daemon.read(|store| store.workspace(&place.project, &name)) {
-        Ok(Some(workspace)) => workspace,
-        Ok(None) => return Outcome::Failed(format!("the workspace {name} is gone")),
-        Err(error) => return Outcome::Failed(error.to_string()),
-    };
-    let project = projects::load_project(daemon, &place.project).ok();
-    let path = match chosen(
-        repositories_of(&workspace, project.as_ref()),
-        asked.repository.as_deref(),
-        "subscribe",
-        true,
-    ) {
-        Ok(mut checkouts) => checkouts.remove(0).path,
-        Err(refusal) => return refusal,
-    };
-    // The read now is stored before the subscription opens, unless a round wrote meanwhile: what
-    // is so now is no event of the next rounds.
-    let before = crate::items::before_live(daemon, &place.project);
-    let (_, read) = refresh_read(daemon, &workspace).await;
-    let Some(repository) = read.repositories.iter().find(|r| r.path == path) else {
-        return Outcome::Failed(format!("{path} was not read"));
-    };
-    if let Some(note) = &repository.note {
-        return Outcome::Refused(format!("refused: {path}: {note}"));
-    }
-    if let Some(error) = &repository.error {
-        return Outcome::Failed(format!("{path}: the forge could not be read: {error}"));
-    }
-    if let (true, Some(problem)) = (repository.blocked, &read.problem) {
-        return Outcome::Failed(problem.clone());
-    }
-    let Some(pull) = &repository.pull else {
-        return Outcome::Refused(format!(
-            "refused: {path} has no pull request for {}: nothing to subscribe to",
-            repository.branch
-        ));
     };
     if matches!(pull.state, "merged" | "closed") {
         return Outcome::Refused(format!(
@@ -1534,14 +1500,13 @@ async fn forge_subscribe(
         ));
     }
     // The one read of the runs: how long CI usually takes, for the agent to know.
-    let runs = match &repository.forge {
+    let runs = match &forge {
         Some(forge) => ci::recent(forge).await,
         None => None,
     };
-    let target = events::target(&workspace, &path, pull.number);
     let held = crate::items::held_after(daemon, &place.project, before).await;
-    if let (Some(_), Some(forge)) = (&held, &repository.forge) {
-        remember(daemon, &place.project, &path, forge, pull);
+    if let (Some(_), Some(forge)) = (&held, &forge) {
+        remember(daemon, &place.project, &path, forge, &pull);
     }
     let unseen = crate::items::unseen(
         daemon,
@@ -1551,7 +1516,7 @@ async fn forge_subscribe(
         &pull.number.to_string(),
     );
     for old in crate::subscriptions::of(daemon, agent) {
-        if old.target == target {
+        if events::same_pull(&old.target, &target) {
             crate::subscriptions::end(daemon, &old, "cancelled");
         }
     }
@@ -1598,15 +1563,128 @@ async fn forge_subscribe(
     }
     // GitHub says no decision when the base branch requires no review: `approved` waits for one.
     if pull.review.is_none()
-        && matches!(repository.forge, Some(Forge::GitHub { .. }))
+        && matches!(forge, Some(Forge::GitHub { .. }))
         && subscription.events.iter().any(|e| e == "approved")
     {
         text.push_str(
             "\nThis repository asks for no review, so approved will not come; subscribe to review.",
         );
     }
-    text.push_str(&checks_when_subscribed(daemon, agent, &path, pull));
+    text.push_str(&checks_when_subscribed(daemon, agent, &path, &pull));
     Outcome::Done(text)
+}
+
+/// The pull request a subscription follows, as it was just read.
+struct Followed {
+    path: String,
+    forge: Option<Forge>,
+    pull: Pull,
+    target: Value,
+    before: crate::items::Before,
+}
+
+/// The pull request of a workspace's branch, read as the workspace is.
+async fn read_of_branch(
+    daemon: &Arc<Daemon>,
+    place: &Place,
+    asked: &ForgeCall,
+) -> Result<Followed, Outcome> {
+    let name = workspace_named(daemon, place, asked.workspace.as_deref(), "forge")?;
+    let workspace = match daemon.read(|store| store.workspace(&place.project, &name)) {
+        Ok(Some(workspace)) => workspace,
+        Ok(None) => return Err(Outcome::Failed(format!("the workspace {name} is gone"))),
+        Err(error) => return Err(Outcome::Failed(error.to_string())),
+    };
+    let project = projects::load_project(daemon, &place.project).ok();
+    let path = chosen(
+        repositories_of(&workspace, project.as_ref()),
+        asked.repository.as_deref(),
+        "subscribe",
+        true,
+    )?
+    .remove(0)
+    .path;
+    // The read now is stored before the subscription opens, unless a round wrote meanwhile: what
+    // is so now is no event of the next rounds.
+    let before = crate::items::before_live(daemon, &place.project);
+    let (_, read) = refresh_read(daemon, &workspace).await;
+    let Some(repository) = read.repositories.iter().find(|r| r.path == path) else {
+        return Err(Outcome::Failed(format!("{path} was not read")));
+    };
+    if let Some(note) = &repository.note {
+        return Err(Outcome::Refused(format!("refused: {path}: {note}")));
+    }
+    if let Some(error) = &repository.error {
+        return Err(Outcome::Failed(format!(
+            "{path}: the forge could not be read: {error}"
+        )));
+    }
+    if let (true, Some(problem)) = (repository.blocked, &read.problem) {
+        return Err(Outcome::Failed(problem.clone()));
+    }
+    let Some(pull) = &repository.pull else {
+        return Err(Outcome::Refused(format!(
+            "refused: {path} has no pull request for {}: nothing to subscribe to",
+            repository.branch
+        )));
+    };
+    Ok(Followed {
+        target: events::target(&place.project, Some(&workspace.name), &path, pull.number),
+        forge: repository.forge.clone(),
+        pull: pull.clone(),
+        path,
+        before,
+    })
+}
+
+/// A pull request of a repository of the agent's place, read by its number: the workspace's
+/// branch is not asked, so it is no pull request of one.
+async fn read_numbered(
+    daemon: &Arc<Daemon>,
+    place: &Place,
+    asked: &ForgeCall,
+    number: u64,
+) -> Result<Followed, Outcome> {
+    if asked.workspace.is_some() {
+        return Err(Outcome::Refused(
+            "refused: forge subscribe takes no workspace with a number: a pull request is of a \
+             repository (repository)"
+                .into(),
+        ));
+    }
+    let checkout = place_checkouts(daemon, place)
+        .and_then(|all| chosen(all, asked.repository.as_deref(), "subscribe", true))?
+        .remove(0);
+    let forge = match declared_forge(&checkout).await {
+        Ok(forge) => forge,
+        Err(None) => {
+            return Err(Outcome::Refused(format!(
+                "refused: {}: {NO_FORGE}",
+                checkout.path
+            )));
+        }
+        Err(Some(why)) => return Err(Outcome::Refused(why)),
+    };
+    // As for a branch's: stored before the subscription opens, unless a round wrote meanwhile.
+    let before = crate::items::before_live(daemon, &place.project);
+    let mut pull = match pull_numbered(&forge, number).await {
+        Err(why) => return Err(Outcome::Failed(why)),
+        Ok(None) => {
+            return Err(Outcome::Refused(format!(
+                "refused: {} has no pull request #{number}",
+                forge.slug()
+            )));
+        }
+        Ok(Some(pull)) => pull,
+    };
+    know_posts(daemon, &place.project, &checkout.path, &forge, &mut pull);
+    Ok(Followed {
+        target: events::target(&place.project, None, &checkout.path, pull.number),
+        forge: Some(forge),
+        pull,
+        path: checkout.path,
+        before,
+    })
 }
 
 /// What `subscribe` says of the checks: those running as it subscribed, which `checks` waits
@@ -1670,10 +1748,10 @@ fn forge_unsubscribe(
     asked: ForgeCall,
 ) -> Outcome {
     if let Some(session) = &asked.session {
-        if asked.workspace.is_some() || asked.repository.is_some() {
+        if asked.workspace.is_some() || asked.repository.is_some() || asked.number.is_some() {
             return Outcome::Refused(
-                "refused: session goes alone: it names a session you follow, workspace and \
-                 repository a pull request"
+                "refused: session goes alone: it names a session you follow, workspace, \
+                 repository and number a pull request"
                     .into(),
             );
         }
@@ -1715,12 +1793,16 @@ fn forge_unsubscribe(
         .filter(|s| s.source == "forge" && asked.run.is_none())
         .filter(|s| named(s, "workspace", &asked.workspace))
         .filter(|s| named(s, "repository", &asked.repository))
+        .filter(|s| asked.number.is_none_or(|n| s.target["number"] == n))
         .collect();
-    cancelled.extend(
-        followed::of(daemon, agent, asked.repository.as_deref(), asked.run)
-            .into_iter()
-            .filter(|s| named(s, "workspace", &asked.workspace)),
-    );
+    // A run is followed by its own number, which `number` (a pull request's) never names.
+    if asked.number.is_none() {
+        cancelled.extend(
+            followed::of(daemon, agent, asked.repository.as_deref(), asked.run)
+                .into_iter()
+                .filter(|s| named(s, "workspace", &asked.workspace)),
+        );
+    }
     if cancelled.is_empty() {
         return Outcome::Refused("refused: you have no such subscription".into());
     }
@@ -2002,22 +2084,7 @@ async fn forge_show(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall, numbe
     let generation = daemon.forges.pulls.generation();
     // A round of the project running stores a read of its own; none starts during this one.
     let held = crate::items::held_now(daemon, &place.project);
-    let pull = match &forge {
-        Forge::GitHub { .. } => match signed_in().await {
-            Err(problem) => Err(problem),
-            Ok(()) => {
-                let repo = forge.gh_repository();
-                let number = number.to_string();
-                gh_json(&["pr", "view", &number, "-R", &repo, "--json", FIELDS])
-                    .await
-                    .map(|viewed| Pull::of(&viewed))
-            }
-        },
-        Forge::Bitbucket { .. } => match bitbucket::Contexts::default().of(&forge).await {
-            Err(problem) => Err(problem),
-            Ok(context) => bitbucket::pull_numbered(&forge, &context, number).await,
-        },
-    };
+    let pull = pull_numbered(&forge, number).await;
     match pull {
         Err(why) => Outcome::Failed(why),
         Ok(None) => Outcome::Refused(format!(
@@ -2033,6 +2100,24 @@ async fn forge_show(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall, numbe
             attached(&forge, &mut pull).await;
             daemon.forges.pulls.put(key, pull.clone(), generation);
             shown_pull(&checkout, &forge, &pull, full, None)
+        }
+    }
+}
+
+/// The pull request `number` of a forge's repository, read now; none when it has no such one.
+async fn pull_numbered(forge: &Forge, number: u64) -> Result<Option<Pull>, String> {
+    match forge {
+        Forge::GitHub { .. } => {
+            signed_in().await?;
+            let repo = forge.gh_repository();
+            let number = number.to_string();
+            gh_json(&["pr", "view", &number, "-R", &repo, "--json", FIELDS])
+                .await
+                .map(|viewed| Pull::of(&viewed))
+        }
+        Forge::Bitbucket { .. } => {
+            let context = bitbucket::Contexts::default().of(forge).await?;
+            bitbucket::pull_numbered(forge, &context, number).await
         }
     }
 }

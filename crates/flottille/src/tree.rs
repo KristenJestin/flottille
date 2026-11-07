@@ -1001,7 +1001,7 @@ pub fn doing(daemon: &Daemon, agent: &Agent) -> String {
 }
 
 /// A duration as a person says it.
-fn ago(ms: u64) -> String {
+pub(crate) fn ago(ms: u64) -> String {
     let seconds = ms / 1000;
     if seconds < 90 {
         format!("{seconds} s")

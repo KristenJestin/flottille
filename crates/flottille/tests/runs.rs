@@ -425,6 +425,59 @@ fn a_command_is_listed_with_the_tail_of_its_output() {
 }
 
 #[test]
+fn an_agent_lists_its_own_running_commands() {
+    let user = User::with_fake_agent();
+    let (_, mcp, workspace) = session(&user);
+    let server = start(&mcp, "server");
+    let quick = run_id(&ok(mcp.call("run", json!({"task": "quick"}))));
+
+    // After a compaction the agent holds no id: the list gives them back.
+    let text = ok(mcp.call("run_status", json!({})));
+
+    let line_of = |id: &str| {
+        text.lines()
+            .find(|line| line.contains(id))
+            .unwrap_or_else(|| panic!("{id} is not listed in {text}"))
+    };
+    let running = line_of(&server);
+    for part in [
+        "./server.sh",
+        workspace.to_str().unwrap(),
+        "is running",
+        "started",
+        "listening on 8080",
+    ] {
+        assert!(running.contains(part), "{part} is missing in {running}");
+    }
+    let ended = line_of(&quick);
+    for part in ["./quick.sh", "exited with code 0", "quick"] {
+        assert!(ended.contains(part), "{part} is missing in {ended}");
+    }
+    // The id it reads there stops the server.
+    let stopped = ok(mcp.call("run_status", json!({"run": server, "action": "stop"})));
+    assert!(stopped.contains("was stopped after"), "{stopped}");
+}
+
+#[test]
+fn a_list_of_commands_takes_no_action_tail_or_start() {
+    let user = User::with_fake_agent();
+    let (_, mcp, _) = session(&user);
+    let nothing = ok(mcp.call("run_status", json!({})));
+    assert!(nothing.contains("No command"), "{nothing}");
+
+    for args in [
+        json!({"action": "stop"}),
+        json!({"tail": 5}),
+        json!({"start": 2}),
+        json!({"when": "ready"}),
+    ] {
+        let answer = mcp.call("run_status", args.clone());
+        assert!(answer.error, "{args} was answered: {}", answer.text);
+        assert!(answer.text.contains("without run"), "{}", answer.text);
+    }
+}
+
+#[test]
 fn a_user_stop_while_the_call_waits_is_told_in_the_call_s_answer() {
     let user = User::with_fake_agent();
     let (agent, mcp, _) = session(&user);

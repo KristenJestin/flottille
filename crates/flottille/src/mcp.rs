@@ -270,29 +270,29 @@ const SERVED: [Definition; 31] = [
     Definition {
         name: "run_status",
         title: "Follow or stop a run",
-        description: "A run this agent started, by the run id run gave. action output (the \
-            default): its state and lines of its output, the last tail lines (40 by default, \
-            1000 at most) or those from start; the answer says how to read the lines before or \
-            after; only the last 64 KiB of an output are kept. action stop: ends it with \
-            everything it started, asked to end, then killed 5 seconds later, and answers once \
-            it ended; a run that already ended is left as it is. {\"run\": \"a1b2c3\", \
-            \"action\": \"stop\"} action notify with when ready: you are told when a run of \
-            a task that says when it is ready is, rather than reading it again and again: \
-            {\"run\": \"a1b2c3\", \"action\": \"notify\", \"when\": \"ready\"}. The same call reads a cut result whole: a long result is \
-            returned as its beginning and its end with a line naming an id (res_...) and the \
-            call that reads the lines left out, from start, a page at a time; stop does not \
+        description: "{} with no run lists your commands (a root's tree's too) with their id, line, \
+            state and last line: the id of a run you lost stops it. With run: a run this agent \
+            started, by the run id run gave. action output (the default): its state and lines \
+            of its output, the last tail lines (40 by default, 1000 at most) or those from \
+            start; the answer says how to read the lines before or after; only the last 64 KiB \
+            of an output are kept. action stop: ends it with everything it started, asked to \
+            end, then killed 5 seconds later, and answers once it ended; a run that already \
+            ended is left as it is. {\"run\": \"a1b2c3\", \"action\": \"stop\"} action notify \
+            with when ready: you are told when a run of a task that says when it is ready is: \
+            {\"run\": \"a1b2c3\", \"action\": \"notify\", \"when\": \"ready\"}. The same \
+            call reads a cut result (res_...) a page at a time, from start; stop does not \
             apply to it.",
         read_only: false,
         idempotent: true,
         destructive: true,
         schema: || {
             json!({"type": "object", "properties": {
-                "run": {"type": "string", "description": "The run id run gave, or the id of a cut result (res_...)."},
+                "run": {"type": "string", "description": "The run id run gave, or the id of a cut result (res_...). Without it, the call lists your commands."},
                 "action": {"type": "string", "enum": ["output", "stop", "notify"], "description": "output by default."},
                 "when": {"type": "string", "enum": ["ready"], "description": "notify: what to be told of."},
                 "tail": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "output: the last lines."},
                 "start": {"type": "integer", "minimum": 1, "description": "output: the first line to show."}
-            }, "required": ["run"], "additionalProperties": false})
+            }, "additionalProperties": false})
         },
     },
     Definition {
@@ -343,7 +343,7 @@ const SERVED: [Definition; 31] = [
                 "action": {"type": "string", "enum": ["list", "show", "subscribe", "unsubscribe", "create", "comment", "edit", "merge", "checks", "close", "reopen", "review", "pipelines", "runs", "run_view", "run_logs", "run", "stop", "step"]},
                 "workspace": {"type": "string", "description": "Yours when left out; in main, name it."},
                 "repository": {"type": "string", "description": "A repository of the project, by its path (\".\" is the project folder itself), never a folder inside one; all of the place's when left out (list, show); the only one is taken without being named."},
-                "number": {"type": "integer", "minimum": 1, "description": "show, comment, review, edit: a pull request."},
+                "number": {"type": "integer", "minimum": 1, "description": "show, comment, review, edit, subscribe, unsubscribe: a pull request. subscribe and unsubscribe take it with repository, without workspace, for one that is not your workspace's branch's."},
                 "state": {"type": "string", "enum": ["open", "closed", "merged", "all"]},
                 "branch": {"type": "string", "description": "list: its source branch."},
                 "detail": {"type": "string", "enum": ["short", "full"]},

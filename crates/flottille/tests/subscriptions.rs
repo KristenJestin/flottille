@@ -2565,3 +2565,279 @@ fn a_bitbucket_pull_request_with_no_reviewer_is_never_approved() {
         );
     }
 }
+
+// Subscribing to a pull request by its number (#374): one that is not of the workspace's branch.
+
+/// The fake `gh` answers `pull` as the pull request of `app/other`, a branch no workspace has.
+fn script_other(user: &User, pull: Value) {
+    let pull = changed(pull);
+    let log = "test\tRun cargo test\t2026-01-01T00:00:00.1234567Z error: test failed\n";
+    user.gh_script(json!({
+        "pulls": {"acme/api": {"app/other": pull}},
+        "logs": {"acme/api": {"456": log}}
+    }));
+}
+
+/// The fake `bkt`'s pull request #12 told `state` (`MERGED`, `DECLINED`), in both shapes.
+fn bitbucket_closed(user: &User, state: &str) {
+    let mut script: Value =
+        serde_json::from_str(&std::fs::read_to_string(user.path("bkt/script.json")).unwrap())
+            .unwrap();
+    for pull in script["pulls"]
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+        .flat_map(|pulls| pulls.as_array_mut().unwrap())
+    {
+        pull["state"] = state.into();
+    }
+    user.bkt_script(script);
+}
+
+#[test]
+fn an_agent_subscribes_to_a_pull_request_by_its_number() {
+    let user = user();
+    fixture(&user);
+    script_other(&user, pull());
+    let (_, mcp) = agent(&user);
+
+    // The workspace's own branch has no pull request: only the number finds this one.
+    let refused = mcp.call(
+        "forge",
+        json!({"action": "subscribe", "events": ["checks"]}),
+    );
+    assert!(refused.error, "{}", refused.text);
+    let said = subscribe(
+        &mcp,
+        json!({"number": 12, "repository": "api", "events": ["checks", "review"]}),
+    );
+    assert!(
+        said.contains("Subscribed to checks, review of the pull request #12 of api:"),
+        "{said}"
+    );
+    assert!(!said.contains("workspace"), "{said}");
+    let shown = mcp.call("forge", json!({"action": "show"}));
+    assert!(
+        shown
+            .text
+            .contains("Your subscriptions:\n- pull request #12 of api: checks, review"),
+        "{}",
+        shown.text
+    );
+}
+
+#[test]
+fn it_is_woken_when_its_checks_end() {
+    let user = user();
+    fixture(&user);
+    script_other(&user, pull());
+    let (_, mcp) = agent(&user);
+
+    subscribe(
+        &mcp,
+        json!({"number": 12, "repository": "api", "events": ["checks"]}),
+    );
+    a_round(&user);
+    assert!(delivered(&user).is_empty(), "still running is no news");
+    script_other(&user, ended(pull()));
+    a_round(&user);
+    let delivery = the_delivery(&user);
+    for part in [
+        "pull request #12 of api",
+        "checks ended: 1 passed, 1 failed",
+    ] {
+        assert!(delivery.contains(part), "{part} in {delivery}");
+    }
+}
+
+#[test]
+fn unsubscribe_by_number_cancels_it() {
+    let user = user();
+    fixture(&user);
+    script_other(&user, pull());
+    let (_, mcp) = agent(&user);
+
+    subscribe(
+        &mcp,
+        json!({"number": 12, "repository": "api", "events": ["checks"]}),
+    );
+    // Another number is no such subscription.
+    let other = mcp.call(
+        "forge",
+        json!({"action": "unsubscribe", "number": 13, "repository": "api"}),
+    );
+    assert!(other.error, "{}", other.text);
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "unsubscribe", "number": 12, "repository": "api"}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("pull request #12 of api"),
+        "{}",
+        answer.text
+    );
+    let shown = mcp.call("forge", json!({"action": "show"}));
+    assert!(!shown.text.contains("Your subscriptions"), "{}", shown.text);
+    script_other(&user, ended(pull()));
+    a_round(&user);
+    assert!(delivered(&user).is_empty(), "{:?}", delivered(&user));
+}
+
+#[test]
+fn a_closed_pull_request_by_number_is_refused() {
+    let user = user();
+    fixture(&user);
+    let mut closed = pull();
+    closed["state"] = "CLOSED".into();
+    script_other(&user, closed);
+    let (_, mcp) = agent(&user);
+
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "subscribe", "number": 12, "repository": "api", "events": ["checks"]}),
+    );
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("the pull request #12 of api is closed"),
+        "{}",
+        answer.text
+    );
+    let shown = mcp.call("forge", json!({"action": "show"}));
+    assert!(!shown.text.contains("Your subscriptions"), "{}", shown.text);
+}
+
+#[test]
+fn a_number_with_no_pull_request_or_with_a_workspace_is_refused() {
+    let user = user();
+    fixture(&user);
+    script_other(&user, pull());
+    let (_, mcp) = agent(&user);
+
+    let missing = mcp.call(
+        "forge",
+        json!({"action": "subscribe", "number": 99, "repository": "api", "events": ["checks"]}),
+    );
+    assert!(missing.error, "{}", missing.text);
+    let named = mcp.call(
+        "forge",
+        json!({"action": "subscribe", "number": 12, "repository": "api", "workspace": "login",
+            "events": ["checks"]}),
+    );
+    assert!(named.error, "{}", named.text);
+    assert!(named.text.contains("takes no workspace"), "{}", named.text);
+}
+
+#[test]
+fn subscribing_by_number_replaces_the_subscription_of_the_workspace_s_own_pull_request() {
+    let user = user();
+    fixture(&user);
+    script(&user, pull());
+    let (_, mcp) = agent(&user);
+
+    subscribe(&mcp, json!({"events": ["checks"]}));
+    subscribe(
+        &mcp,
+        json!({"number": 12, "repository": "api", "events": ["review"]}),
+    );
+    let shown = mcp.call("forge", json!({"action": "show"}));
+    assert_eq!(
+        shown.text.matches("pull request #12 of api").count(),
+        1,
+        "{}",
+        shown.text
+    );
+    assert!(shown.text.contains("of api: review"), "{}", shown.text);
+}
+
+#[test]
+fn an_agent_subscribes_to_a_bitbucket_pull_request_by_its_number() {
+    for shape in Bitbucket::ALL {
+        let user = shape.user();
+        shape.script(&user, &[], "INPROGRESS");
+        let (_, mcp) = agent(&user);
+
+        let said = subscribe(
+            &mcp,
+            json!({"number": 12, "repository": "api", "events": ["checks"]}),
+        );
+        assert!(
+            said.contains("Subscribed to checks of the pull request #12 of api:"),
+            "{shape:?}: {said}"
+        );
+        assert!(!said.contains("workspace"), "{shape:?}: {said}");
+    }
+}
+
+#[test]
+fn a_bitbucket_pull_request_subscribed_by_number_wakes_when_its_checks_end() {
+    for shape in Bitbucket::ALL {
+        let user = shape.user();
+        shape.script(&user, &[], "INPROGRESS");
+        let (_, mcp) = agent(&user);
+
+        subscribe(
+            &mcp,
+            json!({"number": 12, "repository": "api", "events": ["checks"]}),
+        );
+        shape.script(&user, &[], "FAILED");
+        a_round(&user);
+        let delivery = the_delivery(&user);
+        assert!(
+            delivery.contains("pull request #12 of api"),
+            "{shape:?}: {delivery}"
+        );
+    }
+}
+
+#[test]
+fn bitbucket_unsubscribe_by_number_cancels_it() {
+    for shape in Bitbucket::ALL {
+        let user = shape.user();
+        shape.script(&user, &[], "INPROGRESS");
+        let (_, mcp) = agent(&user);
+
+        subscribe(
+            &mcp,
+            json!({"number": 12, "repository": "api", "events": ["checks"]}),
+        );
+        let answer = mcp.call(
+            "forge",
+            json!({"action": "unsubscribe", "number": 12, "repository": "api"}),
+        );
+        assert!(!answer.error, "{shape:?}: {}", answer.text);
+        shape.script(&user, &[], "FAILED");
+        a_round(&user);
+        assert!(
+            delivered(&user).is_empty(),
+            "{shape:?}: {:?}",
+            delivered(&user)
+        );
+    }
+}
+
+#[test]
+fn a_closed_bitbucket_pull_request_by_number_is_refused() {
+    for shape in Bitbucket::ALL {
+        let user = shape.user();
+        shape.script(&user, &[], "SUCCESSFUL");
+        let (_, mcp) = agent(&user);
+        bitbucket_closed(&user, "MERGED");
+
+        let answer = mcp.call(
+            "forge",
+            json!({"action": "subscribe", "number": 12, "repository": "api",
+                "events": ["checks"]}),
+        );
+        assert!(answer.error, "{shape:?}: {}", answer.text);
+        assert!(
+            answer
+                .text
+                .contains("the pull request #12 of api is merged"),
+            "{shape:?}: {}",
+            answer.text
+        );
+    }
+}
