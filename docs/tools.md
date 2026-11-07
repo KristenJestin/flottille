@@ -9,8 +9,8 @@ depend on what it can do (`docs/agents.md`): the file and command tools below fo
 `workspace` and `web` for every agent (a tool that could only refuse is not listed; what each may
 do is the gate's business, not the list's), `skills`, `commands`, `setup` and `project` for a root (below,
 "The project"),
-`wake` for every agent ("Waking later"), and the tree's tools (`agent_*`, `report`, `ask_user`
-or `ask_parent`, `approval_answer`, and `session_send` and `session_read` for a root).
+`wake` for every agent ("Waking later"), and the tree's tools (`agent_*`, `report`, `ask`,
+`approval_answer`, and `session_send` and `session_read` for a root).
 
 ## The server
 
@@ -955,107 +955,129 @@ Two of them take an `action`, as the tools of a family do: `agent_status` (`stat
 
 | Tool | |
 |---|---|
-| `agent_launch {title, brief, provider?, model?, effort?, role?, workspace?, new_workspace?, repositories?, branch?, base?, root?, follow?}` | Starts a session for the user in a workspace with `root: true` ("Sessions for the user", below), or a child on one task, in the caller's own place, and answers at once with its id. A child never works in another place than its parent's: `workspace` and `new_workspace` are the session's, and a child launch that names another workspace than the caller's own, or a new one, is refused before anything is asked, naming the session form (`refused: a child works where you work: workspace and new_workspace are for a session for the user, … "root": true, "workspace": "login" …`); naming the caller's own workspace is its own place. Its description leads with the session form, for work that belongs in a workspace. `provider` is the caller's when left out, and the child's for life; `model` and `effort` the provider's defaults when left out (`docs/agents.md`, "Providers"): a provider not enabled or not ready, or a model or an effort it is known not to offer, is refused naming those that are (`refused: provider opencode is not enabled (…); the ready providers are claude`). `role` is `worker` (by default) or `lead`; with `root`, `workspace` is an existing workspace's name (`main` for the project folder), `new_workspace` the name of a new one (made at once, with `repositories` as its repositories, `branch` as its branch and `base` (`{"api": "develop"}`) as the base a repository starts from, the same rules as `workspace create`: `<branch prefix>/<name>` when left out, an existing branch resumed, the project's branch format; the card says the branch, and that is the branch made, and each base chosen (`The repository api starts from develop, in place of its base rule`); a base for a repository the workspace does not take, or a name git refuses, is refused before the card, while whether the remote has it is read when the workspace is made (the card touches no network); `branch` and `base` without `new_workspace` are refused naming it; their schema says to name the branch by the repository's convention, with the ticket's key when there is one, the session's first message sent once it is prepared; a workspace that fails fails the session; the launch is judged as `workspace create` is, "The workspace"), neither for the caller's own place; both are plain optional fields, and a mix is refused naming the field to use (`refused: workspace and new_workspace are exclusive: …`, `refused: repositories goes with new_workspace, …`). Its description holds a call of each form. Refused, never queued, above the project's children cap (`refused: N children already run in project P, its cap: do the work yourself, or wait for one of them to end (agent_stop ends one of yours)`). Only a root has this tool: a child, whatever its role, has none of the `agent_*` tools (no depth). **`root: true`** starts a session for the user instead of a child ("Sessions for the user", below), and then **`follow`** (a boolean) is required: a launch without it is refused, naming the field and what each value does; a child launch refuses it. |
-| `session_send {session, text}` (a root) | A message to a session the caller started (`agent_launch` with `root`), to the agent that started the caller's session ("Sessions for the user", below), or to any other session of its project with the user's leave, asked once per pair ("Sessions that talk to each other"). |
+| `agent_launch {kind, title, brief, provider?, model?, effort?, role?, workspace?, new_workspace?, repositories?, branch?, base?}` | Starts an agent of the `kind` it names, never guessed, and answers at once with its id. **`kind`** is required, one of: **`child`**, a part of the caller's own task, in its place, that it directs and that reports to it; **`led`**, an autonomous job of its own (its own workspace or `main`) that the caller pilots: a real session the user sees under it and may talk to, which asks the caller its questions and wakes it when it asks, reports or ends; **`handed`**, a session the caller starts for the user and then lets go: it is the user's, and the caller hears nothing more of it unless it writes to it ("Sessions an agent starts", below). A launch without `kind` is refused before anything is asked, naming each kind and what it does (`refused: kind is required: say which agent you start. child: …; led: …; handed: …`); `root` and `follow`, which `kind` replaced, are refused the same way, naming `kind` (`refused: root is no longer taken: kind says which agent you start, …`): there is no silent mapping. Its description says each kind in one line, and holds a call of each. A child never works in another place than its parent's: `workspace` and `new_workspace` are a session's, and a child launch that names another workspace than the caller's own, or a new one, is refused before anything is asked, naming the session form (`refused: a child works where you work: workspace and new_workspace are for a session for the user, … "kind": "led", … "workspace": "login" …`); naming the caller's own workspace is its own place. `provider` is the caller's when left out, and the agent's for life; `model` and `effort` the provider's defaults when left out (`docs/agents.md`, "Providers"): a provider not enabled or not ready, or a model or an effort it is known not to offer, is refused naming those that are (`refused: provider opencode is not enabled (…); the ready providers are claude`). `role` is `worker` (by default for a child) or `lead` (by default for a session); for `led` and `handed`, `workspace` is an existing workspace's name (`main` for the project folder), `new_workspace` the name of a new one (made at once, with `repositories` as its repositories, `branch` as its branch and `base` (`{"api": "develop"}`) as the base a repository starts from, the same rules as `workspace create`: `<branch prefix>/<name>` when left out, an existing branch resumed, the project's branch format; the card says the branch, and that is the branch made, and each base chosen (`The repository api starts from develop, in place of its base rule`); a base for a repository the workspace does not take, or a name git refuses, is refused before the card, while whether the remote has it is read when the workspace is made (the card touches no network); `branch` and `base` without `new_workspace` are refused naming it; their schema says to name the branch by the repository's convention, with the ticket's key when there is one, the session's first message sent once it is prepared; a workspace that fails fails the session; the launch is judged as `workspace create` is, "The workspace"), neither for the caller's own place; both are plain optional fields, and a mix is refused naming the field to use (`refused: workspace and new_workspace are exclusive: …`, `refused: repositories goes with new_workspace, …`). A child launch is refused, never queued, above the project's children cap (`refused: N children already run in project P, its cap: do the work yourself, or wait for one of them to end (agent_stop ends one of yours)`). Only a root has this tool: a child, whatever its role, has none of the `agent_*` tools (no depth). |
+| `session_send {session, text}` (a root) | A message to a session the caller started (`agent_launch` with `led` or `handed`), to the agent that started the caller's session ("Sessions an agent starts", below), or to any other session of its project with the user's leave, asked once per pair ("Sessions that talk to each other"). |
 | `session_read {session?, last?, since?, until?, cursor?}` (a root) | A page of the conversation of another session of the caller's project, framed as that session's data, with the mode of its tree; without `session`, the caller's own id, role and mode ("Sessions that read each other", below). |
 | `agent_send {agent_id, message, model?, effort?}` | A message to a child, urgent: on its next tool result in a turn, a new turn otherwise. It answers the child's question. With `model` or `effort` it also changes the child's, as `agent.options` does for the user (`docs/agents.md`, "The options"): checked as at `agent_launch` (a model or an effort its provider is known not to offer is refused, naming those it offers, and nothing is sent), then set between its turns, before its next prompt. The provider never changes. |
 | `agent_status {agent_id?, action? status \| conversation, detail? short \| full, after?}` | `action status` (the default): one line per child (or for the one named): what it does (in a turn, `running \`<line>\` for 12 min`, `waiting for approval #3`, `waiting on the provider`, idle, reported, ended or failed with why), the time since its last sign of activity, its context use. For all the children it stops there (`detail short`) and says how to get more; for the one named, or with `detail full`, each also has its last three messages. `action conversation` (with `agent_id`; `after` pages): a page of the child's conversation, oldest first, one line per event that says something (`#<n> sent: …`, `said: …` for a whole reply, its streamed pieces joined and masked, two messages apart, `tool call: …`, a tool served and its outcome, a turn's end, a replacement, a report), each line of 2,000 characters at most (a longer reply goes on, whole, on the next lines), the page under 30,000; it ends with the `after` to pass for the next page. |
 | `agent_stop {agent_id}` | Stops the child and its own children, deepest first; what was queued for them is superseded; their runs are stopped. Their workspaces stay. |
 | `report {text}` | The caller is done. At most 10,000 characters, so that it rides whole on its parent's results; a longer one is refused, asking for fewer words and a file that holds the details. A child's report goes to its parent at once (`child-report`, with its workspace, its branch and the last commit of each repository), and the child ends when its turn does (or two minutes later, if its turn goes on). A root's report is shown to the user (`agent.reported`) and the root stays. |
-| `ask_user {question}` (a root) | A question to the user (`agent.asked`), answered later as a message. For a decision only the user can take (commit, push, scope, a choice); see "Where a question goes", below. |
-| `ask_parent {question}` (a child) | A question to its parent (`child-question`), answered with `agent_send`. Until then the child shows as waiting on its parent. What a child needs goes here, never in its report. |
+| `ask {question}` | A question, answered later as a message; the daemon decides where it goes, never the agent, and the tool's description says it for the caller in one sentence chosen by its kind: a **child** asks its parent (`child-question`, answered with `agent_send`; until then the child shows as waiting on its parent); a **led** session asks its pilot (the pilot is woken at the turn's end, "Following a session", and answers with `session_send`; until then the session shows as waiting on its pilot, and the user sees the question in the session too); **any other root** asks the user (`agent.asked`, the inbox). What an agent needs goes here, never in a report or a last message; see "Where a question goes", below. |
+| `ask_user {question}`, `ask_parent {question}` | The two names `ask` replaced, kept for one release: no agent is given them, and a call of either is answered, routed as `ask` is, whoever makes it. |
 | `approval_answer {request_id, decision, why}` | Answers a request held for the caller: `deny` (the agent that asked is told, with the why) or `forward` (to the caller's parent with its why, or to the user from a root). There is no way to allow: `allow` is refused as a decision the tool does not have, and a request the caller does not hold, or no longer holds, is refused (`refused: request #n is not held by this agent: …`). |
 
 They go through the gate like every call (it allows them). Their texts are masked of the
 daemon's secrets before anyone else reads them.
 
-### Sessions for the user
+### Sessions an agent starts
 
 The user asked that the agent they talk to may start, for them, a session like one they start
-from the window: `agent_launch {"title", "brief", "root": true, workspace? | new_workspace?}`.
+from the window: `agent_launch {"kind": "led" | "handed", "title", "brief", workspace? |
+new_workspace?}`. The two kinds differ in who it answers to afterwards:
+
+- **`led`**: an autonomous job of its own that the agent pilots. The user sees it under its pilot
+  and may talk to it like any session; it asks its pilot its questions (`ask`), and the pilot is
+  woken when it asks, reports or ends ("Following a session", below).
+- **`handed`**: a session the agent starts for the user and then lets go. It is the user's; its
+  questions go to the user, and the agent hears nothing more of it unless it writes to it with
+  `session_send`.
+
+Both are the same kind of session otherwise:
 
 - **Only a root starts one.** A child is refused before anything is asked (`refused: only the
   agent the user talks to starts a session for the user; a child's work stays in its tree, under
-  its parent: ask your parent (ask_parent)`), and refused again when the call is performed: a
-  child starting a root would leave its tree, its parent's sight and its parent's answers to its
+  its parent: ask your parent (ask)`), and refused again when the call is performed: a child
+  starting a root would leave its tree, its parent's sight and its parent's answers to its
   requests, with a root's tools.
-- **It is to judge** (a card in Ask, the judge in Auto), as an `action` request whose words name
-  the place and the title and give the first message whole (`Start a session for the user in the
-  workspace login: "Fix login", theirs, not a child of this agent`, `Its first message: …`; in
-  the project folder, `in main, the project folder`), done only while they hold. With `new_workspace` it is also judged as `workspace create` is. The
-  judge is given the brief whole too: a brief longer than its 8,000 characters is refused at the
-  launch (`refused: the brief is longer than …`), and one that holds what the masking takes for a
-  secret makes the launch base, since the card shows it masked and the session gets it as
-  written.
-- **No chain without the user.** The session keeps who started it (`launched_by`). A session an
-  agent started may start one in turn only as base, whatever its mode (`this agent is a session
-  another agent started for the user, and a session it starts comes to the user, …`): each step
-  of a chain is the user's.
-- **The session is the user's**: no parent, depth 0, in the project's tree list and the window's
-  sidebar like any root (`agent.created` with no parent). **Its first message is the agent's,
-  never the user's**: it is delivered as `[flottille:launched]`, under a line naming the agent
-  that wrote it (`agent 0123456789ab started this session for the user with this message:`), the
-  window shows it as `started by` that agent, and the judge never takes it for the user's words:
-  it shows it in a block of its own, `written by agent <id> when it started this session`. A
-  replacement of the session delivers it again the same way. It is a lead by default (`role`), on
-  the caller's provider unless `provider` names another, in `workspace`, a new workspace, or the
-  caller's own place. **`"workspace": "main"` is the project folder**, whatever the caller's
-  place: a root working in a workspace starts a session for the user there, as the window does,
-  with no workspace made (the answer says `in main, the project folder`). `main` is a reserved
-  workspace name (`docs/workspaces.md`, "Where it is"); a project that still holds an older
-  workspace of that name keeps it, and there `"workspace": "main"` names that workspace. A child
-  has no `main` to name: it works in its parent's place only.
+- **It is to judge** (a card in Ask, the judge in Auto), as an `action` request whose words say
+  the kind, name the place and the title and give the first message whole (`Start a session led
+  by this agent in the workspace login: "Fix login", a session the user sees under it and may talk
+  to, not a child of this agent`; `Start a session for the user, handed over, in the workspace
+  login: "Fix login", theirs, not a child of this agent`; `Its first message: …`; in the project
+  folder, `in main, the project folder`), done only while they hold. With `new_workspace` it is
+  also judged as `workspace create` is. The judge is given the brief whole too: a brief longer
+  than its 8,000 characters is refused at the launch (`refused: the brief is longer than …`), and
+  one that holds what the masking takes for a secret makes the launch base, since the card shows
+  it masked and the session gets it as written.
+- **No chain without the user.** The session keeps who started it (`launched_by`), led or handed.
+  A session an agent started may start one in turn only as base, whatever its mode (`this agent
+  is a session another agent started for the user, and a session it starts comes to the user,
+  …`): each step of a chain is the user's.
+- **The session is the user's to talk to**: no parent, depth 0, in the project's tree list like
+  any root (`agent.created` with no parent). **Its first message is the agent's, never the
+  user's**: it is delivered as `[flottille:launched]`, under a line naming the agent that wrote it
+  (`agent 0123456789ab started this session for the user with this message:`), the window shows
+  it as `started by` that agent, and the judge never takes it for the user's words: it shows it in
+  a block of its own, `written by agent <id> when it started this session`. A replacement of the
+  session delivers it again the same way. It is a lead by default (`role`), on the caller's
+  provider unless `provider` names another, in `workspace`, a new workspace, or the caller's own
+  place. **`"workspace": "main"` is the project folder**, whatever the caller's place: a root
+  working in a workspace starts a session there, as the window does, with no workspace made (the
+  answer says `in main, the project folder`). `main` is a reserved workspace name
+  (`docs/workspaces.md`, "Where it is"); a project that still holds an older workspace of that
+  name keeps it, and there `"workspace": "main"` names that workspace. A child has no `main` to
+  name: it works in its parent's place only.
 - **It takes the tree's mode**: the mode of the caller's tree, Ask, Auto or Full, never a looser
-  one; only the user changes it afterwards, and each tree keeps its own. It counts in no children cap and no depth.
-- The caller is answered at once with the new session's id and name; the `agent_*` tools do not
-  reach it. **`follow` is required**, and the agent chooses each time (the maintainer's decision:
-  required, not required to be true). `follow: false`: the caller is told nothing of the session
-  afterwards but what it writes with `session_send`. `follow: true`: see "Following a session",
-  below.
-- **It sits under its workspace**, not under the agent that started it: a root of its own,
-  `agent.trees` lists it apart, with its `workspace` and `launched_by` (the window's sidebar puts
-  it under its place, as any session).
+  one; only the user changes it afterwards, and each tree keeps its own. It counts in no children
+  cap and no depth.
+- The caller is answered at once with the new session's id and name, and what its kind means for
+  it; the `agent_*` tools do not reach it. `agent.show` and the tree give `launched_by`, and
+  `led_by` (its pilot's id, `null` for a handed session).
+- **The user talks to a led session directly**: what they write reaches it as from the window to
+  any session, and its pilot is neither asked nor woken by it.
+- **The pilot ends**: a led session goes on. It becomes a handed session (`led_by` `null`,
+  `agent.handed`), its questions go to the user from then on, and it is told so once by a
+  delivery (`handed`): `<pilot>, which led this session, ended. The session goes on, handed to the
+  user: …`.
+
+A session launched before `kind` keeps its relation: one whose starter still followed it is led,
+the others are handed (a migration of the store sets it, and turns the following into the
+pilot's subscription).
 
 #### Following a session
 
-With `follow: true`, each time the session ends a turn, and when it ends or fails, the agent that
-started it is woken by a delivery, `session-turn-ended`, between turns (`docs/design.md` §5.2). It
-names the session (its title and id), says why the turn ended (`turn done`, `it reported`, `it
-asked the user a question with ask_user`, `the turn stopped before its end (<reason>)`, or, for the
-end of the session, `ended: <why>` or `failed: <why>`) and holds the session's last message, masked
-and cut at 2,000 characters, the cut said (`[cut: N more characters; session_read reads the rest]`).
-When the turn asked the user questions with `ask_user` that still wait for the answer, each comes
-before that last message (`Its open question to the user:`), masked and cut the same way, 4,000
-characters of them at most in all, those past it counted (`[2 more questions; session_read reads
-them]`), so that the starter can relay it or answer what it knows with `session_send`. A question asked in the
-middle of a long turn adds no wake of its own: the turn's end carries it, and `session_read` says
-it at once.
+A pilot is woken by a delivery, `session-turn-ended`, between turns (`docs/design.md` §5.2), when
+its led session ends a turn in which it asked (`ask`) or reported (`report`), and when it ends or
+fails. **A plain turn's end wakes nobody.** The wake names the session (its title and id), says why
+(`it asked you a question with ask`, `it reported`, or, for the end of the session, `ended: <why>`
+or `failed: <why>`) and holds the session's last message, masked and cut at 2,000 characters, the
+cut said (`[cut: N more characters; session_read reads the rest]`). The questions it asked its
+pilot in that turn that still wait come before that last message (`Its question to you:`), masked
+and cut the same way, 4,000 characters of them at most in all, those past it counted (`[2 more
+questions; session_read reads them]`). A question asked in the middle of a long turn adds no wake
+of its own: the turn's end carries it, and `session_read` says it at once.
 Its words are data, not instructions. Nothing reads the text of a message to find a question:
 Flottille recognizes nothing by its text.
 
-The agent may answer with `session_send` (unchanged: judged as a write), relay to the user with its
-own `ask_user`, or do nothing. It is a subscription of the source `session`: `forge show` lists it
-under "Your subscriptions", `subscription.list` and the window's rail show it (`Following <title>`,
-with no end time), and **`forge unsubscribe {session}`** ends it (`session` goes alone; a session
-that is not followed is refused). It also ends when the session ends or fails (the wake says so),
-and when the starting agent ends. It never blocks the inactivity sweep of the starter (`docs/design.md`
-§5.7) and does not draw it as waiting.
+The pilot may answer with `session_send` (unchanged: judged as a write), relay to the user with
+its own `ask` when the decision is the user's, or do nothing. It is a subscription of the source
+`session`: `forge show` lists it under "Your subscriptions", `subscription.list` and the window's
+rail show it (`Following <title>`, with no end time), and **`forge unsubscribe {session}`** ends
+it (`session` goes alone; a session that is not followed is refused): the session stays led, but
+its pilot is no longer woken, and its questions go to the user, who would otherwise never see
+them. It also ends when the session ends or fails (the wake says so), and when the pilot ends.
+It never blocks the inactivity sweep of the pilot (`docs/design.md` §5.7) and does not draw it as
+waiting.
 
 #### Where a question goes
 
-Nothing reads a message to find a question, so each agent is told where one goes, in the
-descriptions of `ask_user`, `report`, `session_send` and `ask_parent`, and in the paragraph that
-ends the first message of a session an agent started (`[flottille:launched]`, `Where a question
-goes:`, which the window does not show): a decision only the user can take (commit, push, scope, a
-choice) goes through `ask_user`, which reaches the user's inbox; a question about the brief or its
-context goes to the agent that started the session, with `session_send`; a question left in a
-report or in a last message is a follow-up, not a wait. A child does the same with `ask_parent`
-instead of `ask_user`. The descriptions stay under the 2,048 characters their limit asks.
+Nothing reads a message to find a question, so each agent is told where one goes: `ask`'s
+description says it for the caller, in one sentence chosen by its kind (its parent for a child, its
+pilot for a led session, the user for any other root), and the paragraph that ends the first
+message of a session an agent started (`[flottille:launched]`, `Where a question goes:`, which the
+window does not show) says it for that session: a led session's questions go through `ask` to its
+pilot, who answers with `session_send`, and the user may also write to it directly; a handed
+session's go through `ask` to the user's inbox, and the agent that started it hears nothing more
+of it unless the session writes to it with `session_send`. A pilot relays to the user, with its own
+`ask`, what only the user can decide. A question left in a report or in a last message is a
+follow-up, not a wait. The descriptions of `ask`, `report` and `session_send` say so, under the
+2,048 characters their limit asks.
 
 #### Sessions that talk to each other
 
 `session_send {session, text}` (a root's tool) writes to another live root of the caller's
-project: a session the caller started, the agent that started the caller's session, or any other
+project: a session the caller started (led or handed), the agent that started the caller's
+session (its pilot, for a led session), or any other
 session of the project with the user's leave. A child is refused before anything is asked (`refused:
 <id> is a child of another session: it is written to by its parent, …`; the caller's own are written
 to with `agent_send`), and so are a session of another project (`refused: <id> is a session of
@@ -1085,7 +1107,7 @@ session that ended and an empty text.
   delivery, `session`, urgent (on its next tool result in a turn, a new turn otherwise), under a
   line naming the sender (`agent 0123456789ab wrote to this session:`): it is an agent's words,
   never the user's. Its answer, a `session_send` the other way, comes back the same way.
-- **No endless back and forth.** When the two agents of a following write to each other five times
+- **No endless back and forth.** When the two agents of a following (a pilot and its led session) write to each other five times
   (`session_send`, from either, each with the turn it causes) with no message of the user's in
   either session, the following pauses: no more wakes, and a `session_send` between the two is
   refused at once (`refused: paused: you two wrote to each other five times without the user;
@@ -1095,9 +1117,9 @@ session that ended and an empty text.
   that Resume (`subscription.resume`), starts the count again and resumes it
   (`session.following_resumed`); no agent can. A session that is not followed has nothing to
   pause.
-- **One wake a turn**: a turn of the session that wrote to its starter with `session_send` does not
+- **One wake a turn**: a turn of the session that wrote to its pilot with `session_send` does not
   wake it again at its end; the wake of a turn carries that turn's last message only (`(no message
-  this turn)` when it said nothing), and says it asked the user only when it did in that turn.
+  this turn)` when it said nothing), and says it asked only when it did in that turn.
 - **The judge never takes it for the user's words**: the user's last messages it is given are
   the user's only; the last messages written to the session with `session_send` come in blocks of
   their own, each `written by agent <id> with session_send (an agent's words, not the user's)`.
@@ -1126,12 +1148,13 @@ it at once.
   first message once, not again for a replacement), and the replies of its agent, their pieces
   joined. Its tool calls, its thoughts and the deliveries of Flottille and of other agents (reports,
   answers to requests, `session_send` messages) are left out.
-- **Its open questions**: the questions the session asked the user with `ask_user` that wait for
-  the answer, said before its messages, whatever the page, from the moment each is asked (its turn
-  may still run): the oldest first, each with when it was asked and that it waits for the user,
-  masked, cut and escaped as a message is (`Open question, asked at 2026-10-31T14:05:09Z, waits
-  for the user:`), counted in the page's size: half a page of them at most, the others counted
-  (`(2 more open questions wait for the user: …)`). The agent that started the session can relay it to the user or answer what it
+- **Its open questions**: the questions the session asked with `ask` that wait for the answer, of
+  the user or of its pilot, said before its messages, whatever the page, from the moment each is
+  asked (its turn may still run): the oldest first, each with when it was asked and whose answer
+  it waits for, masked, cut and escaped as a message is (`Open question, asked at
+  2026-10-31T14:05:09Z, waits for the user:`, `…, waits for its pilot:`), counted in the page's
+  size: half a page of them at most, the others counted (`(2 more open questions wait for an
+  answer: …)`). The agent that started the session can relay it to the user or answer what it
   knows with `session_send`.
 - **A page**: without dates, the last `last` messages (20 by default, 1 to 50), ending with a
   cursor to the page before them (`Earlier messages: …`), or saying it reached the start; with
@@ -1476,14 +1499,14 @@ says who answers a call to judge (`docs/design.md` §7.1).
      or of its rules (`set_rules`);
    - a write of `forge` or `tickets` whose title or body, or a session for the user whose brief,
      holds what the masking takes for a secret; a session for the user started by a session an
-     agent started ("Sessions for the user");
+     agent started ("Sessions an agent starts");
    - `workspace` `remove`, whose card says what would be lost ("The workspace");
    - a write of `tasks` or `setup` whose line, or task, would be base to run, and one that says
      what only the user's word may say ("The project": asking turned off, `check` or `read_only`
      set, a `link` or `root_entries` step, a `copy` of a sensitive name).
 3. **Harmless**: passes in every mode.
    - reading inside the agent's place (the project folder or the workspace), the tree's tools (but
-     `agent_launch` with `root`, `session_send` and `session_read`), `tasks` `list` and `show`, `run_status`, `skill_read`, the reads of `forge` (`list`, `show`)
+     `agent_launch` of a `led` or `handed` session, `session_send` and `session_read`), `tasks` `list` and `show`, `run_status`, `skill_read`, the reads of `forge` (`list`, `show`)
      and of `tickets` (`list`, `search`, `show`), `workspace` `list` and `show`;
    - writing inside a workspace (`fs_write`, `fs_edit`, and `git add`, `mv`, `rm` there);
    - a line the rules know to only read, inside the place: the reads of git (`status`, `log`,
@@ -1516,7 +1539,7 @@ says who answers a call to judge (`docs/design.md` §7.1).
    branch on no remote, `git reset --hard` in a workspace, `git -c` or `--config-env` of other
    keys, git's other global options, `git remote` and `git config` writes of other keys; the
    forge command lines beyond their reads; the writes of `forge` and `tickets`,
-   `agent_launch` with `root` (a session for the user), `session_send` (a message to another
+   `agent_launch` of a `led` or `handed` session (a session for the user), `session_send` (a message to another
    session), `session_read` (another session's conversation), and a write of
    `tasks`, `setup`, `skills`, `commands` or `project` ("The project"), with the line it sets;
    `workspace` `create`, `prepare` and `link_ticket`, and `agent_launch` with `new_workspace`,
