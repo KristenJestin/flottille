@@ -322,12 +322,13 @@ const SERVED: [Definition; 29] = [
         name: "forge",
         title: "Pull requests",
         description: "Pull requests and CI of the project's repositories, through the user's \
-            own gh or bkt (no forge sign-in here: never run them). list: by state and branch, \
-            as last read. show: a workspace's branch's (yours; in main, name it), or number's, \
+            gh or bkt (no forge sign-in here: never run them). list: by state and branch, \
+            as last read. show: a workspace's branch's, or number's, \
             with checks (the log's end of each failed job), review and comment counts; detail \
             full: texts. Writes, judged, answered at once, the result maybe later: create, merge \
             (squash by default; refused with no check, while checks fail or a review asks for changes unless waive gives the \
-            user's words) and checks act on a workspace's branch; edit (title, body, draft, \
+            user's words) and checks act on a workspace's branch (create, no body: \
+            the template); edit (title, body, draft, \
             reviewers, labels, base), comment, close (comment first), reopen on number. \
             subscribe: events wake you until merged or closed; unsubscribe. CI: pipelines lists what can \
             be run; run starts one by name (custom: <name>) with its variables and follows it unless \
@@ -348,7 +349,7 @@ const SERVED: [Definition; 29] = [
                 "detail": {"type": "string", "enum": ["short", "full"]},
                 "fresh": {"type": "boolean", "description": "show: read the pull request again; one read in the last 30 s is given again otherwise (detail full always reads)."},
                 "title": {"type": "string", "description": "create, edit: the pull request's title. create needs the branch pushed first (git push -u origin <branch>)."},
-                "body": {"type": "string", "description": "create, edit: description; comment: the comment."},
+                "body": {"type": "string", "description": "create, edit: description; comment: the comment. create without it takes the project's pull request template when it has one (project settings shows it): fill the template in body rather than replace it."},
                 "draft": {"type": "boolean", "description": "create: open as a draft. edit: false marks it ready for review, true makes it a draft again."},
                 "reviewers": {"type": "array", "items": {"type": "string"}, "description": "create: reviewers besides the project's."},
                 "labels": {"type": "array", "items": {"type": "string"}, "description": "create: labels (GitHub only)."},
@@ -529,7 +530,8 @@ const SERVED: [Definition; 29] = [
         title: "The project's workspaces",
         description: "The project's workspaces. list and show read them. A root's writes, \
             judged: create makes one (worktrees, then setup, judged as a run of each step; to \
-            resume a branch, name it; name new ones by the repository's naming convention), prepare resumes a failed setup, link_ticket links a \
+            resume a branch, name it; name new ones by the repository's naming convention; one \
+            outside the project's branch format is refused), prepare resumes a failed setup, link_ticket links a \
             ticket (null unlinks), rename_branch {branch, repository?} renames the workspace's \
             branch in each of its repositories (or the one named), only while no remote nor pull \
             request has it and the workspace did not resume it; remove, always held for the user, its request saying what \
@@ -545,7 +547,7 @@ const SERVED: [Definition; 29] = [
                 "action": {"type": "string", "enum": ["list", "show", "create", "prepare", "link_ticket", "rename_branch", "remove"]},
                 "name": {"type": "string"},
                 "repositories": {"type": "array", "items": {"type": "string"}, "description": "create: by path."},
-                "branch": {"type": "string", "description": "create: give it when the repository has a naming convention (its AGENTS.md, CONTRIBUTING, or the branches it already has to read), with the ticket's key when the workspace has a ticket (fix/ABC-12-login). Left out, <branch prefix>/<name> is the fallback (the name alone when the project has no prefix). An existing branch is checked out. rename_branch: the new name."},
+                "branch": {"type": "string", "description": "create: give it when the repository has a naming convention (its AGENTS.md, CONTRIBUTING, or the branches it already has to read), with the ticket's key when the workspace has a ticket (fix/ABC-12-login). Left out, <branch prefix>/<name> is the fallback (the name alone when the project has no prefix). An existing branch is checked out. rename_branch: the new name. A branch the workspace starts or renames to must match the project's branch format when it has one (project settings says it): the refusal names the pattern."},
                 "repository": {"type": "string", "description": "rename_branch: by path; every repository of the workspace when left out."},
                 "ticket": {"type": ["string", "null"], "description": "#123 or ABC-123."}
             }, "required": ["action"], "additionalProperties": false})
@@ -617,7 +619,7 @@ const SERVED: [Definition; 29] = [
         title: "Start a session, or launch a child",
         description: "Work that belongs in a workspace is a session for the user: root: true \
             with workspace (existing; main is the project folder) or new_workspace (made \
-            for it, repositories picks them), judged; theirs, not your child, the brief its first \
+            on branch, of repositories), judged; theirs, not your child, the brief its first \
             message; follow (required): true wakes you when each turn ends; you write to it, \
             and it answers you, with session_send. A root only. Without root: a child agent on \
             one precise task, in your own place (workspace and new_workspace are refused), \
@@ -642,6 +644,8 @@ const SERVED: [Definition; 29] = [
                 "workspace": {"type": "string", "description": "With root: an existing workspace of the project, for the session to work in; main is the project folder. A child works in your place."},
                 "new_workspace": {"type": "string", "description": "With root: the name of a new workspace to make for the session. Not with workspace."},
                 "repositories": {"type": "array", "items": {"type": "string"}, "description": "With new_workspace: its repositories, by path; the project's when left out."},
+                "branch": {"type": "string", "description": "With new_workspace: its branch, as workspace create takes it. Name it when the repository has a naming convention (its AGENTS.md, CONTRIBUTING, the branches it has, the project's branch format), with the ticket's key when there is one (feat/ABC-8-pickup-dashboard); the card shows it, and it is the branch made. Left out, <branch prefix>/<name>. An existing branch is resumed."},
+                "base": {"type": "object", "additionalProperties": {"type": "string"}, "description": "With new_workspace: the branch a repository starts from, by path ({\"api\": \"develop\"}), in place of its base rule."},
                 "root": {"type": "boolean", "description": "A session for the user, in a workspace or your place, not a child."},
                 "follow": {"type": "boolean", "description": "Required with root: true, refused without it. true: you are woken at each end of a turn of the session (and when it ends), with its last message. false: you are told nothing of it."}
             }, "required": ["title", "brief"], "additionalProperties": false})

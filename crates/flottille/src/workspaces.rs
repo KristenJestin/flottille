@@ -566,6 +566,10 @@ pub async fn renaming(daemon: &Daemon, asked: &WorkspaceRenameBranch) -> Result<
         )));
     }
     check_branch(&workspace.folder, &asked.branch).await?;
+    let project = projects::load_project(daemon, &workspace.project)?;
+    if let Some(why) = project.branch_refusal(&asked.branch) {
+        return Err(Failure::refused(format!("{why}: choose one that does")));
+    }
     let heads = heads(&workspace).await;
     let read = forge_read(daemon, &workspace).await;
     let mut repositories = Vec::new();
@@ -728,6 +732,35 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
         .branch
         .unwrap_or_else(|| project.default_branch(&asked.name));
     check_branch(&main_checkout(&project.folder, &taken[0]), &branch).await?;
+    // The default name is never resumed: outside the format, it is refused before any fetch.
+    let outside_format = || {
+        project
+            .branch_refusal(&branch)
+            .map(|why| Failure::refused(format!("{why}: give a branch that does")))
+    };
+    if !named && let Some(refusal) = outside_format() {
+        return Err(refusal);
+    }
+    // A branch named that no repository has, nor its remote, would be started everywhere: refused
+    // before anything is fetched.
+    if named && let Some(refusal) = outside_format() {
+        let mut anywhere = false;
+        for path in &taken {
+            let remote = project
+                .repositories
+                .iter()
+                .find(|r| &r.path == path)
+                .map_or("origin", |r| r.remote.as_str());
+            let main = main_checkout(&project.folder, path);
+            if exists_somewhere(&main, remote, &branch, asked.offline).await {
+                anywhere = true;
+                break;
+            }
+        }
+        if !anywhere {
+            return Err(refusal);
+        }
+    }
     let folder = project.workspaces_root.join(&asked.name);
     if daemon
         .read(|store| store.workspace(&project.name, &asked.name))?
@@ -784,7 +817,14 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
             path: path.clone(),
             base,
             resumed,
+            resumed_branch: resumed.then(|| branch.clone()),
         });
+    }
+    // A branch resumed everywhere was named before the format: it is taken as it is.
+    if repositories.iter().any(|worktree| !worktree.resumed)
+        && let Some(refusal) = outside_format()
+    {
+        return Err(refusal);
     }
 
     let workspace = Workspace {
@@ -836,7 +876,29 @@ pub fn notes(made: &Value) -> String {
 }
 
 /// The repositories a new workspace takes: the root one first, then in dependency order.
-fn taken_repositories(project: &Project, asked: Option<&[String]>) -> Result<Vec<String>, Failure> {
+/// Whether one of the repositories a workspace would take has `branch`, its own or its remote's
+/// as last fetched: a branch it may resume, which the creation decides, so the card of a branch
+/// outside the project's format does not refuse it beforehand.
+pub async fn may_resume(project: &Project, asked: Option<&[String]>, branch: &str) -> bool {
+    let Ok(taken) = taken_repositories(project, asked) else {
+        return false;
+    };
+    for path in &taken {
+        let Some(repository) = project.repositories.iter().find(|r| &r.path == path) else {
+            continue;
+        };
+        let main = main_checkout(&project.folder, path);
+        if exists_somewhere(&main, &repository.remote, branch, true).await {
+            return true;
+        }
+    }
+    false
+}
+
+pub fn taken_repositories(
+    project: &Project,
+    asked: Option<&[String]>,
+) -> Result<Vec<String>, Failure> {
     let wanted: Vec<String> = match (asked, &project.default_repositories) {
         (Some(paths), _) => paths.to_vec(),
         (None, RepositorySet::Only(paths)) => paths.clone(),
@@ -875,7 +937,7 @@ fn taken_repositories(project: &Project, asked: Option<&[String]>) -> Result<Vec
 }
 
 /// Asks git itself whether `branch` is a branch name, before anything is written.
-async fn check_branch(dir: &Path, branch: &str) -> Result<(), Failure> {
+pub async fn check_branch(dir: &Path, branch: &str) -> Result<(), Failure> {
     let checked = git::run(dir, &["check-ref-format", "--branch", branch], Class::Read)
         .await
         .map_err(Failure::refused)?;
@@ -959,6 +1021,28 @@ async fn on_remote(
         }
         Err(_) => Ok(commit_of(main, &tracking).await?.is_some()),
     }
+}
+
+/// Whether the repository at `main` has `branch`, its own, as last fetched from `remote`, or on
+/// `remote` as it lists it now (never offline): nothing is fetched.
+async fn exists_somewhere(main: &Path, remote: &str, branch: &str, offline: bool) -> bool {
+    for reference in [
+        format!("refs/heads/{branch}"),
+        format!("refs/remotes/{remote}/{branch}"),
+    ] {
+        if matches!(commit_of(main, &reference).await, Ok(Some(_))) {
+            return true;
+        }
+    }
+    let head = format!("refs/heads/{branch}");
+    !offline
+        && git::output(
+            main,
+            &["ls-remote", "--heads", "--end-of-options", remote, &head],
+            Class::Read,
+        )
+        .await
+        .is_ok_and(|listed| !listed.trim().is_empty())
 }
 
 fn main_checkout(project_folder: &Path, repository: &str) -> PathBuf {

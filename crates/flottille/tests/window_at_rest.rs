@@ -246,6 +246,38 @@ fn the_window_draws_no_frame_at_rest_on_a_project_s_rules_and_message_checks(
 }
 
 #[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_project_s_branch_format(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    idle_session(&user);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::ProjectSettings("app".into()), window, cx)
+    });
+    until(&shell, cx, "the project's settings are read", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .project_settings_page()
+                .is_some_and(|page| page.read(cx).is_loaded())
+        })
+    });
+    cx.update(|window, cx| window.click("project-settings-tabs-setup", cx));
+    until(&shell, cx, "the branch format is shown", |cx| {
+        cx.update(|window, _| window.try_find("branch-format-input-app").is_some())
+    });
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
+
+#[gpui_kit::test]
 fn the_window_draws_no_frame_at_rest_on_settings(cx: &mut TestAppContext) {
     let user = User::with_fake_agent();
     idle_session(&user);

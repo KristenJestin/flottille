@@ -316,7 +316,7 @@ pub async fn prepared(
     args: &Value,
 ) -> Result<Vec<String>, Outcome> {
     if tool == "agent_launch" {
-        return launch_says(daemon, grant, args);
+        return launch_says(daemon, grant, args).await;
     }
     if tool == "session_send" {
         return session_says(daemon, grant, args);
@@ -367,6 +367,14 @@ pub async fn prepared(
             return Err(Outcome::Refused(why));
         }
         let mut says = posted_says(args);
+        // Without a body, the forge shows the project's template: the card says it whole.
+        if args["action"] == "create"
+            && args["body"].is_null()
+            && let Ok(project) = own(daemon, grant)
+            && let Some(template) = &project.pull_requests.template
+        {
+            says.push(format!("Its body, the project's template: {template}"));
+        }
         says.extend(forge_says(daemon, grant, args));
         return Ok(says);
     }
@@ -412,7 +420,7 @@ pub async fn prepared(
             if call.action == "rename_branch" {
                 return rename_says(daemon, grant, &call).await;
             }
-            workspace_says(daemon, grant, &project, &call)
+            workspace_says(daemon, grant, &project, &call).await
         }
         _ => {
             let call: ProjectCall = arguments(tool, args.clone())?;
@@ -1777,7 +1785,7 @@ fn names_of(daemon: &Daemon, project: &str) -> String {
 }
 
 /// What a call of `workspace` changes, in words, once it can be done.
-fn workspace_says(
+async fn workspace_says(
     daemon: &Daemon,
     grant: &Grant,
     project: &Project,
@@ -1808,7 +1816,9 @@ fn workspace_says(
                 name,
                 &call.repositories,
                 call.branch.as_deref(),
-            )?;
+                &BTreeMap::new(),
+            )
+            .await?;
             if let Some(Some(ticket)) = &call.ticket {
                 let key = crate::tickets::accepted(project, ticket)
                     .map_err(|why| Outcome::Refused(format!("refused: {why}")))?;
@@ -1887,13 +1897,14 @@ fn workspace_says(
 
 /// What creating a workspace does, in words, or the refusal of one that cannot be made: the
 /// workspace, then each step of the setup it plays and the services a task's step starts first.
-fn create_says(
+async fn create_says(
     daemon: &Daemon,
     place: &Place,
     project: &Project,
     name: &str,
     repositories: &Option<Vec<String>>,
     branch: Option<&str>,
+    bases: &BTreeMap<String, String>,
 ) -> Result<Vec<String>, Outcome> {
     if !flottille_core::project::valid_name(name) {
         return Err(Outcome::Refused(format!(
@@ -1918,14 +1929,51 @@ fn create_says(
             listed(project.repositories.iter().map(|r| &r.path))
         )));
     }
+    // A base the workspace cannot use is refused here, from what is known without the network:
+    // whether its remote has the branch is read when the workspace is made.
+    let refused = |failure: crate::projects::Failure| {
+        Outcome::Refused(format!("refused: {}", failure.message))
+    };
+    let used =
+        crate::workspaces::taken_repositories(project, repositories.as_deref()).map_err(refused)?;
+    for (path, base) in bases {
+        if !known(path) {
+            return Err(Outcome::Refused(format!(
+                "refused: {path} is not a repository of project {}: its repositories are {}",
+                project.name,
+                listed(project.repositories.iter().map(|r| &r.path))
+            )));
+        }
+        if !used.contains(path) {
+            return Err(Outcome::Refused(format!(
+                "refused: a base is chosen for {path}, which the workspace does not take"
+            )));
+        }
+        crate::workspaces::check_branch(&project.folder, base)
+            .await
+            .map_err(refused)?;
+    }
     let taken = match repositories {
         Some(paths) => format!("with the repositories {}", paths.join(", ")),
         None => "with the project's default repositories".into(),
     };
+    let named = branch.is_some();
     let branch = branch.map_or_else(|| project.default_branch(name), str::to_owned);
+    // Outside the format, only a branch the workspace may resume is left to the creation to judge.
+    if let Some(why) = project.branch_refusal(&branch)
+        && !(named
+            && crate::workspaces::may_resume(project, repositories.as_deref(), &branch).await)
+    {
+        return Err(Outcome::Refused(format!(
+            "refused: {why}: give a branch that does"
+        )));
+    }
     let mut says = vec![format!(
         "Create the workspace {name} on the branch {branch}, {taken}"
     )];
+    says.extend(bases.iter().map(|(path, base)| {
+        format!("The repository {path} starts from {base}, in place of its base rule")
+    }));
     match project.setup.is_empty() {
         true => says.push("The project has no setup: nothing else runs.".into()),
         false => {
@@ -1954,7 +2002,7 @@ pub const CHILD_ROOTS: &str = "refused: only the agent the user talks to starts 
 /// create` says it, since it creates the workspace the same way; with `root`, the session it
 /// starts for the user and its first message whole. Nothing for any other launch. Only a root
 /// starts a root: a child doing so would leave its tree, its parent and its parent's sight.
-fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<String>, Outcome> {
+async fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<String>, Outcome> {
     let root = args["root"] == true;
     if root && !is_root(daemon, grant) {
         return Err(Outcome::Refused(CHILD_ROOTS.into()));
@@ -1966,7 +2014,19 @@ fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<Strin
             let project = own(daemon, grant)?;
             let repositories: Option<Vec<String>> =
                 serde_json::from_value(args["repositories"].clone()).unwrap_or_default();
-            let mut says = create_says(daemon, &grant.place, &project, name, &repositories, None)?;
+            let branch = args["branch"].as_str();
+            let bases: BTreeMap<String, String> =
+                serde_json::from_value(args["base"].clone()).unwrap_or_default();
+            let mut says = create_says(
+                daemon,
+                &grant.place,
+                &project,
+                name,
+                &repositories,
+                branch,
+                &bases,
+            )
+            .await?;
             let whose = match root {
                 true => "a session of the user's",
                 false => "a child",
@@ -2466,6 +2526,18 @@ fn settings_text(project: &Project, settings: &Value) -> String {
             .as_ref()
             .map_or("none".into(), ProjectTracker::said)
     ));
+    if let Some(format) = &project.branch_format {
+        text.push_str(&format!(
+            "Branch format: {format} (a branch a workspace starts, renames to or pushes must \
+             match it)\n"
+        ));
+    }
+    if let Some(template) = &project.pull_requests.template {
+        text.push_str(&format!(
+            "Pull request template (forge create without body uses it; fill it in body):\n\
+             {template}\n"
+        ));
+    }
     text
 }
 

@@ -2622,6 +2622,11 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
         Ok(project) => project,
         Err(failure) => return Outcome::Failed(failure.message),
     };
+    // Opened without a body, a pull request takes the project's template, as its card said.
+    let mut asked = asked;
+    if asked.action == "create" && asked.body.is_none() {
+        asked.body = project.pull_requests.template.clone();
+    }
     let repositories = repositories_of(&workspace, Some(&project));
     // The only repository of the workspace needs no name.
     let asked_repository = match (asked.repository.clone(), repositories.as_slice()) {

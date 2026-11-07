@@ -289,6 +289,17 @@ own branches when it has no such remote), or a dependency is on the repository i
 project lacks or closes a cycle (`projects/app.toml: repositories[0].depends_on: cycle web -> api
 -> web; nothing was saved`).
 
+#### `project.set_conventions`
+
+`{"name", "branch_format"?, "pull_request_template"?}`. Writes the project's branch format (the
+top-level `branch_format`) and pull request template (`[pull_requests]`'s `template`) in its file,
+where they stand (`docs/projects.md`, "Branch format", "Pull request template"): each is kept when
+left out and removed when empty (a template of blanks is empty). Answers `{"name",
+"branch_format", "pull_request_template"}`, `null` for one that is off; `project.settings` gives
+them too. `refused`, nothing written, when the branch format is not a regular expression, with the
+reason (`the branch format ^(feat is not a regular expression (unclosed group); nothing was
+saved`). It is the user's alone: no tool of an agent writes them.
+
 #### `project.set_message_checks`
 
 `{"name", "checks"}`. Writes the project's message checks (`docs/projects.md`, "Message checks"),
@@ -556,7 +567,9 @@ out, `branch` is `<branch prefix>/<name>` when left out (the name alone when the
 out rather than started (`docs/workspaces.md`), `bases` (`{"api": "main"}`) gives a repository it takes
 the branch it starts from in place of its base rule, `offline: true` fetches nothing, and `ticket` (`#123`, `123`
 or a Jira key) links the workspace to a ticket (`tickets.md`); the workspace's `ticket` says it, in
-every answer that shows a workspace, `null` when it has none.
+every answer that shows a workspace, `null` when it has none. A branch outside the project's
+branch format is `refused`, naming the pattern, unless every repository resumes it
+(`docs/projects.md`, "Branch format"); so is `workspace.rename_branch` to one.
 
 `refused`, with nothing written nor made, when the name is not one, the ticket is not one, a
 repository is not the project's, a base is chosen for a repository it does not take or is not a
