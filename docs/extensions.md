@@ -33,7 +33,7 @@ today, moves into the frame last ("The order of the work").
 | Call | One question to a model with no tool at all: input given by Flottille, output checked by the extension. |
 | Trigger | What makes an extension act: an event of the core, a time, a gesture of the user. |
 | Active | Turned on by the user, globally and, for an extension that touches a project, not turned off in that project. |
-| Connection | An MCP server of the user's, declared in a project and run beside the daemon, which Flottille gives to the project's agents as one tool ("Connections"). |
+| Connection | An MCP server of the user's, declared once and run beside the daemon, which Flottille gives to every agent as one tool ("Connections"). |
 
 ## What an extension is, and what it is not
 
@@ -512,36 +512,45 @@ or without a spec. Project-scoped.
 
 ### Connections
 
-Lets the user give their agents a tool that exists as an MCP server (a memory, a browser, the
-desktop) without putting it in Flottille. **The daemon is the MCP client; agents never talk to the
-server.** Project-scoped, off by default, with the usual switches ("Activation").
+Lets the user give their agents a tool that exists as an MCP server, whichever it is (a memory,
+a notes store, a browser, the desktop), without putting it in Flottille. **The daemon is the MCP
+client; agents never talk to the server.** Nothing in it is shaped around one server: the examples
+below are examples. It is **app-wide**: off by default, with the extension's switch and a switch
+of each connection, and no per-project switch ("Activation"). It is built after Specs has built
+the frame it uses.
 
-**What a connection is.** The user declares it in a project: a name, one sentence on what it is
-for, and how to reach the server, either
+**What a connection is.** The user declares it once, in their own configuration: a name, one
+sentence on what it is for, and how to reach the server, either
+
 
 - a **command**, spawned by the daemon without a shell (a program and its arguments, as a task's
   line is), in its own process group, in a folder of its own (no project's place is its place: one
-  server serves every workspace of the project), with the daemon's environment as a run has it
+  server serves every workspace of every project), with the daemon's environment as a run has it
   (the forge tokens emptied, `tools.md`, "Tasks and runs") and the variables the declaration adds; or
 - a **local URL** (`http://127.0.0.1:…`, `localhost` or `[::1]`, Streamable HTTP, no redirect
   followed), for a server the user runs themselves. Any other address is refused.
 
 ```toml
-# $XDG_CONFIG_HOME/flottille/projects/app.toml
-[extensions.connections]
-enabled = true                       # the project's switch
+# $XDG_CONFIG_HOME/flottille/extensions.toml
+[connections]
+enabled = true                       # the extension's switch
 
-[[extensions.connections.server]]
+[[connections.server]]
 name    = "almanac"                  # the tool is conn_almanac
 about   = "The user's notes and decisions."
+enabled = true                       # this connection's switch
 command = ["almanac", "mcp"]
 env     = { ALMANAC_TOKEN = { vault = "almanac-token" } }
 only    = { }                        # limits on arguments, below
 ```
 
+**On, it is given to every agent of every project**, and off to none: the project's file holds
+nothing of it, and no project has a switch for it. A connection for one project only is an open
+question ("Open questions").
+
 **The user's door only**, as `extension.set` is: the window, `flottille connection …` and the
 methods `connection.list`, `.add`, `.edit`, `.remove`, `.review` and `.accept`. No tool of an agent
-declares or edits a connection, and the `project` tool refuses its keys: a command is run with the
+declares or edits a connection: a command is run with the
 user's rights, where no gate looks. The file is in Flottille's own folders, which no tool writes.
 A connection's name is lower-case letters, digits and `_`, 24 at most; the tool is `conn_<name>`,
 so that no core tool, now or later, can take its name, and the gate's card says plainly that the
@@ -549,7 +558,8 @@ tool is a third party's.
 
 **Secrets come from the vault** (`vault.md`). `env` (and, for a URL, `headers`) names an entry
 instead of holding a value: the daemon reads it when it starts the server and puts it where it goes.
-The entry must be one the project sees. The agent sees neither the variable nor its
+The entry must be one of every project (`vault.md`: no `project` on it), since the server is given
+to all; an entry tied to one project is refused. The agent sees neither the variable nor its
 value; the value is masked in everything the daemon stores and shows, a server's output and its
 error text included.
 
@@ -563,7 +573,10 @@ Its cost in the agent's context is about one tool line:
   `action` a plain string, so it never grows with the server.
 - **`action: "help"`** lists the enabled actions, a line each, from the pin; with `for: "<action>"`
   it gives that action's description and full argument schema. Read on demand, answered from the
-  pin, never by a call to the server.
+  pin, never by a call to the server. The description is cut at 4,000 characters, with a line
+  saying so; the review shows it whole.
+- **`help` with `for: "@instructions"`** gives the server's own `instructions` (below). The name
+  cannot be an action's, which is made of letters, digits, `_`, `-` and `.` only.
 - **`arguments`** is the action's own object, checked against the pinned schema before anything
   is sent: an unknown action, a disabled one, or arguments that do not fit are refused, naming
   what is wrong, and the server sees nothing.
@@ -577,10 +590,16 @@ Its cost in the agent's context is about one tool line:
 
 Calls to one connection run one at a time, in order: a browser or a desktop has one state. A call
 has 120 seconds, then it is cancelled and answers `the call failed: …`. The server starts at the
-first call, stays while a session of the project runs and for ten minutes after, and its whole
+first call, stays while a session of any project runs and for ten minutes after, and its whole
 process group is stopped then, with the daemon, and when the connection is turned off. A server that
 fails to start answers `the call failed: the connection could not start: <the first line of its
 error output, masked>`, and is tried again at the next call, never in the background.
+
+**The server's `instructions`** (the text of its MCP `initialize` result, which many servers use to
+say how to use them) are a third party's text like the actions' descriptions, and are kept with
+them in the pin. They are **never put in the agent's context by default**: the agent reads them
+through `help` with `for: "@instructions"`, framed as a third party's, cut at the same 4,000
+characters. The judge does not see them.
 
 **The daemon offers a server nothing but the tools.** It declares no client capability: a server
 asking for sampling (a model call outside the gate), elicitation (a question that would wait for a
@@ -612,21 +631,25 @@ that changes after the user trusted it is a rug pull. So the user's trust is in 
 read**:
 
 - **At the first connection**, Flottille records the server's announced name and version (MCP
-  `serverInfo`) and, for each action, its name, description, argument schema and annotations. The
+  `serverInfo`), its `instructions` and, for each action, its name, description, argument schema
+  and annotations. The
   connection is **awaiting review**: no agent has its tool, no call reaches the server, until the
-  user has read that list in the window, turned off any action they do not want, set any other
+  user has read that list and those instructions in the window, turned off any action they do not
+  want, set any other
   than **judged**, and accepted. That acceptance is the pin.
 - **At every start of the server**, and whenever it says its tools changed
   (`notifications/tools/list_changed`), the daemon lists them again and compares with the pin.
-  **Any change cuts the connection off**: another version, an action added, removed or changed
+  **Any change cuts the connection off**: another version, other instructions (given, removed or
+  changed), an action added, removed or changed
   in its description, schema or annotations. An action name that is not made of letters, digits,
   `_`, `-` and `.` (48 at most) is never offered and is said in the review.
-- **Cut off**, the tool leaves the lists of every session of the project, as a tool that could only
+- **Cut off**, the tool leaves the lists of every session, as a tool that could only
   refuse is not listed (`tools.md`, "When the tools change", with the `tools` delivery: `- conn_almanac:
   gone`); a call already running ends as it began; the server is stopped once it is done; an
   **inbox item** says that the user is needed, naming what changed.
 - **The review** is a **diff** in the window, between the pin and what the server announces now:
-  the version, each action added (whole), removed, or changed (the old text and the new, line by
+  the version, the instructions (the old text and the new, line by line), each action added
+  (whole), removed, or changed (the old text and the new, line by
   line), the unchanged ones folded away. Texts are shown as plain text, never as Markdown. The user
   accepts, or leaves the connection off. **Accepting keeps the settings of the actions that did
   not change and puts every new one to judged** (turned on, as the user has just read it).
@@ -635,43 +658,47 @@ read**:
   against the last pin.
 
 The pin and what the user decided in a review (which actions are on, which pass or are always
-asked) are kept together in the extension's own space of the store (`ext_connections_…`), and not
+asked) are kept, once per connection, together in the extension's own space of the store
+(`ext_connections_…`), and not
 in the file: an edit by hand could not mark a new action as passing without anyone having read it.
 
-**Turned off.** The extension's, the project's or the connection's own switch: the tool leaves the
+**Turned off.** The extension's or the connection's own switch: the tool leaves the
 agents' lists at once ("Activation"), no call reaches the server, and it is stopped once its running
 call ends. A call that was running when it was turned off answers `the call failed: the connection
 was turned off while it ran; it may have been performed`.
 
-**In the window.** The global tab is the switch and its sentence, as every extension's when it has
-nothing global to set. Each project's settings get a **Connections** section with the list pattern
-(rule 7 of `reference/gpui.md`): one row per connection, its state (awaiting review, ready, cut
+**In the window.** The **Connections** tab is the extension's switch and its sentence and, under
+them, the list pattern (rule 7 of `reference/gpui.md`): one row per connection, its state
+(awaiting review, ready, cut
 off, off, failing), its switch, and **Review** where a review is due, which opens the diff in a
-large dialog; adding or editing one is a form dialog with its command or URL, its sentence, its
-variables (picked among the vault's entries) and its limits. A call held for the user is a card as any, naming the connection, the action and its
+large dialog; adding or editing one is a form dialog with its command or URL, its sentence, its variables (picked among the vault entries every project sees) and its limits. A call held for
+the user is a card as any, naming the connection, the action and its
 arguments. Everything animates as the rest of the window does, and the issue lists it.
 
-**What it does not protect.** The server has the user's rights. Flottille sees the name, the
+**What it does not protect.** The server has the user's rights, and what an agent reads from one
+connection may go to another place ("Open questions", 3). Flottille sees the name, the
 action and the arguments of a call, never what the server then does with the machine, and it does
 not read the arguments for paths or addresses. A server that is wrong, compromised or just
 powerful can act as the user, and no mode changes that; this is Full mode's limit
 (`design.md` §7.1), and the reason the user installs only what they would run as a CLI.
 
-**Examples.** Real programs, public; the first is invented.
+**Examples.** The first two are invented; the others are public programs, the first cases of
+0.3.
 
-- **A memory server**, `almanac` (invented), a notes and decisions store: `search` and `read` are set
-  to **passes**, `write` and `link` stay **judged**. Its token is a vault entry, put in its
-  environment.
+- **A personal memory server**, `almanac`, and **a notes server**, `jotter`: `search` and `read` are
+  set to **passes**, `write` and `link` stay **judged**. A token is a vault entry, put in the
+  server's environment. Given to every project's agents, since they are the user's own.
+- **`agent-browser mcp`** (vercel-labs/agent-browser, a browser for agents): its `eval` runs
+  arbitrary script in the page, which no gate can judge, so it is **off**; a limit on `url` names
+  the addresses its `open` may reach (the exact values listed); the other actions stay **judged**.
 - **`agent-desktop mcp`** (vercel-labs/agent-desktop, driving the desktop through AT-SPI on Linux,
   its tools named `desktop_click`, `desktop_snapshot`…): the most powerful kind, since it acts in
-  every application the user has open. Every action is set to **asked**, and a limit names the
-  applications it may act on, on the argument the review shows the actions use for that.
-- **`browse`** (anomalyco/browse, the user's own Chromium through an extension): its
-  `execute` runs arbitrary Playwright code that no gate can judge, so it is **asked**, always;
-  the actions that open, read and screenshot a tab stay **judged**.
+  every application the user has open. It is declared without `--headed` (that flag, a global one
+  of the command, allows physical input), every action is set to **asked**, and a limit on `app`
+  names the applications it may act on.
 
-**Builds**: nothing of the frame that Specs does not build (settings, tools given by an extension,
-data, screens, the project section). The MCP client is `rmcp`'s, which the tests already use (the daemon's
+**Builds**: nothing of the frame that Specs (0.2) does not build (settings, tools given by an
+extension, data, screens). It lands in 0.3 (milestone "Connections"). The MCP client is `rmcp`'s, which the tests already use (the daemon's
 dependency gains the client features it needs, said in the pull request), the server process is the
 daemon's own spawn, and the tests run a small fake MCP server
 on stdio with scripted behaviour, never a real one.
@@ -729,9 +756,8 @@ New: `the_judge_is_declared_with_its_slot_guidance_call_and_decider`,
 3. **The compaction as an extension**: #308 stays core; #309 and #320 are rewritten into the frame
    (slots, guidance, calls, its triggers, the handoff in the core).
 4. **Review and the cold read**: agents an extension launches, the depth exception.
-5. **Connections**: it asks nothing of the frame that Specs did not build (settings, tools given by
-   an extension, data, screens), so it can come as soon as Specs S3 is merged, and before the
-   compaction if the user wants it first.
+5. **Connections** (0.3): it asks nothing of the frame that Specs did not build (settings, tools
+   given by an extension, data, screens), and lands after Specs (0.2) has built it.
 6. **The judge moved into the frame**, a pure refactor.
 7. **Handbook.**
 
@@ -794,8 +820,14 @@ The maintainer's answers on Connections.
     settings of unchanged actions are kept and a new action is judged. Descriptions are third-party
     text put in the agent's context, which is why they are pinned.
 17. **A server's secrets come from the vault** into its environment; the agent never sees them.
-18. **Per project, off by default,** with the usual global and per-project switches; the declaration
-    is the user's alone, never an agent's.
+18. **App-wide, off by default.** A connection is declared once, in the user's configuration, and
+    has its own switch; on, it is given to every agent of every project. There is no project-level
+    declaration and no per-project switch for now ("a connection for one project only" is an open
+    question). The declaration is the user's alone, never an agent's.
+19. **Any MCP server.** Connections is generic: nothing in it is shaped around one server, and the
+    examples are only examples. It lands in 0.3, after Specs (0.2) has built the frame.
+20. **A server's `instructions` are pinned with its actions,** a change cuts the connection off, and
+    they are given by `help`, never put in the agent's context by default.
 
 ## Open questions
 
@@ -811,3 +843,11 @@ The maintainer's answers on Connections.
    only they do (a login, a second factor, a payment), or WebDriver BiDi driving a dedicated
    profile. Not decided, and not designed here: it would be an extension, not a connection, since
    Flottille's code would drive the browser.
+3. **Data moving between tools.** What an agent reads from one connection (personal data from a
+   memory server, given to every project) it may write elsewhere: a public repository, a ticket,
+   another connection. The gate judges each call on its own, not where the data in it came from, so
+   nothing today follows data from where it was read to where it is written. Not designed here.
+4. **A connection for one project only.** App-wide is the first version (decision 18). A server
+   that should reach one project's agents, for instance a desktop-control server wanted in one
+   project, would need a declaration or a switch per project, and a rule for the pin, the vault
+   entries and the server's life when it is. Possible later, not decided.
