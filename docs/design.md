@@ -144,6 +144,15 @@ mapping, cancel, idle release of processes and death handling follow `reference/
 Flottille runs the agent CLIs the user installed and signed in to; it provides no login of its
 own and never reads or copies credentials.
 
+The one credential Flottille holds is what the user puts in its **vault** (`vault.md`): secrets
+kept by the operating system's keyring, never by a file of Flottille's nor its store, set by the
+user only (the window, or `flottille vault set` reading the standard input, never an argument),
+and **never returned** by any method, client or tool, nor written to an event or a log. Agents see
+the entries' names and what they are for (`vault list`), never a secret: a tool of Flottille's that
+needs one takes the entry's name and the daemon puts the secret where it goes itself. An entry tied
+to a project is seen by that project's agents only. Every value of every entry is masked in
+whatever the daemon stores and shows.
+
 ### 4.2 Bare mode: the agent has only Flottille's tools
 
 Every agent runs in bare mode (`reference/hemera.md` §2): no built-in tools, no user or project
@@ -180,6 +189,8 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
 - the services of the machine (every agent): `services`, which lists them with their state and
   starts one, judged as a run of its line in its folder; its stop is always held for the user,
   in every mode, and a root's writes are judged as a task's (`tools.md`, "Services");
+- the user's vault (every agent of a project that sees an entry): `vault`, which lists the
+  entries' names and what they are for, never a secret (`vault.md`);
 - forges (every agent of a project whose repositories declare a forge, in `main` as in a
   workspace): `forge`, which lists and reads the pull requests of the place's repositories and
   their checks (`forges.md`), and opens, comments, edits or merges them or re-runs a failed
@@ -813,7 +824,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   its Rules (the global rules above, read-only and folded, with a link to edit them; a switch,
   "Use only this project's rules"; the project's text editor, Reset to default, and a line saying
   a change reaches the agents created from now on);
-- Settings, in tabs (Judge, Providers, Rules, Sessions, Appearance, Developer mode: one tab shown at a time, as in a project's settings; the first, the Judge, is
+- Settings, in tabs (Judge, Providers, Rules, Workspaces, Vault (`vault.md`), Sessions, Appearance, Developer mode: one tab shown at a time, as in a project's settings; the first, the Judge, is
   the one it opens on, and a link to a section opens its tab): the Judge tab holds the Auto judge (two lines on Auto: the rules pass what is known to be harmless, a
   small model on the user's own quota decides the rest, base calls always come to the user; "No
   judge (Auto asks like Ask)" among its choices) and, under it with its own heading, the Judge
