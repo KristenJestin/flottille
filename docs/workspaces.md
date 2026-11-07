@@ -236,7 +236,13 @@ script of the repository and run the script.` The same rules will hold for the c
 
 ## Removal
 
-Refused while the workspace is being prepared. Then nothing is touched unless:
+Refused while the workspace is being prepared or removed, the refusal saying which, and while
+something works in it (`docs/design.md` §5.1): an agent not ended or a command run still running,
+each named (`the workspace login of project app is not removed, nothing was touched: the agent
+1a2b3c4d5e6f works in it; they end first`); it is checked again once the checks below are done,
+before anything is touched. From its start to its end the removal holds the workspace: no agent
+starts in it (`workspace login of project app is being removed: wait until it is done`), nor a
+preparation. Then nothing is touched unless:
 
 - in each worktree made, `git status` shows no changed nor untracked file (`<file> holds work that
   is not committed`); the links Flottille made and the worktrees standing inside the root one are
@@ -286,7 +292,7 @@ answer says. It is refused, nothing touched, while the
 workspace is in use outside the agent's tree (`docs/design.md` §5.1): an agent of another tree not
 ended that works in it, or a command run of another tree still running in it, each named; the
 tree's own command runs are no obstacle, nor its agents that ended; its other agents not ended
-are. The user's `flottille workspace remove` does not check this.
+are.
 
 ### Its own workspace
 

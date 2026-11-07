@@ -140,6 +140,10 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                     .await
                     .map_err(|e| Failure::new("unavailable", format!("images not kept: {e}")))??
             };
+            // Before the delivery wakes the agent: the turn it starts takes the choice.
+            if let Some(compact) = asked.compact {
+                crate::compaction::choose(daemon, &agent.id, compact);
+            }
             let delivery = deliveries::deliver_message(
                 daemon,
                 &agent.id,
@@ -699,6 +703,13 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
                     project.name
                 )));
             }
+            // A removal, a resume or a preparation holds it; only an agent that waits for its
+            // own preparation starts in it meanwhile.
+            if daemon.preparing.lock().unwrap().contains(&workspace.id)
+                && !(new.preparing && workspace.state() == State::Preparing)
+            {
+                return Err(crate::workspaces::held(daemon, &workspace));
+            }
             let repositories: Vec<_> = workspace
                 .repositories
                 .iter()
@@ -1104,6 +1115,7 @@ async fn agent_life(daemon: Arc<Daemon>, id: String, mut orders: mpsc::Unbounded
     };
     loop {
         if turns.queued.is_empty() {
+            crate::compaction::before_turn(&daemon, &id);
             match deliveries::pump(&daemon, &id) {
                 Some(prompt) => turns.queued.push_back(prompt),
                 None => match orders.recv().await {
@@ -1338,6 +1350,12 @@ fn died(daemon: &Arc<Daemon>, id: &str, status: ExitStatus, turns: &mut Turns) -
         json!({"code": status.code(), "signal": status.signal(), "during_turn": during_turn}),
         false,
     );
+    // Asked for its handoff: the new session starts without it, as a compacted one does.
+    if let Some(compacted) =
+        crate::compaction::handoff_failed(daemon, id, &format!("{reason} during its handoff"))
+    {
+        return compacted_session(daemon, id, compacted);
+    }
     replace(daemon, id, &reason, true, true)
 }
 
@@ -1361,7 +1379,7 @@ fn compacted_session(
         .map(|settings| crate::compaction::kept_now(daemon, id, &settings))
         .unwrap_or(crate::compaction::KEPT);
     // Read before the new session starts: what the old one said is what is kept.
-    let (resume, after) = crate::compaction::resumed(daemon, id, &compacted.summary, kept);
+    let (resume, after) = crate::compaction::resumed(daemon, id, &compacted, kept);
     let goes_on = renew(
         daemon,
         id,
@@ -1371,14 +1389,13 @@ fn compacted_session(
         Some(resume),
     );
     if goes_on {
-        record(
-            daemon,
-            id,
-            "agent.compacted",
-            json!({"by": "flottille", "before": compacted.before, "after": after,
-                "summary": compacted.summary}),
-            false,
-        );
+        let mut data = json!({"by": "flottille", "before": compacted.before, "after": after,
+            "summary": compacted.summary,
+            "source": if compacted.by_agent { "agent" } else { "compactor" }});
+        if compacted.summary.is_none() {
+            data["missing"] = true.into();
+        }
+        record(daemon, id, "agent.compacted", data, false);
     }
     crate::compaction::finish(daemon, id);
     goes_on
@@ -1412,7 +1429,14 @@ fn renew(
     let _ = daemon.write(|store| {
         Ok((
             (),
-            store.supersede_like(id, &[&format!("brief-{id}-"), &format!("resume-{id}-")])?,
+            store.supersede_like(
+                id,
+                &[
+                    &format!("brief-{id}-"),
+                    &format!("resume-{id}-"),
+                    &format!("{}-{id}-", crate::compaction::HANDOFF_KIND),
+                ],
+            )?,
         ))
     });
     let replaced = daemon
@@ -1781,6 +1805,11 @@ impl acp::Events for Recorder {
         // Bookkeeping between two pieces of a message does not end it: it is kept after the
         // message, which stays one. Anything else the agent does (a tool call, a compaction…)
         // ends it.
+        if name == "agent.usage"
+            && let Some(used) = data["used"].as_u64()
+        {
+            crate::compaction::reported(&self.daemon, &self.agent, used, data["size"].as_u64());
+        }
         if BOOKKEEPING.contains(&name) {
             match self.speech.keep(name, data, activity) {
                 Ok(()) => return,
@@ -1876,6 +1905,7 @@ impl acp::Events for Recorder {
     }
 
     fn pump(&self) -> Option<deliveries::Prompt> {
+        crate::compaction::before_turn(&self.daemon, &self.agent);
         deliveries::pump(&self.daemon, &self.agent)
     }
 

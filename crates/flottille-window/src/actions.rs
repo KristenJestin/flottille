@@ -411,6 +411,8 @@ pub enum Command {
         message: String,
         /// Pasted or dropped pictures that go with it, as the clipboard gave them.
         images: Vec<Picture>,
+        /// The composer's Compact before sending, while it shows: the agent's cache expired.
+        compact: Option<bool>,
     },
     /// The user's answer from the card of the question of `seq` the session's root asked: a
     /// message to the root like any other, which answers every question open then (`seqs`).
@@ -2147,14 +2149,14 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             key,
             message,
             images,
+            compact,
         } => {
-            let answer = match ask_alone(
-                connect,
-                "agent.send",
-                json!({"agent": session, "message": message,
-                    "images": images.iter().map(Picture::to_json).collect::<Vec<_>>()}),
-                bounds.quick,
-            ) {
+            let mut params = json!({"agent": session, "message": message,
+                "images": images.iter().map(Picture::to_json).collect::<Vec<_>>()});
+            if let Some(compact) = compact {
+                params["compact"] = json!(compact);
+            }
+            let answer = match ask_alone(connect, "agent.send", params, bounds.quick) {
                 Ok(Ok(taken)) => Ok(crate::session::Accepted {
                     delivery: taken["delivery"].as_str().unwrap_or_default().to_owned(),
                     after: taken["after"].as_u64().unwrap_or_default(),

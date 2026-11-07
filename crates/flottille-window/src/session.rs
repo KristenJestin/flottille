@@ -27,7 +27,7 @@ use flottille_ui::color::mix;
 use flottille_ui::motion::{HOVER, Motion, PANEL};
 use flottille_ui::{
     AgentState, Badge, Button, Card, Confirm, Drawer, Field, Icon, ListRow, Listing, Menu, Modal,
-    Palette, Pill, PulsingLabel, Side, Skeleton, StateIcon, Status, Toast, Type, awaiting,
+    Palette, Pill, PulsingLabel, Side, Skeleton, StateIcon, Status, Switch, Toast, Type, awaiting,
     changing, enter, fade, fold_frame, follow_theme, hoverable, icon, palette, path_line, presence,
     presence_of, section_label, selectable, space, text_region, tipped_when_cut, toast, turning,
 };
@@ -98,6 +98,9 @@ pub fn end_sentence(count: usize) -> String {
 /// The reply field's placeholder and its send button's tooltip: the field writes to the root.
 pub const REPLY_PLACEHOLDER: &str = "Reply…";
 pub const SEND: &str = "Send";
+/// The composer's toggle while the root's prompt cache expired, and what it does.
+pub const COMPACT_BEFORE_SENDING: &str = "Compact before sending";
+const COMPACT_HINT: &str = "Its prompt cache expired: a summary makes the next turn read a short history instead of the whole conversation at full price.";
 /// The composer's button that interrupts the turn that runs.
 pub const STOP: &str = "Stop the turn";
 /// The reply field is one line high when empty, and grows with its lines up to this many.
@@ -460,6 +463,22 @@ impl SessionPage {
             .collect();
         self.queued
             .update(cx, |queued, cx| queued.set_pending(waiting, cx));
+    }
+
+    /// What the root's events say of its prompt cache: expired, the composer offers to compact
+    /// before sending, until a turn starts or the agent is compacted.
+    fn cache_news(&mut self, event: &flottille_core::protocol::Event, cx: &mut Context<Self>) {
+        if event.data["agent"].as_str() != Some(self.opened.id.as_str()) {
+            return;
+        }
+        let offered = match event.name.as_str() {
+            "agent.cache_expired" => Some(event.data["compact"] != false),
+            "agent.prompted" | "agent.compacted" | "agent.turn_ended" | "agent.ended"
+            | "agent.failed" => None,
+            _ => return,
+        };
+        self.reply
+            .update(cx, |reply, cx| reply.offer_compact(offered, cx));
     }
 
     /// What the root's events say of the messages being sent: one taken back leaves, one that
@@ -1149,7 +1168,7 @@ impl SessionPage {
     }
 
     /// The titles of the sessions that live in the place this one does and have not ended, this
-    /// one included: what removing its workspace leaves without a place.
+    /// one included: its workspace is not removed while they work in it.
     fn living_here(&self, cx: &App) -> Vec<String> {
         let Some(shell) = self.shell.upgrade() else {
             return Vec::new();
@@ -1190,6 +1209,10 @@ impl SessionPage {
                 self.read = true;
                 for event in &events {
                     self.note_decision(event);
+                }
+                // What the root's cache last said, in the latest events.
+                for event in &events {
+                    self.cache_news(event, cx);
                 }
                 let root = self.shown == self.opened.id;
                 // The requests another agent of the tree asked are not in this one's events:
@@ -1233,6 +1256,7 @@ impl SessionPage {
                 if self.shown == self.opened.id {
                     self.sending_left(&event, cx);
                 }
+                self.cache_news(&event, cx);
                 let (conversation, this) = (self.conversation.clone(), &*self);
                 conversation.update(cx, |view, cx| {
                     let changes = view.model.apply(&event);
@@ -6525,26 +6549,6 @@ impl SessionRail {
         cx.notify();
     }
 
-    /// What the confirmation says besides the card's sentence: which sessions live in the
-    /// workspace, and that they go on without a place.
-    fn removal_sentence(&self, cx: &App) -> String {
-        let mut said = "Its folder goes, and each repository's branch that holds no commit of its \
-                        own. Flottille removes it only once all its work is committed and pushed."
-            .to_owned();
-        let living = self
-            .page
-            .read_with(cx, |page, cx| page.living_here(cx))
-            .unwrap_or_default();
-        if !living.is_empty() {
-            let titles: Vec<String> = living.iter().map(|title| format!("“{title}”")).collect();
-            said.push_str(&format!(
-                " Sessions living in it, this one included: {}. They keep going without a place.",
-                titles.join(", ")
-            ));
-        }
-        said
-    }
-
     /// The field a ticket is typed in.
     pub fn ticket_field(&self) -> Option<&Entity<InputState>> {
         self.ticket_field.as_ref()
@@ -7663,13 +7667,19 @@ impl Render for SessionRail {
                 "rail-workspace-removal",
                 format!("Remove the workspace {name}?"),
             )
-            .sentence(self.removal_sentence(cx))
-            .action("Remove workspace")
-            .refused(
-                self.place
-                    .as_ref()
-                    .and_then(|place| removal_refused(&self.project, &place.statuses)),
+            .sentence(
+                "Its folder goes, and each repository's branch that holds no commit of its own. \
+                 Flottille removes it only once all its work is committed and pushed.",
             )
+            .action("Remove workspace")
+            .refused({
+                let living = self
+                    .page
+                    .read_with(cx, |page, cx| page.living_here(cx))
+                    .unwrap_or_default();
+                let statuses = self.place.as_ref().map(|place| &place.statuses[..]);
+                removal_refused(&self.project, statuses.unwrap_or_default(), &living)
+            })
             .open(self.confirming)
             .on_confirm(move |_, cx| {
                 this.update(cx, |rail, cx| rail.remove_workspace(cx)).ok();
@@ -8006,6 +8016,11 @@ pub struct Reply {
     running: bool,
     /// An interruption was asked and not answered yet.
     interrupting: bool,
+    /// The root's prompt cache expired (`agent.cache_expired`): the composer offers Compact
+    /// before sending until its next turn or compaction.
+    compact_offered: bool,
+    /// Whether that toggle is ticked: from the setting, then as the user leaves it.
+    compact: bool,
     /// The messages sent and not recorded yet, the oldest first: each shows from the moment it
     /// is sent, and one the daemon refused stays until it is sent again or taken back.
     pending: Vec<Pending>,
@@ -8088,6 +8103,8 @@ impl Reply {
             interrupting: false,
             pending: Vec::new(),
             next_pending: 0,
+            compact_offered: false,
+            compact: false,
             left: HashMap::new(),
             activity: None,
             attached: Attachments::default(),
@@ -8184,6 +8201,49 @@ impl Reply {
     /// The root runs a turn.
     pub fn is_running(&self) -> bool {
         self.running
+    }
+
+    /// Whether the composer offers Compact before sending, ticked as `compact` says when it
+    /// starts to.
+    pub fn offer_compact(&mut self, offered: Option<bool>, cx: &mut Context<Self>) {
+        if offered.is_some() == self.compact_offered {
+            return;
+        }
+        self.compact_offered = offered.is_some();
+        if let Some(compact) = offered {
+            self.compact = compact;
+        }
+        cx.notify();
+    }
+
+    /// The toggle shows, and whether it is ticked.
+    pub fn compact_offer(&self) -> Option<bool> {
+        self.compact_offered.then_some(self.compact)
+    }
+
+    pub fn toggle_compact(&mut self, cx: &mut Context<Self>) {
+        self.compact = !self.compact;
+        cx.notify();
+    }
+
+    /// Compact before sending, under the field while the root's cache expired: it unfolds and
+    /// folds away with its gap.
+    fn render_compact(&self, cx: &mut Context<Self>) -> AnyElement {
+        presence(
+            "reply-compact",
+            self.compact_offered,
+            div()
+                .id("reply-compact-line")
+                .pt(space::SM)
+                .px(space::XS)
+                .child(
+                    Switch::new("reply-compact-toggle", self.compact, COMPACT_BEFORE_SENDING)
+                        .hint(COMPACT_HINT)
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_compact(cx))),
+                )
+                .test_support(),
+        )
+        .into_any_element()
     }
 
     fn set_running(&mut self, running: bool, cx: &mut Context<Self>) {
@@ -8584,6 +8644,7 @@ impl Reply {
                     bytes: image.bytes.clone(),
                 })
                 .collect(),
+            compact: self.compact_offer(),
         };
         self.shell
             .update(cx, |shell, _| shell.perform(command))
@@ -8812,6 +8873,7 @@ impl Render for Reply {
                     .test_support(),
             )
             .child(chips)
+            .child(self.render_compact(cx))
             .child(
                 div()
                     .flex()

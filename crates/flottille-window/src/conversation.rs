@@ -288,7 +288,14 @@ pub fn compacted_text(data: &Value) -> String {
             _ => format!("{}k", (n + 500) / 1_000),
         }
     };
-    let summary = data["summary"].as_str().unwrap_or_default().trim();
+    let summary = match data["summary"].as_str() {
+        Some(summary) => summary.trim(),
+        None if data["missing"] == true => {
+            "The agent's handoff is missing: it went on from what Flottille holds of it and your \
+             last message."
+        }
+        None => "",
+    };
     format!(
         "Conversation compacted · {} → {} tokens\n{summary}",
         tokens("before"),

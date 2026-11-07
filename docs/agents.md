@@ -901,8 +901,22 @@ subscriptions, its requests and what waits for it are the agent's, not its sessi
 While the compactor works the agent's prompts wait (a delivery stays `queued`), and go to the new
 session after its first prompt. A failure changes nothing.
 
-With a compactor chosen, each CLI is left to compact as late as it allows, never turned off, so
-that its own compaction acts only when Flottille's could not:
+When the agents write their own handoff (`summary = "agent"`, `docs/design.md` §5.8, 7) with
+**Automatic** on, a handoff that fails still starts a new session, so each CLI's own compaction is
+turned off where it can be:
+
+- **Claude Code**: `DISABLE_COMPACT=1` in the bridge's environment, and so in `claude`'s, turns
+  off its automatic compaction, its compaction while idle and `/compact` (Claude Code's
+  environment variables). `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` is then not set.
+- **OpenCode**: `compaction.auto = false` in the configuration Flottille gives it.
+- **Codex**: it cannot be turned off. `model_auto_compact_token_limit` is clamped to 90 % of the
+  model's window, so Codex keeps its own compaction at 90 %; with a threshold of 90 % or more,
+  Codex may compact before Flottille asks, and its compaction is said as the CLI's own
+  (`compact_boundary`, a brief sent again to a child).
+
+The setting is read when the agent's process starts: a change reaches an agent at its next one.
+Otherwise, with a compactor chosen, each CLI is left to compact as late as it allows, never
+turned off, so that its own compaction acts only when Flottille's could not:
 
 - **Claude Code**: its threshold is a share of the window (about 95 %, the window less a reserve
   for the summary); `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` can only bring it down, never up (Claude
@@ -919,6 +933,27 @@ that its own compaction acts only when Flottille's could not:
   model's limit less a reserve for its output (OpenCode's compaction documentation). Flottille's
   OpenCode reads only the configuration Flottille gives it, which sets nothing of compaction:
   nothing is set.
+
+### The prompt cache's lifetime
+
+The two triggers around the cache's expiry (`docs/design.md` §5.8, 6) count from each agent's
+last turn's end with its provider's lifetime, established from each CLI and never guessed:
+
+- **Claude Code**: an hour on a Claude subscription within its usage limits, five minutes on an
+  API key, Bedrock, Vertex or Foundry (its setting `promptCacheTtl`, documented in the CLI itself,
+  2.1.295: "Unset = automatic: 1 hour on a Claude subscription within its usage limits, 5 minutes
+  on an API key"). `CLAUDE_CODE_PROMPT_CACHE_TTL` and `FORCE_PROMPT_CACHING_5M`, which would
+  choose otherwise, are withheld from its environment, and Bedrock, Vertex and Foundry are chosen
+  by `CLAUDE_CODE_USE_*` variables, withheld too. Flottille takes five minutes when
+  `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` is set (they win over the login), an hour
+  otherwise. A subscription past its usage limits falls to five minutes, which Flottille cannot
+  see: the first trigger then compacts after the cache expired, which still makes the next
+  request small.
+- **Codex**: OpenAI keeps a prompt's prefix "for 5 to 10 minutes of inactivity, up to an hour
+  off-peak" (OpenAI's prompt caching guide), with no lifetime to count on: unknown, neither
+  trigger.
+- **OpenCode**: its cache is the one of whichever model provider the user signed in to: unknown,
+  neither trigger.
 
 What a new session needs is all in the store: its brief (the root's first message, or a child's),
 the summary, and its messages, word for word as they were recorded; its tools and instructions

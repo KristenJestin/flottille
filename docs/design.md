@@ -485,6 +485,39 @@ agent wrote is data.
 5. **A failure** changes nothing: the agent goes on in its session, `agent.compaction_failed` and
    the developer log say why, and the CLI's own compaction stays the safety net. With a compactor
    chosen, each CLI is set to compact as late as it allows (`docs/agents.md`, "Compaction").
+6. **Around the cache's expiry**: an agent's prompt cache lives a while after its last request
+   (its last turn's end), and the first turn after it expired reads the whole history again at
+   full price. Two settings beside the others use the same compactor and compaction: **Compact
+   before the cache expires** (off) compacts an agent at rest (no turn running, nothing waiting
+   for it) a **margin** (5 minutes, 1 to 30) before its cache expires; **Compact a session resumed
+   after its cache expired** (on) compacts first when a message is about to start a turn of an
+   agent whose cache expired, and the message goes to the new session. Neither below a **minimum
+   size** of context (50,000 tokens), without a compactor, while a picked compactor's notice is
+   not seen, for a context that did not grow since the session started or its last compaction
+   failed, nor for a provider whose cache lifetime is not established (`docs/agents.md`, "The
+   prompt cache's lifetime"); the Compaction tab says each provider's. Once an agent's cache
+   expired, the composer shows **Compact before sending**, ticked from the setting: unticked, the
+   message goes to the session as it is; ticked, it compacts first even with the setting off. A
+   message from Flottille itself (a child's news, a delivery) follows the setting.
+7. **The agent's own handoff**: **Summary written by** (`summary` in `compaction.toml`) is the
+   compactor (the default, all of the above) or **the agent itself**. Then, at the same moments
+   (the threshold at the end of a turn, or asked by hand) and with no compactor needed, Flottille
+   sends the agent a message of its own, shown as Flottille's and never as the user's, that asks
+   for its handoff in a fixed shape: its task, the decisions and why, the files touched, what is
+   done, what is left, what it was about to do. Its prompts wait meanwhile. A turn that goes on
+   past the threshold and reaches it plus 5 points (98 % at most) is cut to ask for it, and the
+   new session is told to go on from what it was about to do. The new session of the same agent
+   (same id, place in the tree, workspace, mode, model and effort) is sent its brief, the handoff
+   (`<your_handoff>`) and what Flottille holds of it (`<flottille_state>`: its place and branch,
+   its children, its subscriptions, its runs still running, the messages waiting), not the
+   latest messages. A handoff that fails (the agent errs, writes nothing, does not end its turn
+   within the compactor's time, or its process dies) still starts the new session, from
+   Flottille's state and the user's last message, and the line says the handoff is missing. While
+   the agents write their own handoff and **Automatic** is on, each CLI's own compaction is
+   turned off where it can be (`docs/agents.md`, "Compaction"). The threshold is the one above
+   (70 % by default, 50 % to 95 %): #405 asked for its own, at 90 %, and was built on this one
+   rather than add a second. The triggers around the cache's expiry stay the compactor's, when
+   one is chosen: a handoff would read the whole history again at full price.
 
 ## 6. Projects and workspaces
 
@@ -959,7 +992,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   files not committed and setup steps played, its pull request, its ticket; one sentence for the
   repositories with no forge; its actions in a "⋯" menu, the same as the workspace's card, with
   Link a ticket…, Unlink the ticket and, for a session in a workspace, Remove workspace…, which
-  asks as the card does and names the sessions living there; while it runs the section says it is
+  asks as the card does, the dialog refusing it, with the sessions named, while sessions not ended work there; while it runs the section says it is
   being removed, and once removed it folds away, the page staying) and facts, its runs, then, pinned at the very bottom and
   folding away when nothing waits, "Waiting for you", the one place of the page that says the user
   is needed (each request that reached the user is a compact card: the whole call, wrapping over
@@ -1070,8 +1103,8 @@ The plan is cut into GitHub milestones; each ends on something the user can use.
    daemon, in [`items.md`](items.md).
 5. **Remote**: network transport, phone, other machines.
 
-Flottille's own features beyond its core (the Auto judge, the compaction, built in today (§7.1,
-§5.8), later specs, review and a handbook) are proposed to become extensions, declared and turned on by the user: a proposal,
+Flottille's own features beyond its core (the Auto judge, the compaction, the agent's own handoff
+included, built in today (§7.1, §5.8), later specs, review and a handbook) are proposed to become extensions, declared and turned on by the user: a proposal,
 nothing built, in [`extensions.md`](extensions.md).
 
 ## 14. Defaults taken, to confirm
