@@ -728,7 +728,7 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
         project,
         new.parent.is_none(),
         depth,
-        crate::vault::seen_by(daemon, &project.name),
+        crate::vault::listed_to(daemon, project),
     );
     let files = roles::project_files(&project.folder, &repositories);
     let skills: Vec<(String, String)> = project

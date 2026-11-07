@@ -8,15 +8,18 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use flottille_core::approval::BETWEEN_TURNS;
+use flottille_core::declared::ProjectTracker;
 use flottille_core::paths::Paths;
-use flottille_core::project::valid_name;
+use flottille_core::project::{Project, valid_name};
 use flottille_core::secrets::{self, VAULT_SHORTEST};
-use flottille_core::store::now_ms;
+use flottille_core::store::{Store, now_ms};
 use flottille_core::vault::Entry;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::daemon::Daemon;
+use crate::deliveries;
 use crate::mcp::{Grant, Outcome, arguments};
 use crate::projects::Failure;
 
@@ -178,6 +181,20 @@ struct Set {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct AskSet {
+    ask: u64,
+    secret: String,
+    username: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AskDismiss {
+    ask: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Remove {
     name: String,
 }
@@ -205,6 +222,23 @@ pub async fn call(
                 message: masked_of(&failure.message, &given),
                 ..failure
             })
+        }
+        "vault.asks" => {
+            let open = daemon.read(asks)?.open;
+            Ok(json!({"asks": open.iter().map(Ask::to_json).collect::<Vec<_>>()}))
+        }
+        "vault.ask_set" => {
+            let given = params["secret"].as_str().unwrap_or_default().to_owned();
+            ask_set(&daemon, params).await.map_err(|failure| Failure {
+                message: masked_of(&failure.message, &given),
+                ..failure
+            })
+        }
+        "vault.ask_dismiss" => {
+            let AskDismiss { ask } = serde_json::from_value(params)?;
+            let request = open_ask(&daemon, ask)?;
+            answered(&daemon, &request, "dismissed");
+            Ok(json!({"dismissed": request.to_json()}))
         }
         "vault.remove" => {
             let Remove { name } = serde_json::from_value(params)?;
@@ -234,7 +268,7 @@ pub async fn call(
     }
 }
 
-async fn set(daemon: &Daemon, params: Value) -> Result<Value, Failure> {
+async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Failure> {
     if !params["secret"].is_string() {
         return Err(Failure::new("invalid-params", "the secret is a text"));
     }
@@ -276,7 +310,38 @@ async fn set(daemon: &Daemon, params: Value) -> Result<Value, Failure> {
         .map_err(unavailable)?;
     daemon.write(|store| store.put_vault_entry(&entry))?;
     retool(daemon);
+    // However it was set, from its request's card or from Settings, what asked for it is told.
+    if let Ok(state) = daemon.read(asks) {
+        for request in state.open.iter().filter(|r| entry.name == r.name) {
+            if entry.seen_by(&request.project) {
+                answered(daemon, request, "set");
+            }
+        }
+    }
     Ok(entry.to_json())
+}
+
+/// `vault.ask_set`: the entry of an open request set with the secret the user typed, and what
+/// Flottille prefilled; the same checks as `vault.set`.
+async fn ask_set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Failure> {
+    let AskSet {
+        ask,
+        secret,
+        username,
+    } = serde_json::from_value(params)?;
+    let request = open_ask(daemon, ask)?;
+    if request.takes_username && username.as_deref().is_none_or(|u| u.trim().is_empty()) {
+        return Err(Failure::refused(format!(
+            "the entry {} needs a username: {}",
+            request.name, request.description
+        )));
+    }
+    set(
+        daemon,
+        json!({"name": request.name, "secret": secret, "description": request.description,
+            "username": username, "project": request.project}),
+    )
+    .await
 }
 
 fn unavailable(why: String) -> Failure {
@@ -305,11 +370,210 @@ fn retool(daemon: &Daemon) {
     }
 }
 
-/// Whether the agents of `project` see an entry: they have the `vault` tool.
-pub fn seen_by(daemon: &Daemon, project: &str) -> bool {
+/// Whether the agents of `project` have the `vault` tool: the project sees an entry, or a feature
+/// of Flottille names one it may ask the user for.
+pub fn listed_to(daemon: &Daemon, project: &Project) -> bool {
     daemon
         .read(|store| store.vault_entries())
-        .is_ok_and(|entries| entries.iter().any(|entry| entry.seen_by(project)))
+        .is_ok_and(|entries| entries.iter().any(|entry| entry.seen_by(&project.name)))
+        || !needs(daemon, project).is_empty()
+}
+
+/// An entry a feature of Flottille names for a project and the vault does not give it: the only
+/// kind an agent may ask the user for, described by the daemon, never by the agent.
+pub struct Need {
+    pub name: String,
+    pub description: String,
+    /// The entry is of no use without its username (Jira's API takes the account's e-mail).
+    pub takes_username: bool,
+}
+
+/// The entries the features of `project` name and its agents cannot use: the tracker's
+/// `worklog_token` naming no entry the project sees.
+pub fn needs(daemon: &Daemon, project: &Project) -> Vec<Need> {
+    let entries = daemon
+        .read(|store| store.vault_entries())
+        .unwrap_or_default();
+    let mut needs = Vec::new();
+    if let Some(ProjectTracker::Jira {
+        site,
+        worklog_token: Some(name),
+        ..
+    }) = &project.tracker
+        && !entries
+            .iter()
+            .any(|entry| &entry.name == name && entry.seen_by(&project.name))
+    {
+        needs.push(Need {
+            name: name.clone(),
+            description: format!(
+                "The Jira API token tickets log_time logs time on {site} with; its username is \
+                 the Jira account's e-mail"
+            ),
+            takes_username: true,
+        });
+    }
+    needs
+}
+
+/// What a refusal for the missing entry `name` adds: the agent may ask the user for it, unless
+/// the user dismissed it and nothing changed since.
+pub fn offer(daemon: &Daemon, project: &Project, name: &str) -> String {
+    let dismissed = daemon
+        .read(asks)
+        .is_ok_and(|state| state.dismissed(&project.name, name));
+    if dismissed || !needs(daemon, project).iter().any(|need| need.name == name) {
+        return String::new();
+    }
+    format!(
+        "; or ask the user for it, who types only the secret: vault {{action: \"ask\", name: \
+         \"{name}\", why: \"<what you need it for>\"}}, answered at once, the user's answer \
+         coming later as a delivery"
+    )
+}
+
+/// A request for an entry, open until the user sets it or dismisses it: its number is the
+/// number of its `vault.asked` event.
+struct Ask {
+    number: u64,
+    at: u64,
+    agent: String,
+    project: String,
+    name: String,
+    why: String,
+    description: String,
+    takes_username: bool,
+    /// The agents whose ask joined it while it was open.
+    joined: Vec<String>,
+}
+
+impl Ask {
+    fn to_json(&self) -> Value {
+        json!({"ask": self.number, "at": self.at, "agent": self.agent, "project": self.project,
+            "name": self.name, "why": self.why, "description": self.description,
+            "takes_username": self.takes_username, "joined": self.joined})
+    }
+}
+
+/// The requests as their events say: those still open, and the entries dismissed since nothing
+/// changed of them.
+struct Asks {
+    open: Vec<Ask>,
+    /// `(project, entry)`, until the project's settings or the entry change.
+    dismissed: Vec<(String, String)>,
+}
+
+impl Asks {
+    fn dismissed(&self, project: &str, name: &str) -> bool {
+        self.dismissed
+            .iter()
+            .any(|(p, n)| p == project && n == name)
+    }
+}
+
+fn asks(store: &Store) -> flottille_core::Result<Asks> {
+    let events = store.events_named(
+        &[
+            "vault.asked",
+            "vault.ask_joined",
+            "vault.ask_answered",
+            "vault.changed",
+            "project.changed",
+        ],
+        0,
+    )?;
+    let mut state = Asks {
+        open: Vec::new(),
+        dismissed: Vec::new(),
+    };
+    let text = |data: &Value, key: &str| data[key].as_str().unwrap_or_default().to_owned();
+    for event in events {
+        let data = &event.data;
+        match event.name.as_str() {
+            "vault.asked" => state.open.push(Ask {
+                number: event.seq,
+                at: event.at,
+                agent: text(data, "agent"),
+                project: text(data, "project"),
+                name: text(data, "name"),
+                why: text(data, "why"),
+                description: text(data, "description"),
+                takes_username: data["takes_username"] == true,
+                joined: Vec::new(),
+            }),
+            "vault.ask_joined" => {
+                if let Some(ask) = state.open.iter_mut().find(|a| data["ask"] == a.number) {
+                    ask.joined.push(text(data, "agent"));
+                }
+            }
+            "vault.ask_answered" => {
+                state.open.retain(|ask| data["ask"] != ask.number);
+                if data["outcome"] == "dismissed" {
+                    state
+                        .dismissed
+                        .push((text(data, "project"), text(data, "name")));
+                }
+            }
+            "vault.changed" => state.dismissed.retain(|(_, name)| data["name"] != *name),
+            _ => state
+                .dismissed
+                .retain(|(project, _)| data["name"] != *project),
+        }
+    }
+    Ok(state)
+}
+
+fn open_ask(daemon: &Daemon, number: u64) -> Result<Ask, Failure> {
+    daemon
+        .read(asks)?
+        .open
+        .into_iter()
+        .find(|ask| ask.number == number)
+        .ok_or_else(|| {
+            Failure::new(
+                "not-found",
+                format!("no request #{number} for a vault entry is open"),
+            )
+        })
+}
+
+/// The request is answered: its card folds away, and each agent that asked is told what the user
+/// did, never the secret.
+fn answered(daemon: &std::sync::Arc<Daemon>, request: &Ask, outcome: &str) {
+    let data = json!({"agent": request.agent, "ask": request.number, "project": request.project,
+        "name": request.name, "outcome": outcome});
+    let written = daemon.write(|store| {
+        let event = store.append_agent_event(&request.agent, "vault.ask_answered", data, false)?;
+        Ok(((), event))
+    });
+    if let Err(error) = written {
+        eprintln!(
+            "flottille daemon: the request for the vault entry {}: {error}",
+            request.name
+        );
+        return;
+    }
+    let body = match outcome {
+        "set" => format!(
+            "the user set the vault entry `{}`: give its name to the tool that needs it",
+            request.name
+        ),
+        _ => format!(
+            "the user dismissed the request for the vault entry `{}`: it is not asked again \
+             until the setting that names it changes",
+            request.name
+        ),
+    };
+    for agent in std::iter::once(&request.agent).chain(&request.joined) {
+        deliveries::deliver(
+            daemon,
+            agent,
+            "vault",
+            Some(format!("vault-ask-{}-{agent}", request.number)),
+            &body,
+            BETWEEN_TURNS,
+        );
+    }
 }
 
 /// Masks the value of every entry from the daemon's start: they are read from the keyring once,
@@ -364,6 +628,8 @@ async fn given(
 #[serde(deny_unknown_fields)]
 struct Asked {
     action: String,
+    name: Option<String>,
+    why: Option<String>,
 }
 
 /// `vault`: what the agent's project sees of the vault, metadata only. No action gives a secret.
@@ -372,10 +638,13 @@ pub fn tool(daemon: &Daemon, grant: &Grant, args: Value) -> Outcome {
         Ok(asked) => asked,
         Err(refused) => return refused,
     };
+    if asked.action == "ask" {
+        return ask(daemon, grant, asked);
+    }
     if asked.action != "list" {
         return Outcome::Refused(
-            "refused: vault only lists the entries; a secret is never shown: give an entry's \
-             name to the tool that needs it"
+            "refused: vault lists the entries, or asks the user for one a refusal said is \
+             missing; a secret is never shown: give an entry's name to the tool that needs it"
                 .into(),
         );
     }
@@ -406,6 +675,86 @@ pub fn tool(daemon: &Daemon, grant: &Grant, args: Value) -> Outcome {
     Outcome::Done(format!(
         "The vault's entries (give a name to the tool that needs its secret):\n{text}"
     ))
+}
+
+/// `vault {action: "ask"}`: the user is asked for an entry a feature of Flottille names and that
+/// is missing, answered at once; a second ask while one is open joins it.
+fn ask(daemon: &Daemon, grant: &Grant, asked: Asked) -> Outcome {
+    let (Some(name), Some(why)) = (
+        asked.name.filter(|n| !n.trim().is_empty()),
+        asked.why.filter(|w| !w.trim().is_empty()),
+    ) else {
+        return Outcome::Refused(
+            "refused: ask needs name, the entry a refusal said is missing, and why, what you \
+             need it for"
+                .into(),
+        );
+    };
+    let project = match crate::projects::load_project(daemon, &grant.place.project) {
+        Ok(project) => project,
+        Err(failure) => return Outcome::Failed(failure.message),
+    };
+    let Some(need) = needs(daemon, &project)
+        .into_iter()
+        .find(|need| need.name == name)
+    else {
+        return Outcome::Refused(format!(
+            "refused: nothing of Flottille's needs a vault entry {name} for this project: ask \
+             names only an entry a refusal said is missing"
+        ));
+    };
+    let why = crate::mcp::masked(why.trim(), &grant.place);
+    let written = daemon.write(|store| {
+        let state = asks(store)?;
+        if state.dismissed(&project.name, &name) {
+            return Ok((Err(()), None));
+        }
+        let open = state
+            .open
+            .iter()
+            .find(|ask| ask.project == project.name && ask.name == name);
+        let (event, joined) = match open {
+            Some(open) => (
+                store.append_agent_event(
+                    &grant.agent,
+                    "vault.ask_joined",
+                    json!({"agent": grant.agent, "ask": open.number, "project": project.name,
+                        "name": name, "why": why}),
+                    false,
+                )?,
+                true,
+            ),
+            None => (
+                store.append_agent_event(
+                    &grant.agent,
+                    "vault.asked",
+                    json!({"agent": grant.agent, "project": project.name, "name": name,
+                        "why": why, "description": need.description,
+                        "takes_username": need.takes_username}),
+                    false,
+                )?,
+                false,
+            ),
+        };
+        Ok((Ok(joined), Some(event)))
+    });
+    match written {
+        Err(error) => Outcome::Failed(error.to_string()),
+        Ok(Err(())) => Outcome::Refused(format!(
+            "refused: the user dismissed the request for the vault entry {name}: it is not asked \
+             again until they change the setting that names it or set it themselves"
+        )),
+        Ok(Ok(true)) => Outcome::Done(format!(
+            "The user is already asked for the vault entry {name}: yours joins that request. \
+             Nothing waits: continue with what does not need it; a delivery says when the user \
+             sets it or dismisses it."
+        )),
+        Ok(Ok(false)) => Outcome::Done(format!(
+            "The user is asked for the vault entry {name}. Nothing waits: continue with what \
+             does not need it; a delivery says when the user sets it or dismisses it. You never \
+             see the secret: once set, give its name to the tool that needs it."
+        )),
+    }
 }
 
 #[cfg(test)]
