@@ -113,15 +113,25 @@ fn conversation(user: &User) -> (String, Mcp, String) {
     (reader, mcp, session)
 }
 
-/// When the user's message `text` to the agent was stored, in milliseconds.
+/// When the user's message `text` to the agent was stored, in milliseconds: the time of its
+/// `delivery.queued` event, which is the time a page of the session gives the message. The
+/// delivery's own `created_at` is read from the clock a moment before, and a second can pass
+/// between the two.
 fn sent_at(user: &User, agent: &str, text: &str) -> u64 {
-    store(user)
+    let store = store(user);
+    let delivery = store
         .last_deliveries_of(agent, "user", 32)
         .unwrap()
         .into_iter()
         .find(|delivery| delivery.body == text)
+        .unwrap();
+    store
+        .last_agent_events(agent, "delivery.queued", 32)
         .unwrap()
-        .created_at
+        .into_iter()
+        .find(|event| event.data["delivery"] == delivery.id.as_str())
+        .unwrap()
+        .at
 }
 
 /// A time in RFC 3339, to the second below it, in UTC.
