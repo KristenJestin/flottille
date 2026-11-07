@@ -46,6 +46,13 @@ pub enum AgentAction {
         /// Print the reply as it streams, until the turn that plays the message ends
         #[arg(long, short)]
         follow: bool,
+        /// When the agent's prompt cache expired, compact it before sending, whatever the setting
+        #[arg(long, conflicts_with = "no_compact")]
+        compact: bool,
+        /// When the agent's prompt cache expired, send to its session as it is, whatever the
+        /// setting
+        #[arg(long)]
+        no_compact: bool,
         /// Print the answer (with --follow, once the turn ended)
         #[arg(long)]
         json: bool,
@@ -220,6 +227,8 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
             agent,
             message,
             follow: following,
+            compact,
+            no_compact,
             json,
         } => {
             let mut client = Client::connect_or_start(paths)?;
@@ -229,6 +238,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                     agent: agent.clone(),
                     message,
                     images: Vec::new(),
+                    compact: (compact || no_compact).then_some(compact),
                 })?,
             )?;
             let mut code = ExitCode::SUCCESS;

@@ -52,11 +52,29 @@ pub static PROVIDER: Provider = Provider {
     // Told the list changed, it does not list the tools again: seen on a real session, where it
     // said an action was missing while the daemon accepted it.
     lists_tools_again: false,
+    cache_lifetime,
     unready: providers::ready_here,
     forget_process: forget_bridge,
     forget_session: forget_history,
     forget_agent,
 };
+
+/// Claude Code's prompt cache lives an hour on a Claude subscription and five minutes on an API
+/// key or a token of another gateway, the variables Flottille passes on taking precedence over the
+/// login (its setting `promptCacheTtl`, 2.1.295: "1 hour on a Claude subscription within its usage
+/// limits, 5 minutes on an API key"). Its own variables, which would choose another, are withheld.
+fn cache_lifetime() -> Option<u64> {
+    Some(lifetime(
+        ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
+            .iter()
+            .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty())),
+    ))
+}
+
+/// The lifetime in seconds, with a key of the API or not.
+fn lifetime(api_key: bool) -> u64 {
+    if api_key { 5 * 60 } else { 60 * 60 }
+}
 
 /// Whether a variable of the daemon's environment stays out of the agent's (`docs/agents.md`).
 /// The agent runs on the user's own sign-in and network, and on what Flottille sets: the daemon's
@@ -216,6 +234,12 @@ fn login_file() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cache_lives_an_hour_on_a_subscription_and_five_minutes_on_an_api_key() {
+        assert_eq!(lifetime(false), 3_600);
+        assert_eq!(lifetime(true), 300);
+    }
 
     #[test]
     fn the_agent_gets_its_sign_in_and_the_network_and_not_the_daemon_s_secrets_or_settings() {

@@ -64,6 +64,15 @@ pub struct Compaction {
     pub maximum: Option<u64>,
     /// Tokens kept word for word.
     pub kept: u64,
+    /// An agent at rest is compacted `margin` minutes before its prompt cache expires.
+    pub before_expiry: bool,
+    pub margin: u64,
+    /// A message to an agent whose cache expired compacts it first.
+    pub after_expiry: bool,
+    /// Below this context, in tokens, neither of the two compacts.
+    pub minimum: u64,
+    /// Each provider's cache lifetime in seconds, in the daemon's order; none when unknown.
+    pub lifetimes: Vec<(String, Option<u64>)>,
 }
 
 impl Compaction {
@@ -77,6 +86,19 @@ impl Compaction {
             threshold: value["threshold"].as_u64().unwrap_or(70),
             maximum: value["maximum"].as_u64(),
             kept: value["kept"].as_u64().unwrap_or(20_000),
+            before_expiry: value["before_expiry"] == true,
+            margin: value["margin"].as_u64().unwrap_or(5),
+            after_expiry: value["after_expiry"] != false,
+            minimum: value["minimum"].as_u64().unwrap_or(50_000),
+            lifetimes: value["lifetimes"]
+                .as_object()
+                .map(|lifetimes| {
+                    lifetimes
+                        .iter()
+                        .map(|(provider, seconds)| (provider.clone(), seconds.as_u64()))
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 }
@@ -85,8 +107,22 @@ impl Compaction {
 pub const THRESHOLDS: [u64; 5] = [50, 60, 70, 80, 90];
 /// The maximum sizes it offers, in tokens, after No ceiling.
 pub const MAXIMUMS: [u64; 4] = [100_000, 150_000, 200_000, 400_000];
+/// The margins before a cache's expiry it offers, in minutes; the daemon takes 1 to 30.
+pub const MARGINS: [u64; 4] = [2, 5, 10, 15];
+/// The minimum sizes of the compaction around the cache's expiry it offers, in tokens.
+pub const MINIMUMS: [u64; 4] = [20_000, 50_000, 100_000, 200_000];
 /// The sizes kept word for word it offers, in tokens.
 pub const KEPTS: [u64; 4] = [5_000, 10_000, 20_000, 40_000];
+
+/// A provider's name as the window shows it.
+fn provider_title(provider: &str) -> &str {
+    match provider {
+        "claude" => "Claude",
+        "codex" => "Codex",
+        "opencode" => "OpenCode",
+        other => other,
+    }
+}
 
 /// What the Compaction tab says under its title.
 const COMPACTION_SENTENCE: &str = "When an agent's context fills up, the compactor writes a \
@@ -467,6 +503,11 @@ impl SettingsPage {
             threshold: 70,
             maximum: None,
             kept: 20_000,
+            before_expiry: false,
+            margin: 5,
+            after_expiry: true,
+            minimum: 50_000,
+            lifetimes: Vec::new(),
         });
         let off = self.compaction.is_none() || self.compaction_pending;
         let this = cx.entity().downgrade();
@@ -609,8 +650,61 @@ impl SettingsPage {
             Some(shown.kept),
             |v| format!("{} tokens", grouped(v.unwrap_or(0) as usize)),
             "kept",
+            this.clone(),
+        );
+        let before_expiry = Switch::new(
+            "compaction-before-expiry",
+            shown.before_expiry,
+            "Compact before the cache expires",
+        )
+        .hint("An agent at rest is compacted the margin before its prompt cache expires, so that its next turn reads a short history.")
+        .disabled(off)
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let on = this.compaction.as_ref().is_some_and(|c| c.before_expiry);
+            this.set_compaction(json!({"before_expiry": !on}), cx)
+        }));
+        let margin = select_of(
+            "compaction-margin",
+            MARGINS.iter().map(|v| Some(*v)).collect(),
+            Some(shown.margin),
+            |v| format!("{} minutes before", v.unwrap_or(0)),
+            "margin",
+            this.clone(),
+        );
+        let after_expiry = Switch::new(
+            "compaction-after-expiry",
+            shown.after_expiry,
+            "Compact a session resumed after its cache expired",
+        )
+        .hint("A message to an agent whose prompt cache expired compacts it first, then goes to the new session. The composer lets you choose for each message.")
+        .disabled(off)
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let on = this.compaction.as_ref().is_some_and(|c| c.after_expiry);
+            this.set_compaction(json!({"after_expiry": !on}), cx)
+        }));
+        let minimum = select_of(
+            "compaction-minimum",
+            MINIMUMS.iter().map(|v| Some(*v)).collect(),
+            Some(shown.minimum),
+            |v| format!("{} tokens", grouped(v.unwrap_or(0) as usize)),
+            "minimum",
             this,
         );
+        let lifetimes = shown
+            .lifetimes
+            .iter()
+            .map(|(provider, seconds)| {
+                let title = provider_title(provider);
+                match seconds {
+                    Some(seconds) if seconds % 3_600 == 0 => {
+                        format!("{title}: {} hour", seconds / 3_600).replace(" 1 hour", " an hour")
+                    }
+                    Some(seconds) => format!("{title}: {} minutes", seconds / 60),
+                    None => format!("{title}: unknown, neither compacts"),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" · ");
         let settings = div()
             .flex()
             .flex_col()
@@ -633,6 +727,27 @@ impl SettingsPage {
             .child(
                 Field::new("compaction-kept-field", "Kept word for word", kept)
                     .hint("The latest messages given again as they are, after the summary."),
+            )
+            .child(before_expiry)
+            .child(
+                Field::new("compaction-margin-field", "Margin", margin)
+                    .hint("How long before the cache expires an agent at rest is compacted."),
+            )
+            .child(after_expiry)
+            .child(
+                Field::new("compaction-minimum-field", "Minimum size", minimum)
+                    .hint("Below it, neither compacts around the cache's expiry: a small session costs little to read again."),
+            )
+            .child(
+                div()
+                    .id("compaction-lifetimes")
+                    .text_size(px(12.))
+                    .text_color(p.faint)
+                    .aria_label(SharedString::from(format!(
+                        "Prompt cache lifetimes. {lifetimes}"
+                    )))
+                    .child(format!("Prompt cache lifetimes. {lifetimes}"))
+                    .test_support(),
             )
             .child(
                 div()

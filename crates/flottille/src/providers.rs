@@ -69,6 +69,10 @@ pub struct Provider {
     /// (`docs/tools.md`, "When the tools change"). When it does not, a new build's tools are said
     /// to it in a delivery.
     pub lists_tools_again: bool,
+    /// How long its prompt cache lives after a request, in seconds (`docs/agents.md`, "The prompt
+    /// cache's lifetime"); none when it cannot be established, and then Flottille does not compact
+    /// around its expiry.
+    pub cache_lifetime: fn() -> Option<u64>,
     /// Why its agents cannot run on this machine whatever the user does in Flottille, as a
     /// clause after the provider's name; `None` when nothing stops them.
     pub unready: fn() -> Option<String>,
