@@ -568,13 +568,24 @@ fn step_time(step: &SetupLine, now: u64) -> Option<String> {
     }
 }
 
-/// Why removing a workspace now would lose work, when it would: files not committed. Flottille
-/// never forces; the daemon refuses the rest (commits not pushed) and says why. The card and the
-/// session's rail ask the same.
+/// Why a workspace cannot be removed now, when it cannot: the sessions not ended that work in it
+/// (`living`, by title), which Flottille never takes the place of, and the files not committed,
+/// which it never forces. The daemon refuses the rest (commits not pushed) and says why. The card
+/// and the session's rail ask the same.
 pub(crate) fn removal_refused(
     project: &str,
     statuses: &[RepositoryStatus],
+    living: &[String],
 ) -> Option<SharedString> {
+    let mut why = Vec::new();
+    if !living.is_empty() {
+        let titles: Vec<String> = living.iter().map(|title| format!("“{title}”")).collect();
+        why.push(format!(
+            "Sessions work in it: {}. End them first: Flottille never removes a workspace an \
+             agent works in.",
+            titles.join(", ")
+        ));
+    }
     let dirty: Vec<(String, u64)> = statuses
         .iter()
         .filter_map(|status| {
@@ -582,20 +593,20 @@ pub(crate) fn removal_refused(
             Some((repository_label(project, &status.path), files))
         })
         .collect();
-    if dirty.is_empty() {
-        return None;
+    if !dirty.is_empty() {
+        let files: u64 = dirty.iter().map(|(_, files)| files).sum();
+        let places: Vec<String> = dirty.into_iter().map(|(label, _)| label).collect();
+        let (count, verb) = match files {
+            1 => ("1 file".to_owned(), "is"),
+            files => (format!("{files} files"), "are"),
+        };
+        why.push(format!(
+            "{count} {verb} not committed in {}. Flottille never forces: commit or discard them \
+             first.",
+            places.join(", ")
+        ));
     }
-    let files: u64 = dirty.iter().map(|(_, files)| files).sum();
-    let places: Vec<String> = dirty.into_iter().map(|(label, _)| label).collect();
-    let (count, verb) = match files {
-        1 => ("1 file".to_owned(), "is"),
-        files => (format!("{files} files"), "are"),
-    };
-    Some(SharedString::from(format!(
-        "{count} {verb} not committed in {}. Flottille never forces: commit or discard them \
-         first.",
-        places.join(", ")
-    )))
+    (!why.is_empty()).then(|| SharedString::from(why.join(" ")))
 }
 
 /// A place's card: its head (name, where it started from, the lines changed, its "⋯"), its
@@ -901,7 +912,8 @@ impl PlaceCard {
     }
 
     fn removal_refused(&self) -> Option<SharedString> {
-        removal_refused(&self.project, &self.facts.statuses)
+        let living: Vec<String> = self.data.sessions.iter().map(|s| s.title.clone()).collect();
+        removal_refused(&self.project, &self.facts.statuses, &living)
     }
 
     /// The labelled lines that have something to say, each in its frame: a line that comes

@@ -3460,3 +3460,179 @@ fn a_named_branch_outside_the_format_that_exists_nowhere_is_refused_before_any_f
     assert!(message.contains(FORMAT), "{message}");
     assert_eq!(tracking(), before, "fetched before the refusal");
 }
+
+// A workspace in use (`docs/design.md` §5.1).
+
+/// A fixture whose user has the fake agent, and the workspace `login` ready.
+fn with_an_agent_s_place(user: User) -> Fixture {
+    let fixture = Fixture::of(user, false);
+    fixture.configure("");
+    fixture.create(json!({})).unwrap();
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    fixture
+}
+
+/// An agent the user starts in the workspace `login`: its id.
+fn agent_in_login(fixture: &Fixture) -> String {
+    fixture
+        .user
+        .call(
+            "agent.run",
+            json!({"project": "app", "workspace": "login", "message": "hello"}),
+        )
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn agent_state(fixture: &Fixture, agent: &str) -> String {
+    fixture.user.call("agent.list", json!({})).unwrap()["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == agent)
+        .map(|a| a["state"].as_str().unwrap().to_owned())
+        .unwrap()
+}
+
+#[test]
+fn the_user_cannot_remove_a_workspace_an_agent_works_in() {
+    let fixture = with_an_agent_s_place(User::with_fake_agent());
+    let agent = agent_in_login(&fixture);
+
+    let (code, message) = fixture.remove("login").unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert!(
+        message.contains(&format!("the agent {agent} works in it")),
+        "the agent is named: {message}"
+    );
+    assert!(message.contains("nothing was touched"), "{message}");
+    assert!(fixture.show("login").is_ok(), "the workspace stays");
+    assert!(fixture.workspace("login").join("web").exists());
+}
+
+#[test]
+fn the_user_removes_a_workspace_once_its_agents_have_ended() {
+    let fixture = with_an_agent_s_place(User::with_fake_agent());
+    let agent = agent_in_login(&fixture);
+    fixture
+        .user
+        .call("agent.stop", json!({"agent": agent}))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while agent_state(&fixture, &agent) != "ended" {
+        assert!(Instant::now() < deadline, "the agent never ended");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    fixture.remove("login").unwrap();
+
+    assert!(fixture.show("login").is_err(), "the workspace is gone");
+    assert!(!fixture.workspace("login").exists());
+}
+
+/// A user whose `git` is a script that runs the real one, but holds `git worktree remove` until
+/// the test releases it: `held` exists once it waits, `release` lets it go on.
+fn holding_removals() -> (User, PathBuf, PathBuf) {
+    let user = User::with_fake_agent();
+    let real = std::process::Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    let real = String::from_utf8(real.stdout).unwrap().trim().to_owned();
+    let (bin, held, release) = (
+        user.path("fake-git"),
+        user.path("removal-held"),
+        user.path("removal-released"),
+    );
+    std::fs::create_dir_all(&bin).unwrap();
+    let script = bin.join("git");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncase \"$*\" in *\"worktree remove\"*)\n  touch '{}'\n  while [ ! -e '{}' ]; \
+             do sleep 0.05; done;;\nesac\nexec '{real}' \"$@\"\n",
+            held.display(),
+            release.display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    (user.with_env("PATH", &path), held, release)
+}
+
+/// Runs `during` while the user's removal of `login` is held mid-way, then lets it end: it must
+/// succeed.
+fn during_a_removal(fixture: &Fixture, held: &Path, release: &Path, during: impl FnOnce()) {
+    std::thread::scope(|scope| {
+        let removal = scope.spawn(|| fixture.remove("login"));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !held.exists() {
+            assert!(Instant::now() < deadline, "the removal never reached git");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        during();
+        std::fs::write(release, "").unwrap();
+        removal.join().unwrap().unwrap();
+    });
+}
+
+#[test]
+fn an_agent_cannot_start_in_a_workspace_being_removed() {
+    let (user, held, release) = holding_removals();
+    let fixture = with_an_agent_s_place(user);
+
+    let mut refused = None;
+    during_a_removal(&fixture, &held, &release, || {
+        refused = Some(fixture.user.call(
+            "agent.run",
+            json!({"project": "app", "workspace": "login", "message": "hello"}),
+        ));
+    });
+
+    let (code, message) = refused.unwrap().unwrap_err();
+    assert_eq!(code, "refused");
+    assert!(
+        message.contains("workspace login of project app is being removed"),
+        "{message}"
+    );
+    let agents = fixture.user.call("agent.list", json!({})).unwrap();
+    assert_eq!(agents["agents"], json!([]), "no agent was made");
+}
+
+#[test]
+fn a_refusal_during_a_removal_says_it_is_being_removed() {
+    let (user, held, release) = holding_removals();
+    let fixture = with_an_agent_s_place(user);
+
+    let mut refusals = Vec::new();
+    during_a_removal(&fixture, &held, &release, || {
+        refusals.push(fixture.remove("login").unwrap_err());
+        refusals.push(
+            fixture
+                .user
+                .call(
+                    "workspace.prepare",
+                    json!({"project": "app", "name": "login"}),
+                )
+                .unwrap_err(),
+        );
+    });
+
+    for (code, message) in refusals {
+        assert_eq!(code, "refused");
+        assert!(
+            message.contains("workspace login of project app is being removed"),
+            "{message}"
+        );
+        assert!(!message.contains("being prepared"), "{message}");
+    }
+}

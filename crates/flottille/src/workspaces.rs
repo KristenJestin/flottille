@@ -549,7 +549,7 @@ pub async fn renaming(daemon: &Daemon, asked: &WorkspaceRenameBranch) -> Result<
         },
     )?;
     if daemon.preparing.lock().unwrap().contains(&workspace.id) {
-        return Err(being_prepared(&workspace));
+        return Err(held(daemon, &workspace));
     }
     if let Some(path) = &asked.repository
         && !workspace.repositories.iter().any(|w| &w.path == path)
@@ -1894,7 +1894,7 @@ async fn resume(daemon: Arc<Daemon>, asked: WorkspaceName) -> Answer {
     let workspace = find(&daemon, &asked)?;
     // Held from the start, as a removal does, so that none starts while the steps are checked.
     if !daemon.preparing.lock().unwrap().insert(workspace.id) {
-        return Err(being_prepared(&workspace));
+        return Err(held(&daemon, &workspace));
     }
     let resumed = resume_held(&daemon, &workspace).await;
     let preparing = resumed
@@ -1976,9 +1976,19 @@ pub(crate) fn done_but_missing(workspace: &Workspace) -> Vec<u32> {
         .collect()
 }
 
-fn being_prepared(workspace: &Workspace) -> Failure {
+/// The refusal of an operation on a workspace another one holds: it says which.
+pub fn held(daemon: &Daemon, workspace: &Workspace) -> Failure {
+    let doing = match daemon
+        .removing_workspaces
+        .lock()
+        .unwrap()
+        .contains(&workspace.id)
+    {
+        true => "removed",
+        false => "prepared",
+    };
     Failure::refused(format!(
-        "workspace {} of project {} is being prepared: wait until it is done (`flottille \
+        "workspace {} of project {} is being {doing}: wait until it is done (`flottille \
          workspace show`)",
         workspace.name, workspace.project
     ))
@@ -2013,58 +2023,94 @@ pub fn resume_at_start(daemon: &Arc<Daemon>) {
 // Removal.
 
 async fn remove(daemon: Arc<Daemon>, asked: WorkspaceName) -> Answer {
-    removed(daemon, asked, None, None).await
+    removed(daemon, asked, None, None, None).await
 }
 
-/// The agent removing the workspace it works in, of the tree whose root is `ours`: it then works
-/// in `main`.
+/// The agent removing the workspace it works in: it then works in `main`.
 struct Moving<'a> {
     agent: &'a str,
-    ours: &'a str,
     main: Place,
 }
 
 /// Removes the workspace; with `approved`, the losses the user's answer to an agent's request
 /// said to discard, even what would be lost: as long as it is exactly what it finds. `moving`,
-/// the agent that works in it, which then works in the project's folder.
+/// the agent that works in it, which then works in the project's folder. `by`, the agent that
+/// removes it and the root of its tree; `None` for the user.
 async fn removed(
     daemon: Arc<Daemon>,
     asked: WorkspaceName,
     approved: Option<&[String]>,
     moving: Option<&Moving<'_>>,
+    by: Option<By<'_>>,
 ) -> Answer {
     let workspace = find(&daemon, &asked)?;
-    // Held for the whole removal, so that no preparation starts meanwhile.
+    // Held for the whole removal, so that no preparation and no agent starts meanwhile.
     if !daemon.preparing.lock().unwrap().insert(workspace.id) {
-        return Err(being_prepared(&workspace));
+        return Err(held(&daemon, &workspace));
     }
-    let removed = remove_held(&daemon, &workspace, approved, moving).await;
+    daemon
+        .removing_workspaces
+        .lock()
+        .unwrap()
+        .insert(workspace.id);
+    let removed = remove_held(&daemon, &workspace, approved, moving, by).await;
+    daemon
+        .removing_workspaces
+        .lock()
+        .unwrap()
+        .remove(&workspace.id);
     daemon.preparing.lock().unwrap().remove(&workspace.id);
     removed
 }
 
-/// What works in the workspace but the agent `caller` of the tree whose root is `ours`: the
-/// other agents not ended, of its tree or not (a tree's agent loses its place as well), and the
-/// command runs still running outside the tree (`docs/design.md` §5.1), each as a sentence.
+/// The agent that removes a workspace, and the root of its tree.
+#[derive(Clone, Copy)]
+struct By<'a> {
+    agent: &'a str,
+    ours: &'a str,
+}
+
+/// The refusal of a removal while something works in the workspace (`in_use`).
+fn refuse_in_use(
+    daemon: &Daemon,
+    workspace: &Workspace,
+    by: Option<By<'_>>,
+) -> Result<(), Failure> {
+    let used = in_use(daemon, workspace, by)?;
+    if used.is_empty() {
+        return Ok(());
+    }
+    Err(Failure::refused(format!(
+        "the workspace {} of project {} is not removed, nothing was touched: {}; they end first",
+        workspace.name,
+        workspace.project,
+        used.join("; ")
+    )))
+}
+
+/// What works in the workspace but the agent `by` removing it: the other agents not ended, of
+/// its tree or not (a tree's agent loses its place as well), and the command runs still running
+/// outside its tree (`docs/design.md` §5.1), each as a sentence. For the user, every agent not
+/// ended and every command run.
 fn in_use(
     daemon: &Daemon,
     workspace: &Workspace,
-    ours: &str,
-    caller: &str,
+    by: Option<By<'_>>,
 ) -> Result<Vec<String>, Failure> {
-    let theirs = |agent: &str| tree::root_of(daemon, agent) != ours;
+    let theirs = |agent: &str| by.is_none_or(|by| tree::root_of(daemon, agent) != by.ours);
     let mut used = Vec::new();
     for agent in daemon.read(Store::agents)? {
         if agent.project == workspace.project
             && agent.workspace.as_deref() == Some(workspace.name.as_str())
             && !agent.state.is_final()
-            && agent.id != caller
+            && by.is_none_or(|by| agent.id != by.agent)
         {
-            let whose = match theirs(&agent.id) {
-                true => "outside this agent's tree",
-                false => "of this agent's tree",
+            let whose = match (by, theirs(&agent.id)) {
+                (None, _) => "",
+                (Some(_), true) => ", outside this agent's tree,",
+                (Some(_), false) => ", of this agent's tree,",
             };
-            used.push(format!("the agent {}, {whose}, works in it", agent.id));
+            used.push(format!("the agent {}{whose} works in it", agent.id));
         }
     }
     for run in daemon.read(Store::running_runs)? {
@@ -2244,7 +2290,9 @@ async fn remove_held(
     workspace: &Workspace,
     approved: Option<&[String]>,
     moving: Option<&Moving<'_>>,
+    by: Option<By<'_>>,
 ) -> Answer {
+    refuse_in_use(daemon, workspace, by)?;
     let Checked {
         made,
         problems,
@@ -2269,18 +2317,9 @@ async fn remove_held(
             }
         )));
     }
-    // Checked again once the checks above, which take time, are done: nothing of another tree
-    // may have come to work in it meanwhile.
-    if let Some(moving) = moving {
-        let used = in_use(daemon, workspace, moving.ours, moving.agent)?;
-        if !used.is_empty() {
-            return Err(Failure::refused(format!(
-                "the workspace {} is not removed, nothing was touched: {}; they end first",
-                workspace.name,
-                used.join("; ")
-            )));
-        }
-    }
+    // Checked again once the checks above, which take time, are done: nothing may have come to
+    // work in it meanwhile.
+    refuse_in_use(daemon, workspace, by)?;
 
     for link in ours {
         std::fs::remove_file(&link).map_err(|error| {
@@ -2677,25 +2716,19 @@ pub async fn workspace_remove(
     let ours = tree::root_of(daemon, agent);
     // From the first check to the end: its session starts nothing in it meanwhile.
     let _removing = own.then(|| Removing::new(daemon, agent, &workspace.name));
-    let used = match in_use(daemon, &workspace, &ours, agent) {
-        Ok(used) => used,
+    let by = By { agent, ours: &ours };
+    match refuse_in_use(daemon, &workspace, Some(by)) {
+        Ok(()) => {}
+        Err(failure) if failure.code == "refused" => {
+            return Outcome::Refused(format!("refused: {}", failure.message));
+        }
         Err(failure) => return Outcome::Failed(failure.message),
-    };
-    if !used.is_empty() {
-        return Outcome::Refused(format!(
-            "refused: workspace {} of project {} is not removed, nothing was touched: {}; they \
-             end first",
-            workspace.name,
-            workspace.project,
-            used.join("; ")
-        ));
     }
     // Where the agent goes on, known before anything is touched: the move cannot fail after.
     let moving = match own {
         true => match projects::load_project(daemon, &place.project) {
             Ok(project) => Some(Moving {
                 agent,
-                ours: &ours,
                 main: Place::main(&project, workspace.project_folder.clone()),
             }),
             Err(failure) => return Outcome::Failed(failure.message),
@@ -2705,7 +2738,7 @@ pub async fn workspace_remove(
     if own {
         // Its commands are not stopped for a removal that cannot start.
         if daemon.preparing.lock().unwrap().contains(&workspace.id) {
-            return Outcome::Refused(format!("refused: {}", being_prepared(&workspace).message));
+            return Outcome::Refused(format!("refused: {}", held(daemon, &workspace).message));
         }
         let runs = match runs_of_tree(daemon, &workspace, &ours) {
             Ok(runs) => runs,
@@ -2715,7 +2748,7 @@ pub async fn workspace_remove(
             crate::runs::stop_by_user(daemon, &run.id).await;
         }
     }
-    let removed = match removed(daemon.clone(), asked, approved, moving.as_ref()).await {
+    let removed = match removed(daemon.clone(), asked, approved, moving.as_ref(), Some(by)).await {
         Ok(removed) => removed,
         Err(failure) => {
             return match failure.code {
