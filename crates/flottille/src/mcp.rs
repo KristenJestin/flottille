@@ -343,7 +343,7 @@ const SERVED: [Definition; 30] = [
                 "action": {"type": "string", "enum": ["list", "show", "subscribe", "unsubscribe", "create", "comment", "edit", "merge", "checks", "close", "reopen", "review", "pipelines", "runs", "run_view", "run_logs", "run", "stop", "step"]},
                 "workspace": {"type": "string", "description": "Yours when left out; in main, name it."},
                 "repository": {"type": "string", "description": "A repository of the project, by its path (\".\" is the project folder itself), never a folder inside one; all of the place's when left out (list, show); the only one is taken without being named."},
-                "number": {"type": "integer", "minimum": 1, "description": "show, comment, review, edit: a pull request."},
+                "number": {"type": "integer", "minimum": 1, "description": "show, comment, review, edit, subscribe, unsubscribe: a pull request. subscribe and unsubscribe take it with repository, without workspace, for one that is not your workspace's branch's."},
                 "state": {"type": "string", "enum": ["open", "closed", "merged", "all"]},
                 "branch": {"type": "string", "description": "list: its source branch."},
                 "detail": {"type": "string", "enum": ["short", "full"]},
