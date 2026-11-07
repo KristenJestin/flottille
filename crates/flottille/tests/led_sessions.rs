@@ -395,8 +395,35 @@ fn a_led_session_s_report_and_end_wake_its_pilot() {
     assert!(woken.contains("it reported"), "{woken}");
     user.call("agent.stop", json!({"agent": session})).unwrap();
     eventually("the end's wake", || wakes(&user, &lead).len() == 2);
-    let woken = wakes(&user, &lead).remove(0);
-    assert!(woken.contains("ended"), "{woken}");
+    let ending: Vec<String> = wakes(&user, &lead)
+        .into_iter()
+        .filter(|woken| woken.contains("Your following of it is over"))
+        .collect();
+    assert_eq!(ending.len(), 1, "{:?}", wakes(&user, &lead));
+    assert!(ending[0].contains("ended:"), "{}", ending[0]);
+    assert!(!ending[0].contains("it reported"), "{}", ending[0]);
+}
+
+#[test]
+fn a_led_session_that_fails_wakes_its_pilot() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "Fix the login.", "do": [{"die": 4}]}
+    ]}));
+    let (lead, mcp) = lead(&user);
+
+    let (session, _) = led(&user, &mcp, "Fix the login.");
+
+    eventually("the failure's wake", || !wakes(&user, &lead).is_empty());
+    assert_eq!(shown(&user, &session)["state"], "failed");
+    let woken = wakes(&user, &lead);
+    assert_eq!(woken.len(), 1, "{woken:?}");
+    assert!(woken[0].contains("failed:"), "{}", woken[0]);
+    assert!(
+        woken[0].contains("Your following of it is over"),
+        "{}",
+        woken[0]
+    );
 }
 
 /// The user allows the launch `answer` held, when it was: the started agent's id and MCP session.
