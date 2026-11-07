@@ -80,6 +80,11 @@ pub enum Block {
         kind: String,
         text: String,
     },
+    /// The links it handed the user (`web show_link`) in a row, with no text of its own between
+    /// them: one card, a line each with its Open button, so that a toast missed is not lost.
+    Links {
+        links: Vec<ShownLink>,
+    },
     /// The edits of a file it changed.
     Diff {
         path: String,
@@ -89,6 +94,17 @@ pub enum Block {
     Approval {
         number: u64,
     },
+    /// A question the agent asked the user with `ask_user`: `seq` is its `agent.asked` event,
+    /// which the daemon's open questions name while it waits for the answer.
+    Question {
+        seq: u64,
+        text: String,
+    },
+    /// A question a led session asked its pilot with `ask`: the pilot answers it; the card only
+    /// shows the user what was asked.
+    Asked {
+        text: String,
+    },
     /// A command's result.
     Command(CommandCard),
     /// A request whose answer came as a card below: the line that told it was asked and decided
@@ -96,6 +112,22 @@ pub enum Block {
     Answered {
         number: u64,
     },
+}
+
+/// A link an agent handed the user: one line of a card of links. `whence` is the address's host,
+/// or the file's path in the place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShownLink {
+    pub title: Option<String>,
+    pub whence: String,
+    pub target: String,
+}
+
+impl ShownLink {
+    /// What names the link: the title, else where it leads.
+    pub fn name(&self) -> &str {
+        self.title.as_deref().unwrap_or(&self.whence)
+    }
 }
 
 /// How a command ended, as its result says it.
@@ -168,26 +200,87 @@ pub struct Call {
     /// How many characters of its result Flottille left out when it cut it at the source
     /// (`docs/tools.md`, "Long results").
     pub cut: Option<u64>,
+    /// It is a `web` `show_link`: the card of links is what the user sees of it.
+    pub shows: bool,
+    /// Its arguments are known: an agent may send them in an update after the call is first said.
+    pub asked: bool,
 }
 
 impl Call {
+    /// Whether the call is left out of the steps: a link shown has its card. A `web` call whose
+    /// arguments are not known yet is left out too while it runs, so that one that turns out to
+    /// show a link never was a row to take away; one that turns out to read appears. A call that
+    /// failed or was interrupted is a step, since no card says it.
+    pub fn hidden(&self) -> bool {
+        match self.state {
+            CallState::Failed | CallState::Interrupted => false,
+            state => {
+                self.shows || (self.name == "web" && !self.asked && state == CallState::Running)
+            }
+        }
+    }
+
     /// How long it took, once it ended.
     pub fn duration_ms(&self) -> Option<u64> {
         self.until.map(|until| until.saturating_sub(self.since))
     }
 }
 
+/// Whether a block draws nothing: the calls of a block of steps are all links shown, which the
+/// card of links says.
+pub fn is_hidden(block: &Block) -> bool {
+    matches!(block, Block::Steps { calls } if !calls.is_empty() && calls.iter().all(Call::hidden))
+}
+
 /// Whether a block stays in sight between the groups: what the agent said, the messages it was
-/// sent, the children it launched (where one that needs the user shows), and why it ended or
-/// came back. Everything else folds into the group between two of them.
+/// sent, links it shared (a toast missed is not lost), the children it launched (where one that
+/// needs the user shows), and why it ended or came back. Everything else folds into the group between two of them.
 pub fn in_sight(block: &Block) -> bool {
     match block {
-        Block::Text { .. } | Block::Message { .. } | Block::Relayed { .. } | Block::SubAgents => {
-            true
+        Block::Text { .. }
+        | Block::Message { .. }
+        | Block::Relayed { .. }
+        | Block::SubAgents
+        | Block::Links { .. } => true,
+        Block::Notice { kind, .. } => {
+            matches!(
+                kind.as_str(),
+                "failed" | "ended" | "resumed" | COMPACTED_KIND
+            )
         }
-        Block::Notice { kind, .. } => matches!(kind.as_str(), "failed" | "ended" | "resumed"),
         _ => false,
     }
+}
+
+/// The kind of the line a compaction of the conversation is.
+pub const COMPACTED_KIND: &str = "compacted";
+
+/// A compaction's line, then the summary Flottille's compactor wrote: `Conversation compacted ·
+/// 150k → 9k tokens`. One by the agent's own CLI has no summary to show.
+pub fn compacted_text(data: &Value) -> String {
+    if data["by"] != "flottille" {
+        return "Conversation compacted by the agent's CLI".into();
+    }
+    let tokens = |key: &str| {
+        let n = data[key].as_u64().unwrap_or(0);
+        match n {
+            0..1_000 => n.to_string(),
+            _ => format!("{}k", (n + 500) / 1_000),
+        }
+    };
+    let summary = match data["summary"].as_str() {
+        Some(summary) => summary.trim(),
+        None if data["missing"] == true => {
+            "The agent's handoff is missing: it went on from what Flottille holds of it and your \
+             last message."
+        }
+        None => "",
+    };
+    format!(
+        "Conversation compacted · {} → {} tokens\n{summary}",
+        tokens("before"),
+        tokens("after")
+    )
 }
 
 /// What the line of a group of the agent's work says.
@@ -231,7 +324,7 @@ impl Summary {
                     }
                 }
                 Block::Steps { calls } => {
-                    for call in calls {
+                    for call in calls.iter().filter(|call| !call.hidden()) {
                         summary.steps += 1;
                         kind(&mut summary.kinds, &call.name);
                         seen(call.since);
@@ -269,12 +362,6 @@ fn running(call: &Call) -> String {
         Some(line) => format!("running {line}"),
         None => format!("running {}", call.name),
     }
-}
-
-/// Whether a block of the conversation's last group waits on the user while it is folded: a
-/// question the agent asked them (its answer comes as a message, which ends the group).
-pub fn asks_the_user(block: &Block) -> bool {
-    matches!(block, Block::Steps { calls } if calls.iter().any(|call| call.name == "ask_user"))
 }
 
 /// What the agent does while a turn runs, as the line above the composer says it.
@@ -318,6 +405,8 @@ pub struct Conversation {
     times: Vec<u64>,
     /// The number of the event that made each block, 0 for one made before the events read.
     seqs: Vec<u64>,
+    /// The delivery each block of a message the agent received is, when the daemon said it.
+    deliveries: Vec<Option<String>>,
     /// When the event being folded came.
     now: u64,
     /// The number of the last event applied: an event read twice (history, then live) is applied
@@ -377,6 +466,7 @@ impl Conversation {
             blocks: Vec::new(),
             times: Vec::new(),
             seqs: Vec::new(),
+            deliveries: Vec::new(),
             now: 0,
             last_seq: 0,
             last_at: None,
@@ -436,6 +526,11 @@ impl Conversation {
 
     pub fn parent(&self) -> Option<&str> {
         self.parent.as_deref()
+    }
+
+    /// The delivery the block at this index is, when it is a message the daemon named.
+    pub fn delivery_of(&self, index: usize) -> Option<&str> {
+        self.deliveries.get(index)?.as_deref()
     }
 
     pub fn last_seq(&self) -> u64 {
@@ -507,6 +602,7 @@ impl Conversation {
         self.times
             .insert(0, self.times.first().copied().unwrap_or(self.now));
         self.seqs.insert(0, 0);
+        self.deliveries.insert(0, None);
         let shift = |at: &mut usize| *at += 1;
         self.calls.values_mut().for_each(shift);
         self.running = self.running.iter().map(|at| at + 1).collect();
@@ -597,6 +693,8 @@ impl Conversation {
                     id: text("id"),
                     args: args_of(&name, &data["raw_input"]),
                     path: path_of(&name, &data["raw_input"]),
+                    shows: shows_link(&name, &data["raw_input"]),
+                    asked: input_known(&data["raw_input"]),
                     name,
                     state: call_state(data["status"].as_str()),
                     since: event.at,
@@ -634,13 +732,23 @@ impl Conversation {
                     .flatten()
                     .filter_map(|name| name.as_str().map(str::to_owned))
                     .collect();
+                let delivery = |at: usize| data["deliveries"][at].as_str().map(str::to_owned);
+                // The delivery of a picture sent alone, for the bubble its thumbnails make.
+                let mut alone = None;
                 for (at, (kind, body)) in sections(&text("text")).into_iter().enumerate() {
                     // A picture sent alone has no words: its thumbnails are the message.
                     if body.trim().is_empty() && !names.is_empty() {
+                        alone = alone.or_else(|| delivery(at));
                         continue;
                     }
                     let said = changes.len();
+                    let rows = self.blocks.len();
                     changes.extend(self.deliver(&kind, body.clone()));
+                    if self.blocks.len() > rows
+                        && let Some(last) = self.deliveries.last_mut()
+                    {
+                        *last = delivery(at);
+                    }
                     // A message that used commands shows what was typed; what the agent received
                     // unfolds under it. The daemon says which, one entry per delivery.
                     let entry = &data["typed"][at];
@@ -668,12 +776,17 @@ impl Conversation {
                         {
                             *images = names;
                         }
-                        _ => changes.extend(self.push(Block::Message {
-                            from: USER.into(),
-                            text: String::new(),
-                            images: names,
-                            commands: None,
-                        })),
+                        _ => {
+                            changes.extend(self.push(Block::Message {
+                                from: USER.into(),
+                                text: String::new(),
+                                images: names,
+                                commands: None,
+                            }));
+                            if let Some(last) = self.deliveries.last_mut() {
+                                *last = alone;
+                            }
+                        }
                     }
                 }
                 changes
@@ -716,11 +829,54 @@ impl Conversation {
                     None => Vec::new(),
                 }
             }
+            "agent.link_shown" => {
+                let Some(shown) = crate::model::LinkShown::of(event) else {
+                    return Vec::new();
+                };
+                let link = ShownLink {
+                    title: shown.title,
+                    whence: shown.whence,
+                    target: shown.target,
+                };
+                let mut changes = self.close(Some(event.at));
+                // Links shown in a row are one card: only thoughts, and the calls that show them,
+                // may sit between two; any other call, and any text, starts a new one.
+                let card = self
+                    .blocks
+                    .iter()
+                    .rposition(|block| !matches!(block, Block::Thought { .. }) && !is_hidden(block))
+                    .filter(|&at| matches!(self.blocks[at], Block::Links { .. }));
+                match card {
+                    Some(at) => {
+                        if let Block::Links { links } = &mut self.blocks[at] {
+                            links.push(link);
+                        }
+                        changes.push(Change::Changed(at));
+                    }
+                    None => changes.extend(self.push(Block::Links { links: vec![link] })),
+                }
+                changes
+            }
             "agent.reported" => {
                 let mut changes = self.close(Some(event.at));
                 changes.extend(self.push(Block::Report {
                     from: self.me.clone(),
                     text: text("text"),
+                }));
+                changes
+            }
+            "agent.asked" if data["to"] == "user" => {
+                let mut changes = self.close(Some(event.at));
+                changes.extend(self.push(Block::Question {
+                    seq: event.seq,
+                    text: text("question"),
+                }));
+                changes
+            }
+            "agent.asked" if data["to"] == "pilot" => {
+                let mut changes = self.close(Some(event.at));
+                changes.extend(self.push(Block::Asked {
+                    text: text("question"),
                 }));
                 changes
             }
@@ -743,6 +899,11 @@ impl Conversation {
                 }));
                 changes
             }
+            // One line, its summary folded under it.
+            "agent.compacted" => self.push(Block::Notice {
+                kind: COMPACTED_KIND.into(),
+                text: compacted_text(data),
+            }),
             "agent.resumed" => self.push(Block::Notice {
                 kind: "resumed".into(),
                 text: "by you, on its own session".into(),
@@ -752,9 +913,10 @@ impl Conversation {
     }
 
     /// An `agent_launch` call, with its arguments when they came: a child of the agent, whose
-    /// list follows the calls, or a session for the user (`root`), which is not one.
+    /// list follows the calls, or a session (`led` or `handed`, `root` in a call made before
+    /// `kind`), which is not one.
     fn launch(&mut self, id: String, input: &Value) {
-        if input["root"] == true {
+        if input["root"] == true || matches!(input["kind"].as_str(), Some("led" | "handed")) {
             let title = input["title"].as_str().unwrap_or_default().to_owned();
             self.sessions.insert(id.clone(), title);
             if self.child_launches.remove(&id) && self.child_launches.is_empty() {
@@ -769,6 +931,7 @@ impl Conversation {
         self.blocks.push(block);
         self.times.push(self.now);
         self.seqs.push(self.last_seq);
+        self.deliveries.push(None);
         vec![Change::Added]
     }
 
@@ -835,6 +998,8 @@ impl Conversation {
         if !data["raw_input"].is_null() {
             call.args = args_of(&call.name, &data["raw_input"]);
             call.path = path_of(&call.name, &data["raw_input"]);
+            call.shows = shows_link(&call.name, &data["raw_input"]);
+            call.asked |= input_known(&data["raw_input"]);
             if call.name == "fs_edit" {
                 self.edits
                     .insert(call.id.clone(), data["raw_input"].clone());
@@ -1115,6 +1280,24 @@ pub fn woken_by(body: &str) -> String {
         (!digits.is_empty()).then(|| format!("#{digits}"))
     };
     let pull = number(body).unwrap_or_else(|| "the pull request".into());
+    // A deadline the agent gave: `Nothing came in 5 min: your subscription to checks of …`.
+    let deadline = |rest: &str| {
+        let minutes = rest.split(" min").next().unwrap_or_default().to_owned();
+        let events = rest
+            .split_once("your subscription to ")
+            .and_then(|(_, rest)| rest.split(" of ").next())
+            .unwrap_or_default()
+            .to_owned();
+        (minutes, events)
+    };
+    if let Some(rest) = body.strip_prefix("Nothing came in ") {
+        let (minutes, events) = deadline(rest);
+        return format!("nothing came for the {events} of {pull} after {minutes} min");
+    }
+    if let Some(rest) = body.strip_prefix("Its deadline, ") {
+        let (minutes, events) = deadline(rest);
+        return format!("the deadline for the {events} of {pull} passed after {minutes} min");
+    }
     if let Some(rest) = body.strip_prefix("Your subscription to ") {
         let events = rest.split(" of pull request").next().unwrap_or_default();
         let minutes = rest
@@ -1395,10 +1578,30 @@ fn shown_args(value: &Value) -> String {
 /// A call's arguments as its line shows them: a page read or a search says its URL or its words,
 /// which are what it asks.
 fn args_of(tool: &str, input: &Value) -> String {
+    // `ask` goes where the daemon says for its caller, its parent, its pilot or the user: its
+    // line does not say who.
+    if let (tool @ ("ask_user" | "ask"), Some(question)) = (tool, input["question"].as_str()) {
+        let first = question.lines().find(|line| !line.trim().is_empty());
+        let asked = match tool {
+            "ask" => "asks",
+            _ => "asked you",
+        };
+        return cut_args(format!("{asked}: {}", first.unwrap_or_default().trim()));
+    }
     match (tool, input["url"].as_str().or(input["query"].as_str())) {
         ("web", Some(asked)) => cut_args(asked.to_owned()),
         _ => shown_args(input),
     }
+}
+
+/// Whether a call's arguments came: an empty object is what an agent sends before them.
+fn input_known(input: &Value) -> bool {
+    !input.is_null() && input.as_object().is_none_or(|object| !object.is_empty())
+}
+
+/// Whether a call is `web` `show_link`.
+fn shows_link(tool: &str, input: &Value) -> bool {
+    tool == "web" && input["action"] == "show_link"
 }
 
 /// The file a file's tool works on: what its line shows in place of its arguments.
@@ -1516,6 +1719,24 @@ mod tests {
     }
 
     #[test]
+    fn a_compaction_says_its_sizes_and_holds_its_summary_and_one_by_the_cli_has_none() {
+        let flottille = json!({"by": "flottille", "before": 152_400, "after": 9_100,
+            "summary": "## Goal\nShip it."});
+        assert_eq!(
+            compacted_text(&flottille),
+            "Conversation compacted · 152k → 9k tokens\n## Goal\nShip it."
+        );
+        assert_eq!(
+            compacted_text(&json!({})),
+            "Conversation compacted by the agent's CLI"
+        );
+        assert!(in_sight(&Block::Notice {
+            kind: COMPACTED_KIND.into(),
+            text: String::new()
+        }));
+    }
+
+    #[test]
     fn only_the_user_s_message_begins_a_turn_a_delivery_does_not() {
         let prompted = |text: &str| event(1, "agent.prompted", json!({ "text": text }));
         assert!(is_user_turn(&prompted("run the tests")));
@@ -1585,6 +1806,18 @@ mod tests {
                 "Your subscription to checks of pull request #3 of app, workspace w ended after 60 min with nothing of what you waited for: subscribe again."
             ),
             "nothing came for the checks of #3 after 60 min"
+        );
+        assert_eq!(
+            woken_by(
+                "Nothing came in 5 min: your subscription to checks, review of pull request #3 of app, workspace w reached its deadline and ended. Subscribe again if you still wait for them."
+            ),
+            "nothing came for the checks, review of #3 after 5 min"
+        );
+        assert_eq!(
+            woken_by(
+                "Its deadline, 30 min, passed: your subscription to comment of pull request #3 of app, workspace w ended. Subscribe again if you still wait for them."
+            ),
+            "the deadline for the comment of #3 passed after 30 min"
         );
         assert_eq!(
             woken_by(
@@ -1856,6 +2089,35 @@ mod tests {
     }
 
     #[test]
+    fn a_led_session_s_question_to_its_pilot_is_shown_as_asked_of_it() {
+        let mut c = root();
+        c.apply(&event(
+            1,
+            "agent.asked",
+            json!({"agent": "r", "question": "Cover the logout too?", "to": "pilot",
+                "pilot": "0123456789ab"}),
+        ));
+        c.apply(&event(
+            2,
+            "agent.asked",
+            json!({"agent": "r", "question": "Cover the logout too?", "to": "user",
+                "moved_from": "0123456789ab"}),
+        ));
+        assert_eq!(
+            c.blocks(),
+            [
+                Block::Asked {
+                    text: "Cover the logout too?".into()
+                },
+                Block::Question {
+                    seq: 2,
+                    text: "Cover the logout too?".into()
+                }
+            ]
+        );
+    }
+
+    #[test]
     fn a_conversation_read_again_from_its_start_still_names_the_children() {
         let mut c = root();
         c.set_names(HashMap::from([("0123456789ab".into(), "docs-pass".into())]));
@@ -1898,6 +2160,298 @@ mod tests {
         assert!(
             matches!(reports[1], Block::Report { from, text } if from == "docs-pass" && text.ends_with("Again."))
         );
+    }
+
+    fn shown(seq: u64, target: &str, title: Option<&str>) -> Event {
+        let host = target.trim_start_matches("https://");
+        event(
+            seq,
+            "agent.link_shown",
+            json!({"agent": "a1", "kind": "url", "target": target, "title": title, "host": host}),
+        )
+    }
+
+    fn line(target: &str, title: Option<&str>) -> ShownLink {
+        ShownLink {
+            title: title.map(str::to_owned),
+            whence: target.trim_start_matches("https://").to_owned(),
+            target: target.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_link_the_agent_shared_becomes_a_card_where_it_was_shared() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        c.apply(&event(1, "agent.message", json!({"text": "Done."})));
+        c.apply(&shown(2, "https://example.org/t/42", Some("Ticket 42")));
+        assert_eq!(
+            &c.blocks()[1..],
+            [Block::Links {
+                links: vec![line("https://example.org/t/42", Some("Ticket 42"))]
+            }]
+        );
+    }
+
+    #[test]
+    fn links_shown_in_a_row_are_one_card() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        c.apply(&event(1, "agent.message", json!({"text": "Done."})));
+        c.apply(&shown(2, "https://example.org/1", Some("One")));
+        // The calls between them, and the thoughts, are no text of the agent's own.
+        c.apply(&event(
+            3,
+            "agent.tool_call",
+            json!({"id": "w2", "title": "mcp__flottille__web", "status": "in_progress",
+                "raw_input": {"action": "show_link", "url": "https://example.org/2"}}),
+        ));
+        c.apply(&event(4, "agent.thought", json!({"text": "Next one."})));
+        c.apply(&shown(5, "https://example.org/2", Some("Two")));
+        let changes = c.apply(&shown(6, "https://example.org/3", None));
+        assert_eq!(
+            c.blocks()
+                .iter()
+                .filter(|block| matches!(block, Block::Links { .. }))
+                .count(),
+            1
+        );
+        let Some(Block::Links { links }) = c
+            .blocks()
+            .iter()
+            .find(|block| matches!(block, Block::Links { .. }))
+        else {
+            panic!("no card");
+        };
+        assert_eq!(
+            links,
+            &[
+                line("https://example.org/1", Some("One")),
+                line("https://example.org/2", Some("Two")),
+                line("https://example.org/3", None),
+            ]
+        );
+        // The card is drawn again, not added again.
+        assert_eq!(changes, [Change::Changed(1)]);
+    }
+
+    #[test]
+    fn a_link_after_the_agent_s_text_starts_a_new_card() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        c.apply(&shown(1, "https://example.org/1", None));
+        c.apply(&event(2, "agent.message", json!({"text": "And another."})));
+        c.apply(&shown(3, "https://example.org/2", None));
+        let cards: Vec<&Block> = c
+            .blocks()
+            .iter()
+            .filter(|block| matches!(block, Block::Links { .. }))
+            .collect();
+        assert_eq!(cards.len(), 2);
+        assert!(
+            matches!(cards[1], Block::Links { links } if links == &[line("https://example.org/2", None)])
+        );
+    }
+
+    #[test]
+    fn the_group_is_the_same_whatever_page_of_the_history_is_read() {
+        let events = [
+            shown(1, "https://example.org/1", None),
+            shown(2, "https://example.org/2", None),
+            event(3, "agent.message", json!({"text": "Look."})),
+            shown(4, "https://example.org/3", None),
+        ];
+        let mut live = Conversation::new("the conversation".into(), None);
+        events.iter().for_each(|event| {
+            live.apply(event);
+        });
+        let mut rebuilt = live.restarted();
+        events.iter().for_each(|event| {
+            rebuilt.apply(event);
+        });
+        assert_eq!(live.blocks(), rebuilt.blocks());
+        assert_eq!(live.blocks().len(), 3);
+    }
+
+    #[test]
+    fn the_call_that_shows_a_link_is_no_step_of_its_own() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        c.apply(&event(
+            1,
+            "agent.tool_call",
+            json!({"id": "r", "title": "fs_read", "status": "completed",
+                "raw_input": {"path": "a.txt"}}),
+        ));
+        // Its arguments come after the call is first said.
+        c.apply(&event(
+            2,
+            "agent.tool_call",
+            json!({"id": "w", "title": "mcp__flottille__web", "status": "in_progress"}),
+        ));
+        let Block::Steps { calls } = &c.blocks()[0] else {
+            panic!("no steps");
+        };
+        assert!(
+            calls[1].hidden(),
+            "a web call whose arguments are not known waits to be drawn"
+        );
+        c.apply(&event(
+            3,
+            "agent.tool_call",
+            json!({"id": "w", "update": true, "raw_input": {"action": "show_link", "url": "https://example.org"}}),
+        ));
+        let Block::Steps { calls } = &c.blocks()[0] else {
+            panic!("no steps");
+        };
+        assert!(calls[1].hidden());
+        assert!(!is_hidden(&c.blocks()[0]), "the read is still a step");
+        let said = Summary::of(c.blocks(), c.times());
+        assert_eq!((said.steps, said.kinds), (1, vec!["fs_read".to_owned()]));
+        c.apply(&event(
+            4,
+            "agent.tool_call",
+            json!({"id": "w", "update": true, "status": "failed"}),
+        ));
+        let Block::Steps { calls } = &c.blocks()[0] else {
+            panic!("no steps");
+        };
+        assert!(
+            !calls[1].hidden(),
+            "a link refused is a step: no card says it"
+        );
+    }
+
+    #[test]
+    fn an_interrupted_show_link_stays_a_visible_step() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        c.apply(&event(
+            1,
+            "agent.tool_call",
+            json!({"id": "w", "title": "mcp__flottille__web", "status": "in_progress",
+                "raw_input": {"action": "show_link", "url": "https://example.org"}}),
+        ));
+        let Block::Steps { calls } = &c.blocks()[0] else {
+            panic!("no steps");
+        };
+        assert!(calls[0].hidden(), "running, its card to come");
+        c.apply(&event(2, "agent.turn_ended", json!({})));
+        let Block::Steps { calls } = &c.blocks()[0] else {
+            panic!("no steps");
+        };
+        assert_eq!(calls[0].state, CallState::Interrupted);
+        assert!(!calls[0].hidden(), "no card will say it: it is a step");
+    }
+
+    /// Whether the first call of the first block is drawn, after each event.
+    fn drawn_after(events: &[Event]) -> Vec<bool> {
+        let mut c = Conversation::new("the conversation".into(), None);
+        events
+            .iter()
+            .map(|event| {
+                c.apply(event);
+                match c.blocks().first() {
+                    Some(Block::Steps { calls }) => !calls[0].hidden(),
+                    _ => false,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_web_call_is_not_drawn_until_its_arguments_say_what_it_is() {
+        let first = |seq| {
+            event(
+                seq,
+                "agent.tool_call",
+                json!({"id": "w", "title": "mcp__flottille__web", "status": "in_progress",
+                    "raw_input": {}}),
+            )
+        };
+        let late = |seq, input: Value, status: &str| {
+            event(
+                seq,
+                "agent.tool_call",
+                json!({"id": "w", "update": true, "status": status, "raw_input": input}),
+            )
+        };
+        // A link: never drawn, so no row vanishes without folding when the arguments come.
+        let shown = drawn_after(&[
+            first(1),
+            late(
+                2,
+                json!({"action": "show_link", "url": "https://example.org"}),
+                "in_progress",
+            ),
+            late(3, Value::Null, "completed"),
+        ]);
+        assert_eq!(shown, [false, false, false]);
+        // A page read: it appears once it is known (an appearance folds in; a row never leaves).
+        let read = drawn_after(&[
+            first(1),
+            late(
+                2,
+                json!({"action": "read", "url": "https://example.org"}),
+                "in_progress",
+            ),
+            late(3, Value::Null, "completed"),
+        ]);
+        assert_eq!(read, [false, true, true]);
+        // Whatever the order, a drawn call is never taken away.
+        for events in [
+            vec![first(1), late(2, Value::Null, "completed")],
+            vec![
+                first(1),
+                late(
+                    2,
+                    json!({"action": "show_link", "path": "a.html"}),
+                    "failed",
+                ),
+            ],
+        ] {
+            let drawn = drawn_after(&events);
+            assert!(
+                drawn.windows(2).all(|pair| !(pair[0] && !pair[1])),
+                "{drawn:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn links_with_another_call_between_them_are_two_cards() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        c.apply(&shown(1, "https://example.org/1", None));
+        c.apply(&event(
+            2,
+            "agent.tool_call",
+            json!({"id": "r", "title": "fs_read", "status": "completed",
+                "raw_input": {"path": "a.txt"}}),
+        ));
+        c.apply(&shown(3, "https://example.org/2", None));
+        assert_eq!(
+            c.blocks()
+                .iter()
+                .filter(|block| matches!(block, Block::Links { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_block_of_nothing_but_links_shown_draws_nothing() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        c.apply(&event(
+            1,
+            "agent.tool_call",
+            json!({"id": "w", "title": "mcp__flottille__web", "status": "completed",
+                "raw_input": {"action": "show_link", "path": "report.html"}}),
+        ));
+        assert!(is_hidden(&c.blocks()[0]));
+        assert_eq!(Summary::of(c.blocks(), c.times()).steps, 0);
+    }
+
+    #[test]
+    fn a_shared_link_stays_in_sight_between_the_groups() {
+        let link = Block::Links {
+            links: vec![line("https://example.org", None)],
+        };
+        assert!(in_sight(&link));
     }
 
     #[test]
@@ -2770,6 +3324,7 @@ mod tests {
             step: false,
             ready: None,
             url: None,
+            service: false,
         }
     }
 

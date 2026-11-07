@@ -403,7 +403,7 @@ fn the_recent_runs_of_a_branch_are_listed() {
     assert!(
         bkt_calls(&user).contains(
             &"api /repositories/acme/api/pipelines/ --context cloud --param pagelen=50 --param \
-              sort=-created_on"
+              sort=-created_on --param target.ref_name=app/login"
                 .to_owned()
         ),
         "{:?}",
@@ -970,6 +970,125 @@ fn a_merge_key_that_cannot_be_applied_is_said_and_the_rest_is_listed() {
     );
 }
 
+/// `check-all` is defined at lines 10 and 14, the way a file with a pasted block has it.
+const REPEATED_KEY: &str = "definitions:
+  steps:
+    - step: &audit
+        name: Audit
+        script: [./audit.sh]
+  checks: &check-all
+    - step: *audit
+pipelines:
+  custom:
+    check-all:
+      - parallel: *check-all
+    audit:
+      - step: *audit
+    check-all:
+      - variables:
+          - name: SCOPE
+      - parallel: *check-all
+";
+
+#[test]
+fn a_custom_pipeline_defined_twice_is_listed_once_with_a_note() {
+    let (user, _, mcp) = setup();
+    api_holds(&user, "feature/x", REPEATED_KEY);
+
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "pipelines", "repository": "api", "branch": "feature/x"}),
+    );
+
+    assert!(!answer.error, "{}", answer.text);
+    let text = answer.text;
+    assert_eq!(text.matches("- custom: check-all").count(), 1, "{text}");
+    assert!(text.contains("- custom: audit"), "{text}");
+    assert!(
+        text.contains(
+            "bitbucket-pipelines.yml: pipelines.custom.check-all is defined twice (lines 10 and \
+             14); the last one is listed"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn the_last_definition_of_a_repeated_key_is_the_one_listed() {
+    let (user, _, mcp) = setup();
+    api_holds(&user, "feature/x", REPEATED_KEY);
+
+    let text = read(
+        &mcp,
+        json!({"action": "pipelines", "repository": "api", "branch": "feature/x"}),
+    );
+
+    assert!(
+        text.contains("- custom: check-all, variables: SCOPE\n"),
+        "the variables of the second definition: {text}"
+    );
+}
+
+#[test]
+fn a_github_workflow_with_a_repeated_key_is_listed_with_a_note() {
+    let (user, _, mcp) = setup();
+    let dir = user.path("work/app/web");
+    std::fs::write(
+        dir.join(".github/workflows/twice.yml"),
+        "name: Twice\non:\n  workflow_dispatch:\n    inputs:\n      scope:\n        required: true\n  \
+         workflow_dispatch:\n    inputs:\n      round:\n        required: false\njobs:\n  x:\n    runs-on: a\n",
+    )
+    .unwrap();
+    user.git(&dir, &["add", "."]);
+    user.git(&dir, &["commit", "--quiet", "-m", "twice"]);
+    user.git(
+        &dir,
+        &["update-ref", "refs/remotes/origin/feature/x", "HEAD"],
+    );
+
+    let text = read(
+        &mcp,
+        json!({"action": "pipelines", "repository": "web", "branch": "feature/x"}),
+    );
+
+    assert!(
+        text.contains("- Twice (.github/workflows/twice.yml), inputs: round"),
+        "the last workflow_dispatch is the one read: {text}"
+    );
+    assert!(
+        text.contains(
+            ".github/workflows/twice.yml: on.workflow_dispatch is defined twice (lines 3 and 7); \
+             the last one is listed"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("- E2E (.github/workflows/e2e.yml)"), "{text}");
+}
+
+#[test]
+fn a_file_with_a_syntax_error_is_still_refused_with_its_line() {
+    let (user, _, mcp) = setup();
+    api_holds(
+        &user,
+        "feature/x",
+        "pipelines:\n  custom:\n    check-all:\n      - step: {script: [a]}\n    check-all:\n      - step:\n          name: Deploy: prod\n",
+    );
+
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "pipelines", "repository": "api", "branch": "feature/x"}),
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    for part in [
+        "cannot be parsed",
+        "mapping values are not allowed",
+        "line 7 column 23",
+    ] {
+        assert!(answer.text.contains(part), "{part:?} in {}", answer.text);
+    }
+}
+
 #[test]
 fn a_broken_workflow_is_named_and_the_others_are_listed() {
     let (user, _, mcp) = setup();
@@ -1025,4 +1144,207 @@ fn a_custom_pipeline_from_an_anchored_file_runs_through_bkt() {
                 .to_owned()
         ]
     );
+}
+
+/// What the user is shown of the request `number`: the whole entry of `approval.list`.
+fn request(user: &User, number: u64) -> Value {
+    user.call("approval.list", json!({}))
+        .unwrap()
+        .get("requests")
+        .and_then(Value::as_array)
+        .and_then(|all| all.iter().find(|r| r["number"] == number))
+        .cloned()
+        .unwrap_or_else(|| panic!("no pending request #{number}"))
+}
+
+#[test]
+fn the_card_of_a_run_without_branch_names_the_branch() {
+    let (user, _, mcp) = setup();
+
+    let number = held(&mcp.call(
+        "forge",
+        json!({"action": "run", "repository": "api", "pipeline": "custom: deploy-preview"}),
+    ));
+
+    // The agent left the branch out: the card says where the pipeline will run, and so does what
+    // the judge reads, which is the same arguments.
+    let card = request(&user, number);
+    assert_eq!(card["call"]["branch"], "app/login", "{card}");
+    // A branch the agent named is left as it was.
+    let number = held(&mcp.call(
+        "forge",
+        json!({"action": "run", "repository": "api", "pipeline": "default", "branch": "main"}),
+    ));
+    assert_eq!(request(&user, number)["call"]["branch"], "main");
+    assert!(bkt_writes(&user).is_empty(), "{:?}", bkt_calls(&user));
+}
+
+#[test]
+fn a_huge_pipelines_file_is_refused() {
+    let (user, _, mcp) = setup();
+    let mut text = BITBUCKET_PIPELINES.to_owned();
+    while text.len() <= 1024 * 1024 {
+        text.push_str(&format!("# {}\n", "padding ".repeat(10)));
+    }
+    api_holds(&user, "feature/x", &text);
+
+    let answer = mcp.call(
+        "forge",
+        json!({"action": "pipelines", "repository": "api", "branch": "feature/x"}),
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("bitbucket-pipelines.yml")
+            && answer.text.contains(&format!("{} bytes", text.len()))
+            && answer.text.contains("limit is 1 MiB"),
+        "{}",
+        answer.text
+    );
+}
+
+#[test]
+fn a_short_secured_value_does_not_garble_the_answer() {
+    let (user, _, mcp) = setup();
+
+    let number = held(&mcp.call(
+        "forge",
+        json!({"action": "run", "repository": "api", "pipeline": "custom: deploy-preview",
+        "variables": [
+            {"key": "PREVIEW_JOBS", "value": "1,4"},
+            {"key": "PREVIEW_TOKEN", "value": "4", "secured": true}
+        ]}),
+    ));
+    // The card keeps the pipeline and the branch as they are; only the value is hidden.
+    let card = request(&user, number);
+    assert_eq!(card["call"]["pipeline"], "custom: deploy-preview", "{card}");
+    assert_eq!(card["call"]["branch"], "app/login", "{card}");
+    assert_eq!(card["call"]["variables"][0]["value"], "1,4", "{card}");
+    assert_eq!(card["call"]["variables"][1]["value"], "[masked]", "{card}");
+
+    let answer = allowed(
+        &user,
+        Answer {
+            error: false,
+            text: format!("Waiting for the user's approval, request #{number}."),
+        },
+    );
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("#43, https://bitbucket.org/acme/api/pipelines/results/43"),
+        "{}",
+        answer.text
+    );
+}
+
+#[test]
+fn runs_finds_a_quiet_branch_s_older_runs() {
+    let (user, _, mcp) = setup();
+    let mut script = bkt_script();
+    let pipelines = script["pipelines"]["acme/api"].as_array_mut().unwrap();
+    // Sixty newer runs of main push the quiet branch's one out of the repository's newest 50.
+    for n in 0..60 {
+        pipelines.insert(
+            0,
+            json!({"uuid": format!("{{main-{n}}}"), "build_number": 100 + n,
+                "state": {"name": "COMPLETED", "result": {"name": "SUCCESSFUL"}},
+                "trigger": {"name": "PUSH"},
+                "created_on": format!("2026-11-02T10:{n:02}:00.000000+00:00"),
+                "target": {"type": "pipeline_ref_target", "ref_type": "branch",
+                    "ref_name": "main", "selector": {"type": "default"}}}),
+        );
+    }
+    pipelines.push(json!({"uuid": "{quiet-2}", "build_number": 2,
+        "state": {"name": "COMPLETED", "result": {"name": "FAILED"}},
+        "trigger": {"name": "PUSH"},
+        "created_on": "2026-10-01T09:00:00.000000+00:00",
+        "target": {"type": "pipeline_ref_target", "ref_type": "branch",
+            "ref_name": "quiet", "selector": {"type": "default"}}}));
+    user.bkt_script(script);
+
+    let text = read(
+        &mcp,
+        json!({"action": "runs", "repository": "api", "branch": "quiet"}),
+    );
+
+    assert!(text.contains("- #2 default, failed, push"), "{text}");
+    assert!(
+        bkt_calls(&user)
+            .iter()
+            .any(|call| call.contains("--param target.ref_name=quiet")),
+        "{:?}",
+        bkt_calls(&user)
+    );
+}
+
+#[test]
+fn a_dash_in_a_bitbucket_variable_key_is_refused() {
+    let (user, _, mcp) = setup();
+
+    for key in ["PREVIEW-SEED", "1SEED", "SEED KEY"] {
+        let answer = mcp.call(
+            "forge",
+            json!({"action": "run", "repository": "api", "pipeline": "custom: deploy-preview",
+                "variables": [{"key": key, "value": "7"}]}),
+        );
+        assert!(answer.error, "{key}: {}", answer.text);
+        assert!(
+            answer.text.contains(key)
+                && answer
+                    .text
+                    .contains("letters, digits and underscores, not starting with a digit"),
+            "{}",
+            answer.text
+        );
+    }
+    // Refused before the user is asked, and before the forge is.
+    assert!(bkt_writes(&user).is_empty(), "{:?}", bkt_calls(&user));
+    // GitHub's inputs may hold a dash.
+    let answer = write(
+        &user,
+        &mcp,
+        json!({"action": "run", "repository": "web", "pipeline": "e2e.yml",
+            "variables": [{"key": "test-suite", "value": "smoke"}]}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+}
+
+#[test]
+fn the_event_of_a_run_carries_the_link_of_the_run() {
+    let (user, id, mcp) = setup();
+    set_mode(&user, &id, "full");
+
+    // Bitbucket answers the run's number and link when it is run with variables (the REST call).
+    for (repository, pipeline, variables, link) in [
+        (
+            "api",
+            "custom: deploy-preview",
+            json!([{"key": "PREVIEW_SEED", "value": "7"}]),
+            "https://bitbucket.org/acme/api/pipelines/results/43",
+        ),
+        (
+            "web",
+            "e2e.yml",
+            json!([{"key": "suite", "value": "smoke"}]),
+            "https://github.com/acme/web/actions/runs/78",
+        ),
+    ] {
+        let answer = mcp.call(
+            "forge",
+            json!({"action": "run", "repository": repository, "pipeline": pipeline,
+                "variables": variables, "follow": false}),
+        );
+        assert!(!answer.error, "{}", answer.text);
+        let store = Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+        let events = store.agent_events(&id, 0, 500).unwrap();
+        let served = events
+            .iter()
+            .rfind(|e| {
+                e.name == "agent.tool_served" && e.data["arguments"]["repository"] == repository
+            })
+            .unwrap_or_else(|| panic!("no tool_served for {repository}"));
+        assert_eq!(served.data["link"], link, "{}", served.data);
+    }
 }

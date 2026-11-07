@@ -151,7 +151,7 @@ pub fn take_notes(daemon: &Daemon, agent: &str, room: usize) -> Vec<String> {
         .write(|store| store.move_deliveries(agent, &ids, "queued", "sent", "note"))
         .unwrap_or_default();
     if !moved.is_empty() {
-        took(daemon, agent, &kinds_of(daemon, &moved));
+        took(daemon, agent, &taken_of(daemon, &moved));
     }
     notes
         .into_iter()
@@ -160,28 +160,47 @@ pub fn take_notes(daemon: &Daemon, agent: &str, room: usize) -> Vec<String> {
         .collect()
 }
 
-fn kinds_of(daemon: &Daemon, ids: &[String]) -> Vec<String> {
+/// The kind and the id of each delivery of `ids`.
+fn taken_of(daemon: &Daemon, ids: &[String]) -> Vec<(String, String)> {
     ids.iter()
         .filter_map(|id| daemon.read(|store| store.delivery(id)).ok().flatten())
-        .map(|d| d.kind)
+        .map(|d| (d.kind, d.id))
         .collect()
 }
 
 /// What an agent taking deliveries changes: a delivery other than the reminder starts its count
-/// of quiet turns again, and a message of its parent (or, for a root, of the user) answers its
-/// question.
-fn took(daemon: &Daemon, agent: &str, kinds: &[String]) {
+/// of quiet turns again, and a message of its parent answers a child's question; a root's waits
+/// until no question of its is left unanswered (`tree::unanswered`): a message of the user
+/// written before a question does not answer it.
+fn took(daemon: &Daemon, agent: &str, taken: &[(String, String)]) {
+    let Ok(Some(found)) = daemon.read(|store| store.agent(agent)) else {
+        return;
+    };
+    // A led session's pilot answers with `session_send`, whose key names it; another session's
+    // message answers nothing.
+    let from_pilot = |id: &str| {
+        found
+            .launched_by
+            .as_ref()
+            .is_some_and(|pilot| id.starts_with(&format!("session-{pilot}-")))
+    };
+    let answering = found.waiting_on_answer
+        && taken.iter().any(|(k, id)| {
+            k == "parent" || k == "user" || (k == "session" && found.led && from_pilot(id))
+        });
+    let open =
+        |to| crate::tree::unanswered_to(daemon, agent, to).is_ok_and(|open| !open.is_empty());
+    let still = answering && found.parent.is_none() && (open("user") || open("pilot"));
     let change = AgentChange {
-        quiet_turns: kinds.iter().any(|k| k != "reminder").then_some(0),
-        waiting_on_answer: kinds
-            .iter()
-            .any(|k| k == "parent" || k == "user")
-            .then_some(false),
+        quiet_turns: taken.iter().any(|(k, _)| k != "reminder").then_some(0),
+        waiting_on_answer: (answering && !still).then_some(false),
         ..AgentChange::default()
     };
-    if change.quiet_turns.is_some() || change.waiting_on_answer.is_some() {
+    if change.quiet_turns.is_some() || answering {
         let _ = daemon.write(|store| {
-            let (_, event) = store.change_agent(agent, change, None)?;
+            // Clients read its open questions again.
+            let event = answering.then(|| ("agent.answered", json!({"agent": agent})));
+            let (_, event) = store.change_agent(agent, change, event)?;
             Ok(((), event))
         });
     }
@@ -364,11 +383,17 @@ pub struct Prompt {
     /// For each delivery taken, in order, what was typed and the commands it used (`null` for one
     /// sent as written); `null` when none used a command. The window shows the typed text.
     pub typed: Value,
+    /// The ids of the deliveries taken, in order: the window knows a message it sent by its own.
+    pub deliveries: Vec<String>,
 }
 
 /// The agent's queued deliveries as one prompt, taken: those that start a session first, then the
 /// others in their order. `None` when there is none, or the agent has ended.
 pub fn pump(daemon: &Daemon, agent: &str) -> Option<Prompt> {
+    // Its conversation is being summarised: what comes waits for the new session.
+    if crate::compaction::holding(daemon, agent) {
+        return None;
+    }
     let found = daemon.read(|store| store.agent(agent)).ok()??;
     if found.state.is_final() {
         return None;
@@ -386,6 +411,11 @@ pub fn pump(daemon: &Daemon, agent: &str) -> Option<Prompt> {
         _ => 3,
     };
     queued.sort_by_key(|d| rank(&d.kind));
+    // Asked for its handoff: that message is the whole prompt, and the others wait for the new
+    // session.
+    if crate::compaction::handing(daemon, agent) {
+        queued.retain(|d| d.kind == crate::compaction::HANDOFF_KIND);
+    }
     // A message sent now is the whole prompt (after what starts a session): the others wait for
     // the next one, in their order.
     if queued.iter().any(|d| d.urgency == approval::REDIRECT) {
@@ -401,7 +431,10 @@ pub fn pump(daemon: &Daemon, agent: &str) -> Option<Prompt> {
     if taken.is_empty() {
         return None;
     }
-    let kinds: Vec<String> = taken.iter().map(|d| d.kind.clone()).collect();
+    let kinds: Vec<(String, String)> = taken
+        .iter()
+        .map(|d| (d.kind.clone(), d.id.clone()))
+        .collect();
     took(daemon, agent, &kinds);
     let typed = if taken.iter().any(|d| d.typed.is_some()) {
         taken
@@ -415,6 +448,7 @@ pub fn pump(daemon: &Daemon, agent: &str) -> Option<Prompt> {
         Value::Null
     };
     Some(Prompt {
+        deliveries: taken.iter().map(|d| d.id.clone()).collect(),
         images: taken.iter().flat_map(|d| d.images.clone()).collect(),
         typed,
         text: taken

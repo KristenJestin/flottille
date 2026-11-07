@@ -11,7 +11,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 
 use crate::agent::{Agent, AgentState, Choices, GateMode, TurnUsage, Used};
-use crate::approval::{Decision, Delivery, Forward, Judgement, Kind, Request, RequestState};
+use crate::approval::{Decision, Delivery, Forward, Judgement, Kind, Leave, Request, RequestState};
 use crate::item::{Check, Cursor, Filter, Item, Post};
 use crate::protocol::Event;
 use crate::run::{Readiness, Run, RunState};
@@ -641,6 +641,58 @@ const MIGRATIONS: &[&str] = &[
             AND instr(body, ' of project ') > 13
             AND instr(substr(body, 13, instr(body, ' of project ') - 13), ' ') = 0;
 ",
+    "
+    -- The agent that wrote each service of `services.toml` the daemon last wrote for an agent
+    -- (`docs/projects.md`, \"Services\"): its lines are judged again when another agent's call
+    -- starts it. No row: the user's own (written by hand, from the command line or the window).
+    -- Not in the file, which the user edits.
+    CREATE TABLE service_writers (
+        name   TEXT PRIMARY KEY,
+        agent  TEXT NOT NULL
+    ) STRICT;
+",
+    "
+    -- The user's leave for a session to write to another it did not start, one way, given once
+    -- for the pair (`docs/tools.md`, \"Sessions that talk to each other\"): it goes with the end
+    -- of either session.
+    CREATE TABLE session_leaves (
+        writer     TEXT NOT NULL REFERENCES agents (id) ON DELETE CASCADE,
+        session    TEXT NOT NULL REFERENCES agents (id) ON DELETE CASCADE,
+        request    INTEGER NOT NULL,
+        granted_at INTEGER NOT NULL,
+        PRIMARY KEY (writer, session)
+    ) STRICT;
+    CREATE INDEX session_leaves_session ON session_leaves (session);
+",
+    "
+    -- The vault's entries (`docs/vault.md`): their metadata only. Their secrets are the
+    -- keyring's, never the store's.
+    CREATE TABLE vault_entries (
+        name        TEXT PRIMARY KEY,
+        description TEXT,
+        url         TEXT,
+        username    TEXT,
+        project     TEXT,
+        updated_at  INTEGER NOT NULL
+    ) STRICT;
+",
+    "
+    -- A session an agent started is led by it or handed to the user (`docs/tools.md`, \"Sessions
+    -- an agent starts\"): one its starter still followed is led, the others handed. A following,
+    -- which woke its starter at each turn end, now wakes a pilot when its session asks, reports
+    -- or ends.
+    ALTER TABLE agents ADD COLUMN led INTEGER NOT NULL DEFAULT 0;
+    UPDATE agents SET led = 1 WHERE launched_by IS NOT NULL AND EXISTS (
+        SELECT 1 FROM subscriptions WHERE source = 'session' AND agent = agents.launched_by
+            AND json_extract(target, '$.session') = agents.id);
+    UPDATE subscriptions SET events = '[\"asked\",\"reported\",\"ended\"]'
+        WHERE source = 'session';
+",
+    "
+    -- The agent a session was detached from by the user (`docs/tools.md`, \"Detach\"): kept for
+    -- the record once `launched_by` is cleared, and to keep its first message the agent's.
+    ALTER TABLE agents ADD COLUMN detached_from TEXT REFERENCES agents (id);
+",
 ];
 
 /// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its
@@ -664,7 +716,7 @@ const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, sta
     created_at, updated_at, active_at, ended_at, chosen_model, chosen_effort, chosen_mode, \
     taken_model, taken_effort, taken_mode, native_id, agent_version, instructions, tools, parent, \
     depth, epoch, title, brief, reported_at, quiet_turns, waiting_on_answer, reopens, images, gate_mode, \
-    launched_by, pending_model, pending_effort, exchanged_at";
+    launched_by, pending_model, pending_effort, exchanged_at, led, detached_from";
 
 const DELIVERY_COLUMNS: &str =
     "id, agent, kind, body, urgency, state, created_at, sent_at, images, typed, commands";
@@ -690,6 +742,10 @@ pub struct AgentChange {
     pub reported_at: Option<Option<u64>>,
     pub quiet_turns: Option<u32>,
     pub waiting_on_answer: Option<bool>,
+    pub led: Option<bool>,
+    /// The user detached the session from the agent that started it: `launched_by` is cleared,
+    /// `detached_from` keeps that agent (`docs/tools.md`, "Detach").
+    pub detached_from: Option<String>,
 }
 
 /// How many cut tool results of one agent keep their whole text (`docs/tools.md`, "Long
@@ -1112,7 +1168,7 @@ impl Store {
             &format!(
                 "INSERT INTO agents ({AGENT_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, \
                  ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, \
-                 ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37)"
+                 ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39)"
             ),
             params![
                 agent.id,
@@ -1152,6 +1208,8 @@ impl Store {
                 agent.pending.model,
                 agent.pending.effort,
                 agent.exchanged_at,
+                agent.led,
+                agent.detached_from,
             ],
         )?;
         let event = append_agent_event(&transaction, &agent.id, event.0, event.1)?;
@@ -1224,6 +1282,13 @@ impl Store {
                 ],
             )?;
         }
+        // A leave lasts while both sessions do: one that ends, even to be resumed, takes it.
+        if change.state.is_some_and(AgentState::is_final) {
+            transaction.execute(
+                "DELETE FROM session_leaves WHERE writer = ?1 OR session = ?1",
+                params![id],
+            )?;
+        }
         if let Some(native_id) = change.native_id {
             transaction.execute(
                 "UPDATE agents SET native_id = ?2 WHERE id = ?1",
@@ -1265,6 +1330,15 @@ impl Store {
                 "UPDATE agents SET quiet_turns = ?2 WHERE id = ?1",
                 params![id, quiet_turns],
             )?;
+        }
+        if let Some(from) = change.detached_from {
+            transaction.execute(
+                "UPDATE agents SET detached_from = ?2, launched_by = NULL, led = 0 WHERE id = ?1",
+                params![id, from],
+            )?;
+        }
+        if let Some(led) = change.led {
+            transaction.execute("UPDATE agents SET led = ?2 WHERE id = ?1", params![id, led])?;
         }
         if let Some(waiting) = change.waiting_on_answer {
             transaction.execute(
@@ -1419,7 +1493,8 @@ impl Store {
                SELECT max(created_at, coalesce(active_at, 0), coalesce(exchanged_at, 0)) AS at \
                  FROM agents WHERE id IN tree \
                UNION ALL SELECT max(e.at) FROM agent_events a JOIN events e ON e.seq = a.seq \
-                 WHERE a.agent IN tree AND e.name NOT IN ('agent.tools_outdated', 'agent.released') \
+                 WHERE a.agent IN tree \
+                 AND e.name NOT IN ('agent.tools_outdated', 'agent.tools_reload', 'agent.released') \
                UNION ALL SELECT max(created_at, coalesce(sent_at, 0)) FROM deliveries \
                  WHERE agent IN tree \
                UNION ALL SELECT max(started_at, coalesce(ended_at, 0)) FROM runs \
@@ -2204,12 +2279,193 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Writes what the source of a subscription last saw of its target; whether it was still
+    /// there: one ended meanwhile is not written back.
+    pub fn set_seen(&self, id: &str, seen: &serde_json::Value) -> Result<bool> {
+        Ok(self.connection.execute(
+            "UPDATE subscriptions SET seen = ?2 WHERE id = ?1",
+            params![id, serde_json::to_string(seen)?],
+        )? > 0)
+    }
+
     /// Removes a subscription; whether it was there.
     pub fn unsubscribe(&self, id: &str) -> Result<bool> {
         Ok(self
             .connection
             .execute("DELETE FROM subscriptions WHERE id = ?1", params![id])?
             > 0)
+    }
+
+    /// The user lets `writer` write to `session`, with the request it was asked in, and its
+    /// `leave.granted` event; `None` when it was given already or either session has ended.
+    pub fn grant_leave(
+        &mut self,
+        writer: &str,
+        session: &str,
+        request: u64,
+    ) -> Result<(Option<Leave>, Option<Event>)> {
+        let transaction = self.connection.transaction()?;
+        let leave = Leave {
+            writer: writer.to_owned(),
+            session: session.to_owned(),
+            request,
+            granted_at: now_ms(),
+        };
+        // Checked in the same write as `change_agent`'s DELETE, so a session ended between the
+        // approval and here never keeps a leave a resume would find.
+        let added = transaction.execute(
+            "INSERT OR IGNORE INTO session_leaves (writer, session, request, granted_at) \
+             SELECT ?1, ?2, ?3, ?4 WHERE (SELECT count(*) FROM agents \
+             WHERE id IN (?1, ?2) AND state NOT IN ('ended', 'failed')) = 2",
+            params![writer, session, request, leave.granted_at],
+        )?;
+        if added == 0 {
+            return Ok((None, None));
+        }
+        let event = append_event(&transaction, "leave.granted", leave.to_json())?;
+        transaction.commit()?;
+        Ok((Some(leave), Some(event)))
+    }
+
+    /// Whether the user let `writer` write to `session`.
+    pub fn has_leave(&self, writer: &str, session: &str) -> Result<bool> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT 1 FROM session_leaves WHERE writer = ?1 AND session = ?2",
+                params![writer, session],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// The leaves that name `agent`, as the writer or as the session written to, oldest first.
+    pub fn leaves_of(&self, agent: &str) -> Result<Vec<Leave>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT writer, session, request, granted_at FROM session_leaves \
+             WHERE writer = ?1 OR session = ?1 ORDER BY granted_at, rowid",
+        )?;
+        let rows = statement.query_map(params![agent], |row| {
+            Ok(Leave {
+                writer: row.get(0)?,
+                session: row.get(1)?,
+                request: row.get(2)?,
+                granted_at: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The vault's entries, by name.
+    pub fn vault_entries(&self) -> Result<Vec<crate::vault::Entry>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT name, description, url, username, project, updated_at FROM vault_entries \
+             ORDER BY name",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(crate::vault::Entry {
+                name: row.get(0)?,
+                description: row.get(1)?,
+                url: row.get(2)?,
+                username: row.get(3)?,
+                project: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Keeps `entry`, in place of the one of its name, with its `vault.changed` event: its
+    /// metadata, never a secret.
+    pub fn put_vault_entry(&mut self, entry: &crate::vault::Entry) -> Result<((), Event)> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO vault_entries (name, description, url, username, project, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT (name) DO UPDATE SET \
+             description = ?2, url = ?3, username = ?4, project = ?5, updated_at = ?6",
+            params![
+                entry.name,
+                entry.description,
+                entry.url,
+                entry.username,
+                entry.project,
+                entry.updated_at
+            ],
+        )?;
+        let event = append_event(
+            &transaction,
+            "vault.changed",
+            json!({"name": entry.name, "project": entry.project}),
+        )?;
+        transaction.commit()?;
+        Ok(((), event))
+    }
+
+    /// Forgets the entry `name`, with its `vault.changed` event; `None` when there was none.
+    pub fn remove_vault_entry(
+        &mut self,
+        name: &str,
+    ) -> Result<(Option<crate::vault::Entry>, Option<Event>)> {
+        let transaction = self.connection.transaction()?;
+        let removed = transaction
+            .query_row(
+                "DELETE FROM vault_entries WHERE name = ?1 \
+                 RETURNING description, url, username, project, updated_at",
+                params![name],
+                |row| {
+                    Ok(crate::vault::Entry {
+                        name: name.to_owned(),
+                        description: row.get(0)?,
+                        url: row.get(1)?,
+                        username: row.get(2)?,
+                        project: row.get(3)?,
+                        updated_at: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+        let Some(removed) = removed else {
+            return Ok((None, None));
+        };
+        let event = append_event(
+            &transaction,
+            "vault.changed",
+            json!({"name": name, "project": removed.project, "removed": true}),
+        )?;
+        transaction.commit()?;
+        Ok((Some(removed), Some(event)))
+    }
+
+    /// The user takes the leave back, with its `leave.withdrawn` event; `None` when there was
+    /// none.
+    pub fn withdraw_leave(
+        &mut self,
+        writer: &str,
+        session: &str,
+    ) -> Result<(Option<Leave>, Option<Event>)> {
+        let transaction = self.connection.transaction()?;
+        let leave = transaction
+            .query_row(
+                "DELETE FROM session_leaves WHERE writer = ?1 AND session = ?2 \
+                 RETURNING request, granted_at",
+                params![writer, session],
+                |row| {
+                    Ok(Leave {
+                        writer: writer.to_owned(),
+                        session: session.to_owned(),
+                        request: row.get(0)?,
+                        granted_at: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?;
+        let Some(leave) = leave else {
+            return Ok((None, None));
+        };
+        let event = append_event(&transaction, "leave.withdrawn", leave.to_json())?;
+        transaction.commit()?;
+        Ok((Some(leave), Some(event)))
     }
 
     /// The project's items that `filter` keeps, with their checks, the most recently changed
@@ -2493,6 +2749,33 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The agent that wrote the service; `None` writes it as the user's.
+    pub fn set_service_writer(&mut self, name: &str, by: Option<&str>) -> Result<()> {
+        match by {
+            Some(agent) => self.connection.execute(
+                "INSERT INTO service_writers (name, agent) VALUES (?1, ?2) \
+                 ON CONFLICT (name) DO UPDATE SET agent = ?2",
+                params![name, agent],
+            )?,
+            None => self
+                .connection
+                .execute("DELETE FROM service_writers WHERE name = ?1", params![name])?,
+        };
+        Ok(())
+    }
+
+    /// The agent that wrote the service; `None` when it is the user's.
+    pub fn service_writer(&self, name: &str) -> Result<Option<String>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT agent FROM service_writers WHERE name = ?1",
+                params![name],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     /// Records what a turn used, one row per model.
     pub fn record_turn_usage(&mut self, rows: &[TurnUsage]) -> Result<()> {
         let transaction = self.connection.transaction()?;
@@ -2559,6 +2842,19 @@ impl Store {
                     cost_usd: row.get(16)?,
                 },
             })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The turns of a session, each once whatever the models it used: its agent and its start and
+    /// end, in milliseconds.
+    pub fn turns_of_session(&self, session: &str) -> Result<Vec<(String, u64, u64)>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT agent, started_at, ended_at FROM turn_usage WHERE session = ?1 \
+             GROUP BY agent, started_at, ended_at ORDER BY started_at",
+        )?;
+        let rows = statement.query_map(params![session], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -3363,6 +3659,8 @@ fn agent_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Agent>> {
             mode: None,
         },
         exchanged_at: row.get(36)?,
+        led: row.get(37)?,
+        detached_from: text(38)?,
     }))
 }
 
@@ -3585,6 +3883,7 @@ mod tests {
                     note: None,
                 },
                 resumed: false,
+                resumed_branch: None,
             }],
             steps: vec![
                 Step {
@@ -4092,6 +4391,8 @@ mod tests {
             images: None,
             gate_mode: GateMode::Auto,
             launched_by: None,
+            led: false,
+            detached_from: None,
         }
     }
 
@@ -4150,6 +4451,33 @@ mod tests {
 
         assert_eq!(ids(store.live_agents().unwrap()), ["running00000"]);
         assert_eq!(ids(store.kept_sessions().unwrap()), ["kept00000000"]);
+    }
+
+    #[test]
+    fn a_leave_is_granted_only_while_both_sessions_are_live() {
+        let mut store = Store::open_in_memory().unwrap();
+        let writer = an_agent();
+        let mut session = an_agent();
+        session.id = "session00000".into();
+        for agent in [&writer, &session] {
+            store
+                .create_agent(agent, ("agent.created", json!({})))
+                .unwrap();
+        }
+        let ended = AgentChange {
+            state: Some(AgentState::Ended),
+            ..AgentChange::default()
+        };
+        store.change_agent(&session.id, ended, None).unwrap();
+
+        let granted = store.grant_leave(&writer.id, &session.id, 7).unwrap();
+
+        assert_eq!(granted, (None, None));
+        store.resume_agent(&session.id).unwrap().unwrap();
+        assert!(!store.has_leave(&writer.id, &session.id).unwrap());
+        let (leave, event) = store.grant_leave(&writer.id, &session.id, 8).unwrap();
+        assert_eq!(leave.map(|l| l.request), Some(8));
+        assert_eq!(event.unwrap().name, "leave.granted");
     }
 
     #[test]
@@ -4518,6 +4846,67 @@ mod tests {
         let run = store.run("r1").unwrap().unwrap();
         assert_eq!(run.agent.as_deref(), Some(agent.id.as_str()));
         assert_eq!(run.project, "app");
+    }
+
+    #[test]
+    fn sessions_launched_before_keep_their_relation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let old = Connection::open(&path).unwrap();
+        let previous = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("ADD COLUMN led INTEGER"))
+            .unwrap();
+        for migration in &MIGRATIONS[..previous] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.pragma_update(None, "user_version", previous).unwrap();
+        // A starter, a session it still follows, one it does not, and a root of the user's.
+        for (id, launched_by) in [
+            ("000000000001", None),
+            ("000000000002", Some("000000000001")),
+            ("000000000003", Some("000000000001")),
+            ("000000000004", None),
+        ] {
+            old.execute(
+                "INSERT INTO agents (id, provider, role, project, workspace, folder, state, \
+                 created_at, updated_at, instructions, tools, launched_by) VALUES (?1, 'claude', \
+                 'lead', 'app', NULL, '/work/app', 'idle', 1, 1, 'text', '[]', ?2)",
+                params![id, launched_by],
+            )
+            .unwrap();
+        }
+        old.execute(
+            "INSERT INTO subscriptions (id, agent, source, target, events, from_whom, seen, \
+             created_at, expires_at) VALUES ('s1', '000000000001', 'session', \
+             '{\"session\":\"000000000002\",\"title\":\"Login\"}', '[\"turn-ended\"]', \
+             'anyone', '{}', 1, 9)",
+            [],
+        )
+        .unwrap();
+        drop(old);
+
+        let store = Store::open(&path).unwrap();
+
+        let led = |id: &str| store.agent(id).unwrap().unwrap().led;
+        assert!(led("000000000002"), "a followed session is led");
+        assert!(!led("000000000003"), "an unfollowed one is handed");
+        assert!(!led("000000000004"));
+        for id in ["000000000002", "000000000003"] {
+            assert_eq!(
+                store.agent(id).unwrap().unwrap().launched_by.as_deref(),
+                Some("000000000001")
+            );
+        }
+        let events: String = store
+            .connection
+            .query_row(
+                "SELECT events FROM subscriptions WHERE id = 's1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(events, r#"["asked","reported","ended"]"#);
     }
 
     #[test]
@@ -5410,7 +5799,11 @@ mod tests {
 
         // The daemon's own words are no activity.
         std::thread::sleep(std::time::Duration::from_millis(5));
-        for name in ["agent.tools_outdated", "agent.released"] {
+        for name in [
+            "agent.tools_outdated",
+            "agent.tools_reload",
+            "agent.released",
+        ] {
             store
                 .append_agent_event(&agent.id, name, json!({}), false)
                 .unwrap();
@@ -6535,5 +6928,25 @@ mod tests {
 
         assert_eq!(store.agent(&agent.id).unwrap(), None);
         assert_eq!(store.turn_usage().unwrap(), [row]);
+    }
+
+    #[test]
+    fn the_agent_that_wrote_a_service_is_kept_until_the_user_writes_it() {
+        let mut store = Store::open_in_memory().unwrap();
+        assert_eq!(store.service_writer("mongo").unwrap(), None);
+
+        store.set_service_writer("mongo", Some("a1b2c3")).unwrap();
+        assert_eq!(
+            store.service_writer("mongo").unwrap(),
+            Some("a1b2c3".to_owned())
+        );
+        store.set_service_writer("mongo", Some("d4e5f6")).unwrap();
+        assert_eq!(
+            store.service_writer("mongo").unwrap(),
+            Some("d4e5f6".to_owned())
+        );
+
+        store.set_service_writer("mongo", None).unwrap();
+        assert_eq!(store.service_writer("mongo").unwrap(), None);
     }
 }

@@ -1201,3 +1201,131 @@ fn a_repository_that_cannot_be_added_or_removed_leaves_the_file_as_it_was() {
     let after = std::fs::read_to_string(user.project_file("app")).unwrap();
     assert!(after.contains("path = \"api\""), "{after}");
 }
+
+#[test]
+fn the_project_setting_delete_the_branch_on_merge_is_saved_in_the_file_and_shown() {
+    let user = User::new();
+    let app = user.path("work/app");
+    user.git_init(&app);
+    user.git(
+        &app,
+        &["remote", "add", "origin", "git@github.com:acme/app.git"],
+    );
+    add(&user, &app);
+    user.call(
+        "project.set_settings",
+        json!({"name": "app", "repositories": [{"path": ".",
+            "forge": {"kind": "github", "repository": "acme/app"}}]}),
+    )
+    .unwrap();
+    let shown = |user: &User| {
+        let settings = user
+            .call("project.settings", json!({"name": "app"}))
+            .unwrap();
+        settings["repositories"][0]["delete_branch_on_merge"].clone()
+    };
+    assert_eq!(shown(&user), json!(false));
+
+    // What is left out is kept: the forge too.
+    let saved = user
+        .call(
+            "project.set_settings",
+            json!({"name": "app", "repositories": [{"path": ".",
+                "forge": {"kind": "github", "repository": "acme/app"},
+                "delete_branch_on_merge": true}]}),
+        )
+        .unwrap();
+    assert_eq!(saved["repositories"][0]["delete_branch_on_merge"], true);
+    let file = std::fs::read_to_string(user.project_file("app")).unwrap();
+    assert!(file.contains("delete_branch_on_merge = true"), "{file}");
+    assert_eq!(shown(&user), json!(true));
+
+    let kept = user
+        .call(
+            "project.set_settings",
+            json!({"name": "app", "repositories": [{"path": ".",
+                "forge": {"kind": "github", "repository": "acme/app"}}]}),
+        )
+        .unwrap();
+    assert_eq!(kept["repositories"][0]["delete_branch_on_merge"], true);
+
+    // Off again: the key leaves the file.
+    user.call(
+        "project.set_settings",
+        json!({"name": "app", "repositories": [{"path": ".",
+            "forge": {"kind": "github", "repository": "acme/app"},
+            "delete_branch_on_merge": false}]}),
+    )
+    .unwrap();
+    let file = std::fs::read_to_string(user.project_file("app")).unwrap();
+    assert!(!file.contains("delete_branch_on_merge"), "{file}");
+}
+
+// The project's conventions (#466): its branch format and its pull request template.
+
+#[test]
+fn an_invalid_pattern_is_refused_when_saved() {
+    let user = User::new();
+    settings_fixture(&user);
+    let before = std::fs::read_to_string(user.project_file("app")).unwrap();
+
+    let (code, message) = user
+        .call(
+            "project.set_conventions",
+            json!({"name": "app", "branch_format": "^(feat|fix/[A-Z]+$"}),
+        )
+        .unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert!(message.contains("^(feat|fix/[A-Z]+$"), "{message}");
+    assert!(message.contains("unclosed group"), "{message}");
+    assert!(message.contains("nothing was saved"), "{message}");
+    assert_eq!(
+        std::fs::read_to_string(user.project_file("app")).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn the_conventions_are_saved_in_the_file_and_emptied_away() {
+    let user = User::new();
+    settings_fixture(&user);
+
+    let saved = user
+        .call(
+            "project.set_conventions",
+            json!({"name": "app", "branch_format": "^feat/.+$",
+                "pull_request_template": "## Why\n\n## How to verify\n"}),
+        )
+        .unwrap();
+    assert_eq!(saved["branch_format"], "^feat/.+$");
+    assert_eq!(
+        saved["pull_request_template"],
+        "## Why\n\n## How to verify\n"
+    );
+    let text = std::fs::read_to_string(user.project_file("app")).unwrap();
+    assert!(text.starts_with("# my project, by hand\n"), "{text}");
+    let settings = user
+        .call("project.settings", json!({"name": "app"}))
+        .unwrap();
+    assert_eq!(settings["branch_format"], "^feat/.+$");
+    assert_eq!(
+        settings["pull_request_template"],
+        "## Why\n\n## How to verify\n"
+    );
+
+    // Left out, a convention is kept; empty, it is removed.
+    let saved = user
+        .call(
+            "project.set_conventions",
+            json!({"name": "app", "branch_format": ""}),
+        )
+        .unwrap();
+    assert_eq!(saved["branch_format"], Value::Null);
+    assert_eq!(
+        saved["pull_request_template"],
+        "## Why\n\n## How to verify\n"
+    );
+    let text = std::fs::read_to_string(user.project_file("app")).unwrap();
+    assert!(!text.contains("branch_format"), "{text}");
+}

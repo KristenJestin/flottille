@@ -473,6 +473,36 @@ $ flottille skill remove shop react
 Removed skill react from shop. The project's files were not touched.
 ```
 
+## The vault
+
+The user's secrets, kept by the keyring, that agents use through Flottille's tools and never see
+(`docs/vault.md`). A secret is never printed, by these commands or any other.
+
+### `flottille vault list [--project <project>]`
+
+The entries: name, description, URL, username and project; never a secret. `--project` keeps the
+entries that project's agents see. `--json` prints `vault.list`.
+
+```
+$ flottille vault list
+The vault's entries (their secrets are never shown):
+  jira  Logs time on Jira  url https://tracker.example.com  username dev@example.com
+```
+
+### `flottille vault set <name>`
+
+Adds the entry, or replaces it whole, with `--description <line>`, `--url <url>`, `--username
+<login>` and `--project <project>` (left out, every project's agents see it). The secret is read
+from the standard input, less its last line end, or typed at a prompt that does not echo it when
+the standard input is a terminal: never an argument, which the shell's history and the process
+list would keep (`printf %s "$TOKEN" | flottille vault set jira`). Refused for an empty or short
+secret (6 characters at least), a name that is not letters, digits, `.`, `_` and `-`, or an
+unknown project. `--json` prints `vault.set`.
+
+### `flottille vault remove <name>`
+
+Removes the entry and its secret from the keyring. `--json` prints `vault.remove`.
+
 ## Workspaces
 
 A workspace is one git worktree per repository, on one branch, prepared by the project's setup
@@ -693,6 +723,10 @@ flottille: agent 1eb211e2dbf2 is a child of agent bd7ed8152969: only its parent 
 <reason>)` when the turn did not end with `end_turn` (cancelled, for instance). Without it, `send`
 returns at once, as above.
 
+**`--compact` / `--no-compact`**: when the agent's prompt cache expired, compact it before the
+turn the message starts, or send to its session as it is, whatever the setting (Settings,
+Compaction, "Compact a session resumed after its cache expired"). Left out, the setting decides.
+
 - **The turn followed is the one that plays your message.** When a turn runs, the message waits
   for it to end: what is left of that turn is not printed, and the command waits for the turn
   your message starts. (It follows the delivery the daemon named in its answer to the send,
@@ -800,7 +834,7 @@ place, its provider and model, then what was said, thought and done, with the tu
 `agent.show`: `{"agent", "events"}`, the agent with its instructions and tools, and its first
 1,000 events. A session that runs an older list of tools than its role has now
 (`tools_outdated: true`, `docs/tools.md`, "When the tools change") is said so under the model,
-with the way to the new list: restart the session (stop, then resume).
+with the way to the new list: reload its tools (`flottille agent reload-tools`, below).
 
 ### `flottille agent stop <agent>`
 
@@ -811,6 +845,33 @@ state.
 ```
 $ flottille agent stop bd7ed8152969
 Stopped agent bd7ed8152969 and its tree; it is ended now. Its workspace stays.
+```
+
+### `flottille agent reload-tools <agent>`
+
+Reloads a root's tools (`agent.reload_tools`, `docs/protocol.md`; `docs/tools.md`, "When the
+tools change"): its process is let go, as an idle one is, and nothing starts until its next
+message, whose process starts on its own session with the tools its role has now. The turn that
+runs is never cut: the process goes once it ended (`, once its turn ended` is then added). The next prompt tells the agent what changed, by tool, or that nothing did (`tools`
+delivery). Its children keep their processes. `--json` prints `{"agent": {...}, "after_turn"}`,
+`after_turn` true when a turn ran. Refused for a child, and for an agent in a final state.
+
+```
+$ flottille agent reload-tools bd7ed8152969
+Reloading the tools of agent bd7ed8152969: they are given at its next message, which tells it what changed.
+```
+
+### `flottille agent compact <agent>`
+
+Compacts an agent's conversation (`agent.compact`, `docs/protocol.md`; `docs/design.md` §5.8):
+the compactor chosen in Settings summarises it, and the agent goes on in a new session from its
+brief, the summary and its latest messages word for word. Between turns it starts at once, else
+once the turn that runs ended. `--json` prints `{"agent": {...}, "after_turn"}`. Refused when no
+compactor is chosen, and for an agent in a final state.
+
+```
+$ flottille agent compact bd7ed8152969
+Compacting agent bd7ed8152969 now: `flottille watch` says agent.compacted when its new session is ready, or agent.compaction_failed and why.
 ```
 
 ### `flottille agent resume <agent>`
@@ -825,6 +886,21 @@ process is still stopping (try again in a moment).
 ```
 $ flottille agent resume bd7ed8152969
 Resumed agent bd7ed8152969 on its own session; it is idle now. Its next message starts it.
+```
+
+### `flottille agent detach <agent>`
+
+Takes a session an agent started (led or handed) away from that agent (`agent.detach`,
+`docs/protocol.md`; the window's session menu has `Detach from <pilot>`): it becomes the user's
+alone, at once. The agent's subscription ends and it is told once; the session's questions come to
+the user, the two need the user's leave to write to each other, and the session may start
+sessions as its mode allows. There is no undo. `--json` prints `{"agent": {...}}`, with
+`detached_from`. Refused, saying why, for a session no agent started and for one already
+detached.
+
+```
+$ flottille agent detach bd7ed8152969
+Detached agent bd7ed8152969 from agent 3f9a1c0b7d2e: it is yours alone now, and its questions come to you.
 ```
 
 ### `flottille agent options <agent> [--model M] [--effort E]`
@@ -901,7 +977,7 @@ What your **root** agents sent you, oldest first. An entry is one of:
 | Kind | What it is | The event it comes from |
 |---|---|---|
 | `report` | the root called `report`: it is done, and says what it did | `agent.reported` |
-| `question` | the root called `ask_user`: it asks you something and goes on without waiting; answer it with `flottille agent send`, which ends its wait for you | `agent.asked` (`to` is `user`) |
+| `question` | the root called `ask`: it asks you something and goes on without waiting; answer it with `flottille agent send`, which ends its wait for you | `agent.asked` (`to` is `user`) |
 | `failure` | the root cannot go on: its process could not start, its session could not open, an option it was asked is not one it offers, it was replaced too often (twice in 30 minutes), or its new workspace could not be prepared (`docs/events.md` also lists "its parent failed", which only concerns a child) | `agent.failed` |
 
 A child's report, question or failure goes to its parent, never to the inbox. The requests a gate
@@ -945,6 +1021,50 @@ that you did (`run.stop`).
 Stops the command if it runs and starts the same line again in the same place, as a new run that
 stays the agent's, if an agent started it; the agent is told (`run.restart`). A command of an agent
 that ended restarts as yours, which the command says.
+
+### `flottille service list`
+
+The services of the machine (`docs/projects.md`, "Services"), one line each: its name, its state,
+its folder, its address and why it failed, and what it needs that is not running.
+
+```
+$ flottille service list
+auth ready (~/work/auth-api) at http://localhost:3001
+mongo ready (~/tools/docker/mongo)
+```
+
+### `flottille service show <name>`
+
+One service: its line as above, then its keys.
+
+### `flottille service add <name> --line <line> [--folder F] [--needs a,b] [--ready-line T | --ready-url U | --ready-command C] [--url U] [--ask-before-running true]`
+
+Writes it in `services.toml`, what is around it kept (`service.add`).
+
+### `flottille service edit <name> [the same options]`
+
+Changes what is given (`service.edit`): `--folder ""` puts it back in the home, `--needs ""`
+leaves it needing nothing.
+
+### `flottille service remove <name>`
+
+Removes it from `services.toml`, refused while a service or a project's task needs it
+(`service.remove`).
+
+### `flottille service start <name>`
+
+Starts it, what it needs first and waited for: `Started mongo, auth.`, or `Nothing started: auth
+runs.`, then its line (`service.start`).
+
+### `flottille service stop <name>`
+
+Stops it and what it started; what it needs and what needs it go on (`service.stop`).
+
+### `flottille service output <name> [--tail N]`
+
+The end of what it wrote, masked, without the colours the program wrote (`service.output`).
+
+Each takes `--json` and prints what the daemon answered.
 
 ### `flottille approvals`
 

@@ -46,6 +46,13 @@ pub enum AgentAction {
         /// Print the reply as it streams, until the turn that plays the message ends
         #[arg(long, short)]
         follow: bool,
+        /// When the agent's prompt cache expired, compact it before sending, whatever the setting
+        #[arg(long, conflicts_with = "no_compact")]
+        compact: bool,
+        /// When the agent's prompt cache expired, send to its session as it is, whatever the
+        /// setting
+        #[arg(long)]
+        no_compact: bool,
         /// Print the answer (with --follow, once the turn ended)
         #[arg(long)]
         json: bool,
@@ -86,6 +93,28 @@ pub enum AgentAction {
     },
     /// Start an ended root again on its own session
     Resume {
+        agent: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Take a session an agent started away from that agent: it becomes yours alone, its
+    /// questions come to you, and there is no undo
+    Detach {
+        agent: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reload a root agent's tools: its process restarts on its conversation with the tools its
+    /// role has now, once its turn ended, and it is told what changed
+    ReloadTools {
+        agent: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compact an agent's conversation now, or once its turn ended: the compactor chosen in
+    /// Settings summarises it, and it goes on in a new session from its brief, the summary and its
+    /// latest messages (`docs/design.md` §5.8)
+    Compact {
         agent: String,
         #[arg(long)]
         json: bool,
@@ -175,6 +204,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                     mode: None,
                     role,
                     message,
+                    images: Vec::new(),
                 })?,
             )?;
             if json {
@@ -197,6 +227,8 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
             agent,
             message,
             follow: following,
+            compact,
+            no_compact,
             json,
         } => {
             let mut client = Client::connect_or_start(paths)?;
@@ -206,6 +238,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                     agent: agent.clone(),
                     message,
                     images: Vec::new(),
+                    compact: (compact || no_compact).then_some(compact),
                 })?,
             )?;
             let mut code = ExitCode::SUCCESS;
@@ -318,6 +351,63 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        AgentAction::Detach { agent, json } => {
+            let detached = Client::connect_or_start(paths)?.request(
+                "agent.detach",
+                serde_json::to_value(AgentName { agent, after: None })?,
+            )?;
+            if json {
+                println!("{detached}");
+            } else {
+                println!(
+                    "Detached agent {} from agent {}: it is yours alone now, and its questions \
+                     come to you.",
+                    text(&detached["agent"], "id"),
+                    text(&detached["agent"], "detached_from")
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        AgentAction::ReloadTools { agent, json } => {
+            let reloaded = Client::connect_or_start(paths)?.request(
+                "agent.reload_tools",
+                serde_json::to_value(AgentName { agent, after: None })?,
+            )?;
+            if json {
+                println!("{reloaded}");
+            } else {
+                let after = match reloaded["after_turn"] == true {
+                    true => ", once its turn ended",
+                    false => "",
+                };
+                println!(
+                    "Reloading the tools of agent {}: they are given at its next message{after}, \
+                     which tells it what changed.",
+                    text(&reloaded["agent"], "id")
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        AgentAction::Compact { agent, json } => {
+            let asked = Client::connect_or_start(paths)?.request(
+                "agent.compact",
+                serde_json::to_value(AgentName { agent, after: None })?,
+            )?;
+            if json {
+                println!("{asked}");
+            } else {
+                let when = match asked["after_turn"] == true {
+                    true => "once its turn ended",
+                    false => "now",
+                };
+                println!(
+                    "Compacting agent {} {when}: `flottille watch` says agent.compacted when its \
+                     new session is ready, or agent.compaction_failed and why.",
+                    text(&asked["agent"], "id")
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         AgentAction::Mode { agent, mode, json } => {
             let set = Client::connect_or_start(paths)?.request(
                 "agent.mode",
@@ -399,6 +489,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                 mode: None,
                 role: None,
                 message,
+                images: Vec::new(),
             },
             json,
         ),
@@ -630,7 +721,15 @@ fn agent_line(agent: &Value, entry: Option<&Value>) -> String {
                 Some(on) => line.push_str(&format!("; waits for its {on}")),
                 None => {}
             }
-            if entry["needs_user"] == true {
+            let questions = entry["questions"].as_array().map_or(&[][..], Vec::as_slice);
+            for question in questions {
+                let asked = question["question"].as_str().unwrap_or_default();
+                line.push_str(&format!(
+                    "; asks you: {}",
+                    asked.lines().next().unwrap_or_default()
+                ));
+            }
+            if entry["needs_user"] == true && questions.is_empty() {
                 line.push_str("; a request waits for you (`flottille approvals`)");
             }
         }
@@ -641,7 +740,7 @@ fn agent_line(agent: &Value, entry: Option<&Value>) -> String {
 
 /// What is said of a session that did not take the tools its role gained.
 pub const OUTDATED: &str = "its session runs an older list of tools than its role has now: \
-    restart the session (stop, then resume) for the new one";
+    reload them (`flottille agent reload-tools`) for the new one";
 
 /// The model and the effort an agent is to change to, as a phrase.
 fn pending_text(agent: &Value) -> String {

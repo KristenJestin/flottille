@@ -1,3 +1,6 @@
+// The tool schemas are large `json!` literals: the default limit of 128 is too low for them.
+#![recursion_limit = "256"]
+
 mod acp;
 mod actions;
 mod adf;
@@ -8,6 +11,7 @@ mod approval_command;
 mod approvals;
 mod bridge;
 mod chat;
+mod children;
 mod claude;
 mod claude_import;
 mod client;
@@ -15,6 +19,7 @@ mod codex;
 mod codex_bridge;
 mod command_command;
 mod commands;
+mod compaction;
 mod daemon;
 mod deliveries;
 mod desktop;
@@ -31,6 +36,7 @@ mod inbox;
 mod inbox_command;
 mod items;
 mod judge;
+mod leaves;
 mod mcp;
 mod message_checks;
 mod models;
@@ -53,8 +59,11 @@ mod rules;
 mod run_methods;
 mod runs;
 mod runs_command;
+mod service_command;
+mod services;
 mod session_read;
 mod setup;
+mod show;
 mod skill_command;
 mod skills;
 mod subscriptions;
@@ -63,6 +72,8 @@ mod tasks;
 mod tickets;
 mod tree;
 mod update;
+mod vault;
+mod vault_command;
 mod web;
 mod workspace_command;
 mod workspaces;
@@ -81,7 +92,9 @@ use crate::client::Client;
 use crate::command_command::CommandAction;
 use crate::project_command::ProjectAction;
 use crate::runs_command::RunsAction;
+use crate::service_command::ServiceAction;
 use crate::skill_command::SkillAction;
+use crate::vault_command::VaultAction;
 use crate::workspace_command::WorkspaceAction;
 
 pub const VERSION: &str = env!("FLOTTILLE_VERSION");
@@ -116,6 +129,12 @@ enum Command {
         #[command(subcommand)]
         action: SkillAction,
     },
+    /// The vault: secrets kept by the keyring, that agents use through Flottille's tools and
+    /// never see
+    Vault {
+        #[command(subcommand)]
+        action: VaultAction,
+    },
     /// Make, follow and remove the workspaces of a project
     Workspace {
         #[command(subcommand)]
@@ -142,6 +161,11 @@ enum Command {
     Runs {
         #[command(subcommand)]
         action: RunsAction,
+    },
+    /// The services of the machine, shared by every project: listed, written, started, stopped
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
     },
     /// Allow a request: its call is checked again, performed, and its result handed to the agent
     Approve {
@@ -312,6 +336,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         }
         Command::Project { action } => return project_command::run(&paths, action),
         Command::Skill { action } => return skill_command::run(&paths, action),
+        Command::Vault { action } => return vault_command::run(&paths, action),
         Command::Workspace { action } => return workspace_command::run(&paths, action),
         Command::Agent { action } => return agent_command::run(&paths, action),
         Command::Named { action } => return command_command::run(&paths, action),
@@ -371,6 +396,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             }
         }
         Command::Runs { action } => runs_command::run(&paths, action)?,
+        Command::Service { action } => service_command::run(&paths, action)?,
         Command::Approvals { json } => approval_command::approvals(&paths, json)?,
         Command::Approve { number, discard } => approval_command::approve(&paths, number, discard)?,
         Command::Deny { number } => approval_command::deny(&paths, number)?,

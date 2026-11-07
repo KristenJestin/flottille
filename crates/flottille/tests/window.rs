@@ -1651,7 +1651,7 @@ fn worker(user: &User, lead: &Mcp, title: &str) -> (String, Mcp) {
 fn worker_doing(lead: &Mcp, what: &str, title: &str) -> String {
     let answer = lead.call(
         "agent_launch",
-        json!({"title": title, "brief": format!("{what} and {title}"), "workspace": "w"}),
+        json!({"kind": "child", "title": title, "brief": format!("{what} and {title}"), "workspace": "w"}),
     );
     assert!(!answer.error, "{}", answer.text);
     answer
@@ -1811,7 +1811,7 @@ fn a_root_agent_s_reply_has_no_label_while_a_child_s_has_its_name(cx: &mut TestA
     let (lead, mcp, _) = lead_in_w(&user);
     let answer = mcp.call(
         "agent_launch",
-        json!({"title": "draft the notes", "brief": "draft the notes", "workspace": "w"}),
+        json!({"kind": "child", "title": "draft the notes", "brief": "draft the notes", "workspace": "w"}),
     );
     assert!(!answer.error, "{}", answer.text);
     let child = answer
@@ -2634,7 +2634,21 @@ fn the_judge_section_shows_a_guidance_it_cannot_follow_and_follows_an_edit_made_
     // Edited by hand past the limit: the judge cannot follow it, and the section says so.
     std::fs::create_dir_all(user.path("config/flottille")).unwrap();
     std::fs::write(user.path("config/flottille/judge.md"), "a".repeat(4_001)).unwrap();
-    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    // The link follows the daemon's events only some time after the page has read the guidance
+    // (its own connection answers first, and on a loaded machine the link's takes longer): an
+    // edit made in between is no event of the link's.
+    let slow = {
+        let connector = user.connector();
+        let first = AtomicBool::new(true);
+        move || {
+            let stream = connector();
+            if first.swap(false, Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(1500));
+            }
+            stream
+        }
+    };
+    let (shell, cx) = window(&user, Arc::new(slow), 1280., cx);
     cx.simulate_resize(size(px(1280.), px(2400.)));
     let page = open_settings(&shell, cx);
     let editor = page.read_with(cx, |page, _| page.judge_guidance().clone());
@@ -2652,7 +2666,11 @@ fn the_judge_section_shows_a_guidance_it_cannot_follow_and_follows_an_edit_made_
         "{said}"
     );
 
-    // From the command line, while the page stays open.
+    // From the command line, while the page stays open and once the window follows the events.
+    let seen = shell.read_with(cx, |shell, _| shell.seen().clone());
+    until(&shell, cx, "the window follows the daemon's events", |_| {
+        seen.snapshots.load(Ordering::SeqCst) > 0
+    });
     user.call("judge.set", json!({"text": "Ask about every migration."}))
         .unwrap();
     user.call("rules.set", json!({"text": "Write tests first."}))
@@ -2677,6 +2695,67 @@ fn the_judge_section_shows_a_guidance_it_cannot_follow_and_follows_an_edit_made_
     });
     settle(cx);
     cx.update(|window, _| assert!(window.try_find("judge-guidance-error").is_none()));
+}
+
+/// A connector whose first connection by the window's link waits until `release` is set, as a
+/// loaded machine makes it wait: the pages read on connections of their own meanwhile.
+fn link_held_until(user: &User, release: Arc<AtomicBool>) -> Connect {
+    let connector = user.connector();
+    let first = AtomicBool::new(true);
+    Arc::new(move || {
+        let is_link = std::thread::current().name() == Some("flottille-link");
+        if is_link && first.swap(false, Ordering::SeqCst) {
+            let until = Instant::now() + Duration::from_secs(20);
+            while !release.load(Ordering::SeqCst) && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        connector()
+    })
+}
+
+#[gpui_kit::test]
+fn an_edit_made_before_the_link_listens_is_shown(cx: &mut TestAppContext) {
+    let user = user();
+    let release = Arc::new(AtomicBool::new(false));
+    let (shell, cx) = window(&user, link_held_until(&user, release.clone()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    let page = open_settings(&shell, cx);
+    let judge = page.read_with(cx, |page, _| page.judge_guidance().clone());
+    let rules = page.read_with(cx, |page, _| page.rules().clone());
+    until(&shell, cx, "the page read the texts", |cx| {
+        judge.read_with(cx, |e, _| e.shown().is_some())
+            && rules.read_with(cx, |e, _| e.shown().is_some())
+    });
+    let seen = shell.read_with(cx, |shell, _| shell.seen().clone());
+    assert_eq!(
+        seen.connections.load(Ordering::SeqCst),
+        0,
+        "the link has not connected yet"
+    );
+
+    // From the command line: no event of the link's, which does not listen yet.
+    user.call("judge.set", json!({"text": "Ask about every migration."}))
+        .unwrap();
+    user.call("rules.set", json!({"text": "Write tests first."}))
+        .unwrap();
+    release.store(true, Ordering::SeqCst);
+
+    until(&shell, cx, "the window follows the events", |cx| {
+        shell.read_with(cx, |shell, _| shell.snapshot() == &fresh(&user))
+    });
+    until(&shell, cx, "the guidance shows the edit", |cx| {
+        judge.read_with(cx, |e, cx| {
+            e.typed(cx).as_deref() == Some("Ask about every migration.")
+        })
+    });
+    // An editor is drawn only on its own tab: the rules follow the edit once it is shown.
+    choose_settings_tab("rules", cx);
+    until(&shell, cx, "the rules show the edit", |cx| {
+        rules.read_with(cx, |e, cx| {
+            e.typed(cx).as_deref() == Some("Write tests first.")
+        })
+    });
 }
 
 #[gpui_kit::test]
@@ -2800,8 +2879,13 @@ fn a_judge_flottille_picked_is_said_once_in_a_notice_that_opens_settings(cx: &mu
     until(&shell, cx, "the notice is gone", |cx| {
         shell.read_with(cx, |s, _| s.judge_notice().is_none())
     });
-    cx.update(|window, _| assert!(window.try_find("judge-notice").is_none()));
+    // It folds away and fades out: still drawn a frame after, gone once settled.
+    cx.executor().advance_clock(Duration::from_millis(16));
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    cx.update(|window, _| assert!(window.try_find("judge-notice").is_some(), "folding away"));
     settle(cx);
+    cx.update(|window, _| assert!(window.try_find("judge-notice").is_none()));
     assert_eq!(
         settings_shown(cx),
         ["judge", "guidance"],
@@ -2873,6 +2957,9 @@ fn a_child_appearing_adds_its_row_to_the_rail_and_the_sub_agents_list(cx: &mut T
         .position(|b| *b == Block::SubAgents)
         .unwrap();
     unfold(&page, at, cx);
+    // The card starts folded: a click on its title lists the sub-agents.
+    cx.update(|window, cx| window.click(format!("row-{at}-sub-agents-toggle"), cx));
+    settle(cx);
     assert!(cx.update(|window, _| window.try_find(format!("sub-agent-{child}")).is_some()));
     let listed = page.read_with(cx, |p, cx| {
         p.conversation()
@@ -3126,6 +3213,15 @@ fn a_session_whose_workspace_is_removed_keeps_its_page_without_its_facts_and_rea
                 .is_some_and(|place| !place.repositories.is_empty())
         })
     });
+    // A workspace is removed once nothing works in it: the lead ends first.
+    user.call("agent.stop", json!({"agent": lead})).unwrap();
+    until(&shell, cx, "the session ended", |cx| {
+        shell.read_with(cx, |s, _| {
+            s.snapshot()
+                .session(&lead)
+                .is_some_and(|session| session.ended)
+        })
+    });
     let rows = row_ids(&page, cx);
     assert_eq!(page.read_with(cx, |p, _| p.histories()), 1);
 
@@ -3133,11 +3229,6 @@ fn a_session_whose_workspace_is_removed_keeps_its_page_without_its_facts_and_rea
         .unwrap();
     until(&shell, cx, "the facts are gone", |cx| {
         page.read_with(cx, |p, cx| p.rail().read(cx).place().is_none())
-    });
-    // A turn ending reads the place again: the daemon does not know it any more.
-    send(&user, &lead, "still there?");
-    until(&shell, cx, "the lead answered", |cx| {
-        blocks(&page, cx).len() == rows.len() + 2
     });
     let deadline = Instant::now() + Duration::from_secs(1);
     until(&shell, cx, "a second has passed", |_| {
@@ -3189,19 +3280,15 @@ fn a_card_appears_while_another_session_streams_without_pause(cx: &mut TestAppCo
     let (shell, cx) = open_session(&user, &lead, 1280., cx);
 
     let number = held_number(mcp.call("fs_read", json!({"path": ".env"})));
-    let asked = Instant::now();
     until(&shell, cx, "the card is shown", |cx| {
         cx.update(|window, _| window.try_find(format!("allow-{number}")).is_some())
     });
 
+    // The stream is thirty seconds of pieces at the least, and the card came before its end: it
+    // did not wait for a pause. No time is asked of the card: how long it takes is the machine's.
     let state =
         user.call("agent.show", json!({"agent": streamer})).unwrap()["agent"]["state"].clone();
     assert_eq!(state, "working", "the other session still streams");
-    assert!(
-        asked.elapsed() < Duration::from_secs(5),
-        "{:?}",
-        asked.elapsed()
-    );
 }
 
 /// Events of the shown agent made up for the page, numbered from `seq`.
@@ -3406,7 +3493,9 @@ fn an_answered_request_keeps_its_record_when_the_page_is_opened_again(cx: &mut T
 }
 
 #[gpui_kit::test]
-fn a_long_conversation_shows_its_last_page_and_earlier_ones_on_demand(cx: &mut TestAppContext) {
+fn a_long_conversation_shows_its_last_page_and_earlier_ones_as_the_user_scrolls_up(
+    cx: &mut TestAppContext,
+) {
     let user = team_user();
     let pieces: Vec<serde_json::Value> =
         (0..1100).map(|n| json!({"say": format!("{n} ")})).collect();
@@ -3474,7 +3563,7 @@ fn a_long_conversation_shows_its_last_page_and_earlier_ones_on_demand(cx: &mut T
         cx.update(|window, _| window.try_find("row-0-sub-agents").is_some()),
         "drawn, not folded under a group"
     );
-    cx.update(|window, cx| window.click("show-earlier", cx));
+    // The scroll to the start asked for the earlier page by itself.
     until(&shell, cx, "the earlier page", |cx| {
         blocks(&page, cx)[0]
             == Block::Message {
@@ -3622,9 +3711,10 @@ fn text_typed_while_a_reply_sends_is_kept(cx: &mut TestAppContext) {
         reply.read_with(cx, |r, _| !r.is_sending())
     });
 
+    // The field emptied as the message was sent: what was typed after it is all it holds.
     assert_eq!(
         reply.read_with(cx, |r, cx| r.field().read(cx).value().to_string()),
-        "and then"
+        " and then"
     );
     let prompts = user.received_requests("session/prompt");
     assert!(prompts.iter().any(|p| p.to_string().contains("first")));
@@ -3643,7 +3733,7 @@ fn providers_user() -> User {
     user.provider_script(
         "opencode",
         json!({"models": ["open/small", "open/medium"], "efforts": ["low", "high"], "turns": [
-            {"when": "launch a helper", "do": [{"mcp": {"tool": "agent_launch", "arguments": {
+            {"when": "launch a helper", "do": [{"mcp": {"tool": "agent_launch", "arguments": {"kind": "child",
                 "title": "helper", "brief": "check the docs", "provider": "claude",
                 "model": "fake-large"}}}]}
         ]}),
@@ -3725,14 +3815,16 @@ fn opening_settings_shows_the_judge_and_its_guidance_alone(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
-fn settings_has_seven_tabs_in_order(cx: &mut TestAppContext) {
+fn settings_has_nine_tabs_in_order(cx: &mut TestAppContext) {
     assert_eq!(
         flottille_window::settings::SECTIONS[..],
         [
             ("judge", "Judge"),
             ("providers", "Providers"),
+            ("compaction", "Compaction"),
             ("rules", "Rules"),
             ("workspaces", "Workspaces"),
+            ("vault", "Vault"),
             ("sessions", "Sessions"),
             ("appearance", "Appearance"),
             ("developer", "Developer mode"),
@@ -3750,7 +3842,7 @@ fn settings_has_seven_tabs_in_order(cx: &mut TestAppContext) {
             .iter()
             .map(|key| window.find(format!("settings-tabs-{key}")).bounds().left())
             .collect();
-        assert_eq!(lefts.len(), 7);
+        assert_eq!(lefts.len(), 9);
         assert!(lefts.windows(2).all(|pair| pair[0] < pair[1]), "{lefts:?}");
         assert!(
             window.try_find("settings-tabs-guidance").is_none(),
@@ -6037,8 +6129,17 @@ fn a_reply_of_thousands_of_lines_streams_in_pieces_that_stay_cheap(cx: &mut Test
     );
     frame(cx);
 
-    // 3,000 lines in 100 pieces of 30: a list item with bold and code on each.
-    let (mut applied, mut whole) = (Vec::new(), Vec::new());
+    // 3,000 lines in 100 pieces of 30: a list item with bold and code on each. What a piece
+    // costs is counted in the work done, never timed: the bytes the parser is handed again and
+    // the pieces of Markdown drawn in the frame, which a busy machine cannot change.
+    let counts = |cx: &mut VisualTestContext| {
+        page.read_with(cx, |p, cx| {
+            let row = p.conversation().read(cx).rows()[0].clone();
+            let row = row.read(cx);
+            (row.parsed(), row.pieces_drawn(cx))
+        })
+    };
+    let (mut parsed, mut drawn) = (Vec::new(), Vec::new());
     for piece in 0..100u64 {
         let text: String = (0..30)
             .map(|line| {
@@ -6046,16 +6147,25 @@ fn a_reply_of_thousands_of_lines_streams_in_pieces_that_stay_cheap(cx: &mut Test
                 format!("- line **{n}** of the reply, with `code {n}`\n")
             })
             .collect();
-        let started = Instant::now();
+        let (before, drawn_before) = counts(cx);
         live(
             &page,
             made_up(2 + piece, "agent.message", json!({"text": text})),
             cx,
         );
-        applied.push(started.elapsed());
+        let (after, _) = counts(cx);
+        // The bound is on the cost of a piece at the start and at the end alike: the parser is
+        // handed the last Markdown piece of the reply again (cut at 4,096 bytes) and the piece
+        // streamed, never the reply, which is over 150,000 bytes when the last piece comes.
+        assert!(
+            after - before <= 4096 + 30 * 50,
+            "the parser is handed the last piece again, not the reply: {} bytes for piece {piece}",
+            after - before
+        );
+        parsed.push(after - before);
         // The parse, in the background in the window, runs here before the frame.
         frame(cx);
-        whole.push(started.elapsed());
+        drawn.push(counts(cx).1 - drawn_before);
     }
 
     let shown = rendered(&page, 0, cx);
@@ -6064,23 +6174,21 @@ fn a_reply_of_thousands_of_lines_streams_in_pieces_that_stay_cheap(cx: &mut Test
         "the last line is drawn"
     );
     assert!(!shown.contains("**"));
-    let mean = |costs: &[Duration]| costs.iter().sum::<Duration>() / costs.len() as u32;
     eprintln!(
-        "a piece of 30 lines, on the window's thread then with its parse and frame: \
-         {:?}, {:?} at the start; {:?}, {:?} past 2,700 lines",
-        mean(&applied[..10]),
-        mean(&whole[..10]),
-        mean(&applied[90..]),
-        mean(&whole[90..])
+        "a piece of 30 lines: {:?} bytes parsed again at the start, {:?} past 2,700 lines; \
+         {:?} Markdown pieces drawn at the start, {:?} past 2,700 lines",
+        &parsed[..3],
+        &parsed[97..],
+        &drawn[..3],
+        &drawn[97..]
     );
     // What matters is that the cost does not grow with the reply (4.8 s a piece past 2,700
-    // lines when the reply was one view). An absolute bound fails on a slower machine, so the
-    // cost past 2,700 lines is compared with the start of the same run, which is floored at a
-    // few milliseconds so a very fast start cannot make the test fail. A spike reached 6 times the
-    // start on a busy machine; the regression was over a hundred.
-    let bound = |start: &[Duration]| mean(start).max(Duration::from_millis(5)) * 10;
-    assert!(mean(&applied[90..]) <= bound(&applied[..10]));
-    assert!(mean(&whole[90..]) <= bound(&whole[..10]));
+    // lines when the reply was one view). The frame draws the pieces in view and no more: four
+    // is the tail of the reply and the one before it, which the list draws half of.
+    assert!(
+        drawn.iter().all(|pieces| *pieces <= 4),
+        "a frame draws the pieces in view, not more as the reply grows: {drawn:?}"
+    );
 }
 
 // Forges (#75): each repository's pull request in the session's WORKSPACE section and on the
@@ -7793,10 +7901,13 @@ fn slash_lists_the_commands_and_filters_them_as_the_user_types(cx: &mut TestAppC
     cx.update(|window, cx| window.click("reply-field", cx));
     cx.simulate_input("/");
     until(&shell, cx, "the list offers the commands", |cx| {
-        slash_offered(&shell, cx).len() == 2
+        slash_offered(&shell, cx).len() == 3
     });
     settle(cx);
-    assert_eq!(slash_offered(&shell, cx), ["close", "open-prs"]);
+    assert_eq!(
+        slash_offered(&shell, cx),
+        ["close", "open-prs", "reload-tools"]
+    );
     let reply = reply_open(&shell, cx);
     let entries = reply.read_with(cx, |r, _| r.slash_entries());
     assert!(
@@ -7824,6 +7935,128 @@ fn slash_lists_the_commands_and_filters_them_as_the_user_types(cx: &mut TestAppC
     );
 }
 
+/// The height of the `/` list's frame, once a frame is drawn; `None` when it is not drawn at all.
+fn slash_height(cx: &mut VisualTestContext) -> Option<f32> {
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        let frame = window.try_find("slash-panel")?;
+        Some(f32::from(frame.bounds().size.height))
+    })
+}
+
+#[gpui_kit::test]
+fn the_command_menu_unfolds_when_slash_is_typed_and_folds_away_when_closed(
+    cx: &mut TestAppContext,
+) {
+    let user = user_with_commands();
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    settle(cx);
+
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("/");
+    until(&shell, cx, "the list offers the commands", |cx| {
+        slash_offered(&shell, cx).len() == 3
+    });
+    let first = slash_height(cx).expect("drawn from the first frame");
+    run_for(Duration::from_millis(60), cx);
+    let part_way = slash_height(cx).unwrap();
+    run_for(Duration::from_millis(600), cx);
+    let open = slash_height(cx).unwrap();
+    assert!(
+        first < part_way && part_way < open,
+        "it unfolds: {first} then {part_way} then {open}"
+    );
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+
+    // Escape: it folds away, still drawn part way, gone once the fold ended.
+    cx.simulate_keystrokes("escape");
+    run_for(Duration::from_millis(60), cx);
+    let leaving = slash_height(cx).expect("still drawn, leaving");
+    assert!(
+        leaving < open && leaving > 0.,
+        "it folds: {leaving} of {open}"
+    );
+    run_for(Duration::from_millis(600), cx);
+    assert_eq!(slash_height(cx), None, "gone once the fold ended");
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+}
+
+#[gpui_kit::test]
+fn the_command_menu_s_height_follows_its_rows_smoothly(cx: &mut TestAppContext) {
+    let user = user_with_commands();
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    settle(cx);
+
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("/");
+    until(&shell, cx, "the list offers the commands", |cx| {
+        slash_offered(&shell, cx).len() == 3
+    });
+    run_for(Duration::from_millis(600), cx);
+    let two = slash_height(cx).unwrap();
+
+    // A row that no longer matches folds away: the height goes down by steps of a frame.
+    cx.simulate_input("op");
+    run_for(Duration::from_millis(60), cx);
+    let part_way = slash_height(cx).unwrap();
+    cx.update(|window, _| {
+        assert!(
+            window.try_find("slash-close").is_some(),
+            "the row that left is still drawn, folding"
+        )
+    });
+    run_for(Duration::from_millis(600), cx);
+    let one = slash_height(cx).unwrap();
+    assert!(
+        one < part_way && part_way < two,
+        "it shrinks: {two} then {part_way} then {one}"
+    );
+    cx.update(|window, _| assert!(window.try_find("slash-close").is_none()));
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+
+    // A row that comes back unfolds.
+    cx.simulate_keystrokes("backspace backspace");
+    run_for(Duration::from_millis(60), cx);
+    let growing = slash_height(cx).unwrap();
+    run_for(Duration::from_millis(600), cx);
+    let again = slash_height(cx).unwrap();
+    assert!(
+        one < growing && growing < again,
+        "it grows: {one} then {growing} then {again}"
+    );
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+}
+
+#[gpui_kit::test]
+fn the_highlight_moves_with_a_fade(cx: &mut TestAppContext) {
+    let user = user_with_commands();
+    let lead = start(&user, "atlas", Some("login"), "Fix the login");
+    let (shell, cx) = open_session(&user, &lead, 1280., cx);
+    settle(cx);
+
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("/");
+    until(&shell, cx, "the list offers the commands", |cx| {
+        slash_offered(&shell, cx).len() == 3
+    });
+    run_for(Duration::from_millis(600), cx);
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+
+    // The arrow moves the highlight: its fill is on its way, not there at once.
+    cx.simulate_keystrokes("down");
+    assert!(
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.simulate_next_frame(cx)
+        }) > 0,
+        "the fill moves over a few frames"
+    );
+    run_for(Duration::from_millis(600), cx);
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+}
+
 #[gpui_kit::test]
 fn picking_a_command_with_slash_puts_its_name_in_the_field_and_sends_nothing(
     cx: &mut TestAppContext,
@@ -7838,7 +8071,7 @@ fn picking_a_command_with_slash_puts_its_name_in_the_field_and_sends_nothing(
     cx.update(|window, cx| window.click("reply-field", cx));
     cx.simulate_input("/");
     until(&shell, cx, "the list offers the commands", |cx| {
-        slash_offered(&shell, cx).len() == 2
+        slash_offered(&shell, cx).len() == 3
     });
     // The keyboard picks: down to the second, Enter.
     cx.simulate_keystrokes("down");
@@ -7863,7 +8096,7 @@ fn picking_a_command_with_slash_puts_its_name_in_the_field_and_sends_nothing(
     });
     cx.simulate_input("/");
     until(&shell, cx, "the list is back", |cx| {
-        slash_offered(&shell, cx).len() == 2
+        slash_offered(&shell, cx).len() == 3
     });
     settle(cx);
     cx.update(|window, cx| window.click("slash-close", cx));
@@ -11347,6 +11580,48 @@ fn remove_opens_a_confirmation_disabled_with_its_reason_when_work_would_be_lost(
 }
 
 #[gpui_kit::test]
+fn the_card_refuses_the_removal_while_sessions_work_there_and_names_them(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    workspace(&user, "atlas", "busy");
+    user.call(
+        "agent.run",
+        json!({"project": "atlas", "workspace": "busy", "message": "work a while"}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(1400.)));
+    open_project(&shell, "atlas", cx);
+    until(&shell, cx, "the card lists the session", |cx| {
+        card_of(&shell, Some("busy"), cx)
+            .is_some_and(|card| card.read_with(cx, |c, _| !c.data().sessions.is_empty()))
+    });
+    let title = card_of(&shell, Some("busy"), cx)
+        .unwrap()
+        .read_with(cx, |c, _| c.data().sessions[0].title.clone());
+    settle(cx);
+
+    cx.update(|window, cx| window.click("workspace-menu-busy", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("remove-workspace", cx));
+    settle(cx);
+    let why = text_of("workspace-removal-busy-refused", cx).unwrap_or_default();
+    assert!(why.contains(&format!("“{title}”")), "{why}");
+    assert!(why.contains("End them first"), "{why}");
+    cx.update(|window, cx| window.click("workspace-removal-busy-action", cx));
+    settle(cx);
+    assert_eq!(
+        user.call("workspace.list", json!({"project": "atlas"}))
+            .unwrap()["workspaces"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1,
+        "nothing was removed"
+    );
+}
+
+#[gpui_kit::test]
 fn the_developer_mode_is_switched_in_settings_with_its_log_s_path_beside_the_switch(
     cx: &mut TestAppContext,
 ) {
@@ -11619,6 +11894,90 @@ fn the_branch_prefix_field_of_the_project_s_settings_accepts_an_empty_prefix(
     assert!(text.contains("branch_prefix = \"\"\n"), "{text}");
     toast_said(&shell, "Branch prefix saved", cx);
     assert!(!page.read_with(cx, |page, cx| page.branch_prefix_savable(cx)));
+}
+
+#[gpui_kit::test]
+fn the_branch_format_and_the_pull_request_template_are_saved_from_the_project_s_settings(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    // Tall enough for the Setup tab's sections, the branch format among them, to be clicked.
+    cx.simulate_resize(size(px(1280.), px(1600.)));
+    let page = open_project_settings(&shell, "atlas", cx);
+    choose_tab("setup", cx);
+    settle(cx);
+    let format = page.read_with(cx, |page, _| page.convention("branch_format").clone());
+    assert_eq!(
+        format.read_with(cx, |s, _| s.saved().map(str::to_owned)),
+        Some(String::new())
+    );
+    assert!(!format.read_with(cx, |s, cx| s.savable(cx)));
+
+    // A pattern that is no regular expression: refused under its field, nothing written.
+    format.update_in(cx, |s, window, cx| s.type_text("^(feat", window, cx));
+    settle(cx);
+    assert!(format.read_with(cx, |s, cx| s.savable(cx)));
+    cx.update(|window, cx| window.click("branch-format-save-atlas", cx));
+    until(&shell, cx, "the pattern is refused", |cx| {
+        format.read_with(cx, |s, _| s.problem().is_some())
+    });
+    let problem = format.read_with(cx, |s, _| s.problem().unwrap().to_owned());
+    assert!(problem.contains("unclosed group"), "{problem}");
+    settle(cx);
+    assert_eq!(
+        text_of("branch-format-field-atlas-error", cx),
+        Some(problem.clone())
+    );
+    let text = std::fs::read_to_string(user.project_file("atlas")).unwrap();
+    assert!(!text.contains("branch_format"), "{text}");
+
+    // Typing again takes the refusal away; a pattern is saved, and the daemon says so.
+    let pattern = "^(feat|fix)/[A-Z]+-[0-9]+-[a-z0-9-]+$";
+    cx.update(|window, cx| window.click("branch-format-input-atlas", cx));
+    cx.simulate_input("|fix)/[A-Z]+-[0-9]+-[a-z0-9-]+$");
+    settle(cx);
+    assert_eq!(
+        format.read_with(cx, |s, cx| s.typed(cx)),
+        Some(pattern.to_owned())
+    );
+    assert_eq!(
+        format.read_with(cx, |s, _| s.problem().map(str::to_owned)),
+        None
+    );
+    cx.update(|window, cx| window.click("branch-format-save-atlas", cx));
+    until(&shell, cx, "the daemon keeps the pattern", |cx| {
+        format.read_with(cx, |s, _| s.saved() == Some(pattern))
+    });
+    toast_said(&shell, "Branch format saved", cx);
+    let text = std::fs::read_to_string(user.project_file("atlas")).unwrap();
+    assert!(text.contains("branch_format = "), "{text}");
+    assert!(!format.read_with(cx, |s, cx| s.savable(cx)));
+
+    // The template, beside the message checks.
+    choose_tab("rules", cx);
+    let template = page.read_with(cx, |page, _| {
+        page.convention("pull_request_template").clone()
+    });
+    let written = "## Why\n\n## How to verify\n";
+    template.update_in(cx, |s, window, cx| s.type_text(written, window, cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("pull-request-template-save-atlas", cx));
+    until(&shell, cx, "the daemon keeps the template", |cx| {
+        template.read_with(cx, |s, _| s.saved() == Some(written))
+    });
+    toast_said(&shell, "Pull request template saved", cx);
+    let shown = user
+        .call("project.settings", json!({"name": "atlas"}))
+        .unwrap();
+    assert_eq!(shown["pull_request_template"], written);
+    settle(cx);
+    assert_eq!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)),
+        0,
+        "nothing moves at rest"
+    );
 }
 
 #[gpui_kit::test]

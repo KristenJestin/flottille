@@ -122,6 +122,12 @@ The user chose the window's appearance (`appearance.set`): every window takes it
 | `theme` | `omarchy` or `flottille`. |
 | `shade` | `light` or `dark`. |
 
+### `compaction.changed`
+
+The compaction's settings or guidance changed, or Flottille picked a compactor for a user who
+never chose one (`docs/protocol.md`, "The compaction methods"): its data is what
+`compaction.show` answers.
+
 ### `tool_results.changed`
 
 The user chose the limit above which a tool result is cut (`tool_results.set`,
@@ -188,6 +194,17 @@ Ready spec was written to its ticket, or its departures posted.
 | `spec`, `project` | |
 | `status` | What it is now: `draft`, `ready` (the user's gestures), later `in_progress`, `review`, `done`. |
 | `was` | What it was. |
+
+### `vault.changed`
+
+An entry of the vault was set or removed (`vault.set`, `vault.remove`, `docs/vault.md`). Never a
+secret.
+
+| Field | |
+|---|---|
+| `name` | The entry. |
+| `project` | The only project whose agents see it, `null` for every project. |
+| `removed` | `true` when it was removed; absent when it was set. |
 
 ### `workspace.created`
 
@@ -308,6 +325,19 @@ than stored.
 | `review`, `reviewers` (`item.reviewed`) | The decision now; Bitbucket's reviewers and their verdicts. |
 | `verdicts` (`item.reviewed`, Bitbucket) | The reviewers whose verdict is new, `{name, state}`, none `pending`: what a subscription to `review` is told. |
 
+#### `item.approved`
+
+A pull request's review decision became approved, from any other state (`item.reviewed` comes
+with it): GitHub's `reviewDecision` turned `APPROVED`; on Bitbucket every reviewer approved and
+none asks for changes (a pull request with no reviewer never). Judged against the decision stored
+before the round: one read approved again, or a decision never read before, is no event, nor is a
+pull request merged or closed by the same round.
+
+| Field | |
+|---|---|
+| `review` | `approved`. |
+| `by` | Who approved: Bitbucket's reviewers who approved; GitHub's authors whose last review that counts (not a comment) is an approval. |
+
 #### `item.checks`
 
 A pull request's checks ended: none runs now, and one was running, or its head commit moved.
@@ -391,6 +421,7 @@ A turn starts with this message.
 | `agent` | |
 | `text` | The message. |
 | `images` | The names of the images that went with it, when some did (`agent.image` gives each back). An image that did not go is said in `text` instead. |
+| `deliveries` | The ids of the deliveries the message is made of, in order: one per delivery of `text` (the id `agent.send` answered for a message of the user). An event written before it was kept has none. |
 | `typed` | When a delivery of the message used commands (`docs/commands.md`): one entry per delivery of `text`, in order, `{"text", "commands"}` for one that used commands (what was typed, masked, and the names of the commands in the order of their first use), `null` for the others. Left out when none did; an event written before it was kept has none. |
 
 #### `agent.user_message`, `agent.message`, `agent.thought`
@@ -419,11 +450,42 @@ A tool call the agent makes, or a change of one (`update`).
 
 #### `agent.compacted`
 
-The agent compacted its context.
+The agent's context was compacted: by its own CLI, or by Flottille (`docs/design.md` §5.8), whose
+compactor summarised it before the agent went on in a new session.
 
 | Field | |
 |---|---|
 | `agent`, `replay` | |
+| `by` | `flottille` when Flottille compacted it; absent for the CLI's own compaction. |
+| `before` | Flottille's only: the tokens of the context in use before, as the last `agent.usage` said. |
+| `after` | Flottille's only: the tokens of what the new session starts with (the brief, the summary and the messages kept), counted as 4 characters a token. |
+| `summary` | Flottille's only: the summary the compactor wrote, or the handoff the agent wrote; `null` when the agent's handoff is missing. |
+| `source` | Flottille's only: `compactor`, or `agent` when the agent wrote its own handoff (`summary = "agent"`). |
+| `missing` | `true` when the agent was asked for its handoff and it failed: the new session started from Flottille's state and the user's last message. Absent otherwise. |
+
+#### `agent.cache_expired`
+
+The prompt cache of the agent, at rest, expired, and its context is past the minimum size of the
+compaction around the expiry (`docs/design.md` §5.8, 6): the composer shows **Compact before
+sending** until the agent's next turn or compaction. Said once per expiry.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `compact` | The setting `after_expiry` when it was said: whether the toggle starts ticked. |
+
+#### `agent.compaction_failed`
+
+Flottille's compaction of the agent failed, and changed nothing: the agent goes on in its
+session, and its CLI's own compaction stays. A failed handoff of an agent that writes its own
+(`source` `agent`) is said the same way, and its new session starts all the same, without it
+(`agent.compacted` with `missing`).
+
+| Field | |
+|---|---|
+| `agent` | |
+| `used` | The tokens of the context in use when it started, as the last `agent.usage` said: Flottille compacts by itself again only past this size plus a tenth of the window. |
+| `reason` | Why: the compactor failed or was silent, its summary was cut off by its length, tried to call a tool, or was not smaller than what it replaces. |
 
 #### `agent.plan`, `agent.usage`, `agent.mode_changed`, `agent.options_changed`
 
@@ -471,7 +533,25 @@ activity.
 | `outcome` | `ok`, `refused`, `failed`, or `held` for a call the gate held (`docs/tools.md`, "The gate"). |
 | `duration_ms` | How long it took. |
 | `request` | For a call the user allowed, performed once they did: the request's number; else `null`. |
+| `link` | Only for a `forge` `run` that was done and whose answer gave the run's link: that link. |
 | `cut` | Only when the result was cut at the source (`docs/tools.md`, "Long results"): `{"result", "chars", "left_out"}`, the id the whole text is read by, its length and how many characters the agent was not shown. |
+
+#### `agent.link_shown`
+
+The agent handed the user a link (`web` `show_link`, `docs/tools.md`, "Showing a link"). Nothing
+was opened: the window turns it into a toast with an Open button and a line of a card in the
+conversation (links shown in a row are one card and one toast, `docs/tools.md`, "Showing a
+link"), and the user's click opens it with the system's default handler. The event carries
+nothing to tell a row apart: the window makes the rows from the events in order.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `kind` | `url`, or `file` for a file of the agent's place. |
+| `target` | What Open opens: the `http(s)` URL as the agent gave it, or the file's absolute real path. |
+| `title` | The few words the agent gave, masked; `null` when it gave none. |
+| `host` | The URL's host; `null` for a file. |
+| `shown` | Only for a file: its path as the place shows it, relative to the place. |
 
 #### `agent.tools_changed`
 
@@ -483,6 +563,17 @@ tracker, or its process starts on a version whose tools differ from those it was
 |---|---|
 | `agent` | |
 | `added`, `removed` | The tools' names, without their prefix, sorted. |
+
+#### `agent.tools_reload`
+
+A reload of the agent's tools waits for its next process (`pending: true`, `agent.reload_tools`),
+or no longer (`pending: false`): the next process took it and was given the tools its role has
+now, or the agent ended first. Like `agent.tools_outdated`, it is no sign of activity.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `pending` | |
 
 #### `agent.tools_outdated`
 
@@ -579,7 +670,7 @@ Its process was let go; the next message starts it again.
 | Field | |
 |---|---|
 | `agent` | |
-| `reason` | `idle` (no turn for the idle release time), `restart` (the daemon that ran it is gone) or `stopped` (an ended root whose session is kept: it can be resumed now, `agent.resume`). |
+| `reason` | `idle` (no turn for the idle release time), `restart` (the daemon that ran it is gone), `reload` (the user reloaded its tools, `agent.reload_tools`) or `stopped` (an ended root whose session is kept: it can be resumed now, `agent.resume`). |
 
 #### `agent.died`
 
@@ -679,15 +770,54 @@ lists it (`docs/cli.md`), and a pilot sees it with `events_since`.
 
 #### `agent.asked`
 
-The agent asked a question: a root of the user (`ask_user`), a child of its parent
-(`ask_parent`). A root's question is for the user: `flottille inbox` lists it, and a pilot sees it
-with `events_since`.
+The agent asked a question with `ask` (or `ask_user`, `ask_parent`, its old names): a child of its
+parent, a led session of its pilot, any other root of the user. A question to the user:
+`flottille inbox` lists it, and a pilot sees it with `events_since`. A question to a led
+session's pilot is shown in the session, and its pilot is woken at the turn's end. When the pilot
+no longer reads the session (it stops following it, it ends, or the user detaches the session),
+each question still open to it is written again, to the user, with `moved_from`: the pilot's are
+closed by it.
 
 | Field | |
 |---|---|
 | `agent` | |
 | `question` | Masked. |
-| `to` | `user` or `parent`. |
+| `to` | `user`, `parent` or `pilot`. |
+| `pilot` | With `to` `pilot`: the pilot's id; `null` otherwise. |
+| `moved_from` | Present on a question to the pilot moved to the user: the pilot's id. |
+
+#### `agent.detached`
+
+The user detached a session from the agent that started it (`agent.detach`): `launched_by` is
+`null` from then on and `detached_from` keeps that agent. There is no undo.
+
+| Field | |
+|---|---|
+| `agent` | The session. |
+| `from` | The agent it was detached from. |
+
+#### `agent.handed`
+
+A led session's pilot ended: the session goes on, handed to the user (`led_by` is `null` from then
+on), and it is told so once by a `handed` delivery.
+
+| Field | |
+|---|---|
+| `agent` | The session. |
+| `from` | Its pilot, which ended. |
+
+#### `agent.answered`
+
+A question of the agent may no longer wait: it took a message of the user (a root) or of its
+parent (a child) while a question of its waited, or its session was replaced or resumed while one
+did. It tells a client to read the root's open questions again (`agent.tree`, `questions`); it does
+not say which are open, the store does: a question is answered once the root took a message of the
+user written after it, and none asked before a replacement or a resume waits.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `why` | `replaced` or `resumed`, when that is why; absent for a message taken. |
 
 #### `agent.stuck`
 
@@ -781,6 +911,47 @@ The user dismissed a command that ended (`run.dismiss`): it is no longer listed.
 |---|---|
 | `agent`, `run` | |
 
+### The events of a leave
+
+The user's leave for a session to write to another it did not start (`docs/tools.md`, "Sessions
+that talk to each other"). Each has `writer` and `session`, the two agents' ids, `request`, the
+number of the request it was given in, and `granted_at`. A leave also goes, with no event of its
+own, when either session ends: `agent.ended` (or `agent.failed`) says it.
+
+#### `leave.granted`
+
+The user allowed the first message of `writer` to `session`: the writer's next messages to it
+are judged as a write is, never asked again for the pair.
+
+#### `leave.withdrawn`
+
+The user took it back (`leave.withdraw`): the writer's next message to that session asks again.
+
+### The events of a service
+
+The services of the machine (`docs/projects.md`, "Services"). Their runs also emit the events of a
+run, with an empty `project`.
+
+#### `service.started`
+
+`{"service", "run", "line", "folder", "ready"}`: the daemon started it, for the user, an agent or
+a task that needs it. `ready` is `"starting"` for a service that says when it is ready, else
+`null`.
+
+#### `service.ready`
+
+`{"service", "run", "url"}`: it is ready.
+
+#### `service.ended`
+
+`{"service", "run", "state", "why"}`: its run ended; `state` is `stopped` (the user, an agent the
+user allowed, or the daemon stopping) or `failed`, `why` the line that says why.
+
+#### `service.changed`
+
+`{"service", "change"}`: `added`, `edited` or `removed` in `services.toml` through Flottille, or
+`outside`: it answered before it was started, and Flottille started nothing.
+
 ### The events of a subscription
 
 A subscription (`docs/design.md` §5.6) opens and ends; each event has `agent`, the agent it wakes,
@@ -788,15 +959,16 @@ and `subscription`, its id. What it delivers is a `delivery.queued` of kind `sub
 
 #### `subscription.opened`
 
-An agent subscribed (`forge` `subscribe`), or asked to be woken (`wake`). Subscribing again to the
+An agent subscribed (`forge` `subscribe`), asked to be woken (`wake`), or started a run it
+follows (`forge` `run`). Subscribing again to the
 same target replaces the agent's subscription, as a new wake replaces the agent's wake: the old one
 ends first, `cancelled`.
 
 | Field | |
 |---|---|
 | `agent`, `subscription` | |
-| `source` | What produces its events: `forge`, `tickets`, `timer` for a wake, or `session` for the following of a session the agent started for the user. |
-| `named` | What it watches in a few words, as the agent reads it (`pull request #12 of api, workspace login`; `wake: <why>`). |
+| `source` | What produces its events: `forge`, `tickets`, `timer` for a wake, `session` for the following of a session the agent started for the user, or `run` for the following of a run it started (`docs/forges.md`, "Following a run"). |
+| `named` | What it watches in a few words, as the agent reads it (`pull request #12 of api, workspace login`; `wake: <why>`; `run #43 of api (custom: nightly on app/login)`). |
 | `events` | The events it waits for. |
 
 #### `session.following_paused`, `session.following_resumed`
@@ -821,5 +993,5 @@ A subscription is over, once.
 | Field | |
 |---|---|
 | `agent`, `subscription` | |
-| `why` | `delivered` (an event it waited for, or the end of its target, or a wake's time, was delivered), `expired` (its time was up, said to the agent), `cancelled` (the agent's `unsubscribe`, the user's `subscription.cancel`, or a new subscription to the same target), `agent-ended` (its agent ended), `session-ended` (the session it followed ended or failed, said to the agent), `unavailable` (until #257, when a subscription held a watch of its own: the daemon could not watch its target again after a restart). Only the first two wake the agent. |
+| `why` | `delivered` (the end of its target, with what it waited for of that read, or a wake's time, or the end of a followed run, was delivered; an event that leaves the target open is delivered and ends nothing), `expired` (the deadline the agent gave passed, said to the agent), `cancelled` (the agent's `unsubscribe`, the user's `subscription.cancel`, or a new subscription to the same target), `agent-ended` (its agent ended), `session-ended` (the session it followed ended or failed, said to the agent), `unavailable` (until #257, when a subscription held a watch of its own: the daemon could not watch its target again after a restart). Only the first two wake the agent. |
 

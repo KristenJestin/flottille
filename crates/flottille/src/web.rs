@@ -716,8 +716,7 @@ async fn in_reader(net: &Net, kind: Body, page: &Page) -> Result<Extracted, Stri
     }
     let mut command = tokio::process::Command::from(command);
     command.kill_on_drop(true);
-    let mut child = command
-        .spawn()
+    let mut child = crate::children::spawn(&mut command)
         .map_err(|e| format!("its reader could not start: {e}"))?;
     // Still alive: it waits for its page.
     if let Some(pid) = child.id()
@@ -1399,7 +1398,7 @@ async fn addresses(net: &Net, url: &Url) -> Result<Vec<SocketAddr>, Missed> {
     Ok(addresses)
 }
 
-trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
+pub(crate) trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
 
 /// One GET of the URL on one of its checked addresses: its status, where it redirects, and its
@@ -1510,7 +1509,7 @@ async fn get(
 }
 
 /// The TLS client: the system's certificates, built once.
-fn tls() -> Result<Arc<ClientConfig>, String> {
+pub(crate) fn tls() -> Result<Arc<ClientConfig>, String> {
     static CONFIG: OnceLock<Result<Arc<ClientConfig>, String>> = OnceLock::new();
     CONFIG
         .get_or_init(|| {

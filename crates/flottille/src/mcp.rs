@@ -18,7 +18,7 @@ use std::time::Instant;
 use bytes::Bytes;
 use flottille_core::agent::{Agent, GateMode};
 use flottille_core::approval::{Judgement, Kind};
-use flottille_core::project::Project;
+use flottille_core::project::{Project, Task};
 use flottille_core::secrets;
 use flottille_core::store::Store;
 use http::{Request, Response, StatusCode};
@@ -92,6 +92,10 @@ pub struct Definition {
 /// all of them, since the tool list it speaks of differs by agent only in which tools it holds.
 const GUIDE: &str = include_str!("../roles/guide.md");
 
+/// A `session_send` the judge allowed while the user withdrew the leave it was judged under.
+const LEAVE_WITHDRAWN: &str = "refused: the user withdrew your leave to write to that session \
+    while this message was judged; send it again to ask them";
+
 /// What a call of a session that was replaced is answered.
 /// What a call is answered when its process ended while it was on its way.
 const GONE: &str = "refused: this session's process has ended: its token no longer works; stop \
@@ -101,7 +105,7 @@ const REPLACED: &str = "refused: this session has been replaced: a new session o
 
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
 /// the order frozen in the agent.
-const SERVED: [Definition; 28] = [
+const SERVED: [Definition; 31] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -225,6 +229,7 @@ const SERVED: [Definition; 28] = [
                 "check": {"type": "boolean", "description": "Tests, lint."},
                 "read_only": {"type": "boolean", "description": "It changes nothing."},
                 "ask_before_running": {"type": "boolean", "description": "Judged each time it runs."},
+                "needs": {"type": "array", "items": {"type": "string"}, "description": "add, edit: the services of the machine (services lists them) it starts and waits for first."},
                 "ready": {"type": ["object", "null"], "description": "add, edit: when a run of it is ready, one of {\"line\": text its output prints}, {\"url\": an address that answers}, {\"command\": a line that exits 0}; templated ({workspace}, {url}…); null removes it.", "properties": {
                     "line": {"type": "string"}, "url": {"type": "string"}, "command": {"type": "string"}
                 }, "minProperties": 1, "maxProperties": 1, "additionalProperties": false},
@@ -265,29 +270,29 @@ const SERVED: [Definition; 28] = [
     Definition {
         name: "run_status",
         title: "Follow or stop a run",
-        description: "A run this agent started, by the run id run gave. action output (the \
-            default): its state and lines of its output, the last tail lines (40 by default, \
-            1000 at most) or those from start; the answer says how to read the lines before or \
-            after; only the last 64 KiB of an output are kept. action stop: ends it with \
-            everything it started, asked to end, then killed 5 seconds later, and answers once \
-            it ended; a run that already ended is left as it is. {\"run\": \"a1b2c3\", \
-            \"action\": \"stop\"} action notify with when ready: you are told when a run of \
-            a task that says when it is ready is, rather than reading it again and again: \
-            {\"run\": \"a1b2c3\", \"action\": \"notify\", \"when\": \"ready\"}. The same call reads a cut result whole: a long result is \
-            returned as its beginning and its end with a line naming an id (res_...) and the \
-            call that reads the lines left out, from start, a page at a time; stop does not \
+        description: "{} with no run lists your commands (a root's tree's too) with their id, line, \
+            state and last line: the id of a run you lost stops it. With run: a run this agent \
+            started, by the run id run gave. action output (the default): its state and lines \
+            of its output, the last tail lines (40 by default, 1000 at most) or those from \
+            start; the answer says how to read the lines before or after; only the last 64 KiB \
+            of an output are kept. action stop: ends it with everything it started, asked to \
+            end, then killed 5 seconds later, and answers once it ended; a run that already \
+            ended is left as it is. {\"run\": \"a1b2c3\", \"action\": \"stop\"} action notify \
+            with when ready: you are told when a run of a task that says when it is ready is: \
+            {\"run\": \"a1b2c3\", \"action\": \"notify\", \"when\": \"ready\"}. The same \
+            call reads a cut result (res_...) a page at a time, from start; stop does not \
             apply to it.",
         read_only: false,
         idempotent: true,
         destructive: true,
         schema: || {
             json!({"type": "object", "properties": {
-                "run": {"type": "string", "description": "The run id run gave, or the id of a cut result (res_...)."},
+                "run": {"type": "string", "description": "The run id run gave, or the id of a cut result (res_...). Without it, the call lists your commands."},
                 "action": {"type": "string", "enum": ["output", "stop", "notify"], "description": "output by default."},
                 "when": {"type": "string", "enum": ["ready"], "description": "notify: what to be told of."},
                 "tail": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "output: the last lines."},
                 "start": {"type": "integer", "minimum": 1, "description": "output: the first line to show."}
-            }, "required": ["run"], "additionalProperties": false})
+            }, "additionalProperties": false})
         },
     },
     Definition {
@@ -317,48 +322,64 @@ const SERVED: [Definition; 28] = [
         name: "forge",
         title: "Pull requests",
         description: "Pull requests and CI of the project's repositories, through the user's \
-            own gh or bkt (no forge sign-in here: never run them). list: by state (open by \
-            default) and branch, as last read. show: a workspace's branch's (yours; in main, name \
-            it), or number's, with checks (the log's end of each failed job), review and comment \
-            counts; detail full adds texts. Writes, judged, answered at once, the result maybe \
-            later: create, merge (method, squash by default; refused with no check, while checks \
-            fail or a review asks for changes unless waive gives the user's words) and checks \
-            (re-run failed) act on a workspace's branch; comment, edit, close (comment first), \
-            reopen on number. subscribe: a workspace's pull request's next events wake you once, \
-            by a delivery; unsubscribe. CI: pipelines lists what can be run; run starts one by \
-            name (custom: <name>) with its variables; runs, run_view, run_logs read; run, stop, \
-            step judged. {\"action\": \"create\", \"repository\": \"api\", \"title\": \
-            \"fix: ...\", \"body\": \"...\"}",
+            gh or bkt (no forge sign-in here: never run them). list: by state and branch, \
+            as last read. show: a branch's or number's, \
+            with checks (the log's end of each failed job), review and comment counts; detail \
+            full: texts. Writes, judged, answered at once, the result maybe later: create, merge \
+            (squash by default; refused with no check, while checks fail or a review asks for changes unless waive gives the \
+            user's words) and checks act on a workspace's branch (create, no body: \
+            the template); edit, comment, review (approve and request_changes wait for the user), \
+            close (comment first), reopen on number. \
+            subscribe: events wake you until merged or closed; unsubscribe. CI: pipelines lists what can \
+            be run; run starts one by name (custom: <name>) with its variables and follows it unless \
+            follow: false; runs, run_view, \
+            run_logs read; run, stop, step judged. {\"action\": \"create\", \"repository\": \
+            \"api\", \"title\": \"fix\", \"body\": \"...\"}",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "show", "subscribe", "unsubscribe", "create", "comment", "edit", "merge", "checks", "close", "reopen", "pipelines", "runs", "run_view", "run_logs", "run", "stop", "step"]},
+                "action": {"type": "string", "enum": ["list", "show", "subscribe", "unsubscribe", "create", "comment", "edit", "merge", "checks", "close", "reopen", "review", "pipelines", "runs", "run_view", "run_logs", "run", "stop", "step"]},
                 "workspace": {"type": "string", "description": "Yours when left out; in main, name it."},
                 "repository": {"type": "string", "description": "A repository of the project, by its path (\".\" is the project folder itself), never a folder inside one; all of the place's when left out (list, show); the only one is taken without being named."},
-                "number": {"type": "integer", "minimum": 1, "description": "show, comment, edit: a pull request."},
+                "number": {"type": "integer", "minimum": 1, "description": "show, comment, review, edit, subscribe, unsubscribe: a pull request. subscribe and unsubscribe take it with repository, without workspace, for one that is not your workspace's branch's."},
                 "state": {"type": "string", "enum": ["open", "closed", "merged", "all"]},
                 "branch": {"type": "string", "description": "list: its source branch."},
                 "detail": {"type": "string", "enum": ["short", "full"]},
                 "fresh": {"type": "boolean", "description": "show: read the pull request again; one read in the last 30 s is given again otherwise (detail full always reads)."},
                 "title": {"type": "string", "description": "create, edit: the pull request's title. create needs the branch pushed first (git push -u origin <branch>)."},
-                "body": {"type": "string", "description": "create, edit: description; comment: the comment."},
-                "draft": {"type": "boolean"},
+                "body": {"type": "string", "description": "create, edit: description; comment: the comment. review: its words. create without it takes the project's pull request template when it has one (project settings shows it): fill the template in body rather than replace it."},
+                "draft": {"type": "boolean", "description": "create: open as a draft. edit: false marks it ready for review, true makes it a draft again."},
+                "reviewers": {"type": "array", "items": {"type": "string"}, "description": "create: reviewers besides the project's."},
+                "labels": {"type": "array", "items": {"type": "string"}, "description": "create: labels (GitHub only)."},
+                "delete_branch_on_merge": {"type": "boolean", "description": "create: delete the source branch when it is merged."},
+                "reviewers_add": {"type": "array", "items": {"type": "string"}, "description": "edit: reviewers to ask."},
+                "reviewers_remove": {"type": "array", "items": {"type": "string"}, "description": "edit: reviewers to take off."},
+                "labels_add": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to put on (GitHub only)."},
+                "labels_remove": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to take off (GitHub only)."},
+                "base": {"type": "string", "description": "edit: the branch it goes into; it must exist on the remote."},
                 "comment": {"type": "string", "description": "close, reopen: posted on the pull request first."},
-                "delete_branch": {"type": "boolean", "description": "close: also delete the pull request's branch, unless a workspace is on it or it comes from a fork."},
+                "verdict": {"type": "string", "enum": crate::forge::REVIEW_VERDICTS, "description": "review: comment, approve or request_changes; the last two wait for the user in every mode."},
+                "comments": {"type": "array", "description": "review: comments on lines of the diff.", "items": {"type": "object", "properties": {
+                    "path": {"type": "string", "description": "The file, as the diff names it."},
+                    "line": {"type": "integer", "minimum": 1, "description": "The line in the new file."},
+                    "body": {"type": "string"}
+                }, "required": ["path", "line", "body"], "additionalProperties": false}},
+                "delete_branch": {"type": "boolean", "description": "close: also delete the pull request's branch, unless a workspace is on it or it comes from a fork. merge: delete its source branch after the merge; the project's setting when left out; never a branch the workspace resumed."},
                 "waive": {"type": "string", "description": "merge: the user's words letting a blocked pull request be merged; held for them."},
                 "method": {"type": "string", "enum": ["squash", "merge", "rebase"], "description": "merge: squash when left out."},
                 "message": {"type": "string", "description": "merge by squash: the squashed commit's message, its subject on the first line; the forge's own when left out."},
-                "events": {"type": "array", "items": {"enum": crate::forge::EVENTS}},
+                "events": {"type": "array", "items": {"enum": crate::forge::EVENTS}, "description": "subscribe: what wakes you. approved: the review as a whole turns approved (once each time, saying who and the checks), where review wakes you at each reviewer."},
                 "from": {"enum": crate::subscriptions::FROM, "description": "subscribe: whose reviews and comments count: anyone (the default), or people (no bot nor agent)."},
-                "minutes": {"type": "integer", "minimum": 1, "maximum": crate::subscriptions::LONGEST_MINUTES, "description": "subscribe: how long it waits; sized by CI when left out, else 60."},
+                "minutes": {"type": "integer", "minimum": 1, "description": "subscribe: a deadline: past it with nothing come, you are woken once and it ends. Left out: none; each event wakes you, no need to subscribe again."},
                 "session": {"type": "string", "description": "unsubscribe: a session you follow, by its agent id, to stop following it."},
                 "pipeline": {"type": "string", "description": "run: as pipelines lists it (Bitbucket default, custom: <name>, branches: <pattern>; GitHub a workflow's file)."},
                 "variables": {"type": "array", "description": "run: Bitbucket variables, GitHub inputs.", "items": {"type": "object", "properties": {
                     "key": {"type": "string"}, "value": {"type": "string"}, "secured": {"type": "boolean"}
                 }, "required": ["key", "value"], "additionalProperties": false}},
-                "run": {"type": "integer", "minimum": 1, "description": "run_view, run_logs, stop, step: as runs lists it."},
+                "follow": {"type": "boolean", "description": "run: true (the default) follows the run started: a delivery wakes you when it ends (successful, failed with its failed steps, stopped) or waits on a manual step; false starts it alone. forge unsubscribe {run} stops following it."},
+                "run": {"type": "integer", "minimum": 1, "description": "run_view, run_logs, stop, step: as runs lists it; unsubscribe: a run you follow."},
                 "step": {"type": "string", "description": "run_logs, step: a step's (job's) name, as run_view lists it."},
                 "do": {"type": "string", "enum": ["start", "rerun"], "description": "step: start a manual step, or run one again."}
             }, "required": ["action"], "additionalProperties": false})
@@ -367,49 +388,57 @@ const SERVED: [Definition; 28] = [
     Definition {
         name: "tickets",
         title: "Tickets",
-        description: "The tickets of the project's tracker (GitHub #123, Jira ABC-123), through the user's own \
-            gh or acli (never run them). list, search (title words): the tickets of a state (open by \
-            default), by label and assignee, as last read; show: a workspace's linked ticket (in \
-            main, name workspace) or ticket, read now, with its links; detail full adds the \
-            comments, with the id of those you posted; types: a Jira project's work item types; \
-            link_types: the kinds of link. Writes, judged, answered at once, the result maybe later: \
-            create, comment, edit, close, reopen, status, link and unlink (ticket kind other: ABC-2 \
-            blocks ABC-1), comment_edit and comment_delete (your own comments only). Nothing is \
-            assigned unless you ask: assignee \"@me\" gives it to the user (Jira create, edit; null \
-            on edit removes it; GitHub edit: assignees). subscribe: the next events of a ticket wake you once (from people: no bot nor agent; \
-            minutes: 60 by default); unsubscribe. {\"action\": \"comment\", \"ticket\": \"#12\", \
-            \"body\": \"...\"}",
+        description: "The tracker's tickets (GitHub #123, Jira ABC-123), via the user's gh or acli \
+            (never run them). list: by state (default open), label, assignee, updated_within; search asks the tracker: {\"action\": \"search\", \"query\": \"x\"}, \
+            on Jira also in_comments, jql; show: a workspace's ticket (in \
+            main, name workspace) or ticket, with its links; detail full adds the comments, \
+            with the id of yours; Jira images and files are named, not shown; \
+            types: a Jira project's work item types (never guess); link_types. \
+            Writes, judged, answered at once, the result maybe later: create, comment, edit, close, \
+            reopen, status, link and unlink (ticket kind other: ABC-2 blocks ABC-1), comment_edit and \
+            comment_delete (yours only); log_time (Jira: ticket, duration, started?, body?; \
+            time_spent: this session's work time, to propose). \
+            Assign only when asked (assignee \"me\": the user; \
+            GitHub: assignees). Jira create: parent, sprint (sprints lists them). \
+            subscribe: a ticket's events wake you until it is closed; unsubscribe.",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "search", "show", "types", "link_types", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "sprint"]},
+                "action": {"type": "string", "enum": ["list", "search", "show", "types", "link_types", "sprints", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "log_time", "time_spent"]},
                 "ticket": {"type": "string", "description": "#123 or ABC-123; the workspace's when left out."},
+                "duration": {"type": "string", "description": "log_time (Jira): the time spent, in Jira's form: 2h 30m, 1d, 45m (weeks, days, hours, minutes)."},
+                "started": {"type": "string", "description": "log_time: when the work started, RFC 3339 with its offset (2026-11-06T09:00:00+01:00); the duration before now when left out."},
                 "workspace": {"type": "string"},
                 "query": {"type": "string", "description": "search: words."},
+                "updated_within": {"type": "integer", "minimum": 1, "maximum": 365, "description": "list, search: updated in the last that many days."},
+                "in_comments": {"type": "string", "description": "search on Jira: words of the comments (not by author). Not for list."},
+                "jql": {"type": "string", "description": "search on Jira: a JQL query, answered only within the tracker's projects (what it may refer to is not checked); ORDER BY allowed. Not for list."},
                 "state": {"type": "string", "enum": ["open", "closed", "all"]},
                 "label": {"type": "string"},
-                "assignee": {"type": ["string", "null"], "description": "list, search: only those assigned to them. create, edit on Jira: whom to assign, \"@me\" (the user signed in to acli), an email or an account id; edit: null removes the assignee."},
+                "assignee": {"type": ["string", "null"], "description": "list, search: only those assigned to them. create, edit on Jira: whom to assign: \"me\" is the user you work for (\"assign it to me\", \"to the user\"), else an email or an account id, not a display name; edit: null removes the assignee."},
                 "detail": {"type": "string", "enum": ["short", "full"]},
                 "fresh": {"type": "boolean", "description": "show: read the ticket again; one read in the last 30 s is given again otherwise (detail full always reads)."},
                 "title": {"type": "string"},
-                "body": {"type": "string", "description": "create, edit: description; comment, comment_edit: the comment. Markdown, converted for Jira."},
-                "labels": {"type": "array", "items": {"type": "string"}, "description": "create, edit: labels to add (GitHub)."},
+                "body": {"type": "string", "description": "create, edit: description; comment, comment_edit, log_time: the comment. Markdown, converted for Jira."},
+                "labels": {"type": "array", "items": {"type": "string"}, "description": "create, edit: labels to add."},
                 "reason": {"enum": ["completed", "not planned"], "description": "close: completed or not planned (GitHub)."},
-                "remove_labels": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to remove (GitHub)."},
-                "assignees": {"type": "array", "items": {"type": "string"}, "description": "edit: logins to add (GitHub), \"@me\" for the user."},
+                "remove_labels": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to remove."},
+                "assignees": {"type": "array", "items": {"type": "string"}, "description": "edit: logins to add (GitHub), \"me\" for the user."},
                 "remove_assignees": {"type": "array", "items": {"type": "string"}, "description": "edit: logins to remove (GitHub)."},
                 "status": {"type": "string", "description": "status: its name."},
                 "other": {"type": "string", "description": "link, unlink: the other ticket. The link reads ticket, kind, other: ABC-2 blocks ABC-1 is ticket ABC-2, kind blocks, other ABC-1."},
                 "kind": {"type": "string", "description": "link, unlink: a kind link_types lists (blocks, is blocked by, relates to; GitHub: parent of, sub-task of)."},
                 "comment": {"type": "string", "description": "comment_edit, comment_delete: the id show (detail full) gives a comment an agent posted; no one else's."},
-                "sprint": {"type": "string", "description": "sprint: refused, acli cannot do it."},
-                "project": {"type": "string", "description": "create, types on Jira: the tracker's project; status: the board."},
+                "sprint": {"type": "string", "description": "create on Jira (with type): an open sprint, by the name or id sprints gives. An existing item's sprint cannot be changed (acli)."},
+                "parent": {"type": "string", "description": "create on Jira: the work item it goes under (an epic, or a sub-task's parent). An existing item's parent cannot be changed (acli)."},
+                "board": {"type": "string", "description": "sprints: one board of the project, by name or id; all of them otherwise."},
+                "project": {"type": "string", "description": "create, types, sprints on Jira: the tracker's project; status: the board."},
                 "type": {"type": "string", "description": "create on Jira: work item type, one of those types lists."},
                 "events": {"type": "array", "items": {"enum": crate::tickets::EVENTS}},
-                "from": {"enum": crate::subscriptions::FROM},
-                "minutes": {"type": "integer", "minimum": 1, "maximum": crate::subscriptions::LONGEST_MINUTES}
+                "from": {"enum": crate::subscriptions::FROM, "description": "subscribe: whose comments count: anyone (the default), or people (no bot nor agent)."},
+                "minutes": {"type": "integer", "minimum": 1, "description": "subscribe: a deadline: past it with nothing come, you are woken once and it ends. Left out: none; each event wakes you until the ticket is closed (Jira: a done status), no need to subscribe again."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -510,7 +539,8 @@ const SERVED: [Definition; 28] = [
         title: "The project's workspaces",
         description: "The project's workspaces. list and show read them. A root's writes, \
             judged: create makes one (worktrees, then setup, judged as a run of each step; to \
-            resume a branch, name it; name new ones by the repository's naming convention), prepare resumes a failed setup, link_ticket links a \
+            resume a branch, name it; name new ones by the repository's naming convention; one \
+            outside the project's branch format is refused), prepare resumes a failed setup, link_ticket links a \
             ticket (null unlinks), rename_branch {branch, repository?} renames the workspace's \
             branch in each of its repositories (or the one named), only while no remote nor pull \
             request has it and the workspace did not resume it; remove, always held for the user, its request saying what \
@@ -526,9 +556,62 @@ const SERVED: [Definition; 28] = [
                 "action": {"type": "string", "enum": ["list", "show", "create", "prepare", "link_ticket", "rename_branch", "remove"]},
                 "name": {"type": "string"},
                 "repositories": {"type": "array", "items": {"type": "string"}, "description": "create: by path."},
-                "branch": {"type": "string", "description": "create: give it when the repository has a naming convention (its AGENTS.md, CONTRIBUTING, or the branches it already has to read), with the ticket's key when the workspace has a ticket (fix/ABC-12-login). Left out, <branch prefix>/<name> is the fallback (the name alone when the project has no prefix). An existing branch is checked out. rename_branch: the new name."},
+                "branch": {"type": "string", "description": "create: give it when the repository has a naming convention (its AGENTS.md, CONTRIBUTING, or the branches it already has to read), with the ticket's key when the workspace has a ticket (fix/ABC-12-login). Left out, <branch prefix>/<name> is the fallback (the name alone when the project has no prefix). An existing branch is checked out. rename_branch: the new name. A branch the workspace starts or renames to must match the project's branch format when it has one (project settings says it): the refusal names the pattern."},
                 "repository": {"type": "string", "description": "rename_branch: by path; every repository of the workspace when left out."},
                 "ticket": {"type": ["string", "null"], "description": "#123 or ABC-123."}
+            }, "required": ["action"], "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "services",
+        title: "The machine's services",
+        description: "The services of the machine: programs every project shares (a database, \
+            an API the apps call), each run once, in its own folder, by Flottille. A task that \
+            needs one starts it before it runs. list: each with its state (stopped, starting, \
+            ready, running, outside: started by someone else, failed and why), folder and \
+            address; show: one, with the end of its output. start: starts it, what it needs \
+            first, judged as a run of its line in its folder: {\"action\": \"start\", \
+            \"name\": \"mongo\"}. Each service a start or a task's run starts first is held \
+            when marked ask_before_running, and one an agent wrote has its lines (line, ready and \
+            url commands) judged in your mode as a run of them in its folder. stop is always held for the user, whatever the mode: you are \
+            answered at once, the result comes later: {\"action\": \"stop\", \"name\": \
+            \"mongo\"}. A root's add, edit and remove are judged as a task's write: \
+            {\"action\": \"add\", \"name\": \"redis\", \"line\": \"redis-server\", \
+            \"folder\": \"~/tools/redis\"}.",
+        read_only: false,
+        idempotent: false,
+        destructive: true,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["list", "show", "start", "stop", "add", "edit", "remove"]},
+                "name": {"type": "string"},
+                "folder": {"type": ["string", "null"], "description": "add, edit: where it runs, absolute or ~/…; the home when left out or null."},
+                "line": {"type": "string", "description": "add, edit: one command line, never run by a shell."},
+                "needs": {"type": "array", "items": {"type": "string"}, "description": "add, edit: the services started and waited for before it."},
+                "ready": {"type": ["object", "null"], "description": "add, edit: when it is ready, one of {\"line\": text its output prints}, {\"url\": an address that answers}, {\"command\": a line that exits 0}; only {url} is filled; null removes it.", "properties": {
+                    "line": {"type": "string"}, "url": {"type": "string"}, "command": {"type": "string"}
+                }, "minProperties": 1, "maxProperties": 1, "additionalProperties": false},
+                "url": {"description": "add, edit: where it answers: an address or {\"command\": a line that prints it}; null removes it.", "anyOf": [
+                    {"type": "string"}, {"type": "null"},
+                    {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"], "additionalProperties": false}
+                ]},
+                "ask_before_running": {"type": "boolean", "description": "add, edit: held for approval each time an agent starts it, itself or as a need."}
+            }, "required": ["action"], "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "vault",
+        title: "The user's vault",
+        description: "The secrets the user keeps for agents (a tracker's token, a test \
+            account's login): list gives each entry's name, what it is for, its URL and its \
+            username. A secret is never shown: a tool of Flottille's that needs one takes the \
+            entry's name and puts the secret where it goes itself. {\"action\": \"list\"}.",
+        read_only: true,
+        idempotent: true,
+        destructive: false,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["list"]}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -539,52 +622,56 @@ const SERVED: [Definition; 28] = [
             characters) and its links. search: DuckDuckGo, 10 results. Both are the web's, not \
             the user's. A URL you were shown (user, ticket, pull request, page, result) \
             passes; one you build is judged: it sends out what it holds. No local or private \
-            address.",
+            address. show_link {url or path, title?}: puts a link in front of the user, who \
+            opens it with a click (an http(s) URL, or a file of your place); use it instead of \
+            xdg-open, open or start, which show nothing here.",
         read_only: true,
         idempotent: true,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["read", "search"]},
+                "action": {"type": "string", "enum": ["read", "search", "show_link"]},
                 "url": {"type": "string"},
                 "query": {"type": "string"},
-                "why": {"type": "string"}
+                "why": {"type": "string"},
+                "path": {"type": "string", "description": "show_link: a file inside your place."},
+                "title": {"type": "string", "description": "show_link: a few words naming the link."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
     Definition {
         name: "agent_launch",
-        title: "Start a session, or launch a child",
-        description: "Work that belongs in a workspace is a session for the user: root: true \
-            with workspace (existing; main is the project folder) or new_workspace (made \
-            for it, repositories picks them), judged; theirs, not your child, the brief its first \
-            message; follow (required): true wakes you when each turn ends; you write to it, \
-            and it answers you, with session_send. A root only. Without root: a child agent on \
-            one precise task, in your own place (workspace and new_workspace are refused), \
-            answered at once with its agent_id; it works on its own and you are told when it \
-            reports, asks, fails, is stuck or idles, so never poll. The brief is all it knows: \
-            the task, what to read, the checks, the deliverable. A child launch is refused above \
-            the children cap. {\"title\": \"Fix login\", \"brief\": \"...\", \"root\": true, \
-            \"workspace\": \"login\", \"follow\": true}; {\"title\": \"Add API\", \"brief\": \
-            \"...\", \"root\": true, \"follow\": false, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}; {\"title\": \
-            \"Write the tests\", \"brief\": \"...\"}",
+        title: "Launch a child, or start a session",
+        description: "kind (required): child, a part of your own task, in your place, that you \
+            direct and that reports to you (no workspace; refused above the children cap); led, an \
+            autonomous job of its own that you pilot, a real session the user sees under you and \
+            may talk to, which asks you its questions and wakes you when it asks, reports or ends; \
+            handed, a session you start for the user and let go, of which you hear nothing more \
+            unless it writes to you. led and handed: a root only, judged, in workspace (main is \
+            the project folder) or new_workspace; you and it write with session_send. Answered at \
+            once with its id; never poll. The brief is all it knows: the task, what to read, the \
+            checks, the deliverable. {\"kind\": \"child\", \"title\": \"Write the tests\", \
+            \"brief\": \"...\"}; {\"kind\": \"led\", \"title\": \"Fix login\", \"brief\": \
+            \"...\", \"workspace\": \"login\"}; {\"kind\": \"handed\", \"title\": \"Add API\", \
+            \"brief\": \"...\", \"new_workspace\": \"api\", \"repositories\": [\"api\"]}",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
+                "kind": {"type": "string", "enum": ["child", "led", "handed"], "description": "child: a part of your task, in your place, that reports to you. led: an autonomous session you pilot, which asks you and wakes you. handed: a session you start for the user and let go."},
                 "title": {"type": "string", "description": "The task in a few words: how you and the user will name this session or child."},
                 "brief": {"type": "string", "description": "Everything the session or the child needs to know."},
                 "provider": {"type": "string", "description": "The provider it runs on: yours when left out."},
                 "model": {"type": "string", "description": "The model; the provider's default when left out."},
                 "effort": {"type": "string", "description": "The model's effort; its default when left out."},
                 "role": {"type": "string", "enum": ["worker", "lead"], "description": "worker by default."},
-                "workspace": {"type": "string", "description": "With root: an existing workspace of the project, for the session to work in; main is the project folder. A child works in your place."},
-                "new_workspace": {"type": "string", "description": "With root: the name of a new workspace to make for the session. Not with workspace."},
+                "workspace": {"type": "string", "description": "With led or handed: an existing workspace of the project, for the session to work in; main is the project folder. A child works in your place."},
+                "new_workspace": {"type": "string", "description": "With led or handed: the name of a new workspace to make for the session. Not with workspace."},
                 "repositories": {"type": "array", "items": {"type": "string"}, "description": "With new_workspace: its repositories, by path; the project's when left out."},
-                "root": {"type": "boolean", "description": "A session for the user, in a workspace or your place, not a child."},
-                "follow": {"type": "boolean", "description": "Required with root: true, refused without it. true: you are woken at each end of a turn of the session (and when it ends), with its last message. false: you are told nothing of it."}
-            }, "required": ["title", "brief"], "additionalProperties": false})
+                "branch": {"type": "string", "description": "With new_workspace: its branch, as workspace create takes it. Name it when the repository has a naming convention (its AGENTS.md, CONTRIBUTING, the branches it has, the project's branch format), with the ticket's key when there is one (feat/ABC-8-pickup-dashboard); the card shows it, and it is the branch made. Left out, <branch prefix>/<name>. An existing branch is resumed."},
+                "base": {"type": "object", "additionalProperties": {"type": "string"}, "description": "With new_workspace: the branch a repository starts from, by path ({\"api\": \"develop\"}), in place of its base rule."}
+            }, "required": ["kind", "title", "brief"], "additionalProperties": false})
         },
     },
     Definition {
@@ -631,10 +718,12 @@ const SERVED: [Definition; 28] = [
     },
     Definition {
         name: "agent_stop",
-        title: "Stop a child",
+        title: "Stop a child or end a session",
         description: "Stops one of your children with its own children, deepest first; what was \
             queued for them is dropped. Use it once its report is acted on, or to end a child \
-            going in circles. Its workspace stays.",
+            going in circles. It also asks to end any session of your project (one you started \
+            for the user, or another): the user decides every time, the result comes later. \
+            Workspaces stay.",
         read_only: false,
         idempotent: true,
         destructive: true,
@@ -648,7 +737,9 @@ const SERVED: [Definition; 28] = [
         name: "wake",
         title: "Wake later",
         description: "Wakes you once, in minutes, by a delivery saying why; end your turn \
-            meanwhile. A new one replaces yours; cancel drops it.",
+            meanwhile. A new one replaces yours; cancel drops it. For a time the user asked: \
+            never poll CI, forge run follows its run and forge subscribe a pull request's \
+            checks.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -666,9 +757,8 @@ const SERVED: [Definition; 28] = [
         description: "Says you are done: your report goes at once to your parent (to the user for \
             a root), and a child's session ends with this turn. Give the result, each point done \
             or skipped and why, what was not verified, open questions. Call it once, as your \
-            last action. A question left in a report is a follow-up, not a wait: a decision \
-            only the user can take goes through ask_user (ask_parent for a child), a question \
-            about the brief to the agent that started your session, with session_send.",
+            last action. A question left in a report is a follow-up, not a wait: what you need \
+            answered goes through ask.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -679,38 +769,31 @@ const SERVED: [Definition; 28] = [
         },
     },
     Definition {
-        name: "ask_user",
-        title: "Ask the user",
-        description: "Puts a question to the user. It does not wait: the answer comes later as a \
-            message. Go on with what does not depend on it, or end your turn saying what you \
-            wait for. What goes here is a decision only the user can take (commit, push, scope, a \
-            choice): a question about the brief or its context goes to the agent that started \
-            your session, with session_send. A question left in a report or a last message is a \
-            follow-up, not a wait.",
+        name: "ask",
+        title: "Ask a question",
+        description: ASK,
         read_only: false,
         idempotent: false,
         destructive: false,
-        schema: || {
-            json!({"type": "object", "properties": {
-                "question": {"type": "string"}
-            }, "required": ["question"], "additionalProperties": false})
-        },
+        schema: question_schema,
+    },
+    Definition {
+        name: "ask_user",
+        title: "Ask (old name)",
+        description: "The old name of ask, kept for one release and routed as ask is: use ask.",
+        read_only: false,
+        idempotent: false,
+        destructive: false,
+        schema: question_schema,
     },
     Definition {
         name: "ask_parent",
-        title: "Ask your parent",
-        description: "Puts a question to the agent that launched you. It does not wait: the \
-            answer comes later as [flottille:parent]. Go on with what does not depend on it, or \
-            end your turn saying what you wait for. What you need from your parent goes here, \
-            never in a report or a last message: that is a follow-up, not a wait.",
+        title: "Ask (old name)",
+        description: "The old name of ask, kept for one release and routed as ask is: use ask.",
         read_only: false,
         idempotent: false,
         destructive: false,
-        schema: || {
-            json!({"type": "object", "properties": {
-                "question": {"type": "string"}
-            }, "required": ["question"], "additionalProperties": false})
-        },
+        schema: question_schema,
     },
     Definition {
         name: "approval_answer",
@@ -733,12 +816,13 @@ const SERVED: [Definition; 28] = [
     Definition {
         name: "session_send",
         title: "Write to a session",
-        description: "Writes to a session you started (agent_launch with root), or to the agent \
-            that started yours. It does not wait: it reaches it on its next tool result, or as \
-            a new turn, labelled with your name; its answer comes later as [flottille:session]. \
-            Judged, as a write is. Your children are written to with agent_send. A question \
-            about the brief or its context to the agent that started your session goes here; a \
-            decision only the user can take goes through ask_user, and one left in a last \
+        description: "Writes to a session you started (agent_launch with root), to the agent \
+            that started yours, or to any other session of your project (not a child). It does \
+            not wait: it reaches it on its next tool result, or as a new turn, labelled with \
+            your name; its answer comes later as [flottille:session]. Judged, as a write is; \
+            the first message to a session you did not start asks the user's leave, in every \
+            mode, once for that session. Your children are written to with agent_send. A \
+            question goes through ask, which says where it goes for you; one left in a last \
             message is a follow-up, not a wait.",
         read_only: false,
         idempotent: false,
@@ -777,6 +861,39 @@ const SERVED: [Definition; 28] = [
 /// Whether the tool is one of the core's.
 pub fn serves(name: &str) -> bool {
     SERVED.iter().any(|tool| tool.name == name)
+}
+
+/// What `ask` says to every caller; where its question goes is said after it, by the caller's
+/// kind (`ask_goes`).
+const ASK: &str = "Puts a question. It does not wait: the answer comes later as a message. Go on \
+    with what does not depend on it, or end your turn saying what you wait for. A question left \
+    in a report or a last message is a follow-up, not a wait: what you need answered goes here.";
+
+fn question_schema() -> Value {
+    json!({"type": "object", "properties": {
+        "question": {"type": "string"}
+    }, "required": ["question"], "additionalProperties": false})
+}
+
+/// The description of `ask` for `agent`: where its question goes, decided by the daemon, never
+/// by the agent (`docs/tools.md`, "Where a question goes").
+fn ask_goes(daemon: &Daemon, agent: &str) -> String {
+    let agent = daemon.read(|store| store.agent(agent)).ok().flatten();
+    let goes = match agent {
+        Some(agent) if agent.parent.is_some() => {
+            "Yours goes to your parent, the agent that launched you, which answers with \
+             [flottille:parent]: what you need from it goes here."
+        }
+        Some(agent) if crate::tree::pilot_of(daemon, &agent).is_some() => {
+            "Yours goes to the agent that leads your session, which answers with session_send; \
+             it relays to the user what is theirs. The user may also write to you directly."
+        }
+        _ => {
+            "Yours goes to the user, in their inbox: a decision only they can take (commit, push, \
+             scope, a choice)."
+        }
+    };
+    format!("{ASK} {goes}")
 }
 
 fn definition(name: &str) -> Option<&'static Definition> {
@@ -1197,6 +1314,22 @@ impl Server {
         outdated
     }
 
+    /// The user detached the agent's session from the agent that started it: its running
+    /// session's grant no longer says so, and a session it starts from now on is judged as any
+    /// of the user's sessions' launches.
+    pub fn detached(&self, agent: &str) {
+        let mut tokens = self.tokens.lock().unwrap();
+        let Some(digest) = tokens.by_agent.get(agent).cloned() else {
+            return;
+        };
+        if let Some(grant) = tokens.grants.get_mut(&digest) {
+            *grant = Arc::new(Grant {
+                launched: false,
+                ..(**grant).clone()
+            });
+        }
+    }
+
     /// The agent's token no longer works: its process is gone. Whether it was said to run an
     /// older list of tools.
     pub fn revoke(&self, agent: &str) -> bool {
@@ -1343,6 +1476,7 @@ pub fn with_tools_now(daemon: &Daemon, agent: &Agent, project: &Project) -> Opti
         project,
         agent.parent.is_none(),
         agent.depth,
+        crate::vault::seen_by(daemon, &project.name),
     );
     // The same tools in another order are the same list: a new order would only cost the
     // session its prompt cache.
@@ -1413,12 +1547,23 @@ pub fn mint(daemon: &Daemon, grant: Grant, provider: &Provider) -> Result<String
         say_outdated(daemon, &agent, outdated);
     }
     // Its conversation still holds what it said of its old tools: an agent that does not list
-    // them again reads what changed with its next turn.
-    if let Some(before) = newer
-        && !provider.lists_tools_again
-        && let Some(changes) = given.since(before)
-    {
-        deliveries::queue(daemon, &agent, "tools", None, &changes);
+    // them again reads what changed with its next turn. One whose tools the user reloaded reads
+    // it whatever its agent does, and that nothing changed when nothing did.
+    let changes = newer.and_then(|before| given.since(before));
+    if crate::agents::take_reload(daemon, &agent) {
+        let said = match changes {
+            Some(changes) => format!("{RELOADED_CHANGED}\n{changes}"),
+            None => RELOADED_UNCHANGED.to_owned(),
+        };
+        deliveries::queue(daemon, &agent, "tools", None, &said);
+    } else if let Some(changes) = changes.filter(|_| !provider.lists_tools_again) {
+        deliveries::queue(
+            daemon,
+            &agent,
+            "tools",
+            None,
+            &format!("{UPDATED}\n{changes}"),
+        );
     }
     let kept = serde_json::to_string(&given).expect("a list given is JSON");
     let kept = daemon.write(|store| {
@@ -1430,6 +1575,15 @@ pub fn mint(daemon: &Daemon, grant: Grant, provider: &Provider) -> Result<String
     }
     Ok(token)
 }
+
+/// What an agent whose tools changed since its last process is told, before what changed.
+const UPDATED: &str = "Flottille was updated: your tools changed since you last read them. They \
+                       are as listed now, whatever was said of them before:";
+/// The same, for an agent whose tools the user reloaded.
+const RELOADED_CHANGED: &str = "Your tools were reloaded: they changed since you last read them. \
+                                They are as listed now, whatever was said of them before:";
+/// What an agent whose tools the user reloaded is told when they are as they were.
+const RELOADED_UNCHANGED: &str = "Your tools were reloaded: nothing changed.";
 
 /// The tool list a process is given (`docs/tools.md`, "When the tools change"), kept with its
 /// agent: a digest of the tools as they are listed (names, schemas, descriptions), and the
@@ -1498,13 +1652,7 @@ impl Given {
                 lines.push(format!("- {tool}: gone"));
             }
         }
-        (!lines.is_empty()).then(|| {
-            format!(
-                "Flottille was updated: your tools changed since you last read them. They are as \
-                 listed now, whatever was said of them before:\n{}",
-                lines.join("\n")
-            )
-        })
+        (!lines.is_empty()).then(|| lines.join("\n"))
     }
 }
 
@@ -1735,7 +1883,13 @@ impl ServerHandler for Handler {
             .tools
             .iter()
             .filter_map(|name| definition(name))
-            .map(|definition| tool_of(definition, true))
+            .map(|definition| {
+                let mut tool = tool_of(definition, true);
+                if definition.name == "ask" {
+                    tool.description = Some(ask_goes(&self.daemon, &grant.agent).into());
+                }
+                tool
+            })
             .collect();
         Ok(ListToolsResult::with_all_items(tools)
             .with_ttl_ms(LIST_TTL_MS)
@@ -1967,11 +2121,7 @@ async fn played_in(
     cancelled: CancellationToken,
 ) -> (String, bool) {
     let started = Instant::now();
-    let replaced = daemon
-        .read(|store| store.agent(&grant.agent))
-        .ok()
-        .flatten()
-        .is_some_and(|agent| agent.epoch != grant.epoch);
+    let replaced = is_replaced(daemon, grant);
     let removed = crate::workspaces::being_removed(daemon, &grant.agent, tool);
     // A line that only prints part of a file is the read it is, served and recorded as such, once
     // nothing refuses the call as the run it was sent as.
@@ -1984,7 +2134,20 @@ async fn played_in(
         Some((args, said)) => ("fs_read", args, Some(said)),
         None => (tool, args, None),
     };
+    // The two names `ask` replaced stay answered for one release, routed as `ask` is
+    // (`docs/tools.md`, "Where a question goes").
+    let tool = match tool {
+        "ask_user" | "ask_parent" if grant.tools.contains(&"ask") => "ask",
+        tool => tool,
+    };
     let reads = Reads::default();
+    // A run that names no branch says the one it will run on, to the card and the judge.
+    let args = match tool {
+        "forge" if !replaced && removed.is_none() => {
+            crate::forge::with_branch(daemon, &grant.place, args).await
+        }
+        _ => args,
+    };
     let recorded = record_of(&args, &grant.place);
     let reads_a_result = reads_a_result(tool, &args);
     let mut verdict = None;
@@ -2004,12 +2167,16 @@ async fn played_in(
         match crate::actions::prepared(daemon, grant, tool, &args).await {
             Err(refused) => refused,
             Ok(says) => {
-                let decided = classify(daemon, grant, tool, &args);
+                let (decided, first) = judged(daemon, grant, tool, &args);
                 verdict = Some(decided.word());
                 match decided {
-                    gate::Verdict::Allow => {
-                        perform(daemon, grant, tool, args, cancelled, None, &reads).await
-                    }
+                    gate::Verdict::Allow => match stale(daemon, grant, tool) {
+                        Some(refused) => refused,
+                        None => {
+                            perform(daemon, grant, tool, args, cancelled, None, &first, &reads)
+                                .await
+                        }
+                    },
                     gate::Verdict::Deny(why) => Outcome::Refused(why),
                     gate::Verdict::Ask(ask) => {
                         if logging {
@@ -2050,24 +2217,49 @@ async fn played_in(
                         match judged {
                             // In Full, what the gate holds passes, base included: what it
                             // refuses was refused above.
-                            // Its own workspace is removed only with the user's word.
+                            // Its own workspace is removed only with the user's word, and so is
+                            // a session written to for the first time; so are a service stopped
+                            // and a pull request approved or blocked, by `forge` or by a line.
                             _ if mode == GateMode::Full
-                                && !removes_own_workspace(grant, tool, &args) =>
+                                && !removes_own_workspace(grant, tool, &args)
+                                && !gate::asks_leave(&ask)
+                                && !gate::asks_end(&ask)
+                                && !crate::services::stops(tool, &args)
+                                && !gate::asks_review(&ask) =>
                             {
                                 verdict = Some("full");
-                                if removes_a_workspace(tool, &args) {
+                                if let Some(refused) = stale(daemon, grant, tool) {
+                                    refused
+                                } else if removes_a_workspace(tool, &args) {
                                     crate::actions::remove_losing(daemon, grant, args).await
                                 } else {
                                     let approved = Some(ask.class);
-                                    perform(daemon, grant, tool, args, cancelled, approved, &reads)
-                                        .await
+                                    perform(
+                                        daemon, grant, tool, args, cancelled, approved, &first,
+                                        &reads,
+                                    )
+                                    .await
                                 }
                             }
                             Some(judged) if judged.verdict == "allow" => {
-                                verdict = Some("judged");
-                                let approved = Some(gate::Class::Judge);
-                                perform(daemon, grant, tool, args, cancelled, approved, &reads)
-                                    .await
+                                // The judge takes seconds: a leave the user withdrew meanwhile,
+                                // or a session ended, stops the message it was judging.
+                                let lost = (tool == "session_send")
+                                    .then(|| crate::tree::needs_leave(daemon, grant, &args));
+                                match (lost, stale(daemon, grant, tool)) {
+                                    (_, Some(refused)) => refused,
+                                    (Some(Err(why)), _) => Outcome::Refused(why),
+                                    (Some(Ok(true)), _) => Outcome::Refused(LEAVE_WITHDRAWN.into()),
+                                    _ => {
+                                        verdict = Some("judged");
+                                        let approved = Some(gate::Class::Judge);
+                                        perform(
+                                            daemon, grant, tool, args, cancelled, approved, &first,
+                                            &reads,
+                                        )
+                                        .await
+                                    }
+                                }
                             }
                             judged => {
                                 let (outcome, number) = approvals::ask(
@@ -2081,7 +2273,7 @@ async fn played_in(
                 }
             }
         }
-    } else if tool == "workspace" && !grant.tools.contains(&"ask_user") {
+    } else if tool == "workspace" && !grant.tools.contains(&"session_send") {
         Outcome::Refused(crate::actions::CHILD_WORKSPACES.into())
     } else {
         Outcome::Refused(format!(
@@ -2116,7 +2308,8 @@ async fn played_in(
     );
     let error = matches!(outcome, Outcome::Refused(_) | Outcome::Failed(_));
     let (text, limit) = shown(outcome, &grant.place);
-    let notes = if replaced {
+    // Notes left for the session that replaced this one are its own, not this late call's.
+    let notes = if is_replaced(daemon, grant) {
         Vec::new()
     } else {
         deliveries::take_notes(
@@ -2126,6 +2319,25 @@ async fn played_in(
         )
     };
     (with_notes(text, &notes), error)
+}
+
+/// Whether a newer session of the grant's agent took over (`docs/design.md` §5.5).
+fn is_replaced(daemon: &Daemon, grant: &Grant) -> bool {
+    daemon
+        .read(|store| store.agent(&grant.agent))
+        .ok()
+        .flatten()
+        .is_some_and(|agent| agent.epoch != grant.epoch)
+}
+
+/// Why a call that waited (a read, a preparation, the judge) can no longer be performed: its
+/// session was replaced or its workspace is being removed meanwhile. Asked right before it is.
+fn stale(daemon: &Daemon, grant: &Grant, tool: &str) -> Option<Outcome> {
+    if is_replaced(daemon, grant) {
+        return Some(Outcome::Refused(REPLACED.into()));
+    }
+    crate::workspaces::being_removed(daemon, &grant.agent, tool)
+        .map(|why| Outcome::Refused(format!("refused: {why}")))
 }
 
 /// The developer log's line for a call (`docs/developer.md`, "call"): what the gate decided and
@@ -2189,11 +2401,49 @@ fn removes_a_workspace(tool: &str, args: &Value) -> bool {
 
 /// The gate's verdict on a call of one of the agent's tools.
 pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gate::Verdict {
+    judged(daemon, grant, tool, args).0
+}
+
+/// The gate's verdict on a call, with the services it judged the call to start first
+/// (`services::started_first`): what the call may start, and nothing else.
+pub fn judged(
+    daemon: &Daemon,
+    grant: &Grant,
+    tool: &str,
+    args: &Value,
+) -> (gate::Verdict, Vec<String>) {
+    let first = match tool {
+        "run" | "services" => crate::services::started_first(daemon, &grant.place, tool, args),
+        _ => Vec::new(),
+    };
+    (verdict_of(daemon, grant, tool, args, &first), first)
+}
+
+fn verdict_of(
+    daemon: &Daemon,
+    grant: &Grant,
+    tool: &str,
+    args: &Value,
+    first: &[String],
+) -> gate::Verdict {
     if let Some(verdict) = crate::extensions::classify(daemon, grant, tool, args) {
         return verdict;
     }
+    if tool == "web" && crate::show::is(args) {
+        return crate::show::verdict(&grant.place, args);
+    }
     if tool == "web" {
         return crate::web::classify(daemon, &grant.agent, args);
+    }
+    if tool == "session_send" {
+        match crate::tree::needs_leave(daemon, grant, args) {
+            Err(why) => return gate::Verdict::Deny(why),
+            Ok(true) => return gate::session_leave(grant, args),
+            Ok(false) => {}
+        }
+    }
+    if tool == "agent_stop" && crate::tree::ends_session(daemon, grant, args) {
+        return gate::end_session();
     }
     // A new workspace's launch is classified by its steps below, but its brief is held to the
     // judge's limit like any other launch's.
@@ -2203,12 +2453,19 @@ pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gat
         return refused;
     }
     let Some(steps) = crate::actions::plays(daemon, grant, tool, args) else {
-        return classified(daemon, grant, tool, args);
+        return with_services(
+            daemon,
+            grant,
+            tool,
+            args,
+            first,
+            classified(daemon, grant, tool, args),
+        );
     };
     // Making a workspace ready plays setup steps without the gate: each is judged as setting it
-    // is, run in the folders it would start in, and the strongest class wins. The copy and link
-    // steps only list their reasons: the user, or an agent through the gate, wrote them, and
-    // playing them is what the user configured.
+    // is, run in the folders it would start in, with the services its task starts first, and the
+    // strongest class wins. The copy and link steps only list their reasons: the user, or an
+    // agent through the gate, wrote them, and playing them is what the user configured.
     let mut base = Vec::new();
     let mut judge = Vec::new();
     let set = crate::actions::asked("setup");
@@ -2218,12 +2475,21 @@ pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gat
             at + 1,
             crate::actions::step_said(step)
         );
-        match classified(
+        let verdict = classified(
             daemon,
             grant,
             "setup",
             &json!({"action": "add", "step": step}),
-        ) {
+        );
+        let verdict = match step.kind() {
+            flottille_core::project::StepKind::Task(task) => {
+                let run = json!({"task": task});
+                let first = crate::services::started_first(daemon, &grant.place, "run", &run);
+                with_services(daemon, grant, "run", &run, &first, verdict)
+            }
+            _ => verdict,
+        };
+        match verdict {
             gate::Verdict::Allow => {}
             gate::Verdict::Deny(why) => {
                 return gate::Verdict::Deny(format!("{why} ({said}, which it plays)"));
@@ -2247,7 +2513,7 @@ pub fn classify(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gat
             }
         }
     }
-    if tool == "agent_launch" && args["root"] == true {
+    if tool == "agent_launch" && crate::tree::starts_session(args) {
         match gate::root_launch(grant, args) {
             gate::Verdict::Deny(why) => return gate::Verdict::Deny(why),
             gate::Verdict::Ask(ask) if ask.class == gate::Class::Base => base.extend(ask.reasons),
@@ -2276,17 +2542,27 @@ fn classified(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gate:
     // way that run will be.
     let sets =
         crate::actions::family(tool, args).and_then(|_| crate::actions::sets(tasks, tool, args));
-    let (paths, words, command) = match &sets {
-        Some(sets) => (
+    // A service started, or as a write leaves it, is judged as a run of its line in its folder.
+    let service = (tool == "services")
+        .then(|| crate::services::reaches(daemon, &grant.place, args))
+        .flatten();
+    let (paths, words, command) = match (&sets, &service) {
+        (Some(sets), _) => (
             crate::actions::folders(&grant.place, sets),
             flottille_core::command::split_line(&sets.task.line).unwrap_or_default(),
             sets.name.clone(),
         ),
-        None => reached(daemon, &grant.place, tool, args),
+        (None, Some((folder, words, name, _))) => {
+            (vec![folder.clone()], words.clone(), Some(name.clone()))
+        }
+        (None, None) => reached(daemon, &grant.place, tool, args),
     };
     // A line equal to a task's is that task, with its own flags; a write's task is as the write
     // leaves it.
     let command = match (&sets, command.as_deref()) {
+        _ if service.is_some() => service
+            .as_ref()
+            .map(|(_, _, name, task)| (name.as_str(), task)),
         (Some(Sets { task, .. }), Some(name)) => Some((name, task)),
         (_, Some(name)) => tasks
             .get_key_value(name)
@@ -2299,6 +2575,30 @@ fn classified(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gate:
             .map(|(name, task)| (name.as_str(), task)),
         (_, None) => None,
     };
+    decided(
+        daemon,
+        grant,
+        project.as_ref(),
+        tool,
+        args,
+        (&words, &paths, command),
+        sets.is_some(),
+    )
+}
+
+/// The gate's verdict on a call as it was resolved: the words of the line it starts, the folders
+/// it reaches and the task it runs; `sets` when it writes a task or a setup step.
+fn decided(
+    daemon: &Daemon,
+    grant: &Grant,
+    project: Option<&Project>,
+    tool: &str,
+    args: &Value,
+    (words, paths, command): (&[String], &[Resolved], Option<(&str, &Task)>),
+    sets: bool,
+) -> gate::Verdict {
+    let no_tasks = BTreeMap::new();
+    let tasks = project.map_or(&no_tasks, |project| &project.tasks);
     let paths_of = &daemon.paths;
     let own = [
         paths_of.data.clone(),
@@ -2306,12 +2606,12 @@ fn classified(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gate:
         paths_of.state.clone(),
         paths_of.runtime.clone(),
     ];
-    let pushed = rewrites(&words) && pushed(&grant.place, paths.first());
+    let pushed = rewrites(words) && pushed(&grant.place, paths.first());
     // The repository a run is in: the one whose folder it runs in.
     let place = &grant.place;
     let repository = paths
         .first()
-        .filter(|_| tool == "run" || sets.is_some())
+        .filter(|_| tool == "run" || sets)
         .and_then(|folder| {
             place
                 .repositories
@@ -2321,7 +2621,7 @@ fn classified(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gate:
         .map_or(".", |(path, _)| path.as_str());
     let search = runs::search_path(place, repository);
     let mut writable = vec![grant.place.root.clone()];
-    if let Some(project) = &project {
+    if let Some(project) = project {
         writable.extend([project.folder.clone(), project.workspaces_root.clone()]);
     }
     let real: Vec<_> = writable
@@ -2334,16 +2634,143 @@ fn classified(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gate:
         grant,
         tool,
         args,
-        words: &words,
-        paths: &paths,
+        words,
+        paths,
         command,
         tasks,
-        never: project.as_ref().map(|project| project.never.as_slice()),
+        never: project.map(|project| project.never.as_slice()),
         own: &own,
         pushed,
         search: search.as_deref(),
         writable: &writable,
         groups: &groups,
+    })
+}
+
+/// The verdict on a call with what it starts first (`docs/projects.md`, "Services"): each service
+/// it needs that does not run, held when it is marked to ask, and an agent's lines judged in this
+/// agent's mode as a run of them in the service's folder; the user's are not judged again. A
+/// service an agent started itself has its other lines (`ready`, `url`) judged as well.
+fn with_services(
+    daemon: &Daemon,
+    grant: &Grant,
+    tool: &str,
+    args: &Value,
+    first: &[String],
+    verdict: gate::Verdict,
+) -> gate::Verdict {
+    if matches!(verdict, gate::Verdict::Deny(_))
+        || !(tool == "run" || (tool == "services" && args["action"] == "start"))
+    {
+        return verdict;
+    }
+    let Ok(services) = crate::services::load(daemon) else {
+        return verdict;
+    };
+    let project = projects::load_project(daemon, &grant.place.project).ok();
+    let mut found: Vec<(String, gate::Verdict)> = Vec::new();
+    let mut judged = |name: &str, lines: &[&str], with_line: bool, flag: bool| {
+        let Some(service) = services.get(name) else {
+            return;
+        };
+        let Ok(folder) = service.folder_in(grant.place.home.as_deref()) else {
+            return;
+        };
+        let folder = [grant.place.resolve(&folder, ".")];
+        let task = service.as_task();
+        let said = format!(
+            "it starts the service {name} it needs (`{}` in {})",
+            service.line, folder[0].shown
+        );
+        if with_line {
+            let words = flottille_core::command::split_line(&service.line).unwrap_or_default();
+            let start = json!({"action": "start", "name": name});
+            let verdict = decided(
+                daemon,
+                grant,
+                project.as_ref(),
+                "services",
+                &start,
+                (&words, &folder, Some((name, &task))),
+                false,
+            );
+            found.push((said.clone(), verdict));
+        } else if flag && service.ask_before_running {
+            let ask = gate::Ask {
+                reasons: vec![format!(
+                    "the service {name} is marked to ask before it runs"
+                )],
+                class: gate::Class::Judge,
+                kind: Kind::Call,
+            };
+            found.push((said.clone(), gate::Verdict::Ask(ask)));
+        }
+        for line in lines {
+            let words = flottille_core::command::split_line(line).unwrap_or_default();
+            let run = json!({"line": line});
+            let verdict = decided(
+                daemon,
+                grant,
+                project.as_ref(),
+                "run",
+                &run,
+                (&words, &folder, None),
+                false,
+            );
+            let said = format!("{said}, its line `{line}`");
+            found.push((said, verdict));
+        }
+    };
+    if tool == "services"
+        && let Some(name) = args["name"].as_str()
+        && crate::services::by_an_agent(daemon, name)
+        && let Some(service) = services.get(name)
+    {
+        judged(name, &service.other_lines(), false, false);
+    }
+    for name in first {
+        match (
+            services.get(name),
+            crate::services::by_an_agent(daemon, name),
+        ) {
+            (Some(service), true) => judged(name, &service.other_lines(), true, true),
+            (Some(_), false) => judged(name, &[], false, true),
+            (None, _) => {}
+        }
+    }
+    let (mut base, mut judge, kind) = match verdict {
+        gate::Verdict::Ask(ask) if ask.class == gate::Class::Base => {
+            (ask.reasons, Vec::new(), ask.kind)
+        }
+        gate::Verdict::Ask(ask) => (Vec::new(), ask.reasons, ask.kind),
+        _ => (Vec::new(), Vec::new(), Kind::Call),
+    };
+    for (said, verdict) in found {
+        match verdict {
+            gate::Verdict::Allow => {}
+            gate::Verdict::Deny(why) => return gate::Verdict::Deny(format!("{why} ({said})")),
+            gate::Verdict::Ask(ask) => {
+                let reasons = ask
+                    .reasons
+                    .into_iter()
+                    .map(|reason| format!("{said}: {reason}"));
+                match ask.class {
+                    gate::Class::Base => base.extend(reasons),
+                    gate::Class::Judge => judge.extend(reasons),
+                }
+            }
+        }
+    }
+    let class = match base.is_empty() {
+        true if judge.is_empty() => return gate::Verdict::Allow,
+        true => gate::Class::Judge,
+        false => gate::Class::Base,
+    };
+    base.extend(judge);
+    gate::Verdict::Ask(gate::Ask {
+        reasons: base,
+        class,
+        kind,
     })
 }
 
@@ -2366,13 +2793,16 @@ fn pushed(place: &Place, folder: Option<&Resolved>) -> bool {
     let Some(folder) = folder else {
         return false;
     };
-    let listed = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&folder.path)
-        .args(["for-each-ref", "--format=%(refname)", "refs/remotes"])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output();
+    let listed = crate::children::spawn_std(
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&folder.path)
+            .args(["for-each-ref", "--format=%(refname)", "refs/remotes"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()),
+    )
+    .and_then(std::process::Child::wait_with_output);
     match listed {
         Ok(output) => String::from_utf8_lossy(&output.stdout)
             .lines()
@@ -2390,7 +2820,8 @@ fn removes_own_workspace(grant: &Grant, tool: &str, args: &Value) -> bool {
 
 /// Performs a call the user allowed, of its class, recorded as the agent's: the request's answer.
 /// `discarding`, the losses of a workspace's removal the user said to make even with what would
-/// be lost.
+/// be lost. `first`, the services it was judged again to start first.
+#[allow(clippy::too_many_arguments)]
 pub async fn performed(
     daemon: &Arc<Daemon>,
     grant: &Arc<Grant>,
@@ -2398,6 +2829,7 @@ pub async fn performed(
     args: Value,
     request: u64,
     class: gate::Class,
+    first: &[String],
     discarding: Option<Vec<String>>,
 ) -> Outcome {
     let started = Instant::now();
@@ -2414,6 +2846,7 @@ pub async fn performed(
                 args,
                 cancelled,
                 Some(class),
+                first,
                 &Reads::default(),
             )
             .await
@@ -2458,6 +2891,17 @@ fn record(
         "duration_ms": duration, "request": request});
     if let Some(cut) = cut {
         data["cut"] = cut.to_json();
+    }
+    // The link of the run a pipeline was started as, for the window to carry.
+    if tool == "forge"
+        && recorded["action"] == "run"
+        && let Outcome::Done(text) = outcome
+        && let Some(link) = text.split_whitespace().find(|word| {
+            word.starts_with("https://")
+                && (word.contains("/actions/runs/") || word.contains("/pipelines/results/"))
+        })
+    {
+        data["link"] = link.trim_end_matches([',', '.']).into();
     }
     if let Err(error) = daemon.write(|store| {
         let event = store.append_agent_event(&grant.agent, "agent.tool_served", data, true)?;
@@ -2509,7 +2953,9 @@ fn reached(
 }
 
 /// Performs a call the gate let through; `approved` with its class when the user or the judge
-/// allowed it, which lets its paths be outside the place.
+/// allowed it, which lets its paths be outside the place. `first`, the services it was judged to
+/// start first.
+#[allow(clippy::too_many_arguments)]
 async fn perform(
     daemon: &Arc<Daemon>,
     grant: &Arc<Grant>,
@@ -2517,17 +2963,18 @@ async fn perform(
     args: Value,
     cancelled: CancellationToken,
     approved: Option<gate::Class>,
+    first: &[String],
     reads: &Reads,
 ) -> Outcome {
     if !matches!(tool, "web" | "tickets" | "forge") {
-        return performed_once(daemon, grant, tool, args, cancelled, approved).await;
+        return performed_once(daemon, grant, tool, args, cancelled, approved, first).await;
     }
     // What a page, a search, a ticket or a pull request showed the agent, from its data and
     // never from the call's own arguments, it may read with `web`. The forge and tracker reads
     // it made are counted for the developer log.
     let (outcome, shown) = reads
         .counting(crate::web::showing(performed_once(
-            daemon, grant, tool, args, cancelled, approved,
+            daemon, grant, tool, args, cancelled, approved, first,
         )))
         .await;
     if let Outcome::Done(_) = &outcome {
@@ -2543,9 +2990,12 @@ async fn performed_once(
     args: Value,
     cancelled: CancellationToken,
     approved: Option<gate::Class>,
+    first: &[String],
 ) -> Outcome {
     match tool {
+        "web" if crate::show::is(&args) => crate::show::show(daemon, grant, args),
         "web" => crate::web::web(args).await,
+        "services" => crate::services::tool(daemon, grant, args, first).await,
         "run" => {
             runs::run(
                 daemon,
@@ -2553,6 +3003,7 @@ async fn performed_once(
                 &grant.place,
                 args,
                 approved.is_some(),
+                first,
                 cancelled,
             )
             .await
@@ -2564,6 +3015,7 @@ async fn performed_once(
         tool if crate::extensions::gives(tool) => {
             crate::extensions::perform(daemon, grant, tool, args)
         }
+        "vault" => crate::vault::tool(daemon, grant, args),
         tool if tree::TOOLS.contains(&tool) => tree::call(daemon, grant, tool, args).await,
         tool if crate::actions::TOOLS.contains(&tool) => {
             crate::actions::perform(daemon, grant, tool, args).await
@@ -2618,7 +3070,8 @@ pub fn record_of(args: &Value, place: &Place) -> Value {
             .flatten()
             .filter(|variable| variable["secured"] == true)
             .filter_map(|variable| variable["value"].as_str())
-            .filter(|value| !value.is_empty())
+            // A shorter one would garble the record; the variable's own value is hidden below.
+            .filter(|value| value.chars().count() >= crate::forge::HIDDEN_EVERYWHERE)
             .map(str::to_owned),
     );
     let mut recorded = walk(args, &|text| secrets::mask_also(text, &env, &values));
@@ -2697,6 +3150,47 @@ mod tests {
     }
 
     #[test]
+    fn the_tickets_description_says_images_and_files_are_named_not_shown() {
+        let tickets = SERVED.iter().find(|d| d.name == "tickets").unwrap();
+
+        assert!(
+            tickets
+                .description
+                .contains("Jira images and files are named, not shown")
+        );
+    }
+
+    #[test]
+    fn the_tickets_tool_says_me_is_the_user_and_names_parent_sprint_and_sprints() {
+        let tickets = SERVED.iter().find(|d| d.name == "tickets").unwrap();
+        let schema = (tickets.schema)();
+        let assignee = schema["properties"]["assignee"]["description"]
+            .as_str()
+            .unwrap();
+
+        assert!(
+            assignee.contains("\"me\" is the user you work for"),
+            "{assignee}"
+        );
+        assert!(assignee.contains("not a display name"), "{assignee}");
+        for word in ["sprints", "parent", "sprint"] {
+            assert!(tickets.description.contains(word), "{word}");
+        }
+        assert!(
+            !schema["properties"]["action"]["enum"]
+                .as_array()
+                .unwrap()
+                .contains(&Value::from("sprint"))
+        );
+        assert!(
+            schema["properties"]["action"]["enum"]
+                .as_array()
+                .unwrap()
+                .contains(&Value::from("sprints"))
+        );
+    }
+
+    #[test]
     fn every_tool_is_described_for_a_new_colleague() {
         for definition in &SERVED {
             let tool = serde_json::to_value(tool_of(definition, true)).unwrap();
@@ -2705,12 +3199,14 @@ mod tests {
             assert_eq!(tool["_meta"]["anthropic/alwaysLoad"], true);
             assert_eq!(tool["inputSchema"]["type"], "object");
             let name = format!("mcp__flottille__{}", definition.name);
+            // The old names of ask are answered, never listed to a new agent.
             assert!(
-                claude::PROVIDER
-                    .tools(true, false, true, true)
-                    .contains(&name)
+                matches!(definition.name, "ask_user" | "ask_parent")
                     || claude::PROVIDER
-                        .tools(false, false, true, true)
+                        .tools(true, false, true, true, true)
+                        .contains(&name)
+                    || claude::PROVIDER
+                        .tools(false, false, true, true, true)
                         .contains(&name),
                 "{} is a tool agents get",
                 definition.name
@@ -2720,16 +3216,16 @@ mod tests {
 
     #[test]
     fn a_grant_holds_the_agent_s_served_tools_in_its_own_order() {
-        let mut leaf = claude::PROVIDER.tools(false, true, true, true);
-        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 16);
+        let mut leaf = claude::PROVIDER.tools(false, true, true, true, false);
+        assert_eq!(served(&claude::PROVIDER, &leaf).len(), 17);
         leaf.reverse();
         leaf.retain(|tool| !tool.ends_with("__search"));
         leaf.push("fs_read".into());
         let served = served(&claude::PROVIDER, &leaf);
-        assert_eq!(served.first(), Some(&"ask_parent"));
+        assert_eq!(served.first(), Some(&"ask"));
         assert_eq!(served.last(), Some(&"fs_read"));
         assert!(!served.contains(&"search"));
-        assert_eq!(served.len(), 15);
+        assert_eq!(served.len(), 16);
     }
 
     #[test]
@@ -2745,7 +3241,7 @@ mod tests {
         let lead = ["mcp__flottille__agent_status", "mcp__flottille__report"].map(String::from);
 
         for stored in [&worker[..], &lead[..]] {
-            let given = claude::PROVIDER.tools(false, false, true, true);
+            let given = claude::PROVIDER.tools(false, false, true, true, false);
             assert!(stored.iter().all(|tool| given.contains(tool)), "{stored:?}");
         }
         let served_worker = served(&claude::PROVIDER, &worker);
@@ -2915,11 +3411,25 @@ mod tests {
     }
 
     #[test]
+    fn the_wake_description_steers_a_wait_on_ci_to_forge() {
+        let wake = definition("wake").unwrap().description;
+        assert!(
+            wake.contains(
+                "never poll CI, forge run follows its run and forge subscribe a pull request's \
+                 checks"
+            ),
+            "{wake}"
+        );
+        assert!(wake.len() < 1000, "{}", wake.len());
+    }
+
+    #[test]
     fn the_forge_description_says_what_the_ci_actions_do() {
         let forge = definition("forge").unwrap().description;
         for said in [
             "pipelines lists what can be run",
             "run starts one by name (custom: <name>) with its variables",
+            "follows it unless follow: false",
         ] {
             assert!(forge.contains(said), "{said:?} in {forge}");
         }
@@ -2931,7 +3441,7 @@ mod tests {
     fn the_texts_cut_to_fit_the_old_cap_are_whole_again() {
         // What #224, #225, #233, #255 and #259 took out of other tools to stay under a number
         // nobody chose (#264): what is still true is said again.
-        let whole: [(&str, Option<&str>, &str); 25] = [
+        let whole: [(&str, Option<&str>, &str); 30] = [
             ("tasks", None, "(tests, lint, servers…)"),
             (
                 "run_status",
@@ -2950,6 +3460,14 @@ mod tests {
             ),
             ("forge", None, "no forge sign-in here: never run them"),
             ("forge", None, "the log's end of each failed job"),
+            ("forge", None, "by state and branch, as last read"),
+            ("forge", None, "close (comment first), reopen on number"),
+            ("forge", None, "run, stop, step judged"),
+            (
+                "forge",
+                None,
+                "{\"action\": \"create\", \"repository\": \"api\", \"title\": \"fix\", \"body\": \"...\"}",
+            ),
             (
                 "forge",
                 None,
@@ -2966,6 +3484,11 @@ mod tests {
                 "all of the place's when left out",
             ),
             ("forge", Some("body"), "comment: the comment."),
+            (
+                "forge",
+                Some("events"),
+                "approved: the review as a whole turns approved (once each time, saying who and the checks), where review wakes you at each reviewer",
+            ),
             (
                 "forge",
                 Some("waive"),
@@ -2999,7 +3522,7 @@ mod tests {
             (
                 "agent_launch",
                 None,
-                "{\"title\": \"Add API\", \"brief\": \"...\", \"root\": true, \"follow\": false, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}",
+                "{\"kind\": \"handed\", \"title\": \"Add API\", \"brief\": \"...\", \"new_workspace\": \"api\", \"repositories\": [\"api\"]}",
             ),
             (
                 "agent_launch",
@@ -3055,7 +3578,7 @@ mod tests {
             ("a child", false, false),
             ("a child at the depth limit", false, true),
         ] {
-            let list = claude::PROVIDER.tools(root, at_depth_limit, true, true);
+            let list = claude::PROVIDER.tools(root, at_depth_limit, true, true, false);
             let names = served(&claude::PROVIDER, &list);
             assert!(
                 names.len() <= TOOLS,

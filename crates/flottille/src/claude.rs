@@ -52,11 +52,29 @@ pub static PROVIDER: Provider = Provider {
     // Told the list changed, it does not list the tools again: seen on a real session, where it
     // said an action was missing while the daemon accepted it.
     lists_tools_again: false,
+    cache_lifetime,
     unready: providers::ready_here,
     forget_process: forget_bridge,
     forget_session: forget_history,
     forget_agent,
 };
+
+/// Claude Code's prompt cache lives an hour on a Claude subscription and five minutes on an API
+/// key or a token of another gateway, the variables Flottille passes on taking precedence over the
+/// login (its setting `promptCacheTtl`, 2.1.295: "1 hour on a Claude subscription within its usage
+/// limits, 5 minutes on an API key"). Its own variables, which would choose another, are withheld.
+fn cache_lifetime() -> Option<u64> {
+    Some(lifetime(
+        ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
+            .iter()
+            .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty())),
+    ))
+}
+
+/// The lifetime in seconds, with a key of the API or not.
+fn lifetime(api_key: bool) -> u64 {
+    if api_key { 5 * 60 } else { 60 * 60 }
+}
 
 /// Whether a variable of the daemon's environment stays out of the agent's (`docs/agents.md`).
 /// The agent runs on the user's own sign-in and network, and on what Flottille sets: the daemon's
@@ -183,10 +201,32 @@ fn command() -> Result<Program, String> {
     Ok((program, vec!["bridge".into(), "claude".into()]))
 }
 
-/// The bare mode is in the session's options: nothing to set on the process.
-fn env(_paths: &Paths, _agent: &Agent) -> Result<Env, String> {
-    Ok(Vec::new())
+/// The bare mode is in the session's options. While the agents write their own handoff, Claude
+/// Code's compaction is off; with a compactor chosen, it compacts as late as it allows
+/// (`docs/agents.md`, "Compaction"): its override can only bring its threshold down, and 100 %
+/// leaves it at its default, whatever the user's environment says.
+fn env(paths: &Paths, _agent: &Agent) -> Result<Env, String> {
+    Ok(compaction_env(
+        crate::compaction::hands_off(paths),
+        crate::compaction::chosen(paths),
+    ))
 }
+
+/// The variables of Claude Code's own compaction: off (`off`), as late as it allows
+/// (`compactor`), or its own.
+fn compaction_env(off: bool, compactor: bool) -> Env {
+    match (off, compactor) {
+        (true, _) => vec![(COMPACT_OFF.into(), "1".into())],
+        (false, true) => vec![(COMPACT_AT.into(), "100".into())],
+        (false, false) => Vec::new(),
+    }
+}
+
+/// Turns off Claude Code's automatic compaction, its compaction while idle and `/compact`.
+const COMPACT_OFF: &str = "DISABLE_COMPACT";
+
+/// Claude Code's auto-compact threshold, a percent of its window, which can only lower its default.
+const COMPACT_AT: &str = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE";
 
 /// The bridge keeps nothing of an agent but its sessions' histories.
 fn forget_agent(_paths: &Paths, _agent: &str) {}
@@ -203,6 +243,12 @@ fn login_file() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_cache_lives_an_hour_on_a_subscription_and_five_minutes_on_an_api_key() {
+        assert_eq!(lifetime(false), 3_600);
+        assert_eq!(lifetime(true), 300);
+    }
 
     #[test]
     fn the_agent_gets_its_sign_in_and_the_network_and_not_the_daemon_s_secrets_or_settings() {
@@ -252,6 +298,24 @@ mod tests {
         ] {
             assert_eq!(withheld(name), gone, "{name}");
         }
+    }
+
+    #[test]
+    fn none_leaves_claude_to_compact_on_its_own_and_a_compactor_makes_it_compact_late() {
+        assert!(compaction_env(false, false).is_empty());
+        assert_eq!(
+            compaction_env(false, true),
+            vec![(COMPACT_AT.into(), "100".into())]
+        );
+        // The agents writing their own handoff: off, whatever the compactor.
+        for compactor in [false, true] {
+            assert_eq!(
+                compaction_env(true, compactor),
+                vec![(COMPACT_OFF.into(), "1".into())]
+            );
+        }
+        // The user's own value reaches the agent while Flottille does not compact.
+        assert!(!withheld(COMPACT_AT));
     }
 
     #[test]

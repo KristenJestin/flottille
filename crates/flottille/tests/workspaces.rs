@@ -3317,3 +3317,322 @@ fn an_own_default_without_project_is_refused() {
         "path: must hold <project>, or every project would share one folder"
     );
 }
+
+// The project's branch format (#466): a branch a workspace starts or renames to must match it; a
+// branch the workspace resumed was named before, and is never refused for its name.
+
+/// The format of the branches of the tests: a type, a ticket's key, a slug.
+const FORMAT: &str = "^(feat|fix|chore)/[A-Z]+-[0-9]+-[a-z0-9-]+$";
+
+impl Fixture {
+    /// Puts the branch format at the top of the project's file, as the Settings would.
+    fn with_branch_format(&self) {
+        let file = self.user.project_file("app");
+        let text = std::fs::read_to_string(&file).unwrap();
+        std::fs::write(file, format!("branch_format = '{FORMAT}'\n{text}")).unwrap();
+    }
+}
+
+#[test]
+fn a_branch_that_does_not_match_the_format_is_refused_naming_the_pattern() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    fixture.with_branch_format();
+
+    // The default `<branch prefix>/<name>` as a branch named.
+    for (asked, branch) in [
+        (json!({"repositories": ["web"]}), "app/login"),
+        (
+            json!({"repositories": ["web"], "branch": "feature/login"}),
+            "feature/login",
+        ),
+    ] {
+        let (code, message) = fixture.create(asked).unwrap_err();
+        assert_eq!(code, "refused", "{message}");
+        assert!(message.contains(FORMAT), "{message}");
+        assert!(message.contains(branch), "{message}");
+    }
+    assert!(!fixture.workspace("login").exists());
+    assert!(!fixture.has_local_branch("web", "app/login"));
+    assert!(!fixture.has_local_branch("web", "feature/login"));
+
+    // A rename to a branch outside the format is refused too, nothing renamed.
+    fixture
+        .create(json!({"repositories": ["web"], "branch": "fix/ABC-12-login"}))
+        .unwrap();
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    let (code, message) = fixture
+        .rename_branch(json!({"branch": "login-again"}))
+        .unwrap_err();
+    assert_eq!(code, "refused");
+    assert!(message.contains(FORMAT), "{message}");
+    assert!(message.contains("login-again"), "{message}");
+    assert_eq!(fixture.branch_of("web"), "fix/ABC-12-login");
+}
+
+#[test]
+fn a_matching_branch_is_created() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    fixture.with_branch_format();
+
+    let created = fixture
+        .create(json!({"repositories": ["web"], "branch": "feat/ABC-8-pickup-dashboard"}))
+        .unwrap();
+
+    assert_eq!(created["branch"], "feat/ABC-8-pickup-dashboard");
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    assert_eq!(fixture.branch_of("web"), "feat/ABC-8-pickup-dashboard");
+    // A rename within the format goes through.
+    let renamed = fixture
+        .rename_branch(json!({"branch": "fix/ABC-8-pickup-dashboard"}))
+        .unwrap();
+    assert_eq!(renamed["branch"], "fix/ABC-8-pickup-dashboard", "{renamed}");
+}
+
+#[test]
+fn a_resumed_branch_is_never_refused_for_its_name() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    fixture.with_branch_format();
+    let web = fixture.folder.join("web");
+    // The user's own branch, made before the format: the workspace takes it as it is.
+    fixture
+        .user
+        .git(&web, &["branch", "--quiet", "legacy-work", "develop"]);
+
+    let created = fixture
+        .create(json!({"repositories": ["web"], "branch": "legacy-work"}))
+        .unwrap();
+
+    assert_eq!(created["branch"], "legacy-work");
+    assert_eq!(created["repositories"][0]["resumed"], true, "{created}");
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    assert_eq!(fixture.branch_of("web"), "legacy-work");
+
+    // One the remote alone has is resumed the same.
+    fixture.remove("login").unwrap();
+    fixture.user.git(
+        &web,
+        &["push", "--quiet", "origin", "legacy-work:old/remote-only"],
+    );
+    let created = fixture
+        .create(json!({"repositories": ["web"], "branch": "old/remote-only", "name": "other"}))
+        .unwrap();
+    assert_eq!(created["branch"], "old/remote-only");
+}
+
+#[test]
+fn a_named_branch_outside_the_format_that_exists_nowhere_is_refused_before_any_fetch() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    fixture.with_branch_format();
+    let web = fixture.folder.join("web");
+    let tracking = || fixture.git(&web, &["rev-parse", "refs/remotes/origin/develop"]);
+    let before = tracking();
+    // develop moves on the remote: a fetch would bring it into the tracking ref.
+    let other = fixture.user.path("other-web");
+    fixture.user.git(
+        &fixture.user.path(""),
+        &[
+            "clone",
+            "--quiet",
+            "--branch",
+            "develop",
+            fixture.remote("web").to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(other.join("MOVED.md"), "moved\n").unwrap();
+    fixture.user.git(&other, &["add", "."]);
+    fixture
+        .user
+        .git(&other, &["commit", "--quiet", "-m", "moved"]);
+    fixture
+        .user
+        .git(&other, &["push", "--quiet", "origin", "develop"]);
+
+    let (code, message) = fixture
+        .create(json!({"repositories": ["web"], "branch": "feature/login"}))
+        .unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert!(message.contains(FORMAT), "{message}");
+    assert_eq!(tracking(), before, "fetched before the refusal");
+}
+
+// A workspace in use (`docs/design.md` §5.1).
+
+/// A fixture whose user has the fake agent, and the workspace `login` ready.
+fn with_an_agent_s_place(user: User) -> Fixture {
+    let fixture = Fixture::of(user, false);
+    fixture.configure("");
+    fixture.create(json!({})).unwrap();
+    assert_eq!(fixture.settled("login")["state"], "ready");
+    fixture
+}
+
+/// An agent the user starts in the workspace `login`: its id.
+fn agent_in_login(fixture: &Fixture) -> String {
+    fixture
+        .user
+        .call(
+            "agent.run",
+            json!({"project": "app", "workspace": "login", "message": "hello"}),
+        )
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn agent_state(fixture: &Fixture, agent: &str) -> String {
+    fixture.user.call("agent.list", json!({})).unwrap()["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == agent)
+        .map(|a| a["state"].as_str().unwrap().to_owned())
+        .unwrap()
+}
+
+#[test]
+fn the_user_cannot_remove_a_workspace_an_agent_works_in() {
+    let fixture = with_an_agent_s_place(User::with_fake_agent());
+    let agent = agent_in_login(&fixture);
+
+    let (code, message) = fixture.remove("login").unwrap_err();
+
+    assert_eq!(code, "refused");
+    assert!(
+        message.contains(&format!("the agent {agent} works in it")),
+        "the agent is named: {message}"
+    );
+    assert!(message.contains("nothing was touched"), "{message}");
+    assert!(fixture.show("login").is_ok(), "the workspace stays");
+    assert!(fixture.workspace("login").join("web").exists());
+}
+
+#[test]
+fn the_user_removes_a_workspace_once_its_agents_have_ended() {
+    let fixture = with_an_agent_s_place(User::with_fake_agent());
+    let agent = agent_in_login(&fixture);
+    fixture
+        .user
+        .call("agent.stop", json!({"agent": agent}))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while agent_state(&fixture, &agent) != "ended" {
+        assert!(Instant::now() < deadline, "the agent never ended");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    fixture.remove("login").unwrap();
+
+    assert!(fixture.show("login").is_err(), "the workspace is gone");
+    assert!(!fixture.workspace("login").exists());
+}
+
+/// A user whose `git` is a script that runs the real one, but holds `git worktree remove` until
+/// the test releases it: `held` exists once it waits, `release` lets it go on.
+fn holding_removals() -> (User, PathBuf, PathBuf) {
+    let user = User::with_fake_agent();
+    let real = std::process::Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    let real = String::from_utf8(real.stdout).unwrap().trim().to_owned();
+    let (bin, held, release) = (
+        user.path("fake-git"),
+        user.path("removal-held"),
+        user.path("removal-released"),
+    );
+    std::fs::create_dir_all(&bin).unwrap();
+    let script = bin.join("git");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncase \"$*\" in *\"worktree remove\"*)\n  touch '{}'\n  while [ ! -e '{}' ]; \
+             do sleep 0.05; done;;\nesac\nexec '{real}' \"$@\"\n",
+            held.display(),
+            release.display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    (user.with_env("PATH", &path), held, release)
+}
+
+/// Runs `during` while the user's removal of `login` is held mid-way, then lets it end: it must
+/// succeed.
+fn during_a_removal(fixture: &Fixture, held: &Path, release: &Path, during: impl FnOnce()) {
+    std::thread::scope(|scope| {
+        let removal = scope.spawn(|| fixture.remove("login"));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !held.exists() {
+            assert!(Instant::now() < deadline, "the removal never reached git");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        during();
+        std::fs::write(release, "").unwrap();
+        removal.join().unwrap().unwrap();
+    });
+}
+
+#[test]
+fn an_agent_cannot_start_in_a_workspace_being_removed() {
+    let (user, held, release) = holding_removals();
+    let fixture = with_an_agent_s_place(user);
+
+    let mut refused = None;
+    during_a_removal(&fixture, &held, &release, || {
+        refused = Some(fixture.user.call(
+            "agent.run",
+            json!({"project": "app", "workspace": "login", "message": "hello"}),
+        ));
+    });
+
+    let (code, message) = refused.unwrap().unwrap_err();
+    assert_eq!(code, "refused");
+    assert!(
+        message.contains("workspace login of project app is being removed"),
+        "{message}"
+    );
+    let agents = fixture.user.call("agent.list", json!({})).unwrap();
+    assert_eq!(agents["agents"], json!([]), "no agent was made");
+}
+
+#[test]
+fn a_refusal_during_a_removal_says_it_is_being_removed() {
+    let (user, held, release) = holding_removals();
+    let fixture = with_an_agent_s_place(user);
+
+    let mut refusals = Vec::new();
+    during_a_removal(&fixture, &held, &release, || {
+        refusals.push(fixture.remove("login").unwrap_err());
+        refusals.push(
+            fixture
+                .user
+                .call(
+                    "workspace.prepare",
+                    json!({"project": "app", "name": "login"}),
+                )
+                .unwrap_err(),
+        );
+    });
+
+    for (code, message) in refusals {
+        assert_eq!(code, "refused");
+        assert!(
+            message.contains("workspace login of project app is being removed"),
+            "{message}"
+        );
+        assert!(!message.contains("being prepared"), "{message}");
+    }
+}

@@ -413,7 +413,9 @@ pub fn prompt(
 fn launched(daemon: &Daemon, agent: &str) -> Option<(String, String)> {
     let root = tree::root_of(daemon, agent);
     let root = daemon.read(|store| store.agent(&root)).ok()??;
-    Some((root.launched_by?, root.brief.unwrap_or_default()))
+    // Detached, its first message is still that agent's words.
+    let launcher = root.launched_by.or(root.detached_from)?;
+    Some((launcher, root.brief.unwrap_or_default()))
 }
 
 /// One of the user's last messages, as the judge is told it.
@@ -756,16 +758,53 @@ fn last_messages(daemon: &Daemon, project: &str, agent: &str) -> Vec<Said> {
 /// in an empty folder, a new session with no MCP server, the model set, one prompt, and the text
 /// it said.
 async fn ask(daemon: &Daemon, judge: &Judge, prompt: &str) -> Result<String, String> {
-    let provider = providers::get(&judge.provider)
-        .ok_or_else(|| format!("there is no provider {}", judge.provider))?;
+    let instructions = instructions(&daemon.paths)?;
+    let model = Model {
+        provider: &judge.provider,
+        model: judge.model.as_deref(),
+        effort: None,
+    };
+    Ok(one_turn(daemon, &model, "judge", &instructions, prompt)
+        .await?
+        .said)
+}
+
+/// A model of a provider, with its effort, that Flottille asks one question with no tool: the
+/// judge, the compactor.
+pub struct Model<'a> {
+    pub provider: &'a str,
+    pub model: Option<&'a str>,
+    pub effort: Option<&'a str>,
+}
+
+/// What a model said in its one turn, why the turn ended (`end_turn`, `max_tokens`…), and whether
+/// it tried to call a tool, which it does not have.
+pub struct Turned {
+    pub said: String,
+    pub stop: String,
+    pub tool: bool,
+}
+
+/// One turn of a model: its provider's ACP agent started in bare mode with no tool, in an empty
+/// folder of its own (`folder`, under the state folder), a new session with no MCP server, the
+/// model and the effort set, one prompt. Its whole process group is stopped after it.
+pub async fn one_turn(
+    daemon: &Daemon,
+    model: &Model<'_>,
+    folder: &str,
+    instructions: &str,
+    prompt: &str,
+) -> Result<Turned, String> {
+    let provider = providers::get(model.provider)
+        .ok_or_else(|| format!("there is no provider {}", model.provider))?;
     let paths = daemon.paths.clone();
     tokio::task::spawn_blocking(move || providers::startable(&paths, provider))
         .await
         .map_err(|e| e.to_string())??;
-    let folder = daemon.paths.state.join("judge");
+    let folder = daemon.paths.state.join(folder);
     std::fs::create_dir_all(&folder).map_err(|e| format!("cannot make its folder: {e}"))?;
-    let instructions = instructions(&daemon.paths)?;
-    let agent = as_agent(&folder, &instructions);
+    // Named after its folder: a provider that writes its instructions to a file names it so.
+    let agent = as_agent(&folder, instructions);
     let launch = providers::launch(provider, &daemon.paths, &agent)?;
     let mut command = Command::new(&launch.program);
     for (name, _) in std::env::vars_os() {
@@ -773,17 +812,18 @@ async fn ask(daemon: &Daemon, judge: &Judge, prompt: &str) -> Result<String, Str
             command.env_remove(name);
         }
     }
-    let mut child = command
-        .envs(launch.env.iter().map(|(name, value)| (name, value)))
-        .args(&launch.args)
-        .current_dir(&folder)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| format!("cannot start {}: {e}", launch.program.display()))?;
+    let mut child = crate::children::spawn(
+        command
+            .envs(launch.env.iter().map(|(name, value)| (name, value)))
+            .args(&launch.args)
+            .current_dir(&folder)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .kill_on_drop(true),
+    )
+    .map_err(|e| format!("cannot start {}: {e}", launch.program.display()))?;
     let _group = child.id().map(Group);
     let stdin = child.stdin.take().ok_or("the judge has no stdin")?;
     let stdout = child.stdout.take().ok_or("the judge has no stdout")?;
@@ -803,7 +843,9 @@ async fn ask(daemon: &Daemon, judge: &Judge, prompt: &str) -> Result<String, Str
     let transport = Lines::new(Box::pin(outgoing), Box::pin(incoming));
     let said = Arc::new(Mutex::new(String::new()));
     let saying = said.clone();
-    let meta = (provider.session_meta)(&instructions, &[])
+    let tool = Arc::new(Mutex::new(false));
+    let (calling, asking) = (tool.clone(), tool.clone());
+    let meta = (provider.session_meta)(instructions, &[])
         .as_object()
         .cloned();
     let result = Client
@@ -817,6 +859,11 @@ async fn ask(daemon: &Daemon, judge: &Judge, prompt: &str) -> Result<String, Str
                 {
                     saying.lock().unwrap().push_str(text);
                 }
+                if let Ok(update) = serde_json::to_value(&notification.update)
+                    && update["sessionUpdate"] == "tool_call"
+                {
+                    *calling.lock().unwrap() = true;
+                }
                 Ok(())
             },
             agent_client_protocol::on_receive_notification!(),
@@ -824,6 +871,7 @@ async fn ask(daemon: &Daemon, judge: &Judge, prompt: &str) -> Result<String, Str
         .on_receive_request(
             // The judge has no tool: whatever it asks to run is refused.
             async move |_request: RequestPermissionRequest, responder, _cx| {
+                *asking.lock().unwrap() = true;
                 responder.respond(RequestPermissionResponse::new(
                     RequestPermissionOutcome::Cancelled,
                 ))
@@ -831,12 +879,16 @@ async fn ask(daemon: &Daemon, judge: &Judge, prompt: &str) -> Result<String, Str
             agent_client_protocol::on_receive_request!(),
         )
         .connect_with(transport, async |cx: ConnectionTo<AcpAgent>| {
-            Ok(session(cx, &folder, meta, judge.model.as_deref(), prompt).await)
+            Ok(session(cx, &folder, meta, model, prompt).await)
         })
         .await;
     let _ = child.start_kill();
     match result {
-        Ok(Ok(())) => Ok(said.lock().unwrap().clone()),
+        Ok(Ok(stop)) => Ok(Turned {
+            said: said.lock().unwrap().clone(),
+            stop,
+            tool: *tool.lock().unwrap(),
+        }),
         Ok(Err(why)) => Err(why),
         Err(error) => Err(format!("the connection to the judge failed: {error}")),
     }
@@ -852,14 +904,15 @@ impl Drop for Group {
     }
 }
 
-/// One session of the judge: open, set the model, play the prompt.
+/// One session of a model: open, set the model and the effort, play the prompt. Why its turn
+/// ended.
 async fn session(
     cx: ConnectionTo<AcpAgent>,
     folder: &Path,
     meta: Option<serde_json::Map<String, Value>>,
-    model: Option<&str>,
+    chosen: &Model<'_>,
     prompt: &str,
-) -> Result<(), String> {
+) -> Result<String, String> {
     cx.send_request(
         InitializeRequest::new(ProtocolVersion::V1)
             .client_info(Implementation::new("Flottille", VERSION)),
@@ -882,7 +935,7 @@ async fn session(
         .as_str()
         .ok_or("it opened a session without an id")?
         .to_owned();
-    if let Some(model) = model {
+    if let Some(model) = chosen.model {
         let option = opened["configOptions"]
             .as_array()
             .into_iter()
@@ -903,22 +956,51 @@ async fn session(
         .await
         .map_err(|e| format!("it refused the model {model}: {e}"))?;
     }
-    cx.send_request(PromptRequest::new(
-        session,
-        vec![ContentBlock::Text(TextContent::new(prompt.to_owned()))],
-    ))
-    .block_task()
-    .await
-    .map_err(|e| format!("its turn failed: {e}"))?;
-    Ok(())
+    if let Some(effort) = chosen.effort {
+        // The effort is the model's: asked once the model is set.
+        let id = opened["configOptions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|option| option["category"] == "thought_level")
+            .and_then(|option| option["id"].as_str())
+            .ok_or_else(|| format!("it has no effort option: it cannot take {effort}"))?
+            .to_owned();
+        let answer = cx
+            .send_request(SetSessionConfigOptionRequest::new(
+                session.clone(),
+                id,
+                SessionConfigOptionValue::value_id(effort.to_owned()),
+            ))
+            .block_task()
+            .await;
+        answer.map_err(|e| format!("it refused the effort {effort}: {e}"))?;
+    }
+    let answer = cx
+        .send_request(PromptRequest::new(
+            session,
+            vec![ContentBlock::Text(TextContent::new(prompt.to_owned()))],
+        ))
+        .block_task()
+        .await
+        .map_err(|e| format!("its turn failed: {e}"))?;
+    let answer = serde_json::to_value(&answer).unwrap_or_default();
+    Ok(answer["stopReason"]
+        .as_str()
+        .unwrap_or("end_turn")
+        .to_owned())
 }
 
-/// The judge as its provider's bare options take an agent: no tool, its instructions, its folder.
+/// A model asked one question, as its provider's bare options take an agent: no tool, its
+/// instructions, its folder.
 fn as_agent(folder: &Path, instructions: &str) -> Agent {
+    let name = folder
+        .file_name()
+        .map_or("judge".into(), |name| name.to_string_lossy().into_owned());
     Agent {
-        id: "judge".into(),
+        id: name.clone(),
         provider: String::new(),
-        role: "judge".into(),
+        role: name,
         parent: None,
         depth: 0,
         epoch: 0,
@@ -948,6 +1030,8 @@ fn as_agent(folder: &Path, instructions: &str) -> Agent {
         tools: Vec::new(),
         gate_mode: GateMode::Ask,
         launched_by: None,
+        led: false,
+        detached_from: None,
     }
 }
 

@@ -282,7 +282,7 @@ fn a_child_reads_the_tasks_but_never_writes_them_nor_sees_the_setup() {
     let opened = user.received_requests("session/new").len();
     let launched = lead.call(
         "agent_launch",
-        json!({"title": "worker", "brief": "Write the tests."}),
+        json!({"kind": "child", "title": "worker", "brief": "Write the tests."}),
     );
     assert!(!launched.error, "{}", launched.text);
     let (url, authorization) = server_of(&user, opened);
@@ -294,7 +294,7 @@ fn a_child_reads_the_tasks_but_never_writes_them_nor_sees_the_setup() {
         "tasks",
         json!({"action": "add", "name": "lint", "line": "cargo clippy"}),
     ));
-    assert!(write.contains("ask_parent"), "{write}");
+    assert!(write.contains("ask your parent (ask)"), "{write}");
     let setup = refused(child.call("setup", json!({"action": "list"})));
     assert!(setup.contains("has no tool setup"), "{setup}");
     assert!(no_request(&user));

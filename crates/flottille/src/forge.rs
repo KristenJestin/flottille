@@ -38,8 +38,11 @@ mod bitbucket;
 mod ci;
 mod closing;
 mod events;
+pub(crate) mod followed;
 mod logs;
 mod pipelines;
+mod review;
+mod yaml;
 
 pub(crate) use events::offer;
 pub use events::{EVENTS, target_named};
@@ -59,6 +62,10 @@ const FIELDS: &str = "number,title,state,isDraft,headRefName,headRefOid,baseRefN
     mergeable,reviewDecision,statusCheckRollup,comments,reviews,body,mergedBy,mergedAt";
 /// The ways `forge` `merge` merges a pull request, the first by default.
 pub const MERGE_METHODS: [&str; 3] = ["squash", "merge", "rebase"];
+pub(crate) use pipelines::{HIDDEN_EVERYWHERE, bitbucket_key, with_branch};
+/// What `forge review` posts: a comment, an approval or a request for changes.
+pub use review::VERDICTS as REVIEW_VERDICTS;
+pub(crate) use review::head_of as review_head;
 
 /// The forge a repository's remote is on: GitHub, or Bitbucket (Cloud, or a Data Center host the
 /// project names).
@@ -337,6 +344,9 @@ pub struct Log {
     pub total: usize,
     /// The lines are the failing command's, found by the forge's markers, not the log's end.
     pub part: bool,
+    /// The run and the step (a Bitbucket step's uuid, a GitHub job's id) whose whole log
+    /// `forge run_logs` reads.
+    pub whole: Option<(u64, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -730,7 +740,7 @@ async fn run_for(
         .stderr(Stdio::piped())
         .process_group(0)
         .kill_on_drop(true);
-    let child = command.spawn().map_err(|error| match error.kind() {
+    let child = crate::children::spawn(&mut command).map_err(|error| match error.kind() {
         std::io::ErrorKind::NotFound => Gh::Missing,
         _ => Gh::Failed(error.to_string()),
     })?;
@@ -1035,8 +1045,23 @@ pub(crate) struct ForgeCall {
     fresh: bool,
     title: Option<String>,
     body: Option<String>,
-    #[serde(default)]
-    draft: bool,
+    /// create: opened as a draft; edit: `false` marks it ready for review, `true` makes it a
+    /// draft again.
+    draft: Option<bool>,
+    /// create: reviewers besides the project's.
+    reviewers: Option<Vec<String>>,
+    /// create: labels (GitHub).
+    labels: Option<Vec<String>>,
+    /// create: the source branch is deleted when the pull request is merged.
+    delete_branch_on_merge: Option<bool>,
+    /// edit: reviewers asked, reviewers taken off.
+    reviewers_add: Option<Vec<String>>,
+    reviewers_remove: Option<Vec<String>>,
+    /// edit: labels put on, labels taken off (GitHub).
+    labels_add: Option<Vec<String>>,
+    labels_remove: Option<Vec<String>>,
+    /// edit: the branch it goes into.
+    base: Option<String>,
     /// merge: why the user lets a pull request whose checks or review block it be merged; the
     /// gate held the call for them.
     waive: Option<String>,
@@ -1047,14 +1072,18 @@ pub(crate) struct ForgeCall {
     message: Option<String>,
     /// close, reopen: posted on the pull request first.
     comment: Option<String>,
-    /// close: also delete the pull request's branch on the forge.
-    #[serde(default)]
-    delete_branch: bool,
+    /// review: `comment`, `approve` or `request_changes` (`REVIEW_VERDICTS`).
+    verdict: Option<String>,
+    /// review: comments on lines of the diff.
+    comments: Option<Vec<review::Inline>>,
+    /// close, merge: also delete the pull request's branch on the forge. For merge, left out
+    /// follows the pull request's wish and the project's setting.
+    delete_branch: Option<bool>,
     /// subscribe: the events it waits for (`EVENTS`).
     events: Option<Vec<String>>,
     /// subscribe: whose reviews and comments count (`subscriptions::FROM`).
     from: Option<String>,
-    /// subscribe: how long it waits at most.
+    /// subscribe: a deadline, in minutes; none when left out.
     minutes: Option<u64>,
     /// unsubscribe: a session the agent follows (`agent_launch` with `follow`), to stop following.
     session: Option<String>,
@@ -1062,7 +1091,9 @@ pub(crate) struct ForgeCall {
     pipeline: Option<String>,
     /// run: the pipeline's variables, the workflow's inputs.
     variables: Option<Vec<pipelines::Variable>>,
-    /// run_view, run_logs, stop, step: the run's number.
+    /// run: follow the run started, which wakes the agent when it ends (the default).
+    follow: Option<bool>,
+    /// run_view, run_logs, stop, step, unsubscribe: the run's number.
     run: Option<u64>,
     /// run_logs, step: a step's (a job's) name or id.
     step: Option<String>,
@@ -1074,6 +1105,206 @@ pub(crate) struct ForgeCall {
 impl ForgeCall {
     fn method(&self) -> &str {
         self.method.as_deref().unwrap_or(MERGE_METHODS[0])
+    }
+
+    /// Why the call cannot be done whatever the forge says, before the user is asked: a
+    /// reviewer, a label or a base that would be an option of the command line, an `edit` that
+    /// changes nothing.
+    pub(crate) fn malformed(&self) -> Option<String> {
+        let lists = [
+            ("reviewers", &self.reviewers, false),
+            ("reviewers_add", &self.reviewers_add, false),
+            ("reviewers_remove", &self.reviewers_remove, false),
+            ("labels", &self.labels, true),
+            ("labels_add", &self.labels_add, true),
+            ("labels_remove", &self.labels_remove, true),
+        ];
+        for (key, names, label) in lists {
+            for name in names.iter().flatten() {
+                // Each is one value of a `--reviewer` or `--label`, never an option of its own;
+                // the forge's commands split a value at its commas.
+                let spaced = !label && name.contains(char::is_whitespace);
+                let blank = label && name.trim().is_empty();
+                if name.is_empty()
+                    || blank
+                    || name.starts_with('-')
+                    || name.contains([',', '\n'])
+                    || spaced
+                {
+                    let what = match label {
+                        true => "one label, not starting with -, without comma",
+                        false => {
+                            "one name of the forge, without space nor comma, not starting with -"
+                        }
+                    };
+                    return Some(format!("refused: {key}: {name:?} is not {what}"));
+                }
+            }
+        }
+        if let Some(base) = &self.base
+            && !branch_name(base)
+        {
+            return Some(format!(
+                "refused: base: {base:?} is not one branch name: git's rules refuse a space, a \
+                 control character, .., ~ ^ : ? * [ \\ @{{, a leading - or /, a trailing / . or \
+                 .lock, and // ; so does the forge's address, with #"
+            ));
+        }
+        if self.action == "review"
+            && let Some(why) = review::malformed(self)
+        {
+            return Some(why);
+        }
+        if self.action == "edit" && !self.changes() {
+            return Some(
+                "refused: forge edit needs at least one of title, body, draft, reviewers_add, \
+                 reviewers_remove, labels_add, labels_remove or base: what changes"
+                    .into(),
+            );
+        }
+        None
+    }
+
+    /// Whether an `edit` changes something.
+    fn changes(&self) -> bool {
+        let said = |text: &Option<String>| text.as_deref().is_some_and(|t| !t.trim().is_empty());
+        let given = |list: &Option<Vec<String>>| list.as_ref().is_some_and(|l| !l.is_empty());
+        said(&self.title)
+            || said(&self.body)
+            || self.draft.is_some()
+            || given(&self.reviewers_add)
+            || given(&self.reviewers_remove)
+            || given(&self.labels_add)
+            || given(&self.labels_remove)
+            || said(&self.base)
+    }
+}
+
+/// Whether `name` is one branch name by git's rules for a reference (`git check-ref-format`), and
+/// fit to be a path of the forge's API: the base is read there before it is written.
+fn branch_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with(['-', '/'])
+        && !name.ends_with(['/', '.'])
+        && !name.ends_with(".lock")
+        && !["..", "//", "@{"].iter().any(|bad| name.contains(bad))
+        && !name.contains(['~', '^', ':', '?', '*', '[', '\\', '#'])
+        && !name.contains(|c: char| c.is_whitespace() || c.is_control())
+        && name != "@"
+}
+
+/// `why`, the failure of a later step of a write, and what the earlier steps had already changed.
+pub(crate) fn after(why: String, done: &[&str]) -> String {
+    match done {
+        [] => why,
+        done => format!(
+            "{why}; {} had already changed the pull request before it failed: read it with \
+             forge show before going on",
+            done.join(" and ")
+        ),
+    }
+}
+
+/// `names` and then those of `more` that `names` has not, in order.
+fn without_twice(names: &[String], more: &Option<Vec<String>>) -> Vec<String> {
+    let mut all = names.to_vec();
+    for name in more.iter().flatten() {
+        if !all.contains(name) {
+            all.push(name.clone());
+        }
+    }
+    all
+}
+
+/// Why the branch `branch` of the workspace in the repository `path` must stay whatever is said:
+/// the workspace resumed it (it was the user's before), or another workspace is on it.
+pub(crate) fn keep_because(
+    daemon: &Daemon,
+    project: &str,
+    workspace: &Workspace,
+    path: &str,
+    branch: &str,
+) -> Option<String> {
+    if workspace
+        .repositories
+        .iter()
+        .any(|r| r.path == path && r.resumed)
+    {
+        return Some("it existed before the workspace".to_owned());
+    }
+    daemon
+        .read(|store| store.workspaces(Some(project)))
+        .unwrap_or_default()
+        .into_iter()
+        .find(|w| {
+            w.name != workspace.name
+                && w.branch == branch
+                && w.repositories.iter().any(|r| r.path == path)
+        })
+        .map(|other| format!("the workspace {} is on it", other.name))
+}
+
+/// The workspace a `create` or `merge` writes for and the repository it takes, as `forge_write`
+/// takes them: the one named, else the workspace's only one. For the card, which is read before.
+pub(crate) fn write_target(
+    daemon: &Daemon,
+    place: &Place,
+    workspace: Option<&str>,
+    repository: Option<&str>,
+) -> Option<(Workspace, String)> {
+    let name = workspace_named(daemon, place, workspace, "forge").ok()?;
+    let workspace = daemon
+        .read(|store| store.workspace(&place.project, &name))
+        .ok()??;
+    let path = match (repository, workspace.repositories.as_slice()) {
+        (Some(path), _) => path.to_owned(),
+        (None, [only]) => only.path.clone(),
+        (None, _) => return None,
+    };
+    Some((workspace, path))
+}
+
+/// What a merge does with the pull request's source branch, as far as the call and the project
+/// say it (`docs/tools.md`, "The forge"): the call's `delete_branch`, else what was kept for that
+/// pull request at its creation, else the repository's project setting; and the reason the branch
+/// must stay whatever they say.
+pub(crate) struct Deletion {
+    pub asked: Option<bool>,
+    pub setting: bool,
+    /// The branch is somebody's else's: the workspace resumed it, or another is on it.
+    pub keep_because: Option<String>,
+}
+
+/// What became of the branch.
+pub(crate) enum Branch {
+    Kept,
+    Delete,
+    Left(String),
+}
+
+impl Deletion {
+    /// Whether the branch of the pull request `number` is to be deleted at its merge.
+    pub fn decide(&self, daemon: &Daemon, on: (&str, &str, &str, &str)) -> Branch {
+        let wanted = self
+            .asked
+            .unwrap_or_else(|| self.setting || crate::posts::delete_branch_kept(daemon, on));
+        match (wanted, &self.keep_because) {
+            (false, _) => Branch::Kept,
+            (true, None) => Branch::Delete,
+            (true, Some(why)) => Branch::Left(why.clone()),
+        }
+    }
+}
+
+impl Branch {
+    /// What the answer of a merge adds about the branch, `branch` being its name.
+    pub fn said(&self, branch: &str) -> String {
+        let branch = masked(branch);
+        match self {
+            Branch::Kept => String::new(),
+            Branch::Delete => format!(", and its branch {branch} was deleted"),
+            Branch::Left(why) => format!(", and its branch {branch} was left: {why}"),
+        }
     }
 }
 
@@ -1118,6 +1349,12 @@ pub async fn forge(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Value
         Ok(asked) => asked,
         Err(refusal) => return refusal,
     };
+    if asked.follow.is_some() && asked.action != "run" {
+        return Outcome::Refused(format!(
+            "refused: forge {} takes no follow: follow is for run",
+            asked.action
+        ));
+    }
     match (asked.action.as_str(), asked.number) {
         ("list", _) => forge_list(daemon, place, asked).await,
         ("show", number) => {
@@ -1131,7 +1368,7 @@ pub async fn forge(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Value
             }
         }
         ("subscribe", _) => forge_subscribe(daemon, agent, place, asked).await,
-        ("unsubscribe", _) => forge_unsubscribe(daemon, agent, asked),
+        ("unsubscribe", _) => forge_unsubscribe(daemon, agent, place, asked),
         ("create" | "merge" | "checks", _) => {
             let written = forge_write(daemon, place, asked).await;
             daemon.forges.pulls.drop_all();
@@ -1147,9 +1384,14 @@ pub async fn forge(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Value
             daemon.forges.pulls.drop_all();
             written
         }
+        ("review", _) => {
+            let written = review::review(daemon, place, asked).await;
+            daemon.forges.pulls.drop_all();
+            written
+        }
         (action, _) if pipelines::ACTIONS.contains(&action) => {
             // A run started or stopped changes the checks of the pull request it is for.
-            let done = pipelines::call(daemon, place, asked).await;
+            let done = pipelines::call(daemon, agent, place, asked).await;
             daemon.forges.pulls.drop_all();
             done
         }
@@ -1167,11 +1409,17 @@ fn subscriptions_text(daemon: &Daemon, agent: &str) -> String {
         .filter(|s| s.source == "forge")
         .collect();
     let following = crate::subscriptions::following(daemon, agent, None);
-    if mine.is_empty() && following.is_empty() {
+    let runs = followed::of(daemon, agent, None, None);
+    if mine.is_empty() && following.is_empty() && runs.is_empty() {
         return String::new();
     }
-    let now = now_ms();
     let mut text = "\nYour subscriptions:\n".to_owned();
+    for subscription in runs {
+        text.push_str(&format!(
+            "- {}: until it ends\n",
+            followed::named(&subscription.target)
+        ));
+    }
     for subscription in following {
         text.push_str(&format!(
             "- {}{}\n",
@@ -1190,18 +1438,19 @@ fn subscriptions_text(daemon: &Daemon, agent: &str) -> String {
             _ => "",
         };
         text.push_str(&format!(
-            "- {}: {}{from}, for {} min more\n",
+            "- {}: {}{from}, {}\n",
             target_named(&subscription.target),
             subscription.events.join(", "),
-            subscription.expires_at.saturating_sub(now).div_ceil(60_000)
+            crate::subscriptions::lasts(&subscription)
         ));
     }
     text
 }
 
-/// `forge subscribe`: the agent waits, once, for the next of the events it names of the pull
-/// request of a workspace's branch; the answer comes at once, the event later as a delivery. What
-/// is already so is not an event: this read is what the next ones are compared with.
+/// `forge subscribe`: the agent is woken at each of the events it names of the pull request of a
+/// workspace's branch, until it is merged or closed; the answer comes at once, the events later as
+/// deliveries. What is already so is not an event: this read is what the next ones are compared
+/// with.
 async fn forge_subscribe(
     daemon: &Arc<Daemon>,
     agent: &str,
@@ -1226,61 +1475,24 @@ async fn forge_subscribe(
             "refused: from is anyone (the default) or people (no bot, not your own), not {from:?}"
         ));
     }
-    let longest = crate::subscriptions::LONGEST_MINUTES;
-    if let Some(minutes) = asked.minutes
-        && !(1..=longest).contains(&minutes)
-    {
-        return Outcome::Refused(format!(
-            "refused: minutes is from 1 to {longest}, 60 by default"
-        ));
-    }
-    if asked.number.is_some() {
+    if asked.minutes == Some(0) {
         return Outcome::Refused(
-            "refused: forge subscribe takes no number: it waits on the pull request of a \
-             workspace's branch (workspace, repository)"
-                .into(),
+            "refused: minutes is a deadline of 1 min or more; leave it out for none".into(),
         );
     }
-    let name = match workspace_named(daemon, place, asked.workspace.as_deref(), "forge") {
-        Ok(name) => name,
+    let found = match asked.number {
+        Some(number) => read_numbered(daemon, place, &asked, number).await,
+        None => read_of_branch(daemon, place, &asked).await,
+    };
+    let Followed {
+        path,
+        forge,
+        pull,
+        target,
+        before,
+    } = match found {
+        Ok(found) => found,
         Err(refusal) => return refusal,
-    };
-    let workspace = match daemon.read(|store| store.workspace(&place.project, &name)) {
-        Ok(Some(workspace)) => workspace,
-        Ok(None) => return Outcome::Failed(format!("the workspace {name} is gone")),
-        Err(error) => return Outcome::Failed(error.to_string()),
-    };
-    let project = projects::load_project(daemon, &place.project).ok();
-    let path = match chosen(
-        repositories_of(&workspace, project.as_ref()),
-        asked.repository.as_deref(),
-        "subscribe",
-        true,
-    ) {
-        Ok(mut checkouts) => checkouts.remove(0).path,
-        Err(refusal) => return refusal,
-    };
-    // The read now is stored before the subscription opens, unless a round wrote meanwhile: what
-    // is so now is no event of the next rounds.
-    let before = crate::items::before_live(daemon, &place.project);
-    let (_, read) = refresh_read(daemon, &workspace).await;
-    let Some(repository) = read.repositories.iter().find(|r| r.path == path) else {
-        return Outcome::Failed(format!("{path} was not read"));
-    };
-    if let Some(note) = &repository.note {
-        return Outcome::Refused(format!("refused: {path}: {note}"));
-    }
-    if let Some(error) = &repository.error {
-        return Outcome::Failed(format!("{path}: the forge could not be read: {error}"));
-    }
-    if let (true, Some(problem)) = (repository.blocked, &read.problem) {
-        return Outcome::Failed(problem.clone());
-    }
-    let Some(pull) = &repository.pull else {
-        return Outcome::Refused(format!(
-            "refused: {path} has no pull request for {}: nothing to subscribe to",
-            repository.branch
-        ));
     };
     if matches!(pull.state, "merged" | "closed") {
         return Outcome::Refused(format!(
@@ -1288,22 +1500,14 @@ async fn forge_subscribe(
             pull.number, pull.state
         ));
     }
-    // The one read of the runs: it tells the agent, and sizes the wait it did not size.
-    let runs = match &repository.forge {
+    // The one read of the runs: how long CI usually takes, for the agent to know.
+    let runs = match &forge {
         Some(forge) => ci::recent(forge).await,
         None => None,
     };
-    let (minutes, duration) = match asked.minutes {
-        Some(minutes) => (minutes, None),
-        None => {
-            let (minutes, why) = ci::wait_for(runs.as_ref());
-            (minutes, Some(why))
-        }
-    };
-    let target = events::target(&workspace, &path, pull.number);
     let held = crate::items::held_after(daemon, &place.project, before).await;
-    if let (Some(_), Some(forge)) = (&held, &repository.forge) {
-        remember(daemon, &place.project, &path, forge, pull);
+    if let (Some(_), Some(forge)) = (&held, &forge) {
+        remember(daemon, &place.project, &path, forge, &pull);
     }
     let unseen = crate::items::unseen(
         daemon,
@@ -1313,7 +1517,7 @@ async fn forge_subscribe(
         &pull.number.to_string(),
     );
     for old in crate::subscriptions::of(daemon, agent) {
-        if old.target == target {
+        if events::same_pull(&old.target, &target) {
             crate::subscriptions::end(daemon, &old, "cancelled");
         }
     }
@@ -1327,7 +1531,7 @@ async fn forge_subscribe(
         from: from.to_owned(),
         seen: json!({}),
         created_at: now,
-        expires_at: now + minutes * 60_000,
+        expires_at: crate::subscriptions::deadline(now, asked.minutes),
     };
     let subscribed = crate::subscriptions::subscribe(daemon, &subscription);
     drop(held);
@@ -1339,10 +1543,10 @@ async fn forge_subscribe(
         _ => "",
     };
     let mut text = format!(
-        "Subscribed: the next {}{from} of the {} wakes you once, as a delivery, within {minutes} \
-         min. What is so now is no event: forge show reads it.",
-        subscription.events.join(" or "),
-        target_named(&subscription.target)
+        "Subscribed to {}{from} of the {}: {}. What is so now is no event: forge show reads it.",
+        subscription.events.join(", "),
+        target_named(&subscription.target),
+        crate::subscriptions::wakes_until(&subscription, asked.minutes)
     );
     match unseen {
         Some(crate::items::Unseen::Source) => text.push_str(&format!(
@@ -1355,10 +1559,165 @@ async fn forge_subscribe(
         ),
         None => {}
     }
-    for line in runs.map(|runs| runs.line()).into_iter().chain(duration) {
-        text.push_str(&format!("\n{line}"));
+    if let Some(runs) = runs {
+        text.push_str(&format!("\n{}", runs.line()));
     }
+    // GitHub says no decision when the base branch requires no review: `approved` waits for one.
+    if pull.review.is_none()
+        && matches!(forge, Some(Forge::GitHub { .. }))
+        && subscription.events.iter().any(|e| e == "approved")
+    {
+        text.push_str(
+            "\nThis repository asks for no review, so approved will not come; subscribe to review.",
+        );
+    }
+    text.push_str(&checks_when_subscribed(daemon, agent, &path, &pull));
     Outcome::Done(text)
+}
+
+/// The pull request a subscription follows, as it was just read.
+struct Followed {
+    path: String,
+    forge: Option<Forge>,
+    pull: Pull,
+    target: Value,
+    before: crate::items::Before,
+}
+
+/// The pull request of a workspace's branch, read as the workspace is.
+async fn read_of_branch(
+    daemon: &Arc<Daemon>,
+    place: &Place,
+    asked: &ForgeCall,
+) -> Result<Followed, Outcome> {
+    let name = workspace_named(daemon, place, asked.workspace.as_deref(), "forge")?;
+    let workspace = match daemon.read(|store| store.workspace(&place.project, &name)) {
+        Ok(Some(workspace)) => workspace,
+        Ok(None) => return Err(Outcome::Failed(format!("the workspace {name} is gone"))),
+        Err(error) => return Err(Outcome::Failed(error.to_string())),
+    };
+    let project = projects::load_project(daemon, &place.project).ok();
+    let path = chosen(
+        repositories_of(&workspace, project.as_ref()),
+        asked.repository.as_deref(),
+        "subscribe",
+        true,
+    )?
+    .remove(0)
+    .path;
+    // The read now is stored before the subscription opens, unless a round wrote meanwhile: what
+    // is so now is no event of the next rounds.
+    let before = crate::items::before_live(daemon, &place.project);
+    let (_, read) = refresh_read(daemon, &workspace).await;
+    let Some(repository) = read.repositories.iter().find(|r| r.path == path) else {
+        return Err(Outcome::Failed(format!("{path} was not read")));
+    };
+    if let Some(note) = &repository.note {
+        return Err(Outcome::Refused(format!("refused: {path}: {note}")));
+    }
+    if let Some(error) = &repository.error {
+        return Err(Outcome::Failed(format!(
+            "{path}: the forge could not be read: {error}"
+        )));
+    }
+    if let (true, Some(problem)) = (repository.blocked, &read.problem) {
+        return Err(Outcome::Failed(problem.clone()));
+    }
+    let Some(pull) = &repository.pull else {
+        return Err(Outcome::Refused(format!(
+            "refused: {path} has no pull request for {}: nothing to subscribe to",
+            repository.branch
+        )));
+    };
+    Ok(Followed {
+        target: events::target(&place.project, Some(&workspace.name), &path, pull.number),
+        forge: repository.forge.clone(),
+        pull: pull.clone(),
+        path,
+        before,
+    })
+}
+
+/// A pull request of a repository of the agent's place, read by its number: the workspace's
+/// branch is not asked, so it is no pull request of one.
+async fn read_numbered(
+    daemon: &Arc<Daemon>,
+    place: &Place,
+    asked: &ForgeCall,
+    number: u64,
+) -> Result<Followed, Outcome> {
+    if asked.workspace.is_some() {
+        return Err(Outcome::Refused(
+            "refused: forge subscribe takes no workspace with a number: a pull request is of a \
+             repository (repository)"
+                .into(),
+        ));
+    }
+    let checkout = place_checkouts(daemon, place)
+        .and_then(|all| chosen(all, asked.repository.as_deref(), "subscribe", true))?
+        .remove(0);
+    let forge = match declared_forge(&checkout).await {
+        Ok(forge) => forge,
+        Err(None) => {
+            return Err(Outcome::Refused(format!(
+                "refused: {}: {NO_FORGE}",
+                checkout.path
+            )));
+        }
+        Err(Some(why)) => return Err(Outcome::Refused(why)),
+    };
+    // As for a branch's: stored before the subscription opens, unless a round wrote meanwhile.
+    let before = crate::items::before_live(daemon, &place.project);
+    let mut pull = match pull_numbered(&forge, number).await {
+        Err(why) => return Err(Outcome::Failed(why)),
+        Ok(None) => {
+            return Err(Outcome::Refused(format!(
+                "refused: {} has no pull request #{number}",
+                forge.slug()
+            )));
+        }
+        Ok(Some(pull)) => pull,
+    };
+    know_posts(daemon, &place.project, &checkout.path, &forge, &mut pull);
+    Ok(Followed {
+        target: events::target(&place.project, None, &checkout.path, pull.number),
+        forge: Some(forge),
+        pull,
+        path: checkout.path,
+        before,
+    })
+}
+
+/// What `subscribe` says of the checks: those running as it subscribed, which `checks` waits
+/// for, and the runs the agent follows on the pull request's branch, which wake it on their own.
+fn checks_when_subscribed(daemon: &Daemon, agent: &str, path: &str, pull: &Pull) -> String {
+    let running: Vec<&str> = pull
+        .checks
+        .iter()
+        .filter(|(_, state)| *state == "pending")
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let mut text = match running.is_empty() {
+        true => "\nNo check of it was running as you subscribed.".to_owned(),
+        false => format!(
+            "\nIts checks running as you subscribed: {}.",
+            masked(&running.join(", "))
+        ),
+    };
+    text.push_str(
+        " checks is the end of the pull request's checks: a run started on its branch outside \
+         them is followed by forge run, not by this subscription.",
+    );
+    for run in followed::of(daemon, agent, Some(path), None)
+        .into_iter()
+        .filter(|s| s.target["branch"] == pull.head.as_str())
+    {
+        text.push_str(&format!(
+            "\nYou already follow the {}: its end wakes you on its own.",
+            followed::named(&run.target)
+        ));
+    }
+    text
 }
 
 /// Marks the comments of a pull request that an agent posted, as Flottille's record says
@@ -1383,12 +1742,17 @@ fn remember(daemon: &Arc<Daemon>, project: &str, path: &str, forge: &Forge, pull
 
 /// `forge unsubscribe`: the agent's subscriptions to the workspace and repository it names, every
 /// one when it names none.
-fn forge_unsubscribe(daemon: &Daemon, agent: &str, asked: ForgeCall) -> Outcome {
+fn forge_unsubscribe(
+    daemon: &Arc<Daemon>,
+    agent: &str,
+    place: &Place,
+    asked: ForgeCall,
+) -> Outcome {
     if let Some(session) = &asked.session {
-        if asked.workspace.is_some() || asked.repository.is_some() {
+        if asked.workspace.is_some() || asked.repository.is_some() || asked.number.is_some() {
             return Outcome::Refused(
-                "refused: session goes alone: it names a session you follow, workspace and \
-                 repository a pull request"
+                "refused: session goes alone: it names a session you follow, workspace, \
+                 repository and number a pull request"
                     .into(),
             );
         }
@@ -1399,27 +1763,57 @@ fn forge_unsubscribe(daemon: &Daemon, agent: &str, asked: ForgeCall) -> Outcome 
             ));
         }
         for subscription in &followed {
-            crate::subscriptions::end(daemon, subscription, "cancelled");
+            if crate::subscriptions::end(daemon, subscription, "cancelled") {
+                crate::tree::unfollowed(daemon, subscription);
+            }
         }
         return Outcome::Done(format!("You no longer follow {session}."));
+    }
+    // A run's number is of one repository: with several, it is named.
+    if let (Some(run), None) = (asked.run, &asked.repository)
+        && let Ok(project) = projects::load_project(daemon, &place.project)
+        && project.repositories.len() > 1
+    {
+        let names: Vec<&str> = project
+            .repositories
+            .iter()
+            .map(|r| r.path.as_str())
+            .collect();
+        return Outcome::Refused(format!(
+            "refused: forge unsubscribe of the run {run} needs repository, one of {}: a run's \
+             number is of one repository",
+            names.join(", ")
+        ));
     }
     let named =
         |s: &flottille_core::subscription::Subscription, key: &str, asked: &Option<String>| {
             asked.as_ref().is_none_or(|a| s.target[key] == a.as_str())
         };
-    let cancelled: Vec<_> = crate::subscriptions::of(daemon, agent)
+    let mut cancelled: Vec<_> = crate::subscriptions::of(daemon, agent)
         .into_iter()
-        .filter(|s| s.source == "forge")
+        .filter(|s| s.source == "forge" && asked.run.is_none())
         .filter(|s| named(s, "workspace", &asked.workspace))
         .filter(|s| named(s, "repository", &asked.repository))
+        .filter(|s| asked.number.is_none_or(|n| s.target["number"] == n))
         .collect();
+    // A run is followed by its own number, which `number` (a pull request's) never names.
+    if asked.number.is_none() {
+        cancelled.extend(
+            followed::of(daemon, agent, asked.repository.as_deref(), asked.run)
+                .into_iter()
+                .filter(|s| named(s, "workspace", &asked.workspace)),
+        );
+    }
     if cancelled.is_empty() {
         return Outcome::Refused("refused: you have no such subscription".into());
     }
     let mut text = "Cancelled your subscriptions:\n".to_owned();
     for subscription in cancelled {
         crate::subscriptions::end(daemon, &subscription, "cancelled");
-        text.push_str(&format!("- {}\n", target_named(&subscription.target)));
+        text.push_str(&format!(
+            "- {}\n",
+            crate::subscriptions::named(&subscription)
+        ));
     }
     Outcome::Done(text)
 }
@@ -1691,22 +2085,7 @@ async fn forge_show(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall, numbe
     let generation = daemon.forges.pulls.generation();
     // A round of the project running stores a read of its own; none starts during this one.
     let held = crate::items::held_now(daemon, &place.project);
-    let pull = match &forge {
-        Forge::GitHub { .. } => match signed_in().await {
-            Err(problem) => Err(problem),
-            Ok(()) => {
-                let repo = forge.gh_repository();
-                let number = number.to_string();
-                gh_json(&["pr", "view", &number, "-R", &repo, "--json", FIELDS])
-                    .await
-                    .map(|viewed| Pull::of(&viewed))
-            }
-        },
-        Forge::Bitbucket { .. } => match bitbucket::Contexts::default().of(&forge).await {
-            Err(problem) => Err(problem),
-            Ok(context) => bitbucket::pull_numbered(&forge, &context, number).await,
-        },
-    };
+    let pull = pull_numbered(&forge, number).await;
     match pull {
         Err(why) => Outcome::Failed(why),
         Ok(None) => Outcome::Refused(format!(
@@ -1722,6 +2101,24 @@ async fn forge_show(daemon: &Arc<Daemon>, place: &Place, asked: ForgeCall, numbe
             attached(&forge, &mut pull).await;
             daemon.forges.pulls.put(key, pull.clone(), generation);
             shown_pull(&checkout, &forge, &pull, full, None)
+        }
+    }
+}
+
+/// The pull request `number` of a forge's repository, read now; none when it has no such one.
+async fn pull_numbered(forge: &Forge, number: u64) -> Result<Option<Pull>, String> {
+    match forge {
+        Forge::GitHub { .. } => {
+            signed_in().await?;
+            let repo = forge.gh_repository();
+            let number = number.to_string();
+            gh_json(&["pr", "view", &number, "-R", &repo, "--json", FIELDS])
+                .await
+                .map(|viewed| Pull::of(&viewed))
+        }
+        Forge::Bitbucket { .. } => {
+            let context = bitbucket::Contexts::default().of(forge).await?;
+            bitbucket::pull_numbered(forge, &context, number).await
         }
     }
 }
@@ -1743,6 +2140,7 @@ fn shown_pull(
     pull_text(
         &mut text,
         &format!("{} ({})", checkout.path, forge.slug()),
+        &checkout.path,
         pull,
         full,
         &again,
@@ -1787,16 +2185,11 @@ async fn forge_note(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
     };
     let body = asked.body.as_deref().filter(|b| !b.trim().is_empty());
     let title = asked.title.as_deref().filter(|t| !t.trim().is_empty());
-    match (action, body, title) {
-        ("comment", None, _) => {
-            return Outcome::Refused("refused: forge comment needs body, the comment".into());
-        }
-        ("edit", None, None) => {
-            return Outcome::Refused(
-                "refused: forge edit needs title, body or both: what changes".into(),
-            );
-        }
-        _ => {}
+    if let Some(why) = asked.malformed() {
+        return Outcome::Refused(why);
+    }
+    if action == "comment" && body.is_none() {
+        return Outcome::Refused("refused: forge comment needs body, the comment".into());
     }
     let checkout = match place_checkouts(daemon, place)
         .and_then(|all| chosen(all, asked.repository.as_deref(), action, true))
@@ -1853,25 +2246,39 @@ async fn forge_note(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
         }
     }
     let number = number.to_string();
+    if action == "edit"
+        && let Err(refusal) = edit_checked(&forge, &asked).await
+    {
+        return refusal;
+    }
     // The id of the comment, where the forge answers one: `gh` prints its link, `bkt` none.
-    let done = match &forge {
-        Forge::Bitbucket { .. } => bitbucket::note(&forge, action, &number, title, body)
+    let done = match (&forge, action) {
+        (Forge::Bitbucket { .. }, "comment") => {
+            bitbucket::note(&forge, action, &number, title, body)
+                .await
+                .map(|()| None)
+        }
+        (Forge::Bitbucket { .. }, _) => bitbucket::edit(&forge, &number, &asked, title, body)
             .await
             .map(|()| None),
-        Forge::GitHub { .. } => {
+        (Forge::GitHub { .. }, "comment") => {
             let repo = forge.gh_repository();
-            let mut args = vec!["pr", action, &number, "-R", &repo];
-            // `gh pr comment` takes no title, and the gate refused one there.
-            if let Some(title) = title.filter(|_| action == "edit") {
-                args.extend(["--title", title]);
-            }
-            if let Some(body) = body {
-                args.extend(["--body", body]);
-            }
+            let args = [
+                "pr",
+                "comment",
+                &number,
+                "-R",
+                &repo,
+                "--body",
+                body.unwrap_or_default(),
+            ];
             gh_text(&args)
                 .await
                 .map(|said| crate::posts::comment_id_in(&said))
         }
+        (Forge::GitHub { .. }, _) => github_edit(&forge, &number, &asked, title, body)
+            .await
+            .map(|()| None),
     };
     let on = (
         place.project.as_str(),
@@ -1895,6 +2302,104 @@ async fn forge_note(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome
         }
     }
 }
+
+/// What an `edit` asks that the forge cannot do, refused before anything is written: labels on
+/// Bitbucket, a destination on Data Center, a base the remote has not got.
+async fn edit_checked(forge: &Forge, asked: &ForgeCall) -> Result<(), Outcome> {
+    let given = |list: &Option<Vec<String>>| list.as_ref().is_some_and(|l| !l.is_empty());
+    let slug = forge.slug();
+    if matches!(forge, Forge::Bitbucket { .. }) {
+        if given(&asked.labels_add) || given(&asked.labels_remove) {
+            return Err(Outcome::Refused(NO_LABELS.replace("{what}", "changed")));
+        }
+        if asked.base.is_some() && !bitbucket::cloud(forge) {
+            return Err(Outcome::Refused(format!(
+                "refused: {slug} is on Bitbucket Data Center, where bkt cannot move a pull \
+                 request's destination: nothing was written; open a new pull request into the \
+                 branch"
+            )));
+        }
+    }
+    let Some(base) = asked.base.as_deref() else {
+        return Ok(());
+    };
+    let found = match forge {
+        Forge::GitHub { .. } => {
+            let path = format!("repos/{slug}/branches/{base}");
+            gh_text(&[
+                "api",
+                &path,
+                "--hostname",
+                declared::GITHUB,
+                "--jq",
+                ".name",
+            ])
+            .await
+            .map(|_| ())
+        }
+        Forge::Bitbucket { .. } => bitbucket::branch_exists(forge, base).await,
+    };
+    match found {
+        Ok(()) => Ok(()),
+        Err(why) if why.contains("404") || why.contains("Not Found") => {
+            Err(Outcome::Refused(format!(
+                "refused: {slug} has no branch {} on the forge; nothing was written",
+                masked(base)
+            )))
+        }
+        Err(why) => Err(Outcome::Failed(why)),
+    }
+}
+
+/// `gh pr edit` for what it takes, then `gh pr ready` for the draft.
+async fn github_edit(
+    forge: &Forge,
+    number: &str,
+    asked: &ForgeCall,
+    title: Option<&str>,
+    body: Option<&str>,
+) -> Result<(), String> {
+    let repo = forge.gh_repository();
+    let mut args = vec!["pr", "edit", number, "-R", &repo];
+    if let Some(title) = title {
+        args.extend(["--title", title]);
+    }
+    if let Some(body) = body {
+        args.extend(["--body", body]);
+    }
+    let flags = [
+        ("--add-reviewer", &asked.reviewers_add),
+        ("--remove-reviewer", &asked.reviewers_remove),
+        ("--add-label", &asked.labels_add),
+        ("--remove-label", &asked.labels_remove),
+    ];
+    for (flag, names) in flags {
+        for name in names.iter().flatten() {
+            args.extend([flag, name]);
+        }
+    }
+    if let Some(base) = &asked.base {
+        args.extend(["--base", base]);
+    }
+    let mut done = Vec::new();
+    if args.len() > 5 {
+        gh_text(&args).await?;
+        done.push("gh pr edit");
+    }
+    if let Some(draft) = asked.draft {
+        let mut args = vec!["pr", "ready", number, "-R", &repo];
+        if draft {
+            args.push("--undo");
+        }
+        gh_text(&args).await.map_err(|why| after(why, &done))?;
+    }
+    Ok(())
+}
+
+/// Why labels are refused on Bitbucket; `{what}` is `changed` or `opened`.
+const NO_LABELS: &str = "refused: Bitbucket has no labels on pull requests: nothing was {what}; \
+     labels are GitHub's, and a Bitbucket pull request is told apart by its reviewers and its \
+     title";
 
 /// What `forge close` and `reopen` read of a pull request before they act.
 pub(crate) struct Seen {
@@ -2001,7 +2506,8 @@ async fn forge_close(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
             w.branch == seen.branch && w.repositories.iter().any(|r| r.path == checkout.path)
         });
     let mut left = None;
-    if asked.delete_branch {
+    let delete_branch = asked.delete_branch == Some(true);
+    if delete_branch {
         left = match (&on_it, seen.own) {
             (Some(workspace), _) => Some(format!("the workspace {} is on it", workspace.name)),
             (None, false) => Some("it comes from a fork".to_owned()),
@@ -2015,7 +2521,7 @@ async fn forge_close(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
             );
         }
     }
-    let delete = asked.delete_branch && left.is_none();
+    let delete = delete_branch && left.is_none();
     let done = if bitbucket {
         bitbucket::decline(&forge, &numbered, comment, delete).await
     } else {
@@ -2213,6 +2719,9 @@ async fn on_remote(folder: &Path, remote: &str, branch: &str) -> Result<(), Stri
 /// `forge` `create`, `merge` and `checks`: one write to the forge of one repository of a
 /// workspace, for the workspace's branch only, through the user's own `gh` or `bkt`.
 async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
+    if let Some(why) = asked.malformed() {
+        return Outcome::Refused(why);
+    }
     let name = match workspace_named(daemon, place, asked.workspace.as_deref(), "forge") {
         Ok(name) => name,
         Err(refusal) => return refusal,
@@ -2228,6 +2737,11 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
         Ok(project) => project,
         Err(failure) => return Outcome::Failed(failure.message),
     };
+    // Opened without a body, a pull request takes the project's template, as its card said.
+    let mut asked = asked;
+    if asked.action == "create" && asked.body.is_none() {
+        asked.body = project.pull_requests.template.clone();
+    }
     let repositories = repositories_of(&workspace, Some(&project));
     // The only repository of the workspace needs no name.
     let asked_repository = match (asked.repository.clone(), repositories.as_slice()) {
@@ -2302,11 +2816,37 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
     if let Err(refusal) = messages_checked(&at, &asked).await {
         return Outcome::Refused(refusal);
     }
-    let reviewers = project.pull_requests.reviewers;
+    let reviewers = without_twice(&project.pull_requests.reviewers, &asked.reviewers);
+    let labels = asked.labels.clone().unwrap_or_default();
+    if matches!(forge, Forge::Bitbucket { .. }) && asked.action == "create" && !labels.is_empty() {
+        return Outcome::Refused(NO_LABELS.replace("{what}", "opened"));
+    }
+    // A branch the workspace resumed was the user's before, and another workspace on the same
+    // branch still uses it: a merge never deletes either, whatever it was told, and a pull
+    // request is not opened to have the forge delete it.
+    let keep_because = keep_because(daemon, &place.project, &workspace, &checkout.path, branch);
+    if asked.action == "create"
+        && asked.delete_branch_on_merge == Some(true)
+        && let Some(why) = &keep_because
+    {
+        return Outcome::Refused(format!(
+            "refused: delete_branch_on_merge: the branch {} is never deleted: {why}; nothing was \
+             opened: open it without delete_branch_on_merge",
+            masked(branch)
+        ));
+    }
+    let deletion = Deletion {
+        asked: asked.delete_branch,
+        setting: project
+            .repositories
+            .iter()
+            .any(|r| r.path == checkout.path && r.delete_branch_on_merge),
+        keep_because,
+    };
     if matches!(forge, Forge::Bitbucket { .. }) {
         let base = &repository.base.branch;
         let on = (daemon, place.project.as_str(), checkout.path.as_str());
-        return bitbucket::write(on, &forge, branch, base, &reviewers, asked).await;
+        return bitbucket::write(on, &forge, (branch, base), &reviewers, &deletion, asked).await;
     }
     if let Err(problem) = signed_in().await {
         return Outcome::Failed(problem);
@@ -2326,29 +2866,47 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                 "pr", "create", "-R", &repo, "--head", branch, "--base", base, "--title", &title,
                 "--body", &body,
             ];
-            if asked.draft {
+            if asked.draft == Some(true) {
                 args.push("--draft");
             }
             for reviewer in &reviewers {
                 args.extend(["--reviewer", reviewer]);
             }
+            for label in &labels {
+                args.extend(["--label", label]);
+            }
             match gh_text(&args).await {
                 Ok(said) => {
                     // `gh` prints the new pull request's link, which ends with its number.
                     let number = said.trim().rsplit('/').next().unwrap_or_default();
-                    if !body.trim().is_empty() && number.parse::<u64>().is_ok() {
-                        let on = (
-                            place.project.as_str(),
-                            forge.kind(),
-                            checkout.path.as_str(),
-                            number,
-                        );
+                    let numbered = number.parse::<u64>().is_ok();
+                    let on = (
+                        place.project.as_str(),
+                        forge.kind(),
+                        checkout.path.as_str(),
+                        number,
+                    );
+                    if !body.trim().is_empty() && numbered {
                         crate::posts::record_body(daemon, on, &body);
                     }
-                    Outcome::Done(format!(
+                    let mut told = format!(
                         "The pull request of {branch} into {base} was opened in {slug}: {}",
                         said.trim()
-                    ))
+                    );
+                    if asked.delete_branch_on_merge == Some(true) && numbered {
+                        // GitHub has no such flag per pull request: Flottille keeps the wish
+                        // and applies it when it merges the pull request.
+                        crate::posts::record_delete_branch(daemon, on, branch);
+                        told += &format!(
+                            ". Flottille will delete the branch {} when it merges #{number}",
+                            masked(branch)
+                        );
+                        if own_deletion(&repo).await {
+                            told += ": the repository's own setting deletes head branches after \
+                                a merge too";
+                        }
+                    }
+                    Outcome::Done(told)
                 }
                 Err(why) => Outcome::Failed(why),
             }
@@ -2418,16 +2976,39 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
             }
             let method = asked.method();
             let flag = format!("--{method}");
+            let on = (
+                place.project.as_str(),
+                forge.kind(),
+                checkout.path.as_str(),
+                number.as_str(),
+            );
+            let kept = deletion.decide(daemon, on);
             let mut args = vec!["pr", "merge", &number, "-R", &repo, &flag];
+            // `-R` names the repository, so that `gh` never touches a local branch of a
+            // checkout, which a workspace may be using.
+            if matches!(kept, Branch::Delete) {
+                args.push("--delete-branch");
+            }
             let message = asked.message.as_deref().map(squash_message);
             if let Some((subject, body)) = &message {
                 args.extend(["--subject", subject, "--body", body]);
             }
             match gh_text(&args).await {
-                Ok(_) => Outcome::Done(format!(
-                    "The pull request #{number} of {branch} was merged by {method} into {base} \
-                     in {slug}."
-                )),
+                Ok(_) => {
+                    // `gh` was told to leave it, but the repository's own setting may not.
+                    let said = match &kept {
+                        Branch::Left(why) if own_deletion(&repo).await => format!(
+                            ", and the repository's own setting deletes head branches: GitHub \
+                             deletes {} although {why}; gh cannot stop it",
+                            masked(branch)
+                        ),
+                        _ => kept.said(branch),
+                    };
+                    Outcome::Done(format!(
+                        "The pull request #{number} of {branch} was merged by {method} into \
+                         {base} in {slug}{said}."
+                    ))
+                }
                 Err(why) => {
                     // Refused by the forge: when the repository forbids the method, say which
                     // ones it allows rather than GitHub's own sentence.
@@ -2500,6 +3081,14 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
         }
         action => Outcome::Refused(format!("refused: forge {action} writes nothing here")),
     }
+}
+
+/// Whether the repository itself deletes the head branch of a pull request once merged
+/// (GitHub's "automatically delete head branches"); false when it cannot be read.
+async fn own_deletion(repo: &str) -> bool {
+    gh_json(&["repo", "view", repo, "--json", "deleteBranchOnMerge"])
+        .await
+        .is_ok_and(|viewed| viewed["deleteBranchOnMerge"] == true)
 }
 
 /// The project's message checks on what a write gives the forge: the title of a pull request
@@ -2592,7 +3181,15 @@ fn read_text(workspace: &Workspace, read: &Read, full: bool, asked: Option<&str>
             ));
             continue;
         };
-        pull_text(&mut text, &named, pull, full, &again, None);
+        pull_text(
+            &mut text,
+            &named,
+            &repository.path,
+            pull,
+            full,
+            &again,
+            None,
+        );
     }
     text
 }
@@ -2614,6 +3211,7 @@ fn comment_body(comment: &Comment) -> (String, bool) {
 fn pull_text(
     text: &mut String,
     named: &str,
+    repository: &str,
     pull: &Pull,
     full: bool,
     again: &str,
@@ -2668,7 +3266,7 @@ fn pull_text(
             text.push_str(&format!("  checks: {mark} ({})\n", each.join(", ")));
         }
     }
-    text.push_str(&logs::text(&pull.jobs));
+    text.push_str(&logs::text(&pull.jobs, repository));
     if let Some(ci) = &pull.ci {
         text.push_str(&format!("  {}\n", ci.line()));
     }

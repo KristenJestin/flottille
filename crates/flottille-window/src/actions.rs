@@ -110,6 +110,8 @@ pub enum Command {
         target: Target,
         pick: Pick,
         message: String,
+        /// The pictures that go with the first message.
+        images: Vec<Picture>,
     },
     /// Enables or disables a provider in `providers.toml`.
     SetProvider {
@@ -163,6 +165,19 @@ pub enum Command {
     JudgeNoticed,
     /// The Auto judge's guidance (`judge.show`).
     JudgeRead,
+    /// The compaction's settings and guidance (`compaction.show`).
+    CompactionRead,
+    /// Changes the compaction's settings (`compaction.set`): the fields given only.
+    CompactionSet {
+        params: Value,
+    },
+    /// Saves the compactor's guidance, or with no text resets it to the default
+    /// (`compaction.set_guidance`, `compaction.reset_guidance`).
+    CompactionGuidance {
+        text: Option<String>,
+    },
+    /// The user saw the notice of the compactor Flottille picked (`compaction.noticed`).
+    CompactionNoticed,
     /// Saves the judge's guidance, or with no text resets it to the default (`judge.set`,
     /// `judge.reset`).
     JudgeWrite {
@@ -203,6 +218,13 @@ pub enum Command {
     SaveProjectSettings {
         project: String,
         settings: Value,
+    },
+    /// Writes one of the project's conventions, `key` of `project.set_conventions`, empty for
+    /// none.
+    SaveConvention {
+        project: String,
+        key: &'static str,
+        value: String,
     },
     /// Writes the project's message checks (`project.set_message_checks`).
     SaveMessageChecks {
@@ -256,6 +278,10 @@ pub enum Command {
         project: String,
         write: CommandWrite,
     },
+    /// The vault's entries, their metadata (`vault.list`).
+    Vault,
+    /// An entry set or removed (`vault.set`, `vault.remove`).
+    VaultWrite(VaultWrite),
     /// The project's skills.
     Skills {
         project: String,
@@ -301,6 +327,23 @@ pub enum Command {
         project: String,
         run: String,
         act: RunAct,
+    },
+    /// The services of the machine (`service.list`).
+    Services,
+    /// A change to the services: `service.add`, `service.edit` or `service.remove`, with its
+    /// parameters.
+    ServiceWrite {
+        method: &'static str,
+        params: Value,
+    },
+    /// Starts a service (and what it needs first), or stops it.
+    ServiceAct {
+        name: String,
+        start: bool,
+    },
+    /// The output of a service's run, as a run's.
+    ServiceOutput {
+        run: String,
     },
     /// The project's setup.
     Setup {
@@ -364,9 +407,21 @@ pub enum Command {
     /// A message to a session's root agent: the only agent the window writes to.
     Reply {
         session: String,
+        /// The message being sent, as the composer keeps it until the daemon answers.
+        key: u64,
         message: String,
         /// Pasted or dropped pictures that go with it, as the clipboard gave them.
         images: Vec<Picture>,
+        /// The composer's Compact before sending, while it shows: the agent's cache expired.
+        compact: Option<bool>,
+    },
+    /// The user's answer from the card of the question of `seq` the session's root asked: a
+    /// message to the root like any other, which answers every question open then (`seqs`).
+    AnswerQuestion {
+        session: String,
+        seq: u64,
+        seqs: Vec<u64>,
+        message: String,
     },
     /// Takes back a message that waits for the session's root (`edit`: to change it and send it
     /// again). The daemon refuses one the root read first.
@@ -391,6 +446,21 @@ pub enum Command {
     },
     /// Starts an ended session's root agent again on its own session.
     Resume {
+        session: String,
+    },
+    /// Detaches a session from the agent that started it, named `from`.
+    Detach {
+        session: String,
+        from: String,
+    },
+    /// Reloads the tools of the session's root: its process restarts on its conversation, once
+    /// the turn that runs ended.
+    ReloadTools {
+        session: String,
+    },
+    /// Compacts the conversation of the session's root (`agent.compact`), now or once the turn
+    /// that runs ended.
+    Compact {
         session: String,
     },
     /// Interrupts the turn the session's root agent runs; the agent stays.
@@ -420,6 +490,12 @@ pub enum Command {
     CancelSubscription {
         session: String,
         subscription: String,
+    },
+    /// Takes back the user's leave for `writer` to write to `leave_session`.
+    WithdrawLeave {
+        session: String,
+        writer: String,
+        leave_session: String,
     },
     /// Resumes a paused following of the session's agents, as a message of the user's does.
     ResumeFollowing {
@@ -472,6 +548,38 @@ pub enum SkillWrite {
     Remove {
         name: String,
     },
+}
+
+/// A change to the vault, as the daemon takes it.
+#[derive(Clone, PartialEq)]
+pub enum VaultWrite {
+    /// A new entry, or one replaced whole.
+    Set {
+        name: String,
+        secret: String,
+        description: String,
+        url: String,
+        username: String,
+        /// Every project's when `None`.
+        project: Option<String>,
+    },
+    Remove {
+        name: String,
+    },
+}
+
+/// What a debug line may say of a write: never its secret.
+impl std::fmt::Debug for VaultWrite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VaultWrite::Set { name, project, .. } => f
+                .debug_struct("Set")
+                .field("name", name)
+                .field("project", project)
+                .finish_non_exhaustive(),
+            VaultWrite::Remove { name } => f.debug_struct("Remove").field("name", name).finish(),
+        }
+    }
 }
 
 /// A change to a project's commands, as the daemon takes it.
@@ -633,6 +741,12 @@ pub enum Outcome {
         read: Result<Value, String>,
         saved: bool,
     },
+    /// One of the project's conventions as saved, empty for none, or why nothing was.
+    Convention {
+        project: String,
+        key: &'static str,
+        saved: Result<String, String>,
+    },
     /// The project's message checks as saved, or why nothing was.
     MessageChecks {
         project: String,
@@ -703,6 +817,14 @@ pub enum Outcome {
         name: String,
         read: Result<CommandInfo, String>,
     },
+    /// The vault's entries, or why they cannot be read.
+    Vault {
+        listed: Result<Vec<crate::vault::VaultEntry>, String>,
+    },
+    /// A change to the vault was made, or refused with why.
+    VaultWritten {
+        refused: Option<String>,
+    },
     /// A change to the commands was made, or refused with why.
     CommandWritten {
         project: String,
@@ -746,6 +868,13 @@ pub enum Outcome {
         seq: u64,
         written: bool,
         shown: Result<flottille_ui::omarchy::Appearance, String>,
+    },
+    /// The compaction as the daemon says it (`compaction.show`), after a read, a change of its
+    /// settings (`written`) or of its guidance (`guidance`).
+    Compaction {
+        written: bool,
+        guidance: bool,
+        shown: Result<Value, String>,
     },
     /// The judge's guidance as the daemon says it, after a read (`written` false) or a save or
     /// a reset.
@@ -829,6 +958,23 @@ pub enum Outcome {
         project: String,
         answer: RunAnswer,
     },
+    Services {
+        listed: Result<Vec<crate::services::ServiceInfo>, String>,
+    },
+    /// A change to the services was made, or refused with why.
+    ServiceWritten {
+        refused: Option<String>,
+    },
+    /// A service was started (with what started) or stopped, or the daemon refused with why.
+    ServiceActed {
+        name: String,
+        start: bool,
+        answer: Result<Value, String>,
+    },
+    /// The output of a service's run.
+    ServiceOutput {
+        output: Option<Box<CommandOutput>>,
+    },
     Setup {
         project: String,
         listed: Result<Vec<flottille_core::project::SetupStep>, String>,
@@ -847,6 +993,14 @@ pub enum Outcome {
     /// A message to the session's root was taken, or refused with why.
     Replied {
         session: String,
+        key: u64,
+        answer: Result<crate::session::Accepted, String>,
+    },
+    /// The answer from the card of `seq` to the questions `seqs` was taken, or refused with why.
+    QuestionAnswered {
+        session: String,
+        seq: u64,
+        seqs: Vec<u64>,
         refused: Option<String>,
     },
     /// A waiting message was taken back, with its text and pictures, or the daemon refused with
@@ -871,6 +1025,25 @@ pub enum Outcome {
     /// The session's root was resumed, or the daemon refused with why.
     Resumed {
         session: String,
+        refused: Option<String>,
+    },
+    /// The session was detached from `from`, or the daemon refused with why.
+    Detached {
+        from: String,
+        refused: Option<String>,
+    },
+    /// The session's tools reload, now or once its turn ends (`after_turn`), or the daemon
+    /// refused with why.
+    ToolsReloaded {
+        session: String,
+        after_turn: bool,
+        refused: Option<String>,
+    },
+    /// The session's compaction starts, now or once its turn ends (`after_turn`), or the daemon
+    /// refused with why.
+    Compacting {
+        session: String,
+        after_turn: bool,
         refused: Option<String>,
     },
     /// The session's turn was interrupted (or none ran), or the daemon refused with why.
@@ -898,6 +1071,11 @@ pub enum Outcome {
     /// A subscription was cancelled, or a following resumed, as asked, or the daemon refused with
     /// why.
     SubscriptionCancelled {
+        session: String,
+        refused: Option<String>,
+    },
+    /// A leave was withdrawn as asked, or the daemon refused with why.
+    LeaveWithdrawn {
         session: String,
         refused: Option<String>,
     },
@@ -1129,6 +1307,7 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             target,
             pick,
             message,
+            images,
         } => {
             let workspace = match target {
                 Target::Main => None,
@@ -1137,7 +1316,7 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             match ask_alone(
                 connect,
                 "agent.start",
-                start_params(&project, workspace.as_deref(), &pick, &message),
+                start_params(&project, workspace.as_deref(), &pick, &message, &images),
                 bounds.quick,
             ) {
                 Ok(Ok(started)) => started_outcome(&project, &started),
@@ -1173,6 +1352,30 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             let _ = ask_alone(connect, "provider.judge_noticed", json!({}), bounds.quick);
             let read = crate::providers::next_read();
             Outcome::Providers(read, read_providers(connect, bounds.quick))
+        }
+        Command::CompactionRead
+        | Command::CompactionSet { .. }
+        | Command::CompactionGuidance { .. }
+        | Command::CompactionNoticed => {
+            let (method, params, written, guidance) = match command {
+                Command::CompactionSet { params } => ("compaction.set", params, true, false),
+                Command::CompactionGuidance { text: Some(text) } => (
+                    "compaction.set_guidance",
+                    json!({"text": text}),
+                    false,
+                    true,
+                ),
+                Command::CompactionGuidance { text: None } => {
+                    ("compaction.reset_guidance", json!({}), false, true)
+                }
+                Command::CompactionNoticed => ("compaction.noticed", json!({}), false, false),
+                _ => ("compaction.show", json!({}), false, false),
+            };
+            Outcome::Compaction {
+                written,
+                guidance,
+                shown: answer(ask_alone(connect, method, params, bounds.quick)),
+            }
         }
         Command::JudgeRead => {
             let shown = ask_alone(connect, "judge.show", json!({}), bounds.quick);
@@ -1294,6 +1497,21 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             )),
             project,
             saved: true,
+        },
+        Command::SaveConvention {
+            project,
+            key,
+            value,
+        } => Outcome::Convention {
+            saved: answer(ask_alone(
+                connect,
+                "project.set_conventions",
+                json!({"name": project, key: value}),
+                bounds.quick,
+            ))
+            .map(|saved| saved[key].as_str().unwrap_or_default().to_owned()),
+            project,
+            key,
         },
         Command::SaveMessageChecks { project, checks } => Outcome::MessageChecks {
             saved: answer(ask_alone(
@@ -1448,6 +1666,41 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 project,
                 name,
             }
+        }
+        Command::Vault => {
+            let listed = ask_alone(connect, "vault.list", json!({}), bounds.quick);
+            Outcome::Vault {
+                listed: listed.and_then(|listed| listed).map(|listed| {
+                    listed["entries"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(crate::vault::VaultEntry::of)
+                        .collect()
+                }),
+            }
+        }
+        Command::VaultWrite(write) => {
+            let (method, params) = match write {
+                VaultWrite::Set {
+                    name,
+                    secret,
+                    description,
+                    url,
+                    username,
+                    project,
+                } => (
+                    "vault.set",
+                    json!({"name": name, "secret": secret, "description": description,
+                        "url": url, "username": username, "project": project}),
+                ),
+                VaultWrite::Remove { name } => ("vault.remove", json!({"name": name})),
+            };
+            let refused = match ask_alone(connect, method, params, bounds.quick) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::VaultWritten { refused }
         }
         Command::CommandWrite { project, write } => {
             let (method, params) = command_write(&project, write);
@@ -1739,6 +1992,48 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             project,
             answer: ask_run(connect, act, &run, bounds.quick),
         },
+        Command::Services => {
+            let listed = ask_alone(connect, "service.list", json!({}), bounds.quick);
+            Outcome::Services {
+                listed: listed.and_then(|listed| listed).map(|listed| {
+                    listed["services"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(crate::services::ServiceInfo::of)
+                        .collect()
+                }),
+            }
+        }
+        Command::ServiceWrite { method, params } => {
+            let refused = match ask_alone(connect, method, params, bounds.quick) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::ServiceWritten { refused }
+        }
+        Command::ServiceAct { name, start } => {
+            // A start waits for what the service needs to be ready.
+            let (method, bound) = match start {
+                true => ("service.start", bounds.slow),
+                false => ("service.stop", bounds.quick),
+            };
+            let answer = ask_alone(connect, method, json!({"name": name}), bound).and_then(|a| a);
+            Outcome::ServiceActed {
+                name,
+                start,
+                answer,
+            }
+        }
+        Command::ServiceOutput { run } => {
+            let output = ask_alone(connect, "run.output", json!({"run": run}), bounds.quick);
+            Outcome::ServiceOutput {
+                output: match output {
+                    Ok(Ok(output)) => Some(Box::new(CommandOutput::of(&output))),
+                    Ok(Err(_)) | Err(_) => None,
+                },
+            }
+        }
         Command::Setup { project } => {
             let listed = ask_alone(
                 connect,
@@ -1785,26 +2080,53 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 image,
             }
         }
+        Command::AnswerQuestion {
+            session,
+            seq,
+            seqs,
+            message,
+        } => {
+            let refused = match ask_alone(
+                connect,
+                "agent.send",
+                json!({"agent": session, "message": message}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::QuestionAnswered {
+                session,
+                seq,
+                seqs,
+                refused,
+            }
+        }
         Command::Reply {
             session,
+            key,
             message,
             images,
-        } => match ask_alone(
-            connect,
-            "agent.send",
-            json!({"agent": session, "message": message,
-                "images": images.iter().map(Picture::to_json).collect::<Vec<_>>()}),
-            bounds.quick,
-        ) {
-            Ok(Ok(_)) => Outcome::Replied {
+            compact,
+        } => {
+            let mut params = json!({"agent": session, "message": message,
+                "images": images.iter().map(Picture::to_json).collect::<Vec<_>>()});
+            if let Some(compact) = compact {
+                params["compact"] = json!(compact);
+            }
+            let answer = match ask_alone(connect, "agent.send", params, bounds.quick) {
+                Ok(Ok(taken)) => Ok(crate::session::Accepted {
+                    delivery: taken["delivery"].as_str().unwrap_or_default().to_owned(),
+                    after: taken["after"].as_u64().unwrap_or_default(),
+                }),
+                Ok(Err(why)) | Err(why) => Err(why),
+            };
+            Outcome::Replied {
                 session,
-                refused: None,
-            },
-            Ok(Err(why)) | Err(why) => Outcome::Replied {
-                session,
-                refused: Some(why),
-            },
-        },
+                key,
+                answer,
+            }
+        }
         Command::Unqueue {
             session,
             delivery,
@@ -1874,6 +2196,52 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             };
             Outcome::Resumed { session, refused }
         }
+        Command::Compact { session } => {
+            let answer = ask_alone(
+                connect,
+                "agent.compact",
+                json!({"agent": session}),
+                bounds.quick,
+            );
+            let (after_turn, refused) = match answer {
+                Ok(Ok(answer)) => (answer["after_turn"] == true, None),
+                Ok(Err(why)) | Err(why) => (false, Some(why)),
+            };
+            Outcome::Compacting {
+                session,
+                after_turn,
+                refused,
+            }
+        }
+        Command::Detach { session, from } => {
+            let refused = match ask_alone(
+                connect,
+                "agent.detach",
+                json!({"agent": session}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::Detached { from, refused }
+        }
+        Command::ReloadTools { session } => {
+            let answer = ask_alone(
+                connect,
+                "agent.reload_tools",
+                json!({"agent": session}),
+                bounds.quick,
+            );
+            let (after_turn, refused) = match answer {
+                Ok(Ok(answer)) => (answer["after_turn"] == true, None),
+                Ok(Err(why)) | Err(why) => (false, Some(why)),
+            };
+            Outcome::ToolsReloaded {
+                session,
+                after_turn,
+                refused,
+            }
+        }
         Command::SetMode { session, mode } => {
             let refused = match ask_alone(
                 connect,
@@ -1932,6 +2300,22 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 Ok(Err(why)) | Err(why) => Some(why),
             };
             Outcome::SubscriptionCancelled { session, refused }
+        }
+        Command::WithdrawLeave {
+            session,
+            writer,
+            leave_session,
+        } => {
+            let refused = match ask_alone(
+                connect,
+                "leave.withdraw",
+                json!({"writer": writer, "session": leave_session}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::LeaveWithdrawn { session, refused }
         }
         Command::ResumeFollowing {
             session,
@@ -2110,7 +2494,13 @@ fn workspace_outcome(
     }
 }
 
-fn start_params(project: &str, workspace: Option<&str>, pick: &Pick, message: &str) -> Value {
+fn start_params(
+    project: &str,
+    workspace: Option<&str>,
+    pick: &Pick,
+    message: &str,
+    images: &[Picture],
+) -> Value {
     // What is left out is sent as a null, which the daemon reads as absent: its to choose.
     json!({
         "project": project,
@@ -2119,6 +2509,7 @@ fn start_params(project: &str, workspace: Option<&str>, pick: &Pick, message: &s
         "model": pick.model,
         "effort": pick.effort,
         "message": message,
+        "images": images.iter().map(Picture::to_json).collect::<Vec<_>>(),
     })
 }
 
@@ -2373,6 +2764,7 @@ mod tests {
             target: Target::Main,
             pick: Pick::default(),
             message: "Fix the timeout".into(),
+            images: Vec::new(),
         }
     }
 

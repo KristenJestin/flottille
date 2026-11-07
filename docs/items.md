@@ -90,7 +90,7 @@ what was left, its cursor not having moved.
 | GitHub issues | `gh issue list -R … --state all --limit 1000 [--search "updated:>=<cursor>"] --json number,title,state,author,assignees,labels,url,updatedAt,createdAt`; only the tracker's repository's issues are kept, as `tickets list` keeps them | `gh issue view <n> --json comments,body` |
 | Bitbucket Cloud | `bkt api /repositories/<w>/<r>/pullrequests --param pagelen=50 --param sort=-updated_on --param state=OPEN --param state=MERGED --param state=DECLINED --param state=SUPERSEDED [--param q=updated_on>="<cursor>"]`, page after page up to 1,000, the filter and the order as `--param`, never in the path (#245) | as `forge show` reads it (its commit statuses, reviewers, comments, conflicts) |
 | Bitbucket Data Center | no filter in what `bkt` reads: every **open** pull request, `bkt api /rest/api/1.0/projects/<p>/repos/<r>/pull-requests` page after page (`limit`, `start`) up to 1,000; one stored open that left the list is read by itself (`…/pull-requests/<id>`) to say whether it was merged or declined, a 404 making it removed | as `forge show` reads it, only when its `version` or `updatedDate` moved since it was stored |
-| Jira | for each project of the tracker, `acli jira workitem search --jql 'project = "<KEY>" [AND updated >= "-<n>m"] ORDER BY updated DESC' --fields key,summary,status,assignee,reporter,labels,issuetype,priority --json --paginate --limit 10000`, once `acli` is checked to be on the tracker's site (`tickets.md`, "The Jira site"), then the same search with `AND (assignee = currentUser() OR reporter = currentUser()) ORDER BY updated DESC` and `--fields key,summary` for `mine` (asked `key` alone, `acli` prints `null` for each work item). Every page is read up to 10,000 work items a project; beyond, the source's `note` says the list is cut, as do the developer log (`cut`) and `tickets list` | `acli jira workitem view <KEY> --json --fields comment`, read as `forge show` reads a work item's comments (`tickets.md`), **only for a work item a subscription to its comments follows** (one open or changed, as for any item), the search holding the rest |
+| Jira | for each project of the tracker, `acli jira workitem search --jql 'project = "<KEY>" [AND updated >= "-<n>m"] ORDER BY updated DESC' --fields key,summary,status,assignee,reporter,labels,issuetype,priority --json --paginate --limit 10000`, once `acli` is checked to be on the tracker's site (`tickets.md`, "The Jira site"), then the same search with `AND (assignee = currentUser() OR reporter = currentUser()) ORDER BY updated DESC` and `--fields key,summary` for `mine` (asked `key` alone, `acli` prints `null` for each work item). Every page is read up to 10,000 work items a project; beyond, the source's `note` says the list is cut, as do the developer log (`cut`) and `tickets list` | `acli jira workitem view <KEY> --json --fields comment,attachment`, read as `forge show` reads a work item's comments (`tickets.md`), **only for a work item a subscription to its comments follows** (one open or changed, as for any item), the search holding the rest |
 
 - **The checks of an open pull request whose CI still runs** are read again at every round, even
   when the pull request did not change, whether its list showed it again or not (Data Center
@@ -173,7 +173,7 @@ what was left, its cursor not having moved.
 Each round compares what it read with what is stored and emits, in the same transaction as it
 stores it (`docs/events.md`): `item.opened`, `item.changed` (with what changed: `state`, `title`,
 `assignees`, `labels`, `status`, and by name alone its `description`, its `discussion` and its
-`checks`), `item.commented`, `item.reviewed`, `item.checks`, `item.merged`, `item.closed`. **A
+`checks`), `item.commented`, `item.reviewed`, `item.approved`, `item.checks`, `item.merged`, `item.closed`. **A
 source's first round stores without emitting.** A source forgotten says `items.forgotten`, once.
 
 ## What reads this stream
@@ -185,16 +185,24 @@ again on its own (#257):
   `subscribe`) or to a ticket (`tickets` `subscribe`) is a filter on the `item.*` events of its
   item, offered once they are stored; it holds no read of its own. A pull request's `item.checks`
   is its `checks`, `item.reviewed` its `review` (each new review, or, on Bitbucket, each new
-  verdict, `verdicts`), `item.commented` its `comment`, `item.merged` and `item.closed` its
+  verdict, `verdicts`), `item.approved` its `approved` (the pull request's decision became approved, judged against the
+  decision the item held before the round), `item.commented` its `comment`, `item.merged` and
+  `item.closed` its
   `merged` and `closed`. A ticket's `item.commented` is its `commented`, an `item.changed` of its
   `status` or of its `state` (a reopening) its `status`, one of its `assignees` its `assigned`,
   `item.closed` its `closed`. The failed jobs' logs a `checks` delivery summarises are read then (three at most), after
-  the round, which does not wait for them; that delivery ends the subscription, so an event that
-  comes while they are read (a comment) is not delivered before it, nor after.
+  the round, which does not wait for them; an event that comes for the subscription while they
+  are read (a comment) is kept and delivered with the checks, after them. Each read that holds
+  events is one delivery, and the subscription goes on until its item ends (`item.merged`,
+  `item.closed`); the deliveries of a round ring each agent once, at the round's end.
+- **A run an agent follows** (`forge` `run`, [`forges.md`](forges.md), "Following a run") is read
+  by the round of its repository's pull requests, after them and whatever they gave: one request
+  a run, none when no run is followed there. It is no item and stores nothing but what its
+  following last said (a wait, a read that failed).
 - **What changed with no event of its own is no event of a subscription**: an `item.changed` that
   names only a `description`, a `discussion` or `checks` delivers nothing, and `items.forgotten`
-  neither delivers nor ends a subscription to an item of that source: it ends at its time, as one
-  to which nothing came, or hears its item again from the rounds after the first of the source
+  neither delivers nor ends a subscription to an item of that source: it ends at its deadline, when
+  the agent gave one, or hears its item again from the rounds after the first of the source
   declared again.
 - **Their latency is the rhythm** above: a minute while a window is connected, five otherwise. A
   subscription that needs to hear sooner has no faster rhythm of its own (a follow-up, if one

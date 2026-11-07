@@ -10,8 +10,8 @@
 //! `judge.reset`), read at each judgement: a change reaches the next one.
 
 use flottille_ui::{
-    Button, Icon, Section, Switch, Toast, hoverable, icon, palette, presence, presence_of, space,
-    toast, turning,
+    Button, Icon, Section, Switch, Toast, follow_theme, hoverable, icon, palette, presence,
+    presence_of, space, toast, turning,
 };
 use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::{
@@ -22,7 +22,7 @@ use gpui_kit::{
 use serde_json::Value;
 
 use crate::actions::Command;
-use crate::commands::{editor_style, perform_later};
+use crate::commands::perform_later;
 use crate::settings::Reveal;
 use crate::shell::Shell;
 
@@ -32,6 +32,9 @@ pub const REACH: &str = "A change reaches the agents created from now on; an age
 
 /// What a project's editor says when its text starts with the global one.
 pub const REPEATS: &str = "These rules repeat the global ones; you can remove that part.";
+
+/// What the compactor's editor says of when a change takes effect.
+pub const COMPACTION_REACH: &str = "A change reaches the next compaction.";
 
 /// What the judge's editor says of when a change takes effect.
 pub const JUDGE_REACH: &str = "A change reaches the next judgement. Calls that always come to you \
@@ -97,6 +100,8 @@ pub struct RulesEditor {
     project: Option<String>,
     /// It edits the Auto judge's guidance, not the rules.
     judge: bool,
+    /// It edits the compactor's guidance, not the rules.
+    compaction: bool,
     /// Made when first drawn, since a text field needs a window.
     field: Option<Entity<TextareaState>>,
     shown: Option<Shown>,
@@ -116,6 +121,7 @@ impl RulesEditor {
             shell,
             project,
             judge: false,
+            compaction: false,
             field: None,
             shown: None,
             waiting: false,
@@ -134,8 +140,20 @@ impl RulesEditor {
         }
     }
 
+    /// The editor of the compactor's guidance.
+    pub fn compaction(shell: WeakEntity<Shell>) -> Self {
+        Self {
+            compaction: true,
+            ..Self::new(shell, None)
+        }
+    }
+
     pub fn is_judge(&self) -> bool {
         self.judge
+    }
+
+    pub fn is_compaction(&self) -> bool {
+        self.compaction
     }
 
     pub fn project(&self) -> Option<&str> {
@@ -147,6 +165,8 @@ impl RulesEditor {
         let project = self.project.clone();
         let command = if self.judge {
             Command::JudgeRead
+        } else if self.compaction {
+            Command::CompactionRead
         } else {
             Command::RulesRead { project }
         };
@@ -158,6 +178,8 @@ impl RulesEditor {
         let project = self.project.clone();
         let command = if self.judge {
             Command::JudgeWrite { text }
+        } else if self.compaction {
+            Command::CompactionGuidance { text }
         } else {
             Command::RulesWrite { project, text }
         };
@@ -254,12 +276,14 @@ impl RulesEditor {
                     .auto_grow(8, 18)
                     .placeholder(if self.judge {
                         "how the judge should weigh a call"
+                    } else if self.compaction {
+                        "what a summary must keep"
                     } else if self.project.is_some() {
                         "what is particular to this project"
                     } else {
                         "how your agents should work"
                     });
-            field.set_editor_style(editor_style(cx));
+            follow_theme(&mut field, cx);
             field
         });
         self._subscriptions
@@ -288,6 +312,8 @@ impl RulesEditor {
         self.waiting = false;
         let what = if self.judge {
             "Judge guidance"
+        } else if self.compaction {
+            "Compaction guidance"
         } else {
             "Rules"
         };
@@ -300,6 +326,8 @@ impl RulesEditor {
             };
             let reach = if self.judge {
                 "They reach the next judgement."
+            } else if self.compaction {
+                "They reach the next compaction."
             } else {
                 "The agents created from now on follow them."
             };
@@ -377,7 +405,7 @@ impl RulesEditor {
     /// Where the text comes from, in a few words: the section's tag.
     pub fn origin(&self) -> &'static str {
         match (
-            self.judge,
+            self.judge || self.compaction,
             &self.project,
             self.shown.as_ref().map(|shown| shown.source),
         ) {
@@ -394,6 +422,9 @@ impl RulesEditor {
     /// What the line beside the buttons says: how to make the text one's own, or when a change
     /// takes effect.
     fn footer(&self) -> &'static str {
+        if self.compaction {
+            return COMPACTION_REACH;
+        }
         match (self.judge, &self.project, self.is_own()) {
             (true, _, _) => JUDGE_REACH,
             (false, Some(_), false) => {
@@ -413,10 +444,13 @@ impl Render for RulesEditor {
         };
         let scope = self.project.clone().unwrap_or_default();
         let judge = self.judge;
+        let compaction = self.compaction;
         let id = |part: &str| {
             ElementId::Name(
                 if judge {
                     format!("judge-guidance-{part}")
+                } else if compaction {
+                    format!("compaction-guidance-{part}")
                 } else {
                     format!("rules-{part}-{scope}")
                 }
@@ -475,6 +509,12 @@ impl Render for RulesEditor {
             }
         };
         let (title, sentence, section) = match (judge, &self.project) {
+            _ if compaction => (
+                "Compaction guidance",
+                "What a summary must keep. It sits inside Flottille's fixed text, which says the \
+                 summary is data and smaller than what it replaces.",
+                "compaction-guidance",
+            ),
             (true, _) => (
                 "Judge guidance",
                 "What the judge is told to allow. It can add to the floor (ask for anything \
@@ -622,9 +662,14 @@ impl Render for RulesEditor {
                         .as_ref()
                         .and_then(|shown| shown.error.clone())
                         .map(|error| {
-                            SharedString::from(format!(
-                                "The judge asks you about every call until this is fixed: {error}."
-                            ))
+                            SharedString::from(if compaction {
+                                format!("Every compaction fails until this is fixed: {error}.")
+                            } else {
+                                format!(
+                                    "The judge asks you about every call until this is fixed: \
+                                     {error}."
+                                )
+                            })
                         }),
                     line(id("error")),
                 )

@@ -145,7 +145,8 @@ and the 2026 practice around it:
    or a tracker declared or gone, a new version: `docs/tools.md`, "When the tools change"):
    - a child gets no `agent_*` tools, whatever its role;
    - only a root gets `approval_answer`;
-   - a root gets `ask_user`, a child gets `ask_parent`.
+   - every agent gets `ask`, whose description says where its question goes for it (its
+     parent, its pilot or the user).
 
    - `forge` is listed to every agent whose project's repositories declare a forge, `tickets`
      to every agent whose project declares a tracker, in `main` as in a workspace, and
@@ -156,8 +157,8 @@ and the 2026 practice around it:
 
    - only a root gets `skills`, `commands`, `setup` and `project`, the project's skills,
      commands, setup and settings, writes its tasks and its workspaces, and starts sessions for
-     the user (`agent_launch` with `root`) (`docs/tools.md`, "The project", "The workspace",
-     "Sessions for the user"): a child does its brief and reads the workspaces.
+     the user (`agent_launch` with `kind` `led` or `handed`) (`docs/tools.md`, "The project", "The
+     workspace", "Sessions an agent starts"): a child does its brief and reads the workspaces.
      Every agent gets `tasks`, `run` and `run_status`, the names `commands_list`,
      `commands_run` and `commands_status` had until #131, and `forge`, `tickets` and
      `workspace` `remove`, the names `forge_read`, `forge_write`, `ticket_read` and
@@ -219,7 +220,7 @@ and the 2026 practice around it:
    | `tasks` | `list` | `list` (few) | `show` | `add` | `edit`, `remove` | Nothing. |
    | `setup` | `list` (each step whole) | `list` | `list` | `add` | `edit`, `remove`, `move` | A `show` of one step: `list` gives each whole. |
    | `project` | — | — | `settings`, `rules` | — | `set_settings`, `set_rules` | Listing, creating or removing projects: an agent works in its own project only, and another project is the user's to register. |
-   | `run`, `run_status` | — | — | `run_status` `output` | `run` | `run_status` `stop` | A list of the agent's runs: each run's id is in the answer that started it and in the delivery that says it ended, and the window lists them for the user. |
+   | `run`, `run_status` | — | — | `run_status` `output` | `run` | `run_status` `stop` | A list of the agent's runs: `run_status` with no `run` gives it (a root's tree's too), each run's id is also in the answer that started it and in the delivery that says it ended, and the window lists them for the user. |
    | `web` | — | `search` | `read` | — | — | Every write (a POST, a form): a GET already carries data out, and nothing an agent does needs to write to the web. |
    | `agent_*` | `agent_status` (every child) | — | `agent_status` (one, or `conversation`), `session_read` (another session of the project, a page) | `agent_launch` (a child in the caller's place, or a session for the user with `root`, in a workspace) | `agent_send`, `agent_stop`, `session_send` (a session the caller started, or the one that started it) | Changing a child's model or effort: `agent_send` with `model` or `effort`, between its turns; a child's provider is the one it was launched with, and only the user sets a mode. |
 

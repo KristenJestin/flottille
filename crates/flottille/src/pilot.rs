@@ -552,6 +552,7 @@ fn agent_start(paths: &Paths, args: Value) -> Done {
         mode: None,
         role,
         message,
+        images: Vec::new(),
     };
     let started = ask(paths, "agent.start", &asked)?;
     let agent = &started["agent"];
@@ -582,6 +583,7 @@ fn agent_send(paths: &Paths, args: Value) -> Done {
             agent: asked.agent_id.clone(),
             message: asked.message,
             images: Vec::new(),
+            compact: None,
         },
     )
     .map_err(|outcome| unknown_agent(outcome, &asked.agent_id))?;

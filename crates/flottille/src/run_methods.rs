@@ -20,7 +20,7 @@ type Answer = Result<Value, Failure>;
 
 /// The ended runs of a list, the latest ones: a session that ran hundreds of commands lists the
 /// last few, not all.
-const ENDED_LISTED: usize = 30;
+pub(crate) const ENDED_LISTED: usize = 30;
 /// A run's last line is cut to this many characters.
 const LAST_LINE_CHARS: usize = 300;
 /// What a list reads of an ended run's output: its last characters, which hold the lines below.
@@ -137,8 +137,10 @@ fn list(daemon: &Daemon, asked: List) -> Answer {
         (Some(_), _) => {}
         (None, Some(project)) => commands.extend(users(project, asked.ended)?),
         (None, None) => {
+            // A service's run is no project's: the service methods show it.
             for stored in daemon.read(Store::running_runs)? {
                 if stored.agent.is_none()
+                    && !stored.project.is_empty()
                     && let Some(view) = runs::view(daemon, &stored.id)
                 {
                     let tail = tail_lines(end_of(&view.output, TAIL_CHARS));
@@ -297,7 +299,7 @@ fn tail_lines(tail: &str) -> Vec<String> {
 }
 
 /// The last line of the output with something on it, as the program wrote it.
-fn last_line(output: &str) -> String {
+pub(crate) fn last_line(output: &str) -> String {
     // A line redrawn in place ends with its last state: the window keeps what follows `\r`.
     let line = output
         .lines()

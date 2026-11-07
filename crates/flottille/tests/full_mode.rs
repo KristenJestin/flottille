@@ -323,7 +323,7 @@ fn started(user: &User, title: &str) -> String {
 fn launch_root(mcp: &Mcp, title: &str) -> Answer {
     mcp.call(
         "agent_launch",
-        json!({"title": title, "brief": "Write the docs.", "follow": false, "root": true}),
+        json!({"title": title, "brief": "Write the docs.", "kind": "handed"}),
     )
 }
 
@@ -431,7 +431,7 @@ fn in_full_a_child_s_call_is_allowed_without_asking_its_parent() {
     let opened = user.received_requests("session/new").len();
     let launched = mcp.call(
         "agent_launch",
-        json!({"title": "worker", "brief": "Write the tests."}),
+        json!({"kind": "child", "title": "worker", "brief": "Write the tests."}),
     );
     assert!(!launched.error, "{}", launched.text);
     let (url, authorization) = server_of(&user, opened);
@@ -807,6 +807,28 @@ fn in_full_a_launcher_behind_a_wrapper_a_runner_or_a_desktop_is_refused() {
         );
     }
     assert!(user.launches().is_empty(), "{:?}", user.launches());
+    assert!(no_request(&user));
+}
+
+#[test]
+fn in_full_a_push_past_the_wall_is_refused_naming_git_push() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let (id, mcp, _) = session(&user);
+    set_mode(&user, &id, "full");
+
+    for (command, line) in [
+        ("send-pack", "git send-pack ../r HEAD:refs/heads/x"),
+        ("http-push", "git http-push https://example.com/r.git x"),
+        ("remote-ext", "git remote-ext origin 'git-receive-pack r'"),
+    ] {
+        let said = refused(mcp.call("run", json!({ "line": line })));
+        assert!(
+            said.contains(&format!(
+                "git {command} pushes past Flottille's wall; use git push"
+            )),
+            "{line}: {said}"
+        );
+    }
     assert!(no_request(&user));
 }
 

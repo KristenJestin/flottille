@@ -61,10 +61,10 @@ user's), so that the user's own sign-in works; a call is cut after 30 s.
 - **What a tracker says is masked** before it is shown or stored (titles, descriptions, comments,
   errors), as every output is (`flottille_core::secrets`).
 - **The reads and the writes Flottille runs are known.** Of `acli`, the reads are `acli jira auth
-  status`, `acli jira workitem view <KEY> --json --fields summary,status,description,comment`
-  (`--fields status` or `--fields comment` alone for the status of a write and the rounds'
+  status`, `acli jira workitem view <KEY> --json --fields summary,status,description,comment,issuelinks,attachment,assignee,parent,*navigable`
+  (`--fields status` or `--fields comment,attachment` alone for the status of a write and the rounds'
   comments), and `acli jira workitem search --jql <JQL> --fields key,summary,status,assignee,labels --json
-  --limit 200`, `workitem link type --json` and `workitem view <KEY> --json --fields issuelinks` (the link types and an item's links); its writes (`workitem create`, `comment create`, `comment update`, `comment delete`, `edit`, `transition`, `link create`, `link delete`, below) run
+  --limit 200`, `workitem link type --json` and `workitem view <KEY> --json --fields issuelinks` (the link types and an item's links; the JQL of a `list` or a `search` is in `docs/tools.md`); its writes (`workitem create`, `comment create`, `comment update`, `comment delete`, `edit`, `transition`, `link create`, `link delete`, below) run
   only for a `tickets` call the gate let through, and the tests look at every call the fake
   received. Of `gh`, the reads are `gh issue view <n> -R github.com/owner/name --json
   number,title,state,body,comments,url` and `gh issue list` (`docs/tools.md`, "The tickets"); its
@@ -145,7 +145,15 @@ in it is paragraphs, a line break staying a line break.
 
 **Reading** gives, for the same nodes, the Markdown above (a table is `| a | b |` rows under a
 `| --- |` line), a mention as its text, a link card as its address, a hard break as a line break.
-Anything else (images, attachments, status lozenges) is left out. A character that Markdown would
+An image or a file (`mediaSingle`, `mediaGroup`, `media`, `mediaInline`) is a line where it stands:
+`[image: <name>, not shown: ask the user to paste it if it matters]`, or `[file: <name>, not
+shown]`; an external image (`type: "external"`) gives its address as its name. The name is the
+media's `alt`, which is the attachment's file name (the media's `id` is not the attachment's), and
+the type is the attachment's `mimeType` when one has that name, else the name's extension. Flottille
+cannot show it: `acli` has no command that downloads an attachment, and its address needs the
+user's credentials, which Flottille never reads, so that address is never fetched nor shown. The
+same text is what a subscription delivers of a new comment. Anything else (status lozenges) is
+left out. A character that Markdown would
 take for markup (`*`, `` ` ``, `[`, `<`, `~`, `_` at a word's edge, a line starting with `#`, `>`,
 `-` or `1.`) is written with a backslash, so that it comes back as the text it was.
 
@@ -173,7 +181,7 @@ item as `acli … --json` is expected to print it,
 ```
 
 Also assumed: `acli jira auth status` prints the active site on a line `Site: <host>` (the
-site check above reads it, and refuses when it is missing), `--fields summary,status,description,comment` returns the comments (the
+site check above reads it, and refuses when it is missing), `--fields summary,status,description,comment,issuelinks,attachment,assignee,parent,*navigable` returns the comments and the attachments (the
 documentation's own example is `--fields summary,comment`), and `acli jira auth status` ends with 0
 when signed in and non-zero when not (its page does not document its exit codes). The reading
 tolerates a description that is a string and `fields.comment` being the array itself. **The
@@ -199,9 +207,17 @@ workspace keeps only the reference, and what it shows is as fresh as that read.
 incrementally, its title, state, assignee, labels and status kept in the store and its changes
 said as `item.*` events ([`items.md`](items.md)); its description is not kept, nor its comments,
 except those of a Jira work item a subscription follows (below).
-`tickets` `list` and `search` answer from that store once a round of the tracker worked, saying
-its age; `show` reads live and stores what it read; a subscription to a ticket hears those
+`tickets` `list` answers from that store once a round of the tracker worked, saying its age;
+`search`, and a `list` with `updated_within`, ask the tracker; `show` reads live and stores what it read; a subscription to a ticket hears those
 events.
+
+### Attachments
+
+A work item's attachments (`fields.attachment`, read with the item, so cached with it) are listed
+at the end of `tickets show`, one line each: file name, type, size, who added it and when, the first
+30 and then `… and N more`. They are named, never shown (the same words as an image in a text): the user can paste one into the
+conversation. `workspace.ticket` gives them all as `attachments: [{name, type, bytes, author, at}]`.
+Their `content` address is never kept.
 
 ## How fast it is read
 
@@ -224,7 +240,8 @@ developer log's `reads`.
 ## The protocol and the command line
 
 - `workspace.ticket {project, name}` answers `{project, workspace, ticket, tracker, repository,
-  title, state, url, description, comments: [{author, at, body}], older_comments, read_at,
+  title, state, url, description, comments: [{author, at, body}], older_comments, attachments,
+  read_at,
   problem}`; with no ticket linked, `ticket` is null and the rest is absent; when it cannot be
   read, `problem` says why (`docs/protocol.md`).
 - `workspace.link_ticket {project, name, ticket}` links, or unlinks when `ticket` is null, and
@@ -289,8 +306,8 @@ leaves it out.
 ## The agent's tool `tickets`
 
 `tickets {action, …}` (`docs/tools.md`, "The tickets"): `list` every ticket of a state in one call
-(by label and assignee), `search` with words, `show` the workspace's ticket or another of the
-project's tracker by its key, `types` the work item types of a Jira project; `create`, `comment`, `edit` (on GitHub also labels and assignees; on Jira the assignee), `close` (on
+(by label, assignee and `updated_within`), `search` with words, `in_comments` or `jql`, `show` the workspace's ticket or another of the
+project's tracker by its key, `types` the work item types of a Jira project, `sprints` the open sprints of its boards; `create` (on Jira also under a parent and in a sprint), `comment`, `log_time` (Jira, "Logging time" below) and `time_spent`, `edit` (labels on both; on GitHub assignees, on Jira the assignee), `close` (on
 GitHub, completed or not planned), `reopen` and `status` (on GitHub, the Status of the issue on its
 Projects board, `docs/tools.md`), each to judge, held in Ask and allowed in Full as the other writes are. A key the
 tracker does not take, or a creation in a Jira project that is not one of the tracker's, is
@@ -300,21 +317,33 @@ whose link is the tracker repository's are kept, the others counted. Every agent
 the tool, in `main` as in a workspace, whether a ticket is linked or not (a session running
 when the tracker is declared is told, `docs/tools.md`, "When the tools change"). Until #141 `show` was `ticket_read`.
 
-`list` and `search` answer from what the daemon's rounds keep ([`items.md`](items.md), "What
-reads this stream"), with its age (`… : 2 (as of 3 min ago)`); a `search` finds the words in the
-titles, all of them, whatever their case, since no description is kept, and its answer says
-so. Before the first round
-of the tracker worked, they ask the tracker as they did.
+`list` answers from what the daemon's rounds keep ([`items.md`](items.md), "What reads this
+stream"), with its age (`… : 2 (as of 3 min ago)`); before the first round of the tracker worked,
+it asks the tracker. A `search` always asks the tracker, since the rounds keep no description nor
+comment: Jira's `text ~` (`comment ~` for `in_comments`), GitHub's `in:title,body,comments`, its
+answer saying where it looked; the same search within 30 s is given again. `updated_within` is a
+date the rounds do not keep of a Jira work item (`acli` refuses `updated`): a list with it asks
+the tracker too. An agent's `jql` is put in parentheses after the tracker's projects, and refused
+when it could leave them (`docs/tools.md`, "The tickets").
 
 ### Subscribing to a ticket
 
-**`subscribe {ticket?, workspace?, events, from?, minutes?}`**: the next of `events` of the
-ticket (the one named, or the workspace's) wakes the agent once, as a `subscription` delivery
-(`docs/design.md` §5.6), with the same shape as `forge` `subscribe`: `commented` (a new comment,
-its author and an excerpt), `status` (Jira's status moved, or the ticket was reopened), `assigned`
-(its assignees changed) and `closed`, which ends any subscription to it. `from: people` leaves out
-a bot (a GitHub login `app/<name>` or `<name>[bot]`, as for a pull request) and a comment
-known as posted by an agent; `minutes` is 60 by default, 6000 at most. The
+**`subscribe {ticket?, workspace?, events, from?, minutes?}`**: each of `events` of the ticket
+(the one named, or the workspace's) wakes the agent, as a `subscription` delivery
+(`docs/design.md` §5.6), until the ticket is closed, with the same shape as `forge` `subscribe`:
+the agent subscribes once (`it wakes you at each of these events until the ticket is closed; no
+need to subscribe again`). The events are `commented` (a new comment, its author and an excerpt),
+`status` (Jira's status moved, or the ticket was reopened), `assigned` (its assignees changed) and
+`closed`, which ends any subscription to it, said: a GitHub issue closed, or a Jira work item moved
+to a status of the category `done`, whatever the status is called (its item's state is `closed`
+then, "What is read"). `from: people` leaves out a bot (a GitHub login `app/<name>` or
+`<name>[bot]`, as for a pull request) and a comment known as posted by an agent; `minutes`,
+optional and with no cap, is a deadline: past it the agent is woken once and the subscription
+ends; without it there is none. A ticket already closed (or a Jira work item already in a `done`
+status) is refused, `the ticket ABC-1 is already closed (it is in Done)`: nothing would end the
+subscription. `show` ends with the agent's subscriptions to tickets (`Your
+subscriptions:` then `- ticket #5 of api: commented, until the ticket is closed`, or `for 52 min
+more` with a deadline). The
 ticket is read once and stored first: what is so now is no event. The answer says when the rounds
 do not see it yet, and so miss what happens before their next one: the tracker had no complete
 round (it never worked), or the item is not stored (a Jira work item whose status Jira gives no
@@ -324,7 +353,7 @@ call per followed work item that changed: the one the round's search lists in it
 search never prints `updated`, below), since a tracker's every work item would cost one call each;
 a comment is then an `item.commented` as on GitHub, and an agent's own, known by its record,
 is said `posted by an agent` and left out of `from: people`. Subscribing again to the same
-ticket replaces the agent's subscription; **`unsubscribe {ticket?}`** cancels those to the ticket
+ticket replaces the agent's subscription (its events, `from` and deadline); **`unsubscribe {ticket?}`** cancels those to the ticket
 named, every one when it names none. The events are the rounds' (`item.commented`,
 `item.changed`, `item.closed`): a subscription hears as often as the rounds come. It is listed,
 cancelled and ends as a pull request's (`docs/protocol.md`, "The subscription methods"); the
@@ -337,9 +366,10 @@ are written (a text holding what looks like a secret is base for the gate, as on
 
 | Write | `acli` |
 |---|---|
-| `create` | `jira workitem create --project <P> --summary <title> [--description-file <file>] [--assignee <who>] [--type <type>] [--label a,b] --json`, `P` one of the tracker's projects (the only one when it has one); with no type, the project's default |
+| `create` | `jira workitem create --project <P> --summary <title> [--description-file <file>] [--assignee <who>] [--type <type>] [--label a,b] [--parent <key>] --json`, `P` one of the tracker's projects (the only one when it has one); with no type, the project's default |
+| `create` in a sprint | `jira workitem create --from-json <file> --json`, then `jira workitem edit --key <K> --assignee <who> --yes` when it has an assignee ("Parents and sprints", below) |
 | `comment` | `jira workitem comment create --key <K> --body-file <file>` |
-| `edit` | `jira workitem edit --key <K> [--summary <title>] [--description-file <file>] [--assignee <who> \| --remove-assignee] --yes` |
+| `edit` | `jira workitem edit --key <K> [--summary <title>] [--description-file <file>] [--assignee <who> \| --remove-assignee] [--labels a,b] [--remove-labels c] --yes` |
 | `close`, `reopen`, `status` | `jira workitem transition --key <K> --status <name> --yes` |
 
 **The text of a description and of a comment is Markdown converted to ADF** (above), and passed
@@ -369,9 +399,11 @@ ticket itself.
   its standard types, Blocks, Cloners, Duplicate and Relates (`blocks (is blocked by) [Blocks]`), and
   by its name alone otherwise (`- Escalates`). `link` finds the kind among the outward wordings (or a
   type's name: `ticket` is on the outward end), then the inward ones (`ticket` is on the inward end),
-  in any case, and runs `acli jira workitem link create --out <the outward item> --in <the inward
-  item> --type <the type's name> --yes` (`--out` is the item the outward wording applies to: `A
-  blocks B` is out A, in B; on a real site, `--out A --in B --type Blocks` printed `A Blocks B`). A kind the site does not have is refused before the user is asked, naming
+  in any case, and runs `acli jira workitem link create --out <the item the outward wording points
+  at> --in <the other> --type <the type's name> --yes`: `A blocks B` is out B, in A. On a real site
+  (#520), `--out A --in B --type Blocks` made Jira's page and its JQL say `A is blocked by B`
+  (`issue in linkedIssues(A, "is blocked by")` is B), though acli printed `A Blocks B`: its message
+  is not the direction. A kind the site does not have is refused before the user is asked, naming
   the ones it has (`"devours" is not a link type of example.atlassian.net: its kinds are blocks, is
   blocked by, relates to, …`). `unlink` reads the links of `ticket` (below), finds the link to
   `other` of that type with `ticket` at that end and deletes it by its id (`link delete --id <id>
@@ -386,16 +418,18 @@ ticket itself.
   kinds are refused, naming that.
 - **`show` lists the links** of a Jira work item, after its comments: `Links (2):` and a line each,
   `- is blocked by ABC-2 (In Progress): Add search`. They are read in the same `acli jira workitem view
-  <KEY> --json --fields summary,status,description,comment,issuelinks` as the ticket and kept with it in
+  <KEY> --json --fields summary,status,description,comment,issuelinks,attachment,assignee,parent,*navigable` as the ticket and kept with it in
   the 30 s cache, so a cached `show` runs nothing and still lists them; a write drops the cache. A
   write that names a link (`unlink`) reads `--fields issuelinks` alone. `link list --key <KEY> --json`
   is not used: it gives only `{"issueLinks": [{"id", "outwardIssueKey", "typeName"}]}`, the key `null`
   when the item is the outward one, so it
   cannot name the other item. Each of `issuelinks` is `{id, type: {name, inward, outward},
-  inwardIssue, outwardIssue}`, one of the two null, and the field names the **other** item's side,
-  as measured on a real site: a link made with `--out A --in B --type Blocks` is on A `inwardIssue:
-  B` (A reads it `blocks B`, the outward wording) and on B `outwardIssue: A` (B `is blocked by A`,
-  the inward one). Web links are not among them and are not listed. GitHub's sub-issues are not listed yet.
+  inwardIssue, outwardIssue}`, one of the two null, the field holding the other item, and **it
+  reads with the wording the field is named after**, as Jira's page says it (#520): on A,
+  `outwardIssue: B` is `A blocks B` (the outward wording) and `inwardIssue: B` is `A is blocked by
+  B` (the inward one). Measured on a real site: a link made with `--out A --in B --type Blocks` is
+  on A `inwardIssue: B` and on B `outwardIssue: A`, and Jira says B blocks A. Web links are not
+  among them and are not listed. GitHub's sub-issues are not listed yet.
 - **Comments**: `comment_edit` and `comment_delete` change only a comment Flottille recorded by its
   id as posted by an agent (`posts`, "What Flottille posts is recorded", `forges.md`; on Jira the id
   is read right after the post, never later by its words), found by the id that
@@ -408,11 +442,6 @@ ticket itself.
   delete --key <K> --id <id>`; on GitHub, `gh api repos/<owner>/<name>/issues/comments/<id>
   --method PATCH -f body=<text>` and `--method DELETE`. An edit replaces the record of the id with the
   new words, so that the comment stays the agent's and has one record; a delete drops it.
-- **`sprint {ticket, sprint}`** is refused, before anything is asked, saying why: `acli` 1.3.39 has
-  no way to put a work item in a sprint (`workitem edit` has no sprint flag; `acli jira sprint`
-  creates, updates, deletes, views and lists the work items of a sprint; `board list-sprints` lists
-  them), so the user puts it there on the board.
-
 **Measured on a real Jira Cloud site**: the shapes of `link type --json`, `link list --json` and
 `view --fields issuelinks` above, `link delete --id <link id> --yes`, and `comment list --key <K>
 --json`, whose comments each carry their `id` (their `body` plain text). The view's comments are
@@ -436,17 +465,34 @@ refused it, and the new work item went to the project's default assignee.
   was written; …` with `acli`'s own line. If the type is one of them, `acli`'s line is the answer,
   as before: Flottille does not read an error's wording to find its cause.
 - **`assignee`** on Jira `create` (`--assignee`) and `edit` (`--assignee`; `assignee: null` is
-  `--remove-assignee`): `"@me"`, an email or an account id, **as `acli` takes them**. `acli`
-  resolves `@me` itself (`acli jira workitem create --help`: "Use '@me' to self-assign, 'default'
-  to assign to the project's default assignee"), so Flottille reads no account and no credential
-  for it. `default` is `acli`'s too. A blank assignee is no assignee; a `null` one is told from a
-  missing one (a blank is never a removal). On GitHub it is `assignees` (`edit`, `--add-assignee`,
-  `@me` accepted by `gh`); `assignee` there is refused, and on `comment`, `close`, `reopen` and
-  `status` on both trackers.
+  `--remove-assignee`): `"me"`, an email or an account id, **as `acli` takes them**. `me` is the
+  user the agent works for, sent as `acli`'s `@me` (`"@me"` is taken too), which `acli` resolves
+  itself (`acli jira workitem create --help`: "Use '@me' to self-assign"), so Flottille reads no
+  account and no credential for it. An account id is 24 hexadecimal digits or `<number>:<uuid>`.
+  **Anything else is refused before anything is asked**: seen in daily use, an agent gave the
+  user's display name, and `acli` refused the whole creation (`invalid format for assignee email:
+  mail: missing '@' or angle-addr`); `acli` cannot look a name up. The answer is `assignee is me,
+  an email or an account id; a display name cannot be looked up with acli`. A blank assignee is no
+  assignee; a `null` one is told from a missing one (a blank is never a removal). On GitHub it is
+  `assignees` (`edit`, `--add-assignee`, `me` sent as `gh`'s `@me`); `assignee` there is refused,
+  and on `comment`, `close`, `reopen` and `status` on both trackers.
+- **An assignee the site does not know**: a `create` `acli` refuses while it names an assignee
+  answers `acli refused the creation assigned to "bob@example.org": … User not found for email:
+  …; nothing was created`, asking the agent to ask the user before creating it without one: it is
+  never tried again without its assignee. `acli jira workitem edit` is a bulk command: with an
+  unknown assignee it ends with 0 and prints `✗ Failure: ABC-1 can't be edited: unexpected error,
+  …` (measured), so an edit whose output holds a `✗` line is said as not done, with that line and
+  its assignee.
 - **Nothing is assigned by default**: the user is assigned only when the agent asks for `"@me"`;
   the tool's description says that a tracker may assign a new work item itself.
-- **The card** of a ticket write says the assignee (`Its assignee: @me`, `It removes the
-  assignee`); each is a write judged as before.
+- **The card** of a ticket write says the assignee, the sprint and the parent in words (`It
+  assigns it to you` for `me`, `It assigns it to ana@example.org`, `It removes the assignee`, `It
+  puts it in sprint "Sprint 42"`, `It puts it under ABC-10`); each is a write judged as before.
+- **Labels on Jira**: `create` `--label a,b`; `edit` `--labels a,b` (which adds to the work item's
+  labels, measured) and `--remove-labels c`. The card says them (`It adds the labels bug, p1`,
+  `It removes the labels wontfix`). A label holding a comma is refused before anything is asked
+  (`acli` and `gh` take labels separated by commas and would split it), and a blank one is left
+  out, on GitHub as on Jira, with flags or in a JSON definition.
 - **Assumed**, as the other shapes of this page: `project view --json` prints Jira's REST
   project, with `issueTypes[].name` and `.subtask`. Its page gives flags and no output, and it
   could not be run (a call to a site). The maintainer checks it with one `tickets {"action":
@@ -497,6 +543,72 @@ or `acli` without regard to case; `create --json` prints the created work item w
 create with no `--type` takes the project's default type; a refused transition ends with a non-zero
 code.
 
+### Parents and sprints
+
+Seen in daily use: an agent writing a Jira work item for the user could not choose its sprint nor
+give it a parent, and the user did both by hand. What `acli` 1.3.39 can do decides what Flottille
+does (#362):
+
+- **A parent at `create`**: `parent`, a key of the tracker (any case, kept in upper case),
+  `--parent <key>`: an epic, or the parent of a sub-task. Measured: a task created with `--parent`
+  on an epic's key is under that epic. `acli jira workitem edit` has no parent, so **`edit` with
+  `parent` is refused before anything is asked**: `acli's workitem edit has no parent …: changing
+  the parent of an existing work item needs Jira's REST API, which Flottille does not call yet
+  (#382)`. A `link` of kind `parent of` is refused the same way.
+- **`sprints {project?, board?}`**, a read: the project's boards (`acli jira board search
+  --project <P> --json`, Jira's agile page `{"values": [{"id", "name", "type"}]}`, as a real site
+  printed it), the one named alone when `board` names one (its name or its id; `board` on any
+  other action is refused), and for each its
+  active and future sprints (`acli jira board list-sprints --id <N> --state active,future
+  --json`), one line each: `- Sprint 42 [id 42], active, ends 2026-11-20`. A board without
+  sprints is said in `acli`'s words (`✗ The board does not support sprints`, measured on a simple
+  board). On GitHub the answer is that issues have no sprint.
+- **A sprint at `create`**: `sprint`, an open sprint of the project's boards by its name (any
+  case) or its id, **found before the user is asked**, with the site's Sprint field (below), so
+  that the card names the sprint as the site does, with its board (`It puts it in sprint "Sprint
+  42" (board "ABC board")`, for an agent that gave `42`). One that is not open, a name two boards
+  share (asking for its id), and a site whose Sprint field is not known are refused then, nothing
+  asked. Once allowed, the sprint is read again (it may have closed meanwhile). `acli` sets a
+  sprint only through a custom field, and a custom field only from a JSON definition (`create
+  --from-json`, `additionalAttributes`), which takes no other flag (measured: `--assignee`
+  alongside is ignored) and no `@me` (measured: `User not found for email: @me`). So a creation
+  in a sprint writes the whole work item as JSON, in a private file as a description is
+  (`projectKey`, `summary`, `type`, `description` as ADF, `labels`, `parentIssueId`, which takes a
+  key as measured, and `additionalAttributes: {"<the Sprint field>": <the sprint's id>}`), and
+  sets its assignee right after with `edit --assignee`; if that edit fails, the answer says the
+  work item was opened **without its assignee** (`The ticket ABC-11 was opened in ABC, in sprint
+  "Sprint 42", without its assignee: …; acli did not assign it to "…": …; it exists with no
+  assignee`).
+- **A creation `acli` answers without the new key** (on either path) is no success: the answer
+  says that what was done is not known, that it may have been opened, which of its sprint,
+  parent and assignee may not be set (in a sprint, the assignee was not set: its edit needs the
+  key), and to look at the project before creating it again, with `acli`'s own words. The JSON definition has no default type (measured:
+  `no value given for required property type`), so **a `sprint` without `type` is refused before
+  anything is asked**.
+- **The Sprint field** is a custom field whose id is the site's own (`customfield_10020` on many
+  sites). `acli` lists no field (`acli jira field` creates, updates, deletes and restores one), so
+  it is found where it shows: `acli jira workitem search --jql 'project in (<the tracker's>) AND
+  sprint is not EMPTY ORDER BY updated DESC' --fields key,summary --json --limit 1`, then `acli
+  jira workitem view <K> --json --fields '*navigable'`, the field whose value is Jira's list of
+  sprints (`[{"id", "name", "state", "boardId"}]`). It is kept for the daemon's life, by site.
+  When no work item of the tracker's projects has been in a sprint yet, a creation in a sprint is
+  refused saying so, nothing written: the user puts the first one in its sprint on the board.
+- **Moving an existing work item to a sprint is refused** before anything is asked: `acli's
+  workitem edit takes no sprint (it sets no custom field) …`, and `acli jira sprint` creates,
+  updates, deletes, views and lists the work items of a sprint. The former `sprint` action, which
+  was always refused, is gone.
+- **`show`** says a Jira work item's assignee (`Assignee: Anne Example`, `nobody`), its parent
+  (`Parent: ABC-10 Sign-in`) and its sprint (`Sprint: Sprint 42 (active)`: the active and future
+  ones, or the last closed one), read in the same view as the rest (`--fields
+  …,assignee,parent,*navigable`: `*navigable` brings the Sprint field, whatever its id; measured,
+  `attachment` is not among the navigable fields and stays asked by name).
+- **Not measured**: the maintainer's test site has no board with sprints (its only board is a
+  simple one, and JQL answers `field 'sprint' does not exist`), so the shape of `list-sprints
+  --json` (taken as the same agile page as `board search`, or a bare list), the Sprint field's
+  value, and a `create --from-json` holding it are **assumed**, from Jira's REST API. The
+  maintainer checks them on a site with sprints: `tickets sprints`, then a `create` with
+  `sprint`.
+
 ### What `acli jira workitem search` prints is assumed too
 
 Its page (<https://developer.atlassian.com/cloud/acli/reference/commands/jira-workitem-search/>)
@@ -504,8 +616,8 @@ gives its flags (`--jql`, `--fields`, `--json`, `--limit`, `--paginate`) and no 
 reading takes an array of work items in the shape `view` prints, or Jira's REST search object
 (`{"issues": [...]}`), and reads `key`, `self`, `fields.summary`, `fields.status.name`,
 `fields.assignee.displayName` and `fields.labels`. An item whose `self` names another site (not
-the tracker's, nor an Atlassian host, as above) is left out and counted; one with no `self` is kept, since the search was of the signed-in site's
-projects. The maintainer checks it on their work machine
+the tracker's, nor an Atlassian host, as above) is left out and counted, as is one whose key is of a project the tracker does not declare; one
+with no `self` is kept, since the search was of the signed-in site's projects. The maintainer checks it on their work machine
 (`tickets list` from an agent of a Jira project); a different shape shows as an empty list.
 
 **Which fields `--fields` allows is not documented**: the page above gives the default
@@ -526,6 +638,49 @@ round after the first searches `updated >= "-<minutes>m"` since its last, so **a
 changed**: a followed one is then read for its comments, and a followed one the window does not
 list is not read at all. No search is sent for the followed items alone, and none asks `updated`. The maintainer checks the Tickets tab of a Jira project on their machine.
 
+### Logging time
+
+`acli` has no worklog command, so the daemon calls Jira's REST API itself, once the gate let the
+call through: `POST https://<site>/rest/api/3/issue/<KEY>/worklog`, with the daemon's own HTTP
+client (TLS with the system's certificates, a redirect never followed, since the credentials would
+go with it, a call cut after 30 s).
+
+```
+tickets {action: "log_time", ticket: "ABC-123", duration: "2h 30m", started: "2026-11-06T09:00:00+01:00", body: "…"}
+```
+
+- **`duration`** is Jira's form: whole numbers of weeks, days, hours and minutes, each once and the
+  biggest first (`1w 2d`, `2h 30m`, `45m`). It is sent as written and Jira applies the site's own
+  working time; only for a start left out is it counted in Jira's default (a day is 8 hours, a
+  week 5 days). **`started`** is an RFC 3339 time with its offset, sent in UTC; left out, it is the
+  duration before the moment the worklog is logged (the card says so, since the user may take a
+  while to allow it). **`body`**, optional, is the worklog's comment, Markdown converted to ADF as
+  every Jira text is. **`ticket` is required**: the workspace's ticket is never taken for it, so that the card names the work item the user allows.
+- **The token is a vault entry the project names** (`docs/vault.md`): `worklog_token = "<entry>"`
+  in `[tracker]` (`kind = "jira"` only), the entry's secret being a Jira API token and its
+  username the account's e-mail; the request is `Basic` over `username:secret`. The daemon reads
+  the secret with `vault::secret` for this one request. No entry named, an entry the project does
+  not see, or one with no username is refused before anyone is asked, with a sentence that says
+  how to set one up. The token is in no card, result, log, event nor the store: what Jira
+  answers is masked of it, and so is every error.
+- **A change of the tracker says its entry**: the card of `project set_settings` reads `Set the tracker to Jira on <site> (ABC), logging time with the vault entry `<name>``, so that the user sees which credentials a worklog would use.
+- **GitHub is refused with a sentence** (`GitHub issues have no time tracking`), and so are a
+  duration or a start that is wrong, before anyone is asked.
+- **It is a ticket write**, judged like `comment`: held in Ask, allowed in Full, and the card says
+  the ticket, the duration and the start (`It logs 2h 30m on ABC-1, started
+  2026-11-06T09:00:00Z`). The result says the worklog's id.
+- `time_spent {}` (a read, never held) says how long the agents of the caller's session actually
+  worked: **the sum of their turns** (`turn_usage`, each turn once whatever the models it used),
+  the agents that worked at the same time each counted, never the time between the first and the
+  last message. The agent proposes it to the user, who confirms or changes it; it never logs it
+  alone. A turn whose agent reported no usage is not on record and not counted.
+- The tests send the call to a fake HTTP server of this machine (`FLOTTILLE_TEST_JIRA_BASE`, read
+  by a debug build only), with the daemon's in-memory keyring.
+
+**The maintainer checks it on their Jira site**: one worklog logged on a real work item, with an
+API token of their own: Jira Cloud's answer to a worklog written as above is not something this was
+written against.
+
 ## Tests
 
 Tests never call GitHub or Jira nor use anyone's sign-in: a fake `gh` (`crates/flottille-fake-gh`,
@@ -533,7 +688,9 @@ which answers `issue view`, `issue list`, the issue writes, the `gh project` cal
 missing `project` scope too) and a fake `acli`
 (`crates/flottille-fake-acli`, `workitem view`, `workitem search` and the writes; it reads the
 files of `--description-file` and `--body-file` and ends with 1 on a document that is not valid
-ADF, so that a test catches one), first on the
+ADF, so that a test catches one; without a scripted `search`, a search finds the work items its
+JQL's `project in`, `text ~`, `comment ~` and `updated >= "-<n>d"` find, as a site does, and the
+fake `gh` reads `in:` and `updated:>=` of an issue search), first on the
 `PATH` of the test's daemon, answer from a script and record every call; the repositories are
 throwaway ones whose `origin` is set to a GitHub URL after their workspace is made, and whose
 forge and tracker are declared with `project.set_settings`

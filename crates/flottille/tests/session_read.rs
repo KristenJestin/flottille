@@ -489,7 +489,7 @@ fn a_child_and_an_unknown_session_cannot_be_read() {
     let (_, mcp) = root(&user, "app", "lead the work");
     let launched = ok(mcp.call(
         "agent_launch",
-        json!({"title": "worker", "brief": "Write the tests."}),
+        json!({"kind": "child", "title": "worker", "brief": "Write the tests."}),
     ));
     let child = launched
         .split(|c: char| !c.is_ascii_hexdigit())
@@ -523,7 +523,7 @@ fn a_child_has_no_session_read() {
     let opened = user.received_requests("session/new").len();
     ok(mcp.call(
         "agent_launch",
-        json!({"title": "worker", "brief": "Write the tests."}),
+        json!({"kind": "child", "title": "worker", "brief": "Write the tests."}),
     ));
     let (url, authorization) = server_of(&user, opened);
     let child = Mcp::initialize(&url, &authorization);

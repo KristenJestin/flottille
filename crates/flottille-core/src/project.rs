@@ -59,6 +59,10 @@ pub struct Repository {
     /// The forge it is on, as the user declared it; none is read nor written without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forge: Option<RepositoryForge>,
+    /// "Delete the branch on merge": a merge by `forge` deletes the pull request's source branch
+    /// on the forge, unless the merge says otherwise (`docs/projects.md`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delete_branch_on_merge: bool,
 }
 
 fn default_remote() -> String {
@@ -102,11 +106,14 @@ pub struct PullRequests {
     /// The forge's names of the people asked to review each pull request.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reviewers: Vec<String>,
+    /// The description of a pull request opened without one, in Markdown: an agent fills it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
 }
 
 impl PullRequests {
     pub fn is_empty(&self) -> bool {
-        self.title.is_none() && self.reviewers.is_empty()
+        self.title.is_none() && self.reviewers.is_empty() && self.template.is_none()
     }
 }
 
@@ -138,6 +145,10 @@ pub struct Task {
     /// Where a run of it answers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<Box<TaskUrl>>,
+    /// The services of the machine started, and waited for, before it runs (`service.rs`). A
+    /// boxed slice, not a `Vec`, for the gate's answers to stay small.
+    #[serde(default, skip_serializing_if = "<[String]>::is_empty")]
+    pub needs: Box<[String]>,
     /// Obsolete: who added it (a line the user allowed always). Read and not followed: the line
     /// is a plain task, and the daemon's migration drops the key.
     ///
@@ -345,6 +356,10 @@ pub struct Project {
     /// Starts the branches of the project's workspaces; a slug of the name unless set, and empty
     /// when the branch is to be the workspace's name alone.
     pub branch_prefix: String,
+    /// A regular expression the branch a workspace starts, renames to or pushes must match; none
+    /// by default (`docs/projects.md`, "Branch format").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch_format: Option<String>,
     /// Where the workspaces are made; absolute: the project's own `workspaces_root` when it has
     /// one, else the user's default (`place`).
     pub workspaces_root: PathBuf,
@@ -428,6 +443,7 @@ struct File {
     name: Option<String>,
     folder: PathBuf,
     branch_prefix: Option<String>,
+    branch_format: Option<String>,
     workspaces_root: Option<String>,
     #[serde(default = "all_repositories")]
     default_repositories: RepositorySet,
@@ -499,6 +515,9 @@ pub struct Places<'a> {
     pub home: Option<&'a Path>,
     /// Where the workspaces of a project that names no folder go.
     pub default: &'a Place,
+    /// The services of the machine, which a task's `needs` names; `None` when they are not
+    /// known (their file cannot be read), and the names are then not checked.
+    pub services: Option<&'a [String]>,
 }
 
 impl<'a> Places<'a> {
@@ -509,6 +528,7 @@ impl<'a> Places<'a> {
             data,
             home: None,
             default: &Place::Data,
+            services: None,
         }
     }
 }
@@ -522,6 +542,7 @@ impl Project {
             name: name.to_owned(),
             folder,
             branch_prefix: slug(name),
+            branch_format: None,
             workspaces_root: data.join("workspaces").join(name),
             workspaces_root_own: None,
             default_repositories: RepositorySet::All,
@@ -538,6 +559,7 @@ impl Project {
                     base: default_base(),
                     depends_on: Vec::new(),
                     forge: None,
+                    delete_branch_on_merge: false,
                 })
                 .collect(),
             variables: BTreeMap::new(),
@@ -644,6 +666,17 @@ impl Project {
         }
     }
 
+    /// Why `branch` cannot be started, renamed to or pushed: it does not match the project's
+    /// branch format. None without a format.
+    pub fn branch_refusal(&self, branch: &str) -> Option<String> {
+        let format = self.branch_format.as_deref()?;
+        // Checked when the file was read: a pattern that no longer compiles refuses nothing.
+        let pattern = regex::Regex::new(format).ok()?;
+        (!pattern.is_match(branch)).then(|| {
+            format!("the branch {branch} does not match the project's branch format {format}")
+        })
+    }
+
     /// The text of the project's file.
     pub fn to_toml(&self) -> crate::Result<String> {
         let refused = |error: &dyn fmt::Display| {
@@ -686,6 +719,9 @@ fn check(name: &str, mut file: File, places: &Places) -> Result<Project, String>
         Some(prefix) => prefix,
         None => slug(name),
     };
+    if let Some(format) = &file.branch_format {
+        check_branch_format(format).map_err(|why| format!("branch_format: {why}"))?;
+    }
     let own_root = match &file.workspaces_root {
         Some(own) => Some(place::typed(own, name, places.home, "workspaces_root")?),
         None => None,
@@ -802,6 +838,12 @@ fn check(name: &str, mut file: File, places: &Places) -> Result<Project, String>
     }
     for (task, entry) in &tasks {
         check_task(task, entry, &known).map_err(|error| format!("tasks.{task}{error}"))?;
+        if let Some(services) = places.services {
+            crate::service::check_needs(&entry.needs, &|need| {
+                services.iter().any(|service| service == need)
+            })
+            .map_err(|error| format!("tasks.{task}.needs: {error}"))?;
+        }
     }
 
     for (index, step) in setup.iter().enumerate() {
@@ -817,6 +859,14 @@ fn check(name: &str, mut file: File, places: &Places) -> Result<Project, String>
         .is_some_and(|title| title.trim().is_empty())
     {
         return Err("pull_requests.title: must not be empty".into());
+    }
+    if file
+        .pull_requests
+        .template
+        .as_ref()
+        .is_some_and(|template| template.trim().is_empty())
+    {
+        return Err("pull_requests.template: must not be empty".into());
     }
     for (index, reviewer) in file.pull_requests.reviewers.iter().enumerate() {
         // Each is one `--reviewer` of the forge's command line, never an option of its own.
@@ -882,6 +932,7 @@ fn check(name: &str, mut file: File, places: &Places) -> Result<Project, String>
         name: name.to_owned(),
         folder: file.folder,
         branch_prefix,
+        branch_format: file.branch_format,
         workspaces_root,
         workspaces_root_own: file.workspaces_root,
         default_repositories: file.default_repositories,
@@ -1163,6 +1214,21 @@ pub fn check_step(
 /// What stands for the file holding the message in a message check.
 pub const MESSAGE: &str = "{message}";
 
+/// Why `format` cannot be a branch format: it is empty, or not a regular expression, said with
+/// the reason of the regex crate (`unclosed group`).
+pub fn check_branch_format(format: &str) -> Result<(), String> {
+    if format.trim().is_empty() {
+        return Err("must not be empty".into());
+    }
+    regex::Regex::new(format).map(|_| ()).map_err(|error| {
+        let why = error.to_string();
+        // The crate draws the pattern over several lines, its reason on the last.
+        let why = why.lines().last().unwrap_or_default();
+        let why = why.strip_prefix("error: ").unwrap_or(why);
+        format!("{format} is not a regular expression ({why})")
+    })
+}
+
 /// Why a message check cannot be run, none when it can: one line split without a shell, naming
 /// the file it checks.
 pub fn check_message_check(line: &str) -> Result<(), String> {
@@ -1360,6 +1426,13 @@ mod tests {
     "#;
 
     #[test]
+    fn a_repository_deletes_its_branch_on_merge_only_when_its_file_says_so() {
+        assert!(!parse(MINIMAL).unwrap().repositories[0].delete_branch_on_merge);
+        let text = format!("{MINIMAL}\n        delete_branch_on_merge = true\n");
+        assert!(parse(&text).unwrap().repositories[0].delete_branch_on_merge);
+    }
+
+    #[test]
     fn a_minimal_configuration_gets_the_defaults() {
         let project = parse(MINIMAL).unwrap();
 
@@ -1436,6 +1509,49 @@ mod tests {
         assert_eq!(project.branch_prefix, "");
         assert_eq!(project.default_branch("login"), "login");
         assert!(project.to_toml().unwrap().contains("branch_prefix = \"\""));
+    }
+
+    #[test]
+    fn the_branch_format_is_read_and_a_branch_outside_it_refused() {
+        let project = parse(&format!(
+            "branch_format = '^(feat|fix)/[A-Z]+-[0-9]+-[a-z0-9-]+$'\n{MINIMAL}"
+        ))
+        .unwrap();
+        assert_eq!(project.branch_refusal("feat/ABC-8-pickup-dashboard"), None);
+        assert_eq!(
+            project.branch_refusal("feature/abc-8").as_deref(),
+            Some(
+                "the branch feature/abc-8 does not match the project's branch format \
+                 ^(feat|fix)/[A-Z]+-[0-9]+-[a-z0-9-]+$"
+            )
+        );
+        assert!(project.to_toml().unwrap().contains("branch_format = "));
+        assert_eq!(parse(MINIMAL).unwrap().branch_refusal("anything"), None);
+        for (format, why) in [
+            (
+                "^(feat",
+                "branch_format: ^(feat is not a regular expression (unclosed group)",
+            ),
+            (" ", "branch_format: must not be empty"),
+        ] {
+            let refused = refusal(&format!("branch_format = '{format}'\n{MINIMAL}"));
+            assert!(refused.contains(why), "{refused}");
+        }
+    }
+
+    #[test]
+    fn the_pull_request_template_is_read_and_an_empty_one_refused() {
+        let project = parse(&format!(
+            "{MINIMAL}\n[pull_requests]\ntemplate = \"## Why\\n\"\n"
+        ))
+        .unwrap();
+        assert_eq!(project.pull_requests.template.as_deref(), Some("## Why\n"));
+        assert!(!project.pull_requests.is_empty());
+        let refused = refusal(&format!("{MINIMAL}\n[pull_requests]\ntemplate = \" \"\n"));
+        assert!(
+            refused.contains("pull_requests.template: must not be empty"),
+            "{refused}"
+        );
     }
 
     #[test]
@@ -1974,6 +2090,7 @@ line = \"serve\"
                 data: Path::new(DATA),
                 home: Some(Path::new("/home/someone")),
                 default: place,
+                services: None,
             },
         )
     }
@@ -2378,7 +2495,8 @@ line = \"serve\"
             project.tracker,
             Some(ProjectTracker::Jira {
                 site: "example.atlassian.net".into(),
-                projects: vec!["ABC".into()]
+                projects: vec!["ABC".into()],
+                worklog_token: None,
             })
         );
         // What is read is written back the same.

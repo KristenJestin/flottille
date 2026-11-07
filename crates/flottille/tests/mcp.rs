@@ -249,6 +249,7 @@ fn a_session_sees_only_its_tools() {
             "skill_read",
             "workspace",
             "web",
+            "services",
             "agent_launch",
             "agent_send",
             "agent_status",
@@ -259,15 +260,12 @@ fn a_session_sees_only_its_tools() {
             "project",
             "wake",
             "report",
-            "ask_user",
+            "ask",
             "session_send",
             "session_read",
             "approval_answer",
         ]
     );
-    // A root asks the user, never a parent.
-    let text = refused(mcp.call("ask_parent", json!({"question": "x"})));
-    assert!(text.contains("has no tool ask_parent"), "{text}");
     let text = refused(mcp.call("shell", json!({})));
     assert!(text.contains("has no tool shell"), "{text}");
 
@@ -378,7 +376,7 @@ fn a_2026_07_28_client_with_server_discover_lists_and_calls_the_tools() {
     let (_, url, authorization) = agent(&user, json!({}));
 
     let mcp = Mcp::discover(&url, &authorization);
-    assert_eq!(mcp.names().len(), 25);
+    assert_eq!(mcp.names().len(), 26);
     assert!(ok(mcp.call("fs_list", json!({"path": "."}))).contains("README.md"));
 
     let meta = json!({
@@ -1775,8 +1773,8 @@ fn a_session_whose_client_ignores_the_change_is_said_to_run_an_older_list() {
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(
         text.contains(
-            "runs an older list of tools than its role has now: restart the session (stop, then \
-             resume) for the new one"
+            "runs an older list of tools than its role has now: reload them (`flottille agent \
+             reload-tools`) for the new one"
         ),
         "{text}"
     );
@@ -2097,5 +2095,76 @@ fn a_permission_asked_after_a_change_is_answered_from_the_current_list() {
         user.received_requests("session/new").len(),
         1,
         "one process"
+    );
+}
+
+// A replaced agent's late calls (`docs/design.md` §5.5).
+
+/// Flottille's word for a call of a session that was replaced meanwhile.
+const REPLACED: &str = "this session has been replaced";
+
+/// A root agent of `app` working in the project folder, where a write goes to the judge, whose
+/// process dies once the test creates `die-now` in the fake agent's folder: its id, the URL and
+/// the authorization of its session's MCP server.
+fn dying_root(user: &User) -> (String, String, String) {
+    project(user);
+    user.fake_script(json!({"turns": [
+        {"when": "hello", "times": 1, "do": [{"hold": "die-now"}, {"die": 3}]}
+    ]}));
+    agent(user, json!({}))
+}
+
+fn epoch(user: &User, id: &str) -> Value {
+    user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["epoch"].clone()
+}
+
+#[test]
+fn a_call_judged_while_its_agent_is_replaced_is_refused() {
+    let user = User::with_fake_agent().with_judge(json!([
+        {"hold": "release"},
+        {"say": "{\"verdict\": \"allow\", \"reason\": \"It fits the task.\"}"}
+    ]));
+    let (id, url, authorization) = dying_root(&user);
+    let folder = user.path("work/app");
+    let call = std::thread::spawn(move || {
+        Mcp::initialize(&url, &authorization).call(
+            "fs_write",
+            json!({"path": "notes.txt", "content": "the old session's\n"}),
+        )
+    });
+    eventually("the judgement", || {
+        user.judge_received()
+            .iter()
+            .any(|e| e["received"]["method"] == "session/prompt")
+    });
+
+    std::fs::write(user.path("fake/die-now"), "").unwrap();
+    eventually("the replacement", || epoch(&user, &id) == 1);
+    std::fs::write(user.path("fake-judge/release"), "").unwrap();
+
+    let text = refused(call.join().unwrap());
+    assert!(text.contains(REPLACED), "{text}");
+    assert!(!folder.join("notes.txt").exists());
+}
+
+#[test]
+fn a_call_of_the_current_epoch_still_passes() {
+    let user = User::with_fake_agent().with_judge(json!([
+        {"hold": "release"},
+        {"say": "{\"verdict\": \"allow\", \"reason\": \"It fits the task.\"}"}
+    ]));
+    let (id, url, authorization) = dying_root(&user);
+    let folder = user.path("work/app");
+    std::fs::write(user.path("fake-judge/release"), "").unwrap();
+
+    ok(Mcp::initialize(&url, &authorization).call(
+        "fs_write",
+        json!({"path": "notes.txt", "content": "the session's\n"}),
+    ));
+
+    assert_eq!(epoch(&user, &id), 0);
+    assert_eq!(
+        std::fs::read_to_string(folder.join("notes.txt")).unwrap(),
+        "the session's\n"
     );
 }

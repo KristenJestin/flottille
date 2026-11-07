@@ -1,22 +1,18 @@
 //! How long the CI of a repository usually takes, for `forge show` and `forge subscribe`
-//! (`docs/forges.md`, "How long CI takes"): an agent that subscribes to a pull request picks a
-//! duration blind, one that is told the last runs' length can wait for as long as they need. One
-//! read of the forge, made when one of those two runs and never by the rounds of the items nor a
-//! watch; a repository whose runs cannot be read is simply not told.
+//! (`docs/forges.md`, "How long CI takes"): the agent is told, as information; a subscription
+//! needs no duration. One read of the forge, made when one of those two runs and never by the
+//! rounds of the items nor a watch; a repository whose runs cannot be read is simply not told.
 
 use serde_json::Value;
 
 use super::{Forge, bitbucket, gh_json};
 use crate::session_read::form;
-use crate::subscriptions::{DEFAULT_MINUTES, LONGEST_MINUTES};
 
 /// How many finished runs are measured: the newest.
 const MEASURED: usize = 5;
 /// How many runs `gh` is asked for, so that this many finished ones are found among the runs it
 /// lists as completed (a cancelled run is completed too).
 const ASKED: &str = "20";
-/// The shortest a subscription sized by the runs waits.
-const SHORTEST_MINUTES: u64 = 15;
 
 /// The time the newest finished runs of a repository took.
 #[derive(Clone, Debug, PartialEq)]
@@ -47,43 +43,6 @@ impl Runs {
             Self::minutes(longest as f64)
         )
     }
-}
-
-/// How long a subscription waits when the agent gives no `minutes`, and why, as a sentence: twice
-/// the average of the runs, rounded up to the minute, from `SHORTEST_MINUTES` to
-/// `LONGEST_MINUTES`; `DEFAULT_MINUTES` without runs.
-pub fn wait_for(runs: Option<&Runs>) -> (u64, String) {
-    let Some(runs) = runs else {
-        return (
-            DEFAULT_MINUTES,
-            format!(
-                "Duration: {DEFAULT_MINUTES} min, the default: no recent CI run to measure it by."
-            ),
-        );
-    };
-    // Twice the average, in minutes, rounded up: 2 * total / count / 60.
-    let total: u64 = runs.seconds.iter().sum();
-    let twice = (2 * total).div_ceil(60 * runs.seconds.len() as u64);
-    let (minutes, why) = if twice < SHORTEST_MINUTES {
-        (
-            SHORTEST_MINUTES,
-            "the shortest: twice the average of the recent CI runs is",
-        )
-    } else if twice > LONGEST_MINUTES {
-        (
-            LONGEST_MINUTES,
-            "the longest: twice the average of the recent CI runs is",
-        )
-    } else {
-        return (
-            twice,
-            format!("Duration: {twice} min, twice the average of the recent CI runs."),
-        );
-    };
-    (
-        minutes,
-        format!("Duration: {minutes} min, {why} {twice} min."),
-    )
 }
 
 /// The newest finished runs of the repository's CI, when there are some and the forge gave them.

@@ -262,7 +262,7 @@ fn two_jira_items_are_linked_and_unlinked() {
     assert!(made.contains("ABC-2 blocks ABC-1"), "{made}");
     assert!(
         acli_calls(&user).contains(
-            &"jira workitem link create --out ABC-2 --in ABC-1 --type Blocks --yes".to_owned()
+            &"jira workitem link create --out ABC-1 --in ABC-2 --type Blocks --yes".to_owned()
         ),
         "{:?}",
         acli_calls(&user)
@@ -314,7 +314,7 @@ fn the_inward_wording_swaps_the_two_items() {
     assert!(made.contains("ABC-1 is blocked by ABC-2"), "{made}");
     assert!(
         acli_calls(&user).contains(
-            &"jira workitem link create --out ABC-2 --in ABC-1 --type Blocks --yes".to_owned()
+            &"jira workitem link create --out ABC-1 --in ABC-2 --type Blocks --yes".to_owned()
         ),
         "{:?}",
         acli_calls(&user)
@@ -352,7 +352,7 @@ fn show_lists_an_item_s_links() {
     jira_script(
         &user,
         json!({"links": [
-            {"id": "500", "type": "Blocks", "out": "ABC-2", "in": "ABC-1"},
+            {"id": "500", "type": "Blocks", "out": "ABC-1", "in": "ABC-2"},
             {"id": "501", "type": "Relates", "out": "ABC-1", "in": "ABC-3"},
         ]}),
     );
@@ -373,11 +373,80 @@ fn show_lists_an_item_s_links() {
     // asked with the ticket's own fields so that one read serves both.
     assert!(
         acli_calls(&user).contains(
-            &"jira workitem view ABC-1 --json --fields summary,status,description,comment,issuelinks"
+            &"jira workitem view ABC-1 --json --fields summary,status,description,comment,issuelinks,attachment,assignee,parent,*navigable"
                 .to_owned()
         ),
         "{:?}",
         acli_calls(&user)
+    );
+}
+
+#[test]
+fn a_work_item_blocked_by_one_and_blocking_another_says_both_rightly() {
+    let user = user();
+    on_jira(&user);
+    // As acli makes them, `--out X --in Y` being `Y blocks X` on a real site: ABC-1 blocks ABC-2,
+    // which blocks ABC-3.
+    jira_script(
+        &user,
+        json!({"links": [
+            {"id": "500", "type": "Blocks", "out": "ABC-2", "in": "ABC-1"},
+            {"id": "501", "type": "Blocks", "out": "ABC-3", "in": "ABC-2"},
+        ]}),
+    );
+    let mcp = root_in(&user);
+
+    let shown = read(&user, &mcp, json!({"action": "show", "ticket": "ABC-2"}));
+
+    assert!(
+        shown.contains("- is blocked by ABC-1 (To Do): The login fails"),
+        "{shown}"
+    );
+    assert!(shown.contains("- blocks ABC-3 (Done): Shipped"), "{shown}");
+    let first = read(&user, &mcp, json!({"action": "show", "ticket": "ABC-1"}));
+    assert!(
+        first.contains("- blocks ABC-2 (In Progress): Add search"),
+        "{first}"
+    );
+    let last = read(&user, &mcp, json!({"action": "show", "ticket": "ABC-3"}));
+    assert!(
+        last.contains("- is blocked by ABC-2 (In Progress): Add search"),
+        "{last}"
+    );
+}
+
+#[test]
+fn linking_with_is_blocked_by_puts_the_other_item_on_the_blocking_end() {
+    let user = user();
+    on_jira(&user);
+    jira_script(&user, json!({}));
+    let mcp = root_in(&user);
+
+    let made = written(
+        &user,
+        &mcp,
+        json!({"action": "link", "ticket": "ABC-2", "kind": "is blocked by", "other": "ABC-1"}),
+    );
+
+    assert!(made.contains("ABC-2 is blocked by ABC-1"), "{made}");
+    assert!(made.contains("ABC-1 blocks ABC-2"), "{made}");
+    // On a real site `--out A --in B --type Blocks` made B block A, whatever acli printed.
+    assert!(
+        acli_calls(&user).contains(
+            &"jira workitem link create --out ABC-2 --in ABC-1 --type Blocks --yes".to_owned()
+        ),
+        "{:?}",
+        acli_calls(&user)
+    );
+    let blocked = read(&user, &mcp, json!({"action": "show", "ticket": "ABC-2"}));
+    assert!(
+        blocked.contains("- is blocked by ABC-1 (To Do): The login fails"),
+        "{blocked}"
+    );
+    let blocking = read(&user, &mcp, json!({"action": "show", "ticket": "ABC-1"}));
+    assert!(
+        blocking.contains("- blocks ABC-2 (In Progress): Add search"),
+        "{blocking}"
     );
 }
 
@@ -626,25 +695,6 @@ fn a_jira_parent_is_refused_naming_what_acli_lacks() {
     assert!(said.contains("parent"), "{said}");
     assert!(said.contains("workitem edit"), "{said}");
     assert!(said.contains("nothing was written"), "{said}");
-}
-
-#[test]
-fn a_sprint_is_refused_naming_what_acli_lacks() {
-    let user = user();
-    on_jira(&user);
-    jira_script(&user, json!({}));
-    let mcp = root_in(&user);
-
-    let said = refused_at_once(
-        &user,
-        &mcp,
-        json!({"action": "sprint", "ticket": "ABC-1", "sprint": "Sprint 4"}),
-    );
-
-    assert!(said.contains("acli"), "{said}");
-    assert!(said.contains("sprint"), "{said}");
-    assert!(said.contains("nothing was written"), "{said}");
-    assert!(acli_calls(&user).is_empty(), "{:?}", acli_calls(&user));
 }
 
 /// A work item whose comments are `comments` (Jira's shape).
@@ -1039,4 +1089,75 @@ fn an_edited_comment_keeps_one_record() {
         .find(|line| line.ends_with(": Fixed, rebased"))
         .unwrap_or_else(|| panic!("{shown}"));
     assert!(line.contains("[comment 10100]"), "{shown}");
+}
+
+#[test]
+fn a_call_prepared_while_its_agent_is_replaced_is_refused() {
+    let user = user();
+    on_github(&user);
+    // The root dies once the test creates `die-now`; its replacement plays nothing.
+    user.fake_script(json!({"turns": [
+        {"when": "hello", "times": 1, "do": [{"hold": "die-now"}, {"die": 3}]}
+    ]}));
+    user.gh_script(json!({"issues": {"acme/app": {"1": {
+        "number": 1, "title": "The login fails", "state": "OPEN", "body": "", "comments": []
+    }}}, "commented": 501}));
+    let opened = user.received_requests("session/new").len();
+    let id = user
+        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (url, authorization) = server_of(&user, opened);
+    // In Full, the edit is performed as soon as it is prepared: no judge, no card.
+    let mode = user.run(&["agent", "mode", &id, "full"]);
+    assert!(mode.status.success(), "{mode:?}");
+    let mcp = Mcp::initialize(&url, &authorization);
+    let posted = mcp.call(
+        "tickets",
+        json!({"action": "comment", "ticket": "#1", "body": "Fixed on app/login"}),
+    );
+    assert!(!posted.error, "{}", posted.text);
+    // Preparing the edit reads the issue, which takes seconds.
+    user.gh_script(json!({"issues": {"acme/app": {"1": {
+        "number": 1, "title": "The login fails", "state": "OPEN", "body": "", "comments": [
+            {"author": {"login": "someone"}, "createdAt": "2099-10-01T10:00:00Z",
+             "body": "Fixed on app/login", "url": "https://github.com/acme/app/issues/1#issuecomment-501"}
+        ]}}}, "read_delay_ms": 4000}));
+    let before = gh_calls(&user).len();
+    let call = std::thread::spawn(move || {
+        Mcp::initialize(&url, &authorization).call(
+            "tickets",
+            json!({"action": "comment_edit", "ticket": "#1", "comment": "issuecomment-501",
+                "body": "the old session's"}),
+        )
+    });
+    eventually("the edit being prepared", || {
+        gh_calls(&user)[before..]
+            .iter()
+            .any(|call| call.starts_with("issue view"))
+    });
+
+    std::fs::write(user.path("fake/die-now"), "").unwrap();
+    eventually("the replacement", || {
+        user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["epoch"] == 1
+    });
+    assert!(
+        !call.is_finished(),
+        "the edit was prepared before the replacement"
+    );
+
+    let answer = call.join().unwrap();
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("this session has been replaced"),
+        "{}",
+        answer.text
+    );
+    let calls = gh_calls(&user);
+    assert!(
+        !calls.iter().any(|call| call.contains("--method PATCH")),
+        "{calls:?}"
+    );
 }

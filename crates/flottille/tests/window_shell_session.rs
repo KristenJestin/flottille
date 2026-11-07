@@ -47,7 +47,7 @@ fn user() -> User {
         {"when": "run server", "do": [
             {"mcp": {"tool": "run", "arguments": {"task": "server"}}}]},
         {"when": "start the docs session", "do": [{"mcp": {"tool": "agent_launch",
-            "arguments": {"title": "Docs", "brief": "Write the docs", "follow": false, "root": true,
+            "arguments": {"title": "Docs", "brief": "Write the docs", "kind": "handed",
                 "workspace": "w"}}}]},
         {"when": "write to the session", "do": [{"mcp": {"tool": "session_send",
             "arguments": {"session": "{prompt:agent}", "text": "The tests pass now."}}}]}

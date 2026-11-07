@@ -2164,6 +2164,7 @@ dependencies = [
  "image",
  "libc",
  "markdown",
+ "oo7",
  "pdf_oxide",
  "rmcp",
  "rusqlite",
@@ -2190,6 +2191,7 @@ version = "0.1.0"
 dependencies = [
  "image",
  "libc",
+ "regex",
  "rusqlite",
  "serde",
  "serde-saphyr",
@@ -2246,6 +2248,10 @@ dependencies = [
  "serde_json",
  "tempfile",
 ]
+
+[[package]]
+name = "flottille-fake-pnpm"
+version = "0.1.0"
 
 [[package]]
 name = "flottille-fake-server"
