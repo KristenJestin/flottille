@@ -424,7 +424,7 @@ fn child_of(user: &User, mcp: &Mcp) -> Mcp {
     let opened = user.received_requests("session/new").len();
     ok(mcp.call(
         "agent_launch",
-        json!({"title": "worker", "brief": "Read the log."}),
+        json!({"kind": "child", "title": "worker", "brief": "Read the log."}),
     ));
     let (url, authorization) = server_of(user, opened);
     Mcp::initialize(&url, &authorization)

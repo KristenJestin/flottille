@@ -484,7 +484,7 @@ fn the_window_draws_no_frame_at_rest_on_a_session_with_a_folded_sub_agents_card(
     let user = User::with_fake_agent();
     user.fake_script(json!({"turns": [
         {"when": "launch a worker", "do": [{"mcp": {"tool": "agent_launch",
-            "arguments": {"title": "write the docs", "brief": "REPORT and write the docs"}}}]},
+            "arguments": {"kind": "child", "title": "write the docs", "brief": "REPORT and write the docs"}}}]},
         {"when": "REPORT", "do": [{"mcp": {"tool": "report", "arguments": {"text": "done"}}}]}
     ]}));
     let id = idle_session(&user);

@@ -260,15 +260,12 @@ fn a_session_sees_only_its_tools() {
             "project",
             "wake",
             "report",
-            "ask_user",
+            "ask",
             "session_send",
             "session_read",
             "approval_answer",
         ]
     );
-    // A root asks the user, never a parent.
-    let text = refused(mcp.call("ask_parent", json!({"question": "x"})));
-    assert!(text.contains("has no tool ask_parent"), "{text}");
     let text = refused(mcp.call("shell", json!({})));
     assert!(text.contains("has no tool shell"), "{text}");
 

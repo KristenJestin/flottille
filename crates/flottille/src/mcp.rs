@@ -105,7 +105,7 @@ const REPLACED: &str = "refused: this session has been replaced: a new session o
 
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
 /// the order frozen in the agent.
-const SERVED: [Definition; 29] = [
+const SERVED: [Definition; 30] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -616,39 +616,37 @@ const SERVED: [Definition; 29] = [
     },
     Definition {
         name: "agent_launch",
-        title: "Start a session, or launch a child",
-        description: "Work that belongs in a workspace is a session for the user: root: true \
-            with workspace (existing; main is the project folder) or new_workspace (made \
-            on branch, of repositories), judged; theirs, not your child, the brief its first \
-            message; follow (required): true wakes you when each turn ends; you write to it, \
-            and it answers you, with session_send. A root only. Without root: a child agent on \
-            one precise task, in your own place (workspace and new_workspace are refused), \
-            answered at once with its agent_id; it works on its own and you are told when it \
-            reports, asks, fails, is stuck or idles, so never poll. The brief is all it knows: \
-            the task, what to read, the checks, the deliverable. A child launch is refused above \
-            the children cap. {\"title\": \"Fix login\", \"brief\": \"...\", \"root\": true, \
-            \"workspace\": \"login\", \"follow\": true}; {\"title\": \"Add API\", \"brief\": \
-            \"...\", \"root\": true, \"follow\": false, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}; {\"title\": \
-            \"Write the tests\", \"brief\": \"...\"}",
+        title: "Launch a child, or start a session",
+        description: "kind (required): child, a part of your own task, in your place, that you \
+            direct and that reports to you (no workspace; refused above the children cap); led, an \
+            autonomous job of its own that you pilot, a real session the user sees under you and \
+            may talk to, which asks you its questions and wakes you when it asks, reports or ends; \
+            handed, a session you start for the user and let go, of which you hear nothing more \
+            unless it writes to you. led and handed: a root only, judged, in workspace (main is \
+            the project folder) or new_workspace; you and it write with session_send. Answered at \
+            once with its id; never poll. The brief is all it knows: the task, what to read, the \
+            checks, the deliverable. {\"kind\": \"child\", \"title\": \"Write the tests\", \
+            \"brief\": \"...\"}; {\"kind\": \"led\", \"title\": \"Fix login\", \"brief\": \
+            \"...\", \"workspace\": \"login\"}; {\"kind\": \"handed\", \"title\": \"Add API\", \
+            \"brief\": \"...\", \"new_workspace\": \"api\", \"repositories\": [\"api\"]}",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
+                "kind": {"type": "string", "enum": ["child", "led", "handed"], "description": "child: a part of your task, in your place, that reports to you. led: an autonomous session you pilot, which asks you and wakes you. handed: a session you start for the user and let go."},
                 "title": {"type": "string", "description": "The task in a few words: how you and the user will name this session or child."},
                 "brief": {"type": "string", "description": "Everything the session or the child needs to know."},
                 "provider": {"type": "string", "description": "The provider it runs on: yours when left out."},
                 "model": {"type": "string", "description": "The model; the provider's default when left out."},
                 "effort": {"type": "string", "description": "The model's effort; its default when left out."},
                 "role": {"type": "string", "enum": ["worker", "lead"], "description": "worker by default."},
-                "workspace": {"type": "string", "description": "With root: an existing workspace of the project, for the session to work in; main is the project folder. A child works in your place."},
-                "new_workspace": {"type": "string", "description": "With root: the name of a new workspace to make for the session. Not with workspace."},
+                "workspace": {"type": "string", "description": "With led or handed: an existing workspace of the project, for the session to work in; main is the project folder. A child works in your place."},
+                "new_workspace": {"type": "string", "description": "With led or handed: the name of a new workspace to make for the session. Not with workspace."},
                 "repositories": {"type": "array", "items": {"type": "string"}, "description": "With new_workspace: its repositories, by path; the project's when left out."},
                 "branch": {"type": "string", "description": "With new_workspace: its branch, as workspace create takes it. Name it when the repository has a naming convention (its AGENTS.md, CONTRIBUTING, the branches it has, the project's branch format), with the ticket's key when there is one (feat/ABC-8-pickup-dashboard); the card shows it, and it is the branch made. Left out, <branch prefix>/<name>. An existing branch is resumed."},
-                "base": {"type": "object", "additionalProperties": {"type": "string"}, "description": "With new_workspace: the branch a repository starts from, by path ({\"api\": \"develop\"}), in place of its base rule."},
-                "root": {"type": "boolean", "description": "A session for the user, in a workspace or your place, not a child."},
-                "follow": {"type": "boolean", "description": "Required with root: true, refused without it. true: you are woken at each end of a turn of the session (and when it ends), with its last message. false: you are told nothing of it."}
-            }, "required": ["title", "brief"], "additionalProperties": false})
+                "base": {"type": "object", "additionalProperties": {"type": "string"}, "description": "With new_workspace: the branch a repository starts from, by path ({\"api\": \"develop\"}), in place of its base rule."}
+            }, "required": ["kind", "title", "brief"], "additionalProperties": false})
         },
     },
     Definition {
@@ -732,9 +730,8 @@ const SERVED: [Definition; 29] = [
         description: "Says you are done: your report goes at once to your parent (to the user for \
             a root), and a child's session ends with this turn. Give the result, each point done \
             or skipped and why, what was not verified, open questions. Call it once, as your \
-            last action. A question left in a report is a follow-up, not a wait: a decision \
-            only the user can take goes through ask_user (ask_parent for a child), a question \
-            about the brief to the agent that started your session, with session_send.",
+            last action. A question left in a report is a follow-up, not a wait: what you need \
+            answered goes through ask.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -745,38 +742,31 @@ const SERVED: [Definition; 29] = [
         },
     },
     Definition {
-        name: "ask_user",
-        title: "Ask the user",
-        description: "Puts a question to the user. It does not wait: the answer comes later as a \
-            message. Go on with what does not depend on it, or end your turn saying what you \
-            wait for. What goes here is a decision only the user can take (commit, push, scope, a \
-            choice): a question about the brief or its context goes to the agent that started \
-            your session, with session_send. A question left in a report or a last message is a \
-            follow-up, not a wait.",
+        name: "ask",
+        title: "Ask a question",
+        description: ASK,
         read_only: false,
         idempotent: false,
         destructive: false,
-        schema: || {
-            json!({"type": "object", "properties": {
-                "question": {"type": "string"}
-            }, "required": ["question"], "additionalProperties": false})
-        },
+        schema: question_schema,
+    },
+    Definition {
+        name: "ask_user",
+        title: "Ask (old name)",
+        description: "The old name of ask, kept for one release and routed as ask is: use ask.",
+        read_only: false,
+        idempotent: false,
+        destructive: false,
+        schema: question_schema,
     },
     Definition {
         name: "ask_parent",
-        title: "Ask your parent",
-        description: "Puts a question to the agent that launched you. It does not wait: the \
-            answer comes later as [flottille:parent]. Go on with what does not depend on it, or \
-            end your turn saying what you wait for. What you need from your parent goes here, \
-            never in a report or a last message: that is a follow-up, not a wait.",
+        title: "Ask (old name)",
+        description: "The old name of ask, kept for one release and routed as ask is: use ask.",
         read_only: false,
         idempotent: false,
         destructive: false,
-        schema: || {
-            json!({"type": "object", "properties": {
-                "question": {"type": "string"}
-            }, "required": ["question"], "additionalProperties": false})
-        },
+        schema: question_schema,
     },
     Definition {
         name: "approval_answer",
@@ -805,8 +795,7 @@ const SERVED: [Definition; 29] = [
             your name; its answer comes later as [flottille:session]. Judged, as a write is; \
             the first message to a session you did not start asks the user's leave, in every \
             mode, once for that session. Your children are written to with agent_send. A \
-            question about the brief or its context to the agent that started your session goes \
-            here; a decision only the user can take goes through ask_user, and one left in a last \
+            question goes through ask, which says where it goes for you; one left in a last \
             message is a follow-up, not a wait.",
         read_only: false,
         idempotent: false,
@@ -841,6 +830,39 @@ const SERVED: [Definition; 29] = [
         },
     },
 ];
+
+/// What `ask` says to every caller; where its question goes is said after it, by the caller's
+/// kind (`ask_goes`).
+const ASK: &str = "Puts a question. It does not wait: the answer comes later as a message. Go on \
+    with what does not depend on it, or end your turn saying what you wait for. A question left \
+    in a report or a last message is a follow-up, not a wait: what you need answered goes here.";
+
+fn question_schema() -> Value {
+    json!({"type": "object", "properties": {
+        "question": {"type": "string"}
+    }, "required": ["question"], "additionalProperties": false})
+}
+
+/// The description of `ask` for `agent`: where its question goes, decided by the daemon, never
+/// by the agent (`docs/tools.md`, "Where a question goes").
+fn ask_goes(daemon: &Daemon, agent: &str) -> String {
+    let agent = daemon.read(|store| store.agent(agent)).ok().flatten();
+    let goes = match agent {
+        Some(agent) if agent.parent.is_some() => {
+            "Yours goes to your parent, the agent that launched you, which answers with \
+             [flottille:parent]: what you need from it goes here."
+        }
+        Some(agent) if crate::tree::pilot_of(daemon, &agent).is_some() => {
+            "Yours goes to the agent that leads your session, which answers with session_send; \
+             it relays to the user what is theirs. The user may also write to you directly."
+        }
+        _ => {
+            "Yours goes to the user, in their inbox: a decision only they can take (commit, push, \
+             scope, a choice)."
+        }
+    };
+    format!("{ASK} {goes}")
+}
 
 fn definition(name: &str) -> Option<&'static Definition> {
     SERVED.iter().find(|tool| tool.name == name)
@@ -1803,7 +1825,13 @@ impl ServerHandler for Handler {
             .tools
             .iter()
             .filter_map(|name| definition(name))
-            .map(|definition| tool_of(definition, true))
+            .map(|definition| {
+                let mut tool = tool_of(definition, true);
+                if definition.name == "ask" {
+                    tool.description = Some(ask_goes(&self.daemon, &grant.agent).into());
+                }
+                tool
+            })
             .collect();
         Ok(ListToolsResult::with_all_items(tools)
             .with_ttl_ms(LIST_TTL_MS)
@@ -2052,6 +2080,12 @@ async fn played_in(
         Some((args, said)) => ("fs_read", args, Some(said)),
         None => (tool, args, None),
     };
+    // The two names `ask` replaced stay answered for one release, routed as `ask` is
+    // (`docs/tools.md`, "Where a question goes").
+    let tool = match tool {
+        "ask_user" | "ask_parent" if grant.tools.contains(&"ask") => "ask",
+        tool => tool,
+    };
     let reads = Reads::default();
     let recorded = record_of(&args, &grant.place);
     let reads_a_result = reads_a_result(tool, &args);
@@ -2168,7 +2202,7 @@ async fn played_in(
                 }
             }
         }
-    } else if tool == "workspace" && !grant.tools.contains(&"ask_user") {
+    } else if tool == "workspace" && !grant.tools.contains(&"session_send") {
         Outcome::Refused(crate::actions::CHILD_WORKSPACES.into())
     } else {
         Outcome::Refused(format!(
@@ -2382,7 +2416,7 @@ fn verdict_of(
             }
         }
     }
-    if tool == "agent_launch" && args["root"] == true {
+    if tool == "agent_launch" && crate::tree::starts_session(args) {
         match gate::root_launch(grant, args) {
             gate::Verdict::Deny(why) => return gate::Verdict::Deny(why),
             gate::Verdict::Ask(ask) if ask.class == gate::Class::Base => base.extend(ask.reasons),
@@ -3052,10 +3086,12 @@ mod tests {
             assert_eq!(tool["_meta"]["anthropic/alwaysLoad"], true);
             assert_eq!(tool["inputSchema"]["type"], "object");
             let name = format!("mcp__flottille__{}", definition.name);
+            // The old names of ask are answered, never listed to a new agent.
             assert!(
-                claude::PROVIDER
-                    .tools(true, false, true, true)
-                    .contains(&name)
+                matches!(definition.name, "ask_user" | "ask_parent")
+                    || claude::PROVIDER
+                        .tools(true, false, true, true)
+                        .contains(&name)
                     || claude::PROVIDER
                         .tools(false, false, true, true)
                         .contains(&name),
@@ -3073,7 +3109,7 @@ mod tests {
         leaf.retain(|tool| !tool.ends_with("__search"));
         leaf.push("fs_read".into());
         let served = served(&claude::PROVIDER, &leaf);
-        assert_eq!(served.first(), Some(&"ask_parent"));
+        assert_eq!(served.first(), Some(&"ask"));
         assert_eq!(served.last(), Some(&"fs_read"));
         assert!(!served.contains(&"search"));
         assert_eq!(served.len(), 16);
@@ -3373,7 +3409,7 @@ mod tests {
             (
                 "agent_launch",
                 None,
-                "{\"title\": \"Add API\", \"brief\": \"...\", \"root\": true, \"follow\": false, \"new_workspace\": \"api\", \"repositories\": [\"api\"]}",
+                "{\"kind\": \"handed\", \"title\": \"Add API\", \"brief\": \"...\", \"new_workspace\": \"api\", \"repositories\": [\"api\"]}",
             ),
             (
                 "agent_launch",

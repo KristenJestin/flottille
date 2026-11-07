@@ -208,13 +208,22 @@ fn page(daemon: &Daemon, grant: &Grant, args: Value) -> Result<String, Outcome> 
     values.extend(grant.place.secret_values());
     let env = std::env::vars_os().collect();
     let mask = |text: &str| secrets::mask_also(text, &env, &values);
-    // A question asked with ask_user is no message: said apart, before them, for the reader to
+    // A question asked with ask is no message: said apart, before them, for the reader to
     // relay it, each cut as a message is, the oldest first, in at most half a page.
     let mut questions = Vec::new();
     let (mut used, mut left) = (0, 0);
-    for question in crate::tree::open_questions(daemon, &session).map_err(|f| failed(f.message))? {
+    // Those of a led session to its pilot too, which its pilot reads to answer them.
+    let to_user = crate::tree::open_questions(daemon, &session).map_err(|f| failed(f.message))?;
+    let to_pilot = crate::tree::pilot_questions(daemon, &session).map_err(|f| failed(f.message))?;
+    let mut open: Vec<(Value, &str)> = to_user
+        .into_iter()
+        .map(|question| (question, "the user"))
+        .chain(to_pilot.into_iter().map(|question| (question, "its pilot")))
+        .collect();
+    open.sort_by_key(|(question, _)| question["seq"].as_u64());
+    for (question, whom) in open {
         let said = format!(
-            "\nOpen question, asked at {}, waits for the user:\n<session_question>\n{}\n\
+            "\nOpen question, asked at {}, waits for {whom}:\n<session_question>\n{}\n\
              </session_question>\n",
             shown_date(question["at"].as_u64().unwrap_or_default()),
             escaped(&crate::mcp::cut(
@@ -259,13 +268,13 @@ fn page(daemon: &Daemon, grant: &Grant, args: Value) -> Result<String, Outcome> 
     ));
     if !questions.is_empty() {
         text.push_str(
-            "\nIts open questions to the user, asked with ask_user, the oldest first: each waits \
-             for the user's answer.\n",
+            "\nIts open questions, asked with ask, the oldest first: each waits for the answer \
+             of whom it names.\n",
         );
         text.push_str(&questions.concat());
         if left > 0 {
             text.push_str(&format!(
-                "\n({left} more open questions wait for the user: they show here once those \
+                "\n({left} more open questions wait for an answer: they show here once those \
                  above are answered.)\n"
             ));
         }

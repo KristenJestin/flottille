@@ -340,5 +340,6 @@ fn as_agent(provider: &Provider, folder: &Path) -> Agent {
         tools: Vec::new(),
         gate_mode: GateMode::Ask,
         launched_by: None,
+        led: false,
     }
 }

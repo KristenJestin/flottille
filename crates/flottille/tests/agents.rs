@@ -170,7 +170,7 @@ fn the_exact_claude_code_options_are_sent() {
         "project",
         "wake",
         "report",
-        "ask_user",
+        "ask",
         "session_send",
         "session_read",
         "approval_answer",

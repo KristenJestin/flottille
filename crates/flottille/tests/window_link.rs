@@ -36,7 +36,7 @@ fn user() -> User {
             link("https://example.org/2", "Two"),
             link("https://example.org/3", "Three")]},
         {"when": "LAUNCH A WORKER", "do": [{"mcp": {"tool": "agent_launch",
-            "arguments": {"title": "Worker", "brief": "WORKER SHOWS ONE"}}}]},
+            "arguments": {"kind": "child", "title": "Worker", "brief": "WORKER SHOWS ONE"}}}]},
         {"when": "WORKER SHOWS ONE", "do": [link("https://example.org/w", "Worker's")]},
         {"when": "STAY QUIET", "do": []},
         {"when": "SHOW SPLIT", "do": [

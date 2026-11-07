@@ -1056,7 +1056,7 @@ pub fn says(
     if writes("services", args) && !root {
         return Err(Outcome::Refused(
             "refused: a child reads the services of the machine and starts them; the agent the \
-             user talks to changes them: ask your parent (ask_parent)"
+             user talks to changes them: ask your parent (ask)"
                 .into(),
         ));
     }

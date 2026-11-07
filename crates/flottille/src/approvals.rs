@@ -497,7 +497,7 @@ pub fn waiting_for_user(daemon: &Daemon) -> flottille_core::Result<usize> {
         daemon
             .read(|store| store.agents())?
             .into_iter()
-            .filter(tree::asks_the_user)
+            .filter(|agent| tree::asks_the_user(daemon, agent))
             .map(|agent| agent.id),
     );
     agents.sort();
@@ -547,6 +547,7 @@ mod tests {
             images: None,
             gate_mode: GateMode::Auto,
             launched_by: None,
+            led: false,
         }
     }
 

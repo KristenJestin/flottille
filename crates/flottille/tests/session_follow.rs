@@ -1,8 +1,7 @@
-//! The scenarios of following a session (`docs/tools.md`, "Sessions for the user", "Sessions that
-//! talk to each other"): the agent that starts a session for the user chooses with `follow`
-//! whether it is woken at each end of a turn of that session, and two sessions that write to each
-//! other without the user pause. The fake ACP agent, temporary folders, no real agent.
-
+//! The scenarios of following a session (`docs/tools.md`, "Following a session", "Sessions that
+//! talk to each other"): the pilot of a led session is woken when a turn of it asks or reports,
+//! and when it ends, and two sessions that write to each other without the user pause. The fake
+//! ACP agent, temporary folders, no real agent.
 mod common;
 
 use std::time::{Duration, Instant};
@@ -111,20 +110,17 @@ fn settle() {
     std::thread::sleep(Duration::from_millis(600));
 }
 
-/// What the lead gets when it starts a session titled `title` with this `follow` (none: the field
-/// is left out): the answer, and the session's id and MCP session once it started.
+/// What the lead gets when it starts a session titled `title` of `kind`: the answer, and the
+/// session's id and MCP session once it started.
 fn launch(
     user: &User,
     mcp: &Mcp,
     title: &str,
     brief: &str,
-    follow: Option<bool>,
+    kind: &str,
 ) -> (Answer, Option<(String, Mcp)>) {
     let opened = user.received_requests("session/new").len();
-    let mut arguments = json!({"title": title, "brief": brief, "root": true});
-    if let Some(follow) = follow {
-        arguments["follow"] = json!(follow);
-    }
+    let arguments = json!({"kind": kind, "title": title, "brief": brief});
     let answer = mcp.call("agent_launch", arguments);
     if answer.error {
         return (answer, None);
@@ -147,11 +143,25 @@ fn agents(user: &User) -> Vec<Value> {
         .clone()
 }
 
+fn ask(question: &str) -> Value {
+    json!({"mcp": {"tool": "ask", "arguments": {"question": question}}})
+}
+
+/// What the agents play: a led session asks at each turn of its own, so that each wakes its
+/// pilot (a plain turn's end wakes nobody); the lead's own turns ask nothing.
+fn asking() -> Value {
+    json!({"turns": [
+        {"when": "Fix the login.", "do": [ask("Which scope?"), {"say": "I asked."}]},
+        {"when": "wrote to this session", "do": [ask("Which scope now?"), {"say": "Asked again."}]},
+        {"when": "Go on.", "do": [ask("Go on how?"), {"say": "Asked how."}]}
+    ]})
+}
+
 /// A followed session whose first turn ended and woke its starter: the lead's id and MCP session,
 /// the session's id and MCP session.
 fn followed(user: &User, brief: &str) -> (String, Mcp, String, Mcp) {
     let (lead, mcp) = lead(user);
-    let (answer, session) = launch(user, &mcp, "Login", brief, Some(true));
+    let (answer, session) = launch(user, &mcp, "Login", brief, "led");
     assert!(!answer.error, "{}", answer.text);
     let (session, second) = session.unwrap();
     eventually("the first wake", || wakes(user, &lead).len() == 1);
@@ -176,46 +186,11 @@ fn inbox(user: &User) -> Vec<Value> {
 }
 
 #[test]
-fn a_root_launch_without_follow_is_refused_naming_the_field() {
-    let user = User::with_fake_agent();
-    let (_, mcp) = lead(&user);
-
-    let (answer, started) = launch(&user, &mcp, "Login", "Fix the login.", None);
-
-    assert!(answer.error, "{}", answer.text);
-    assert!(started.is_none());
-    for word in ["refused", "follow", "true", "false", "last message"] {
-        assert!(answer.text.contains(word), "{word}: {}", answer.text);
-    }
-    assert!(agents(&user).iter().all(|a| a["title"] != "Login"));
-}
-
-#[test]
-fn a_child_launch_does_not_take_follow() {
-    let user = User::with_fake_agent();
-    let (_, mcp) = lead(&user);
-
-    let answer = mcp.call(
-        "agent_launch",
-        json!({"title": "worker", "brief": "Write the tests.", "follow": true}),
-    );
-
-    assert!(answer.error, "{}", answer.text);
-    // Not the unknown field it was before following: the refusal says what follow is for.
-    assert!(
-        answer.text.contains("session for the user"),
-        "{}",
-        answer.text
-    );
-    assert!(agents(&user).iter().all(|a| a["title"] != "worker"));
-}
-
-#[test]
-fn a_followed_session_wakes_its_starter_at_each_turn_end_with_its_last_message() {
+fn a_led_session_wakes_its_pilot_at_each_question_with_its_last_message() {
     let user = User::with_fake_agent();
     user.fake_script(json!({"turns": [
-        {"when": "Fix the login.", "do": [{"say": "Should the logout be covered too?"}]},
-        {"when": "Yes, cover it.", "do": [{"say": "Logout covered."}]}
+        {"when": "Fix the login.", "do": [ask("Scope?"), {"say": "Should the logout be covered too?"}]},
+        {"when": "Yes, cover it.", "do": [ask("Push?"), {"say": "Logout covered."}]}
     ]}));
     let (lead, _, session, _) = followed(&user, "Fix the login.");
 
@@ -223,7 +198,7 @@ fn a_followed_session_wakes_its_starter_at_each_turn_end_with_its_last_message()
     for word in [
         "\"Login\"",
         session.as_str(),
-        "turn done",
+        "asked you",
         "Should the logout be covered too?",
     ] {
         assert!(woken.contains(word), "{word}: {woken}");
@@ -243,7 +218,7 @@ fn a_followed_session_wakes_its_starter_at_each_turn_end_with_its_last_message()
 fn a_long_last_message_is_cut_and_the_cut_is_said() {
     let user = User::with_fake_agent();
     user.fake_script(json!({"turns": [
-        {"when": "Fix the login.", "do": [{"say": "word ".repeat(2_000)}]}
+        {"when": "Fix the login.", "do": [ask("Scope?"), {"say": "word ".repeat(2_000)}]}
     ]}));
 
     let (lead, _, _, _) = followed(&user, "Fix the login.");
@@ -265,14 +240,14 @@ fn a_turn_that_ends_with_a_question_or_a_report_says_so() {
             {"say": "Reported."}]}
     ]}));
     let (lead, mcp) = lead(&user);
-    let (_, asking) = launch(&user, &mcp, "Asking", "Ask it.", Some(true));
-    let (_, reporting) = launch(&user, &mcp, "Reporting", "Report it.", Some(true));
+    let (_, asking) = launch(&user, &mcp, "Asking", "Ask it.", "led");
+    let (_, reporting) = launch(&user, &mcp, "Reporting", "Report it.", "led");
     assert!(asking.is_some() && reporting.is_some());
 
     eventually("both wakes", || wakes(&user, &lead).len() == 2);
 
     let woken = wakes(&user, &lead).join("\n---\n");
-    assert!(woken.contains("asked the user"), "{woken}");
+    assert!(woken.contains("asked you"), "{woken}");
     assert!(woken.contains("reported"), "{woken}");
 }
 
@@ -281,10 +256,10 @@ fn an_unfollowed_session_wakes_nobody() {
     let user = User::with_fake_agent();
     let (lead, mcp) = lead(&user);
 
-    let (answer, session) = launch(&user, &mcp, "Login", "Fix the login.", Some(false));
+    let (answer, session) = launch(&user, &mcp, "Login", "Fix the login.", "handed");
 
     assert!(!answer.error, "{}", answer.text);
-    assert!(!answer.text.contains("You follow it"), "{}", answer.text);
+    assert!(answer.text.contains("handed over"), "{}", answer.text);
     let (session, _) = session.unwrap();
     eventually("the session's turn", || turns(&user, &session) == 1);
     settle();
@@ -295,6 +270,7 @@ fn an_unfollowed_session_wakes_nobody() {
 #[test]
 fn the_starter_answers_a_followed_session_with_session_send() {
     let user = User::with_fake_agent();
+    user.fake_script(asking());
     let (lead, mcp, session, _) = followed(&user, "Fix the login.");
 
     let sent = mcp.call(
@@ -322,6 +298,7 @@ fn the_starter_answers_a_followed_session_with_session_send() {
 #[test]
 fn the_following_shows_in_the_starters_subscriptions_and_in_show() {
     let user = User::with_fake_agent().with_fake_gh();
+    user.fake_script(asking());
     pulls(&user);
     let (lead, mcp, session, _) = followed(&user, "Fix the login.");
 
@@ -342,6 +319,7 @@ fn the_following_shows_in_the_starters_subscriptions_and_in_show() {
 #[test]
 fn unsubscribe_ends_the_following() {
     let user = User::with_fake_agent().with_fake_gh();
+    user.fake_script(asking());
     pulls(&user);
     let (lead, mcp, session, _) = followed(&user, "Fix the login.");
 
@@ -367,6 +345,7 @@ fn unsubscribe_ends_the_following() {
 #[test]
 fn the_following_ends_with_the_session() {
     let user = User::with_fake_agent();
+    user.fake_script(asking());
     let (lead, _, session, _) = followed(&user, "Fix the login.");
 
     user.call("agent.stop", json!({"agent": session})).unwrap();
@@ -385,6 +364,7 @@ fn the_following_ends_with_the_session() {
 #[test]
 fn the_following_ends_with_the_starter() {
     let user = User::with_fake_agent();
+    user.fake_script(asking());
     let (lead, _, _, _) = followed(&user, "Fix the login.");
 
     user.call("agent.stop", json!({"agent": lead})).unwrap();
@@ -406,6 +386,7 @@ fn write(user: &User, from: &Mcp, to: &str, text: &str) {
 #[test]
 fn five_exchanges_without_the_user_pause_the_following_and_say_so() {
     let user = User::with_fake_agent();
+    user.fake_script(asking());
     let (lead, mcp, session, second) = followed(&user, "Fix the login.");
 
     write(&user, &mcp, &session, "one");
@@ -435,6 +416,7 @@ fn five_exchanges_without_the_user_pause_the_following_and_say_so() {
 #[test]
 fn a_user_message_resumes_a_paused_following() {
     let user = User::with_fake_agent();
+    user.fake_script(asking());
     let (lead, mcp, session, second) = followed(&user, "Fix the login.");
     write(&user, &mcp, &session, "one");
     write(&user, &second, &lead, "two");
@@ -461,11 +443,12 @@ fn a_user_message_resumes_a_paused_following() {
 #[test]
 fn the_descriptions_say_where_a_question_goes() {
     let user = User::with_fake_agent();
-    let (lead, mcp, session, _) = followed(&user, "Fix the login.");
+    user.fake_script(asking());
+    let (lead, mcp, session, second) = followed(&user, "Fix the login.");
     let opened = user.received_requests("session/new").len();
     let child = mcp.call(
         "agent_launch",
-        json!({"title": "worker", "brief": "Write the tests."}),
+        json!({"kind": "child", "title": "worker", "brief": "Write the tests."}),
     );
     assert!(!child.error, "{}", child.text);
     let (url, authorization) = server_of(&user, opened);
@@ -481,38 +464,32 @@ fn the_descriptions_say_where_a_question_goes() {
     };
 
     let tools = mcp.tools();
-    for name in ["ask_user", "report", "session_send"] {
+    for name in ["ask", "report", "session_send"] {
         let said = description(&tools, name);
         assert!(said.chars().count() < 2_048, "{name}: {said}");
-        assert!(
-            name == "ask_user" || said.contains("ask_user"),
-            "{name}: {said}"
-        );
-        assert!(
-            name == "session_send" || said.contains("session_send"),
-            "{name}: {said}"
-        );
+        assert!(name == "ask" || said.contains("ask"), "{name}: {said}");
         assert!(said.contains("follow-up"), "{name}: {said}");
     }
+    let tools = second.tools();
+    let ask = description(&tools, "ask");
+    assert!(ask.contains("goes to the agent that leads"), "{ask}");
+    assert!(ask.contains("session_send"), "{ask}");
     let launched = delivered(&user, &session, "launched").remove(0);
-    assert!(launched.contains("ask_user"), "{launched}");
+    assert!(launched.contains("ask"), "{launched}");
     assert!(
-        launched.contains(&format!("session_send {{\"session\": \"{lead}\"")),
+        launched.contains(&format!("led by agent {lead}")),
         "{launched}"
     );
     assert!(launched.contains("follow-up"), "{launched}");
     assert!(launched.contains("Fix the login."), "{launched}");
-    // The same for a child, with ask_parent instead of ask_user.
+    // A child's goes to its parent.
     let tools = worker.tools();
-    for name in ["ask_parent", "report"] {
+    for name in ["ask", "report"] {
         let said = description(&tools, name);
         assert!(said.chars().count() < 2_048, "{name}: {said}");
-        assert!(
-            name == "ask_parent" || said.contains("ask_parent"),
-            "{name}: {said}"
-        );
         assert!(said.contains("follow-up"), "{name}: {said}");
     }
+    assert!(description(&tools, "ask").contains("goes to your parent"));
 }
 
 /// The five exchanges that pause the following of the session by the lead.
@@ -540,6 +517,7 @@ fn refused_write(user: &User, from: &Mcp, to: &str) -> String {
 #[test]
 fn a_session_send_between_a_paused_pair_is_refused_naming_why() {
     let user = User::with_fake_agent();
+    user.fake_script(asking());
     let (lead, mcp, session, second) = followed(&user, "Fix the login.");
     pause(&user, &mcp, &session, &second, &lead);
 
@@ -567,7 +545,7 @@ fn a_session_send_between_a_paused_pair_is_refused_naming_why() {
 fn the_last_message_is_of_the_turn_that_ended() {
     let user = User::with_fake_agent();
     user.fake_script(json!({"turns": [
-        {"when": "Fix the login.", "do": [{"say": "Should the logout be covered too?"}]},
+        {"when": "Fix the login.", "do": [ask("Scope?"), {"say": "Should the logout be covered too?"}]},
         {"when": "Report it.", "do": [
             {"mcp": {"tool": "report", "arguments": {"text": "All done."}}}]}
     ]}));
@@ -587,23 +565,24 @@ fn the_last_message_is_of_the_turn_that_ended() {
 }
 
 #[test]
-fn it_asked_the_user_only_in_the_turn_that_asked() {
+fn it_asked_you_only_in_the_turn_that_asked() {
     let user = User::with_fake_agent();
     user.fake_script(json!({"turns": [
-        {"when": "Ask it.", "do": [
-            {"mcp": {"tool": "ask_user", "arguments": {"question": "Commit now?"}}},
-            {"say": "I asked."}]},
-        {"when": "The brief says", "do": [{"say": "Understood."}]}
+        {"when": "Ask it.", "do": [ask("Commit now?"), {"say": "I asked."}]},
+        {"when": "The brief says", "do": [
+            {"mcp": {"tool": "report", "arguments": {"text": "Done."}}},
+            {"say": "Understood."}]}
     ]}));
     let (lead, mcp, session, _) = followed(&user, "Ask it.");
-    assert!(wakes(&user, &lead)[0].contains("asked the user"));
+    assert!(wakes(&user, &lead)[0].contains("asked you"));
 
     write(&user, &mcp, &session, "The brief says: no push.");
 
     eventually("the second wake", || wakes(&user, &lead).len() == 2);
     let woken = wakes(&user, &lead).remove(0);
-    assert!(woken.contains("turn done"), "{woken}");
-    assert!(!woken.contains("asked the user"), "{woken}");
+    assert!(woken.contains("it reported"), "{woken}");
+    assert!(!woken.contains("asked you"), "{woken}");
+    assert!(!woken.contains("Commit now?"), "{woken}");
 }
 
 #[test]
@@ -617,7 +596,7 @@ fn a_turn_that_wrote_to_its_starter_does_not_wake_it_again() {
             {"say": "I asked my starter."}]}
     ]}));
 
-    let (answer, session) = launch(&user, &mcp, "Login", "Fix the login.", Some(true));
+    let (answer, session) = launch(&user, &mcp, "Login", "Fix the login.", "led");
 
     assert!(!answer.error, "{}", answer.text);
     let (session, _) = session.unwrap();
@@ -636,6 +615,7 @@ fn a_secret_in_the_last_message_is_masked() {
     let user = User::with_fake_agent();
     user.fake_script(json!({"turns": [
         {"when": "Fix the login.", "do": [
+            ask("Scope?"),
             {"say": "The token is ghp_fakefakefakefakefakefakefakefake0001 here."}]}
     ]}));
 
@@ -649,6 +629,7 @@ fn a_secret_in_the_last_message_is_masked() {
 #[test]
 fn the_pause_and_the_count_survive_a_restart() {
     let user = User::with_fake_agent();
+    user.fake_script(asking());
     let (lead, mcp, session, second) = followed(&user, "Fix the login.");
     pause(&user, &mcp, &session, &second, &lead);
 
@@ -664,6 +645,7 @@ fn the_pause_and_the_count_survive_a_restart() {
 #[test]
 fn an_agent_cannot_resume_a_paused_following() {
     let user = User::with_fake_agent();
+    user.fake_script(asking());
     let (lead, mcp, session, second) = followed(&user, "Fix the login.");
     pause(&user, &mcp, &session, &second, &lead);
 
@@ -704,6 +686,7 @@ fn an_agent_cannot_resume_a_paused_following() {
 #[test]
 fn a_following_holds_neither_the_inactivity_sweep_nor_waiting_for() {
     let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_CLOCK", "1");
+    user.fake_script(asking());
     let (lead, _, _, _) = followed(&user, "Fix the login.");
 
     let tree = user.call("agent.tree", json!({"agent": lead})).unwrap();

@@ -949,6 +949,7 @@ fn as_agent(folder: &Path, instructions: &str) -> Agent {
         tools: Vec::new(),
         gate_mode: GateMode::Ask,
         launched_by: None,
+        led: false,
     }
 }
 

@@ -374,7 +374,9 @@ pub fn decide(call: &Call) -> Verdict {
     match call.tool {
         "forge" => forge(call),
         "tickets" => tickets(call),
-        "agent_launch" if call.args["root"] == true => root_launch(call.grant, call.args),
+        "agent_launch" if crate::tree::starts_session(call.args) => {
+            root_launch(call.grant, call.args)
+        }
         "session_send" => session_send(call.grant, call.args),
         // Its own session (none named, or its id) is no other's conversation: the answer says the tree's mode.
         "session_read"
@@ -4304,7 +4306,7 @@ mod tests {
         let fixture = Fixture::main();
         let verdict = fixture.judge(
             "agent_launch",
-            json!({"title": "t", "brief": "b", "root": true}),
+            json!({"title": "t", "brief": "b", "kind": "handed"}),
             Some(&fixture.never),
         );
         assert!(to_judge(&verdict), "{verdict:?}");
@@ -4316,7 +4318,7 @@ mod tests {
         // A child launched is the caller's own work, as before.
         let child = fixture.judge(
             "agent_launch",
-            json!({"title": "t", "brief": "b"}),
+            json!({"kind": "child", "title": "t", "brief": "b"}),
             Some(&fixture.never),
         );
         assert_eq!(child, Verdict::Allow);
@@ -4328,7 +4330,7 @@ mod tests {
         fixture.grant.launched = true;
         let verdict = fixture.judge(
             "agent_launch",
-            json!({"title": "t", "brief": "b", "root": true}),
+            json!({"title": "t", "brief": "b", "kind": "handed"}),
             Some(&fixture.never),
         );
         assert!(base_class(&verdict), "{verdict:?}");
@@ -4408,7 +4410,7 @@ mod tests {
             ("forge", json!({"action": "create", "title": token})),
             (
                 "agent_launch",
-                json!({"title": "t", "brief": token, "root": true}),
+                json!({"title": "t", "brief": token, "kind": "handed"}),
             ),
         ] {
             let verdict = fixture.judge(tool, args, Some(&fixture.never));
@@ -4425,7 +4427,7 @@ mod tests {
             ),
             (
                 "agent_launch",
-                json!({"title": "t", "brief": long, "root": true}),
+                json!({"title": "t", "brief": long, "kind": "handed"}),
             ),
         ] {
             assert!(

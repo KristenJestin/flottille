@@ -399,7 +399,7 @@ pub async fn prepared(
             if family(tool, args).is_some() && !is_root(daemon, grant) {
                 return Err(Outcome::Refused(
                     "refused: a child reads the project's tasks and runs them; the agent the user \
-                     talks to changes them: ask your parent (ask_parent)"
+                     talks to changes them: ask your parent (ask)"
                         .into(),
                 ));
             }
@@ -1673,7 +1673,7 @@ const WORKSPACE_ACTIONS: &str =
 /// What a child is told of the writes of the `workspace` family but `remove`, which are not its
 /// own.
 pub const CHILD_WORKSPACES: &str = "refused: the agent the user talks to manages the project's \
-    workspaces; you work in the place you were given: ask your parent (ask_parent)";
+    workspaces; you work in the place you were given: ask your parent (ask)";
 
 /// The setup steps a call plays without the gate, as the gate judges them: creating a workspace
 /// (`workspace create`, `agent_launch` with `new_workspace`) plays the project's setup, resuming
@@ -1996,14 +1996,14 @@ async fn create_says(
 
 /// What a child is told of `agent_launch` with `root`.
 pub const CHILD_ROOTS: &str = "refused: only the agent the user talks to starts a session for \
-    the user; a child's work stays in its tree, under its parent: ask your parent (ask_parent)";
+    the user; a child's work stays in its tree, under its parent: ask your parent (ask)";
 
 /// What `agent_launch` does, in words, when it is judged: with `new_workspace`, as `workspace
 /// create` says it, since it creates the workspace the same way; with `root`, the session it
 /// starts for the user and its first message whole. Nothing for any other launch. Only a root
 /// starts a root: a child doing so would leave its tree, its parent and its parent's sight.
 async fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<String>, Outcome> {
-    let root = args["root"] == true;
+    let root = crate::tree::starts_session(args);
     if root && !is_root(daemon, grant) {
         return Err(Outcome::Refused(CHILD_ROOTS.into()));
     }
@@ -2027,9 +2027,10 @@ async fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec
                 &bases,
             )
             .await?;
-            let whose = match root {
-                true => "a session of the user's",
-                false => "a child",
+            let whose = match args["kind"].as_str() {
+                Some("led") => "a session led by this agent",
+                Some("handed") => "a session of the user's, handed over",
+                _ => "a child",
             };
             says[0].push_str(&format!(", for {whose}: \"{title}\""));
             says
@@ -2044,10 +2045,16 @@ async fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec
                 Some(name) if !main => format!("the workspace {name}"),
                 _ => "main, the project folder".to_owned(),
             };
-            vec![format!(
-                "Start a session for the user in {place}: \"{title}\", theirs, not a child of \
-                 this agent"
-            )]
+            vec![match args["kind"].as_str() {
+                Some("led") => format!(
+                    "Start a session led by this agent in {place}: \"{title}\", a session the user \
+                     sees under it and may talk to, not a child of this agent"
+                ),
+                _ => format!(
+                    "Start a session for the user, handed over, in {place}: \"{title}\", theirs, \
+                     not a child of this agent"
+                ),
+            }]
         }
         _ => return Ok(Vec::new()),
     };

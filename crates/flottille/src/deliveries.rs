@@ -175,10 +175,14 @@ fn took(daemon: &Daemon, agent: &str, kinds: &[String]) {
     let Ok(Some(found)) = daemon.read(|store| store.agent(agent)) else {
         return;
     };
-    let answering = found.waiting_on_answer && kinds.iter().any(|k| k == "parent" || k == "user");
-    let still = answering
-        && found.parent.is_none()
-        && crate::tree::unanswered(daemon, agent).is_ok_and(|open| !open.is_empty());
+    // A led session's pilot answers with `session_send`.
+    let answering = found.waiting_on_answer
+        && kinds
+            .iter()
+            .any(|k| k == "parent" || k == "user" || (k == "session" && found.led));
+    let open =
+        |to| crate::tree::unanswered_to(daemon, agent, to).is_ok_and(|open| !open.is_empty());
+    let still = answering && found.parent.is_none() && (open("user") || open("pilot"));
     let change = AgentChange {
         quiet_turns: kinds.iter().any(|k| k != "reminder").then_some(0),
         waiting_on_answer: (answering && !still).then_some(false),
