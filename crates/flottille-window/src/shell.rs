@@ -860,6 +860,19 @@ impl Shell {
                     page.update(cx, |page, cx| page.picture_read(name, image, cx));
                 }
             }
+            Outcome::VaultAnswered {
+                session,
+                ask,
+                refused,
+            } => {
+                if let Some(page) = self
+                    .session_page
+                    .clone()
+                    .filter(|page| page.read(cx).id() == session)
+                {
+                    page.update(cx, |page, cx| page.vault_answered(ask, refused, window, cx));
+                }
+            }
             Outcome::QuestionAnswered {
                 session,
                 seq,

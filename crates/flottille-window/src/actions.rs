@@ -275,6 +275,12 @@ pub enum Command {
     Vault,
     /// An entry set or removed (`vault.set`, `vault.remove`).
     VaultWrite(VaultWrite),
+    /// The user's answer to the request `ask` for a vault entry, from its card in `session`.
+    VaultAnswer {
+        session: String,
+        ask: u64,
+        answer: VaultAnswer,
+    },
     /// The project's skills.
     Skills {
         project: String,
@@ -559,6 +565,29 @@ pub enum VaultWrite {
     Remove {
         name: String,
     },
+}
+
+/// The answer a card gives to a request for a vault entry.
+#[derive(Clone, PartialEq)]
+pub enum VaultAnswer {
+    /// The secret typed, the username when the entry takes one, and another name for the entry
+    /// when the one asked is used by another project.
+    Set {
+        secret: String,
+        username: String,
+        name: Option<String>,
+    },
+    Dismiss,
+}
+
+/// What a debug line may say of an answer: never its secret.
+impl std::fmt::Debug for VaultAnswer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VaultAnswer::Set { .. } => f.write_str("Set"),
+            VaultAnswer::Dismiss => f.write_str("Dismiss"),
+        }
+    }
 }
 
 /// What a debug line may say of a write: never its secret.
@@ -983,6 +1012,13 @@ pub enum Outcome {
         session: String,
         key: u64,
         answer: Result<crate::session::Accepted, String>,
+    },
+    /// The answer to the request `ask` for a vault entry was taken, or refused with why (never
+    /// holding the secret: the daemon masks it).
+    VaultAnswered {
+        session: String,
+        ask: u64,
+        refused: Option<String>,
     },
     /// The answer from the card of `seq` to the questions `seqs` was taken, or refused with why.
     QuestionAnswered {
@@ -1681,6 +1717,32 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 Ok(Err(why)) | Err(why) => Some(why),
             };
             Outcome::VaultWritten { refused }
+        }
+        Command::VaultAnswer {
+            session,
+            ask,
+            answer,
+        } => {
+            let (method, params) = match answer {
+                VaultAnswer::Set {
+                    secret,
+                    username,
+                    name,
+                } => (
+                    "vault.ask_set",
+                    json!({"ask": ask, "secret": secret, "username": username, "name": name}),
+                ),
+                VaultAnswer::Dismiss => ("vault.ask_dismiss", json!({"ask": ask})),
+            };
+            let refused = match ask_alone(connect, method, params, bounds.quick) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::VaultAnswered {
+                session,
+                ask,
+                refused,
+            }
         }
         Command::CommandWrite { project, write } => {
             let (method, params) = command_write(&project, write);

@@ -200,7 +200,8 @@ fn entry_of(daemon: &Daemon, project: &Project) -> Result<(String, String), Stri
         return Err(format!(
             "refused: the project's worklog_token names the vault entry {name}, and the vault \
              has none of that name for this project: the user creates it (flottille vault set \
-             {name} --username <their Jira account e-mail>) or corrects the project's tracker"
+             {name} --username <their Jira account e-mail>) or corrects the project's tracker{}",
+            vault::offer(daemon, project, name)
         ));
     };
     match entry

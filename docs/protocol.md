@@ -494,7 +494,8 @@ reaches them: no tool of an agent does.
 
 The user's secrets, kept by the keyring, that agents use and never see (`docs/vault.md`). No
 method answers a secret, and an error about a call that carried one never repeats it. The user's
-door alone reaches them: an agent's only part is the `vault` tool, which lists.
+door alone reaches them: an agent's only part is the `vault` tool, which lists, and asks the user
+for an entry a feature names and that is missing.
 
 - `vault.list {project?}` answers `{"entries": [{"name", "description", "url", "username",
   "project"}]}`, by name; with `project`, the entries its agents see (its own and every project's).
@@ -509,7 +510,26 @@ door alone reaches them: an agent's only part is the `vault` tool, which lists.
   (locked), the entry then left whole.
 
 Both writes emit `vault.changed`, and give the agents of every project the tools their roles have
-now (`vault` is listed to an agent whose project sees an entry).
+now (`vault` is listed to an agent whose project sees an entry, or misses one a feature names). A
+set answers the open requests for that entry whose project now sees it (`set`).
+
+The requests agents made for a missing entry (`docs/vault.md`, "Asking the user for an entry"):
+
+- `vault.asks` answers `{"asks": [{"ask", "at", "agent", "project", "name", "why", "description",
+  "takes_username", "taken", "joined"}]}`, the open requests, oldest first; `ask` is the number of
+  its `vault.asked` event, `taken` why its name cannot be set for the project (another project
+  uses it), `null` otherwise, `joined` the agents whose ask joined it.
+- `vault.ask_set {ask, secret, username?, name?}` sets the entry as `vault.set` does, with the
+  description and the project the request holds, under `name` when given, else the name it
+  holds; `refused` without a username when `takes_username`, and as `vault.set`; `refused` with
+  `` `<name>` is used by the project <other>: choose another name`` (`every project` for a global
+  entry) when an entry of that name exists and is not the project's: a request never changes an
+  existing entry's project; `not-found` when no such request is open. Each agent that asked is
+  handed a `vault` delivery, `the user set the vault entry <name>`, which says the project's
+  setting still names the entry asked when the user chose another name.
+- `vault.ask_dismiss {ask}` closes it, answers `{"dismissed": <request>}`, and hands each agent
+  `the user dismissed the request …`. The entry is not asked for again by this project until the
+  project's settings change (`project.changed`) or the entry is set (`vault.changed`).
 
 ### The skill methods
 
@@ -1608,8 +1628,10 @@ An entry is `{"seq", "at", "kind", "agent", "project", "workspace", "text"}`, ma
 a root agent (`docs/events.md`): `report` (`agent.reported`, `text` its report), `question`
 (`agent.asked` to the user, `text` its question), `failure` (`agent.failed`, `text` its reason) or
 `paused` (`session.following_paused`: two sessions talk to each other without the user, `text` says
-which and how to resume; `agent` is the followed session). A pause that resumed since is
-`"resolved": true`, its `text` ending `It has resumed since.`
+which and how to resume; `agent` is the followed session) or `vault` (`vault.asked`, `text` the
+entry, its project and the agent's reason). A pause that resumed since is `"resolved": true`, its
+`text` ending `It has resumed since.`; a request for a vault entry the user answered is
+`"resolved": true` too.
 A child's own go to its parent and are not here. Without `after`, the last `limit` entries (50 by
 default); with it, the first `limit` entries numbered after it. Nothing is marked read: the inbox
 is a view of the stored events.

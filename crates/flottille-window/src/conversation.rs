@@ -105,6 +105,10 @@ pub enum Block {
     Asked {
         text: String,
     },
+    /// The agent asked the user for a vault entry a feature of Flottille names and that is
+    /// missing (`vault.asked`): what Flottille prefilled and the agent's reason. `open` until the
+    /// daemon says it was answered (`vault.ask_answered`).
+    VaultAsk(VaultAsk),
     /// A command's result.
     Command(CommandCard),
     /// A request whose answer came as a card below: the line that told it was asked and decided
@@ -112,6 +116,22 @@ pub enum Block {
     Answered {
         number: u64,
     },
+}
+
+/// A request for a vault entry, as its card shows it: never a secret.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VaultAsk {
+    /// The number of its `vault.asked` event: the request's number.
+    pub seq: u64,
+    pub name: String,
+    pub project: String,
+    pub description: String,
+    pub takes_username: bool,
+    /// Why the name cannot be set for the project, as the daemon refuses with it: another
+    /// project uses it.
+    pub taken: Option<String>,
+    pub why: String,
+    pub open: bool,
 }
 
 /// A link an agent handed the user: one line of a card of links. `whence` is the address's host,
@@ -879,6 +899,34 @@ impl Conversation {
                     text: text("question"),
                 }));
                 changes
+            }
+            "vault.asked" => {
+                let mut changes = self.close(Some(event.at));
+                changes.extend(self.push(Block::VaultAsk(VaultAsk {
+                    seq: event.seq,
+                    name: text("name"),
+                    project: text("project"),
+                    description: text("description"),
+                    takes_username: data["takes_username"] == true,
+                    taken: data["taken"].as_str().map(str::to_owned),
+                    why: text("why"),
+                    open: true,
+                })));
+                changes
+            }
+            "vault.ask_answered" => {
+                let at = self.blocks.iter().position(
+                    |block| matches!(block, Block::VaultAsk(ask) if data["ask"] == ask.seq),
+                );
+                match at {
+                    Some(at) => {
+                        if let Block::VaultAsk(ask) = &mut self.blocks[at] {
+                            ask.open = false;
+                        }
+                        vec![Change::Changed(at)]
+                    }
+                    None => Vec::new(),
+                }
             }
             "approval.requested" if data["held_by"] == "user" => {
                 let number = data["number"].as_u64().unwrap_or(0);
