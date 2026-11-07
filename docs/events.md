@@ -166,6 +166,16 @@ secret.
 | `project` | The only project whose agents see it, `null` for every project. |
 | `removed` | `true` when it was removed; absent when it was set. |
 
+### `vault.asked`, `vault.ask_joined`, `vault.ask_answered`
+
+An agent asked the user for a vault entry a feature of Flottille names and that is missing
+(`vault {action: "ask"}`, `docs/vault.md`, "Asking the user for an entry"), an event of that
+agent. `vault.asked` opens the request, numbered by its `seq`: `agent`, `project`, `name`, `why`
+(the agent's reason), and what Flottille prefilled, `description` and `takes_username`.
+`vault.ask_joined` is another agent's ask while it is open: `agent`, `ask` (the request's
+number), `project`, `name`, `why`. `vault.ask_answered`, an event of the agent that opened it,
+closes it: `ask`, `project`, `name`, `outcome` (`set` or `dismissed`). Never a secret.
+
 ### `workspace.created`
 
 A workspace was written, before anything is made on disk (`docs/workspaces.md`). Every event of a
