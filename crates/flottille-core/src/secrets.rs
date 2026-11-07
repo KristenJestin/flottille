@@ -2,9 +2,36 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::sync::RwLock;
 
 /// What a secret is replaced by.
 pub const MASK: &str = "[masked]";
+
+/// The values of the vault's entries (`docs/vault.md`): masked by every `Secrets` of this
+/// process, whatever else it masks, so that no text the daemon stores or shows holds one.
+static VAULT: RwLock<Vec<String>> = RwLock::new(Vec::new());
+
+/// The shortest secret the vault keeps: a shorter one is too likely to be an ordinary word, and
+/// masking it would mask that word everywhere.
+pub const VAULT_SHORTEST: usize = 6;
+
+/// Masks `value` from now on, in every text of this process.
+pub fn add_vault_value(value: &str) {
+    let mut values = VAULT
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !values.iter().any(|known| known == value) {
+        values.push(value.to_owned());
+    }
+}
+
+/// Stops masking `value` for the vault: its entry was replaced or removed.
+pub fn forget_vault_value(value: &str) {
+    VAULT
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|known| known != value);
+}
 
 /// Parts of a variable's name that say its value is a secret (`PASS` covers `PASSWORD` and
 /// `PASSWD`, `KEY` covers `API_KEY` and `PRIVATE_KEY`).
@@ -58,6 +85,13 @@ impl Secrets {
             .iter()
             .filter(|value| value.len() >= 6)
             .cloned()
+            .chain(
+                VAULT
+                    .read()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .iter()
+                    .cloned(),
+            )
             .chain(
                 env.iter()
                     .filter_map(|(name, value)| Some((name.to_str()?, value.to_str()?)))

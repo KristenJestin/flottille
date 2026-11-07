@@ -86,13 +86,17 @@ const SIGN_INS: [&str; 7] = [
 /// listing counts (`names_in`).
 const HARNESS_FILE: &str = "tool-results.toml";
 
+/// The other file `User::new` writes there: the vault's keyring is the daemon's memory, never the
+/// user's own keyring (`docs/vault.md`).
+const KEYRING_FILE: &str = "keyring.toml";
+
 /// The names in a folder, without the file the harness itself wrote there: what a test asks is
 /// what the daemon left, not what `User::new` put.
 pub fn names_in(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|name| name != HARNESS_FILE)
+        .filter(|name| name != HARNESS_FILE && name != KEYRING_FILE)
         .collect();
     names.sort();
     names
@@ -136,6 +140,7 @@ impl User {
             .create(&file)
             .unwrap();
         std::fs::write(file.join(HARNESS_FILE), "limit = \"off\"\n").unwrap();
+        std::fs::write(file.join(KEYRING_FILE), "backend = \"memory\"\n").unwrap();
         user
     }
 

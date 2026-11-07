@@ -698,7 +698,13 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
     let now = now_ms();
     let depth = new.parent.as_ref().map_or(0, |(_, depth)| depth + 1);
     let at_depth_limit = depth >= DEPTH_LIMIT;
-    let tools = tools_of(provider, project, new.parent.is_none(), depth);
+    let tools = tools_of(
+        provider,
+        project,
+        new.parent.is_none(),
+        depth,
+        crate::vault::seen_by(daemon, &project.name),
+    );
     let files = roles::project_files(&project.folder, &repositories);
     let skills: Vec<(String, String)> = project
         .skills
@@ -1045,13 +1051,21 @@ pub fn forget_kept_sessions(daemon: &Daemon) {
 }
 
 /// The tools of an agent of `project`, a root or a child at `depth`, as its provider names them:
-/// what its role has in the project as it is now.
-pub fn tools_of(provider: &Provider, project: &Project, root: bool, depth: u32) -> Vec<String> {
+/// what its role has in the project as it is now, and whether the project sees an entry of the
+/// vault.
+pub fn tools_of(
+    provider: &Provider,
+    project: &Project,
+    root: bool,
+    depth: u32,
+    vault: bool,
+) -> Vec<String> {
     provider.tools(
         root,
         depth >= DEPTH_LIMIT,
         project.repositories.iter().any(|r| r.forge.is_some()),
         project.tracker.is_some(),
+        vault,
     )
 }
 

@@ -105,7 +105,7 @@ const REPLACED: &str = "refused: this session has been replaced: a new session o
 
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
 /// the order frozen in the agent.
-const SERVED: [Definition; 29] = [
+const SERVED: [Definition; 30] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -587,6 +587,22 @@ const SERVED: [Definition; 29] = [
                     {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"], "additionalProperties": false}
                 ]},
                 "ask_before_running": {"type": "boolean", "description": "add, edit: held for approval each time an agent starts it, itself or as a need."}
+            }, "required": ["action"], "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "vault",
+        title: "The user's vault",
+        description: "The secrets the user keeps for agents (a tracker's token, a test \
+            account's login): list gives each entry's name, what it is for, its URL and its \
+            username. A secret is never shown: a tool of Flottille's that needs one takes the \
+            entry's name and puts the secret where it goes itself. {\"action\": \"list\"}.",
+        read_only: true,
+        idempotent: true,
+        destructive: false,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["list"]}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
@@ -1397,7 +1413,13 @@ pub fn grant_of(daemon: &Daemon, agent: &Agent) -> Result<Grant, String> {
 /// changed.
 pub fn with_tools_now(daemon: &Daemon, agent: &Agent, project: &Project) -> Option<Agent> {
     let provider = providers::of(agent).ok()?;
-    let tools = crate::agents::tools_of(provider, project, agent.parent.is_none(), agent.depth);
+    let tools = crate::agents::tools_of(
+        provider,
+        project,
+        agent.parent.is_none(),
+        agent.depth,
+        crate::vault::seen_by(daemon, &project.name),
+    );
     // The same tools in another order are the same list: a new order would only cost the
     // session its prompt cache.
     let (now, had): (HashSet<&String>, HashSet<&String>) =
@@ -2870,6 +2892,7 @@ async fn performed_once(
         "forge" => crate::forge::forge(daemon, &grant.agent, &grant.place, args).await,
         "tickets" => crate::tickets::tickets(daemon, &grant.agent, &grant.place, args).await,
         "wake" => crate::subscriptions::wake(daemon, &grant.agent, args),
+        "vault" => crate::vault::tool(daemon, grant, args),
         tool if tree::TOOLS.contains(&tool) => tree::call(daemon, grant, tool, args).await,
         tool if crate::actions::TOOLS.contains(&tool) => {
             crate::actions::perform(daemon, grant, tool, args).await
@@ -3054,10 +3077,10 @@ mod tests {
             let name = format!("mcp__flottille__{}", definition.name);
             assert!(
                 claude::PROVIDER
-                    .tools(true, false, true, true)
+                    .tools(true, false, true, true, false)
                     .contains(&name)
                     || claude::PROVIDER
-                        .tools(false, false, true, true)
+                        .tools(false, false, true, true, false)
                         .contains(&name),
                 "{} is a tool agents get",
                 definition.name
@@ -3067,7 +3090,7 @@ mod tests {
 
     #[test]
     fn a_grant_holds_the_agent_s_served_tools_in_its_own_order() {
-        let mut leaf = claude::PROVIDER.tools(false, true, true, true);
+        let mut leaf = claude::PROVIDER.tools(false, true, true, true, false);
         assert_eq!(served(&claude::PROVIDER, &leaf).len(), 17);
         leaf.reverse();
         leaf.retain(|tool| !tool.ends_with("__search"));
@@ -3092,7 +3115,7 @@ mod tests {
         let lead = ["mcp__flottille__agent_status", "mcp__flottille__report"].map(String::from);
 
         for stored in [&worker[..], &lead[..]] {
-            let given = claude::PROVIDER.tools(false, false, true, true);
+            let given = claude::PROVIDER.tools(false, false, true, true, false);
             assert!(stored.iter().all(|tool| given.contains(tool)), "{stored:?}");
         }
         let served_worker = served(&claude::PROVIDER, &worker);
@@ -3429,7 +3452,7 @@ mod tests {
             ("a child", false, false),
             ("a child at the depth limit", false, true),
         ] {
-            let list = claude::PROVIDER.tools(root, at_depth_limit, true, true);
+            let list = claude::PROVIDER.tools(root, at_depth_limit, true, true, false);
             let names = served(&claude::PROVIDER, &list);
             assert!(
                 names.len() <= TOOLS,
