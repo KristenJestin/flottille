@@ -901,8 +901,22 @@ subscriptions, its requests and what waits for it are the agent's, not its sessi
 While the compactor works the agent's prompts wait (a delivery stays `queued`), and go to the new
 session after its first prompt. A failure changes nothing.
 
-With a compactor chosen, each CLI is left to compact as late as it allows, never turned off, so
-that its own compaction acts only when Flottille's could not:
+When the agents write their own handoff (`summary = "agent"`, `docs/design.md` §5.8, 7) with
+**Automatic** on, a handoff that fails still starts a new session, so each CLI's own compaction is
+turned off where it can be:
+
+- **Claude Code**: `DISABLE_COMPACT=1` in the bridge's environment, and so in `claude`'s, turns
+  off its automatic compaction, its compaction while idle and `/compact` (Claude Code's
+  environment variables). `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` is then not set.
+- **OpenCode**: `compaction.auto = false` in the configuration Flottille gives it.
+- **Codex**: it cannot be turned off. `model_auto_compact_token_limit` is clamped to 90 % of the
+  model's window, so Codex keeps its own compaction at 90 %; with a threshold of 90 % or more,
+  Codex may compact before Flottille asks, and its compaction is said as the CLI's own
+  (`compact_boundary`, a brief sent again to a child).
+
+The setting is read when the agent's process starts: a change reaches an agent at its next one.
+Otherwise, with a compactor chosen, each CLI is left to compact as late as it allows, never
+turned off, so that its own compaction acts only when Flottille's could not:
 
 - **Claude Code**: its threshold is a share of the window (about 95 %, the window less a reserve
   for the summary); `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` can only bring it down, never up (Claude

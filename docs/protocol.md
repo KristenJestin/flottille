@@ -365,8 +365,9 @@ Each emits `judge.changed`. The user's door alone reaches them: no tool of an ag
 `compaction.md` beside it, absent while Flottille's default (`crates/flottille/roles/compaction.md`)
 holds. The guidance sits inside a fixed text (`crates/flottille/roles/compactor-base.md`).
 
-- `compaction.show` answers `{"compactor", "automatic", "threshold", "maximum", "kept",
-  "guidance"}`: the compactor `{"provider", "model", "effort", "picked"}` (`model` and `effort`
+- `compaction.show` answers `{"compactor", "summary", "automatic", "threshold", "maximum", "kept",
+  "guidance"}`: who writes the summary (`compactor`, the default, or `agent`: the agent's own
+  handoff, `docs/design.md` §5.8, 7), the compactor `{"provider", "model", "effort", "picked"}` (`model` and `effort`
   only when chosen, `picked` only while the user has not seen the notice of a compactor Flottille
   picked) or `null` for none, whether it compacts by itself (default `true`), the threshold in
   percent of the context window (default 70), the maximum size in tokens (`null`, the default, is
@@ -380,7 +381,7 @@ holds. The guidance sits inside a fixed text (`crates/flottille/roles/compactor-
   minutes (default 5), `after_expiry` (default `true`), `minimum` in tokens (default 50000), and
   `lifetimes`, each provider's cache lifetime in seconds, `null` where it is not established.
 - `compaction.set` takes any of `compactor` (`{"provider", "model", "effort"}`, or `"none"`),
-  `automatic` (a boolean), `threshold` (50 to 95), `maximum` (a number of tokens from 20000, or
+  `summary` (`"compactor"` or `"agent"`), `automatic` (a boolean), `threshold` (50 to 95), `maximum` (a number of tokens from 20000, or
   `"none"`), `kept` (0 to 50000, and never more than a quarter of the size that compacts the
   agent), `before_expiry` and `after_expiry` (booleans), `margin` (1 to 30 minutes) and `minimum`
   (0 to 1000000 tokens); what is left out stays. It answers as `compaction.show`;

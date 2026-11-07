@@ -57,6 +57,8 @@ pub struct Compaction {
     pub compactor: Option<(String, Option<String>, Option<String>)>,
     /// Flottille picked it and the user has not seen the notice yet.
     pub picked: bool,
+    /// The agents write their own handoff, not the compactor.
+    pub by_agent: bool,
     pub automatic: bool,
     /// Percent of the model's context window.
     pub threshold: u64,
@@ -82,6 +84,7 @@ impl Compaction {
         Compaction {
             compactor: text("provider").map(|provider| (provider, text("model"), text("effort"))),
             picked: compactor["picked"] == true,
+            by_agent: value["summary"] == "agent",
             automatic: value["automatic"] != false,
             threshold: value["threshold"].as_u64().unwrap_or(70),
             maximum: value["maximum"].as_u64(),
@@ -125,9 +128,10 @@ fn provider_title(provider: &str) -> &str {
 }
 
 /// What the Compaction tab says under its title.
-const COMPACTION_SENTENCE: &str = "When an agent's context fills up, the compactor writes a \
-     summary of its conversation, and the agent goes on in a new session from its brief, the \
-     summary and its latest messages. With None, each agent's program compacts on its own.";
+const COMPACTION_SENTENCE: &str = "When an agent's context fills up, the compactor or the \
+     agent itself writes a summary of its conversation, and the agent goes on in a new session \
+     from its brief and the summary. With the compactor set to None, each agent's program \
+     compacts on its own.";
 
 /// What the compactor's picker calls no compactor.
 pub const NO_COMPACTOR: &str = "None (each program compacts on its own)";
@@ -499,6 +503,7 @@ impl SettingsPage {
         let shown = self.compaction.clone().unwrap_or(Compaction {
             compactor: None,
             picked: false,
+            by_agent: false,
             automatic: true,
             threshold: 70,
             maximum: None,
@@ -588,7 +593,28 @@ impl SettingsPage {
                     .ok();
                 }
             });
-        let some = shown.compactor.is_some();
+        let some = shown.compactor.is_some() || shown.by_agent;
+        let summary = Select::new(
+            "compaction-summary",
+            [
+                SelectOption::new("compactor", "The compactor")
+                    .line("A model of your choice summarises the conversation."),
+                SelectOption::new("agent", "The agent itself")
+                    .line("Flottille asks the agent for its handoff, and turns its program's own compaction off where it can."),
+            ],
+            usize::from(shown.by_agent),
+        )
+        .disabled(off)
+        .on_choose({
+            let this = this.clone();
+            move |index, _, cx| {
+                let source = if index == 1 { "agent" } else { "compactor" };
+                this.update(cx, |this, cx| {
+                    this.set_compaction(json!({"summary": source}), cx)
+                })
+                .ok();
+            }
+        });
         let automatic = Switch::new("compaction-automatic", shown.automatic, "Compact automatically")
             .hint("On, an agent is compacted at the end of a turn once its context passes the threshold or the maximum size. Off, only when you ask, from a session's menu.")
             .disabled(off)
@@ -766,7 +792,15 @@ impl SettingsPage {
             .bg(p.card)
             .border_1()
             .border_color(p.line)
-            .child(Field::new("compactor-field", "Compactor", picker))
+            .child(
+                Field::new("compaction-summary-field", "Summary written by", summary)
+                    .hint("The compactor, or the agent itself in a handoff of a fixed shape."),
+            )
+            .child(
+                div()
+                    .pt(space::MD)
+                    .child(Field::new("compactor-field", "Compactor", picker)),
+            )
             .child(
                 presence(
                     "compaction-settings-block",
