@@ -65,8 +65,8 @@ daemon puts the secret where it goes itself (an HTTP header, a command's standar
 field), with `vault::secret`, which only a tool's own code calls and whose value never leaves that
 use. It never waits for the user: an item of a locked keyring is answered at once that the keyring
 is locked and the user must unlock it, and a keyring that does not answer within 3 seconds is
-answered the same. The first users come with their own issues: `tickets log_time` (#383) and the
-Browser extension.
+answered the same. The first users: `tickets log_time` (`docs/tickets.md`, "Logging time") and the
+Browser extension, which comes with its own issue.
 
 ## The tests' keyring
 

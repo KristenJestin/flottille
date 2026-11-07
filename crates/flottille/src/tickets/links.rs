@@ -298,7 +298,7 @@ pub(super) async fn types(project: &Project) -> Outcome {
              description)."
                 .into(),
         ),
-        Some(ProjectTracker::Jira { site, projects }) => match link_types_of(site).await {
+        Some(ProjectTracker::Jira { site, projects, .. }) => match link_types_of(site).await {
             Err(why) => Outcome::Failed(why),
             Ok(types) => {
                 let first = projects.first().map_or("ABC", String::as_str);

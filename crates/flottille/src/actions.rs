@@ -335,6 +335,12 @@ pub async fn prepared(
             return Err(Outcome::Refused(why));
         }
         let mut says = posted_says(args);
+        // The time a worklog logs, and on which ticket; a vault entry that is not there is
+        // refused here, before the user is asked.
+        says.extend(
+            crate::tickets::worklog_says(daemon, &grant.place, &project, args)
+                .map_err(Outcome::Refused)?,
+        );
         // The labels, which the user reads whole; the sprint as the site names it.
         for (key, said) in [
             ("labels", "It adds the labels"),
@@ -582,7 +588,7 @@ pub async fn approved_losses(
 fn posted_says(args: &Value) -> Vec<String> {
     if matches!(
         args["action"].as_str(),
-        Some("list" | "search" | "show" | "types" | "link_types" | "sprints") | None
+        Some("list" | "search" | "show" | "types" | "link_types" | "sprints" | "time_spent") | None
     ) {
         return Vec::new();
     }

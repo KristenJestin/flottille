@@ -1398,7 +1398,7 @@ async fn addresses(net: &Net, url: &Url) -> Result<Vec<SocketAddr>, Missed> {
     Ok(addresses)
 }
 
-trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
+pub(crate) trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
 
 /// One GET of the URL on one of its checked addresses: its status, where it redirects, and its
@@ -1509,7 +1509,7 @@ async fn get(
 }
 
 /// The TLS client: the system's certificates, built once.
-fn tls() -> Result<Arc<ClientConfig>, String> {
+pub(crate) fn tls() -> Result<Arc<ClientConfig>, String> {
     static CONFIG: OnceLock<Result<Arc<ClientConfig>, String>> = OnceLock::new();
     CONFIG
         .get_or_init(|| {

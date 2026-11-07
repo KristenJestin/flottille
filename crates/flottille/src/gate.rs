@@ -753,11 +753,14 @@ pub const FORGE_ACTIONS: &str = "list, show, subscribe, unsubscribe, create, com
      reopen, pipelines, runs, run_view, run_logs, run, stop and step";
 /// The actions of `tickets`, as a refusal names them.
 pub const TICKET_ACTIONS: &str = "list, search, show, types, link_types, sprints, subscribe, unsubscribe, create, comment, \
-     edit, close, reopen, status, link, unlink, comment_edit and comment_delete";
+     edit, close, reopen, status, link, unlink, comment_edit, comment_delete, log_time and \
+     time_spent";
 /// What `tickets close` closes for, as `gh issue close --reason` names it.
 pub const CLOSE_REASONS: [&str; 2] = ["completed", "not planned"];
 /// The arguments of `tickets` that belong to `edit` or `close` alone.
-const TICKET_ONLY: [(&str, &str); 4] = [
+const TICKET_ONLY: [(&str, &str); 6] = [
+    ("duration", "log_time"),
+    ("started", "log_time"),
     ("reason", "close"),
     ("remove_labels", "edit"),
     ("assignees", "edit"),
@@ -773,9 +776,18 @@ fn tickets(call: &Call) -> Verdict {
     let shown = |key: &str| crate::mcp::masked(&words(key), &call.grant.place);
     let said = match action {
         "list" | "search" | "show" | "types" | "link_types" | "sprints" | "subscribe"
-        | "unsubscribe" => {
+        | "unsubscribe" | "time_spent" => {
             return Verdict::Allow;
         }
+        "log_time" => format!(
+            "it logs {} on {} on the tracker, started {}",
+            shown("duration"),
+            shown("ticket"),
+            call.args["started"].as_str().map_or_else(
+                || "that long before it is logged".to_owned(),
+                |_| shown("started")
+            )
+        ),
         // The link as the ticket named reads it, so that the card says its direction.
         "link" => format!(
             "it links two tickets on the tracker: {} {} {}",
@@ -818,7 +830,7 @@ fn tickets(call: &Call) -> Verdict {
         }
     };
     let none: &[&str] = match action {
-        "comment" | "comment_edit" => &["title"],
+        "comment" | "comment_edit" | "log_time" => &["title"],
         "close" | "reopen" | "status" | "link" | "unlink" | "comment_delete" => &["title", "body"],
         _ => &[],
     };

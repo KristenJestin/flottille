@@ -2487,7 +2487,8 @@ line = \"serve\"
             project.tracker,
             Some(ProjectTracker::Jira {
                 site: "example.atlassian.net".into(),
-                projects: vec!["ABC".into()]
+                projects: vec!["ABC".into()],
+                worklog_token: None,
             })
         );
         // What is read is written back the same.

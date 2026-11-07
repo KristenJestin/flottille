@@ -2779,6 +2779,19 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The turns of a session, each once whatever the models it used: its agent and its start and
+    /// end, in milliseconds.
+    pub fn turns_of_session(&self, session: &str) -> Result<Vec<(String, u64, u64)>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT agent, started_at, ended_at FROM turn_usage WHERE session = ?1 \
+             GROUP BY agent, started_at, ended_at ORDER BY started_at",
+        )?;
+        let rows = statement.query_map(params![session], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// The agent's deliveries `sending` become `sent`: the turn that held them ended.
     pub fn deliveries_taken(&self, agent: &str) -> Result<()> {
         self.connection.execute(
