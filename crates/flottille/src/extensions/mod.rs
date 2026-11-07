@@ -68,9 +68,11 @@ pub struct Extension {
     pub tools: &'static [Tool],
     /// Whether the agent is a session it started (`start_session`).
     pub started: fn(&Daemon, &str) -> bool,
-    /// The Core event trigger: the events of the core it hears (`item.changed`, `agent.ended`…),
-    /// each with its handler, called once the event is stored. A handler wakes no agent but
-    /// through a delivery (`tell`).
+    /// The Core event trigger: the events of the core it hears (`item.changed`, `agent.ended`,
+    /// `agent.resumed`…), each with its handler, called once the event is stored, on the thread
+    /// that stored it: the request that caused it (`agent.stop`, `agent.resume`) answers after the
+    /// handlers ran, so a handler stays short. A handler wakes no agent but through a delivery
+    /// (`tell`).
     pub heard: &'static [(&'static str, Handler)],
     /// What it adds to what the core says of an agent (`agent.tree`'s `extensions.<name>`), or
     /// nothing.

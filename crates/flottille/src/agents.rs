@@ -244,6 +244,13 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             if waited {
                 crate::tree::answered(daemon, &agent.id, "resumed");
             }
+            crate::extensions::heard(
+                daemon,
+                &[(
+                    "agent.resumed",
+                    json!({"agent": agent.id, "project": agent.project}),
+                )],
+            );
             tell_resumed(daemon, &agent, ended_at);
             Ok(json!({"agent": agent.to_json()}))
         }
