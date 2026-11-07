@@ -1261,9 +1261,110 @@ struct StopChild {
     agent_id: String,
 }
 
+/// What `agent_stop` names: one of the caller's children, stopped at once as ever, or a live
+/// session of its project, ended only once the user allowed it, every time.
+enum Stopped {
+    Child(Agent),
+    Session(Agent),
+}
+
+/// What `agent_stop` ends, or the refusal, before anything is asked: the caller itself, a child
+/// of another session, a session of another project, an unknown id or a session that ended.
+fn stopped(daemon: &Daemon, caller: &Agent, id: &str) -> Result<Stopped, Outcome> {
+    let found = daemon.read(|store| store.agent(id)).map_err(failed)?;
+    match found {
+        None => Err(refused(format!(
+            "refused: {id} names no agent: agent_stop ends one of your children or a session of \
+             your project, named by its agent id"
+        ))),
+        Some(agent) if agent.parent.as_deref() == Some(caller.id.as_str()) => {
+            Ok(Stopped::Child(agent))
+        }
+        Some(agent) if agent.id == caller.id => Err(refused(format!(
+            "refused: {id} is your own session: agent_stop ends another; end your turn instead"
+        ))),
+        Some(agent) if agent.parent.is_some() => Err(refused(format!(
+            "refused: {id} is a child of another session: it is stopped by its parent, never by \
+             you"
+        ))),
+        Some(agent) if agent.project != caller.project => Err(refused(format!(
+            "refused: {id} is a session of another project, {}, not of {}: an agent ends only \
+             the sessions of its own project",
+            agent.project, caller.project
+        ))),
+        Some(agent) if agent.state.is_final() => Err(refused(format!(
+            "refused: {} has {} already",
+            named(&agent),
+            agent.state.as_str()
+        ))),
+        Some(agent) => Ok(Stopped::Session(agent)),
+    }
+}
+
+fn caller_of(daemon: &Daemon, grant: &Grant) -> Result<Agent, Outcome> {
+    daemon
+        .read(|store| store.agent(&grant.agent))
+        .map_err(failed)?
+        .ok_or_else(|| failed(format!("there is no agent {}", grant.agent)))
+}
+
+/// What `agent_stop` does, in words, for a session the user is asked to end: the session, where
+/// it works, who started it, and what ending does; nothing for a child, stopped as ever. A call
+/// that names nothing it may end is the refusal, before anything is asked.
+pub fn stop_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<String>, Outcome> {
+    let asked: StopChild = arguments("agent_stop", args.clone())?;
+    let caller = caller_of(daemon, grant)?;
+    let Stopped::Session(session) = stopped(daemon, &caller, &asked.agent_id)? else {
+        return Ok(Vec::new());
+    };
+    let place = match &session.workspace {
+        Some(name) => format!("the workspace {name}"),
+        None => "main".to_owned(),
+    };
+    let starter = match session.launched_by.as_deref() {
+        Some(id) if id == caller.id => "this agent".to_owned(),
+        None => "you, not by this agent".to_owned(),
+        Some(id) => match daemon.read(|store| store.agent(id)) {
+            Ok(Some(agent)) => format!("{}, not by this agent", named(&agent)),
+            _ => format!("agent {id}, not by this agent"),
+        },
+    };
+    Ok(vec![format!(
+        "End the session {}, in {place}, started by {starter}: its tree, its runs and what was \
+         queued for it are stopped; its workspace stays",
+        named(&session)
+    )])
+}
+
+/// Whether an `agent_stop` ends a session rather than one of the caller's children: the user
+/// is asked, every time, in every mode (`gate::end_session`).
+pub fn ends_session(daemon: &Daemon, grant: &Grant, args: &Value) -> bool {
+    let Ok(asked) = serde_json::from_value::<StopChild>(args.clone()) else {
+        return false;
+    };
+    caller_of(daemon, grant)
+        .and_then(|caller| stopped(daemon, &caller, &asked.agent_id))
+        .is_ok_and(|stopped| matches!(stopped, Stopped::Session(_)))
+}
+
+/// `agent_stop`: one of the caller's children, or, once the user allowed it, a session of its
+/// project, ended as the window's "End session" ends it.
 fn stop(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     let asked: StopChild = arguments("agent_stop", args)?;
-    let child = child_of(daemon, caller, &asked.agent_id)?;
+    let child = match stopped(daemon, caller, &asked.agent_id)? {
+        Stopped::Child(child) => child,
+        Stopped::Session(session) => {
+            let reason = format!(
+                "ended at the request of the session {}, allowed by you",
+                named(caller)
+            );
+            stop_tree(daemon, &session.id, &reason);
+            return Ok(Outcome::Done(format!(
+                "Ended the session {} with its tree. Its workspace stays.",
+                named(&session)
+            )));
+        }
+    };
     if child.state.is_final() {
         return Ok(Outcome::Done(format!(
             "{} has {} already.",

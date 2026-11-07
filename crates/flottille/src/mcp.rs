@@ -718,10 +718,12 @@ const SERVED: [Definition; 31] = [
     },
     Definition {
         name: "agent_stop",
-        title: "Stop a child",
+        title: "Stop a child or end a session",
         description: "Stops one of your children with its own children, deepest first; what was \
             queued for them is dropped. Use it once its report is acted on, or to end a child \
-            going in circles. Its workspace stays.",
+            going in circles. It also asks to end any session of your project (one you started \
+            for the user, or another): the user decides every time, the result comes later. \
+            Workspaces stay.",
         read_only: false,
         idempotent: true,
         destructive: true,
@@ -2212,6 +2214,7 @@ async fn played_in(
                             _ if mode == GateMode::Full
                                 && !removes_own_workspace(grant, tool, &args)
                                 && !gate::asks_leave(&ask)
+                                && !gate::asks_end(&ask)
                                 && !crate::services::stops(tool, &args)
                                 && !gate::asks_review(&ask) =>
                             {
@@ -2426,6 +2429,9 @@ fn verdict_of(
             Ok(true) => return gate::session_leave(grant, args),
             Ok(false) => {}
         }
+    }
+    if tool == "agent_stop" && crate::tree::ends_session(daemon, grant, args) {
+        return gate::end_session();
     }
     // A new workspace's launch is classified by its steps below, but its brief is held to the
     // judge's limit like any other launch's.

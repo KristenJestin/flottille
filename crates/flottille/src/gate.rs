@@ -546,6 +546,24 @@ pub fn session_leave(grant: &Grant, args: &Value) -> Verdict {
     found.verdict(Kind::Action)
 }
 
+/// Why `agent_stop` of a session that is not the caller's child comes to the user, every time:
+/// it ends the user's other conversation, and no leave is kept.
+pub const END_SESSION: &str = "it ends a session of the user's, not one of this agent's \
+    children: the user decides, every time, in every mode, Full included";
+
+/// `agent_stop` of a session that is not the caller's child: base, never judged, and held in
+/// Full (`asks_end`).
+pub fn end_session() -> Verdict {
+    let mut found = Found::default();
+    found.base(END_SESSION.into());
+    found.verdict(Kind::Action)
+}
+
+/// Whether a held call ends a session that is not the caller's child: only the user answers it.
+pub fn asks_end(ask: &Ask) -> bool {
+    ask.reasons.iter().any(|reason| reason == END_SESSION)
+}
+
 /// Whether a held call asks the user's leave for a pair of sessions: only the user answers it.
 pub fn asks_leave(ask: &Ask) -> bool {
     ask.reasons.iter().any(|reason| reason == LEAVE)
