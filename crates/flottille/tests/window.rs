@@ -2697,6 +2697,67 @@ fn the_judge_section_shows_a_guidance_it_cannot_follow_and_follows_an_edit_made_
     cx.update(|window, _| assert!(window.try_find("judge-guidance-error").is_none()));
 }
 
+/// A connector whose first connection by the window's link waits until `release` is set, as a
+/// loaded machine makes it wait: the pages read on connections of their own meanwhile.
+fn link_held_until(user: &User, release: Arc<AtomicBool>) -> Connect {
+    let connector = user.connector();
+    let first = AtomicBool::new(true);
+    Arc::new(move || {
+        let is_link = std::thread::current().name() == Some("flottille-link");
+        if is_link && first.swap(false, Ordering::SeqCst) {
+            let until = Instant::now() + Duration::from_secs(20);
+            while !release.load(Ordering::SeqCst) && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        connector()
+    })
+}
+
+#[gpui_kit::test]
+fn an_edit_made_before_the_link_listens_is_shown(cx: &mut TestAppContext) {
+    let user = user();
+    let release = Arc::new(AtomicBool::new(false));
+    let (shell, cx) = window(&user, link_held_until(&user, release.clone()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(2400.)));
+    let page = open_settings(&shell, cx);
+    let judge = page.read_with(cx, |page, _| page.judge_guidance().clone());
+    let rules = page.read_with(cx, |page, _| page.rules().clone());
+    until(&shell, cx, "the page read the texts", |cx| {
+        judge.read_with(cx, |e, _| e.shown().is_some())
+            && rules.read_with(cx, |e, _| e.shown().is_some())
+    });
+    let seen = shell.read_with(cx, |shell, _| shell.seen().clone());
+    assert_eq!(
+        seen.connections.load(Ordering::SeqCst),
+        0,
+        "the link has not connected yet"
+    );
+
+    // From the command line: no event of the link's, which does not listen yet.
+    user.call("judge.set", json!({"text": "Ask about every migration."}))
+        .unwrap();
+    user.call("rules.set", json!({"text": "Write tests first."}))
+        .unwrap();
+    release.store(true, Ordering::SeqCst);
+
+    until(&shell, cx, "the window follows the events", |cx| {
+        shell.read_with(cx, |shell, _| shell.snapshot() == &fresh(&user))
+    });
+    until(&shell, cx, "the guidance shows the edit", |cx| {
+        judge.read_with(cx, |e, cx| {
+            e.typed(cx).as_deref() == Some("Ask about every migration.")
+        })
+    });
+    // An editor is drawn only on its own tab: the rules follow the edit once it is shown.
+    choose_settings_tab("rules", cx);
+    until(&shell, cx, "the rules show the edit", |cx| {
+        rules.read_with(cx, |e, cx| {
+            e.typed(cx).as_deref() == Some("Write tests first.")
+        })
+    });
+}
+
 #[gpui_kit::test]
 fn the_judge_s_model_picker_names_the_provider_s_default_model_once_it_is_known(
     cx: &mut TestAppContext,
