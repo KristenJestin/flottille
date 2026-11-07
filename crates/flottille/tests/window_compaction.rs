@@ -456,3 +456,70 @@ fn unticking_the_toggle_sends_without_compacting(cx: &mut TestAppContext) {
     });
     assert_eq!(compactions(&user, &id), 0);
 }
+
+const HANDOFF: &str = "## Task\nAdd the login page.\n## About to do\nWire the form.";
+
+#[gpui_kit::test]
+fn the_conversation_shows_one_divider_with_the_sizes_and_the_summary_folded(
+    cx: &mut TestAppContext,
+) {
+    // The agent writes its own handoff (#405): no compactor.
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "flottille:handoff", "do": [{"say": HANDOFF}]},
+        {"when": "FULL", "times": 1, "do": [{"say": "Done."}, {"usage": {"used": 192_000, "size": 200_000}}]},
+        {"when": "your_handoff", "do": [{"say": "Picking up."}, {"usage": {"used": 9_000, "size": 200_000}}]}
+    ]}));
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    std::fs::create_dir_all(user.path("config/flottille")).unwrap();
+    std::fs::write(
+        user.path("config/flottille/compaction.toml"),
+        "summary = \"agent\"\nthreshold = 90\n",
+    )
+    .unwrap();
+    let id = start(&user, "add the login page FULL");
+    eventually("the handoff", || {
+        user.call("agent.show", json!({"agent": id})).unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["name"] == "agent.compacted")
+    });
+    let (shell, cx) = window(&user, cx);
+
+    // The Compaction tab says who writes the summary, and keeps its settings without a compactor.
+    let page = open_compaction_tab(&shell, cx);
+    assert!(visible(cx, "compaction-summary"));
+    assert!(visible(cx, "compaction-threshold"));
+    page.read_with(cx, |p, _| {
+        assert!(p.compaction().is_some_and(|c| c.by_agent));
+    });
+
+    let session = open_session(&shell, &id, cx);
+    until(&shell, cx, "the line is in the conversation", |cx| {
+        compacted_row(&session, cx).is_some()
+    });
+    settle(cx);
+    let lines = session.read_with(cx, |page, cx| {
+        page.conversation()
+            .read(cx)
+            .blocks()
+            .iter()
+            .filter(|b| matches!(b, Block::Notice { kind, .. } if kind == "compacted"))
+            .count()
+    });
+    assert_eq!(lines, 1, "one divider");
+    let (at, _) = compacted_row(&session, cx).unwrap();
+    let line = label(cx, &format!("row-{at}-notice-summary")).unwrap();
+    assert!(
+        line.starts_with("Conversation compacted · 192k → "),
+        "{line}"
+    );
+    assert!(!present(cx, &format!("row-{at}-notice-text")), "folded");
+    cx.update(|window, cx| window.click(format!("row-{at}-notice-toggle"), cx));
+    one_frame(cx);
+    assert!(present(cx, &format!("row-{at}-notice-text")), "unfolding");
+    settle(cx);
+    let text = label(cx, &format!("row-{at}-notice-text")).unwrap();
+    assert!(text.contains("Wire the form."), "{text}");
+}
