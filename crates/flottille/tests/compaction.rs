@@ -600,3 +600,203 @@ fn a_secret_in_the_summary_is_masked() {
     });
     assert!(!prompts(&user).iter().any(|p| p.contains(SECRET)));
 }
+
+// The compaction around the expiry of the prompt cache (`docs/design.md` §5.8, "Around the
+// cache's expiry"). The agents stand for Claude, signed in without an API key here: their cache
+// lives an hour. The daemon's clock is moved ahead (`test.advance`).
+
+const MINUTE: u64 = 60_000;
+
+/// `user_with` a scripted summary, the threshold left out of the way and the daemon's clock moved
+/// by the test.
+fn clocked(settings: &str) -> User {
+    user_with(
+        json!([{"say": SUMMARY}]),
+        &format!("automatic = false\n{settings}"),
+    )
+    .with_env("FLOTTILLE_TEST_CLOCK", "1")
+}
+
+/// An agent whose first turn (`HALF`, 60k tokens of context) ended: its id.
+fn at_rest(user: &User) -> String {
+    let agent = session(user, "add the login page HALF");
+    eventually("the first turn's end", || turns_ended(user, &agent) == 1);
+    agent
+}
+
+fn advance(user: &User, ms: u64) {
+    user.call("test.advance", json!({"ms": ms})).unwrap();
+}
+
+#[test]
+fn an_agent_at_rest_is_compacted_the_margin_before_its_cache_expires() {
+    let user = clocked("before_expiry = true");
+    let agent = at_rest(&user);
+
+    advance(&user, 54 * MINUTE);
+    quiet(&user, &agent);
+    advance(&user, MINUTE);
+    eventually("the compaction", || !compacted(&user, &agent).is_empty());
+    assert_eq!(compacted(&user, &agent)[0]["before"], 60_000);
+    // Once: its new session is not compacted again while nothing grew.
+    eventually("the new session's first turn", || {
+        prompts(&user).iter().any(|p| p.contains(SUMMARY))
+    });
+    advance(&user, 61 * MINUTE);
+    std::thread::sleep(Duration::from_millis(1_500));
+    assert_eq!(compacted(&user, &agent).len(), 1);
+}
+
+#[test]
+fn an_agent_with_a_turn_running_is_not_compacted_before_expiry() {
+    let user = clocked("before_expiry = true");
+    let agent = at_rest(&user);
+
+    advance(&user, 54 * MINUTE);
+    send(&user, &agent, "hold on HANG");
+    eventually("the turn that runs", || {
+        prompts(&user).iter().any(|p| p.contains("hold on"))
+    });
+    advance(&user, 2 * MINUTE);
+    quiet(&user, &agent);
+}
+
+#[test]
+fn a_message_to_an_agent_whose_cache_expired_compacts_first() {
+    let user = clocked("");
+    let agent = at_rest(&user);
+
+    advance(&user, 61 * MINUTE);
+    // Said once, for the composer's toggle, ticked from the setting.
+    advance(&user, MINUTE);
+    let expired = events(&user, &agent, "agent.cache_expired");
+    assert_eq!(expired.len(), 1, "{expired:?}");
+    assert_eq!(expired[0]["compact"], true);
+    send(&user, &agent, "go on AFTER");
+    eventually("the compaction", || !compacted(&user, &agent).is_empty());
+    eventually("the message in the new session", || {
+        prompts(&user).iter().any(|p| p.contains("go on AFTER"))
+    });
+    assert_eq!(user.received_requests("session/new").len(), 2);
+    let given = prompts(&user);
+    let summary = given.iter().position(|p| p.contains(SUMMARY)).unwrap();
+    let message = given
+        .iter()
+        .position(|p| p.contains("go on AFTER"))
+        .unwrap();
+    assert!(summary <= message, "{given:#?}");
+}
+
+#[test]
+fn a_message_before_the_expiry_is_sent_as_it_is() {
+    let user = clocked("");
+    let agent = at_rest(&user);
+
+    advance(&user, 59 * MINUTE);
+    send(&user, &agent, "go on AFTER");
+    eventually("the next turn", || turns_ended(&user, &agent) == 2);
+    quiet(&user, &agent);
+    assert_eq!(user.received_requests("session/new").len(), 1);
+}
+
+#[test]
+fn below_the_minimum_size_neither_trigger_compacts() {
+    let user = clocked("before_expiry = true\nminimum = 100000");
+    let agent = at_rest(&user);
+
+    advance(&user, 61 * MINUTE);
+    quiet(&user, &agent);
+    send(&user, &agent, "go on AFTER");
+    eventually("the next turn", || turns_ended(&user, &agent) == 2);
+    quiet(&user, &agent);
+}
+
+#[test]
+fn unticking_the_toggle_sends_without_compacting() {
+    let user = clocked("");
+    let agent = at_rest(&user);
+
+    advance(&user, 61 * MINUTE);
+    user.call(
+        "agent.send",
+        json!({"agent": agent, "message": "go on AFTER", "compact": false}),
+    )
+    .unwrap();
+    eventually("the next turn", || turns_ended(&user, &agent) == 2);
+    quiet(&user, &agent);
+}
+
+#[test]
+fn ticking_the_toggle_compacts_even_with_the_setting_off() {
+    let user = clocked("after_expiry = false");
+    let agent = at_rest(&user);
+
+    advance(&user, 61 * MINUTE);
+    user.call(
+        "agent.send",
+        json!({"agent": agent, "message": "go on AFTER", "compact": true}),
+    )
+    .unwrap();
+    eventually("the compaction", || !compacted(&user, &agent).is_empty());
+}
+
+#[test]
+fn a_parent_woken_by_its_child_follows_the_setting() {
+    let user = clocked("");
+    let (agent, mcp) = session_with_mcp(&user, "lead the work HALF");
+    eventually("the first turn's end", || turns_ended(&user, &agent) == 1);
+
+    advance(&user, 61 * MINUTE);
+    // The child ends two turns without a report: its parent is told, by Flottille.
+    let launched = mcp.call(
+        "agent_launch",
+        json!({"kind": "child", "title": "tests", "brief": "write the tests", "workspace": "w"}),
+    );
+    assert!(!launched.error, "{}", launched.text);
+    eventually("the compaction", || !compacted(&user, &agent).is_empty());
+}
+
+#[test]
+fn without_a_compactor_neither_trigger_runs() {
+    let user = clocked("");
+    std::fs::write(
+        user.path("config/flottille/compaction.toml"),
+        "compactor = \"none\"\nautomatic = false\nbefore_expiry = true\n",
+    )
+    .unwrap();
+    let agent = at_rest(&user);
+
+    advance(&user, 61 * MINUTE);
+    quiet(&user, &agent);
+    send(&user, &agent, "go on AFTER");
+    eventually("the next turn", || turns_ended(&user, &agent) == 2);
+    quiet(&user, &agent);
+}
+
+#[test]
+fn the_expiry_settings_and_the_lifetimes_are_shown_and_kept() {
+    let user = user();
+    let shown = user.call("compaction.show", json!({})).unwrap();
+    assert_eq!(shown["before_expiry"], false, "{shown}");
+    assert_eq!(shown["margin"], 5, "{shown}");
+    assert_eq!(shown["after_expiry"], true, "{shown}");
+    assert_eq!(shown["minimum"], 50_000, "{shown}");
+    assert_eq!(shown["lifetimes"]["claude"], 3_600, "{shown}");
+    assert_eq!(shown["lifetimes"]["codex"], Value::Null, "{shown}");
+    assert_eq!(shown["lifetimes"]["opencode"], Value::Null, "{shown}");
+
+    let set = user
+        .call(
+            "compaction.set",
+            json!({"before_expiry": true, "margin": 10, "after_expiry": false, "minimum": 80_000}),
+        )
+        .unwrap();
+    assert_eq!(set["before_expiry"], true, "{set}");
+    assert_eq!(set["margin"], 10, "{set}");
+    assert_eq!(set["after_expiry"], false, "{set}");
+    assert_eq!(set["minimum"], 80_000, "{set}");
+    let refused = user
+        .call("compaction.set", json!({"margin": 0}))
+        .unwrap_err();
+    assert!(refused.1.contains("margin"), "{refused:?}");
+}

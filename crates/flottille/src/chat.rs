@@ -89,6 +89,7 @@ fn send_and_follow(
             agent: agent.to_owned(),
             message,
             images: Vec::new(),
+            compact: None,
         })?,
     )?;
     follow(
@@ -131,6 +132,7 @@ fn refuse(client: &mut Client, agent: &str) -> Result<()> {
             agent: agent.to_owned(),
             message: String::new(),
             images: Vec::new(),
+            compact: None,
         })?,
     ) {
         Err(error) => Err(error),

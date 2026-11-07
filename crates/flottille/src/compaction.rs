@@ -11,9 +11,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use flottille_core::agent::AgentState;
+use flottille_core::agent::{Agent, AgentState};
 use flottille_core::paths::Paths;
 use flottille_core::protocol::Event;
+use flottille_core::store::now_ms;
 use serde_json::{Value, json};
 
 use crate::agents::{self, Order};
@@ -41,6 +42,16 @@ pub const THRESHOLDS: std::ops::RangeInclusive<u64> = 50..=95;
 pub const KEPT: u64 = 20_000;
 /// The most the user may keep word for word.
 pub const KEPT_MAX: u64 = 50_000;
+/// How long before its cache expires an agent at rest is compacted, until the user says another,
+/// in minutes.
+pub const MARGIN: u64 = 5;
+/// The margins the user may choose, in minutes.
+pub const MARGINS: std::ops::RangeInclusive<u64> = 1..=30;
+/// The context below which neither trigger of the cache's expiry compacts, until the user says
+/// another, in tokens.
+pub const MINIMUM: u64 = 50_000;
+/// The most the minimum size may be, in tokens.
+pub const MINIMUM_MAX: u64 = 1_000_000;
 /// The smallest maximum size, in tokens.
 pub const MAXIMUM_MIN: u64 = 20_000;
 /// The margin, a share of the window in percent, by which the context must grow past the size a
@@ -90,6 +101,13 @@ pub struct Settings {
     pub maximum: Option<u64>,
     /// Tokens of the latest messages given again word for word.
     pub kept: u64,
+    /// An agent at rest is compacted `margin` minutes before its cache expires.
+    pub before_expiry: bool,
+    pub margin: u64,
+    /// A message to an agent whose cache expired compacts it first.
+    pub after_expiry: bool,
+    /// Below this context, in tokens, neither of the two compacts.
+    pub minimum: u64,
 }
 
 impl Default for Settings {
@@ -101,6 +119,10 @@ impl Default for Settings {
             threshold: THRESHOLD,
             maximum: None,
             kept: KEPT,
+            before_expiry: false,
+            margin: MARGIN,
+            after_expiry: true,
+            minimum: MINIMUM,
         }
     }
 }
@@ -196,6 +218,26 @@ impl Settings {
                         .filter(|n| *n <= KEPT_MAX)
                         .ok_or_else(|| refuse(kept_range()))?;
                 }
+                "before_expiry" => {
+                    settings.before_expiry = item
+                        .as_bool()
+                        .ok_or_else(|| refuse("before_expiry is true or false".into()))?;
+                }
+                "margin" => {
+                    settings.margin = number(item)
+                        .filter(|n| MARGINS.contains(n))
+                        .ok_or_else(|| refuse(margin_range()))?;
+                }
+                "after_expiry" => {
+                    settings.after_expiry = item
+                        .as_bool()
+                        .ok_or_else(|| refuse("after_expiry is true or false".into()))?;
+                }
+                "minimum" => {
+                    settings.minimum = number(item)
+                        .filter(|n| *n <= MINIMUM_MAX)
+                        .ok_or_else(|| refuse(minimum_range()))?;
+                }
                 key => return Err(refuse(format!("unknown key `{key}`"))),
             }
         }
@@ -217,6 +259,18 @@ fn maximum_range() -> String {
 
 fn kept_range() -> String {
     format!("kept is a number of tokens from 0 to {KEPT_MAX}")
+}
+
+fn margin_range() -> String {
+    format!(
+        "margin is a number of minutes from {} to {}",
+        MARGINS.start(),
+        MARGINS.end()
+    )
+}
+
+fn minimum_range() -> String {
+    format!("minimum is a number of tokens from 0 to {MINIMUM_MAX}")
 }
 
 /// Whether the user chose a compactor: then each CLI is set to compact as late as it allows, so
@@ -387,6 +441,15 @@ fn show(daemon: &Daemon) -> Result<Value, Failure> {
         "threshold": settings.threshold,
         "maximum": settings.maximum,
         "kept": settings.kept,
+        "before_expiry": settings.before_expiry,
+        "margin": settings.margin,
+        "after_expiry": settings.after_expiry,
+        "minimum": settings.minimum,
+        // Each provider's cache lifetime in seconds; none where it is not known.
+        "lifetimes": providers::PROVIDERS
+            .iter()
+            .map(|provider| (provider.name.to_owned(), json!((provider.cache_lifetime)())))
+            .collect::<serde_json::Map<_, _>>(),
         "guidance": {"text": text, "source": source, "error": error, "default": DEFAULT},
     }))
 }
@@ -436,6 +499,18 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
                 }
                 if let Some(kept) = asked.kept {
                     set("kept", Some(toml_edit::value(kept as i64)));
+                }
+                if let Some(on) = asked.before_expiry {
+                    set("before_expiry", Some(toml_edit::value(on)));
+                }
+                if let Some(margin) = asked.margin {
+                    set("margin", Some(toml_edit::value(margin as i64)));
+                }
+                if let Some(on) = asked.after_expiry {
+                    set("after_expiry", Some(toml_edit::value(on)));
+                }
+                if let Some(minimum) = asked.minimum {
+                    set("minimum", Some(toml_edit::value(minimum as i64)));
                 }
                 // The tables last, whatever order the keys came in.
                 if let Some(compactor) = document.remove("compactor") {
@@ -508,6 +583,10 @@ struct Asked {
     threshold: Option<u64>,
     maximum: Option<Option<u64>>,
     kept: Option<u64>,
+    before_expiry: Option<bool>,
+    margin: Option<u64>,
+    after_expiry: Option<bool>,
+    minimum: Option<u64>,
 }
 
 impl Asked {
@@ -522,6 +601,10 @@ impl Asked {
             threshold: None,
             maximum: None,
             kept: None,
+            before_expiry: None,
+            margin: None,
+            after_expiry: None,
+            minimum: None,
         };
         for (key, value) in params {
             match key.as_str() {
@@ -587,6 +670,31 @@ impl Asked {
                             .ok_or_else(|| wrong(kept_range()))?,
                     );
                 }
+                "before_expiry" | "after_expiry" => {
+                    let on = value
+                        .as_bool()
+                        .ok_or_else(|| wrong(format!("{key} is true or false")))?;
+                    match key.as_str() {
+                        "before_expiry" => asked.before_expiry = Some(on),
+                        _ => asked.after_expiry = Some(on),
+                    }
+                }
+                "margin" => {
+                    asked.margin = Some(
+                        value
+                            .as_u64()
+                            .filter(|n| MARGINS.contains(n))
+                            .ok_or_else(|| wrong(margin_range()))?,
+                    );
+                }
+                "minimum" => {
+                    asked.minimum = Some(
+                        value
+                            .as_u64()
+                            .filter(|n| *n <= MINIMUM_MAX)
+                            .ok_or_else(|| wrong(minimum_range()))?,
+                    );
+                }
                 key => return Err(wrong(format!("unknown field `{key}`"))),
             }
         }
@@ -598,6 +706,9 @@ impl Asked {
 #[derive(Default)]
 pub struct Live {
     phases: Mutex<HashMap<String, Phase>>,
+    /// What the user chose for the message they sent, by agent: compact first or not, whatever
+    /// the setting, when the agent's cache expired.
+    choices: Mutex<HashMap<String, bool>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -759,6 +870,139 @@ fn usage(daemon: &Daemon, agent: &str) -> Option<(u64, Option<u64>)> {
         return None;
     }
     Some((report.data["used"].as_u64()?, report.data["size"].as_u64()))
+}
+
+/// The user's choice for the message they send the agent now (the composer's toggle,
+/// `--compact`): taken by the turn it starts.
+pub fn choose(daemon: &Daemon, agent: &str, compact: bool) {
+    daemon
+        .compactions
+        .choices
+        .lock()
+        .unwrap()
+        .insert(agent.to_owned(), compact);
+}
+
+/// When the agent's prompt cache expires, by the store's clock, if Flottille may compact it around
+/// then: a compactor chosen and its pick seen, the lifetime of its provider's cache known, a
+/// context reported since its last compaction of at least the minimum size, and grown past the
+/// size its session started at or its last compaction failed at. None otherwise.
+fn expiry(daemon: &Daemon, agent: &Agent, settings: &Settings) -> Option<u64> {
+    if settings.compactor.as_ref().is_none_or(|c| c.picked) {
+        return None;
+    }
+    let lifetime = (providers::get(&agent.provider)?.cache_lifetime)();
+    let (used, _) = usage(daemon, &agent.id)?;
+    if used < settings.minimum || floor(daemon, &agent.id).is_some_and(|floor| used <= floor) {
+        return None;
+    }
+    // Its last request is its last turn's.
+    let last = daemon
+        .read(|store| store.last_agent_events(&agent.id, "agent.turn_ended", 1))
+        .ok()?
+        .into_iter()
+        .next()?;
+    expires_at(lifetime, last.at)
+}
+
+/// When a cache written at `last` (ms) expires: none when its lifetime (s) is unknown.
+fn expires_at(lifetime: Option<u64>, last: u64) -> Option<u64> {
+    lifetime.map(|lifetime| last + lifetime * 1_000)
+}
+
+/// What only the passing of time decides for an agent at rest (`sweep`): its compaction the margin
+/// before its cache expires, when the user asked for it, and once expired, the event that tells
+/// the window to offer its composer's toggle.
+pub fn at_rest(daemon: &Arc<Daemon>, agent: &Agent, now: u64) {
+    if agent.state != AgentState::Idle
+        || daemon
+            .compactions
+            .phases
+            .lock()
+            .unwrap()
+            .contains_key(&agent.id)
+    {
+        return;
+    }
+    let Ok(settings) = settings(daemon) else {
+        return;
+    };
+    let Some(expires) = expiry(daemon, agent, &settings) else {
+        return;
+    };
+    let queued = daemon
+        .read(|store| store.deliveries(&agent.id, "queued"))
+        .unwrap_or_default();
+    if settings.before_expiry && queued.is_empty() && now + settings.margin * 60_000 >= expires {
+        start(daemon, &agent.id);
+        return;
+    }
+    let last = |name| {
+        daemon
+            .read(|store| store.last_agent_events(&agent.id, name, 1))
+            .ok()
+            .and_then(|events| events.into_iter().next())
+            .map_or(0, |event| event.seq)
+    };
+    if now >= expires && last("agent.cache_expired") < last("agent.turn_ended") {
+        agents::record(
+            daemon,
+            &agent.id,
+            "agent.cache_expired",
+            json!({"compact": settings.after_expiry}),
+            false,
+        );
+    }
+}
+
+/// A turn of the agent is about to start: its compaction first when its cache expired and the
+/// message's sender or the setting asks for it. The prompt waits for the new session.
+pub fn before_turn(daemon: &Arc<Daemon>, agent: &str) {
+    let chosen = daemon.compactions.choices.lock().unwrap().remove(agent);
+    if daemon
+        .compactions
+        .phases
+        .lock()
+        .unwrap()
+        .contains_key(agent)
+    {
+        return;
+    }
+    let queued = daemon
+        .read(|store| store.deliveries(agent, "queued"))
+        .unwrap_or_default();
+    // A session that starts (its brief, a summary) is no turn of the old conversation.
+    let starts = |kind: &str| matches!(kind, "instructions" | "brief" | "launched" | "resume");
+    if queued.is_empty() || queued.iter().any(|d| starts(&d.kind)) {
+        return;
+    }
+    let Ok(settings) = settings(daemon) else {
+        return;
+    };
+    if !chosen.unwrap_or(settings.after_expiry) {
+        return;
+    }
+    let Ok(Some(found)) = daemon.read(|store| store.agent(agent)) else {
+        return;
+    };
+    if found.state.is_final()
+        || expiry(daemon, &found, &settings).is_none_or(|expires| now_ms() < expires)
+    {
+        return;
+    }
+    start(daemon, agent);
+}
+
+/// Starts the agent's compaction, unless one is under way or asked.
+fn start(daemon: &Arc<Daemon>, agent: &str) {
+    {
+        let mut phases = daemon.compactions.phases.lock().unwrap();
+        if phases.contains_key(agent) {
+            return;
+        }
+        phases.insert(agent.to_owned(), Phase::Running);
+    }
+    tokio::spawn(run(daemon.clone(), agent.to_owned()));
 }
 
 /// How long the compactor may take before its compaction is taken for a failure.
@@ -1123,6 +1367,16 @@ pub fn resumed(daemon: &Daemon, agent: &str, summary: &str, kept: u64) -> (Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_provider_whose_lifetime_is_unknown_gets_neither_trigger() {
+        // Both triggers start from the expiry: none without a lifetime.
+        assert_eq!(expires_at(None, 1_000), None);
+        assert_eq!(expires_at(Some(300), 1_000), Some(301_000));
+        for name in ["codex", "opencode"] {
+            assert_eq!((providers::get(name).unwrap().cache_lifetime)(), None);
+        }
+    }
 
     #[test]
     fn a_summary_cut_off_calling_a_tool_empty_or_not_smaller_is_refused() {

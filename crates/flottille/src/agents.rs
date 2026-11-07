@@ -140,6 +140,10 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                     .await
                     .map_err(|e| Failure::new("unavailable", format!("images not kept: {e}")))??
             };
+            // Before the delivery wakes the agent: the turn it starts takes the choice.
+            if let Some(compact) = asked.compact {
+                crate::compaction::choose(daemon, &agent.id, compact);
+            }
             let delivery = deliveries::deliver_message(
                 daemon,
                 &agent.id,
@@ -1104,6 +1108,7 @@ async fn agent_life(daemon: Arc<Daemon>, id: String, mut orders: mpsc::Unbounded
     };
     loop {
         if turns.queued.is_empty() {
+            crate::compaction::before_turn(&daemon, &id);
             match deliveries::pump(&daemon, &id) {
                 Some(prompt) => turns.queued.push_back(prompt),
                 None => match orders.recv().await {
@@ -1876,6 +1881,7 @@ impl acp::Events for Recorder {
     }
 
     fn pump(&self) -> Option<deliveries::Prompt> {
+        crate::compaction::before_turn(&self.daemon, &self.agent);
         deliveries::pump(&self.daemon, &self.agent)
     }
 
