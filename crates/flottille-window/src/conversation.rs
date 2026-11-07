@@ -100,6 +100,11 @@ pub enum Block {
         seq: u64,
         text: String,
     },
+    /// A question a led session asked its pilot with `ask`: the pilot answers it; the card only
+    /// shows the user what was asked.
+    Asked {
+        text: String,
+    },
     /// A command's result.
     Command(CommandCard),
     /// A request whose answer came as a card below: the line that told it was asked and decided
@@ -828,6 +833,13 @@ impl Conversation {
                 let mut changes = self.close(Some(event.at));
                 changes.extend(self.push(Block::Question {
                     seq: event.seq,
+                    text: text("question"),
+                }));
+                changes
+            }
+            "agent.asked" if data["to"] == "pilot" => {
+                let mut changes = self.close(Some(event.at));
+                changes.extend(self.push(Block::Asked {
                     text: text("question"),
                 }));
                 changes
@@ -2014,6 +2026,35 @@ mod tests {
                 images: Vec::new(),
                 commands: None,
             }]
+        );
+    }
+
+    #[test]
+    fn a_led_session_s_question_to_its_pilot_is_shown_as_asked_of_it() {
+        let mut c = root();
+        c.apply(&event(
+            1,
+            "agent.asked",
+            json!({"agent": "r", "question": "Cover the logout too?", "to": "pilot",
+                "pilot": "0123456789ab"}),
+        ));
+        c.apply(&event(
+            2,
+            "agent.asked",
+            json!({"agent": "r", "question": "Cover the logout too?", "to": "user",
+                "moved_from": "0123456789ab"}),
+        ));
+        assert_eq!(
+            c.blocks(),
+            [
+                Block::Asked {
+                    text: "Cover the logout too?".into()
+                },
+                Block::Question {
+                    seq: 2,
+                    text: "Cover the logout too?".into()
+                }
+            ]
         );
     }
 

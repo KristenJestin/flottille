@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use common::User;
 use flottille_ui::omarchy::Environment;
+use flottille_ui::toggle_id;
 use flottille_window::Shell;
 use flottille_window::shell::Selection;
 use flottille_window::tree::session_id;
@@ -589,5 +590,77 @@ fn the_window_draws_no_frame_at_rest_on_a_session_with_a_card_of_links_and_a_thu
         frames_at_rest(&shell, cx),
         (0, 0),
         "(frames drawn, frames asked)"
+    );
+}
+
+/// The lead `idle_session` started launches a session it leads, titled `title`, allowed by the
+/// user when it is held: the session's id.
+fn led_by_lead(user: &User, mcp: &common::mcp::Mcp, title: &str) -> String {
+    let answer = mcp.call(
+        "agent_launch",
+        json!({"kind": "led", "title": title, "brief": format!("{title} now.")}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    if let Some(number) = answer
+        .text
+        .strip_prefix("Waiting for the user's approval, request #")
+        .and_then(|rest| rest.split_once('.'))
+        .map(|(number, _)| number.parse::<u64>().unwrap())
+    {
+        user.call("approval.approve", json!({"number": number}))
+            .unwrap();
+    }
+    let found = || {
+        user.call("agent.list", json!({})).unwrap()["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["title"] == title)
+            .map(|a| a["id"].as_str().unwrap().to_owned())
+    };
+    eventually("the led session", || found().is_some());
+    let id = found().unwrap();
+    eventually("its first turn ends", || {
+        user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["state"] == "idle"
+    });
+    id
+}
+
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_with_a_pilot_and_two_led_sessions_one_folded(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    let lead = idle_session(&user);
+    let (url, authorization) = common::mcp::server_of(&user, 0);
+    let mcp = common::mcp::Mcp::initialize(&url, &authorization);
+    let first = led_by_lead(&user, &mcp, "Docs");
+    let second = led_by_lead(&user, &mcp, "Tests");
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "both led sessions under their pilot", |cx| {
+        cx.update(|window, _| {
+            window.try_find(session_id(&first)).is_some()
+                && window.try_find(session_id(&second)).is_some()
+        })
+    });
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "unfolded: (frames drawn, frames asked)"
+    );
+
+    // The pilot folds its led sessions away.
+    cx.update(|window, cx| window.click(toggle_id(session_id(&lead)), cx));
+    until(&shell, cx, "the led rows folded away", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&first)).is_none())
+    });
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "folded: (frames drawn, frames asked)"
     );
 }

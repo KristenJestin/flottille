@@ -52,6 +52,8 @@ pub struct TreeRow {
     actions: Option<(AnyElement, bool)>,
     /// A faint line under the title: the row is two lines high.
     second: Option<AnyElement>,
+    /// A mark before the title, where a folder or a branch has its icon.
+    leading: Option<AnyElement>,
     on_click: Option<OnClick>,
     on_toggle: Option<OnClick>,
 }
@@ -76,9 +78,16 @@ impl TreeRow {
             trailing: None,
             actions: None,
             second: None,
+            leading: None,
             on_click: None,
             on_toggle: None,
         }
+    }
+
+    /// A mark before the title: what kind of row it is, said in its own tooltip.
+    pub fn leading(mut self, element: impl IntoElement) -> Self {
+        self.leading = Some(element.into_any_element());
+        self
     }
 
     /// A faint line under the title (the place a session works in): the row takes two lines, and
@@ -170,7 +179,9 @@ impl RenderOnce for TreeRow {
             .when(self.expanded.is_some(), |d| {
                 d.aria_expanded(self.expanded == Some(true))
             });
-        if let Some(turn) = chevron_turn.filter(|_| project || self.upward) {
+        // A session's row turns a chevron when it folds a level of its own (`on_toggle`).
+        let folds = self.on_toggle.is_some();
+        if let Some(turn) = chevron_turn.filter(|_| project || self.upward || folds) {
             let angle = match self.upward {
                 false => -FRAC_PI_2 * turn,
                 // Folded (1) points right as a project's does; open (0) points up.
@@ -202,6 +213,9 @@ impl RenderOnce for TreeRow {
             TreeLevel::Main => row = row.child(icon(Icon::Folder).text_color(p.faint)),
             TreeLevel::Workspace => row = row.child(icon(Icon::Branch).text_color(p.faint)),
             TreeLevel::Project | TreeLevel::Session => {}
+        }
+        if let Some(leading) = self.leading {
+            row = row.child(leading);
         }
         let title = tipped_when_cut(
             div()
