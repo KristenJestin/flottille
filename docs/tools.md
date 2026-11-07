@@ -650,12 +650,26 @@ pending requests.
   The card says `Its verdict: approve`, `Its body: …` and one `Its inline comment on <path> line
   <n>: …` for each comment, whole and masked, and a body or a comment that holds what looks like a
   secret makes any verdict base. The call is answered at once that it is held; the result comes
-  later as a delivery. Once allowed, an `approve` or `request_changes` of a pull request that is
-  not open is refused, nothing posted (`refused: the pull request #7 of acme/app is closed, not
-  open; nothing was posted`). On GitHub the review goes in one call, so that it is posted whole
-  or not at all; on Bitbucket the body, then each comment on a line, then the verdict, and a
-  failure says what had already been posted. `request_changes` on Bitbucket Data Center is
-  refused (`bkt` has no such command).
+  later as a delivery. **An `approve` or `request_changes` is given on the commit the user
+  read**: its card says `Its head: <commit>`, GitHub gets it as the review's `commit_id`, and an
+  answer that finds the branch moved since is not done (`new commits since you were allowed; ask
+  again`). The pull request's state and head are read before the card and again before the post,
+  and one that cannot be read refuses the call (`refused: the state and the head of the pull
+  request #7 of acme/app could not be read (…); nothing was posted`): an approval is never given
+  on a pull request nobody could look at. Once allowed, one of a pull request that is not open
+  is refused, nothing posted (`refused: the pull request #7 of acme/app is closed, not open;
+  nothing was posted`). On GitHub the review goes in one call, so that it is posted whole or not
+  at all; on Bitbucket the body, then each comment on a line, then the verdict, and a failure
+  says what had already been posted (`the review's comment and 3 of 10 line comments had already
+  changed the pull request`), those comments being recorded as the agent's. `request_changes` on
+  Bitbucket Data Center is refused before anything is asked (`bkt` has no such command). **The
+  same verdicts given by a command line are held the same way**: `run` of `gh pr review
+  --approve` or `--request-changes` (`-a`, `-r`), of `gh api` on a pull request's `reviews`
+  with an `event` of `APPROVE` or `REQUEST_CHANGES` (or a review given in a file, whose event is
+  not read), of a GraphQL review mutation naming one, and of `bkt` approving or requesting
+  changes in any form (`pr approve`, a `request-changes` command or endpoint, an `approve`
+  endpoint, a `NEEDS_WORK` or `APPROVED` status) is base, held in every mode, Full included, and
+  never reaches the judge.
 - **`close {number, repository?, comment?, delete_branch?}`** closes a pull request of a
   repository of the place (GitHub: `gh pr close`; Bitbucket: `bkt pr decline`), posting `comment`
   first; **`reopen {number, repository?, comment?}`** opens a closed one again (`gh pr reopen`).
@@ -1414,8 +1428,10 @@ says who answers a call to judge (`docs/design.md` §7.1).
      `src=`) of `docker`, `podman` or `nerdctl` `run` or `create` that names a path is a path the
      line writes, refused as above. A named volume, and a container itself, are not.
 2. **Base**: a card for the user in every mode, never the judge's, with a strong warning.
-   - a `forge` `review` with the verdict `approve` or `request_changes`: an agent never approves
-     nor blocks a pull request alone, and Full does not let it through;
+   - a `forge` `review` with the verdict `approve` or `request_changes`, and a line that gives
+     the same verdict (`gh pr review --approve`, `gh api … -f event=APPROVE`, `bkt pr
+     approve`…): an agent never approves nor blocks a pull request alone, and Full does not let
+     it through;
    - the project's `never` list: an entry matches a line's words from any position (its first
      word is a program, in any folder), or a task by its name, and then every task and line of
      the same words as that task's; and a run when the

@@ -479,8 +479,10 @@ and an approval or a change request is refused, once allowed, when the pull requ
 - **GitHub**: one call of the review API, `gh api repos/<owner>/<name>/pulls/<n>/reviews
   --hostname github.com --method POST --input <file>`, the file holding `{"event": "COMMENT" |
   "APPROVE" | "REQUEST_CHANGES", "body": …, "comments": [{"path", "line", "side": "RIGHT",
-  "body"}]}` (GitHub's documentation, "Create a review for a pull request"; `gh pr review` takes
-  no comment on a line). The file is removed when `gh` ends. A line that is not in the diff is
+  "body"}], "commit_id": …}` (GitHub's documentation, "Create a review for a pull request";
+  `gh pr review` takes no comment on a line). `commit_id`, for an approval or a change request, is
+  the head the card was built on (`gh pr view --json headRefOid`). The file is removed when `gh`
+  ends. A line that is not in the diff is
   GitHub's own refusal, and nothing is posted.
 - **Bitbucket**: `bkt pr comment <id> --text <body>`, then one `bkt pr comment <id> --text …
   --file <path> --to-line <n>` for each comment, then the verdict: `bkt pr approve <id>` or, on
@@ -489,6 +491,14 @@ and an approval or a change request is refused, once allowed, when the pull requ
   what had already been posted. **`request_changes` on Data Center is refused** with nothing posted:
   `bkt` has no command for it, and the API asks for the user's own slug, which Flottille never
   asks for.
+
+**An approval or a change request is given on the head the user read.** The card says `Its head:
+<commit>` (GitHub's `headRefOid`; Bitbucket's page, Cloud `source.commit.hash`, Data Center
+`fromRef.latestCommit`), the answer reads it again and does nothing when it moved (`new commits
+since you were allowed; ask again`), and the state and the head are read again before the post.
+A pull request whose state or head cannot be read is refused, before the card and after it: an
+approval is never given on one nobody could look at. On Bitbucket a review that stops half way
+says how many comments the forge took (`3 of 10 line comments`) and records them as the agent's.
 
 **These shapes (the review API's body, `request-changes`, `bkt pr comment --file --to-line`) are
 assumed from the forges' REST documentation and `bkt`'s help (v0.37.0), not seen on a real server,
@@ -521,7 +531,8 @@ once the user allowed the call, like `close`'s.
 `forge {action, …}` (`docs/tools.md`, "The forge"): `list` the pull requests of the place's
 repositories by state and branch, `show` a workspace's branch's or one by its number with its
 checks, reviews and comments; `create`, `merge`, `checks`, `comment`, `review` and `edit`, each to
-judge (a merge that waives the checks base, and a `review` that approves or requests changes). The same `gh` (or `bkt`, for a Bitbucket repository) and the
+judge (a merge that waives the checks base, and a `review` that approves or requests changes).
+The same `gh` (or `bkt`, for a Bitbucket repository) and the
 same rules: spawned by the daemon, the repository named, its output masked, no token to the agent.
 It never reaches a repository outside the agent's place, and is listed to every agent of a
 project whose repository declares a forge, in `main` as in a workspace. Until #141 it was
