@@ -117,6 +117,11 @@ the components of `flottille-ui` that hold them, never its own.
 - **Never read, copy, log or print credentials** of the agents or of the user (agent login files
   are only checked for presence). Secrets found in files or outputs are masked before they are
   stored or shown.
+- **The vault is the only credential Flottille holds** (`docs/vault.md`): the user's secrets, in
+  the OS keyring, never in a file of Flottille's nor the store. A secret is write-only: no method,
+  client, tool, event, log or error ever returns it, agents see the entries' metadata only, a tool
+  that needs one is given the entry's name and the daemon uses the secret itself, and every value
+  is masked. Tests use the in-memory keyring their configuration chooses, never the real one.
 - Flottille runs the agent CLIs the user installed and signed in to. It provides no login of its
   own.
 

@@ -258,6 +258,10 @@ pub enum Command {
         project: String,
         write: CommandWrite,
     },
+    /// The vault's entries, their metadata (`vault.list`).
+    Vault,
+    /// An entry set or removed (`vault.set`, `vault.remove`).
+    VaultWrite(VaultWrite),
     /// The project's skills.
     Skills {
         project: String,
@@ -514,6 +518,38 @@ pub enum SkillWrite {
     },
 }
 
+/// A change to the vault, as the daemon takes it.
+#[derive(Clone, PartialEq)]
+pub enum VaultWrite {
+    /// A new entry, or one replaced whole.
+    Set {
+        name: String,
+        secret: String,
+        description: String,
+        url: String,
+        username: String,
+        /// Every project's when `None`.
+        project: Option<String>,
+    },
+    Remove {
+        name: String,
+    },
+}
+
+/// What a debug line may say of a write: never its secret.
+impl std::fmt::Debug for VaultWrite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VaultWrite::Set { name, project, .. } => f
+                .debug_struct("Set")
+                .field("name", name)
+                .field("project", project)
+                .finish_non_exhaustive(),
+            VaultWrite::Remove { name } => f.debug_struct("Remove").field("name", name).finish(),
+        }
+    }
+}
+
 /// A change to a project's commands, as the daemon takes it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CommandWrite {
@@ -748,6 +784,14 @@ pub enum Outcome {
         project: String,
         name: String,
         read: Result<CommandInfo, String>,
+    },
+    /// The vault's entries, or why they cannot be read.
+    Vault {
+        listed: Result<Vec<crate::vault::VaultEntry>, String>,
+    },
+    /// A change to the vault was made, or refused with why.
+    VaultWritten {
+        refused: Option<String>,
     },
     /// A change to the commands was made, or refused with why.
     CommandWritten {
@@ -1534,6 +1578,41 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 project,
                 name,
             }
+        }
+        Command::Vault => {
+            let listed = ask_alone(connect, "vault.list", json!({}), bounds.quick);
+            Outcome::Vault {
+                listed: listed.and_then(|listed| listed).map(|listed| {
+                    listed["entries"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .map(crate::vault::VaultEntry::of)
+                        .collect()
+                }),
+            }
+        }
+        Command::VaultWrite(write) => {
+            let (method, params) = match write {
+                VaultWrite::Set {
+                    name,
+                    secret,
+                    description,
+                    url,
+                    username,
+                    project,
+                } => (
+                    "vault.set",
+                    json!({"name": name, "secret": secret, "description": description,
+                        "url": url, "username": username, "project": project}),
+                ),
+                VaultWrite::Remove { name } => ("vault.remove", json!({"name": name})),
+            };
+            let refused = match ask_alone(connect, method, params, bounds.quick) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::VaultWritten { refused }
         }
         Command::CommandWrite { project, write } => {
             let (method, params) = command_write(&project, write);

@@ -1320,3 +1320,55 @@ fn a_parent_changes_its_child_s_model_with_agent_send_and_a_refused_change_sends
         "held until its turn ends"
     );
 }
+
+/// The command of `line` a session starts and leaves running: its run id.
+fn keep_running(mcp: &Mcp, line: &str) -> String {
+    let text = ok(mcp.call("run", json!({"line": line, "timeout": 1})));
+    text.strip_prefix("run ")
+        .and_then(|rest| rest.split(':').next())
+        .unwrap_or_else(|| panic!("no run in {text}"))
+        .to_owned()
+}
+
+#[test]
+fn it_does_not_see_another_root_s_commands() {
+    let user = user().with_allowing_judge();
+    let (_, lead) = lead(&user);
+    let opened = user.received_requests("session/new").len();
+    user.call(
+        "agent.run",
+        json!({"project": "app", "workspace": "w", "message": "lead the other work"}),
+    )
+    .unwrap();
+    let (url, authorization) = common::mcp::server_of(&user, opened);
+    let other = Mcp::initialize(&url, &authorization);
+    let mine = keep_running(&lead, "sleep 600");
+    let theirs = keep_running(&other, "sleep 601");
+
+    let text = ok(lead.call("run_status", json!({})));
+
+    assert!(text.contains(&mine), "{text}");
+    assert!(!text.contains(&theirs), "{text}");
+    assert!(!text.contains("sleep 601"), "{text}");
+}
+
+#[test]
+fn a_root_sees_its_children_s_commands() {
+    let user = user().with_allowing_judge();
+    let (_, lead) = lead(&user);
+    launch(&lead, "builder", "HANG and run a command");
+    let worker = titled(&user, "builder");
+    let mine = keep_running(&lead, "sleep 600");
+    let theirs = keep_running(&worker, "sleep 601");
+
+    let root_sees = ok(lead.call("run_status", json!({})));
+    let child_sees = ok(worker.call("run_status", json!({})));
+
+    assert!(root_sees.contains(&mine), "{root_sees}");
+    assert!(root_sees.contains(&theirs), "{root_sees}");
+    assert!(child_sees.contains(&theirs), "{child_sees}");
+    assert!(
+        !child_sees.contains(&mine),
+        "a child lists only its own: {child_sees}"
+    );
+}

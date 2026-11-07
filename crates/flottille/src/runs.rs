@@ -1476,7 +1476,8 @@ pub async fn restart_by_user(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StatusArguments {
-    run: String,
+    /// Without it, the call lists the agent's commands.
+    run: Option<String>,
     action: Option<String>,
     tail: Option<usize>,
     start: Option<usize>,
@@ -1484,24 +1485,39 @@ struct StatusArguments {
     when: Option<String>,
 }
 
-/// `run_status`: the state and the output of a run this agent started, or its stop.
+/// `run_status`: the state and the output of a run this agent started, or its stop; with no
+/// `run`, the list of its commands.
 pub async fn run_status(daemon: &Daemon, agent: &str, args: Value) -> Outcome {
     let args: StatusArguments = match arguments("run_status", args) {
         Ok(args) => args,
         Err(refusal) => return refusal,
     };
+    let Some(id) = args.run.as_deref() else {
+        if args.action.is_some()
+            || args.tail.is_some()
+            || args.start.is_some()
+            || args.when.is_some()
+        {
+            return Outcome::Refused(
+                "refused: run_status without run lists your commands: action, tail, start and \
+                 when go with a run"
+                    .into(),
+            );
+        }
+        return list(daemon, agent);
+    };
     // A cut result's id is read the same way a run's output is, by lines.
-    if crate::results::is_id(&args.run) {
+    if crate::results::is_id(id) {
         return crate::results::read_kept(
             daemon,
             agent,
-            &args.run,
+            id,
             args.action.as_deref(),
             args.tail,
             args.start,
         );
     }
-    let run = match own(daemon, agent, &args.run) {
+    let run = match own(daemon, agent, id) {
         Ok(run) => run,
         Err(refusal) => return refusal,
     };
@@ -1540,14 +1556,7 @@ pub async fn run_status(daemon: &Daemon, agent: &str, args: Value) -> Outcome {
                     "refused: tail must be 1 to {TAIL_LINES_MAX} lines: read on with start"
                 ));
             }
-            Outcome::Done(describe(
-                daemon,
-                &args.run,
-                Some(tail),
-                args.start,
-                false,
-                false,
-            ))
+            Outcome::Done(describe(daemon, id, Some(tail), args.start, false, false))
         }
         "stop" => {
             if args.tail.is_some() || args.start.is_some() {
@@ -1557,14 +1566,80 @@ pub async fn run_status(daemon: &Daemon, agent: &str, args: Value) -> Outcome {
                         .into(),
                 );
             }
-            stop(daemon, &args.run, RunState::Stopped).await;
-            Outcome::Done(describe(daemon, &args.run, None, None, false, false))
+            stop(daemon, id, RunState::Stopped).await;
+            Outcome::Done(describe(daemon, id, None, None, false, false))
         }
         other => Outcome::Refused(format!(
             "refused: run_status has no action {other:?}: its actions are output (the default), \
              stop and notify"
         )),
     }
+}
+
+/// The commands that run or ended and are not dismissed: a root's and its tree's, as `run.list`
+/// with `tree` gives them, a child's own. The id of one it lost lets it stop it.
+fn list(daemon: &Daemon, agent: &str) -> Outcome {
+    let root = crate::tree::root_of(daemon, agent);
+    let ids = if root == agent {
+        match crate::tree::ids(daemon, &root) {
+            Ok(ids) => ids,
+            Err(failure) => return Outcome::Failed(failure.message),
+        }
+    } else {
+        vec![agent.to_owned()]
+    };
+    let found = daemon.read(|store| {
+        let mut found = store.running_runs_of(&ids)?;
+        found.extend(store.ended_runs_of(&ids, crate::run_methods::ENDED_LISTED, 8 * 1024)?);
+        Ok(found)
+    });
+    let found = match found {
+        Ok(found) => found,
+        Err(error) => return Outcome::Failed(error.to_string()),
+    };
+    if found.is_empty() {
+        return Outcome::Done(
+            "No command of yours is running, and none ended that is still listed.".into(),
+        );
+    }
+    let now = now_ms();
+    let mut text = String::from("Your commands, the oldest first:");
+    for stored in found {
+        let Some(view) = view(daemon, &stored.id) else {
+            continue;
+        };
+        let run = view.run;
+        let end = (run.state != RunState::Running).then_some(End {
+            state: run.state,
+            exit_code: run.exit_code,
+            signal: run.signal,
+        });
+        let label = match &run.name {
+            Some(name) => format!("{name} (`{}`)", run.line),
+            None => format!("`{}`", run.line),
+        };
+        text.push_str(&format!(
+            "\n- run {}: {label} in {} {}, started {} ago",
+            run.id,
+            run.folder.display(),
+            state_text(end, false),
+            crate::tree::ago(now.saturating_sub(run.started_at)),
+        ));
+        if run.agent.as_deref() != Some(agent)
+            && let Some(starter) = run.agent.as_deref()
+        {
+            text.push_str(&format!(", by agent {starter}"));
+        }
+        let last = crate::run_methods::last_line(&view.output);
+        if !last.is_empty() {
+            text.push_str(&format!("; last line: {last}"));
+        }
+    }
+    text.push_str(
+        "\nRead one with run_status {\"run\": \"<id>\"}, stop one of yours with run_status \
+         {\"run\": \"<id>\", \"action\": \"stop\"}.",
+    );
+    Outcome::Done(text)
 }
 
 /// The run, refused unless the agent started it.
