@@ -1,8 +1,8 @@
 # Extensions
 
 **Status: a proposal, nothing built.** Written from a discussion with the maintainer
-(November 2026), and settled with their answers of 2026-11-03 ("Decisions taken"). No question is
-left open but the one in "Open questions".
+(November 2026), and settled with their answers of 2026-11-03 and 2026-11-07 ("Decisions taken").
+No question is left open but those in "Open questions".
 
 Some of Flottille's features add a capability of Flottille's own on top of what it is: specs, the
 compaction, a reviewer and a cold read, the Auto judge, later a handbook. Each brings its
@@ -33,6 +33,7 @@ today, moves into the frame last ("The order of the work").
 | Call | One question to a model with no tool at all: input given by Flottille, output checked by the extension. |
 | Trigger | What makes an extension act: an event of the core, a time, a gesture of the user. |
 | Active | Turned on by the user, globally and, for an extension that touches a project, not turned off in that project. |
+| Connection | An MCP server of the user's, declared in a project and run beside the daemon, which Flottille gives to the project's agents as one tool ("Connections"). |
 
 ## What an extension is, and what it is not
 
@@ -62,19 +63,28 @@ An extension is:
 It is not:
 
 - **A plugin of a third party.** Bare mode is the product: an agent can do only what Flottille's
-  tools let it, and every call is seen by the gate. Code of someone else's in the daemon would run
-  with the daemon's rights, see every conversation and every secret the daemon masks, and act
+  tools let it, and every call is seen by the gate. Code of someone else's **in the daemon** would
+  run with the daemon's rights, see every conversation and every secret the daemon masks, and act
   where the gate does not look: it would end bare mode, whatever it promised. It would also make
   Flottille's interfaces a public contract to keep stable, bring a supply chain to trust, and put
   screens in the window that no rule of the window holds. Flottille is for one person; what they
   want added is added to Flottille.
+
+  This is not a refusal of third-party tools. A tool of someone else's that runs **beside** the
+  daemon, as a program of its own, is what the **Connections** extension is for ("Connections"):
+  Flottille's own code, which the user points at an MCP server they installed. The server runs in
+  its own process with the user's rights, trusted as a CLI the user installed is; the daemon never
+  loads a line of it. The gate controls **what is asked of it**, never **what it does** with the
+  rights it has: that is the limit of Connections, said where the gate's other limits are said
+  (`design.md` §7.1, Full mode).
 - **A role.** An extension gives **tools**, never a role: the session that writes a spec is a
   `lead` with the `spec` tool, not a "spec session". The agents an extension launches itself (a
   cold read, a reviewer) are workers with its instructions and its tools ("Agents an extension
   launches"). A new tool alone is not an extension either.
 - **A way around the core.** An extension reaches agents, the store and the window only through
-  what the core gives it below. It never spawns a process of its own, never writes the store
-  outside its space, never draws outside its places.
+  what the core gives it below. It never spawns a process of its own (the servers of Connections
+  are the user's declaration, spawned by the daemon as a run is, never by the extension's code),
+  never writes the store outside its space, never draws outside its places.
 
 ## The declaration
 
@@ -341,7 +351,8 @@ with the components every other tab is built from. There is no "Extensions" tab.
 - **Tool results** (#308, core): a section at the end of the Providers tab, since it is about what
   every agent is given, whatever runs it.
 
-Settings, in order: Judge, Specs, Compaction, Review, Providers, Rules, Appearance, Developer mode.
+Settings, in order: Judge, Specs, Compaction, Review, Connections, Providers, Rules, Appearance,
+Developer mode.
 The order is a number each declaration gives; a core tab has its own place, and none is moved by
 another's declaration.
 
@@ -499,6 +510,172 @@ or without a spec. Project-scoped.
 - **Builds**: agents an extension launches and the depth exception, slots overridable per project,
   the composer command, the folded line of the tree.
 
+### Connections
+
+Lets the user give their agents a tool that exists as an MCP server (a memory, a browser, the
+desktop) without putting it in Flottille. **The daemon is the MCP client; agents never talk to the
+server.** Project-scoped, off by default, with the usual switches ("Activation").
+
+**What a connection is.** The user declares it in a project: a name, one sentence on what it is
+for, and how to reach the server, either
+
+- a **command**, spawned by the daemon without a shell (a program and its arguments, as a task's
+  line is), in its own process group, in a folder of its own (no project's place is its place: one
+  server serves every workspace of the project), with the daemon's environment as a run has it
+  (the forge tokens emptied, `tools.md`, "Tasks and runs") and the variables the declaration adds; or
+- a **local URL** (`http://127.0.0.1:…`, `localhost` or `[::1]`, Streamable HTTP, no redirect
+  followed), for a server the user runs themselves. Any other address is refused.
+
+```toml
+# $XDG_CONFIG_HOME/flottille/projects/app.toml
+[extensions.connections]
+enabled = true                       # the project's switch
+
+[[extensions.connections.server]]
+name    = "almanac"                  # the tool is conn_almanac
+about   = "The user's notes and decisions."
+command = ["almanac", "mcp"]
+env     = { ALMANAC_TOKEN = { vault = "almanac-token" } }
+only    = { }                        # limits on arguments, below
+```
+
+**The user's door only**, as `extension.set` is: the window, `flottille connection …` and the
+methods `connection.list`, `.add`, `.edit`, `.remove`, `.review` and `.accept`. No tool of an agent
+declares or edits a connection, and the `project` tool refuses its keys: a command is run with the
+user's rights, where no gate looks. The file is in Flottille's own folders, which no tool writes.
+A connection's name is lower-case letters, digits and `_`, 24 at most; the tool is `conn_<name>`,
+so that no core tool, now or later, can take its name, and the gate's card says plainly that the
+tool is a third party's.
+
+**Secrets come from the vault** (`vault.md`). `env` (and, for a URL, `headers`) names an entry
+instead of holding a value: the daemon reads it when it starts the server and puts it where it goes.
+The entry must be one the project sees. The agent sees neither the variable nor its
+value; the value is masked in everything the daemon stores and shows, a server's output and its
+error text included.
+
+**One tool, however many actions.** A connection is one Flottille tool, `conn_<name> {action,
+arguments?, for?}`, as `tickets` and `forge` take an `action`; the server's tools are its actions.
+Its cost in the agent's context is about one tool line:
+
+- **A short description, pinned**, written by Flottille from a fixed text, the user's sentence and
+  the names of the **enabled** actions (1,200 characters at most; beyond that, `and 12 more: help
+  lists them`). Never a word the server wrote. Its schema is the same for every connection, with
+  `action` a plain string, so it never grows with the server.
+- **`action: "help"`** lists the enabled actions, a line each, from the pin; with `for: "<action>"`
+  it gives that action's description and full argument schema. Read on demand, answered from the
+  pin, never by a call to the server.
+- **`arguments`** is the action's own object, checked against the pinned schema before anything
+  is sent: an unknown action, a disabled one, or arguments that do not fit are refused, naming
+  what is wrong, and the server sees nothing.
+- **A result** is the server's text blocks, masked, escaped as every result is, framed as a third
+  party's data, and cut at the user's limit with the rest read through `run_status` (`tools.md`,
+  "Long results"). An image, a sound or a resource has no place in a text result: it is left out
+  with one line saying what it was and how big. `isError` is an error.
+- **Every call is recorded** as an `agent.tool_served` event of the agent (the action and its
+  arguments in the arguments, cut and masked as all are), and a connection that starts, stops,
+  fails or is cut off says so in `connection.changed` and `connection.cut_off` (`events.md`).
+
+Calls to one connection run one at a time, in order: a browser or a desktop has one state. A call
+has 120 seconds, then it is cancelled and answers `the call failed: …`. The server starts at the
+first call, stays while a session of the project runs and for ten minutes after, and its whole
+process group is stopped then, with the daemon, and when the connection is turned off. A server that
+fails to start answers `the call failed: the connection could not start: <the first line of its
+error output, masked>`, and is tried again at the next call, never in the background.
+
+**The daemon offers a server nothing but the tools.** It declares no client capability: a server
+asking for sampling (a model call outside the gate), elicitation (a question that would wait for a
+human) or roots is answered with an error. The server's prompts and resources are not used.
+
+**No classification to do.** A call of a connection is **to judge**: a card in Ask, the judge in
+Auto (which sees the call as any, with the action's pinned description in a block of its own,
+escaped, as the agent's words are), passed in Full and recorded as allowed by Full mode. The user
+may change one action, never more than that:
+
+| Setting | The call is | Use |
+|---|---|---|
+| **judged** (the default) | to judge | everything the user did not look at |
+| **passes** | harmless: passes in every mode | an action that only reads, as the user decided |
+| **asked** | base: always a card in Ask and Auto, with a strong warning, never the judge's; Full passes it | an action the judge cannot read |
+
+The server's own annotations (`readOnlyHint`…) are shown in the review and never used: they are
+the server's claim about itself. What stays refused in every mode stays refused: an action that
+is off, arguments that do not fit, a limit, a cut-off connection, a call of a replaced agent.
+
+**Limits on arguments.** `only = { app = ["gedit", "Files"] }` says that an argument named `app`
+may take those values and no other, wherever an action's pinned schema has an argument of that
+name: another value, or none where the action takes one, is refused, naming the limit. It is the
+one thing the gate can hold for a server it does not know. The review lists, for each limit, the
+actions it covers and those it does not, so that a gap is seen before it is used.
+
+**Pinning.** Third-party text put in the agent's context is how a tool is poisoned, and a server
+that changes after the user trusted it is a rug pull. So the user's trust is in **what they
+read**:
+
+- **At the first connection**, Flottille records the server's announced name and version (MCP
+  `serverInfo`) and, for each action, its name, description, argument schema and annotations. The
+  connection is **awaiting review**: no agent has its tool, no call reaches the server, until the
+  user has read that list in the window, turned off any action they do not want, set any other
+  than **judged**, and accepted. That acceptance is the pin.
+- **At every start of the server**, and whenever it says its tools changed
+  (`notifications/tools/list_changed`), the daemon lists them again and compares with the pin.
+  **Any change cuts the connection off**: another version, an action added, removed or changed
+  in its description, schema or annotations. An action name that is not made of letters, digits,
+  `_`, `-` and `.` (48 at most) is never offered and is said in the review.
+- **Cut off**, the tool leaves the lists of every session of the project, as a tool that could only
+  refuse is not listed (`tools.md`, "When the tools change", with the `tools` delivery: `- conn_almanac:
+  gone`); a call already running ends as it began; the server is stopped once it is done; an
+  **inbox item** says that the user is needed, naming what changed.
+- **The review** is a **diff** in the window, between the pin and what the server announces now:
+  the version, each action added (whole), removed, or changed (the old text and the new, line by
+  line), the unchanged ones folded away. Texts are shown as plain text, never as Markdown. The user
+  accepts, or leaves the connection off. **Accepting keeps the settings of the actions that did
+  not change and puts every new one to judged** (turned on, as the user has just read it).
+- **A declaration the user edits** (the command, its arguments, the URL, the variables, the limits)
+  is a different server as far as trust goes: the connection is awaiting review again, the diff
+  against the last pin.
+
+The pin and what the user decided in a review (which actions are on, which pass or are always
+asked) are kept together in the extension's own space of the store (`ext_connections_…`), and not
+in the file: an edit by hand could not mark a new action as passing without anyone having read it.
+
+**Turned off.** The extension's, the project's or the connection's own switch: the tool leaves the
+agents' lists at once ("Activation"), no call reaches the server, and it is stopped once its running
+call ends. A call that was running when it was turned off answers `the call failed: the connection
+was turned off while it ran; it may have been performed`.
+
+**In the window.** The global tab is the switch and its sentence, as every extension's when it has
+nothing global to set. Each project's settings get a **Connections** section with the list pattern
+(rule 7 of `reference/gpui.md`): one row per connection, its state (awaiting review, ready, cut
+off, off, failing), its switch, and **Review** where a review is due, which opens the diff in a
+large dialog; adding or editing one is a form dialog with its command or URL, its sentence, its
+variables (picked among the vault's entries) and its limits. A call held for the user is a card as any, naming the connection, the action and its
+arguments. Everything animates as the rest of the window does, and the issue lists it.
+
+**What it does not protect.** The server has the user's rights. Flottille sees the name, the
+action and the arguments of a call, never what the server then does with the machine, and it does
+not read the arguments for paths or addresses. A server that is wrong, compromised or just
+powerful can act as the user, and no mode changes that; this is Full mode's limit
+(`design.md` §7.1), and the reason the user installs only what they would run as a CLI.
+
+**Examples.** Real programs, public; the first is invented.
+
+- **A memory server**, `almanac` (invented), a notes and decisions store: `search` and `read` are set
+  to **passes**, `write` and `link` stay **judged**. Its token is a vault entry, put in its
+  environment.
+- **`agent-desktop mcp`** (vercel-labs/agent-desktop, driving the desktop through AT-SPI on Linux,
+  its tools named `desktop_click`, `desktop_snapshot`…): the most powerful kind, since it acts in
+  every application the user has open. Every action is set to **asked**, and a limit names the
+  applications it may act on, on the argument the review shows the actions use for that.
+- **`browse`** (anomalyco/browse, the user's own Chromium through an extension): its
+  `execute` runs arbitrary Playwright code that no gate can judge, so it is **asked**, always;
+  the actions that open, read and screenshot a tab stay **judged**.
+
+**Builds**: nothing of the frame that Specs does not build (settings, tools given by an extension,
+data, screens, the project section). The MCP client is `rmcp`'s, which the tests already use (the daemon's
+dependency gains the client features it needs, said in the pull request), the server process is the
+daemon's own spawn, and the tests run a small fake MCP server
+on stdio with scripted behaviour, never a real one.
+
 ### Judge
 
 As it is today (`design.md` §7.1), nothing of its behaviour changed, moved into the frame last
@@ -552,8 +729,11 @@ New: `the_judge_is_declared_with_its_slot_guidance_call_and_decider`,
 3. **The compaction as an extension**: #308 stays core; #309 and #320 are rewritten into the frame
    (slots, guidance, calls, its triggers, the handoff in the core).
 4. **Review and the cold read**: agents an extension launches, the depth exception.
-5. **The judge moved into the frame**, a pure refactor.
-6. **Handbook.**
+5. **Connections**: it asks nothing of the frame that Specs did not build (settings, tools given by
+   an extension, data, screens), so it can come as soon as Specs S3 is merged, and before the
+   compaction if the user wants it first.
+6. **The judge moved into the frame**, a pure refactor.
+7. **Handbook.**
 
 Remote reads an extension's settings in `extension.list` and its results in events, as the window
 does; nothing more is asked of the frame by this note.
@@ -566,7 +746,9 @@ judge's code written a second time for the compaction until the last step remove
 
 ## Decisions taken
 
-The maintainer's answers of 2026-11-03.
+### 2026-11-03
+
+The maintainer's answers.
 
 1. **Auto with the judge off: shown unavailable** (`Segmented`'s `.unavailable`, faded, with one
    line saying the judge is off and a link to the Judge's tab). A session already in Auto when
@@ -592,6 +774,29 @@ The maintainer's answers of 2026-11-03.
     `/review`, the `review` tool, a pull request opened and the command line, never a button; it
     blocks nothing; two rounds at most.
 
+### 2026-11-07
+
+The maintainer's answers on Connections.
+
+13. **Third-party tools run beside the daemon, never in it.** "A plugin of a third party" stays
+    refused; **Connections** is Flottille's own extension that lets the user declare an MCP server
+    of theirs, trusted as a CLI they installed. The gate controls what is asked of it, not what it
+    does.
+14. **The daemon is the MCP client; agents never talk to a server.** A connection is **one**
+    Flottille tool with an `action`, so that its cost is about one tool line: a short pinned
+    description with the enabled actions' names, `help` for an action's schema, results capped,
+    masked and recorded like any other.
+15. **No manual classification.** Every call of a connection is judged (Auto) or asked (Ask) by
+    default. **Passes** is an optional shortcut for an action that only reads; **asked** is for one
+    the judge cannot read.
+16. **Pinning.** The server's version, its actions and their descriptions are recorded when the user
+    reviews them; any change cuts the connection off until the user reviews the diff; the
+    settings of unchanged actions are kept and a new action is judged. Descriptions are third-party
+    text put in the agent's context, which is why they are pinned.
+17. **A server's secrets come from the vault** into its environment; the agent never sees them.
+18. **Per project, off by default,** with the usual global and per-project switches; the declaration
+    is the user's alone, never an agent's.
+
 ## Open questions
 
 1. **Who reaches a review's agents.** They are children of the reviewed session, which today could
@@ -600,3 +805,9 @@ The maintainer's answers of 2026-11-03.
    change does not steer its own review; the session sees the review through its deliveries and
    the folded line), and a call of theirs held by the gate goes to the user, as a root's does,
    rather than to the session or the pilot. To confirm with the Review issue.
+2. **A browser of Flottille's own for Firefox.** Connections can carry an existing browser server,
+   but the ones that exist drive Chromium. Flottille could have its own: a WebExtension in the
+   user's own Firefox, which sends synthetic events and hands the tab back to the user for what
+   only they do (a login, a second factor, a payment), or WebDriver BiDi driving a dedicated
+   profile. Not decided, and not designed here: it would be an extension, not a connection, since
+   Flottille's code would drive the browser.
