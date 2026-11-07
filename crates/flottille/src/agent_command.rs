@@ -659,7 +659,15 @@ fn agent_line(agent: &Value, entry: Option<&Value>) -> String {
                 Some(on) => line.push_str(&format!("; waits for its {on}")),
                 None => {}
             }
-            if entry["needs_user"] == true {
+            let questions = entry["questions"].as_array().map_or(&[][..], Vec::as_slice);
+            for question in questions {
+                let asked = question["question"].as_str().unwrap_or_default();
+                line.push_str(&format!(
+                    "; asks you: {}",
+                    asked.lines().next().unwrap_or_default()
+                ));
+            }
+            if entry["needs_user"] == true && questions.is_empty() {
                 line.push_str("; a request waits for you (`flottille approvals`)");
             }
         }

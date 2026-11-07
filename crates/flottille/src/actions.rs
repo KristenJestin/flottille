@@ -376,6 +376,13 @@ pub async fn prepared(
             says.push(format!("Its body, the project's template: {template}"));
         }
         says.extend(forge_says(daemon, grant, args));
+        // What an approval or a change request is given on: the commit the user reads it for.
+        if crate::gate::decides_a_review(tool, args)
+            && let Ok(call) = serde_json::from_value::<crate::forge::ForgeCall>(args.clone())
+        {
+            let head = crate::forge::review_head(daemon, &grant.place, &call).await;
+            says.push(format!("Its head: {}", head.map_err(Outcome::Refused)?));
+        }
         return Ok(says);
     }
     if tool == "services" {
@@ -660,6 +667,19 @@ fn forge_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Vec<String> {
                 .map(|base| format!("It moves it onto the base {base}")));
         }
         Some("merge") => say(merge_says(daemon, grant, args)),
+        Some("review") => {
+            say(args["verdict"]
+                .as_str()
+                .map(|verdict| format!("Its verdict: {verdict}")));
+            for inline in args["comments"].as_array().into_iter().flatten() {
+                say(Some(format!(
+                    "Its inline comment on {} line {}: {}",
+                    inline["path"].as_str().unwrap_or("?"),
+                    inline["line"],
+                    inline["body"].as_str().unwrap_or_default()
+                )));
+            }
+        }
         _ => {}
     }
     says

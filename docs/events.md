@@ -702,6 +702,19 @@ with `events_since`.
 | `question` | Masked. |
 | `to` | `user` or `parent`. |
 
+#### `agent.answered`
+
+A question of the agent may no longer wait: it took a message of the user (a root) or of its
+parent (a child) while a question of its waited, or its session was replaced or resumed while one
+did. It tells a client to read the root's open questions again (`agent.tree`, `questions`); it does
+not say which are open, the store does: a question is answered once the root took a message of the
+user written after it, and none asked before a replacement or a resume waits.
+
+| Field | |
+|---|---|
+| `agent` | |
+| `why` | `replaced` or `resumed`, when that is why; absent for a message taken. |
+
 #### `agent.stuck`
 
 The sweep found the agent stuck in a turn (`docs/agents.md`, "The sweep"): its session is

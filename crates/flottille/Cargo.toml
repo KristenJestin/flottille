@@ -39,6 +39,7 @@ serde_json = "1.0.154"
 # workflows): the maintained fork of serde_yaml.
 serde_norway = "0.9.42"
 sha2 = "0.11.1"
+tempfile = "3.27.0"
 tokio = { version = "1.54.1", features = ["rt", "net", "io-util", "sync", "macros", "signal", "time", "process", "fs"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
 tokio-util = "0.7.20"
@@ -55,4 +56,5 @@ gpui-kit = { version = "=0.8.0", default-features = false, features = ["assets",
 rmcp = { version = "3.7.0", default-features = false, features = ["client", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider"] }
 # Only to give reqwest, under rmcp's test client, the crypto provider it insists on even for http.
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
-tempfile = "3.27.0"
+# To take a store back to what an older version wrote (the scenarios of #519).
+rusqlite = { version = "0.41.0", features = ["bundled", "fallible_uint"] }

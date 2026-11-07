@@ -393,6 +393,14 @@ pub enum Command {
         /// Pasted or dropped pictures that go with it, as the clipboard gave them.
         images: Vec<Picture>,
     },
+    /// The user's answer from the card of the question of `seq` the session's root asked: a
+    /// message to the root like any other, which answers every question open then (`seqs`).
+    AnswerQuestion {
+        session: String,
+        seq: u64,
+        seqs: Vec<u64>,
+        message: String,
+    },
     /// Takes back a message that waits for the session's root (`edit`: to change it and send it
     /// again). The daemon refuses one the root read first.
     Unqueue {
@@ -943,6 +951,13 @@ pub enum Outcome {
         session: String,
         key: u64,
         answer: Result<crate::session::Accepted, String>,
+    },
+    /// The answer from the card of `seq` to the questions `seqs` was taken, or refused with why.
+    QuestionAnswered {
+        session: String,
+        seq: u64,
+        seqs: Vec<u64>,
+        refused: Option<String>,
     },
     /// A waiting message was taken back, with its text and pictures, or the daemon refused with
     /// why ("already read by the agent").
@@ -1975,6 +1990,28 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 session,
                 name,
                 image,
+            }
+        }
+        Command::AnswerQuestion {
+            session,
+            seq,
+            seqs,
+            message,
+        } => {
+            let refused = match ask_alone(
+                connect,
+                "agent.send",
+                json!({"agent": session, "message": message}),
+                bounds.quick,
+            ) {
+                Ok(Ok(_)) => None,
+                Ok(Err(why)) | Err(why) => Some(why),
+            };
+            Outcome::QuestionAnswered {
+                session,
+                seq,
+                seqs,
+                refused,
             }
         }
         Command::Reply {

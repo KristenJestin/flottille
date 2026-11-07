@@ -26,9 +26,9 @@ use flottille_ui::card::Block as CardBlock;
 use flottille_ui::color::mix;
 use flottille_ui::motion::{HOVER, Motion, PANEL};
 use flottille_ui::{
-    AgentState, Badge, Button, Card, Drawer, Icon, ListRow, Listing, Menu, Modal, Palette, Pill,
-    PulsingLabel, Side, Skeleton, StateIcon, Status, Toast, Type, awaiting, changing, enter, fade,
-    fold_frame, follow_theme, hoverable, icon, palette, path_line, presence, presence_of,
+    AgentState, Badge, Button, Card, Drawer, Field, Icon, ListRow, Listing, Menu, Modal, Palette,
+    Pill, PulsingLabel, Side, Skeleton, StateIcon, Status, Toast, Type, awaiting, changing, enter,
+    fade, fold_frame, follow_theme, hoverable, icon, palette, path_line, presence, presence_of,
     section_label, selectable, space, text_region, tipped_when_cut, toast, turning,
 };
 use futures::channel::mpsc::UnboundedSender;
@@ -52,7 +52,7 @@ use crate::attachments::{Attachments, STILL_SCALING};
 use crate::commands::CommandInfo;
 use crate::conversation::{
     Activity, Block, Call, CallState, Change, Conversation, DiffLine, Ending, STARTED_SESSION_KIND,
-    Summary, USER, WOKEN_BY_KIND, asks_the_user, in_sight, is_hidden,
+    Summary, USER, WOKEN_BY_KIND, in_sight, is_hidden,
 };
 use crate::leaves::LeaveList;
 use crate::link::{Connect, Update};
@@ -1410,6 +1410,12 @@ impl SessionPage {
         let (was_ended, now_ended) = (ended(&self.tree), ended(&tree));
         let root = |tree: &[TreeAgent]| older_tools(tree.iter().find(|a| a.parent.is_none()));
         let older_changed = root(&self.tree) != root(&tree);
+        let questions = |tree: &[TreeAgent]| {
+            tree.iter()
+                .find(|a| a.parent.is_none())
+                .map(|root| root.questions.clone())
+        };
+        let asked_changed = questions(&self.tree) != questions(&tree);
         let was_waiting = self.reloads_after_turn();
         self.tree = tree;
         // The line of a reload that waits for the turn comes and goes with the daemon's word.
@@ -1434,7 +1440,80 @@ impl SessionPage {
             let conversation = self.conversation.clone();
             conversation.update(cx, |view, _| view.model.set_names(names));
             self.refresh_conversation(cx);
+        } else if asked_changed {
+            self.refresh_conversation(cx);
         }
+    }
+
+    /// The user answers the question of `seq` from its card: a message to the root, which
+    /// names the question when several wait.
+    pub fn answer_question(&mut self, seq: u64, answer: String, cx: &mut Context<Self>) {
+        let open = self
+            .tree
+            .iter()
+            .find(|a| a.parent.is_none())
+            .map(|root| root.questions.clone())
+            .unwrap_or_default();
+        // A message of the user answers every question open: it quotes each when several wait.
+        let message = match open.len() > 1 {
+            true => {
+                let quoted: Vec<String> = open
+                    .iter()
+                    .map(|q| format!("> {}", q.text.lines().next().unwrap_or_default()))
+                    .collect();
+                format!("{}\n\n{answer}", quoted.join("\n>\n"))
+            }
+            false => answer,
+        };
+        let mut seqs: Vec<u64> = open.iter().map(|q| q.seq).collect();
+        if !seqs.contains(&seq) {
+            seqs.push(seq);
+        }
+        let command = Command::AnswerQuestion {
+            session: self.opened.id.clone(),
+            seq,
+            seqs,
+            message,
+        };
+        self.shell
+            .update(cx, |shell, _| shell.perform(command))
+            .ok();
+    }
+
+    /// What the daemon answered to the answer of the question of `seq`.
+    pub fn question_answered(
+        &mut self,
+        seq: u64,
+        refused: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let rows = self.conversation.read(cx).rows.clone();
+        let answer = rows.iter().find_map(|row| {
+            let row = row.read(cx);
+            matches!(*row.block, Block::Question { seq: s, .. } if s == seq)
+                .then(|| row.answer.clone())
+                .flatten()
+        });
+        if let Some(answer) = answer {
+            answer.update(cx, |answer, cx| answer.answered(refused, window, cx));
+        }
+    }
+
+    /// How many questions of the root wait for the user's answer.
+    fn open_questions(&self) -> usize {
+        self.tree
+            .iter()
+            .find(|a| a.parent.is_none())
+            .map_or(0, |root| root.questions.len())
+    }
+
+    /// Whether the question of `seq` waits for the user's answer, as the daemon says it.
+    fn asking(&self, seq: u64) -> bool {
+        self.tree
+            .iter()
+            .find(|a| a.parent.is_none())
+            .is_some_and(|root| root.questions.iter().any(|q| q.seq == seq))
     }
 
     /// Brings the cards of running commands up to the rail's list, which is read each second while
@@ -1476,6 +1555,18 @@ impl SessionPage {
             for at in view.specials.clone() {
                 let row = view.rows[at].clone();
                 view.touched += 1;
+                if let Block::Question { seq, .. } = *row.read(cx).block {
+                    if let Some(answer) = row.read(cx).answer.clone() {
+                        let open = self.open_questions();
+                        answer.update(cx, |answer, cx| answer.set_open(open, cx));
+                    }
+                    let asking = self.asking(seq);
+                    if row.read(cx).asking != asking {
+                        row.update(cx, |row, cx| row.set_asking(asking, cx));
+                        view.card_changed(at, cx);
+                    }
+                    continue;
+                }
                 let kind = match *row.read(cx).block {
                     Block::Approval { number } => Some(number),
                     _ => None,
@@ -2356,15 +2447,12 @@ impl ConversationView {
 
     /// Finds again the rows of a group that stay out of its fold. Whether they changed.
     fn find_needs(&mut self, segment: usize, cx: &gpui_kit::App) -> bool {
-        let last = segment + 1 == self.segments.len();
         let Some(Segment::Group(group)) = self.segments.get(segment) else {
             return false;
         };
         let rows = group.rows.clone();
         self.walked += rows.len();
-        let needs: Vec<usize> = rows
-            .filter(|&at| self.needs_the_user(at, last, cx))
-            .collect();
+        let needs: Vec<usize> = rows.filter(|&at| self.needs_the_user(at, cx)).collect();
         let Some(Segment::Group(group)) = self.segments.get_mut(segment) else {
             return false;
         };
@@ -2452,26 +2540,11 @@ impl ConversationView {
                 }
             }
         }
-        self.mark_asks(segment, cx);
         if leaving {
             self.sweep = Some(cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(PANEL + FRAME).await;
                 this.update(cx, |this, cx| this.swept(cx)).ok();
             }));
-        }
-    }
-
-    /// A question to the user that stays out of a folded group shows alone, without the calls
-    /// merged with it.
-    fn mark_asks(&self, segment: usize, cx: &mut gpui_kit::App) {
-        let Some(Segment::Group(group)) = self.segments.get(segment) else {
-            return;
-        };
-        let only = !group.open;
-        for &at in &group.needs {
-            if asks_the_user(&self.model.blocks()[at]) {
-                self.rows[at].update(cx, |row, cx| row.set_asks_only(only, cx));
-            }
         }
     }
 
@@ -2878,7 +2951,6 @@ impl ConversationView {
                     })
                     .collect();
             }
-            self.mark_asks(segment, cx);
         }
         let items = self.item_of(self.segments.len()) + self.pending.len();
         match read.follow {
@@ -2901,7 +2973,10 @@ impl ConversationView {
 
     fn add_row(&mut self, at: usize, page: &SessionPage, cx: &mut Context<Self>) {
         let block = self.model.blocks()[at].clone();
-        if matches!(block, Block::SubAgents | Block::Approval { .. }) {
+        if matches!(
+            block,
+            Block::SubAgents | Block::Approval { .. } | Block::Question { .. }
+        ) {
             self.specials.push(at);
         }
         let me = self.model.me().to_owned();
@@ -2990,7 +3065,10 @@ impl ConversationView {
                 }
                 Change::Changed(at) => {
                     let block = self.model.blocks()[*at].clone();
-                    if !matches!(block, Block::SubAgents | Block::Approval { .. }) {
+                    if !matches!(
+                        block,
+                        Block::SubAgents | Block::Approval { .. } | Block::Question { .. }
+                    ) {
                         // A request answered by a card has no card of its own to bring up to date.
                         self.specials.retain(|special| special != at);
                     }
@@ -3034,16 +3112,17 @@ impl ConversationView {
     }
 
     /// Whether the row `at` of a group shows under the group's line while it is folded: a call
-    /// held for the user's answer, a command still running, a question asked to the user in the
-    /// last group.
-    fn needs_the_user(&self, at: usize, last: bool, cx: &gpui_kit::App) -> bool {
+    /// held for the user's answer, a command still running, a question to the user the daemon
+    /// says is open.
+    fn needs_the_user(&self, at: usize, cx: &gpui_kit::App) -> bool {
         match &self.model.blocks()[at] {
             Block::Approval { .. } => self.rows[at]
                 .read(cx)
                 .card()
                 .is_some_and(|card| card.decision.is_none()),
             Block::Command(card) => card.ending == Ending::Running,
-            block => last && asks_the_user(block),
+            Block::Question { .. } => self.rows[at].read(cx).asking,
+            _ => false,
         }
     }
 
@@ -3526,9 +3605,10 @@ pub struct Row {
     card: Option<ApprovalCard>,
     icons: HashMap<String, Entity<StateIcon>>,
     pills: HashMap<String, Entity<Pill>>,
-    /// Its steps show only the question asked to the user: they stay out of a folded group
-    /// for it alone.
-    asks_only: bool,
+    /// Its question waits for the user's answer, as the daemon says: its card shows.
+    asking: bool,
+    /// The field that answers its question, made when the card first shows.
+    answer: Option<Entity<AnswerBox>>,
     /// It is a message the user sent from the composer: being sent, refused, or recorded since.
     sent: Option<Sent>,
     /// The lines of a card of links, and the pictures among them.
@@ -3578,6 +3658,10 @@ impl Row {
             Block::Approval { number } => page.card(number),
             _ => None,
         };
+        let asking = match block {
+            Block::Question { seq, .. } => page.asking(seq),
+            _ => false,
+        };
         cx.new(|cx| {
             let mut row = Row {
                 at,
@@ -3599,7 +3683,8 @@ impl Row {
                 card,
                 icons: HashMap::new(),
                 pills: HashMap::new(),
-                asks_only: false,
+                asking,
+                answer: None,
                 sent: None,
                 links: LinksCard::default(),
                 renders: 0,
@@ -3774,10 +3859,15 @@ impl Row {
         &self.block
     }
 
-    /// Shows only the question its steps ask the user, or all of them again.
-    fn set_asks_only(&mut self, only: bool, cx: &mut Context<Self>) {
-        if self.asks_only != only {
-            self.asks_only = only;
+    /// The field that answers its question, once its card showed.
+    pub fn answer(&self) -> Option<&Entity<AnswerBox>> {
+        self.answer.as_ref()
+    }
+
+    /// Its question is open, or no longer: its card unfolds or folds away.
+    fn set_asking(&mut self, asking: bool, cx: &mut Context<Self>) {
+        if self.asking != asking {
+            self.asking = asking;
             cx.notify();
         }
     }
@@ -3932,8 +4022,10 @@ impl Row {
         if let Block::Links { links } = &block {
             self.links.show(links, cx, |row: &mut Row| &mut row.links);
         }
-        if let Block::Text { text } | Block::Thought { text, .. } | Block::Report { text, .. } =
-            &block
+        if let Block::Text { text }
+        | Block::Thought { text, .. }
+        | Block::Report { text, .. }
+        | Block::Question { text, .. } = &block
         {
             let muted = matches!(block, Block::Thought { .. });
             self.set_markdown(text, muted, false, cx);
@@ -4964,8 +5056,7 @@ impl Render for Row {
                     .enumerate()
                     .filter(|(_, (call, _))| !call.hidden())
                     .map(|(at, (call, (_, mark)))| {
-                        let shown = !self.asks_only || call.name == "ask_user";
-                        let step = div()
+                        div()
                             .id(ElementId::Name(format!("step-{}-{at}", self.at).into()))
                             .flex()
                             .gap(space::MD)
@@ -5059,12 +5150,7 @@ impl Render for Row {
                             .child(div().flex_none().mono(11.).text_color(p.faint).child(
                                 SharedString::from(call.duration_ms().map_or("…".into(), seconds)),
                             ))
-                            .test_support();
-                        presence(
-                            ElementId::Name(format!("step-{}-{at}-shown", self.at).into()),
-                            shown,
-                            step,
-                        )
+                            .test_support()
                     })
                     .collect::<Vec<_>>();
                 let toggle = || {
@@ -5081,11 +5167,7 @@ impl Render for Row {
                 };
                 // Folded to one discreet line until a click opens it: a long run of calls
                 // would push the conversation down. The line and the card fold into each other.
-                let said: Vec<&Call> = calls
-                    .iter()
-                    .filter(|call| !call.hidden())
-                    .filter(|call| !self.asks_only || call.name == "ask_user")
-                    .collect();
+                let said: Vec<&Call> = calls.iter().filter(|call| !call.hidden()).collect();
                 let last = said.last().expect("a block of steps holds a call");
                 let count = said.len();
                 let line = SharedString::from(format!(
@@ -5471,6 +5553,7 @@ impl Render for Row {
                     .into_any_element()
             }
             Block::Approval { number } => self.render_card(*number, window, cx).into_any_element(),
+            Block::Question { seq, .. } => self.render_question(*seq, window, cx),
             Block::Answered { .. } => div().into_any_element(),
             // One line; a click opens the output in the panel the rail opens.
             Block::Command(result) => {
@@ -5590,6 +5673,235 @@ impl Row {
                 outcome,
             ))
             .into_any_element()
+    }
+}
+
+impl Row {
+    /// A question the agent asked the user, in full, with the field that answers it: it unfolds
+    /// where it was asked while the daemon says it waits, and folds away once the answer is
+    /// taken.
+    fn render_question(
+        &mut self,
+        seq: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = |part: &str| ElementId::Name(format!("row-{}-{part}", self.at).into());
+        let answer = match &self.answer {
+            Some(answer) => answer.clone(),
+            None => {
+                let page = self.page.clone();
+                let (session, open) = page
+                    .upgrade()
+                    .map(|page| {
+                        let page = page.read(cx);
+                        (page.id().to_owned(), page.open_questions())
+                    })
+                    .unwrap_or_default();
+                let answer =
+                    cx.new(|cx| AnswerBox::new(self.at, seq, session, open, page, window, cx));
+                self.answer = Some(answer.clone());
+                answer
+            }
+        };
+        let card = Card::new()
+            .title(SharedString::from(format!("{} asks you", self.me)))
+            .meta(self.when.map(clock).unwrap_or_default())
+            .child(
+                div()
+                    .id(id("question-text"))
+                    .px(space::LG)
+                    .pt(space::MD)
+                    .child(markdown_view(
+                        id("question-region"),
+                        &self.markdown,
+                        self.scope,
+                    ))
+                    .test_support(),
+            )
+            .child(div().px(space::LG).py(space::MD).child(answer));
+        div()
+            .id(id("question"))
+            .child(presence(id("question-open"), self.asking, card))
+            .test_support()
+            .into_any_element()
+    }
+}
+
+/// What a question's card says once its answer was sent while the agent works: a message of the
+/// user waits for the end of the agent's turn (or "Send now" under the conversation), and the
+/// card folds away once the agent took it.
+pub const ANSWER_WAITS: &str =
+    "Your answer is sent: it waits under the conversation until the agent's turn ends.";
+
+/// What each card says while several questions wait: a message of the user answers them all.
+pub const ANSWERS_ALL: &str =
+    "Several questions wait: your answer goes to all of them, and quotes each.";
+
+/// The questions whose answer the user sent, by session: the window keeps them, so that a page
+/// opened again, or a history read again, does not ask for an answer twice.
+#[derive(Default)]
+struct SentAnswers(HashSet<(String, u64)>);
+
+impl gpui_kit::Global for SentAnswers {}
+
+/// The answer to the questions `seqs` of `session` was taken by the daemon.
+pub fn answers_sent(session: &str, seqs: &[u64], cx: &mut App) {
+    let sent = &mut cx.default_global::<SentAnswers>().0;
+    sent.extend(seqs.iter().map(|&seq| (session.to_owned(), seq)));
+}
+
+/// The field that answers a question, in its own view: its caret blinks without drawing the row.
+pub struct AnswerBox {
+    at: usize,
+    seq: u64,
+    session: String,
+    /// How many questions of the session wait: its answer goes to all of them.
+    open: usize,
+    page: WeakEntity<SessionPage>,
+    field: Entity<InputState>,
+    has_text: bool,
+    sending: bool,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl AnswerBox {
+    fn new(
+        at: usize,
+        seq: u64,
+        session: String,
+        open: usize,
+        page: WeakEntity<SessionPage>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let field = cx.new(|cx| {
+            let mut field = InputState::new(window, cx).placeholder("Your answer");
+            follow_theme(&mut field, cx);
+            field
+        });
+        let mut subscriptions = vec![cx.subscribe_in(
+            &field,
+            window,
+            |this: &mut Self, field, event, _, cx| match event {
+                InputEvent::Change => {
+                    this.has_text = !field.read(cx).value().trim().is_empty();
+                    cx.notify();
+                }
+                InputEvent::PressEnter { .. } => this.send(cx),
+                _ => {}
+            },
+        )];
+        subscriptions.push(cx.observe_global::<SentAnswers>(|_, cx| cx.notify()));
+        AnswerBox {
+            at,
+            seq,
+            session,
+            open,
+            page,
+            field,
+            has_text: false,
+            sending: false,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    /// How many questions of the session wait now.
+    fn set_open(&mut self, open: usize, cx: &mut Context<Self>) {
+        if self.open != open {
+            self.open = open;
+            cx.notify();
+        }
+    }
+
+    pub fn field(&self) -> &Entity<InputState> {
+        &self.field
+    }
+
+    /// Whether the answer to its question went: the field gives way to a line saying it waits.
+    pub fn is_sent(&self, cx: &App) -> bool {
+        cx.try_global::<SentAnswers>()
+            .is_some_and(|sent| sent.0.contains(&(self.session.clone(), self.seq)))
+    }
+
+    /// Sends what the field holds to the root, as a message.
+    pub fn send(&mut self, cx: &mut Context<Self>) {
+        let typed = self.field.read(cx).value().trim().to_owned();
+        if typed.is_empty() || self.sending {
+            return;
+        }
+        self.sending = true;
+        let seq = self.seq;
+        self.page
+            .update(cx, |page, cx| page.answer_question(seq, typed, cx))
+            .ok();
+        cx.notify();
+    }
+
+    fn answered(&mut self, refused: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        self.sending = false;
+        match refused {
+            None => {
+                self.has_text = false;
+                self.field
+                    .update(cx, |field, cx| field.set_value("", window, cx));
+            }
+            Some(why) => toast(Toast::failure("The answer was not sent").detail(why), cx),
+        }
+        cx.notify();
+    }
+}
+
+impl Render for AnswerBox {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let id = |part: &str| ElementId::Name(format!("row-{}-{part}", self.at).into());
+        let frame = div()
+            .id(id("answer-frame"))
+            .h(px(34.))
+            .px(space::MD)
+            .rounded(px(8.))
+            .bg(p.field)
+            .border_1()
+            .border_color(p.line2)
+            .flex()
+            .items_center()
+            .text_size(px(13.))
+            .child(Input::new(&self.field))
+            .test_support();
+        let send = Button::primary(id("answer-send"), "Answer")
+            .disabled(!self.has_text || self.sending)
+            .on_click(cx.listener(|this, _, _, cx| this.send(cx)));
+        let field = Field::new(
+            id("answer-field"),
+            "Your answer",
+            div()
+                .flex()
+                .items_center()
+                .gap(space::SM)
+                .child(div().flex_1().min_w_0().child(frame))
+                .child(send),
+        );
+        let all = div()
+            .id(id("answer-all"))
+            .pb(space::SM)
+            .text_size(px(12.5))
+            .text_color(p.mute)
+            .aria_label(ANSWERS_ALL)
+            .child(ANSWERS_ALL)
+            .test_support();
+        let waits = div()
+            .id(id("answer-waits"))
+            .text_size(px(12.5))
+            .text_color(p.faint)
+            .aria_label(ANSWER_WAITS)
+            .child(ANSWER_WAITS)
+            .test_support();
+        let sent = self.is_sent(cx);
+        div()
+            .child(presence(id("answer-several"), self.open > 1 && !sent, all))
+            .child(presence(id("answer-open"), !sent, field))
+            .child(presence(id("answer-sent"), sent, waits))
     }
 }
 
@@ -8397,6 +8709,7 @@ mod tests {
             doing: String::new(),
             waiting_on: None,
             needs_user: false,
+            questions: Vec::new(),
             resumable: false,
             stopping: false,
             images: None,

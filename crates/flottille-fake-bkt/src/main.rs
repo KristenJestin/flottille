@@ -46,7 +46,12 @@
 //! does; each record in `received.jsonl` then also holds `at`, the milliseconds since the epoch
 //! the call started at, so that a test sees which calls ran together.
 //! `step_fail` (`{"acme/api": {"publish": "Error: 502 Bad Gateway"}}`) makes `pr comment`,
-//! `edit`, `decline` or `publish` of that repository alone fail that way.
+//! `edit`, `decline`, `publish` or `approve` of that repository alone fail that way.
+//! `comment_fail` (`{"acme/api": {"Typo.": "Error: 502 Bad Gateway"}}`) makes `pr comment` fail
+//! that way when its `--text` holds the key, the other comments posting.
+//! `pr approve <id>` prints `✓ Approved pull request #N` for a pull request of `pulls`, and
+//! `bkt api /repositories/<w>/<r>/pullrequests/<id>/request-changes --method POST` answers the
+//! participant it made, as Bitbucket Cloud's API does (assumed shape, `docs/forges.md`).
 //! `pipeline_fail` makes `pipeline list` alone fail that way, and `checks_fail`
 //! (`{"acme/api": {"12": "Error: 404 Not Found"}}`) `pr checks` of that pull request alone.
 //!
@@ -318,7 +323,7 @@ fn answer(script: &Value, args: &[String]) -> i32 {
         }
         [
             "pr",
-            verb @ ("comment" | "edit" | "decline" | "publish"),
+            verb @ ("comment" | "edit" | "decline" | "publish" | "approve"),
             id,
         ] => {
             let held = script["pulls"][&key]
@@ -334,7 +339,21 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 eprintln!("{failure}");
                 return 1;
             }
-            if *verb == "publish" {
+            if *verb == "comment"
+                && let Some(failure) = script["comment_fail"][&key].as_object().and_then(|fails| {
+                    let text = option("--text").unwrap_or_default();
+                    fails
+                        .iter()
+                        .find(|(needle, _)| text.contains(needle.as_str()))
+                        .and_then(|(_, failure)| failure.as_str())
+                })
+            {
+                eprintln!("{failure}");
+                return 1;
+            }
+            if *verb == "approve" {
+                println!("✓ Approved pull request #{id}");
+            } else if *verb == "publish" {
                 println!("✓ Published pull request #{id}");
             } else if *verb == "decline" {
                 println!("Declined pull request #{id}");
@@ -539,6 +558,14 @@ fn posted(script: &Value, method: &str, path: &str, input: Option<&str>) -> i32 
                 json!({"type": "pipeline", "uuid": format!("{{{number}}}"),
                     "build_number": number, "state": {"name": "PENDING"}, "target": target,
                     "repository": {"full_name": format!("{owner}/{repo}")}})
+            );
+            0
+        }
+        ("POST", [_, _, "pullrequests", id, "request-changes"]) => {
+            println!(
+                "{}",
+                json!({"role": "REVIEWER", "state": "changes_requested",
+                    "approved": false, "pull_request": id.parse::<u64>().unwrap_or(0)})
             );
             0
         }

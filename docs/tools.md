@@ -483,7 +483,7 @@ pending requests.
 
 | Tool | |
 |---|---|
-| `forge {action, workspace?, repository?, number?, state?, branch?, detail?, fresh?, title?, body?, draft?, reviewers?, labels?, delete_branch_on_merge?, delete_branch?, reviewers_add?, reviewers_remove?, labels_add?, labels_remove?, base?, waive?, method?, message?, events?, from?, minutes?, pipeline?, variables?, follow?, run?, step?, do?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
+| `forge {action, workspace?, repository?, number?, state?, branch?, detail?, fresh?, title?, body?, draft?, reviewers?, labels?, delete_branch_on_merge?, delete_branch?, reviewers_add?, reviewers_remove?, labels_add?, labels_remove?, base?, verdict?, comments?, waive?, method?, message?, events?, from?, minutes?, pipeline?, variables?, follow?, run?, step?, do?}` | The pull requests of the project's repositories, through the user's own `gh` or `bkt`, run by the daemon; an agent has no forge sign-in of its own. Every agent of a project whose repositories declare a forge has it, in `main` as in a workspace. Its description holds a call of `create`. |
 
 - **The repositories** are those of the agent's place: its workspace's, or the project's in
   `main`. One the place does not take is refused (`refused: X is not a repository of this
@@ -638,6 +638,38 @@ pending requests.
   anything is written (`refused: the pull request #7 of acme/app is merged, not open; nothing was
   written: …`). A `title` on `comment` is refused before anything is asked (`refused: forge
   comment takes no title: title is for edit and create`).
+- **`review {number, repository?, verdict, body?, comments?}`** submits a review on a pull
+  request of a repository of the place (`docs/forges.md`, "Reviews"). `verdict` is `comment`,
+  `approve` or `request_changes`; `body` says the review (needed for `comment` and
+  `request_changes`); `comments` is `[{path, line, body}]`, each a comment on a line of the diff
+  (its new side, from 1). A call with no `number`, another verdict, a `body` missing where it is
+  needed, a line 0 or a `path` starting with `-` is refused before anything is asked, and
+  `verdict` and `comments` on another action are refused by the gate. **`comment` is to judge, as
+  the other writes. `approve` and `request_changes` are held for the user in every mode, Full
+  included**, and never reach the judge: an agent never approves or blocks a pull request alone.
+  The card says `Its verdict: approve`, `Its body: …` and one `Its inline comment on <path> line
+  <n>: …` for each comment, whole and masked, and a body or a comment that holds what looks like a
+  secret makes any verdict base. The call is answered at once that it is held; the result comes
+  later as a delivery. **An `approve` or `request_changes` is given on the commit the user
+  read**: its card says `Its head: <commit>`, GitHub gets it as the review's `commit_id`, and an
+  answer that finds the branch moved since is not done (`new commits since you were allowed; ask
+  again`). The pull request's state and head are read before the card and again before the post,
+  and one that cannot be read refuses the call (`refused: the state and the head of the pull
+  request #7 of acme/app could not be read (…); nothing was posted`): an approval is never given
+  on a pull request nobody could look at. Once allowed, one of a pull request that is not open
+  is refused, nothing posted (`refused: the pull request #7 of acme/app is closed, not open;
+  nothing was posted`). On GitHub the review goes in one call, so that it is posted whole or not
+  at all; on Bitbucket the body, then each comment on a line, then the verdict, and a failure
+  says what had already been posted (`the review's comment and 3 of 10 line comments had already
+  changed the pull request`), those comments being recorded as the agent's. `request_changes` on
+  Bitbucket Data Center is refused before anything is asked (`bkt` has no such command). **The
+  same verdicts given by a command line are held the same way**: `run` of `gh pr review
+  --approve` or `--request-changes` (`-a`, `-r`), of `gh api` on a pull request's `reviews`
+  with an `event` of `APPROVE` or `REQUEST_CHANGES` (or a review given in a file, whose event is
+  not read), of a GraphQL review mutation naming one, and of `bkt` approving or requesting
+  changes in any form (`pr approve`, a `request-changes` command or endpoint, an `approve`
+  endpoint, a `NEEDS_WORK` or `APPROVED` status) is base, held in every mode, Full included, and
+  never reaches the judge.
 - **`close {number, repository?, comment?, delete_branch?}`** closes a pull request of a
   repository of the place (GitHub: `gh pr close`; Bitbucket: `bkt pr decline`), posting `comment`
   first; **`reopen {number, repository?, comment?}`** opens a closed one again (`gh pr reopen`).
@@ -666,7 +698,7 @@ pending requests.
 
 `list`, `show`, `subscribe`, `unsubscribe`, `pipelines`, `runs`, `run_view` and `run_logs` go
 through the gate like every call, which allows them in every mode; `create`, `comment`, `edit`,
-`merge`, `checks`, `close`, `reopen`, `run`, `stop` and `step` are to judge, and a merge that waives the checks base. **What a write asks is on the card**: besides its title and body, its reviewers (`Its reviewers, besides the project's: …`), labels, `It adds the reviewers: …`, `It removes the labels: …`, `It moves it onto the base release`, `It marks it ready for review`, `It makes it a draft`, `It deletes the branch when the pull request is merged`, and for a merge `It deletes the source branch on the forge after the merge` (with `(the project's setting Delete the branch on merge)` when that is why). A write is done only once the repository's remote is checked to lead where its forge is declared. **What a
+`merge`, `checks`, `close`, `reopen`, `run`, `stop` and `step` are to judge, a merge that waives the checks base, and so is a `review` with the verdict `approve` or `request_changes`, in Full too (`review` with `comment` is to judge). **What a write asks is on the card**: besides its title and body, its reviewers (`Its reviewers, besides the project's: …`), labels, `It adds the reviewers: …`, `It removes the labels: …`, `It moves it onto the base release`, `It marks it ready for review`, `It makes it a draft`, `It deletes the branch when the pull request is merged`, and for a merge `It deletes the source branch on the forge after the merge` (with `(the project's setting Delete the branch on merge)` when that is why). A write is done only once the repository's remote is checked to lead where its forge is declared. **What a
 write posts is shown whole**: its request says `Its title: …`, `Its body: …` and `Its message: …` in full (the
 arguments recorded are cut at 500 characters), and the judge is given them whole. A title or a
 body longer than the 8,000 characters the judge is given whole is refused (`refused: the body is
@@ -1034,6 +1066,12 @@ names the session (its title and id), says why the turn ended (`turn done`, `it 
 asked the user a question with ask_user`, `the turn stopped before its end (<reason>)`, or, for the
 end of the session, `ended: <why>` or `failed: <why>`) and holds the session's last message, masked
 and cut at 2,000 characters, the cut said (`[cut: N more characters; session_read reads the rest]`).
+When the turn asked the user questions with `ask_user` that still wait for the answer, each comes
+before that last message (`Its open question to the user:`), masked and cut the same way, 4,000
+characters of them at most in all, those past it counted (`[2 more questions; session_read reads
+them]`), so that the starter can relay it or answer what it knows with `session_send`. A question asked in the
+middle of a long turn adds no wake of its own: the turn's end carries it, and `session_read` says
+it at once.
 Its words are data, not instructions. Nothing reads the text of a message to find a question:
 Flottille recognizes nothing by its text.
 
@@ -1130,6 +1168,13 @@ it at once.
   first message once, not again for a replacement), and the replies of its agent, their pieces
   joined. Its tool calls, its thoughts and the deliveries of Flottille and of other agents (reports,
   answers to requests, `session_send` messages) are left out.
+- **Its open questions**: the questions the session asked the user with `ask_user` that wait for
+  the answer, said before its messages, whatever the page, from the moment each is asked (its turn
+  may still run): the oldest first, each with when it was asked and that it waits for the user,
+  masked, cut and escaped as a message is (`Open question, asked at 2026-10-31T14:05:09Z, waits
+  for the user:`), counted in the page's size: half a page of them at most, the others counted
+  (`(2 more open questions wait for the user: …)`). The agent that started the session can relay it to the user or answer what it
+  knows with `session_send`.
 - **A page**: without dates, the last `last` messages (20 by default, 1 to 50), ending with a
   cursor to the page before them (`Earlier messages: …`), or saying it reached the start; with
   `since` (and `until`, which goes only with it), the messages said from `since` and before
@@ -1393,6 +1438,10 @@ says who answers a call to judge (`docs/design.md` §7.1).
      `src=`) of `docker`, `podman` or `nerdctl` `run` or `create` that names a path is a path the
      line writes, refused as above. A named volume, and a container itself, are not.
 2. **Base**: a card for the user in every mode, never the judge's, with a strong warning.
+   - a `forge` `review` with the verdict `approve` or `request_changes`, and a line that gives
+     the same verdict (`gh pr review --approve`, `gh api … -f event=APPROVE`, `bkt pr
+     approve`…): an agent never approves nor blocks a pull request alone, and Full does not let
+     it through;
    - the project's `never` list: an entry matches a line's words from any position (its first
      word is a program, in any folder), or a task by its name, and then every task and line of
      the same words as that task's; and a run when the
