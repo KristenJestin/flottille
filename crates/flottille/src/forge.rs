@@ -41,6 +41,7 @@ mod events;
 pub(crate) mod followed;
 mod logs;
 mod pipelines;
+mod review;
 mod yaml;
 
 pub(crate) use events::offer;
@@ -61,6 +62,9 @@ const FIELDS: &str = "number,title,state,isDraft,headRefName,headRefOid,baseRefN
     mergeable,reviewDecision,statusCheckRollup,comments,reviews,body,mergedBy,mergedAt";
 /// The ways `forge` `merge` merges a pull request, the first by default.
 pub const MERGE_METHODS: [&str; 3] = ["squash", "merge", "rebase"];
+/// What `forge review` posts: a comment, an approval or a request for changes.
+pub use review::VERDICTS as REVIEW_VERDICTS;
+pub(crate) use review::head_of as review_head;
 
 /// The forge a repository's remote is on: GitHub, or Bitbucket (Cloud, or a Data Center host the
 /// project names).
@@ -1067,6 +1071,10 @@ pub(crate) struct ForgeCall {
     message: Option<String>,
     /// close, reopen: posted on the pull request first.
     comment: Option<String>,
+    /// review: `comment`, `approve` or `request_changes` (`REVIEW_VERDICTS`).
+    verdict: Option<String>,
+    /// review: comments on lines of the diff.
+    comments: Option<Vec<review::Inline>>,
     /// close, merge: also delete the pull request's branch on the forge. For merge, left out
     /// follows the pull request's wish and the project's setting.
     delete_branch: Option<bool>,
@@ -1140,6 +1148,11 @@ impl ForgeCall {
                  control character, .., ~ ^ : ? * [ \\ @{{, a leading - or /, a trailing / . or \
                  .lock, and // ; so does the forge's address, with #"
             ));
+        }
+        if self.action == "review"
+            && let Some(why) = review::malformed(self)
+        {
+            return Some(why);
         }
         if self.action == "edit" && !self.changes() {
             return Some(
@@ -1367,6 +1380,11 @@ pub async fn forge(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Value
         }
         ("close" | "reopen", _) => {
             let written = forge_close(daemon, place, asked).await;
+            daemon.forges.pulls.drop_all();
+            written
+        }
+        ("review", _) => {
+            let written = review::review(daemon, place, asked).await;
             daemon.forges.pulls.drop_all();
             written
         }
