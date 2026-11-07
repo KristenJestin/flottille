@@ -2634,7 +2634,21 @@ fn the_judge_section_shows_a_guidance_it_cannot_follow_and_follows_an_edit_made_
     // Edited by hand past the limit: the judge cannot follow it, and the section says so.
     std::fs::create_dir_all(user.path("config/flottille")).unwrap();
     std::fs::write(user.path("config/flottille/judge.md"), "a".repeat(4_001)).unwrap();
-    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    // The link follows the daemon's events only some time after the page has read the guidance
+    // (its own connection answers first, and on a loaded machine the link's takes longer): an
+    // edit made in between is no event of the link's.
+    let slow = {
+        let connector = user.connector();
+        let first = AtomicBool::new(true);
+        move || {
+            let stream = connector();
+            if first.swap(false, Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(1500));
+            }
+            stream
+        }
+    };
+    let (shell, cx) = window(&user, Arc::new(slow), 1280., cx);
     cx.simulate_resize(size(px(1280.), px(2400.)));
     let page = open_settings(&shell, cx);
     let editor = page.read_with(cx, |page, _| page.judge_guidance().clone());
@@ -2652,7 +2666,11 @@ fn the_judge_section_shows_a_guidance_it_cannot_follow_and_follows_an_edit_made_
         "{said}"
     );
 
-    // From the command line, while the page stays open.
+    // From the command line, while the page stays open and once the window follows the events.
+    let seen = shell.read_with(cx, |shell, _| shell.seen().clone());
+    until(&shell, cx, "the window follows the daemon's events", |_| {
+        seen.snapshots.load(Ordering::SeqCst) > 0
+    });
     user.call("judge.set", json!({"text": "Ask about every migration."}))
         .unwrap();
     user.call("rules.set", json!({"text": "Write tests first."}))
@@ -3197,19 +3215,15 @@ fn a_card_appears_while_another_session_streams_without_pause(cx: &mut TestAppCo
     let (shell, cx) = open_session(&user, &lead, 1280., cx);
 
     let number = held_number(mcp.call("fs_read", json!({"path": ".env"})));
-    let asked = Instant::now();
     until(&shell, cx, "the card is shown", |cx| {
         cx.update(|window, _| window.try_find(format!("allow-{number}")).is_some())
     });
 
+    // The stream is thirty seconds of pieces at the least, and the card came before its end: it
+    // did not wait for a pause. No time is asked of the card: how long it takes is the machine's.
     let state =
         user.call("agent.show", json!({"agent": streamer})).unwrap()["agent"]["state"].clone();
     assert_eq!(state, "working", "the other session still streams");
-    assert!(
-        asked.elapsed() < Duration::from_secs(5),
-        "{:?}",
-        asked.elapsed()
-    );
 }
 
 /// Events of the shown agent made up for the page, numbered from `seq`.

@@ -60,6 +60,7 @@ use crate::links_card::{LinksCard, Open};
 use crate::mode::ModeSwitch;
 use crate::model::Place;
 use crate::open::Opener;
+use crate::picture_viewer::PictureViewer;
 use crate::project::removal_refused;
 use crate::providers::Providers;
 use crate::queued::QueuedMessages;
@@ -268,6 +269,8 @@ pub struct SessionPage {
     /// asked for.
     pictures: HashMap<String, Arc<gpui_kit::Image>>,
     asked_pictures: HashSet<String>,
+    /// The picture of a bubble opened large.
+    viewer: Entity<PictureViewer>,
     needs_you: bool,
     /// The confirmation of ending the session is open.
     ending: bool,
@@ -389,6 +392,7 @@ impl SessionPage {
             histories: 0,
             pictures: HashMap::new(),
             asked_pictures: HashSet::new(),
+            viewer: cx.new(|_| PictureViewer::new()),
             needs_you,
             ending: false,
             end_error: None,
@@ -1963,6 +1967,7 @@ impl Render for SessionPage {
             .when(!wide, |d| d.child(self.drawer.clone()))
             .child(self.run_drawer.clone())
             .child(self.end_modal(cx))
+            .child(self.viewer.clone())
     }
 }
 
@@ -4748,7 +4753,7 @@ impl Render for Row {
                         .flex_wrap()
                         .gap(space::SM)
                         .when(quiet < 1.0, |d| d.opacity(quiet))
-                        .children(pictures.into_iter().enumerate().map(|(n, picture)| {
+                        .children(pictures.iter().enumerate().map(|(n, picture)| {
                             let thumb = div()
                                 .id(id(&format!("image-{n}")))
                                 .flex_none()
@@ -4759,16 +4764,32 @@ impl Render for Row {
                                 .border_color(p.line2)
                                 .bg(p.card)
                                 .overflow_hidden();
-                            match picture {
-                                Some(picture) => thumb.child(
-                                    gpui_kit::img(picture)
-                                        .size_full()
-                                        .rounded(px(9.))
-                                        .object_fit(gpui_kit::ObjectFit::Cover),
-                                ),
-                                None => thumb,
-                            }
-                            .test_support()
+                            let (Some(picture), Some(page)) = (picture, &page) else {
+                                return thumb.test_support().into_any_element();
+                            };
+                            // A click opens it large, among the pictures of the message that are
+                            // read; its border fades in on the hover.
+                            let viewer = page.read(cx).viewer.clone();
+                            let loaded: Vec<Arc<gpui_kit::Image>> =
+                                pictures.iter().flatten().cloned().collect();
+                            let place = pictures[..n].iter().flatten().count();
+                            hoverable(
+                                thumb
+                                    .cursor_pointer()
+                                    .on_click(move |_, _, cx| {
+                                        viewer.update(cx, |viewer, cx| {
+                                            viewer.show(loaded.clone(), place, cx)
+                                        });
+                                    })
+                                    .child(
+                                        gpui_kit::img(picture.clone())
+                                            .size_full()
+                                            .rounded(px(9.))
+                                            .object_fit(gpui_kit::ObjectFit::Cover),
+                                    ),
+                                move |d, t| d.border_color(mix(p.line2, p.mute, t)),
+                            )
+                            .into_any_element()
                         }))
                         .test_support()
                 });

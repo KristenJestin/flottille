@@ -180,7 +180,15 @@ pub enum ProjectTracker {
     /// The issues of one repository of the project, by its path; its forge is declared GitHub.
     Github { repository: String },
     /// Jira Cloud on `site` (`example.atlassian.net`), its tickets in these projects only.
-    Jira { site: String, projects: Vec<String> },
+    /// `worklog_token` names the entry of the vault (`docs/vault.md`) whose secret and username
+    /// log time on a work item (`docs/tickets.md`, "Logging time"): the name only, never the
+    /// secret.
+    Jira {
+        site: String,
+        projects: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worklog_token: Option<String>,
+    },
 }
 
 impl ProjectTracker {
@@ -195,7 +203,12 @@ impl ProjectTracker {
     /// project's repositories) and puts the site in lowercase and the keys in uppercase. The error
     /// is `.<key>: <what>`.
     pub fn check(&mut self) -> Result<(), String> {
-        let ProjectTracker::Jira { site, projects } = self else {
+        let ProjectTracker::Jira {
+            site,
+            projects,
+            worklog_token,
+        } = self
+        else {
             return Ok(());
         };
         *site = site.trim().to_ascii_lowercase();
@@ -216,6 +229,15 @@ impl ProjectTracker {
             }
         }
         projects.dedup();
+        if let Some(entry) = worklog_token {
+            *entry = entry.trim().to_owned();
+            if !crate::project::valid_name(entry) {
+                return Err(format!(
+                    ".worklog_token: must be the name of a vault entry (letters, digits, '.', '_' \
+                     and '-', starting with a letter or a digit), not \"{entry}\""
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -223,8 +245,18 @@ impl ProjectTracker {
     pub fn said(&self) -> String {
         match self {
             ProjectTracker::Github { repository } => format!("GitHub issues of {repository}"),
-            ProjectTracker::Jira { site, projects } => {
-                format!("Jira on {site} ({})", projects.join(", "))
+            // The entry too: it picks the credentials a worklog is sent with, and a card that left
+            // it out would let a change of it go through unseen.
+            ProjectTracker::Jira {
+                site,
+                projects,
+                worklog_token,
+            } => {
+                let said = format!("Jira on {site} ({})", projects.join(", "));
+                match worklog_token {
+                    Some(entry) => format!("{said}, logging time with the vault entry `{entry}`"),
+                    None => said,
+                }
             }
         }
     }
@@ -538,6 +570,7 @@ mod tests {
         let jira = ProjectTracker::Jira {
             site: "example.atlassian.net".into(),
             projects: vec!["ABC".into()],
+            worklog_token: None,
         };
         let issues = ProjectTracker::Github {
             repository: "api".into(),
@@ -556,10 +589,28 @@ mod tests {
     }
 
     #[test]
+    fn a_tracker_change_says_the_worklog_entry() {
+        let mut jira = ProjectTracker::Jira {
+            site: "example.atlassian.net".into(),
+            projects: vec!["ABC".into()],
+            worklog_token: None,
+        };
+        assert_eq!(jira.said(), "Jira on example.atlassian.net (ABC)");
+        if let ProjectTracker::Jira { worklog_token, .. } = &mut jira {
+            *worklog_token = Some("jira-time".into());
+        }
+        assert_eq!(
+            jira.said(),
+            "Jira on example.atlassian.net (ABC), logging time with the vault entry `jira-time`"
+        );
+    }
+
+    #[test]
     fn a_jira_tracker_names_its_site_and_at_least_one_project_key() {
         let mut fine = ProjectTracker::Jira {
             site: "Example.Atlassian.net".into(),
             projects: vec!["abc".into(), "D_2".into()],
+            worklog_token: Some(" jira-time ".into()),
         };
         assert_eq!(fine.check(), Ok(()));
         assert_eq!(
@@ -567,6 +618,7 @@ mod tests {
             ProjectTracker::Jira {
                 site: "example.atlassian.net".into(),
                 projects: vec!["ABC".into(), "D_2".into()],
+                worklog_token: Some("jira-time".into()),
             }
         );
         for (site, projects, wrong) in [
@@ -587,6 +639,7 @@ mod tests {
             let mut tracker = ProjectTracker::Jira {
                 site: site.into(),
                 projects: projects.into_iter().map(str::to_owned).collect(),
+                worklog_token: None,
             };
             let said = tracker.check().unwrap_err();
             assert!(said.starts_with(wrong), "{site} {said}");

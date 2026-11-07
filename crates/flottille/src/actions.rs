@@ -321,6 +321,9 @@ pub async fn prepared(
     if tool == "session_send" {
         return session_says(daemon, grant, args);
     }
+    if tool == "agent_stop" {
+        return crate::tree::stop_says(daemon, grant, args);
+    }
     if tool == "session_read" {
         return crate::session_read::says(daemon, grant, args);
     }
@@ -335,6 +338,12 @@ pub async fn prepared(
             return Err(Outcome::Refused(why));
         }
         let mut says = posted_says(args);
+        // The time a worklog logs, and on which ticket; a vault entry that is not there is
+        // refused here, before the user is asked.
+        says.extend(
+            crate::tickets::worklog_says(daemon, &grant.place, &project, args)
+                .map_err(Outcome::Refused)?,
+        );
         // The labels, which the user reads whole; the sprint as the site names it.
         for (key, said) in [
             ("labels", "It adds the labels"),
@@ -363,6 +372,32 @@ pub async fn prepared(
         // What no forge could do is refused at once: the user is not asked for it.
         if let Ok(call) = serde_json::from_value::<crate::forge::ForgeCall>(args.clone())
             && let Some(why) = call.malformed()
+        {
+            return Err(Outcome::Refused(why));
+        }
+        // A Bitbucket variable's name is refused as it is, before the user is asked.
+        if args["action"] == "run"
+            && let Some((_, path)) = write_target(
+                daemon,
+                &grant.place,
+                args["workspace"].as_str(),
+                args["repository"].as_str(),
+            )
+            && let Ok(project) = projects::load_project(daemon, &grant.place.project)
+            && let Some(repository) = project.repositories.iter().find(|r| r.path == path)
+            && matches!(
+                repository.forge,
+                Some(
+                    RepositoryForge::BitbucketCloud { .. }
+                        | RepositoryForge::BitbucketDataCenter { .. }
+                )
+            )
+            && let Some(why) = args["variables"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|variable| variable["key"].as_str())
+                .find_map(crate::forge::bitbucket_key)
         {
             return Err(Outcome::Refused(why));
         }
@@ -582,7 +617,7 @@ pub async fn approved_losses(
 fn posted_says(args: &Value) -> Vec<String> {
     if matches!(
         args["action"].as_str(),
-        Some("list" | "search" | "show" | "types" | "link_types" | "sprints") | None
+        Some("list" | "search" | "show" | "types" | "link_types" | "sprints" | "time_spent") | None
     ) {
         return Vec::new();
     }

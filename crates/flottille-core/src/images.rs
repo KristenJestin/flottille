@@ -53,6 +53,21 @@ pub fn needs_scaling(mime: &str, bytes: &[u8]) -> bool {
         .is_ok_and(|(width, height)| width.max(height) > MAX_SIDE)
 }
 
+/// The size in pixels a picture (png, jpeg, gif or webp) declares, read from its header alone:
+/// what the window needs to fit it large without decoding it.
+pub fn dimensions(mime: &str, bytes: &[u8]) -> Option<(u32, u32)> {
+    let format = match mime {
+        "image/png" => ImageFormat::Png,
+        "image/jpeg" => ImageFormat::Jpeg,
+        "image/gif" => ImageFormat::Gif,
+        "image/webp" => ImageFormat::WebP,
+        _ => return None,
+    };
+    ImageReader::with_format(Cursor::new(bytes), format)
+        .into_dimensions()
+        .ok()
+}
+
 /// Why a picture is not made a thumbnail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refused {

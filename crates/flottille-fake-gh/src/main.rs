@@ -53,6 +53,8 @@
 //! `view_fail` (`{"acme/app": {"12": "HTTP 502: Bad Gateway"}}`) makes `pr view` and `issue view`
 //! of that number alone fail that way; `list_delay_ms` makes `pr list` wait that long first,
 //! `listing_delay_ms` a `pr list` of every branch alone (a round's, not a branch's `--head`),
+//! `listing_wait_for` (a path) the same list until that file exists, 20 s at most: a round held
+//! for as long as a test wants, whatever the machine's load,
 //! `view_delay_ms` `pr view`. `read_delay_ms` makes every `pr` and `issue` call wait that long
 //! before it answers or fails, as a network of seconds does.
 //!
@@ -749,6 +751,14 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 }
                 if let (Some(ms), None) = (script["listing_delay_ms"].as_u64(), option("--head")) {
                     std::thread::sleep(std::time::Duration::from_millis(ms));
+                }
+                if let (Some(path), None) = (script["listing_wait_for"].as_str(), option("--head"))
+                {
+                    let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                    while !std::path::Path::new(path).exists() && std::time::Instant::now() < until
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
                 }
                 let state = option("--state").unwrap_or("open");
                 let limit: usize = option("--limit").and_then(|n| n.parse().ok()).unwrap_or(30);
