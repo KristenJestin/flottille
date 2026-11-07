@@ -562,7 +562,7 @@ fn where_questions_go(starter: &str, led: bool) -> String {
 
 /// The brief of a child whose new workspace is being prepared, once it is ready; a workspace
 /// that fails fails the child.
-async fn brief_once_ready(daemon: Arc<Daemon>, child: Agent) {
+pub async fn brief_once_ready(daemon: Arc<Daemon>, child: Agent) {
     let name = child.workspace.clone().unwrap_or_default();
     loop {
         let workspace = daemon.read(|store| store.workspace(&child.project, &name));
@@ -1976,6 +1976,13 @@ fn end(daemon: &Arc<Daemon>, id: &str, state: AgentState, reason: &str) -> bool 
         Some(reason.to_owned()),
         Some((event, json!({"reason": reason}))),
     );
+    crate::extensions::heard(
+        daemon,
+        &[(
+            event,
+            json!({"agent": id, "project": agent.project, "reason": reason}),
+        )],
+    );
     let _ = daemon.write(|store| Ok(((), store.supersede(id)?)));
     // Nobody is left to answer what it asked, nor to answer what it held: nobody sees them.
     let _ = daemon.write_all(|store| {
@@ -2449,6 +2456,7 @@ pub fn tree(daemon: &Daemon, agent: &Agent) -> Result<Vec<Value>, Failure> {
             "context": context_used(daemon, &agent),
             "context_tokens": context_tokens(daemon, &agent).map(|(used, _)| used),
             "queued": queued,
+            "extensions": crate::extensions::facts(daemon, &agent.id),
         }));
         let children = daemon.read(|store| store.children(&agent.id))?;
         stack.extend(children.into_iter().rev().map(|child| child.id));

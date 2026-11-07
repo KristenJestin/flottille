@@ -68,10 +68,15 @@ pub struct Extension {
     pub tools: &'static [Tool],
     /// Whether the agent is a session it started (`start_session`).
     pub started: fn(&Daemon, &str) -> bool,
-    /// The Core event trigger: the events of the core it hears (`item.changed`…), each with its
-    /// handler, called once the event is stored, off the request path. A handler wakes no agent
-    /// but through a delivery (`tell`).
+    /// The Core event trigger: the events of the core it hears (`item.changed`, `agent.ended`,
+    /// `agent.resumed`…), each with its handler, called once the event is stored, on the thread
+    /// that stored it: the request that caused it (`agent.stop`, `agent.resume`) answers after the
+    /// handlers ran, so a handler stays short. A handler wakes no agent but through a delivery
+    /// (`tell`).
     pub heard: &'static [(&'static str, Handler)],
+    /// What it adds to what the core says of an agent (`agent.tree`'s `extensions.<name>`), or
+    /// nothing.
+    pub fact: fn(&Daemon, &str) -> Option<Value>,
 }
 
 /// What hears an event of the core: its data, as `flottille watch` prints it.
@@ -478,14 +483,16 @@ pub fn perform(daemon: &Arc<Daemon>, grant: &Grant, name: &str, args: Value) -> 
     }
 }
 
-/// Starts a `lead` session for the user in the project's main checkout, as `agent_launch` starts
-/// a root: `message` is its first message, said to be Flottille's. `before` runs once the agent
-/// is made and before it is written: its refusal leaves no agent behind. The extension then
-/// knows the session as its own (`Extension::started`), so a daemon stopped before its first
-/// message delivers it at the next start (`tree::brief_at_start`).
+/// Starts a `lead` session for the user, as `agent_launch` starts a root, in the project's main
+/// checkout or in `workspace`, a workspace just made: its first message, `message`, said to be
+/// Flottille's, waits until the workspace is prepared. `before` runs once the agent is made and
+/// before it is written: its refusal leaves no agent behind. The extension then knows the
+/// session as its own (`Extension::started`), so a daemon stopped before its first message
+/// delivers it at the next start (`tree::brief_at_start`).
 pub fn start_session(
     daemon: &Arc<Daemon>,
     project: &Project,
+    workspace: Option<&str>,
     title: &str,
     message: &str,
     before: impl FnOnce(&Agent) -> Result<(), Failure>,
@@ -496,8 +503,8 @@ pub fn start_session(
         project,
         crate::agents::New {
             id: None,
-            workspace: None,
-            preparing: false,
+            workspace: workspace.map(str::to_owned),
+            preparing: workspace.is_some(),
             role,
             parent: None,
             title: Some(title.to_owned()),
@@ -512,7 +519,12 @@ pub fn start_session(
     )?;
     before(&agent)?;
     crate::agents::write_new(daemon, &agent)?;
-    crate::tree::brief(daemon, &agent);
+    match workspace {
+        Some(_) => {
+            tokio::spawn(crate::tree::brief_once_ready(daemon.clone(), agent.clone()));
+        }
+        None => crate::tree::brief(daemon, &agent),
+    }
     Ok(agent)
 }
 
@@ -535,6 +547,17 @@ pub fn heard(daemon: &Arc<Daemon>, events: &[(&'static str, Value)]) {
             }
         }
     }
+}
+
+/// What the extensions add to what the core says of an agent, each under its name.
+pub fn facts(daemon: &Daemon, agent: &str) -> Value {
+    Value::Object(
+        ALL.iter()
+            .filter_map(|extension| {
+                Some((extension.name.to_owned(), (extension.fact)(daemon, agent)?))
+            })
+            .collect(),
+    )
 }
 
 /// Tells an agent what happened, as a delivery of the extension's kind (`[flottille:<name>]`):
