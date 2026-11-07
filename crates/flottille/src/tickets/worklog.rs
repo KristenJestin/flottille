@@ -125,6 +125,13 @@ pub fn unwritable(tracker: &ProjectTracker, args: &Value) -> Option<String> {
                 .into(),
         );
     }
+    // Named, never the workspace's read at execution: the card says the ticket the user allows.
+    if given(args, "ticket").is_none() {
+        return Some(
+            "refused: tickets log_time needs ticket, the work item to log the time on (ABC-123)"
+                .into(),
+        );
+    }
     let Some(duration) = given(args, "duration") else {
         return Some(
             "refused: tickets log_time needs duration, in Jira's form (2h 30m); \

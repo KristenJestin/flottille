@@ -245,8 +245,18 @@ impl ProjectTracker {
     pub fn said(&self) -> String {
         match self {
             ProjectTracker::Github { repository } => format!("GitHub issues of {repository}"),
-            ProjectTracker::Jira { site, projects, .. } => {
-                format!("Jira on {site} ({})", projects.join(", "))
+            // The entry too: it picks the credentials a worklog is sent with, and a card that left
+            // it out would let a change of it go through unseen.
+            ProjectTracker::Jira {
+                site,
+                projects,
+                worklog_token,
+            } => {
+                let said = format!("Jira on {site} ({})", projects.join(", "));
+                match worklog_token {
+                    Some(entry) => format!("{said}, logging time with the vault entry `{entry}`"),
+                    None => said,
+                }
             }
         }
     }
@@ -576,6 +586,23 @@ mod tests {
         assert!(number.starts_with("#4 is a GitHub issue"), "{number}");
         let key = issues.accepts(&Key::parse("ABC-1").unwrap()).unwrap_err();
         assert!(key.starts_with("ABC-1 is a Jira key"), "{key}");
+    }
+
+    #[test]
+    fn a_tracker_change_says_the_worklog_entry() {
+        let mut jira = ProjectTracker::Jira {
+            site: "example.atlassian.net".into(),
+            projects: vec!["ABC".into()],
+            worklog_token: None,
+        };
+        assert_eq!(jira.said(), "Jira on example.atlassian.net (ABC)");
+        if let ProjectTracker::Jira { worklog_token, .. } = &mut jira {
+            *worklog_token = Some("jira-time".into());
+        }
+        assert_eq!(
+            jira.said(),
+            "Jira on example.atlassian.net (ABC), logging time with the vault entry `jira-time`"
+        );
     }
 
     #[test]

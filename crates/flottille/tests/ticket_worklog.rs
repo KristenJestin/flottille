@@ -404,6 +404,20 @@ fn log_time_without_a_configured_entry_is_refused() {
 }
 
 #[test]
+fn log_time_without_a_ticket_is_refused() {
+    let jira = Jira::accepting();
+    let user = user(&jira);
+    jira_with(&user, Some("jira-time"));
+    entry(&user);
+    let (mcp, _) = root_in(&user);
+
+    // The workspace's own ticket is not guessed at execution: the card names the ticket.
+    let said = refused_at_once(&user, &mcp, json!({"action": "log_time", "duration": "1h"}));
+    assert!(said.contains("needs ticket"), "{said}");
+    assert!(jira.received().is_empty());
+}
+
+#[test]
 fn a_duration_that_is_not_jira_s_form_is_refused() {
     let jira = Jira::accepting();
     let user = user(&jira);

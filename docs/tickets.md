@@ -624,7 +624,7 @@ tickets {action: "log_time", ticket: "ABC-123", duration: "2h 30m", started: "20
   week 5 days). **`started`** is an RFC 3339 time with its offset, sent in UTC; left out, it is the
   duration before the moment the worklog is logged (the card says so, since the user may take a
   while to allow it). **`body`**, optional, is the worklog's comment, Markdown converted to ADF as
-  every Jira text is. The ticket is the call's, or the workspace's when left out.
+  every Jira text is. **`ticket` is required**: the workspace's ticket is never taken for it, so that the card names the work item the user allows.
 - **The token is a vault entry the project names** (`docs/vault.md`): `worklog_token = "<entry>"`
   in `[tracker]` (`kind = "jira"` only), the entry's secret being a Jira API token and its
   username the account's e-mail; the request is `Basic` over `username:secret`. The daemon reads
@@ -632,6 +632,7 @@ tickets {action: "log_time", ticket: "ABC-123", duration: "2h 30m", started: "20
   not see, or one with no username is refused before anyone is asked, with a sentence that says
   how to set one up. The token is in no card, result, log, event nor the store: what Jira
   answers is masked of it, and so is every error.
+- **A change of the tracker says its entry**: the card of `project set_settings` reads `Set the tracker to Jira on <site> (ABC), logging time with the vault entry `<name>``, so that the user sees which credentials a worklog would use.
 - **GitHub is refused with a sentence** (`GitHub issues have no time tracking`), and so are a
   duration or a start that is wrong, before anyone is asked.
 - **It is a ticket write**, judged like `comment`: held in Ask, allowed in Full, and the card says
