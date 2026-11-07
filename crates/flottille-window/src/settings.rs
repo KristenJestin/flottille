@@ -33,7 +33,7 @@ use crate::vault::VaultSection;
 use crate::workspaces_folder::WorkspacesFolder;
 
 /// The sections of the page, in order: each index entry's key and label.
-pub const SECTIONS: [(&str, &str); 8] = [
+pub const SECTIONS: [(&str, &str); 9] = [
     ("judge", "Judge"),
     ("providers", "Providers"),
     ("compaction", "Compaction"),
