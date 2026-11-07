@@ -2800,8 +2800,13 @@ fn a_judge_flottille_picked_is_said_once_in_a_notice_that_opens_settings(cx: &mu
     until(&shell, cx, "the notice is gone", |cx| {
         shell.read_with(cx, |s, _| s.judge_notice().is_none())
     });
-    cx.update(|window, _| assert!(window.try_find("judge-notice").is_none()));
+    // It folds away and fades out: still drawn a frame after, gone once settled.
+    cx.executor().advance_clock(Duration::from_millis(16));
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    cx.update(|window, _| assert!(window.try_find("judge-notice").is_some(), "folding away"));
     settle(cx);
+    cx.update(|window, _| assert!(window.try_find("judge-notice").is_none()));
     assert_eq!(
         settings_shown(cx),
         ["judge", "guidance"],
@@ -3731,12 +3736,13 @@ fn opening_settings_shows_the_judge_and_its_guidance_alone(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
-fn settings_has_eight_tabs_in_order(cx: &mut TestAppContext) {
+fn settings_has_nine_tabs_in_order(cx: &mut TestAppContext) {
     assert_eq!(
         flottille_window::settings::SECTIONS[..],
         [
             ("judge", "Judge"),
             ("providers", "Providers"),
+            ("compaction", "Compaction"),
             ("rules", "Rules"),
             ("workspaces", "Workspaces"),
             ("vault", "Vault"),
@@ -3757,7 +3763,7 @@ fn settings_has_eight_tabs_in_order(cx: &mut TestAppContext) {
             .iter()
             .map(|key| window.find(format!("settings-tabs-{key}")).bounds().left())
             .collect();
-        assert_eq!(lefts.len(), 8);
+        assert_eq!(lefts.len(), 9);
         assert!(lefts.windows(2).all(|pair| pair[0] < pair[1]), "{lefts:?}");
         assert!(
             window.try_find("settings-tabs-guidance").is_none(),

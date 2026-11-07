@@ -51,6 +51,8 @@ pub enum Update {
     AppearanceChanged,
     /// The limit of tool results was chosen, from any client: the settings page reads it again.
     ToolResultsChanged,
+    /// The compaction's settings or guidance changed, or a compactor was picked.
+    CompactionChanged,
     /// After how many days an inactive session is ended was chosen, from any client: the settings
     /// page reads it again.
     SessionsChanged,
@@ -199,6 +201,9 @@ fn follow(
         }
         if event.name == "sessions.changed" {
             let _ = updates.unbounded_send(Update::SessionsChanged);
+        }
+        if event.name == "compaction.changed" {
+            let _ = updates.unbounded_send(Update::CompactionChanged);
         }
         if event.name == "tool_results.changed" {
             let _ = updates.unbounded_send(Update::ToolResultsChanged);

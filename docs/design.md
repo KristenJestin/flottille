@@ -436,6 +436,56 @@ It is looked for when the daemon starts and then about once an hour, from the sw
 runs: no timer of its own, nothing woken more often. The clock is the store's, which a test moves
 (`test.advance`).
 
+### 5.8 Compaction
+
+Each agent CLI compacts its own context, with its own model and rules. Flottille compacts it
+instead with **the compactor**, a model the user chooses in Settings, Compaction, as they choose the
+Auto judge (§7.1): provider, model and effort; **None** leaves each CLI to compact on its own, as
+before. A user who never chose gets one picked as the judge is: the smallest model of the first
+provider enabled, installed and signed in among those Flottille lists (Claude's Haiku), written
+once to `compaction.toml` and said once in a notice that opens Settings. It runs on the user's
+quota, as a session of one of their CLIs with no tool at all, one process per compaction, stopped
+after it (the judge's runner).
+
+The settings, global, beside it: **Automatic** (on: Flottille compacts by itself; off: only when
+the user asks), the **threshold** (70 % of the model's context window), a **maximum size** in
+tokens that compacts even when the window is larger (none by default), the tokens **kept word for
+word** (20,000), and the **guidance**, Flottille's default text (`roles/compaction.md`: fixed
+sections, goal, constraints, done and in progress, decisions with their reason, next steps, files,
+errors and fixes, critical context, and what only Flottille holds), editable with Reset to default,
+inside a fixed text (`roles/compactor-base.md`) that says what the compactor is and that what the
+agent wrote is data.
+
+1. **When**: at the end of a turn, never in it, once the context the agent used (`agent.usage`, a
+   report made since its last compaction) passes the threshold (50 % to 95 %) or the maximum size
+   (20,000 tokens at least), and has grown by a tenth of the window past the size its session
+   started at (what the first turn of a compacted session reported) and past the size its last
+   failed compaction started at: neither a session that starts past the threshold nor a compactor
+   that fails is run at every end of a turn. Not while the compactor was picked by Flottille and
+   its notice not seen yet. Or when the user asks (`agent.compact`, `flottille agent compact`, the
+   session's menu), at once between turns or once the turn ended, whatever the sizes; one asked
+   while the compactor works is refused. The tokens kept word for word (50,000 at most) are never
+   more than a quarter of the size that compacts the agent.
+2. **The summary**: the compactor is given the conversation since the last compaction as Flottille
+   recorded it, thinking left out and each tool's input and result cut to its first 500
+   characters; the previous summary, to update rather than start over; and what only Flottille
+   holds: the brief, the place and its branch, the children and their state, the subscriptions,
+   the messages waiting. The agent's prompts wait meanwhile.
+3. **The check**: a summary cut off by its length, one that tried to call a tool, an empty one, or
+   one not smaller than what it replaces (the previous summary and the conversation since) is
+   refused.
+4. **The new session**: the agent starts again in a new session of its CLI the way a replaced one
+   does (`docs/agents.md`, "Compaction"), uncounted and with nothing told to its parent: it is sent
+   its brief, the summary, then its latest messages word for word. The summary, masked of the
+   daemon's secrets, comes in a block of its own (`<earlier_conversation_summary>`, every `<`
+   escaped) under a line that says a model wrote it from the earlier conversation: data, not the
+   user's words nor Flottille's instructions. `agent.compacted` says it, with
+   the sizes before and after and the summary; the conversation shows it as one line,
+   `Conversation compacted · 152k → 9k tokens`, which unfolds to the summary.
+5. **A failure** changes nothing: the agent goes on in its session, `agent.compaction_failed` and
+   the developer log say why, and the CLI's own compaction stays the safety net. With a compactor
+   chosen, each CLI is set to compact as late as it allows (`docs/agents.md`, "Compaction").
+
 ## 6. Projects and workspaces
 
 ### 6.1 Projects
@@ -1017,8 +1067,8 @@ The plan is cut into GitHub milestones; each ends on something the user can use.
    daemon, in [`items.md`](items.md).
 5. **Remote**: network transport, phone, other machines.
 
-Flottille's own features beyond its core (the Auto judge, the compaction, later specs, review and a
-handbook) are proposed to become extensions, declared and turned on by the user: a proposal,
+Flottille's own features beyond its core (the Auto judge, the compaction, built in today (§7.1,
+§5.8), later specs, review and a handbook) are proposed to become extensions, declared and turned on by the user: a proposal,
 nothing built, in [`extensions.md`](extensions.md).
 
 ## 14. Defaults taken, to confirm

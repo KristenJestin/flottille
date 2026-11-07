@@ -390,6 +390,10 @@ pub struct Prompt {
 /// The agent's queued deliveries as one prompt, taken: those that start a session first, then the
 /// others in their order. `None` when there is none, or the agent has ended.
 pub fn pump(daemon: &Daemon, agent: &str) -> Option<Prompt> {
+    // Its conversation is being summarised: what comes waits for the new session.
+    if crate::compaction::holding(daemon, agent) {
+        return None;
+    }
     let found = daemon.read(|store| store.agent(agent)).ok()??;
     if found.state.is_final() {
         return None;

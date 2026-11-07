@@ -242,9 +242,38 @@ pub fn in_sight(block: &Block) -> bool {
         | Block::Relayed { .. }
         | Block::SubAgents
         | Block::Links { .. } => true,
-        Block::Notice { kind, .. } => matches!(kind.as_str(), "failed" | "ended" | "resumed"),
+        Block::Notice { kind, .. } => {
+            matches!(
+                kind.as_str(),
+                "failed" | "ended" | "resumed" | COMPACTED_KIND
+            )
+        }
         _ => false,
     }
+}
+
+/// The kind of the line a compaction of the conversation is.
+pub const COMPACTED_KIND: &str = "compacted";
+
+/// A compaction's line, then the summary Flottille's compactor wrote: `Conversation compacted ·
+/// 150k → 9k tokens`. One by the agent's own CLI has no summary to show.
+pub fn compacted_text(data: &Value) -> String {
+    if data["by"] != "flottille" {
+        return "Conversation compacted by the agent's CLI".into();
+    }
+    let tokens = |key: &str| {
+        let n = data[key].as_u64().unwrap_or(0);
+        match n {
+            0..1_000 => n.to_string(),
+            _ => format!("{}k", (n + 500) / 1_000),
+        }
+    };
+    let summary = data["summary"].as_str().unwrap_or_default().trim();
+    format!(
+        "Conversation compacted · {} → {} tokens\n{summary}",
+        tokens("before"),
+        tokens("after")
+    )
 }
 
 /// What the line of a group of the agent's work says.
@@ -863,6 +892,11 @@ impl Conversation {
                 }));
                 changes
             }
+            // One line, its summary folded under it.
+            "agent.compacted" => self.push(Block::Notice {
+                kind: COMPACTED_KIND.into(),
+                text: compacted_text(data),
+            }),
             "agent.resumed" => self.push(Block::Notice {
                 kind: "resumed".into(),
                 text: "by you, on its own session".into(),
@@ -1675,6 +1709,24 @@ mod tests {
             name: name.into(),
             data,
         }
+    }
+
+    #[test]
+    fn a_compaction_says_its_sizes_and_holds_its_summary_and_one_by_the_cli_has_none() {
+        let flottille = json!({"by": "flottille", "before": 152_400, "after": 9_100,
+            "summary": "## Goal\nShip it."});
+        assert_eq!(
+            compacted_text(&flottille),
+            "Conversation compacted · 152k → 9k tokens\n## Goal\nShip it."
+        );
+        assert_eq!(
+            compacted_text(&json!({})),
+            "Conversation compacted by the agent's CLI"
+        );
+        assert!(in_sight(&Block::Notice {
+            kind: COMPACTED_KIND.into(),
+            text: String::new()
+        }));
     }
 
     #[test]

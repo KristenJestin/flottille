@@ -104,6 +104,14 @@ pub enum AgentAction {
         #[arg(long)]
         json: bool,
     },
+    /// Compact an agent's conversation now, or once its turn ended: the compactor chosen in
+    /// Settings summarises it, and it goes on in a new session from its brief, the summary and its
+    /// latest messages (`docs/design.md` §5.8)
+    Compact {
+        agent: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Set a session's mode: in ask, every call to judge comes to you; in auto, the judge you
     /// chose in Settings decides it; in full, nothing is asked: every call the gate would hold
     /// passes, and what it refuses stays refused (`docs/design.md` §7)
@@ -366,6 +374,26 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                     "Reloading the tools of agent {}: they are given at its next message{after}, \
                      which tells it what changed.",
                     text(&reloaded["agent"], "id")
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        AgentAction::Compact { agent, json } => {
+            let asked = Client::connect_or_start(paths)?.request(
+                "agent.compact",
+                serde_json::to_value(AgentName { agent, after: None })?,
+            )?;
+            if json {
+                println!("{asked}");
+            } else {
+                let when = match asked["after_turn"] == true {
+                    true => "once its turn ended",
+                    false => "now",
+                };
+                println!(
+                    "Compacting agent {} {when}: `flottille watch` says agent.compacted when its \
+                     new session is ready, or agent.compaction_failed and why.",
+                    text(&asked["agent"], "id")
                 );
             }
             Ok(ExitCode::SUCCESS)

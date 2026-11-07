@@ -158,6 +158,19 @@ pub enum Command {
     JudgeNoticed,
     /// The Auto judge's guidance (`judge.show`).
     JudgeRead,
+    /// The compaction's settings and guidance (`compaction.show`).
+    CompactionRead,
+    /// Changes the compaction's settings (`compaction.set`): the fields given only.
+    CompactionSet {
+        params: Value,
+    },
+    /// Saves the compactor's guidance, or with no text resets it to the default
+    /// (`compaction.set_guidance`, `compaction.reset_guidance`).
+    CompactionGuidance {
+        text: Option<String>,
+    },
+    /// The user saw the notice of the compactor Flottille picked (`compaction.noticed`).
+    CompactionNoticed,
     /// Saves the judge's guidance, or with no text resets it to the default (`judge.set`,
     /// `judge.reset`).
     JudgeWrite {
@@ -434,6 +447,11 @@ pub enum Command {
     /// Reloads the tools of the session's root: its process restarts on its conversation, once
     /// the turn that runs ended.
     ReloadTools {
+        session: String,
+    },
+    /// Compacts the conversation of the session's root (`agent.compact`), now or once the turn
+    /// that runs ended.
+    Compact {
         session: String,
     },
     /// Interrupts the turn the session's root agent runs; the agent stays.
@@ -837,6 +855,13 @@ pub enum Outcome {
         written: bool,
         shown: Result<flottille_ui::omarchy::Appearance, String>,
     },
+    /// The compaction as the daemon says it (`compaction.show`), after a read, a change of its
+    /// settings (`written`) or of its guidance (`guidance`).
+    Compaction {
+        written: bool,
+        guidance: bool,
+        shown: Result<Value, String>,
+    },
     /// The judge's guidance as the daemon says it, after a read (`written` false) or a save or
     /// a reset.
     JudgeGuidance {
@@ -996,6 +1021,13 @@ pub enum Outcome {
     /// The session's tools reload, now or once its turn ends (`after_turn`), or the daemon
     /// refused with why.
     ToolsReloaded {
+        session: String,
+        after_turn: bool,
+        refused: Option<String>,
+    },
+    /// The session's compaction starts, now or once its turn ends (`after_turn`), or the daemon
+    /// refused with why.
+    Compacting {
         session: String,
         after_turn: bool,
         refused: Option<String>,
@@ -1306,6 +1338,30 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             let _ = ask_alone(connect, "provider.judge_noticed", json!({}), bounds.quick);
             let read = crate::providers::next_read();
             Outcome::Providers(read, read_providers(connect, bounds.quick))
+        }
+        Command::CompactionRead
+        | Command::CompactionSet { .. }
+        | Command::CompactionGuidance { .. }
+        | Command::CompactionNoticed => {
+            let (method, params, written, guidance) = match command {
+                Command::CompactionSet { params } => ("compaction.set", params, true, false),
+                Command::CompactionGuidance { text: Some(text) } => (
+                    "compaction.set_guidance",
+                    json!({"text": text}),
+                    false,
+                    true,
+                ),
+                Command::CompactionGuidance { text: None } => {
+                    ("compaction.reset_guidance", json!({}), false, true)
+                }
+                Command::CompactionNoticed => ("compaction.noticed", json!({}), false, false),
+                _ => ("compaction.show", json!({}), false, false),
+            };
+            Outcome::Compaction {
+                written,
+                guidance,
+                shown: answer(ask_alone(connect, method, params, bounds.quick)),
+            }
         }
         Command::JudgeRead => {
             let shown = ask_alone(connect, "judge.show", json!({}), bounds.quick);
@@ -2117,6 +2173,23 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 Ok(Err(why)) | Err(why) => Some(why),
             };
             Outcome::Resumed { session, refused }
+        }
+        Command::Compact { session } => {
+            let answer = ask_alone(
+                connect,
+                "agent.compact",
+                json!({"agent": session}),
+                bounds.quick,
+            );
+            let (after_turn, refused) = match answer {
+                Ok(Ok(answer)) => (answer["after_turn"] == true, None),
+                Ok(Err(why)) | Err(why) => (false, Some(why)),
+            };
+            Outcome::Compacting {
+                session,
+                after_turn,
+                refused,
+            }
         }
         Command::Detach { session, from } => {
             let refused = match ask_alone(

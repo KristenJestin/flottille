@@ -63,6 +63,8 @@ pub enum Exit {
     Died(ExitStatus),
     /// Its session is to be replaced, for this reason.
     Replace(String),
+    /// Its conversation was summarised: a new session goes on from the summary.
+    Compact(Box<crate::compaction::Compacted>),
     /// The user reloads its tools: let go between turns, to be started again on its session with
     /// the tools its role has now.
     Reload,
@@ -388,7 +390,14 @@ async fn drive(
     );
 
     let mut turn: Option<Turn> = None;
+    // A compaction that came while a turn ran: its new session starts once the turn ended.
+    let mut compacting: Option<Box<crate::compaction::Compacted>> = None;
     loop {
+        if turn.is_none()
+            && let Some(compacted) = compacting.take()
+        {
+            return Ok(Exit::Compact(compacted));
+        }
         // A reload never cuts a turn: the process goes once it ended, before the next prompt,
         // which the next process plays.
         if turn.is_none() && events.reloading() {
@@ -473,6 +482,12 @@ async fn drive(
             order = orders.recv() => match order {
                 None | Some(Order::Stop) => return Ok(Exit::Stopped),
                 Some(Order::Replace(reason)) => return Ok(Exit::Replace(reason)),
+                // The agent's prompts wait while it is summarised, so no turn should run; one that
+                // started before is never cut.
+                Some(Order::Compact(compacted)) if turn.is_none() => {
+                    return Ok(Exit::Compact(compacted));
+                }
+                Some(Order::Compact(compacted)) => compacting = Some(compacted),
                 // What was delivered is pumped at the top of the loop, once no turn runs.
                 Some(Order::Ring) => {}
                 Some(Order::Cancel(answer)) => {
