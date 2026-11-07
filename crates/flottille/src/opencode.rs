@@ -143,7 +143,8 @@ fn env(paths: &Paths, agent: &Agent) -> Result<Env, String> {
         .and_then(|mut out| out.write_all(text.as_bytes()))
         .map_err(|e| format!("cannot write the agent's instructions: {e}"))?;
     let password = password().map_err(|e| format!("cannot make OpenCode's password: {e}"))?;
-    Ok(bare(paths, &file, &password, &agent.tools)?
+    let compaction = !crate::compaction::hands_off(paths);
+    Ok(bare(paths, &file, &password, &agent.tools, compaction)?
         .into_iter()
         .map(|(name, value)| (name.into(), value.into()))
         .collect())
@@ -156,6 +157,7 @@ fn bare(
     instructions: &Path,
     password: &str,
     tools: &[String],
+    compaction: bool,
 ) -> Result<Vec<(String, String)>, String> {
     let root = folder(paths);
     let path = |sub: &str| root.join(sub).to_string_lossy().into_owned();
@@ -182,18 +184,19 @@ fn bare(
         ("OPENCODE_SERVER_PASSWORD".into(), password.into()),
         (
             "OPENCODE_CONFIG_CONTENT".into(),
-            config(instructions, tools)?.to_string(),
+            config(instructions, tools, compaction)?.to_string(),
         ),
     ])
 }
 
 /// The configuration Flottille gives OpenCode: one primary agent, its own, denied every tool but
 /// the agent's own (`tools`, as OpenCode names them), its prompt the agent's instructions;
-/// nothing shared, nothing updated.
+/// nothing shared, nothing updated. Its own compaction is off unless `compaction`: the agents
+/// then write their own handoff (`docs/agents.md`, "Compaction").
 ///
 /// OpenCode replaces `{env:…}` and `{file:…}` in this text before it reads it: no text of the
 /// agent's goes in it but the path of its instructions, whose file is read as it is.
-fn config(instructions: &Path, tools: &[String]) -> Result<Value, String> {
+fn config(instructions: &Path, tools: &[String], compaction: bool) -> Result<Value, String> {
     let shown = instructions.to_string_lossy();
     if shown.contains(['{', '}', '"', '\\']) || shown.chars().any(char::is_control) {
         return Err(format!(
@@ -201,7 +204,7 @@ fn config(instructions: &Path, tools: &[String]) -> Result<Value, String> {
              cannot carry"
         ));
     }
-    Ok(json!({
+    let mut config = json!({
         "default_agent": AGENT,
         "agent": {
             AGENT: {
@@ -218,7 +221,11 @@ fn config(instructions: &Path, tools: &[String]) -> Result<Value, String> {
         "autoupdate": false,
         "snapshot": false,
         "experimental": {"mcp_timeout": TOOL_WAIT_MS},
-    }))
+    });
+    if !compaction {
+        config["compaction"] = json!({"auto": false});
+    }
+    Ok(config)
 }
 
 /// The permissions OpenCode names for its own tools, in OpenCode 1.19.0 (`docs/agents.md`).
@@ -313,7 +320,14 @@ mod tests {
             "flottille_fs_read".to_owned(),
             "flottille_report".to_owned(),
         ];
-        let env = bare(&paths(), file, "0123456789abcdef0123456789abcdef", &tools).unwrap();
+        let env = bare(
+            &paths(),
+            file,
+            "0123456789abcdef0123456789abcdef",
+            &tools,
+            true,
+        )
+        .unwrap();
 
         let data = "/home/u/.local/share/flottille/agents/opencode";
         let expected: Vec<(String, String)> = [
@@ -426,7 +440,12 @@ mod tests {
 
     #[test]
     fn a_remote_configuration_merged_first_cannot_turn_a_built_in_tool_back_on() {
-        let ours = config(Path::new("/run/a.md"), &["flottille_report".to_owned()]).unwrap();
+        let ours = config(
+            Path::new("/run/a.md"),
+            &["flottille_report".to_owned()],
+            true,
+        )
+        .unwrap();
         for remote in [
             json!({"agent": {"flottille": {"permission": {"*": "allow", "bash": "allow"}}}}),
             json!({"agent": {"flottille": {"permission": {"bash": "allow", "*": "allow"}}}}),
@@ -450,6 +469,14 @@ mod tests {
     }
 
     #[test]
+    fn its_own_compaction_is_off_while_the_agents_write_their_handoff() {
+        let on = config(Path::new("/run/a.md"), &[], true).unwrap();
+        assert!(on.get("compaction").is_none(), "{on}");
+        let off = config(Path::new("/run/a.md"), &[], false).unwrap();
+        assert_eq!(off["compaction"], json!({"auto": false}));
+    }
+
+    #[test]
     fn a_path_opencode_s_configuration_cannot_carry_is_refused() {
         for path in [
             "/run/{env:HOME}/a.md",
@@ -457,7 +484,7 @@ mod tests {
             "/run/a\\b.md",
             "/run/a\nb.md",
         ] {
-            assert!(config(Path::new(path), &[]).is_err(), "{path}");
+            assert!(config(Path::new(path), &[], true).is_err(), "{path}");
         }
     }
 

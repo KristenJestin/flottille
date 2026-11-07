@@ -6,6 +6,13 @@
 //! Its settings are `compaction.toml` of Flottille's configuration folder, its guidance
 //! `compaction.md` beside it (`docs/protocol.md`, "The compaction methods"). A compaction that
 //! fails changes nothing: the agent goes on in its session, and its CLI's own compaction stays.
+//!
+//! The summary may instead be the agent's own (`summary = "agent"`, #405): at the same moments
+//! Flottille asks the agent for its handoff in a message of its own, and cuts a turn that runs far
+//! past the threshold to ask it; the new session starts from the brief, the handoff and what
+//! Flottille holds of the agent. The CLI's own compaction is then off where it can be, and a
+//! handoff that fails still starts a new session, from Flottille's state and the user's last
+//! message.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -19,6 +26,7 @@ use serde_json::{Value, json};
 
 use crate::agents::{self, Order};
 use crate::daemon::Daemon;
+use crate::deliveries;
 use crate::judge::{self, Model};
 use crate::projects::Failure;
 use crate::providers;
@@ -38,6 +46,12 @@ pub const LIMIT: usize = 4_000;
 pub const THRESHOLD: u64 = 70;
 /// The thresholds the user may choose, in percent.
 pub const THRESHOLDS: std::ops::RangeInclusive<u64> = 50..=95;
+/// How many points of the window past the threshold a turn of an agent that writes its own handoff
+/// is cut to ask for it, and the most that may be.
+const CUT_POINTS: u64 = 5;
+const CUT_MAX: u64 = 98;
+/// The delivery that asks an agent for its handoff, which the window shows as Flottille's.
+pub const HANDOFF_KIND: &str = "handoff";
 /// The tokens of the latest messages given again word for word, until the user says another.
 pub const KEPT: u64 = 20_000;
 /// The most the user may keep word for word.
@@ -94,6 +108,8 @@ pub struct Settings {
     /// Whether the file says anything of the compactor, one or `compactor = "none"`: Flottille
     /// picks one only while it does not.
     pub compactor_set: bool,
+    /// The agent writes its own handoff (`summary = "agent"`), not the compactor.
+    pub by_agent: bool,
     pub automatic: bool,
     /// Percent of the model's context window.
     pub threshold: u64,
@@ -115,6 +131,7 @@ impl Default for Settings {
         Settings {
             compactor: None,
             compactor_set: false,
+            by_agent: false,
             automatic: true,
             threshold: THRESHOLD,
             maximum: None,
@@ -196,6 +213,13 @@ impl Settings {
                     }
                     settings.compactor = Some(compactor);
                 }
+                "summary" => {
+                    settings.by_agent = match item.as_str() {
+                        Some("agent") => true,
+                        Some("compactor") => false,
+                        _ => return Err(refuse(SUMMARY_SOURCES.into())),
+                    };
+                }
                 "automatic" => {
                     settings.automatic = item
                         .as_bool()
@@ -245,6 +269,8 @@ impl Settings {
     }
 }
 
+const SUMMARY_SOURCES: &str = "summary is \"compactor\" or \"agent\"";
+
 fn threshold_range() -> String {
     format!(
         "threshold is a percent of the context window from {} to {}",
@@ -278,6 +304,13 @@ fn minimum_range() -> String {
 /// picked counts as none.
 pub fn chosen(paths: &Paths) -> bool {
     Settings::load(paths).is_ok_and(|settings| settings.compactor.is_some())
+}
+
+/// Whether Flottille's compaction is on with the agents writing their own handoff: then each CLI's
+/// own compaction is turned off where it can be (`docs/agents.md`, "Compaction"), since a handoff
+/// that fails still starts a new session.
+pub fn hands_off(paths: &Paths) -> bool {
+    Settings::load(paths).is_ok_and(|settings| settings.by_agent && settings.automatic)
 }
 
 /// Held while `compaction.toml` or `compaction.md` is written: two edits at once leave one whole.
@@ -437,6 +470,7 @@ fn show(daemon: &Daemon) -> Result<Value, Failure> {
     };
     Ok(json!({
         "compactor": settings.compactor,
+        "summary": if settings.by_agent { "agent" } else { "compactor" },
         "automatic": settings.automatic,
         "threshold": settings.threshold,
         "maximum": settings.maximum,
@@ -488,6 +522,10 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
                         None => changed |= item.is_some(),
                     }
                 };
+                if let Some(by_agent) = asked.by_agent {
+                    let source = if by_agent { "agent" } else { "compactor" };
+                    set("summary", Some(toml_edit::value(source)));
+                }
                 if let Some(automatic) = asked.automatic {
                     set("automatic", Some(toml_edit::value(automatic)));
                 }
@@ -579,6 +617,7 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
 /// none (`"none"`).
 struct Asked {
     compactor: Option<Option<Compactor>>,
+    by_agent: Option<bool>,
     automatic: Option<bool>,
     threshold: Option<u64>,
     maximum: Option<Option<u64>>,
@@ -597,6 +636,7 @@ impl Asked {
         };
         let mut asked = Asked {
             compactor: None,
+            by_agent: None,
             automatic: None,
             threshold: None,
             maximum: None,
@@ -637,6 +677,13 @@ impl Asked {
                         effort: blank(chosen.effort),
                         picked: false,
                     }));
+                }
+                "summary" => {
+                    asked.by_agent = Some(match value.as_str() {
+                        Some("agent") => true,
+                        Some("compactor") => false,
+                        _ => return Err(wrong(SUMMARY_SOURCES.into())),
+                    });
                 }
                 "automatic" => {
                     asked.automatic = Some(
@@ -709,6 +756,17 @@ pub struct Live {
     /// What the user chose for the message they sent, by agent: compact first or not, whatever
     /// the setting, when the agent's cache expired.
     choices: Mutex<HashMap<String, bool>>,
+    /// The handoffs asked, by agent.
+    handoffs: Mutex<HashMap<String, Handoff>>,
+    /// The agents whose turn Flottille cut to ask for their handoff.
+    cut: Mutex<std::collections::HashSet<String>>,
+}
+
+/// A handoff asked of an agent: the message that asks it, and the context it had then.
+struct Handoff {
+    delivery: String,
+    before: u64,
+    interrupted: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -717,11 +775,18 @@ enum Phase {
     Asked,
     /// The compactor works: the agent's prompts wait for its new session.
     Running,
+    /// The agent writes its handoff: the message that asks for it is its only prompt.
+    Handing,
 }
 
 /// Whether the agent's prompts wait: its compaction is under way.
 pub fn holding(daemon: &Daemon, agent: &str) -> bool {
     daemon.compactions.phases.lock().unwrap().get(agent) == Some(&Phase::Running)
+}
+
+/// Whether the agent is asked for its handoff: its prompt is that message alone.
+pub fn handing(daemon: &Daemon, agent: &str) -> bool {
+    daemon.compactions.phases.lock().unwrap().get(agent) == Some(&Phase::Handing)
 }
 
 /// The compaction is over, done or failed: what waited for it goes to the agent.
@@ -733,7 +798,8 @@ pub fn finish(daemon: &Arc<Daemon>, agent: &str) {
 /// `agent.compact`: the user asks for a compaction now, or at the end of the turn that runs.
 /// Whether it waits for the turn's end.
 pub fn ask(daemon: &Arc<Daemon>, agent: &flottille_core::agent::Agent) -> Result<bool, Failure> {
-    if settings(daemon)?.compactor.is_none() {
+    let settings = settings(daemon)?;
+    if !settings.by_agent && settings.compactor.is_none() {
         return Err(Failure::refused(
             "there is no compactor: choose one in Settings, Compaction, and the agent's CLI \
              compacts on its own until then",
@@ -742,7 +808,7 @@ pub fn ask(daemon: &Arc<Daemon>, agent: &flottille_core::agent::Agent) -> Result
     let in_turn = agent.state == AgentState::Working;
     let mut phases = daemon.compactions.phases.lock().unwrap();
     match phases.get(&agent.id) {
-        Some(Phase::Running) => {
+        Some(Phase::Running | Phase::Handing) => {
             return Err(Failure::refused(
                 "a compaction runs for this agent already: its new session follows it",
             ));
@@ -754,10 +820,20 @@ pub fn ask(daemon: &Arc<Daemon>, agent: &flottille_core::agent::Agent) -> Result
         phases.insert(agent.id.clone(), Phase::Asked);
         return Ok(true);
     }
-    phases.insert(agent.id.clone(), Phase::Running);
-    drop(phases);
-    tokio::spawn(run(daemon.clone(), agent.id.clone()));
+    begin(daemon, &mut phases, &agent.id, settings.by_agent);
     Ok(false)
+}
+
+/// Starts the agent's compaction, under the lock of the phases: the agent asked for its handoff,
+/// or the compactor at work.
+fn begin(daemon: &Arc<Daemon>, phases: &mut HashMap<String, Phase>, agent: &str, by_agent: bool) {
+    if by_agent {
+        phases.insert(agent.to_owned(), Phase::Handing);
+        hand_off(daemon, agent);
+    } else {
+        phases.insert(agent.to_owned(), Phase::Running);
+        tokio::spawn(run(daemon.clone(), agent.to_owned()));
+    }
 }
 
 /// The agent's turn ended: its compaction starts when the user asked for one during the turn, or
@@ -774,6 +850,7 @@ pub fn turn_ended(daemon: &Arc<Daemon>, agent: &str) {
         .copied();
     match asked {
         Some(Phase::Running) => return,
+        Some(Phase::Handing) => return handed(daemon, agent),
         Some(Phase::Asked) => {}
         None => {
             if !due(daemon, agent) {
@@ -781,15 +858,13 @@ pub fn turn_ended(daemon: &Arc<Daemon>, agent: &str) {
             }
         }
     }
+    let by_agent = Settings::load(&daemon.paths).is_ok_and(|settings| settings.by_agent);
     // Decided under the lock: a compaction asked by hand meanwhile is the one that runs.
-    {
-        let mut phases = daemon.compactions.phases.lock().unwrap();
-        if phases.get(agent).copied() != asked {
-            return;
-        }
-        phases.insert(agent.to_owned(), Phase::Running);
+    let mut phases = daemon.compactions.phases.lock().unwrap();
+    if phases.get(agent).copied() != asked {
+        return;
     }
-    tokio::spawn(run(daemon.clone(), agent.to_owned()));
+    begin(daemon, &mut phases, agent, by_agent);
 }
 
 /// Whether Flottille compacts the agent by itself now.
@@ -797,16 +872,28 @@ fn due(daemon: &Daemon, agent: &str) -> bool {
     let Ok(settings) = settings(daemon) else {
         return false;
     };
-    let Some(compactor) = &settings.compactor else {
-        return false;
-    };
-    if !settings.automatic || compactor.picked {
+    // The agent writes its own handoff with no compactor at all.
+    let compactor_ready = settings.compactor.as_ref().is_some_and(|c| !c.picked);
+    if !settings.automatic || !(settings.by_agent || compactor_ready) {
         return false;
     }
     let Some((used, size)) = usage(daemon, agent) else {
         return false;
     };
-    let past_threshold = size.is_some_and(|size| used * 100 >= size * settings.threshold);
+    grown_past(daemon, agent, &settings, settings.threshold, used, size)
+}
+
+/// Whether the agent's context passed `threshold` percent of its window or the maximum size, and
+/// grew by a margin past the size its session started at or its last compaction failed at.
+fn grown_past(
+    daemon: &Daemon,
+    agent: &str,
+    settings: &Settings,
+    threshold: u64,
+    used: u64,
+    size: Option<u64>,
+) -> bool {
+    let past_threshold = size.is_some_and(|size| used * 100 >= size * threshold);
     let past_maximum = settings.maximum.is_some_and(|maximum| used >= maximum);
     if !past_threshold && !past_maximum {
         return false;
@@ -1005,6 +1092,265 @@ fn start(daemon: &Arc<Daemon>, agent: &str) {
     tokio::spawn(run(daemon.clone(), agent.to_owned()));
 }
 
+/// What Flottille asks an agent for its handoff: its whole answer, in a fixed shape.
+const HANDOFF: &str = "Your context is nearly full. Flottille is about to start you again in a \
+     new session of your program, the same agent in the same place, and gives that session your \
+     brief, this handoff and what Flottille holds of you (runs, subscriptions, children, messages \
+     waiting). Write your handoff now, for yourself to go on from: your whole answer, with no tool \
+     call, in these sections:\n\n\
+     ## Task\nWhat you were asked, in a few lines.\n\n\
+     ## Decisions\nThe decisions taken, each with why.\n\n\
+     ## Files touched\nEach file you changed or created, and what for.\n\n\
+     ## Done\nWhat is finished and checked.\n\n\
+     ## Left to do\nWhat remains, in order.\n\n\
+     ## About to do\nThe very next step you were about to take.";
+
+/// What it adds when Flottille cut a turn to ask for it.
+const HANDOFF_CUT: &str = "Your last turn was interrupted for this handoff, its context far past \
+     the threshold: say under About to do exactly where it stopped.";
+
+/// Asks the agent for its handoff, in a message of Flottille's that is its next prompt alone.
+/// Called under the lock of the phases, the agent's phase `Handing`.
+fn hand_off(daemon: &Arc<Daemon>, agent: &str) {
+    let interrupted = daemon.compactions.cut.lock().unwrap().remove(agent);
+    let before = usage(daemon, agent).map_or(0, |(used, _)| used);
+    let mut text = HANDOFF.to_owned();
+    if interrupted {
+        text = format!("{text}\n\n{HANDOFF_CUT}");
+    }
+    let id = format!("{HANDOFF_KIND}-{agent}-{}", now_ms());
+    daemon.compactions.handoffs.lock().unwrap().insert(
+        agent.to_owned(),
+        Handoff {
+            delivery: id.clone(),
+            before,
+            interrupted,
+        },
+    );
+    // Spawned: the delivery rings the agent, whose orders are not taken under this lock.
+    let daemon = daemon.clone();
+    let agent = agent.to_owned();
+    tokio::spawn(async move {
+        if deliveries::deliver(
+            &daemon,
+            &agent,
+            HANDOFF_KIND,
+            Some(id.clone()),
+            &text,
+            flottille_core::approval::BETWEEN_TURNS,
+        )
+        .is_none()
+        {
+            fail_handoff(
+                &daemon,
+                &agent,
+                "the message asking for it could not be stored",
+            );
+            return;
+        }
+        // An agent that never ends the turn of its handoff has it cut, which fails it.
+        tokio::time::sleep(timeout()).await;
+        let still = daemon
+            .compactions
+            .handoffs
+            .lock()
+            .unwrap()
+            .get(&agent)
+            .is_some_and(|handoff| handoff.delivery == id);
+        if still {
+            let (answer, running) = tokio::sync::oneshot::channel();
+            agents::order(&daemon, &agent, Order::Cancel(answer));
+            if running.await != Ok(true) {
+                fail_handoff(
+                    &daemon,
+                    &agent,
+                    "the agent did not take the message asking for it",
+                );
+            }
+        }
+    });
+}
+
+/// The turn of an agent asked for its handoff ended: its answer is the summary when the turn was
+/// the handoff's and ended well; the new session starts either way.
+fn handed(daemon: &Arc<Daemon>, agent: &str) {
+    let Some(delivery) = daemon
+        .compactions
+        .handoffs
+        .lock()
+        .unwrap()
+        .get(agent)
+        .map(|handoff| handoff.delivery.clone())
+    else {
+        return;
+    };
+    let Ok(events) = daemon.read(|store| store.last_agent_events(agent, "agent.prompted", 1))
+    else {
+        return;
+    };
+    let Some(prompted) = events.into_iter().next() else {
+        return;
+    };
+    let asked = prompted.data["deliveries"]
+        .as_array()
+        .is_some_and(|ids| ids.iter().any(|id| id == delivery.as_str()));
+    if !asked {
+        return;
+    }
+    let mut said = String::new();
+    let mut stop = String::new();
+    let mut after = prompted.seq;
+    while let Ok(page) = daemon.read(|store| store.agent_events(agent, after, 1_000)) {
+        let Some(last) = page.last() else {
+            break;
+        };
+        after = last.seq;
+        for event in &page {
+            match event.name.as_str() {
+                "agent.message" => said.push_str(event.data["text"].as_str().unwrap_or_default()),
+                "agent.turn_ended" => {
+                    stop = event.data["stop_reason"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned()
+                }
+                _ => {}
+            }
+        }
+    }
+    let said = said.trim();
+    match (stop.as_str(), said.is_empty()) {
+        ("end_turn", false) => {
+            let Some(handoff) = daemon.compactions.handoffs.lock().unwrap().remove(agent) else {
+                return;
+            };
+            daemon
+                .compactions
+                .phases
+                .lock()
+                .unwrap()
+                .insert(agent.to_owned(), Phase::Running);
+            // Model output, kept and shown: no secret of the daemon's environment in it.
+            let summary = flottille_core::secrets::mask(said, &std::env::vars_os().collect());
+            daemon.developer.write(
+                "compaction",
+                json!({"agent": agent, "before": handoff.before, "source": "agent",
+                    "summary_chars": summary.chars().count()}),
+                &[],
+            );
+            agents::order(
+                daemon,
+                agent,
+                Order::Compact(Box::new(Compacted {
+                    summary: Some(summary),
+                    before: handoff.before,
+                    by_agent: true,
+                    interrupted: handoff.interrupted,
+                })),
+            );
+        }
+        (_, true) if stop == "end_turn" => {
+            fail_handoff(daemon, agent, "the agent wrote no handoff")
+        }
+        _ => fail_handoff(
+            daemon,
+            agent,
+            &format!("the turn of its handoff ended `{stop}`"),
+        ),
+    }
+}
+
+/// The handoff failed: said, and the new session starts without it, from Flottille's state and the
+/// user's last message.
+fn fail_handoff(daemon: &Arc<Daemon>, agent: &str, reason: &str) {
+    if let Some(compacted) = handoff_failed(daemon, agent, reason) {
+        agents::order(daemon, agent, Order::Compact(Box::new(compacted)));
+    }
+}
+
+/// `fail_handoff` short of the order: what the new session starts from. None when no handoff was
+/// asked of the agent.
+pub fn handoff_failed(daemon: &Daemon, agent: &str, reason: &str) -> Option<Compacted> {
+    let handoff = daemon.compactions.handoffs.lock().unwrap().remove(agent)?;
+    daemon
+        .compactions
+        .phases
+        .lock()
+        .unwrap()
+        .insert(agent.to_owned(), Phase::Running);
+    daemon.developer.write(
+        "compaction",
+        json!({"agent": agent, "source": "agent", "failed": reason}),
+        &[],
+    );
+    agents::record(
+        daemon,
+        agent,
+        "agent.compaction_failed",
+        json!({"reason": reason, "used": handoff.before, "source": "agent"}),
+        false,
+    );
+    Some(Compacted {
+        summary: None,
+        before: handoff.before,
+        by_agent: true,
+        interrupted: handoff.interrupted,
+    })
+}
+
+/// The agent reported the context it uses (`used` of `size` tokens), as it reports it, before the
+/// report is recorded after the message it came in: a turn far past the threshold (`CUT_POINTS` more,
+/// `CUT_MAX` at most) of an agent that writes its own handoff is cut, and its handoff asked once
+/// it ended.
+pub fn reported(daemon: &Arc<Daemon>, agent: &str, used: u64, size: Option<u64>) {
+    if daemon
+        .compactions
+        .phases
+        .lock()
+        .unwrap()
+        .contains_key(agent)
+    {
+        return;
+    }
+    let Ok(settings) = Settings::load(&daemon.paths) else {
+        return;
+    };
+    if !settings.by_agent || !settings.automatic {
+        return;
+    }
+    let cut_at = (settings.threshold + CUT_POINTS).min(CUT_MAX);
+    let at_most = Settings {
+        maximum: None,
+        ..settings.clone()
+    };
+    if !grown_past(daemon, agent, &at_most, cut_at, used, size) {
+        return;
+    }
+    let working = daemon
+        .read(|store| store.agent(agent))
+        .ok()
+        .flatten()
+        .is_some_and(|found| found.state == AgentState::Working);
+    if !working {
+        return;
+    }
+    {
+        let mut phases = daemon.compactions.phases.lock().unwrap();
+        if phases.contains_key(agent) {
+            return;
+        }
+        phases.insert(agent.to_owned(), Phase::Asked);
+    }
+    daemon
+        .compactions
+        .cut
+        .lock()
+        .unwrap()
+        .insert(agent.to_owned());
+    let (answer, _) = tokio::sync::oneshot::channel();
+    agents::order(daemon, agent, Order::Cancel(answer));
+}
+
 /// How long the compactor may take before its compaction is taken for a failure.
 fn timeout() -> Duration {
     std::env::var("FLOTTILLE_COMPACTOR_TIMEOUT_MS")
@@ -1016,9 +1362,14 @@ fn timeout() -> Duration {
 
 /// A summary written and checked: what the agent's task needs to start its new session.
 pub struct Compacted {
-    pub summary: String,
+    /// None when the agent's handoff failed: the new session starts without it.
+    pub summary: Option<String>,
     /// The context in use before, in tokens.
     pub before: u64,
+    /// The agent wrote it (its handoff), not the compactor.
+    pub by_agent: bool,
+    /// Flottille cut the agent's turn to ask for it.
+    pub interrupted: bool,
 }
 
 /// One compaction of the agent, in the background: the summary, then the new session through
@@ -1036,15 +1387,16 @@ async fn run(daemon: Arc<Daemon>, agent: String) {
     match outcome {
         Ok(mut compacted) => {
             // Model output, kept and shown: no secret of the daemon's environment in it.
-            compacted.summary =
-                flottille_core::secrets::mask(&compacted.summary, &std::env::vars_os().collect());
+            let summary = compacted.summary.take().unwrap_or_default();
+            let summary = flottille_core::secrets::mask(&summary, &std::env::vars_os().collect());
             daemon.developer.write(
                 "compaction",
                 json!({"agent": agent, "before": compacted.before,
-                    "summary_chars": compacted.summary.chars().count(),
+                    "summary_chars": summary.chars().count(),
                     "duration_ms": started.elapsed().as_millis() as u64}),
                 &[],
             );
+            compacted.summary = Some(summary);
             agents::order(&daemon, &agent, Order::Compact(Box::new(compacted)));
         }
         Err(reason) => {
@@ -1082,7 +1434,7 @@ async fn compact(daemon: &Arc<Daemon>, agent: &str) -> Result<Compacted, String>
     let transcript = read.transcript();
     let before = usage(daemon, agent).map_or(0, |(used, _)| used);
     let previous = read.previous.as_deref();
-    let prompt = prompt(previous, &state(daemon, &found), &transcript);
+    let prompt = prompt(previous, &state(daemon, &found, true), &transcript);
     let model = Model {
         provider: &compactor.provider,
         model: compactor.model.as_deref(),
@@ -1096,7 +1448,12 @@ async fn compact(daemon: &Arc<Daemon>, agent: &str) -> Result<Compacted, String>
         turned.tool,
         previous.map_or(0, str::len) + transcript.len(),
     )?;
-    Ok(Compacted { summary, before })
+    Ok(Compacted {
+        summary: Some(summary),
+        before,
+        by_agent: false,
+        interrupted: false,
+    })
 }
 
 /// Why a summary is refused, if it is: cut off by its length, a call to a tool, empty, or not
@@ -1250,12 +1607,14 @@ fn prompt(previous: Option<&str>, state: &str, transcript: &str) -> String {
     )
 }
 
-/// What only Flottille knows of the agent: its brief, its place, its children, its subscriptions,
-/// its requests and the messages waiting for it.
-fn state(daemon: &Daemon, agent: &flottille_core::agent::Agent) -> String {
+/// What only Flottille knows of the agent: its brief (`with_brief`), its place, its children, its
+/// subscriptions, its runs and the messages waiting for it.
+fn state(daemon: &Daemon, agent: &flottille_core::agent::Agent, with_brief: bool) -> String {
     let mut lines = Vec::new();
-    let (_, brief) = tree::first_message(daemon, agent);
-    lines.push(format!("Brief:\n{brief}"));
+    if with_brief {
+        let (_, brief) = tree::first_message(daemon, agent);
+        lines.push(format!("Brief:\n{brief}"));
+    }
     lines.push(format!(
         "Place: {} ({})",
         agent.workspace.as_deref().unwrap_or("the project folder"),
@@ -1291,6 +1650,15 @@ fn state(daemon: &Daemon, agent: &flottille_core::agent::Agent) -> String {
     if !mine.is_empty() {
         lines.push(format!("Subscriptions:\n{}", mine.join("\n")));
     }
+    if let Ok(runs) = daemon.read(|store| store.running_runs_of(std::slice::from_ref(&agent.id))) {
+        let running: Vec<String> = runs
+            .iter()
+            .map(|run| format!("- {}: {}", run.id, cut(&run.line)))
+            .collect();
+        if !running.is_empty() {
+            lines.push(format!("Runs still running:\n{}", running.join("\n")));
+        }
+    }
     if let Ok(queued) = daemon.read(|store| store.deliveries(&agent.id, "queued")) {
         let waiting: Vec<String> = queued
             .iter()
@@ -1321,8 +1689,92 @@ pub fn kept_now(daemon: &Daemon, agent: &str, settings: &Settings) -> u64 {
 }
 
 /// What the new session is sent after the brief: the summary, then the latest messages word for
-/// word, oldest first, as many as fit in `kept` tokens. Its size in tokens, with the brief's.
-pub fn resumed(daemon: &Daemon, agent: &str, summary: &str, kept: u64) -> (String, u64) {
+/// word, oldest first, as many as fit in `kept` tokens; or, for a summary the agent wrote, its
+/// handoff (or the user's last message when it failed) and what Flottille holds of it. Its size in
+/// tokens, with the brief's.
+pub fn resumed(daemon: &Daemon, agent: &str, compacted: &Compacted, kept: u64) -> (String, u64) {
+    let body = match (compacted.by_agent, &compacted.summary) {
+        (true, summary) => handed_body(daemon, agent, summary.as_deref(), compacted.interrupted),
+        (false, summary) => {
+            compactor_body(daemon, agent, summary.as_deref().unwrap_or_default(), kept)
+        }
+    };
+    let brief = daemon
+        .read(|store| store.agent(agent))
+        .ok()
+        .flatten()
+        .and_then(|agent| agent.brief)
+        .map_or(0, |brief| brief.len());
+    let after = ((brief + body.len()) / CHARS_PER_TOKEN) as u64;
+    (body, after)
+}
+
+/// The new session's word after its brief when the agent wrote its own handoff.
+fn handed_body(daemon: &Daemon, agent: &str, handoff: Option<&str>, interrupted: bool) -> String {
+    let state = daemon
+        .read(|store| store.agent(agent))
+        .ok()
+        .flatten()
+        .map(|found| state(daemon, &found, false))
+        .unwrap_or_default();
+    let state = format!(
+        "What Flottille holds of you now:\n\n<flottille_state>\n{}\n</flottille_state>",
+        escaped(&state)
+    );
+    match handoff {
+        Some(handoff) => {
+            let next = match interrupted {
+                true => {
+                    "Your last turn was cut for the handoff: go on from what you were about to do."
+                }
+                false => "Go on where you stopped.",
+            };
+            format!(
+                "Your conversation was compacted by Flottille: this new session starts from your \
+                 brief (above), the handoff you wrote at the end of your last session, and what \
+                 Flottille holds of you.\n\n<your_handoff>\n{}\n</your_handoff>\n\n{state}\n\n\
+                 {next} Check the real state of your place before you act again.",
+                escaped(handoff)
+            )
+        }
+        None => {
+            let last = last_user_message(daemon, agent).map_or_else(
+                || "The user wrote nothing since your brief.".to_owned(),
+                |text| {
+                    format!(
+                        "The user's last message:\n\n<last_user_message>\n{}\n</last_user_message>",
+                        escaped(&text)
+                    )
+                },
+            );
+            format!(
+                "Your conversation was compacted by Flottille, and your handoff is missing: you \
+                 were asked for it and did not write it. This new session starts from your brief \
+                 (above), what Flottille holds of you and the user's last message.\n\n{state}\n\n\
+                 {last}\n\nCheck the real state of your place first: what you did before is \
+                 there, not here."
+            )
+        }
+    }
+}
+
+/// The text of the user's last message to the agent, if any.
+fn last_user_message(daemon: &Daemon, agent: &str) -> Option<String> {
+    let prompted = daemon
+        .read(|store| store.last_agent_events(agent, "agent.prompted", 50))
+        .ok()?;
+    // Newest first.
+    prompted.iter().find_map(|event| {
+        event.data["deliveries"].as_array()?.iter().find_map(|id| {
+            let id = id.as_str()?;
+            let found = daemon.read(|store| store.delivery(id)).ok()??;
+            (found.kind == "user").then_some(found.body)
+        })
+    })
+}
+
+/// The new session's word after its brief when the compactor wrote the summary.
+fn compactor_body(daemon: &Daemon, agent: &str, summary: &str, kept: u64) -> String {
     let read = Read::of(daemon, agent).unwrap_or(Read {
         previous: None,
         entries: Vec::new(),
@@ -1354,14 +1806,7 @@ pub fn resumed(daemon: &Daemon, agent: &str, summary: &str, kept: u64) -> (Strin
     body.push_str(
         "\n\nGo on where you stopped. Check the real state of your place before you act again.",
     );
-    let brief = daemon
-        .read(|store| store.agent(agent))
-        .ok()
-        .flatten()
-        .and_then(|agent| agent.brief)
-        .map_or(0, |brief| brief.len());
-    let after = ((brief + body.len()) / CHARS_PER_TOKEN) as u64;
-    (body, after)
+    body
 }
 
 #[cfg(test)]

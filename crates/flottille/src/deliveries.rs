@@ -411,6 +411,11 @@ pub fn pump(daemon: &Daemon, agent: &str) -> Option<Prompt> {
         _ => 3,
     };
     queued.sort_by_key(|d| rank(&d.kind));
+    // Asked for its handoff: that message is the whole prompt, and the others wait for the new
+    // session.
+    if crate::compaction::handing(daemon, agent) {
+        queued.retain(|d| d.kind == crate::compaction::HANDOFF_KIND);
+    }
     // A message sent now is the whole prompt (after what starts a session): the others wait for
     // the next one, in their order.
     if queued.iter().any(|d| d.urgency == approval::REDIRECT) {
