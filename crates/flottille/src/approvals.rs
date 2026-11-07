@@ -375,7 +375,9 @@ async fn performed(
     }
     // What the user allowed is what they read: an action whose words changed meanwhile (its
     // command was edited, its skill removed) is not done.
-    if request.kind == Kind::Action {
+    // A verdict on a pull request is read as it stood: its card says the head it was given on.
+    let review = gate::decides_a_review(tool, &request.arguments);
+    if request.kind == Kind::Action || review {
         match actions::prepared(daemon, &grant, tool, &request.arguments).await {
             Err(Outcome::Refused(why) | Outcome::Failed(why) | Outcome::Held(why)) => {
                 return not_executed(mcp::masked(&why, &grant.place));
@@ -387,10 +389,12 @@ async fn performed(
                     .map(|said| mcp::masked(said, &grant.place))
                     .collect();
                 if actions::compared(&says) != actions::compared(&request.says) {
-                    return not_executed(format!(
-                        "what it does changed since the user allowed it; it would now: {}",
-                        says.join("; ")
-                    ));
+                    // The words of a review are the agent's own: only the head can differ.
+                    let why = match review {
+                        true => "new commits since you were allowed; ask again",
+                        false => "what it does changed since the user allowed it",
+                    };
+                    return not_executed(format!("{why}; it would now: {}", says.join("; ")));
                 }
             }
         }

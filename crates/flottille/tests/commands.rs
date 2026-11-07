@@ -2526,7 +2526,7 @@ fn forge_write_and_workspace_remove_are_listed_to_every_agent_of_a_workspace() {
     let child = child_of(
         &user,
         &mcp,
-        json!({"title": "same place", "brief": "Open the pull request."}),
+        json!({"kind": "child", "title": "same place", "brief": "Open the pull request."}),
     );
     assert_eq!(listed(&child), (true, true), "its child");
 }

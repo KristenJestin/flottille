@@ -510,6 +510,29 @@ fn session_send(grant: &Grant, args: &Value) -> Verdict {
     found.verdict(Kind::Action)
 }
 
+/// What every reason of a verdict on a pull request ends with, whichever way it is given (the
+/// tool `forge`, a `gh` or a `bkt` line): `asks_review` finds it, and Full does not let it through.
+pub const REVIEW_VERDICT: &str = "only the user approves a pull request or asks for changes on \
+    it, in every mode, Full included";
+
+/// Whether a held call is a verdict on a pull request: held for the user in every mode, Full
+/// included, and never decided by the judge.
+pub fn asks_review(ask: &Ask) -> bool {
+    ask.reasons
+        .iter()
+        .any(|reason| reason.contains(REVIEW_VERDICT))
+}
+
+/// Whether a call of `forge` approves a pull request or requests changes on it.
+pub fn decides_a_review(tool: &str, args: &Value) -> bool {
+    tool == "forge"
+        && args["action"] == "review"
+        && matches!(
+            args["verdict"].as_str(),
+            Some("approve" | "request_changes")
+        )
+}
+
 /// The first `session_send` of a session to another it did not start: the user's leave, asked
 /// with the message, which never reaches the judge and which Full does not let through
 /// (`asks_leave`).
@@ -610,6 +633,17 @@ fn forge(call: &Call) -> Verdict {
         | "run_logs" => return Verdict::Allow,
         "create" => "it opens a pull request on the forge",
         "comment" => "it comments on a pull request on the forge",
+        "review" => match call.args["verdict"].as_str() {
+            Some(verdict) if crate::forge::REVIEW_VERDICTS.contains(&verdict) => {
+                "it posts a review on a pull request on the forge"
+            }
+            _ => {
+                return Verdict::Deny(format!(
+                    "refused: forge review needs verdict, one of {}",
+                    crate::forge::REVIEW_VERDICTS.join(", ")
+                ));
+            }
+        },
         "edit" => {
             "it changes a pull request on the forge: its title, its description, whether it is a \
              draft, its reviewers, its labels or its base"
@@ -628,7 +662,7 @@ fn forge(call: &Call) -> Verdict {
         }
     };
     let none: &[&str] = match action {
-        "comment" => &["title", "comment", "message"],
+        "comment" | "review" => &["title", "comment", "message"],
         "merge" => &["title", "body", "comment"],
         "checks" | "run" | "stop" | "step" => &["title", "body", "comment", "message"],
         "close" | "reopen" => &["title", "body", "message"],
@@ -654,6 +688,17 @@ fn forge(call: &Call) -> Verdict {
     }
     let mut found = Found::default();
     found.judge(said.into());
+    // What blocks or approves a pull request is the user's to decide, never a judge's.
+    match call.args["verdict"].as_str() {
+        Some("approve") => found.base(format!(
+            "it approves a pull request on the forge: {REVIEW_VERDICT}"
+        )),
+        Some("request_changes") => found.base(format!(
+            "it requests changes on a pull request on the forge, which blocks it: \
+             {REVIEW_VERDICT}"
+        )),
+        _ => {}
+    }
     if let Err(refused) = texts(
         call.grant,
         call.args,
@@ -661,6 +706,11 @@ fn forge(call: &Call) -> Verdict {
         &mut found,
     ) {
         return refused;
+    }
+    for inline in call.args["comments"].as_array().into_iter().flatten() {
+        if let Err(refused) = texts(call.grant, inline, &["body"], &mut found) {
+            return refused;
+        }
     }
     if let Some(waived) = call.args.get("waive").filter(|w| !w.is_null()) {
         if action != "merge" {
@@ -685,7 +735,7 @@ fn forge(call: &Call) -> Verdict {
 }
 
 /// The arguments of `forge` that belong to some actions alone, and those.
-const FORGE_ONLY: [(&str, &[&str]); 10] = [
+const FORGE_ONLY: [(&str, &[&str]); 12] = [
     ("draft", &["create", "edit"]),
     ("reviewers", &["create"]),
     ("labels", &["create"]),
@@ -696,11 +746,13 @@ const FORGE_ONLY: [(&str, &[&str]); 10] = [
     ("labels_add", &["edit"]),
     ("labels_remove", &["edit"]),
     ("base", &["edit"]),
+    ("verdict", &["review"]),
+    ("comments", &["review"]),
 ];
 
 /// The actions of `forge`, as a refusal names them.
-pub const FORGE_ACTIONS: &str = "list, show, subscribe, unsubscribe, create, comment, edit, merge, checks, close, reopen, \
-     pipelines, runs, run_view, run_logs, run, stop and step";
+pub const FORGE_ACTIONS: &str = "list, show, subscribe, unsubscribe, create, comment, review, edit, merge, checks, close, \
+     reopen, pipelines, runs, run_view, run_logs, run, stop and step";
 /// The actions of `tickets`, as a refusal names them.
 pub const TICKET_ACTIONS: &str = "list, search, show, types, link_types, sprints, subscribe, unsubscribe, create, comment, \
      edit, close, reopen, status, link, unlink, comment_edit and comment_delete";
@@ -1690,6 +1742,13 @@ fn program(call: &Call, layer: &[String]) -> Line {
     let any = |names: &[&str]| args.iter().any(|w| names.contains(&w.as_str()));
     let line = match program {
         "git" => git(call, layer),
+        "gh" if gh_verdict(args) => Line::Base(format!(
+            "{} gives a verdict on a pull request: {REVIEW_VERDICT}",
+            shown_words(layer)
+        )),
+        "bkt" if bkt_verdict(args) => Line::Base(format!(
+            "bkt gives a verdict on a pull request, signed in as the user: {REVIEW_VERDICT}"
+        )),
         "gh" | "glab" if forge_reads(program, args) => Line::Reads,
         "gh" | "glab" => Line::Judge(format!(
             "{} writes to the forge, or is not one of its reads",
@@ -2721,6 +2780,111 @@ fn forge_words(args: &[String]) -> Vec<&str> {
         }
     }
     words
+}
+
+/// Whether a `gh` line approves a pull request or requests changes on it: `gh pr review` with
+/// `--approve` or `--request-changes` (or `-a`, `-r`, alone or among other short flags), `gh api`
+/// posting a review whose `event` is one of them, a review given in a file (its event is not read
+/// here), or a GraphQL review mutation naming one.
+fn gh_verdict(args: &[String]) -> bool {
+    match forge_words(args).as_slice() {
+        ["pr", "review"] => args.iter().any(|word| {
+            word.starts_with("--approve")
+                || word.starts_with("--request-changes")
+                || (word.starts_with('-')
+                    && !word.starts_with("--")
+                    && word.chars().skip(1).any(|c| c == 'a' || c == 'r'))
+        }),
+        ["api", ..] if !api_reads(args) => {
+            let lower: Vec<String> = args.iter().map(|word| word.to_lowercase()).collect();
+            let verdict = |text: &str| text.contains("approve") || text.contains("request_changes");
+            let reviews = lower
+                .iter()
+                .any(|w| !w.starts_with('-') && w.contains("/pulls/") && w.contains("/reviews"));
+            let in_file = lower
+                .iter()
+                .any(|w| w == "--input" || w.starts_with("--input="));
+            let event = api_fields(args).iter().any(|field| {
+                field
+                    .split_once('=')
+                    .is_some_and(|(k, v)| k == "event" && verdict(&v.to_lowercase()))
+            });
+            let graphql = lower.iter().any(|w| w == "graphql")
+                && lower.iter().any(|w| w.contains("pullrequestreview"))
+                && lower.iter().any(|w| verdict(w));
+            (reviews && (event || in_file)) || graphql
+        }
+        _ => false,
+    }
+}
+
+/// The `key=value` fields a `gh api` line gives (`-f`, `-F`, `--field`, `--raw-field`).
+fn api_fields(args: &[String]) -> Vec<&str> {
+    let mut fields = Vec::new();
+    let mut at = 0;
+    while let Some(word) = args.get(at) {
+        at += 1;
+        match word.as_str() {
+            "-f" | "-F" | "--field" | "--raw-field" => {
+                fields.extend(args.get(at).map(String::as_str));
+                at += 1;
+            }
+            word => {
+                let long = ["--field=", "--raw-field="]
+                    .iter()
+                    .find_map(|prefix| word.strip_prefix(prefix));
+                let short = (!word.starts_with("--"))
+                    .then(|| word.strip_prefix("-f").or_else(|| word.strip_prefix("-F")))
+                    .flatten();
+                fields.extend(long.or(short));
+            }
+        }
+    }
+    fields
+}
+
+/// Whether a `bkt` line approves a pull request or requests changes on it, in any form: `pr
+/// approve`, a request-changes command or endpoint, an `approve` endpoint, or a participant's
+/// `NEEDS_WORK` or `APPROVED` status. The texts it posts (`--text` and the like) are not read.
+fn bkt_verdict(args: &[String]) -> bool {
+    let mut words = args.iter().map(|word| word.to_lowercase());
+    while let Some(word) = words.next() {
+        if [
+            "--text",
+            "--description",
+            "--title",
+            "--comment",
+            "--message",
+            "-m",
+        ]
+        .contains(&word.as_str())
+        {
+            words.next();
+            continue;
+        }
+        if [
+            "--text=",
+            "--description=",
+            "--title=",
+            "--comment=",
+            "--message=",
+        ]
+        .iter()
+        .any(|flag| word.starts_with(flag))
+        {
+            continue;
+        }
+        if word == "approve"
+            || word.ends_with("/approve")
+            || word.contains("request-changes")
+            || word.contains("request_changes")
+            || word.contains("needs_work")
+            || word.contains("\"approved\"")
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Whether a forge command line only reads.
@@ -4180,6 +4344,104 @@ mod tests {
                 Some(&fixture.never),
             );
             assert!(to_judge(&verdict), "{action}");
+        }
+    }
+
+    #[test]
+    fn a_review_comment_is_judged_and_an_approval_or_a_change_request_is_base() {
+        let fixture = Fixture::workspace();
+        let review = |verdict: Value| {
+            let args = json!({"action": "review", "repository": ".", "number": 1,
+                "verdict": verdict, "body": "x",
+                "comments": [{"path": "a.rs", "line": 1, "body": "y"}]});
+            fixture.judge("forge", args, Some(&fixture.never))
+        };
+        assert!(to_judge(&review(json!("comment"))));
+        for verdict in ["approve", "request_changes"] {
+            let asked = review(json!(verdict));
+            assert!(base_class(&asked), "{verdict}: {asked:?}");
+            assert!(crate::gate::decides_a_review(
+                "forge",
+                &json!({"action": "review", "verdict": verdict})
+            ));
+        }
+        assert!(!crate::gate::decides_a_review(
+            "forge",
+            &json!({"action": "review", "verdict": "comment"})
+        ));
+        assert!(denied(&review(json!("lgtm"))));
+        assert!(denied(&review(Value::Null)));
+        // A verdict or inline comments on another action are refused: the card would show them.
+        for (action, key, value) in [
+            ("comment", "verdict", json!("approve")),
+            (
+                "edit",
+                "comments",
+                json!([{"path": "a", "line": 1, "body": "b"}]),
+            ),
+        ] {
+            let args = json!({"action": action, "repository": ".", "number": 1, key: value});
+            let verdict = fixture.judge("forge", args, Some(&fixture.never));
+            assert!(
+                matches!(&verdict, Verdict::Deny(why) if why.contains(key)),
+                "{action}: {verdict:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_verdict_run_by_a_command_line_is_held_for_the_user_like_forge_review() {
+        let fixture = Fixture::workspace();
+        for line in [
+            "gh pr review 12 --approve",
+            "gh pr review 12 --request-changes -b nope",
+            "gh pr review 12 -a",
+            "gh pr review 12 -r -b nope",
+            "gh pr review 12 -R github.com/acme/app --approve=true",
+            "gh api repos/acme/app/pulls/12/reviews -f event=APPROVE",
+            "gh api repos/acme/app/pulls/12/reviews -F event=REQUEST_CHANGES -f body=x",
+            "gh api -X POST /repos/acme/app/pulls/12/reviews --raw-field event=approve",
+            "gh api repos/acme/app/pulls/12/reviews --input review.json",
+            "gh api repos/acme/app/pulls/12/reviews/7/events -f event=APPROVE",
+            "gh api graphql -f query=mutation{addPullRequestReview(input:{event:APPROVE}){clientMutationId}}",
+            "bkt pr approve 12",
+            "bkt --context cloud pr approve 12 --repo app",
+            "bkt pr request-changes 12",
+            "bkt api /repositories/acme/app/pullrequests/12/request-changes --method POST",
+            "bkt api /repositories/acme/app/pullrequests/12/approve --method POST",
+            "env gh pr review 12 --approve",
+        ] {
+            match fixture.run(line) {
+                Verdict::Ask(ask) => assert!(
+                    ask.class == Class::Base && asks_review(&ask),
+                    "{line}: {ask:?}"
+                ),
+                other => panic!("{line}: {other:?}"),
+            }
+        }
+        // What only comments is not a verdict.
+        for line in [
+            "gh pr review 12 --comment -b hello",
+            "gh pr review 12 -R github.com/acme/app -c -b hello",
+            "gh api repos/acme/app/pulls/12/reviews -f event=COMMENT -f body=x",
+            "gh api repos/acme/app/pulls/12/comments -f body=approve",
+            "bkt pr comment 12 --text \"please approve this\"",
+        ] {
+            if let Verdict::Ask(ask) = fixture.run(line) {
+                assert!(!asks_review(&ask), "{line}: {ask:?}");
+            }
+        }
+        for (verdict, held) in [
+            ("approve", true),
+            ("request_changes", true),
+            ("comment", false),
+        ] {
+            let args = json!({"action": "review", "repository": ".", "number": 1,
+                "verdict": verdict, "body": "x"});
+            let Verdict::Ask(ask) = fixture.judge("forge", args, Some(&fixture.never)) else {
+                panic!("{verdict}: not held");
+            };
+            assert_eq!(asks_review(&ask), held, "{verdict}: {ask:?}");
         }
     }
 
