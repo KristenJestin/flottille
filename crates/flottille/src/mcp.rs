@@ -323,14 +323,14 @@ const SERVED: [Definition; 29] = [
         title: "Pull requests",
         description: "Pull requests and CI of the project's repositories, through the user's \
             gh or bkt (no forge sign-in here: never run them). list: by state and branch, \
-            as last read. show: a workspace's branch's, or number's, \
+            as last read. show: a branch's or number's, \
             with checks (the log's end of each failed job), review and comment counts; detail \
             full: texts. Writes, judged, answered at once, the result maybe later: create, merge \
             (squash by default; refused with no check, while checks fail or a review asks for changes unless waive gives the \
-            user's words) and checks act on a workspace's branch; edit (title, body, draft, \
-            reviewers, labels, base), comment, review (approve and request_changes wait for the user), \
+            user's words) and checks act on a workspace's branch (create, no body: \
+            the template); edit, comment, review (approve and request_changes wait for the user), \
             close (comment first), reopen on number. \
-            subscribe: events wake you; unsubscribe. CI: pipelines lists what can \
+            subscribe: events wake you until merged or closed; unsubscribe. CI: pipelines lists what can \
             be run; run starts one by name (custom: <name>) with its variables and follows it unless \
             follow: false; runs, run_view, \
             run_logs read; run, stop, step judged. {\"action\": \"create\", \"repository\": \
