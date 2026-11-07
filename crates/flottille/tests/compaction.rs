@@ -308,7 +308,7 @@ fn a_compacted_agent_keeps_its_id_children_subscriptions_and_pending_deliveries(
     eventually("the first turn's end", || turns_ended(&user, &agent) == 1);
     let launched = mcp.call(
         "agent_launch",
-        json!({"title": "tests", "brief": "write the tests HANG", "workspace": "w"}),
+        json!({"kind": "child", "title": "tests", "brief": "write the tests HANG", "workspace": "w"}),
     );
     assert!(!launched.error, "{}", launched.text);
     let child = launched
