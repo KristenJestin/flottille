@@ -508,6 +508,17 @@ fn session_send(grant: &Grant, args: &Value) -> Verdict {
     found.verdict(Kind::Action)
 }
 
+/// Whether a call approves a pull request or requests changes on it: held for the user in every
+/// mode, Full included, never decided by the judge.
+pub fn decides_a_review(tool: &str, args: &Value) -> bool {
+    tool == "forge"
+        && args["action"] == "review"
+        && matches!(
+            args["verdict"].as_str(),
+            Some("approve" | "request_changes")
+        )
+}
+
 /// The first `session_send` of a session to another it did not start: the user's leave, asked
 /// with the message, which never reaches the judge and which Full does not let through
 /// (`asks_leave`).
@@ -608,6 +619,17 @@ fn forge(call: &Call) -> Verdict {
         | "run_logs" => return Verdict::Allow,
         "create" => "it opens a pull request on the forge",
         "comment" => "it comments on a pull request on the forge",
+        "review" => match call.args["verdict"].as_str() {
+            Some(verdict) if crate::forge::REVIEW_VERDICTS.contains(&verdict) => {
+                "it posts a review on a pull request on the forge"
+            }
+            _ => {
+                return Verdict::Deny(format!(
+                    "refused: forge review needs verdict, one of {}",
+                    crate::forge::REVIEW_VERDICTS.join(", ")
+                ));
+            }
+        },
         "edit" => {
             "it changes a pull request on the forge: its title, its description, whether it is a \
              draft, its reviewers, its labels or its base"
@@ -626,7 +648,7 @@ fn forge(call: &Call) -> Verdict {
         }
     };
     let none: &[&str] = match action {
-        "comment" => &["title", "comment", "message"],
+        "comment" | "review" => &["title", "comment", "message"],
         "merge" => &["title", "body", "comment"],
         "checks" | "run" | "stop" | "step" => &["title", "body", "comment", "message"],
         "close" | "reopen" => &["title", "body", "message"],
@@ -652,6 +674,18 @@ fn forge(call: &Call) -> Verdict {
     }
     let mut found = Found::default();
     found.judge(said.into());
+    // What blocks or approves a pull request is the user's to decide, never a judge's.
+    match call.args["verdict"].as_str() {
+        Some("approve") => found.base(
+            "it approves a pull request on the forge: only the user approves one, in every mode,              Full included"
+                .into(),
+        ),
+        Some("request_changes") => found.base(
+            "it requests changes on a pull request on the forge, which blocks it: only the user              does, in every mode, Full included"
+                .into(),
+        ),
+        _ => {}
+    }
     if let Err(refused) = texts(
         call.grant,
         call.args,
@@ -659,6 +693,11 @@ fn forge(call: &Call) -> Verdict {
         &mut found,
     ) {
         return refused;
+    }
+    for inline in call.args["comments"].as_array().into_iter().flatten() {
+        if let Err(refused) = texts(call.grant, inline, &["body"], &mut found) {
+            return refused;
+        }
     }
     if let Some(waived) = call.args.get("waive").filter(|w| !w.is_null()) {
         if action != "merge" {
@@ -683,7 +722,7 @@ fn forge(call: &Call) -> Verdict {
 }
 
 /// The arguments of `forge` that belong to some actions alone, and those.
-const FORGE_ONLY: [(&str, &[&str]); 10] = [
+const FORGE_ONLY: [(&str, &[&str]); 12] = [
     ("draft", &["create", "edit"]),
     ("reviewers", &["create"]),
     ("labels", &["create"]),
@@ -694,11 +733,13 @@ const FORGE_ONLY: [(&str, &[&str]); 10] = [
     ("labels_add", &["edit"]),
     ("labels_remove", &["edit"]),
     ("base", &["edit"]),
+    ("verdict", &["review"]),
+    ("comments", &["review"]),
 ];
 
 /// The actions of `forge`, as a refusal names them.
-pub const FORGE_ACTIONS: &str = "list, show, subscribe, unsubscribe, create, comment, edit, merge, checks, close, reopen, \
-     pipelines, runs, run_view, run_logs, run, stop and step";
+pub const FORGE_ACTIONS: &str = "list, show, subscribe, unsubscribe, create, comment, review, edit, merge, checks, close, \
+     reopen, pipelines, runs, run_view, run_logs, run, stop and step";
 /// The actions of `tickets`, as a refusal names them.
 pub const TICKET_ACTIONS: &str = "list, search, show, types, link_types, sprints, subscribe, unsubscribe, create, comment, \
      edit, close, reopen, status, link, unlink, comment_edit and comment_delete";
@@ -4178,6 +4219,48 @@ mod tests {
                 Some(&fixture.never),
             );
             assert!(to_judge(&verdict), "{action}");
+        }
+    }
+
+    #[test]
+    fn a_review_comment_is_judged_and_an_approval_or_a_change_request_is_base() {
+        let fixture = Fixture::workspace();
+        let review = |verdict: Value| {
+            let args = json!({"action": "review", "repository": ".", "number": 1,
+                "verdict": verdict, "body": "x",
+                "comments": [{"path": "a.rs", "line": 1, "body": "y"}]});
+            fixture.judge("forge", args, Some(&fixture.never))
+        };
+        assert!(to_judge(&review(json!("comment"))));
+        for verdict in ["approve", "request_changes"] {
+            let asked = review(json!(verdict));
+            assert!(base_class(&asked), "{verdict}: {asked:?}");
+            assert!(crate::gate::decides_a_review(
+                "forge",
+                &json!({"action": "review", "verdict": verdict})
+            ));
+        }
+        assert!(!crate::gate::decides_a_review(
+            "forge",
+            &json!({"action": "review", "verdict": "comment"})
+        ));
+        assert!(denied(&review(json!("lgtm"))));
+        assert!(denied(&review(Value::Null)));
+        // A verdict or inline comments on another action are refused: the card would show them.
+        for (action, key, value) in [
+            ("comment", "verdict", json!("approve")),
+            (
+                "edit",
+                "comments",
+                json!([{"path": "a", "line": 1, "body": "b"}]),
+            ),
+        ] {
+            let args = json!({"action": action, "repository": ".", "number": 1, key: value});
+            let verdict = fixture.judge("forge", args, Some(&fixture.never));
+            assert!(
+                matches!(&verdict, Verdict::Deny(why) if why.contains(key)),
+                "{action}: {verdict:?}"
+            );
         }
     }
 

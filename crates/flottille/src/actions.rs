@@ -660,6 +660,19 @@ fn forge_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Vec<String> {
                 .map(|base| format!("It moves it onto the base {base}")));
         }
         Some("merge") => say(merge_says(daemon, grant, args)),
+        Some("review") => {
+            say(args["verdict"]
+                .as_str()
+                .map(|verdict| format!("Its verdict: {verdict}")));
+            for inline in args["comments"].as_array().into_iter().flatten() {
+                say(Some(format!(
+                    "Its inline comment on {} line {}: {}",
+                    inline["path"].as_str().unwrap_or("?"),
+                    inline["line"],
+                    inline["body"].as_str().unwrap_or_default()
+                )));
+            }
+        }
         _ => {}
     }
     says

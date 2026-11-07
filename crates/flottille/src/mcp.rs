@@ -327,10 +327,10 @@ const SERVED: [Definition; 29] = [
             with checks (the log's end of each failed job), review and comment counts; detail \
             full: texts. Writes, judged, answered at once, the result maybe later: create, merge \
             (squash by default; refused with no check, while checks fail or a review asks for changes unless waive gives the \
-            user's words) and checks act on a workspace's branch (create, no body: \
-            the template); edit (title, body, draft, \
-            reviewers, labels, base), comment, close (comment first), reopen on number. \
-            subscribe: events wake you until merged or closed; unsubscribe. CI: pipelines lists what can \
+            user's words) and checks act on a workspace's branch; edit (title, body, draft, \
+            reviewers, labels, base), comment, review (approve and request_changes wait for the user), \
+            close (comment first), reopen on number. \
+            subscribe: events wake you; unsubscribe. CI: pipelines lists what can \
             be run; run starts one by name (custom: <name>) with its variables and follows it unless \
             follow: false; runs, run_view, \
             run_logs read; run, stop, step judged. {\"action\": \"create\", \"repository\": \
@@ -340,16 +340,16 @@ const SERVED: [Definition; 29] = [
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "show", "subscribe", "unsubscribe", "create", "comment", "edit", "merge", "checks", "close", "reopen", "pipelines", "runs", "run_view", "run_logs", "run", "stop", "step"]},
+                "action": {"type": "string", "enum": ["list", "show", "subscribe", "unsubscribe", "create", "comment", "edit", "merge", "checks", "close", "reopen", "review", "pipelines", "runs", "run_view", "run_logs", "run", "stop", "step"]},
                 "workspace": {"type": "string", "description": "Yours when left out; in main, name it."},
                 "repository": {"type": "string", "description": "A repository of the project, by its path (\".\" is the project folder itself), never a folder inside one; all of the place's when left out (list, show); the only one is taken without being named."},
-                "number": {"type": "integer", "minimum": 1, "description": "show, comment, edit: a pull request."},
+                "number": {"type": "integer", "minimum": 1, "description": "show, comment, review, edit: a pull request."},
                 "state": {"type": "string", "enum": ["open", "closed", "merged", "all"]},
                 "branch": {"type": "string", "description": "list: its source branch."},
                 "detail": {"type": "string", "enum": ["short", "full"]},
                 "fresh": {"type": "boolean", "description": "show: read the pull request again; one read in the last 30 s is given again otherwise (detail full always reads)."},
                 "title": {"type": "string", "description": "create, edit: the pull request's title. create needs the branch pushed first (git push -u origin <branch>)."},
-                "body": {"type": "string", "description": "create, edit: description; comment: the comment. create without it takes the project's pull request template when it has one (project settings shows it): fill the template in body rather than replace it."},
+                "body": {"type": "string", "description": "create, edit: description; comment: the comment. review: its words. create without it takes the project's pull request template when it has one (project settings shows it): fill the template in body rather than replace it."},
                 "draft": {"type": "boolean", "description": "create: open as a draft. edit: false marks it ready for review, true makes it a draft again."},
                 "reviewers": {"type": "array", "items": {"type": "string"}, "description": "create: reviewers besides the project's."},
                 "labels": {"type": "array", "items": {"type": "string"}, "description": "create: labels (GitHub only)."},
@@ -360,6 +360,12 @@ const SERVED: [Definition; 29] = [
                 "labels_remove": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to take off (GitHub only)."},
                 "base": {"type": "string", "description": "edit: the branch it goes into; it must exist on the remote."},
                 "comment": {"type": "string", "description": "close, reopen: posted on the pull request first."},
+                "verdict": {"type": "string", "enum": crate::forge::REVIEW_VERDICTS, "description": "review: comment, approve or request_changes; the last two wait for the user in every mode."},
+                "comments": {"type": "array", "description": "review: comments on lines of the diff.", "items": {"type": "object", "properties": {
+                    "path": {"type": "string", "description": "The file, as the diff names it."},
+                    "line": {"type": "integer", "minimum": 1, "description": "The line in the new file."},
+                    "body": {"type": "string"}
+                }, "required": ["path", "line", "body"], "additionalProperties": false}},
                 "delete_branch": {"type": "boolean", "description": "close: also delete the pull request's branch, unless a workspace is on it or it comes from a fork. merge: delete its source branch after the merge; the project's setting when left out; never a branch the workspace resumed."},
                 "waive": {"type": "string", "description": "merge: the user's words letting a blocked pull request be merged; held for them."},
                 "method": {"type": "string", "enum": ["squash", "merge", "rebase"], "description": "merge: squash when left out."},
@@ -2119,11 +2125,13 @@ async fn played_in(
                             // In Full, what the gate holds passes, base included: what it
                             // refuses was refused above.
                             // Its own workspace is removed only with the user's word, and so is
-                            // a session written to for the first time.
+                            // a session written to for the first time; so are a service stopped
+                            // and a pull request approved or blocked.
                             _ if mode == GateMode::Full
                                 && !removes_own_workspace(grant, tool, &args)
                                 && !gate::asks_leave(&ask)
-                                && !crate::services::stops(tool, &args) =>
+                                && !crate::services::stops(tool, &args)
+                                && !gate::decides_a_review(tool, &args) =>
                             {
                                 verdict = Some("full");
                                 if removes_a_workspace(tool, &args) {
