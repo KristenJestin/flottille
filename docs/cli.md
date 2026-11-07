@@ -588,6 +588,10 @@ flottille: agent 1eb211e2dbf2 is a child of agent bd7ed8152969: only its parent 
 <reason>)` when the turn did not end with `end_turn` (cancelled, for instance). Without it, `send`
 returns at once, as above.
 
+**`--compact` / `--no-compact`**: when the agent's prompt cache expired, compact it before the
+turn the message starts, or send to its session as it is, whatever the setting (Settings,
+Compaction, "Compact a session resumed after its cache expired"). Left out, the setting decides.
+
 - **The turn followed is the one that plays your message.** When a turn runs, the message waits
   for it to end: what is left of that turn is not printed, and the command waits for the turn
   your message starts. (It follows the delivery the daemon named in its answer to the send,

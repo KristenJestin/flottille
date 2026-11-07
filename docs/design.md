@@ -485,6 +485,20 @@ agent wrote is data.
 5. **A failure** changes nothing: the agent goes on in its session, `agent.compaction_failed` and
    the developer log say why, and the CLI's own compaction stays the safety net. With a compactor
    chosen, each CLI is set to compact as late as it allows (`docs/agents.md`, "Compaction").
+6. **Around the cache's expiry**: an agent's prompt cache lives a while after its last request
+   (its last turn's end), and the first turn after it expired reads the whole history again at
+   full price. Two settings beside the others use the same compactor and compaction: **Compact
+   before the cache expires** (off) compacts an agent at rest (no turn running, nothing waiting
+   for it) a **margin** (5 minutes, 1 to 30) before its cache expires; **Compact a session resumed
+   after its cache expired** (on) compacts first when a message is about to start a turn of an
+   agent whose cache expired, and the message goes to the new session. Neither below a **minimum
+   size** of context (50,000 tokens), without a compactor, while a picked compactor's notice is
+   not seen, for a context that did not grow since the session started or its last compaction
+   failed, nor for a provider whose cache lifetime is not established (`docs/agents.md`, "The
+   prompt cache's lifetime"); the Compaction tab says each provider's. Once an agent's cache
+   expired, the composer shows **Compact before sending**, ticked from the setting: unticked, the
+   message goes to the session as it is; ticked, it compacts first even with the setting off. A
+   message from Flottille itself (a child's news, a delivery) follows the setting.
 
 ## 6. Projects and workspaces
 
