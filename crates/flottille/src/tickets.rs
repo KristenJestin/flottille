@@ -3658,7 +3658,7 @@ mod tests {
     fn a_jira_work_item_lists_its_attachments() {
         let item = json!({"fields": {
             "attachment": [attachment("image-20260101-120000.png", Some("image/png")),
-                attachment("spec.pdf", None)],
+                attachment("design.pdf", None)],
         }});
 
         let ticket = work_item("ABC-1", &item, "acme.atlassian.net");
@@ -3671,7 +3671,7 @@ mod tests {
                  conversation:\n\
                  - image-20260101-120000.png, image/png, 95.4 KiB, by Ana Example, \
                  2026-01-01T12:00:00.000+0100\n\
-                 - spec.pdf, 95.4 KiB, by Ana Example, 2026-01-01T12:00:00.000+0100\n"
+                 - design.pdf, 95.4 KiB, by Ana Example, 2026-01-01T12:00:00.000+0100\n"
             ),
             "{text}"
         );
@@ -3712,14 +3712,14 @@ mod tests {
     #[test]
     fn the_json_of_an_attachment_is_name_type_bytes_author_at() {
         let item = json!({"fields": {
-            "attachment": [attachment("spec.pdf", Some("application/pdf"))],
+            "attachment": [attachment("design.pdf", Some("application/pdf"))],
         }});
 
         let json = work_item("ABC-1", &item, "acme.atlassian.net").to_json();
 
         assert_eq!(
             json["attachments"],
-            json!([{"name": "spec.pdf", "type": "application/pdf", "bytes": 97717,
+            json!([{"name": "design.pdf", "type": "application/pdf", "bytes": 97717,
                 "author": "Ana Example", "at": "2026-01-01T12:00:00.000+0100"}])
         );
     }
