@@ -72,6 +72,11 @@
 //! POST with `issue_id` and `…/blocked_by/<id>` DELETE, `…/issues/comments/<id>` PATCH with
 //! `body` and DELETE) end with 0 and print `{}`: the test reads them in the record.
 //!
+//! A review (#364, `docs/tools.md`, "The forge"): `api repos/<owner>/<name>/pulls/<n>/reviews
+//! --method POST --input <file>` answers `{"id": 1}` for a pull request the script holds (not found
+//! otherwise, `fail` as for the other calls); the record's `input` holds what the file held, as
+//! JSON, since the file is gone when the call ends.
+//!
 //! `events` gives, by repository and number, what `gh api repos/<owner>/<name>/issues/<number>/events`
 //! lists (`{"acme/app": {"7": [{"event": "merged", "actor": {"login": "bob"}, "created_at":
 //! "2026-01-01T10:00:00Z"}]}}`), `[]` without; with a `--jq`, the `merged` and `closed` ones as
@@ -127,7 +132,13 @@ fn main() {
         .expect("the record");
     // One `write` of the whole line: `writeln!` on a `File` writes the JSON piece by piece, and
     // the pieces of two processes appending together would mix (#325).
-    let line = format!("{}\n", json!({"args": args, "env": env}));
+    // The file `--input` names is gone once the call ends: its content is kept in the record.
+    let input = args
+        .iter()
+        .position(|arg| arg == "--input")
+        .and_then(|at| std::fs::read_to_string(args.get(at + 1)?).ok())
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+    let line = format!("{}\n", json!({"args": args, "env": env, "input": input}));
     record.write_all(line.as_bytes()).expect("the record");
     let script: Value = std::fs::read_to_string(dir.join("script.json"))
         .ok()
@@ -259,6 +270,35 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 eprintln!("fake gh: item-edit needs --id, --project-id, --field-id and an option");
                 return 2;
             }
+            0
+        }
+        ["api", path, rest @ ..] if path.starts_with("repos/") && path.ends_with("/reviews") => {
+            let parts: Vec<&str> = path.split('/').collect();
+            let [_, owner, name, "pulls", number, "reviews"] = parts[..] else {
+                eprintln!("fake gh: api {path} is not a call Flottille makes");
+                return 2;
+            };
+            let repository = format!("{owner}/{name}");
+            if rest.windows(2).all(|pair| pair != ["--method", "POST"])
+                || !rest.contains(&"--input")
+            {
+                eprintln!("fake gh: a review is posted with --method POST --input");
+                return 2;
+            }
+            let held = script["pulls"][&repository]
+                .as_object()
+                .into_iter()
+                .flat_map(|branches| branches.values())
+                .any(|pull| number.parse().ok() == pull["number"].as_u64());
+            if !held {
+                eprintln!("gh: Not Found (HTTP 404)");
+                return 1;
+            }
+            if let Some(failure) = script["fail"][&repository].as_str() {
+                eprintln!("{failure}");
+                return 1;
+            }
+            println!("{}", json!({"id": 1, "state": "COMMENTED"}));
             0
         }
         ["api", path, rest @ ..]

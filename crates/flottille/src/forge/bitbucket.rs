@@ -1691,7 +1691,17 @@ pub(super) async fn seen(forge: &Forge, number: u64) -> Result<Option<Seen>, Str
 /// `merged`, `declined` or `superseded`. None when it cannot be read (no context, no such page, a
 /// state not known), which `forge edit` takes for a pull request it may write to.
 pub(super) async fn state_now(forge: &Forge, number: u64) -> Option<&'static str> {
-    let context = Contexts::default().of(forge).await.ok()?;
+    page_now(forge, number).await.ok().map(|(state, _)| state)
+}
+
+/// The state of the pull request `number` from its own page, and the commit its source branch is
+/// at (Cloud `source.commit.hash`, Data Center `fromRef.latestCommit`) when the page says one. An
+/// error saying why when the page cannot be read or its state is not known.
+pub(super) async fn page_now(
+    forge: &Forge,
+    number: u64,
+) -> Result<(&'static str, Option<String>), String> {
+    let context = Contexts::default().of(forge).await?;
     let id = number.to_string();
     let path = if cloud(forge) {
         cloud_page(forge, &id)
@@ -1701,14 +1711,27 @@ pub(super) async fn state_now(forge: &Forge, number: u64) -> Option<&'static str
         };
         format!("/rest/api/1.0/projects/{owner}/repos/{name}/pull-requests/{id}")
     };
-    let page = json(&["api", &path, "--context", &context]).await.ok()?;
-    match page["state"].as_str()? {
-        "OPEN" => Some("open"),
-        "MERGED" => Some("merged"),
-        "DECLINED" => Some("declined"),
-        "SUPERSEDED" => Some("superseded"),
-        _ => None,
-    }
+    let page = json(&["api", &path, "--context", &context]).await?;
+    let state = match page["state"].as_str() {
+        Some("OPEN") => "open",
+        Some("MERGED") => "merged",
+        Some("DECLINED") => "declined",
+        Some("SUPERSEDED") => "superseded",
+        _ => {
+            return Err(format!(
+                "the state of its page is not one it knows: {}",
+                page["state"]
+            ));
+        }
+    };
+    let head = [
+        &page["source"]["commit"]["hash"],
+        &page["fromRef"]["latestCommit"],
+    ]
+    .into_iter()
+    .find_map(|hash| hash.as_str().filter(|hash| !hash.is_empty()))
+    .map(str::to_owned);
+    Ok((state, head))
 }
 
 /// `forge close` of a Bitbucket pull request: `bkt pr decline <id> [--comment T]
