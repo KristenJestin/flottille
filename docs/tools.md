@@ -276,6 +276,11 @@ the agent, in the store (`session_files`), so it holds across restarts; the text
   the version read is no longer kept;
 - removed since: `refused: X was removed since this session read it; nothing was written`.
 
+The check and the write of a file are one step: `fs_write` and `fs_edit` hold the file (its real
+path, whoever the agent) from the check to the end of the write, so that two calls at once on the
+same file run one after the other, and the second sees the first one's change and is refused as
+changed since it was read. Files that differ do not wait on each other.
+
 A write goes to a temporary file `.<name>.<id>.flottille` beside the file, with the file's mode,
 renamed over it: a link is replaced, never written through. Its folder is the one the gate
 checked, opened without following a link (above): a folder swapped for a link meanwhile is
@@ -320,7 +325,7 @@ own while the judge thought), it is refused (`refused: X: the path changed since
 | `tasks` | `action list \| show \| add \| edit \| remove`, `name?`, `line?`, `repository?`, `serve?`, `check?`, `read_only?`, `ask_before_running?`, `ready?`, `url?`, `needs?` | The project's tasks (`docs/projects.md`, "Tasks"). `list` gives one line each: `name: line`, and where it runs, whether it keeps running, is a check, changes nothing, is judged each time it runs, when it is ready and where it answers; `show` gives one. `ready` is `{"line"}`, `{"url"}` or `{"command"}`, `url` an address or `{"command"}`, `null` removing either; a `command` line is judged as a run of it, as the task's own line is. Every agent reads them; a root writes them ("The project"): `add` takes `name` and `line` and the flags, `edit` changes what it is given (`repository: null` puts the task back at the place's top), `remove` removes it, refused while a setup step runs it. A child's write is refused, pointing it to `ask_parent`. |
 | `run` | `task` or `line` (exactly one), `repository?`, `timeout? 1..600`, `notify? "ready"`, `why?` | Runs a task (`refused: the project has no task X: list them with tasks {"action": "list"}`) or one line, in the repository's folder (the task's, or the one named) or the place's top. Its description holds a call of each form: `{"task": "test"}`, `{"task": "dev", "notify": "ready"}`, `{"line": "cargo test -p core", "repository": "api", "timeout": 120}`. With `notify: "ready"`, for a task that says when it is ready, the agent is told when it is (below); on a task that does not, or a line, it is refused with a sentence. |
 | `services` | `action list \| show \| start \| stop \| add \| edit \| remove`, `name?`, `folder?`, `line?`, `needs?`, `ready?`, `url?`, `ask_before_running?` | The services of the machine (`docs/projects.md`, "Services"), for every agent. `list` gives one line each: `- <name>: <state> in <folder>`, why it failed, its address, and what it needs that is not running; `show` gives one with its line and the last 20 lines of its output. `list` and `show` run no command: they try again only a service seen outside Flottille whose `ready` is an address. `start` starts it, what it needs first and waited for, and answers with what it started (`Nothing started: the service X runs.` when it runs); it is judged as a run of its line in its folder, which is outside the place, as any line outside the place is; each service it starts first that Flottille does not run (one seen outside Flottille included) is held when marked `ask_before_running`, and one an agent wrote has its lines judged in the caller's mode as runs in its folder (as are the `ready` and `url` commands of a service an agent wrote and starts itself); one Flottille ran when the call was judged and that stopped since refuses it, to be called again. `stop` of a service that does not run, or runs outside Flottille, is refused at once. **`stop` is held for the user every time, in every mode, Full included**: a service is shared by every project. The call is answered at once that it is held, the result comes later as a delivery, and the request names the service and the projects' tasks that need it. A root's `add`, `edit` and `remove` are judged as a write of `tasks` is, the line (and its ready's and address's commands) as a run of it in its folder; `folder`, `ready` and `url` take `null` to remove them; `remove` is refused while a service or a project's task needs it. A child's write is refused, pointing it to `ask_parent`. Its description holds `{"action": "start", "name": "mongo"}`, `{"action": "stop", "name": "mongo"}` and an `add`. |
-| `run_status` | `run`, `action? output \| stop \| notify`, `when? "ready"`, `tail? 1..1000`, `start?` | `action output` (the default): the run's state and lines of its output, the last `tail` (40 by default), or `tail` lines from line `start`. `run` may also be the id of a cut result ("Long results"), read by lines with `start`, never stopped. `action stop`: stops the run and everything in its process group, `SIGTERM`, then `SIGKILL` 5 s later, and answers once it ended; `tail` and `start` are refused with it. `action notify` with `when: "ready"`: the agent is told when a run already started is ready, as `notify` on `run` does; refused for a run of a task that says no ready. |
+| `run_status` | `run?`, `action? output \| stop \| notify`, `when? "ready"`, `tail? 1..1000`, `start?` | With no `run` (and no `action`, `tail`, `start` or `when`, refused with it): the list of the agent's commands that run and those that ended and are not dismissed (the last 30), the oldest started first, one line each: id, line (and task), folder, state, how long ago it started and its last line, masked; it gives back the id an agent lost to a compaction, to read or stop its dev server. A child lists its own; a root lists its tree's (as `run.list` with `tree` does), a child's command named by its starter's id, which only the starter reads and stops. `action output` (the default): the run's state and lines of its output, the last `tail` (40 by default), or `tail` lines from line `start`. `run` may also be the id of a cut result ("Long results"), read by lines with `start`, never stopped. `action stop`: stops the run and everything in its process group, `SIGTERM`, then `SIGKILL` 5 s later, and answers once it ended; `tail` and `start` are refused with it. `action notify` with `when: "ready"`: the agent is told when a run already started is ready, as `notify` on `run` does; refused for a run of a task that says no ready. |
 
 Until #131 these were `commands_list`, `commands_run` (its `command` now `task`) and
 `commands_status`. For one release a call under an old name is the new tool's (`commands_list`
@@ -521,9 +526,11 @@ pending requests.
   `show` ends with the agent's subscriptions, when it has some (`Your subscriptions:` then `- pull
   request #12 of api, workspace login: checks, review, until it is merged or closed`, or `for 52
   min more` with a deadline).
-- **`subscribe {workspace?, repository?, events, from?, minutes?}`**: each of `events`
+- **`subscribe {workspace?, repository?, number?, events, from?, minutes?}`**: each of `events`
   (`checks`, `review`, `approved`, `comment`, `merged`, `closed`) of the pull request of a workspace's branch
-  wakes the agent, as a `subscription` delivery (`docs/design.md` §5.6), until the pull request is
+  (or, with `number`, the pull request of that number of `repository`: one the agent did not open from its
+  workspace, a colleague's, another repository's; `workspace` is refused with it, and `repository` is needed
+  when the place has several) wakes the agent, as a `subscription` delivery (`docs/design.md` §5.6), until the pull request is
   merged or closed: the agent subscribes once (the answer says `it wakes you at each of these
   events until it is merged or closed; no need to subscribe again`). The events of one round are
   one delivery, and the deliveries of a round one wake; those that come while the agent is in a
@@ -553,9 +560,11 @@ pending requests.
   no review decision) adds one line to the answer: `This repository asks for no review, so
   approved will not come; subscribe to review.` A merged or closed pull request ends any subscription, said; so does its
   deadline, said, its agent's end, and `unsubscribe` or the user's Cancel. Subscribing again to the same pull request replaces the agent's
-  subscription: its events, `from` and deadline. A pull request merged or closed, a repository with no forge or no pull request,
-  and `number` are refused. **`unsubscribe {workspace?, repository?}`** cancels the agent's
-  subscriptions to them (the runs it follows there with them), every one when it names none;
+  subscription: its events, `from` and deadline. A pull request merged or closed, a repository with no forge, no pull request (or no pull request of that
+  number) are refused. A subscription by number is the same subscription as one found by the workspace's
+  branch, and the one replaces the other when it is the same pull request. **`unsubscribe {workspace?, repository?, number?}`** cancels the agent's
+  subscriptions to them (the runs it follows there with them, unless `number` is given: it names a pull
+  request, never a run), every one when it names none;
   **`unsubscribe {run, repository?}`** stops following a run it started (`repository` needed
   when the project has several); **`unsubscribe
   {session}`** stops following a
@@ -731,6 +740,16 @@ It is the agent's own bookkeeping: the gate allows it in every mode, never held.
 **It is for a time the user asked, not for CI.** Agents used it to poll a pipeline, even beside a
 pull request's subscription: its description says `For a time the user asked: never poll CI, forge
 run follows its run and forge subscribe a pull request's checks.`
+
+## The vault
+
+**`vault {action: "list"}`** lists the entries of the user's vault the agent's project sees
+(`docs/vault.md`): each name with what it is for, its URL and its username, one field a line. It is
+listed to an agent whose project sees at least one entry (a tool that could only say the vault is
+empty is not listed), and the agents of every project get or lose it when an entry is set or
+removed. No action returns a secret: any other action is refused, saying that a secret is never
+shown and that its name is given to the tool that needs it, which puts the secret where it goes
+itself. A read: the gate allows it in every mode.
 
 ## The workspace
 

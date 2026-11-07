@@ -5,13 +5,13 @@
 //! read it, is never written over. Results are cut to stay well under what the agent keeps in its
 //! context (`docs/reference/mcp.md` §4 rules 5 and 8), and each says how to get the next part.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 
 use flottille_core::glob;
 use serde::Deserialize;
@@ -48,9 +48,29 @@ const CHUNK: usize = 64 * 1024;
 #[derive(Default)]
 pub struct Kept {
     texts: Mutex<HashMap<String, VecDeque<(PathBuf, String)>>>,
+    /// The files being written, by real path: `fs_write` and `fs_edit` check and write one as a
+    /// single step, whoever the agent.
+    writing: Mutex<HashSet<PathBuf>>,
+    written: Condvar,
+    /// Run between the check of a file and its write, so that a test makes two calls meet there.
+    #[cfg(test)]
+    between: Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl Kept {
+    /// Waits for the other writers of `path`, then holds it until the guard is dropped.
+    fn writing(&self, path: &Path) -> Writing<'_> {
+        let mut writing = self.writing.lock().unwrap();
+        while writing.contains(path) {
+            writing = self.written.wait(writing).unwrap();
+        }
+        writing.insert(path.to_owned());
+        Writing {
+            kept: self,
+            path: path.to_owned(),
+        }
+    }
+
     fn keep(&self, agent: &str, path: &Path, text: Option<String>) {
         let mut texts = self.texts.lock().unwrap();
         let files = texts.entry(agent.to_owned()).or_default();
@@ -63,6 +83,14 @@ impl Kept {
         }
     }
 
+    #[cfg(test)]
+    fn between_check_and_write(&self) {
+        let hook = self.between.lock().unwrap().clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
     fn text(&self, agent: &str, path: &Path) -> Option<String> {
         let texts = self.texts.lock().unwrap();
         texts
@@ -70,6 +98,19 @@ impl Kept {
             .iter()
             .find(|(kept, _)| kept == path)
             .map(|(_, text)| text.clone())
+    }
+}
+
+/// A file held by the call that checks it and writes it.
+struct Writing<'a> {
+    kept: &'a Kept,
+    path: PathBuf,
+}
+
+impl Drop for Writing<'_> {
+    fn drop(&mut self) {
+        self.kept.writing.lock().unwrap().remove(&self.path);
+        self.kept.written.notify_all();
     }
 }
 
@@ -1028,6 +1069,8 @@ pub fn fs_write(cx: &Context, args: Value) -> Outcome {
         Ok(path) => path,
         Err(refusal) => return refusal,
     };
+    // From the check to the end of the write: a second call sees this one's change.
+    let _held = cx.daemon.mcp.kept.writing(&path.path);
     let existed = match fresh(cx, &path) {
         Ok(existed) => existed,
         Err(refusal) => return refusal,
@@ -1062,6 +1105,7 @@ pub fn fs_edit(cx: &Context, args: Value) -> Outcome {
         Ok(path) => path,
         Err(refusal) => return refusal,
     };
+    let _held = cx.daemon.mcp.kept.writing(&path.path);
     if let Err(refusal) = exists(&path) {
         return refusal;
     }
@@ -1222,6 +1266,8 @@ fn diff(before: &str, after: &str) -> String {
 
 /// Writes the file, then the session knows it as written.
 fn write(cx: &Context, path: &Resolved, content: String) -> Result<usize, Outcome> {
+    #[cfg(test)]
+    cx.daemon.mcp.kept.between_check_and_write();
     put(path, content.as_bytes())?;
     let size = content.len();
     let sha = sha256(content.as_bytes());
@@ -1741,5 +1787,256 @@ mod tests {
         assert_eq!(walk_order("a/b", "a.txt"), Less);
         assert_eq!(walk_order("many/02.txt", "many/02.txt"), Equal);
         assert_eq!(walk_order("z", "a/b"), Greater);
+    }
+}
+
+#[cfg(test)]
+mod at_once {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Condvar};
+    use std::time::Duration;
+
+    use flottille_core::agent::{Agent, AgentState, Choices, GateMode};
+    use flottille_core::paths::Paths;
+    use flottille_core::store::Store;
+
+    use super::*;
+    use crate::projects::Projects;
+
+    fn an_agent(id: &str) -> Agent {
+        Agent {
+            id: id.into(),
+            provider: "claude".into(),
+            role: "lead".into(),
+            project: "app".into(),
+            workspace: None,
+            folder: "/app".into(),
+            state: AgentState::Starting,
+            state_reason: None,
+            created_at: 1_792_843_730_808,
+            updated_at: 1_792_843_730_808,
+            active_at: None,
+            exchanged_at: None,
+            ended_at: None,
+            chosen: Choices::default(),
+            taken: Choices::default(),
+            pending: Choices::default(),
+            native_id: None,
+            agent_version: None,
+            instructions: String::new(),
+            tools: Vec::new(),
+            parent: None,
+            depth: 0,
+            epoch: 0,
+            title: None,
+            brief: None,
+            reported_at: None,
+            quiet_turns: 0,
+            waiting_on_answer: false,
+            reopens: false,
+            images: None,
+            gate_mode: GateMode::Auto,
+            launched_by: None,
+        }
+    }
+
+    /// Two agents of one place, a daemon over throwaway folders, and `src/lib.rs` and `src/main.rs`
+    /// that both agents read.
+    struct Scene {
+        _dir: tempfile::TempDir,
+        root: PathBuf,
+        place: Place,
+        daemon: Daemon,
+    }
+
+    impl Scene {
+        fn new() -> Scene {
+            let dir = tempfile::tempdir().unwrap();
+            let base = std::fs::canonicalize(dir.path()).unwrap();
+            let paths = Paths {
+                runtime: base.join("runtime"),
+                state: base.join("state"),
+                config: base.join("config"),
+                data: base.join("data"),
+            };
+            let mut store = Store::open_in_memory().unwrap();
+            for id in ["a", "b"] {
+                store
+                    .create_agent(&an_agent(id), ("agent.created", json!({})))
+                    .unwrap();
+            }
+            let projects = Projects::open(&paths).unwrap();
+            let daemon = Daemon::new(&paths, store, projects, 0, None);
+            let root = base.join("app");
+            std::fs::create_dir_all(root.join("src")).unwrap();
+            let place = Place {
+                project: "app".into(),
+                workspace: None,
+                root: root.clone(),
+                repositories: vec![(".".into(), root.clone())],
+                branch: String::new(),
+                variables: Default::default(),
+                home: None,
+            };
+            let scene = Scene {
+                _dir: dir,
+                root,
+                place,
+                daemon,
+            };
+            for name in ["lib.rs", "main.rs"] {
+                std::fs::write(scene.root.join("src").join(name), "one\ntwo\nthree\n").unwrap();
+                for agent in ["a", "b"] {
+                    scene.read(agent, &format!("src/{name}"));
+                }
+            }
+            scene
+        }
+
+        fn cx<'a>(&'a self, agent: &'a str) -> Context<'a> {
+            Context {
+                daemon: &self.daemon,
+                agent,
+                place: &self.place,
+                approved: None,
+            }
+        }
+
+        fn read(&self, agent: &str, path: &str) {
+            let outcome = fs_read(&self.cx(agent), json!({"path": path}));
+            assert!(matches!(outcome, Outcome::Done(_)), "{}", said(&outcome));
+        }
+
+        fn text(&self, path: &str) -> String {
+            std::fs::read_to_string(self.root.join(path)).unwrap()
+        }
+
+        /// Makes the calls that reach `between_check_and_write` meet there, as long as `wait`.
+        fn meet_for(&self, wait: Duration) -> Arc<AtomicUsize> {
+            let arrived = Arc::new((Mutex::new(0usize), Condvar::new()));
+            let met = Arc::new(AtomicUsize::new(0));
+            let (counted, together) = (arrived.clone(), met.clone());
+            *self.daemon.mcp.kept.between.lock().unwrap() = Some(Arc::new(move || {
+                let (count, bell) = &*counted;
+                let mut count = count.lock().unwrap();
+                *count += 1;
+                bell.notify_all();
+                let (count, _) = bell
+                    .wait_timeout_while(count, wait, |count| *count < 2)
+                    .unwrap();
+                if *count >= 2 {
+                    together.fetch_add(1, Ordering::SeqCst);
+                }
+            }));
+            met
+        }
+    }
+
+    fn said(outcome: &Outcome) -> &str {
+        match outcome {
+            Outcome::Done(text)
+            | Outcome::Refused(text)
+            | Outcome::Failed(text)
+            | Outcome::Held(text) => text,
+        }
+    }
+
+    /// Both calls at once, each from its own thread, as the daemon runs them.
+    fn at_once(
+        scene: &Scene,
+        first: impl FnOnce(&Context) -> Outcome + Send,
+        second: impl FnOnce(&Context) -> Outcome + Send,
+    ) -> (Outcome, Outcome) {
+        std::thread::scope(|threads| {
+            let a = threads.spawn(|| first(&scene.cx("a")));
+            let b = threads.spawn(|| second(&scene.cx("b")));
+            (a.join().unwrap(), b.join().unwrap())
+        })
+    }
+
+    fn edit(path: &str, old: &str, new: &str) -> Value {
+        json!({"path": path, "edits": [{"old": old, "new": new}]})
+    }
+
+    /// One of the two was done and the other refused as stale: which one is not told.
+    fn one_done_one_stale(scene: &Scene, outcomes: (Outcome, Outcome)) -> (bool, String) {
+        let (a, b) = outcomes;
+        let (done, stale, a_first) = match (&a, &b) {
+            (Outcome::Done(_), Outcome::Refused(refusal)) => (&a, refusal, true),
+            (Outcome::Refused(refusal), Outcome::Done(_)) => (&b, refusal, false),
+            _ => panic!("not one done and one refused: {} / {}", said(&a), said(&b)),
+        };
+        assert!(matches!(done, Outcome::Done(_)));
+        assert!(
+            stale.contains("changed since this session read it; read it again before writing"),
+            "{stale}"
+        );
+        let _ = scene;
+        (a_first, stale.clone())
+    }
+
+    #[test]
+    fn two_edits_of_the_same_file_at_once_never_lose_one() {
+        let scene = Scene::new();
+        scene.meet_for(Duration::from_millis(500));
+
+        let outcomes = at_once(
+            &scene,
+            |cx| fs_edit(cx, edit("src/lib.rs", "one", "ONE")),
+            |cx| fs_edit(cx, edit("src/lib.rs", "three", "THREE")),
+        );
+        let (a_first, stale) = one_done_one_stale(&scene, outcomes);
+
+        let expected = if a_first {
+            "ONE\ntwo\nthree\n"
+        } else {
+            "one\ntwo\nTHREE\n"
+        };
+        assert_eq!(scene.text("src/lib.rs"), expected, "{stale}");
+    }
+
+    #[test]
+    fn two_writes_of_the_same_file_at_once_never_lose_one() {
+        let scene = Scene::new();
+        scene.meet_for(Duration::from_millis(500));
+
+        let outcomes = at_once(
+            &scene,
+            |cx| fs_write(cx, json!({"path": "src/lib.rs", "content": "from a\n"})),
+            |cx| fs_write(cx, json!({"path": "src/lib.rs", "content": "from b\n"})),
+        );
+        let (a_first, _) = one_done_one_stale(&scene, outcomes);
+
+        assert_eq!(
+            scene.text("src/lib.rs"),
+            if a_first { "from a\n" } else { "from b\n" }
+        );
+        // The refused one is told what changed, and may write after reading again.
+        let again = if a_first { "b" } else { "a" };
+        scene.read(again, "src/lib.rs");
+        let outcome = fs_write(
+            &scene.cx(again),
+            json!({"path": "src/lib.rs", "content": "from both\n"}),
+        );
+        assert!(matches!(outcome, Outcome::Done(_)), "{}", said(&outcome));
+    }
+
+    #[test]
+    fn edits_of_two_different_files_at_once_both_pass() {
+        let scene = Scene::new();
+        let met = scene.meet_for(Duration::from_secs(10));
+
+        let (a, b) = at_once(
+            &scene,
+            |cx| fs_edit(cx, edit("src/lib.rs", "one", "ONE")),
+            |cx| fs_edit(cx, edit("src/main.rs", "three", "THREE")),
+        );
+
+        assert!(matches!(a, Outcome::Done(_)), "{}", said(&a));
+        assert!(matches!(b, Outcome::Done(_)), "{}", said(&b));
+        // Neither waited on the other: both were between the check and the write together.
+        assert_eq!(met.load(Ordering::SeqCst), 2);
+        assert_eq!(scene.text("src/lib.rs"), "ONE\ntwo\nthree\n");
+        assert_eq!(scene.text("src/main.rs"), "one\ntwo\nTHREE\n");
     }
 }
