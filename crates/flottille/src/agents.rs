@@ -1326,7 +1326,7 @@ fn compacted_session(
     compacted: crate::compaction::Compacted,
 ) -> bool {
     let kept = crate::compaction::settings(daemon)
-        .map(|settings| settings.kept)
+        .map(|settings| crate::compaction::kept_now(daemon, id, &settings))
         .unwrap_or(crate::compaction::KEPT);
     // Read before the new session starts: what the old one said is what is kept.
     let (resume, after) = crate::compaction::resumed(daemon, id, &compacted.summary, kept);

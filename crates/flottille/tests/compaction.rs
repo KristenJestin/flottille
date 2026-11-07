@@ -30,7 +30,11 @@ fn script() -> Value {
             {"say": details, "message": "m2"}, {"usage": {"used": 150_000, "size": 200_000}}]},
         {"when": "AGAIN", "times": 1, "do": [{"say": details}, {"usage": {"used": 160_000, "size": 200_000}}]},
         {"when": "HALF", "times": 1, "do": [{"say": details}, {"usage": {"used": 60_000, "size": 200_000}}]},
-        {"when": "HANG", "do": [{"hold": "release"}]}
+        {"when": "STILL", "do": [{"say": "Still at it."}, {"usage": {"used": 152_000, "size": 200_000}}]},
+        {"when": "GROWN", "do": [{"say": details}, {"usage": {"used": 175_000, "size": 200_000}}]},
+        {"when": "AFTER", "do": [{"say": "Back at it."}, {"usage": {"used": 25_000, "size": 200_000}}]},
+        {"when": "HANG", "do": [{"hold": "release"}]},
+        {"when": "earlier_conversation_summary", "do": [{"say": "Picking up."}, {"usage": {"used": 25_000, "size": 200_000}}]}
     ]})
 }
 
@@ -454,9 +458,12 @@ fn the_settings_are_kept_and_refused_out_of_range() {
     assert_eq!(shown["compactor"]["provider"], "opencode");
     for wrong in [
         json!({"threshold": 5}),
+        json!({"threshold": 40}),
         json!({"threshold": 100}),
         json!({"kept": -1}),
+        json!({"kept": 60000}),
         json!({"maximum": 0}),
+        json!({"maximum": 19999}),
     ] {
         let refused = user.call("compaction.set", wrong.clone()).unwrap_err();
         assert_eq!(refused.0, "invalid-params", "{wrong}: {refused:?}");
@@ -465,4 +472,131 @@ fn the_settings_are_kept_and_refused_out_of_range() {
         .call("compaction.set", json!({"maximum": "none"}))
         .unwrap();
     assert_eq!(shown["maximum"], Value::Null);
+}
+
+#[test]
+fn a_failed_compaction_is_not_tried_again_at_every_turn_end() {
+    let user = user_with(json!([{"die": 3}]), "");
+    let agent = session(&user, "add the login page FULL");
+    eventually("the failure", || !failed(&user, &agent).is_empty());
+    eventually("the first turn's end", || turns_ended(&user, &agent) == 1);
+
+    // Still past the threshold, but not grown by a tenth of the window: not tried again.
+    send(&user, &agent, "STILL one");
+    eventually("the second turn's end", || turns_ended(&user, &agent) == 2);
+    send(&user, &agent, "STILL two");
+    eventually("the third turn's end", || turns_ended(&user, &agent) == 3);
+    std::thread::sleep(Duration::from_millis(1_500));
+    assert_eq!(compactor_prompts(&user).len(), 1, "tried again");
+    assert_eq!(failed(&user, &agent).len(), 1);
+
+    // Grown by more than that: tried again.
+    send(&user, &agent, "GROWN");
+    eventually("a second try", || compactor_prompts(&user).len() == 2);
+}
+
+#[test]
+fn a_failed_compaction_can_still_be_asked_for_by_hand() {
+    let user = user_with(json!([{"die": 3}]), "");
+    let agent = session(&user, "add the login page FULL");
+    eventually("the failure", || !failed(&user, &agent).is_empty());
+    eventually("the first turn's end", || turns_ended(&user, &agent) == 1);
+
+    user.call("agent.compact", json!({"agent": agent})).unwrap();
+    eventually("a second try", || failed(&user, &agent).len() == 2);
+}
+
+#[test]
+fn a_new_session_that_starts_past_the_maximum_is_not_compacted_again() {
+    let user = user_with(json!([{"say": SUMMARY}]), "maximum = 20000");
+    let agent = session(&user, "add the login page FULL");
+    eventually("the compaction", || compacted(&user, &agent).len() == 1);
+
+    // Its first turn, on the brief and the summary, reports 25k: past the maximum already.
+    send(&user, &agent, "AFTER one");
+    eventually("its turns", || turns_ended(&user, &agent) >= 3);
+    send(&user, &agent, "AFTER two");
+    eventually("one more turn", || turns_ended(&user, &agent) >= 4);
+    std::thread::sleep(Duration::from_millis(1_500));
+    assert_eq!(compacted(&user, &agent).len(), 1, "compacted again");
+    assert_eq!(compactor_prompts(&user).len(), 1);
+}
+
+#[test]
+fn a_compaction_asked_while_one_runs_is_answered_that_one_runs() {
+    let user = user_with(json!([{"hold": "release"}, {"say": SUMMARY}]), "");
+    let agent = session(&user, "add the login page FULL");
+    eventually("the compactor at work", || {
+        compactor_prompts(&user).len() == 1
+    });
+
+    let refused = user
+        .call("agent.compact", json!({"agent": agent}))
+        .unwrap_err();
+    assert!(refused.1.contains("a compaction runs"), "{refused:?}");
+    std::fs::write(user.path("fake-compactor/release"), "").unwrap();
+    eventually("the compaction", || !compacted(&user, &agent).is_empty());
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(compacted(&user, &agent).len(), 1);
+    assert_eq!(compactor_prompts(&user).len(), 1);
+}
+
+#[test]
+fn a_picked_compactor_compacts_only_by_hand_until_its_notice_is_seen() {
+    let user = user();
+    std::fs::write(
+        user.path("config/flottille/compaction.toml"),
+        "[compactor]\nprovider = \"opencode\"\npicked = true\n",
+    )
+    .unwrap();
+    let agent = session(&user, "add the login page FULL");
+    eventually("the turn's end", || turns_ended(&user, &agent) == 1);
+    quiet(&user, &agent);
+
+    user.call("compaction.noticed", json!({})).unwrap();
+    send(&user, &agent, "now the logout AGAIN");
+    eventually("the compaction", || !compacted(&user, &agent).is_empty());
+}
+
+#[test]
+fn the_summary_is_framed_as_data_a_model_wrote() {
+    let user = user();
+    let agent = session(&user, "add the login page FULL");
+    eventually("the compaction", || !compacted(&user, &agent).is_empty());
+    send(&user, &agent, "go on");
+    eventually("the new session's first prompt", || {
+        prompts(&user).iter().any(|p| p.contains(SUMMARY))
+    });
+    let first = prompts(&user)
+        .into_iter()
+        .find(|p| p.contains(SUMMARY))
+        .unwrap();
+    let opens = first
+        .find("<earlier_conversation_summary>")
+        .expect("its block");
+    let closes = first.find("</earlier_conversation_summary>").unwrap();
+    let summary = first.find(SUMMARY).unwrap();
+    assert!(opens < summary && summary < closes, "{first}");
+    assert!(
+        first.contains("written by a model") && first.contains("not the user's words"),
+        "{first}"
+    );
+}
+
+#[test]
+fn a_secret_in_the_summary_is_masked() {
+    const SECRET: &str = "s3cr3t-deploy-value-9876";
+    let said = format!("{SUMMARY}\nThe deploy key is {SECRET}.");
+    let user = User::with_fake_agent().with_env("DEPLOY_SECRET", SECRET);
+    user.fake_script(script());
+    let user = user.with_compactor(json!([{"say": said}]), "");
+    let agent = session(&user, "add the login page FULL");
+    eventually("the compaction", || !compacted(&user, &agent).is_empty());
+    let event = compacted(&user, &agent)[0].to_string();
+    assert!(!event.contains(SECRET), "{event}");
+    send(&user, &agent, "go on");
+    eventually("the new session's first prompt", || {
+        prompts(&user).iter().any(|p| p.contains("Wire the form"))
+    });
+    assert!(!prompts(&user).iter().any(|p| p.contains(SECRET)));
 }
