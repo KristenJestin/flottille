@@ -331,6 +331,15 @@ the writing session keeps it with `spec` `write` `departures`: read by you, not 
 it is offered; `--post` posts it on each of the spec's tickets as a comment, once, carrying nothing
 of Flottille. Nothing posts it but you: refused before Done, when empty, and when already posted.
 
+### `flottille spec develop <spec> [--json]`
+
+"Launch development" of a Ready spec: a workspace `spec-<n>` linked to its first ticket, and a
+session for you in it whose first message is the spec, labelled, with what Flottille asks of its
+pull request (the Problem, the `C` list with their verification, a link to the spec). Prints the
+spec, the session and the workspace. Refused unless the spec is Ready, and while another
+development of it runs. The spec is then In progress, Review once the session's pull request is
+open, Done once its pull requests are merged, and Ready again if the session ends with none open.
+
 ### `flottille spec draft <spec>`
 
 Sends a Ready spec back to Draft, so that it can be written again; its writing session is told.

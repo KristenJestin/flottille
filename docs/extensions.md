@@ -1,13 +1,15 @@
 # Extensions
 
-**Status: a proposal, S1 to S3 built.** S1 (#332) built the declaration and the registry,
+**Status: a proposal, S1 to S5 built.** S1 (#332) built the declaration and the registry,
 activation global and per project, `extensions.toml`, `extension.list`/`set`, the data space and
 the scan that the core names no extension, and Specs in the store with its statuses, lock, three
 modes and tickets, from the command line. S2 (#333) built the tools an extension gives and the
 Action trigger, and writing a spec: the `spec` tool, "New spec" and "Write the spec", questions and
 answers, from the command line and the protocol. S3 (#334) built Specs in the window: the
 renderer of an extension's tab of Settings and of its section of a project's settings, the
-project's Specs tab, "Write the spec" on a ticket's row and a spec's page; the rest is a proposal. Written from a discussion with the maintainer
+project's Specs tab, "Write the spec" on a ticket's row and a spec's page. S4 (#459) built the
+ticket side. S5 (#336) built "Launch development" and the statuses read from what Flottille sees;
+the rest is a proposal. Written from a discussion with the maintainer
 (November 2026), and settled with their answers of 2026-11-03 ("Decisions taken"). No question is
 left open but the one in "Open questions".
 
@@ -169,7 +171,8 @@ As built, the Action trigger is the declaration's `actions`: each is answered by
 method `<prefix>.<action>`, reached by its name or through `extension.act {name, action, …}`. The
 frame gives the handlers two acts of the core: `start_session` (a `lead` for the user in the
 project's main checkout, started as `agent_launch` starts a root, its first message the
-extension's; the extension's `before` records it before the agent is written, so that its refusal
+extension's, or in a workspace just made, where its first message waits until the workspace is
+prepared; the extension's `before` records it before the agent is written, so that its refusal
 leaves no agent, and its `started` then knows the session as its own, so that a daemon stopped
 before the first message delivers it at its next start) and `tell` (a delivery of the extension's kind, `[flottille:<name>]`).
 
@@ -187,8 +190,10 @@ As built, the Core event trigger is the declaration's `heard`: each event name o
 its handler, which the core calls with the event's data once a round of the items stored it
 (`extensions::heard`, from the items' `flush`); the handler checks that its extension is active
 where the event is. Specs hears `item.changed`, `item.commented` and `item.closed` of a ticket a
-spec covers, and tells the session writing that spec while it is a Draft (the development session
-comes with S5). The rounds keep no description (`docs/tickets.md`), so a description edited alone
+spec covers, and tells the session writing that spec while it is a Draft. The core also hands
+`agent.ended` and `agent.failed` (`{agent, project, reason}`) to the extensions as it ends an agent
+(`tree.rs`); Specs hears them and `item.opened`, `item.changed`, `item.merged` and `item.closed`
+of a pull request to read again the status of the specs under development. The rounds keep no description (`docs/tickets.md`), so a description edited alone
 is no event: in the mode "the ticket is the spec", the next Ready finds it by reading the ticket
 again.
 
@@ -223,7 +228,9 @@ migration lower, runs the core's migrations it is missing, and moves the count t
 
 An extension may also add facts to what the core says of an agent, under its own name
 (`agent.tree`'s `extensions.<name>`): the spec a session writes or develops, the compaction's
-cache state, a review's progress.
+cache state, a review's progress. As built, the declaration's `fact` gives it for an agent, or
+nothing; the window's session page shows Specs' as a "Spec" line of its rail, which opens the
+spec's page.
 
 **The core names no extension**: a scan of the daemon's core modules refuses an extension's name
 as a module path or an identifier outside `extensions/` and the registry, as the window's rules
@@ -506,7 +513,7 @@ development on its own at Ready.
 | S2 (built) | the `spec` tool for a root, "New spec" and "Write the spec", questions and answers, Ready and Draft | tools given by an extension, the Action trigger |
 | S3 (built) | the project's Specs tab, a spec's page, its settings tab | screens: a project tab, a page, an action on a ticket's row, the renderer of an extension's tab and of its project section |
 | S4 (built) | the ticket side of the modes | Core event triggers (a ticket changed) |
-| S5 | launching the development, the statuses read from what Flottille sees | Core event triggers (an agent ended, a pull request opened or merged) |
+| S5 (built) | launching the development, the statuses read from what Flottille sees | Core event triggers (an agent ended, a pull request opened or merged) |
 | S6 | amendments | nothing new: actions of the tool given by who calls it |
 
 ### Compaction

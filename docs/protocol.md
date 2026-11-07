@@ -513,6 +513,23 @@ and `departures_posted_at` when the user posted it, `null` before.
   "offered" (Done, and something to post), "posted_at", "tickets"}`. With `post`, posts them on each
   of its tickets as a comment through the tracker's own write, once: `refused` before Done, when
   empty or already posted, and for a spec of another mode; `unavailable` when the tracker refuses.
+- `spec.develop {spec}`, "Launch development": makes a workspace `spec-<n>` (`spec-<n>-<k>` for
+  its k-th development) linked to the spec's first ticket (a workspace has one), then starts a
+  `lead` session for the user in it, a root neither led nor handed, whose first message, sent once
+  the workspace is prepared, is the spec as it is, labelled, and what Flottille asks of the work
+  (its pull request's description holds the Problem, the `C` list with their verification, and a
+  link to the spec: its ticket's page in the mode `ticket`, else its number and title). Answers
+  `{"spec", "agent", "workspace", "branch"}`, the spec In progress. `refused` unless the spec is
+  Ready, and while a development of it runs (one at a time); a workspace that cannot be made
+  starts nothing. Nothing calls it on its own at Ready.
+
+**The statuses read from what Flottille sees.** A spec under development is **In progress** while
+its development session runs, **Review** while a pull request of a development's branch is open,
+**Done** once those pull requests are merged (a closed one counts for nothing), and back to
+**Ready** when its session ended or failed with none open. It is read again when one of its
+sessions ends or fails (`agent.ended`, `agent.failed`) and when a round of the items sees a pull
+request of its project opened, changed, merged or closed: nothing sets a status and forgets it. A
+Draft is the user's and stays one.
 
 **The lock.** Past Draft, every write to a spec (`spec.write`, `spec.link`, `spec.unlink`,
 `spec.answer`, and the `spec` tool's `write` and `ask`) is refused, whoever asks, the user's door
@@ -520,7 +537,8 @@ included: `spec 3 is Ready: it is locked; send it back to Draft first`. Every wr
 check, in the same transaction as the write.
 
 `spec.new` and `spec.from_ticket` emit `spec.created`; a write, a question asked or answered, the
-writing session recorded, a write to the ticket and the departures posted `spec.changed`; `spec.ready` and `spec.draft` `spec.status_changed`. The
+writing session recorded, a write to the ticket and the departures posted `spec.changed`; `spec.ready`, `spec.draft`, `spec.develop` and the statuses read from what Flottille sees
+`spec.status_changed`. The
 user's door alone reaches these methods: an agent has the `spec` tool (`docs/tools.md`, "Specs"),
 whose actions make no spec Ready nor Draft.
 
@@ -1394,7 +1412,7 @@ does it with `agent_send` (`docs/tools.md`).
 #### `agent.tree`
 
 `{"agent"}`. The whole tree of the agent's root, each agent before its children:
-`{"agents": [{"agent", "doing", "waiting_on", "needs_user", "questions", "context", "context_tokens", "queued"}]}`. `agent` is the agent in short
+`{"agents": [{"agent", "doing", "waiting_on", "needs_user", "questions", "context", "context_tokens", "queued", "extensions"}]}`. `agent` is the agent in short
 (`id`, `provider`, `role`, `title`, `project`, `workspace`, `parent`, `launched_by`, `led_by`, `detached_from`, `depth`, `epoch`, `state`,
 `state_reason`, `created_at`, `active_at`, `exchanged_at`, `ended_at`, `waiting_on_answer`, `model`: the model it
 took at the last start of its process, else the one asked, `null` for the agent's default before it
@@ -1421,7 +1439,9 @@ user wrote to it that wait for it to read them between its turns, the oldest fir
 it and their names, which `agent.image` reads back, when it was written), empty for a child. For a
 message that used commands (`docs/commands.md`), `text` is what the user typed, `commands` the
 names of the commands, in the order of their first use, and `received` what the agent will receive
-for it.
+for it. `extensions` is what the extensions active in its project say of it, each under its name
+(`docs/extensions.md`, "Data"), `{}` when none does: Specs' is `{"spec", "title", "status",
+"work"}`, the spec a session it started writes (`work` `writing`) or develops (`developing`).
 
 #### `agent.read`
 

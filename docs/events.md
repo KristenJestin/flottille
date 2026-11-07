@@ -192,8 +192,9 @@ Ready spec was written to its ticket, or its departures posted.
 | Field | |
 |---|---|
 | `spec`, `project` | |
-| `status` | What it is now: `draft`, `ready` (the user's gestures), later `in_progress`, `review`, `done`. |
+| `status` | What it is now: `draft`, `ready` (the user's gestures, or a development that ended with no pull request open), `in_progress` (a development launched, `spec.develop`), `review` (its pull request open), `done` (its pull requests merged). |
 | `was` | What it was. |
+| `agent` | The development session, when `spec.develop` launched it. |
 
 ### `vault.changed`
 
